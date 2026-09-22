@@ -26,32 +26,27 @@ sudo /tmp/bokheim-deploy.ABC123/deploy-sudo.sh
 `deploy-sudo.sh` takes no arguments. It validates the staged artifacts and
 credentials before stopping services or replacing the database.
 
-The script builds `sync-server`, `catalog-server`, and `metadata-server`,
-transfers the release artifacts and service units over SSH, and invokes a fixed
-root-owned activation helper. A complete Open Library snapshot must already be
-available at `/home/johan/data/openlibrary/current.sqlite`; see
-`../../metadata/README.md`. The
-helper deliberately drops and recreates only the local `bokheim` PostgreSQL
-database before migrating and restarting; book and thumbnail files remain on
-disk. It refuses the destructive step unless the database credential matches
-the expected local database exactly. The script defaults to `192.168.1.68`;
+The script builds `sync-server`, transfers its release artifact and systemd
+unit over SSH, and invokes the fixed root-owned sync activation helper. It
+runs additive transactional migrations and never recreates the PostgreSQL
+database. Catalogue and metadata services are deployed independently. The
+script defaults to `192.168.1.68`;
 override the SSH account when needed:
 
 ```sh
 BOKHEIM_DEPLOY_USER=johan servers/sync/deploy/deploy-remote.sh
 ```
 
-Provision the fixed activation helper once on the host:
+Provision the non-destructive sync activation helper once on the host:
 
 ```sh
 sudo servers/sync/deploy/provision-server-deploy.sh johan
 ```
 
 Reconnect SSH afterward. The provisioner grants passwordless sudo only for
-`/usr/local/sbin/bokheim-deploy-servers`; staged shell scripts are never run as
+`/usr/local/sbin/bokheim-deploy-sync`; staged shell scripts are never run as
 root. Routine deployments then need only the SSH key. The script does not
-modify Caddy, replace credentials, or delete asset files; it does replace the
-`bokheim` database as described above.
+modify Caddy, replace credentials, delete asset files, or reset the database.
 
 ### Debian-compatible release binaries
 
@@ -60,29 +55,14 @@ development machine. Do not copy host-native release binaries when the build
 machine reports a newer glibc requirement; a binary requiring `GLIBC_2.43`, for
 example, will not start on the host.
 
-Sync and metadata can retain their static musl builds. The catalogue loads
 PDFium dynamically and must use a compatible GNU build environment:
 
 ```sh
 rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl -p sync-server
-# Build the catalogue in a GNU environment matching the destination's glibc.
-python3 shared/pdfium/prepare.py --target x86_64-unknown-linux-gnu
-cargo build --release --target x86_64-unknown-linux-gnu -p catalog-server
 python3 shared/pdfium/prepare.py --target x86_64-unknown-linux-gnu \
   --dest target/x86_64-unknown-linux-gnu/release/pdfium --offline
 cargo build --release --target x86_64-unknown-linux-musl -p metadata-server
-```
-
-Artifacts are written below `target/<target>/release/`. Stage the catalogue
-with its adjacent `pdfium/` directory. The remote helper uses
-`BOKHEIM_CATALOG_CARGO_TARGET` (default GNU x86-64) independently of the other
-servers and checks the required glibc against the destination before transfer.
-Verify linkage before staging:
-
-```sh
-file target/x86_64-unknown-linux-gnu/release/catalog-server
-ldd target/x86_64-unknown-linux-gnu/release/catalog-server || true
 ```
 
 The release helper currently builds host-native artifacts itself. When
@@ -276,13 +256,10 @@ Validate and start the deployment:
 sudo systemctl daemon-reload
 sudo caddy validate --envfile /etc/bokheim/caddy.env --config /etc/caddy/Caddyfile
 sudo systemctl enable --now bokheim-sync.service
-sudo systemctl enable --now bokheim-catalogs.service
 sudo systemctl enable caddy.service
 sudo systemctl restart caddy.service
 curl --fail https://api.bokheim.se/api/health
-curl --fail https://catalogs.bokheim.se/health
 curl --fail https://meta.bokheim.se/health
-curl --fail --header 'Accept: application/vnd.bokheim+protobuf; version=18' --output /dev/null https://catalogs.bokheim.se/api/opds/catalogs
 ```
 
 The expected health response is `ok`. Bokheim clients use the fixed production
@@ -298,7 +275,7 @@ cannot amplify into repeated durable writes on the asset volume.
 Run the complete deployment gate after DNS and certificate issuance settle:
 
 ```sh
-sudo servers/sync/deploy/verify-public.sh api.bokheim.se catalogs.bokheim.se meta.bokheim.se
+sudo servers/sync/deploy/verify-public.sh api.bokheim.se meta.bokheim.se
 ```
 
 ## Deploy the GPUI web application

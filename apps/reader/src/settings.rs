@@ -12,20 +12,41 @@ use app_preferences::{ReaderFontFamily, ReaderPreferencePatch, ReaderTextAlignme
 pub use app_preferences::PdfZoomMode as PdfZoomModePreference;
 use gpui::{App, Global};
 
+/// Which sidebar tab a reader last had open. The sidebar itself is always
+/// visible while chrome is shown, so this is purely "which of the three"
+/// rather than "open or closed".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SidebarTab {
+    #[default]
+    Contents,
+    Annotations,
+    Settings,
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ReaderPreferences {
     pub font_size: f32,
     pub column_width: f64,
+    #[serde(default = "default_min_line_width_ch")]
+    pub min_line_width_ch: f64,
+    #[serde(default = "default_max_line_width_ch")]
+    pub max_line_width_ch: f64,
     pub scale: f64,
     pub toc_width: f32,
-    #[serde(default = "default_toc_visible")]
-    pub toc_visible: bool,
+    #[serde(default)]
+    pub active_sidebar_tab: SidebarTab,
     #[serde(default)]
     pub font_family: ReaderFontFamily,
     #[serde(default)]
     pub text_alignment: ReaderTextAlignment,
     #[serde(default = "default_line_height")]
     pub line_height: f32,
+    #[serde(default)]
+    pub horizontal_margin_px: f32,
+    #[serde(default)]
+    pub vertical_margin_px: f32,
+    #[serde(default)]
+    pub min_column_gap_px: f32,
     /// Set by the application from a user-facing setting, but not yet honoured
     /// by the native reader, which derives its column count from the viewport.
     #[serde(default = "default_max_column_count")]
@@ -54,12 +75,17 @@ impl Default for ReaderPreferences {
         Self {
             font_size: 20.0,
             column_width: 600.0,
+            min_line_width_ch: default_min_line_width_ch(),
+            max_line_width_ch: default_max_line_width_ch(),
             scale: 1.0,
             toc_width: 300.0,
-            toc_visible: default_toc_visible(),
+            active_sidebar_tab: SidebarTab::default(),
             font_family: ReaderFontFamily::default(),
             text_alignment: ReaderTextAlignment::default(),
             line_height: default_line_height(),
+            horizontal_margin_px: 0.0,
+            vertical_margin_px: 0.0,
+            min_column_gap_px: 0.0,
             max_column_count: default_max_column_count(),
             pdf_page_count: default_pdf_page_count(),
             pdf_trim_margins: default_pdf_trim_margins(),
@@ -70,12 +96,16 @@ impl Default for ReaderPreferences {
     }
 }
 
-fn default_toc_visible() -> bool {
-    !cfg!(feature = "kobo")
-}
-
 fn default_pdf_trim_margins() -> bool {
     true
+}
+
+fn default_min_line_width_ch() -> f64 {
+    45.0
+}
+
+fn default_max_line_width_ch() -> f64 {
+    65.0
 }
 
 fn default_pdf_zoom() -> f32 {
@@ -100,15 +130,20 @@ fn default_audiobook_speed() -> f64 {
 
 impl ReaderPreferences {
     /// Applies the portion of reader state synchronized by the backend while
-    /// preserving UI-only state such as TOC visibility and width.
+    /// preserving UI-only state such as the active sidebar tab and its width.
     pub fn apply_synchronized(&mut self, saved: &app_preferences::ReaderPreferences) {
         self.font_size = saved.font_size_px();
         self.column_width = saved.max_line_width_px();
+        self.min_line_width_ch = saved.min_line_width_ch();
+        self.max_line_width_ch = saved.max_line_width_ch();
         self.scale = saved.zoom();
         self.line_height = saved.line_height();
         self.font_family = saved.font_family();
         self.text_alignment = saved.text_alignment();
         self.max_column_count = saved.max_column_count();
+        self.horizontal_margin_px = saved.horizontal_margin_px();
+        self.vertical_margin_px = saved.vertical_margin_px();
+        self.min_column_gap_px = saved.min_column_gap_px();
         self.pdf_zoom_mode = saved.pdf_zoom_mode();
         self.pdf_page_count = saved.pdf_page_count();
         self.pdf_zoom = saved.pdf_zoom();
@@ -125,6 +160,12 @@ impl ReaderPreferences {
         if self.column_width != next.column_width {
             patches.push(ReaderPreferencePatch::MaxLineWidthPx(next.column_width));
         }
+        if self.min_line_width_ch != next.min_line_width_ch {
+            patches.push(ReaderPreferencePatch::MinLineWidthCh(next.min_line_width_ch));
+        }
+        if self.max_line_width_ch != next.max_line_width_ch {
+            patches.push(ReaderPreferencePatch::MaxLineWidthCh(next.max_line_width_ch));
+        }
         if self.scale != next.scale {
             patches.push(ReaderPreferencePatch::Zoom(next.scale));
         }
@@ -139,6 +180,15 @@ impl ReaderPreferences {
         }
         if self.max_column_count != next.max_column_count {
             patches.push(ReaderPreferencePatch::MaxColumnCount(next.max_column_count));
+        }
+        if self.horizontal_margin_px != next.horizontal_margin_px {
+            patches.push(ReaderPreferencePatch::HorizontalMarginPx(next.horizontal_margin_px));
+        }
+        if self.vertical_margin_px != next.vertical_margin_px {
+            patches.push(ReaderPreferencePatch::VerticalMarginPx(next.vertical_margin_px));
+        }
+        if self.min_column_gap_px != next.min_column_gap_px {
+            patches.push(ReaderPreferencePatch::MinColumnGapPx(next.min_column_gap_px));
         }
         if self.pdf_zoom_mode != next.pdf_zoom_mode {
             patches.push(ReaderPreferencePatch::PdfZoomMode(next.pdf_zoom_mode));
@@ -171,7 +221,7 @@ impl ReaderPreferences {
         // `foreground` stays unset on purpose: it replaces every run's colour,
         // which flattens a book rather than adapting it. `theme` is the
         // one that re-lights instead of overwriting.
-        html::pipeline::ReaderStyleOverrides { font_family: family, text_align: alignment, line_height: Some(self.line_height), minimum_font_size: None, foreground: None, background: None, theme }
+        html::pipeline::ReaderStyleOverrides { font_family: family, text_align: alignment, line_height: Some(self.line_height), minimum_font_size: None, foreground: None, background: None, strip_root_spacing: true, theme }
     }
 }
 

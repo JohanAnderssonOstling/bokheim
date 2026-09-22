@@ -1,1 +1,0 @@
-SELECT EXISTS(SELECT 1 FROM book b JOIN book_dir bd ON bd.book_row_id=b.row_id WHERE b.content_hash=?1 AND b.deleted_at IS NULL AND bd.deleted_at IS NULL)

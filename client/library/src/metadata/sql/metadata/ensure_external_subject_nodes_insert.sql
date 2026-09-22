@@ -1,1 +1,0 @@
-INSERT OR IGNORE INTO subject_system(id,version,matcher_version) VALUES(?1,'external',1)

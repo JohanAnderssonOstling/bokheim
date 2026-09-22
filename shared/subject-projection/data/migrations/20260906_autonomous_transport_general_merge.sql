@@ -1,0 +1,10 @@
+BEGIN IMMEDIATE;
+UPDATE source_selector SET concept_id=488 WHERE concept_id=13717;
+UPDATE lcc_range SET concept_id=488 WHERE concept_id=13717;
+DELETE FROM concept_parent WHERE concept_id=13717;
+DELETE FROM concept WHERE concept_id=13717;
+UPDATE concept SET preferred_label='International Relations Societies' WHERE concept_id=5353;
+UPDATE concept SET preferred_label='Social Groups in Roman Literature' WHERE concept_id=8024;
+UPDATE concept SET preferred_label='Themes & Groups in U.S. Literature' WHERE concept_id=3862;
+UPDATE concept SET preferred_label='Women & Poetry' WHERE concept_id=7430;
+COMMIT;

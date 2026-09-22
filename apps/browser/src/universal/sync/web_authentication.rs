@@ -15,7 +15,6 @@ extern "C" {
 pub(super) struct WebAuthentication {
     panel: JsValue,
     _submit: Closure<dyn FnMut(String, String, String, String) -> js_sys::Promise>,
-    _updates: gpui::Task<()>,
 }
 impl Drop for WebAuthentication {
     fn drop(&mut self) {
@@ -25,25 +24,13 @@ impl Drop for WebAuthentication {
 
 impl SyncPage {
     pub(super) fn open_web_authentication(&mut self, cx: &mut Context<Self>) {
-        let backend = self.services.backend.clone();
-        let (updated, updates) = async_channel::unbounded();
+        let events = self.events.clone();
         let submit = Closure::new(move |action: String, email: String, secret: String, token: String| {
-            let backend = backend.clone();
-            let updated = updated.clone();
+            let events = events.clone();
             wasm_bindgen_futures::future_to_promise(async move {
-                let result = match action.as_str() {
-                    "login" => backend.login(email, secret).await.map(|_| ()),
-                    "register" => backend.request_public_registration(email, secret).await,
-                    "verify" => backend.verify_email(email, secret).await.map(|_| ()),
-                    "resend" => backend.resend_verification(email).await,
-                    "request-reset" => backend.request_password_reset(email).await,
-                    "reset" => backend.reset_password(token, secret).await,
-                    _ => Err("Unknown authentication action".into()),
-                };
-                result.map_err(|error| JsValue::from_str(&error))?;
-                if matches!(action.as_str(), "login" | "verify") {
-                    let _ = updated.send(()).await;
-                }
+                let (reply, result) = async_channel::bounded(1);
+                events.try_send(super::SyncEvent::Authenticate { action, email, secret, token, reply }).map_err(|_| JsValue::from_str("The application window is closed"))?;
+                result.recv().await.map_err(|_| JsValue::from_str("The application window is closed"))?.map_err(|error| JsValue::from_str(&error))?;
                 Ok(JsValue::UNDEFINED)
             })
         });
@@ -58,14 +45,7 @@ impl SyncPage {
         self.web_authentication = None;
         match open_authentication(&theme.to_string(), account_contract::PASSWORD_MIN_CHARACTERS as u32, submit.as_ref().unchecked_ref()) {
             Ok(panel) => {
-                let task = cx.spawn(async move |page, cx| {
-                    while updates.recv().await.is_ok() {
-                        if page.update(cx, |page, cx| page.schedule_refresh(cx)).is_err() {
-                            break;
-                        }
-                    }
-                });
-                self.web_authentication = Some(WebAuthentication { panel, _submit: submit, _updates: task });
+                self.web_authentication = Some(WebAuthentication { panel, _submit: submit });
             }
             Err(_) => {
                 self.error = Some("Could not open the sign-in form".into());

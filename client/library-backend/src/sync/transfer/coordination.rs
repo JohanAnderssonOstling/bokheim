@@ -3,9 +3,15 @@
 use super::worker::TransferWorker;
 use super::{TransferError, TransferJob, TransferOperation};
 use asset_transfer::ClaimedTransferJob;
+#[cfg(not(target_arch = "wasm32"))]
+use futures_util::StreamExt;
 use library_database::{TransferOutcome, TransferSnapshot};
 #[cfg(target_arch = "wasm32")]
+use library_model::{DownloadProgress, DownloadState};
+#[cfg(target_arch = "wasm32")]
 use library_replica::BlobKind;
+#[cfg(target_arch = "wasm32")]
+use library_runtime::events::LibraryEvent;
 
 #[cfg(not(target_arch = "wasm32"))]
 impl TransferWorker {
@@ -21,6 +27,28 @@ impl TransferWorker {
                 _ => Err(TransferError::retryable("invalid upload batch job")),
             })
             .collect::<Result<Vec<_>, _>>()?;
+        if intents.iter().any(|intent| intent.size_bytes > sync_common::book_batch::MAX_BOOK_BYTES) {
+            // The batch endpoint cannot carry these books. Each upload owns a
+            // fresh snapshot and commits as soon as its HTTP request finishes,
+            // so progress does not wait for the rest of the claimed group.
+            let results = futures_util::stream::iter(claimed.iter().map(|item| {
+                let job = item.job.clone();
+                async move {
+                    let guard = self.refresh_guard(super::RefreshScope::Planned)?;
+                    match self.execute_owned_job(job.clone()).await {
+                        Err(TransferError::AuthenticationRequired) => {
+                            self.refresh_after_auth(guard).await?;
+                            self.execute_owned_job(job).await
+                        }
+                        result => result,
+                    }
+                }
+            }))
+            .buffered(asset_transfer::runner::MAX_CONCURRENT_LARGE_UPLOADS)
+            .collect()
+            .await;
+            return Ok(results);
+        }
         let guard = self.refresh_guard(super::RefreshScope::Planned)?;
         let result = self.book_transfers().upload_batch(snapshot, &intents, out).await;
         if !matches!(result, Err(TransferError::AuthenticationRequired)) {
@@ -30,6 +58,7 @@ impl TransferWorker {
         self.book_transfers().upload_batch(snapshot, &intents, out).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn handle_job(&self, job: TransferJob) -> Result<(), TransferError> {
         self.execute_owned_job(job).await
     }
@@ -47,7 +76,8 @@ impl TransferWorker {
             let user = self.live_user_id().unwrap_or_default();
             let key = format!("{}|{}|{}|download|{}", credentials.server_url(), user, self.library_id, content_hash);
             for attempt in 0..2 {
-                let worker = self.clone();
+                let mut worker = self.clone();
+                worker.progress_key = Some(key.clone());
                 let owned_job = job.clone();
                 let expected_user = user.clone();
                 let original = job.clone();
@@ -73,13 +103,25 @@ impl TransferWorker {
                         rmp_serde::to_vec_named(&(result, abandoned)).map_err(|error| error.to_string())
                     })
                 };
-                let response = client_platform_web::transport::bridge::transfer_request(key.clone(), run).map_err(|error| TransferError::retryable(format!("transfer coordinator unavailable: {error:?}")))?;
+                let event_tx = self.event_tx.clone();
+                let progress_hash = *content_hash;
+                let progress = move |fraction: f64| {
+                    if let Some(tx) = &event_tx {
+                        let value = DownloadProgress::new(fraction as f32).unwrap_or(DownloadProgress::ZERO);
+                        let _ = tx.try_send(LibraryEvent::DownloadStatusChanged { content_hash: progress_hash, state: DownloadState::Downloading(value) });
+                    }
+                };
+                let response = client_platform_web::transport::bridge::transfer_request_with_progress(key.clone(), run, progress).map_err(|error| TransferError::retryable(format!("transfer coordinator unavailable: {error:?}")))?;
                 let bytes = response.await.map_err(TransferError::retryable)?;
                 let (result, abandoned): (Result<(), TransferError>, bool) = rmp_serde::from_slice(&bytes).map_err(TransferError::retryable)?;
-                result?;
                 if self.live_user_id().unwrap_or_default() != user {
                     return Err(TransferError::retryable("account changed during shared download"));
                 }
+                // Followers need their own committed-state notification even
+                // when another tab executed the job and produced its outcome.
+                let state = self.commit_connection()?.transfer_download_state(content_hash, self.assets.exists(BlobKind::Book, content_hash)?)?;
+                self.send_download_status(*content_hash, state);
+                result?;
                 if let TransferOperation::DownloadBlob { content_hash, placement } = &job.operation {
                     // The first executor may have lost its placement during HTTP.
                     // A follower with a still-live placement gets one fresh pass.

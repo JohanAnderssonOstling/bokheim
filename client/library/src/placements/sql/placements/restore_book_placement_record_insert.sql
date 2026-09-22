@@ -1,1 +1,0 @@
-INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded,deleted_at,trash_origin_dir_id) VALUES(?1,(SELECT row_id FROM book WHERE content_hash=?2),?3,'',0,NULL,NULL) ON CONFLICT(dir_id,book_row_id) DO UPDATE SET file_name=excluded.file_name,deleted_at=NULL,trash_origin_dir_id=NULL

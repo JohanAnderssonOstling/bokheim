@@ -1,7 +1,7 @@
 //! User-initiated library organization backed by the shared SQLite model.
 use crate::BackendError;
 
-use super::{LibrarySession, filenames};
+use super::{filenames, LibrarySession};
 use crate::{ContentHash, DirId};
 use library_model::{LibraryFolderDestination, LibraryTrashView};
 
@@ -31,13 +31,19 @@ impl LibrarySession {
     }
 
     async fn move_library_directory(&self, directory_id: &DirId, requested_parent: Option<&DirId>, requested_name: Option<&str>) -> Result<String, BackendError> {
-        let requested_name = requested_name.map(filenames::validate_component).transpose()?;
-        let name = self.db.move_directory(directory_id, requested_parent, requested_name.as_deref())?;
-        // Replay inline; the queue row still backs recovery if this fails.
+        let name = self.queue_directory_move(directory_id, requested_parent, requested_name)?;
         #[cfg(not(target_arch = "wasm32"))]
         if let Err(error) = self.assets.placement().prepare_directory_with_database(&self.db, *directory_id).await {
             log::warn!("directory rename will retry from the durable queue: {error}");
         }
+        Ok(name)
+    }
+
+    /// The logical mutation is ordered; physical replay is durable background
+    /// work and must not hold up later commands or reader events.
+    pub(super) fn queue_directory_move(&self, directory_id: &DirId, requested_parent: Option<&DirId>, requested_name: Option<&str>) -> Result<String, BackendError> {
+        let requested_name = requested_name.map(filenames::validate_component).transpose()?;
+        let name = self.db.move_directory(directory_id, requested_parent, requested_name.as_deref())?;
         self.notify_contents_changed();
         Ok(name)
     }
@@ -72,17 +78,24 @@ impl LibrarySession {
 
     pub fn restore_book(&self, content_hash: &ContentHash) -> Result<(), BackendError> {
         self.assets.ensure_restore_available().map_err(BackendError::operation)?;
+        #[cfg(not(target_arch = "wasm32"))]
         let placement = self.assets.placement();
         let mut choices = Vec::new();
         for candidate in self.db.restore_book_plan(content_hash).map_err(BackendError::operation)? {
             // First live directory walking up that still exists on disk; the
-            // root needs no check, matching the previous walk.
+            // root needs no check, matching the previous walk. Browser
+            // storage has no out-of-band deleter, so liveness alone decides.
             let mut target = sync_common::ROOT_DIR_ID;
             for ancestor in &candidate.ancestry {
-                if ancestor.live && placement.directory_available(&ancestor.path) {
-                    target = ancestor.id;
-                    break;
+                if !ancestor.live {
+                    continue;
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                if !placement.directory_available(&ancestor.path) {
+                    continue;
+                }
+                target = ancestor.id;
+                break;
             }
             choices.push((candidate.original, target));
         }

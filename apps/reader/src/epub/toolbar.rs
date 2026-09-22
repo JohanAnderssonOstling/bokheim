@@ -1,16 +1,15 @@
-//! EPUB-specific appearance controls in the shared toolbar.
+//! EPUB-specific appearance controls in the shared sidebar.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Window};
 use ui_components as components;
 
 use crate::epub::ReaderView;
-use crate::invalidation::Component;
 use crate::settings::ReaderSettings;
-use crate::shell::toolbar::{self as shared_toolbar, ToolbarContent, ToolbarTarget};
+use crate::shell::toolbar::SidebarTarget;
 use crate::{ReaderFontFamily, ReaderTextAlignment};
 
-impl ToolbarTarget for ReaderView {
+impl SidebarTarget for ReaderView {
     #[cfg(feature = "kobo")]
     fn brightness_controls(&self) -> gpui::Entity<crate::shell::brightness::BrightnessControls> {
         self.brightness.clone()
@@ -20,9 +19,8 @@ impl ToolbarTarget for ReaderView {
         (self.close_reader)(window, cx);
     }
 
-    fn toggle_sidebar(&mut self, _: bool, cx: &mut Context<Self>) {
-        crate::shell::state_panel::toggle_sidebar(&mut self.sidebar, true, cx);
-        crate::invalidation::notify(cx, Component::ReaderShell, "sidebar_visibility_changed");
+    fn hide_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.chrome.hide(cx);
     }
 
     fn search_is_open(&self) -> bool {
@@ -32,96 +30,94 @@ impl ToolbarTarget for ReaderView {
     fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         crate::shell::input::CommandTarget::execute(self, &crate::ToggleSearch, window, cx);
     }
-
-    fn has_selected_annotation(&self) -> bool {
-        self.marks.selected().is_some()
-    }
-
-    fn delete_selected_annotation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.marks.selected().map(|annotation| annotation.id.clone()) else { return };
-        self.delete_annotation(id, cx);
-        self.focus_document(window, cx);
-    }
 }
 
 impl ReaderView {
-    fn render_settings_panel(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_settings_panel(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = components::browser_theme(cx);
         let current = ReaderSettings::preferences(cx).clone();
-        components::reader_settings_dropdown(window.viewport_size().height, theme)
+        components::reader_settings_tab_body(theme)
+            .when(!cfg!(feature = "kobo"), |body| body.child(crate::shell::theme_picker::reader_theme_picker(cx, theme)))
             .child(
-                components::reader_settings_section("Typography", theme)
+                components::reader_settings_group(theme)
                     .child(
-                        components::reader_setting_row("Typeface").child(components::reader_choice_button_group(
+                        components::reader_setting_row_smallcaps("Typeface", theme).child(components::reader_choice_button_group(
                             "reader-font-group",
                             [
-                                components::reader_choice_button("reader-font-publisher", "Book", current.font_family == ReaderFontFamily::Publisher)
+                                components::reader_choice_button("reader-font-publisher", "Book", current.font_family == ReaderFontFamily::Publisher, theme)
                                     .on_click(cx.listener(|this, _, _, cx| this.set_reader_font_family(ReaderFontFamily::Publisher, cx))),
-                                components::reader_choice_button("reader-font-serif", "Serif", current.font_family == ReaderFontFamily::Serif).on_click(cx.listener(|this, _, _, cx| this.set_reader_font_family(ReaderFontFamily::Serif, cx))),
+                                components::reader_choice_button("reader-font-serif", "Serif", current.font_family == ReaderFontFamily::Serif, theme).on_click(cx.listener(|this, _, _, cx| this.set_reader_font_family(ReaderFontFamily::Serif, cx))),
                             ],
                         )),
                     )
                     .child(
-                        components::reader_setting_row("Alignment").child(components::reader_choice_button_group(
+                        components::reader_setting_row_smallcaps("Alignment", theme).child(components::reader_choice_button_group(
                             "reader-alignment-group",
                             [
-                                components::reader_choice_button("reader-alignment-publisher", "Book", current.text_alignment == ReaderTextAlignment::Publisher)
+                                components::reader_choice_button("reader-alignment-publisher", "Book", current.text_alignment == ReaderTextAlignment::Publisher, theme)
                                     .on_click(cx.listener(|this, _, _, cx| this.set_reader_text_alignment(ReaderTextAlignment::Publisher, cx))),
-                                components::reader_choice_button("reader-alignment-start", "Left", current.text_alignment == ReaderTextAlignment::Start)
+                                components::reader_choice_button("reader-alignment-start", "Left", current.text_alignment == ReaderTextAlignment::Start, theme)
                                     .on_click(cx.listener(|this, _, _, cx| this.set_reader_text_alignment(ReaderTextAlignment::Start, cx))),
-                                components::reader_choice_button("reader-alignment-justify", "Justify", current.text_alignment == ReaderTextAlignment::Justify)
+                                components::reader_choice_button("reader-alignment-justify", "Justify", current.text_alignment == ReaderTextAlignment::Justify, theme)
                                     .on_click(cx.listener(|this, _, _, cx| this.set_reader_text_alignment(ReaderTextAlignment::Justify, cx))),
                             ],
                         )),
                     )
-                    .child(components::reader_setting_row("Font size").child(components::reader_stepper_group(
-                        components::reader_stepper_button("font-size-smaller", "−", theme).tooltip("Decrease font size (Alt+-)").on_click(cx.listener(|this, _, _, cx| this.adjust_font_size(-1.0, cx))),
+            )
+            .child(
+                components::reader_settings_group(theme)
+                    .child(components::reader_setting_row("Font size").child(components::settings_stepper(
+                        components::settings_stepper_button("font-size-smaller", "−", false, theme).tooltip("Decrease font size (Alt+-)").on_click(cx.listener(|this, _, _, cx| this.adjust_font_size(-1.0, cx))),
                         format!("{:.0}px", current.font_size),
-                        components::reader_stepper_button("font-size-larger", "+", theme).tooltip("Increase font size (Alt++)").on_click(cx.listener(|this, _, _, cx| this.adjust_font_size(1.0, cx))),
+                        components::settings_stepper_button("font-size-larger", "+", false, theme).tooltip("Increase font size (Alt++)").on_click(cx.listener(|this, _, _, cx| this.adjust_font_size(1.0, cx))),
                         theme,
                     )))
-                    .child(components::reader_setting_row("Line height").child(components::reader_stepper_group(
-                        components::reader_stepper_button("line-height-smaller", "−", theme).on_click(cx.listener(|this, _, _, cx| this.adjust_line_height(-0.1, cx))),
+                    .child(components::reader_setting_row("Line height").child(components::settings_stepper(
+                        components::settings_stepper_button("line-height-smaller", "−", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_line_height(-0.1, cx))),
                         format!("{:.1}", current.line_height),
-                        components::reader_stepper_button("line-height-larger", "+", theme).on_click(cx.listener(|this, _, _, cx| this.adjust_line_height(0.1, cx))),
+                        components::settings_stepper_button("line-height-larger", "+", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_line_height(0.1, cx))),
                         theme,
                     ))),
             )
             .child(
-                components::reader_settings_section("Page layout", theme)
+                components::reader_settings_group(theme)
+                    .child(components::reader_setting_row("Side margins").child(components::settings_stepper(
+                        components::settings_stepper_button("side-margins-smaller", "−", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_horizontal_margin(-8.0, cx))),
+                        format!("{:.0}px", current.horizontal_margin_px),
+                        components::settings_stepper_button("side-margins-larger", "+", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_horizontal_margin(8.0, cx))),
+                        theme,
+                    )))
+                    .child(components::reader_setting_row("Top/bottom margins").child(components::settings_stepper(
+                        components::settings_stepper_button("vertical-margins-smaller", "−", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_vertical_margin(-8.0, cx))),
+                        format!("{:.0}px", current.vertical_margin_px),
+                        components::settings_stepper_button("vertical-margins-larger", "+", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_vertical_margin(8.0, cx))),
+                        theme,
+                    )))
+                    .when(!cfg!(feature = "kobo"), |section| section.child(components::reader_setting_row("Column gap").child(components::settings_stepper(
+                        components::settings_stepper_button("column-gap-smaller", "−", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_min_column_gap(-8.0, cx))),
+                        format!("{:.0}px", current.min_column_gap_px),
+                        components::settings_stepper_button("column-gap-larger", "+", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_min_column_gap(8.0, cx))),
+                        theme,
+                    )))),
+            )
+            .child(
+                components::reader_settings_group(theme)
                     .when(!cfg!(feature = "kobo"), |section| {
                         section
-                            .child(components::reader_setting_row("Column width").child(components::reader_stepper_group(
-                                components::reader_stepper_button("column-width-smaller", "−", theme).tooltip("Decrease column width (Ctrl+Alt+-)").on_click(cx.listener(|this, _, _, cx| this.adjust_column_width(-40.0, cx))),
-                                format!("{:.0}px", current.column_width),
-                                components::reader_stepper_button("column-width-larger", "+", theme).tooltip("Increase column width (Ctrl+Alt++)").on_click(cx.listener(|this, _, _, cx| this.adjust_column_width(40.0, cx))),
+                            .child(components::reader_setting_row("Line width min").child(components::settings_stepper(
+                                components::settings_stepper_button("line-width-min-smaller", "−", false, theme).on_click(cx.listener(|this, _, window, cx| this.adjust_min_line_width_ch(-5.0, window, cx))),
+                                format!("{:.0}ch", current.min_line_width_ch),
+                                components::settings_stepper_button("line-width-min-larger", "+", false, theme).on_click(cx.listener(|this, _, window, cx| this.adjust_min_line_width_ch(5.0, window, cx))),
                                 theme,
                             )))
-                            .child(components::reader_setting_row("Fit columns").child(components::reader_stepper_group(
-                                components::reader_stepper_button("fit-columns-fewer", "−", theme).tooltip("Fit fewer columns in the current reader width").on_click(cx.listener(|this, _, window, cx| {
-                                    this.adjust_desired_column_count(-1, window, cx);
-                                })),
-                                self.desired_column_count.to_string(),
-                                components::reader_stepper_button("fit-columns-more", "+", theme).tooltip("Fit more columns in the current reader width").on_click(cx.listener(|this, _, window, cx| {
-                                    this.adjust_desired_column_count(1, window, cx);
-                                })),
+                            .child(components::reader_setting_row("Line width max").child(components::settings_stepper(
+                                components::settings_stepper_button("line-width-max-smaller", "−", false, theme).on_click(cx.listener(|this, _, window, cx| this.adjust_max_line_width_ch(-5.0, window, cx))),
+                                format!("{:.0}ch", current.max_line_width_ch),
+                                components::settings_stepper_button("line-width-max-larger", "+", false, theme).on_click(cx.listener(|this, _, window, cx| this.adjust_max_line_width_ch(5.0, window, cx))),
                                 theme,
                             )))
-                    })
-                    .child(components::reader_setting_row("Zoom").child(components::reader_stepper_group(
-                        components::reader_stepper_button("reader-zoom-out", "−", theme).tooltip("Zoom out (Ctrl+-)").on_click(cx.listener(|this, _, _, cx| this.adjust_scale(-0.1, cx))),
-                        format!("{:.1}x", current.scale),
-                        components::reader_stepper_button("reader-zoom-in", "+", theme).tooltip("Zoom in (Ctrl++)").on_click(cx.listener(|this, _, _, cx| this.adjust_scale(0.1, cx))),
-                        theme,
-                    ))),
+                    }),
             )
             .into_any_element()
-    }
-
-    pub(super) fn render_toolbar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme = components::browser_theme(cx);
-        let progress = self.progress.summary();
-        let content = ToolbarContent::new(self.spine_title(), progress.label(), progress.tooltip(), self.document_focus(cx), self.render_settings_panel(window, cx));
-        shared_toolbar::reader_toolbar(self, &cx.entity(), content, theme, window)
     }
 }

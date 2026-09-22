@@ -1,7 +1,8 @@
 //! Presentation timing only: backend work and its progress continue immediately.
 use super::LibraryActivitySummary;
-use bokheim_backend::TransferJobKind;
-use std::time::{Duration, Instant};
+use app::TransferJobKind;
+use std::time::Duration;
+use web_time::Instant;
 use sync_common::LibraryId;
 
 const SHOW_DELAY: Duration = Duration::from_millis(300);
@@ -11,17 +12,20 @@ const IDLE_GRACE: Duration = Duration::from_millis(800);
 pub(super) enum ActivityKind {
     StorageQuota,
     Operation,
+    OperationThumbnails,
+    OperationBookUploads,
+    OperationCoverUploads,
+    OperationSyncChanges,
     Files,
     Scan,
     Thumbnails,
-    ScanSync,
     Metadata,
     Preparation,
     Transfer(TransferJobKind),
 }
 impl ActivityKind {
     fn server(self) -> bool {
-        !matches!(self, Self::Operation | Self::Files | Self::Scan | Self::Thumbnails)
+        !matches!(self, Self::Operation | Self::OperationThumbnails | Self::Files | Self::Scan | Self::Thumbnails)
     }
 }
 

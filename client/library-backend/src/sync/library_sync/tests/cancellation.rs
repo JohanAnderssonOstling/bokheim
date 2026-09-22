@@ -214,7 +214,7 @@ async fn state_checkpoint_does_not_wait_for_asset_reconciliation() {
     manager.event_tx = Some(events);
     manager.reconcile_assets(Vec::new()).await.unwrap();
     assert!(manager.transfer_statuses().is_empty(), "unprepared uploads must remain blocked");
-    manager.database.finish_upload_pipeline().unwrap();
+    manager.database.finish_upload_preparation(&manager.database.upload_preparation_snapshot().unwrap()).unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(3), manager.reconcile_assets(Vec::new())).await.expect("planning must return while the upload is blocked").unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(3), started.notified()).await.unwrap();
     let reading = reading_change(1, 1, "epubcfi(/6/2)", 1);

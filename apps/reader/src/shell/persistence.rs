@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
 
-use bokheim_backend::LibraryClient;
+use library_backend::LibraryClient;
 use gpui::{App, Context};
 
 pub(crate) type PersistenceFuture<T> = Pin<Box<dyn Future<Output = Result<T, String>> + 'static>>;
@@ -164,7 +164,7 @@ pub(crate) struct ReadingPositionWriter {
 }
 
 impl ReadingPositionWriter {
-    pub(crate) fn new(cx: &App, content_hash: bokheim_backend::ContentHash, library: Rc<LibraryClient>) -> Self {
+    pub(crate) fn new(cx: &App, content_hash: app::ContentHash, library: Rc<LibraryClient>) -> Self {
         let writer = PositionWriter::new(
             cx,
             "save reading position",

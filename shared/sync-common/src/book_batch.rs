@@ -11,13 +11,19 @@ pub const MAX_BATCH_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_MANIFEST_BYTES: usize = 16 * 1024;
 
 pub fn payload_bytes(entries: &[BlobManifestEntry]) -> Option<u64> {
-    if entries.is_empty() || entries.len() > MAX_BOOKS { return None; }
+    if entries.is_empty() || entries.len() > MAX_BOOKS {
+        return None;
+    }
     let mut seen = std::collections::HashSet::new();
     let mut total = 0u64;
     for entry in entries {
-        if entry.size_bytes == 0 || entry.size_bytes > MAX_BOOK_BYTES || !seen.insert(entry.content_hash) { return None; }
+        if entry.size_bytes == 0 || entry.size_bytes > MAX_BOOK_BYTES || !seen.insert(entry.content_hash) {
+            return None;
+        }
         total = total.checked_add(entry.size_bytes)?;
-        if total > MAX_BATCH_BYTES { return None; }
+        if total > MAX_BATCH_BYTES {
+            return None;
+        }
     }
     Some(total)
 }

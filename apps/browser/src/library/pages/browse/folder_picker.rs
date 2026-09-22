@@ -181,8 +181,18 @@ impl Render for FolderPicker {
         }
         let picker = cx.entity();
         let selected_path = self.selected_path();
+        let columns = self.columns();
+        // Flex can size a `flex_1` child against a parent's own resolved
+        // height, but not against one that is itself only a `max_h` with no
+        // explicit height to grow into — that left the column strip at zero
+        // height. Computed here instead, from the tallest column's own rows,
+        // and clamped the same way the library switcher's list is.
+        const ROW_HEIGHT: f32 = 36.0;
+        let rows = columns.iter().map(|destinations| destinations.len()).max().unwrap_or(0);
+        let column_content_height = rows as f32 * ROW_HEIGHT + components::SPACE_XS * 2.0;
+        let panel_height = (58.0 + column_content_height).min(components::NAVIGATION_MODAL_MAX_HEIGHT);
         let mut column_strip = div().flex_1().min_h_0().min_w_0().flex().flex_row().overflow_x_scrollbar();
-        for (depth, destinations) in self.columns().into_iter().enumerate() {
+        for (depth, destinations) in columns.into_iter().enumerate() {
             let mut contents = div().w_full().flex().flex_col().p(px(components::SPACE_XS));
             for destination in destinations {
                 let on_path = destination.id == self.selected_id || selected_path.contains(&destination.id);
@@ -204,7 +214,6 @@ impl Render for FolderPicker {
                 .id(format!("folder-picker-column-{depth}"))
                 .flex_1()
                 .min_w(px(190.0))
-                .h_full()
                 .min_h_0()
                 .border_r_1()
                 .border_color(theme.rule)
@@ -215,8 +224,14 @@ impl Render for FolderPicker {
         let can_select = self.destination(self.selected_id).is_some() && !self.disabled_ids.contains(&self.selected_id);
         let cancel_picker = picker.clone();
         let confirm_picker = picker.clone();
+        // Sized to its content rather than stretched full-height: the picker
+        // is a handful of folder columns, not a page, and a nearly-empty
+        // library left it a mostly-blank pane. Capped the way the library
+        // switcher's own growing list is, so a deep tree still scrolls
+        // instead of pushing the dialog off the window.
         let panel = components::modal_surface(theme)
-            .size_full()
+            .w_full()
+            .h(px(panel_height))
             .flex()
             .flex_col()
             .track_focus(&self.focus)
@@ -238,14 +253,26 @@ impl Render for FolderPicker {
             )
             .child(column_strip);
         let dismiss_picker = picker;
+        // Anchored to the window rather than left to flow: a picker opened
+        // from folder editing lives inside one pane of a possibly-split
+        // browse view, and `modal_overlay`'s `size_full` would only ever
+        // cover that one narrow pane. Anchoring at the window's origin with
+        // its own viewport-sized child escapes that nesting, so the picker
+        // always gets the window's full width regardless of how many split
+        // panes are open beside it.
+        let viewport = window.viewport_size();
         gpui::deferred(
-            components::modal_overlay()
-                .occlude()
-                .child(components::modal_scrim("folder-picker-scrim", theme).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    dismiss_picker.update(cx, |picker, cx| picker.cancel(cx));
-                }))
-                .child(panel),
+            gpui::anchored().position(gpui::point(px(0.0), px(0.0))).child(
+                components::modal_overlay()
+                    .w(viewport.width)
+                    .h(viewport.height)
+                    .occlude()
+                    .child(components::modal_scrim("folder-picker-scrim", theme).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        dismiss_picker.update(cx, |picker, cx| picker.cancel(cx));
+                    }))
+                    .child(panel),
+            ),
         )
         .with_priority(2)
     }

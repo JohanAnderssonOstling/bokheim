@@ -30,7 +30,7 @@ impl ReaderView {
             LoadState::Loading | LoadState::Error(_) => None,
         }
         .or_else(|| self.annotation_popup_anchor.map(annotation_editor::Passage::from_point));
-        let geometry = annotation_editor::geometry(passage, f32::from(viewport.width), f32::from(viewport.height), sidebar_width, components::READER_TOOLBAR_HEIGHT, column_count.max(1));
+        let geometry = annotation_editor::geometry(passage, f32::from(viewport.width), f32::from(viewport.height), sidebar_width, components::reader_toolbar_size_px(window), column_count.max(1));
         Some(annotation_editor::standard_editor(
             "reader-annotation-popup",
             entity,
@@ -55,8 +55,8 @@ impl ReaderView {
         }
         Some(
             panel
-                .child(components::reader_state_actions().child(components::reader_control_button("reader-footnote-open", "Go to note", theme).on_click(cx.listener(|this, _, _, cx| this.navigate_from_footnote(cx)))).child(
-                    components::reader_control_button("reader-footnote-close", "Close", theme).on_click(cx.listener(|this, _, _, cx| {
+                .child(components::action_row().child(components::topbar_action_button("reader-footnote-open", "Go to note", gpui_component::IconName::ArrowRight, theme).on_click(cx.listener(|this, _, _, cx| this.navigate_from_footnote(cx)))).child(
+                    components::topbar_action_button("reader-footnote-close", "Close", gpui_component::IconName::Close, theme).on_click(cx.listener(|this, _, _, cx| {
                         this.footnote = None;
                         crate::invalidation::notify(cx, Component::ReaderShell, "footnote_closed");
                     })),
@@ -71,7 +71,7 @@ impl ReaderView {
         let close_image = entity.clone();
         let viewport = window.viewport_size();
         let reader_width = (f32::from(viewport.width) - sidebar_width).max(1.0);
-        let reader_height = (f32::from(viewport.height) - components::READER_TOOLBAR_HEIGHT).max(1.0);
+        let reader_height = (f32::from(viewport.height) - components::reader_toolbar_size_px(window)).max(1.0);
         Some(
             components::ReaderImagePopup::new(uri, image, gpui::size(px(reader_width), px(reader_height)))
                 .on_copy(move |_, cx| copy_image.update(cx, |this, cx| this.copy_preview_image(cx)))

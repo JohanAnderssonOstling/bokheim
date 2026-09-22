@@ -1,10 +1,10 @@
 //! Kobo hardware operations that are independent of any UI framework.
 
-pub mod brightness;
-pub mod natural_light;
 pub mod battery;
 #[cfg(target_os = "linux")]
 pub mod bluetooth;
+pub mod brightness;
+pub mod natural_light;
 #[cfg(target_os = "linux")]
 pub mod wifi;
 

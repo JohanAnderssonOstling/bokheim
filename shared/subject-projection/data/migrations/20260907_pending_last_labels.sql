@@ -1,0 +1,10 @@
+BEGIN IMMEDIATE;
+update concept set preferred_label='Central African Rep. Econ. History' where concept_id=12166;
+update concept set preferred_label='Central Australia & Northern Terr.' where concept_id=13867;
+update concept set preferred_label='Constructed & Secret Languages' where concept_id=3752;
+update concept set preferred_label='Mexican & Central American Lang.' where concept_id=8503;
+update concept set preferred_label='South American & Caribbean Lang.' where concept_id=9519;
+update concept set preferred_label='1st Republic & Kemalism, 1923–1960' where concept_id=51571;
+update concept set preferred_label='Post-Soviet Ukrainian Politics' where concept_id=51594;
+update concept set preferred_label='Post-Soviet Ukrainian Diplomacy' where concept_id=51595;
+COMMIT;

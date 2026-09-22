@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
-const DEFAULT_CATALOG_URL: &str = "http://127.0.0.1:8092/";
+const DEFAULT_AUTHORITY_URL: &str = "http://127.0.0.1:8092/";
 const DEFAULT_METADATA_URL: &str = "http://127.0.0.1:8091/";
 const RESPONSE_LIMIT: usize = 1024 * 1024;
 const REVIEW_RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
@@ -12,13 +12,13 @@ const REVIEW_RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
 #[derive(Clone)]
 pub struct OperationalServices {
     client: Client,
-    catalog_url: Option<Url>,
+    authority_url: Option<Url>,
     metadata_url: Option<Url>,
 }
 
 #[derive(Serialize)]
 pub(crate) struct OperationalSnapshot {
-    pub(crate) catalogue: RemoteService,
+    pub(crate) authority: RemoteService,
     pub(crate) metadata: RemoteService,
 }
 
@@ -35,26 +35,30 @@ impl Default for OperationalServices {
     }
 }
 
+pub(crate) fn is_supported_authority_process(process: &str) -> bool {
+    matches!(process, "cover_downloads" | "enrichment")
+}
+
 impl OperationalServices {
     pub fn from_env() -> Result<Self, String> {
         Self::from_values(|name| std::env::var(name).ok())
     }
 
     fn from_values(mut value: impl FnMut(&str) -> Option<String>) -> Result<Self, String> {
-        let catalog_url = parse_url("BOKHEIM_ADMIN_CATALOG_URL", value("BOKHEIM_ADMIN_CATALOG_URL"), DEFAULT_CATALOG_URL)?;
+        let authority_url = parse_url("BOKHEIM_ADMIN_AUTHORITY_URL", value("BOKHEIM_ADMIN_AUTHORITY_URL"), DEFAULT_AUTHORITY_URL)?;
         let metadata_url = parse_url("BOKHEIM_ADMIN_METADATA_URL", value("BOKHEIM_ADMIN_METADATA_URL"), DEFAULT_METADATA_URL)?;
         let client = Client::builder().redirect(Policy::none()).timeout(Duration::from_secs(5)).build().map_err(|error| format!("could not build operations HTTP client: {error}"))?;
-        Ok(Self { client, catalog_url, metadata_url })
+        Ok(Self { client, authority_url, metadata_url })
     }
 
     pub(crate) async fn snapshot(&self) -> OperationalSnapshot {
-        let (catalogue, metadata) = tokio::join!(self.fetch(self.catalog_url.as_ref(), "internal/operations"), self.fetch(self.metadata_url.as_ref(), "internal/operations"));
-        OperationalSnapshot { catalogue, metadata }
+        let (authority, metadata) = tokio::join!(self.fetch(self.authority_url.as_ref(), "internal/operations"), self.fetch(self.metadata_url.as_ref(), "internal/operations"));
+        OperationalSnapshot { authority, metadata }
     }
 
-    pub(crate) async fn catalog_identity_reviews(&self, source_id: Option<&str>, status: Option<&str>, limit: u16) -> Result<Value, String> {
-        let base = self.catalog_url.as_ref().ok_or("catalogue service disabled")?;
-        let mut url = base.join("internal/identity-reviews").map_err(|_| "invalid catalogue review endpoint")?;
+    pub(crate) async fn authority_identity_reviews(&self, source_id: Option<&str>, status: Option<&str>, limit: u16) -> Result<Value, String> {
+        let base = self.authority_url.as_ref().ok_or("authority service disabled")?;
+        let mut url = base.join("internal/identity-reviews").map_err(|_| "invalid authority review endpoint")?;
         {
             let mut query = url.query_pairs_mut();
             if let Some(source_id) = source_id.filter(|value| !value.is_empty()) {
@@ -65,37 +69,37 @@ impl OperationalServices {
             }
             query.append_pair("limit", &limit.to_string());
         }
-        self.catalog_json(self.client.get(url), REVIEW_RESPONSE_LIMIT).await
+        self.authority_json(self.client.get(url), REVIEW_RESPONSE_LIMIT).await
     }
 
-    pub(crate) async fn catalog_identity_review_action(&self, review_id: &str, action: &Value) -> Result<Value, String> {
-        let base = self.catalog_url.as_ref().ok_or("catalogue service disabled")?;
-        let url = base.join(&format!("internal/identity-reviews/{review_id}")).map_err(|_| "invalid catalogue review endpoint")?;
-        self.catalog_json(self.client.post(url).json(action), RESPONSE_LIMIT).await
+    pub(crate) async fn authority_identity_review_action(&self, review_id: &str, action: &Value) -> Result<Value, String> {
+        let base = self.authority_url.as_ref().ok_or("authority service disabled")?;
+        let url = base.join(&format!("internal/identity-reviews/{review_id}")).map_err(|_| "invalid authority review endpoint")?;
+        self.authority_json(self.client.post(url).json(action), RESPONSE_LIMIT).await
     }
 
-    pub(crate) async fn catalog_process_action(&self, process: &str, action: &Value) -> Result<Value, String> {
-        if process != "catalogue_crawling" && process != "cover_downloads" && process != "enrichment" {
-            return Err("unknown catalogue process".to_owned());
+    pub(crate) async fn authority_process_action(&self, process: &str, action: &Value) -> Result<Value, String> {
+        if !is_supported_authority_process(process) {
+            return Err("unknown authority process".to_owned());
         }
-        let base = self.catalog_url.as_ref().ok_or("catalogue service disabled")?;
-        let url = base.join(&format!("internal/processes/{process}")).map_err(|_| "invalid catalogue process endpoint")?;
-        self.catalog_json(self.client.post(url).json(action), RESPONSE_LIMIT).await
+        let base = self.authority_url.as_ref().ok_or("authority service disabled")?;
+        let url = base.join(&format!("internal/processes/{process}")).map_err(|_| "invalid authority process endpoint")?;
+        self.authority_json(self.client.post(url).json(action), RESPONSE_LIMIT).await
     }
 
-    async fn catalog_json(&self, request: reqwest::RequestBuilder, limit: usize) -> Result<Value, String> {
-        let response = request.header(reqwest::header::ACCEPT, "application/json").send().await.map_err(|_| "catalogue service request failed")?;
+    async fn authority_json(&self, request: reqwest::RequestBuilder, limit: usize) -> Result<Value, String> {
+        let response = request.header(reqwest::header::ACCEPT, "application/json").send().await.map_err(|_| "authority service request failed")?;
         if !response.status().is_success() {
-            return Err("catalogue service returned an error".to_owned());
+            return Err("authority service returned an error".to_owned());
         }
         if response.content_length().is_some_and(|length| length > limit as u64) {
-            return Err("catalogue service response is too large".to_owned());
+            return Err("authority service response is too large".to_owned());
         }
-        let bytes = response.bytes().await.map_err(|_| "catalogue service response failed")?;
+        let bytes = response.bytes().await.map_err(|_| "authority service response failed")?;
         if bytes.len() > limit {
-            return Err("catalogue service response is too large".to_owned());
+            return Err("authority service response is too large".to_owned());
         }
-        serde_json::from_slice(&bytes).map_err(|_| "catalogue service returned invalid JSON".to_owned())
+        serde_json::from_slice(&bytes).map_err(|_| "authority service returned invalid JSON".to_owned())
     }
 
     async fn fetch(&self, base: Option<&Url>, path: &str) -> RemoteService {
@@ -148,11 +152,18 @@ mod tests {
 
     #[test]
     fn operational_targets_are_loopback_only_and_may_be_disabled() {
-        assert!(parse_url("test", Some("http://127.0.0.1:8090".to_owned()), DEFAULT_CATALOG_URL).unwrap().is_some());
-        assert!(parse_url("test", Some("http://[::1]:8090".to_owned()), DEFAULT_CATALOG_URL).unwrap().is_some());
-        assert!(parse_url("test", Some(String::new()), DEFAULT_CATALOG_URL).unwrap().is_none());
-        assert!(parse_url("test", Some("http://example.com".to_owned()), DEFAULT_CATALOG_URL).is_err());
-        assert!(parse_url("test", Some("https://127.0.0.1".to_owned()), DEFAULT_CATALOG_URL).is_err());
-        assert!(parse_url("test", Some("http://127.0.0.1@203.0.113.1".to_owned()), DEFAULT_CATALOG_URL).is_err());
+        assert!(parse_url("test", Some("http://127.0.0.1:8090".to_owned()), DEFAULT_AUTHORITY_URL).unwrap().is_some());
+        assert!(parse_url("test", Some("http://[::1]:8090".to_owned()), DEFAULT_AUTHORITY_URL).unwrap().is_some());
+        assert!(parse_url("test", Some(String::new()), DEFAULT_AUTHORITY_URL).unwrap().is_none());
+        assert!(parse_url("test", Some("http://example.com".to_owned()), DEFAULT_AUTHORITY_URL).is_err());
+        assert!(parse_url("test", Some("https://127.0.0.1".to_owned()), DEFAULT_AUTHORITY_URL).is_err());
+        assert!(parse_url("test", Some("http://127.0.0.1@203.0.113.1".to_owned()), DEFAULT_AUTHORITY_URL).is_err());
+    }
+
+    #[test]
+    fn only_live_authority_processes_are_supported() {
+        assert!(is_supported_authority_process("cover_downloads"));
+        assert!(is_supported_authority_process("enrichment"));
+        assert!(!is_supported_authority_process("other"));
     }
 }

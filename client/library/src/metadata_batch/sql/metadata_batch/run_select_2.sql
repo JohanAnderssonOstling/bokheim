@@ -1,1 +1,0 @@
-SELECT metadata_batch_flag(1)

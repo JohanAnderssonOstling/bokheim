@@ -52,36 +52,6 @@ INSERT INTO description_import_metric(name,value) VALUES
     ('subject_heading_records',0),
     ('matched_subject_heading_records',0);";
 
-const AUTHOR_PROFILE_SCHEMA: &str = "CREATE TABLE author_profile_snapshot(
-    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    schema_version INTEGER NOT NULL,
-    dump_date TEXT NOT NULL,
-    imported_at_ms INTEGER NOT NULL,
-    author_records INTEGER NOT NULL,
-    biography_records INTEGER NOT NULL
-) STRICT;
-CREATE TABLE author_profile_import_setting(
-    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    builder_version INTEGER NOT NULL,
-    record_limit INTEGER,
-    dump_date TEXT NOT NULL
-) STRICT;
-CREATE TABLE author_profile_import_input(
-    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-    path TEXT NOT NULL,
-    size_bytes INTEGER NOT NULL,
-    modified_ms INTEGER NOT NULL
-) STRICT;
-CREATE TABLE import_checkpoint(
-    phase TEXT PRIMARY KEY,
-    records_read INTEGER NOT NULL,
-    completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0,1))
-) WITHOUT ROWID;
-CREATE TABLE author_profile(
-    author_id INTEGER PRIMARY KEY,
-    biography TEXT NOT NULL
-) STRICT;";
-
 pub(super) struct SidecarSpec {
     name: &'static str,
     input_name: &'static str,
@@ -94,10 +64,6 @@ pub(super) struct SidecarSpec {
 impl SidecarSpec {
     pub(super) fn description(builder_version: i64) -> Self {
         Self { name: "description", input_name: "works", builder_version, setting_table: "description_import_setting", input_table: "description_import_input", schema: DESCRIPTION_SCHEMA }
-    }
-
-    pub(super) fn author_profile(builder_version: i64) -> Self {
-        Self { name: "author-profile", input_name: "author", builder_version, setting_table: "author_profile_import_setting", input_table: "author_profile_import_input", schema: AUTHOR_PROFILE_SCHEMA }
     }
 }
 

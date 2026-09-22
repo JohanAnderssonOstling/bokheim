@@ -28,12 +28,8 @@ fn relocated_package_renders_and_searches() -> Result<(), Box<dyn std::error::Er
         page.objects_mut().create_text_object(PdfPoints::new(72.0), PdfPoints::new(720.0), "Packaged PDFium", font, PdfPoints::new(18.0))?;
         document.save_to_file(&directory.join("fixture.pdf"))?;
     }
-    let result = Command::new(&executable)
-        .args(["--exact", "relocated_package_renders_and_searches", "--nocapture"])
-        .env("BOKHEIM_PDFIUM_PACKAGE_TEST_CHILD", "1")
-        .env_remove("BOKHEIM_PDFIUM_LIBRARY_PATH")
-        .current_dir(&directory)
-        .output()?;
+    let result =
+        Command::new(&executable).args(["--exact", "relocated_package_renders_and_searches", "--nocapture"]).env("BOKHEIM_PDFIUM_PACKAGE_TEST_CHILD", "1").env_remove("BOKHEIM_PDFIUM_LIBRARY_PATH").current_dir(&directory).output()?;
     fs::remove_dir_all(&directory)?;
     assert!(result.status.success(), "{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
     Ok(())

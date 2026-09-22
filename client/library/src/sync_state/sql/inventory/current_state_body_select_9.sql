@@ -1,1 +1,0 @@
-SELECT bokheim_mutation('reading_position',content_hash,read_pos,COALESCE(read_progress,0)),0 FROM book WHERE content_hash=?1 AND read_pos IS NOT NULL

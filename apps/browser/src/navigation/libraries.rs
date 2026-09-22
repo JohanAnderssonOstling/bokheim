@@ -5,12 +5,12 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use app_preferences::LibraryView;
-use bokheim_backend::AppClient;
+use app::AppClient;
 use gpui::{App, AppContext, Context, Entity, SharedString, Task, Window};
 use sync_common::LibraryId;
 
 use super::{LibrarySession, LibrarySummary, Navigate};
-use crate::library::OpenBook;
+use crate::library::{BookDetailClosed, OpenBook};
 
 fn library_summaries(backend: &AppClient) -> crate::services::UiFuture<Vec<LibrarySummary>> {
     let backend = backend.clone();
@@ -20,6 +20,7 @@ fn library_summaries(backend: &AppClient) -> crate::services::UiFuture<Vec<Libra
 pub(crate) struct Libraries {
     backend: Rc<AppClient>,
     open_book: OpenBook,
+    book_detail_closed: BookDetailClosed,
     sessions: HashMap<LibraryId, Entity<LibrarySession>>,
     entries: Vec<LibrarySummary>,
     selected_id: Option<LibraryId>,
@@ -43,7 +44,7 @@ impl Libraries {
         }
     }
 
-    pub(super) fn new(backend: Rc<AppClient>, open_book: OpenBook, entries: Vec<LibrarySummary>, library_id: Option<LibraryId>, navigate: Navigate, cx: &mut Context<Self>) -> Self {
+    pub(super) fn new(backend: Rc<AppClient>, open_book: OpenBook, book_detail_closed: BookDetailClosed, entries: Vec<LibrarySummary>, library_id: Option<LibraryId>, navigate: Navigate, cx: &mut Context<Self>) -> Self {
         let selection_epoch = Rc::new(Cell::new(0));
         let list_epoch = selection_epoch.clone();
         let list_backend = backend.clone();
@@ -75,8 +76,9 @@ impl Libraries {
         });
         // The shared backend scheduler owns startup reconciliation. Each tab
         // uses the initial local list and subscribes to discovery updates.
-        let sessions = library_id.into_iter().filter(|id| entries.iter().any(|entry| entry.library_id() == id)).map(|id| (id, cx.new(|cx| LibrarySession::new(backend.clone(), open_book.clone(), id, cx)))).collect();
-        let mut libraries = Self { backend, open_book, sessions, entries, selected_id: library_id, creating_libraries: 0, selection_epoch, navigate, _list_updates: list_updates };
+        let sessions =
+            library_id.into_iter().filter(|id| entries.iter().any(|entry| entry.library_id() == id)).map(|id| (id, cx.new(|cx| LibrarySession::new(backend.clone(), open_book.clone(), book_detail_closed.clone(), id, cx)))).collect();
+        let mut libraries = Self { backend, open_book, book_detail_closed, sessions, entries, selected_id: library_id, creating_libraries: 0, selection_epoch, navigate, _list_updates: list_updates };
         libraries
     }
 
@@ -171,7 +173,7 @@ impl Libraries {
         .detach();
     }
 
-    pub(crate) fn folder_creation_backend(&self) -> std::rc::Rc<bokheim_backend::AppClient> {
+    pub(crate) fn folder_creation_backend(&self) -> std::rc::Rc<app::AppClient> {
         self.backend.clone()
     }
 
@@ -220,7 +222,8 @@ impl Libraries {
                     }
                     let backend = sessions.backend.clone();
                     let open_book = sessions.open_book.clone();
-                    let session = sessions.sessions.entry(*id).or_insert_with(|| cx.new(|cx| LibrarySession::new(backend, open_book, *id, cx)));
+                    let book_detail_closed = sessions.book_detail_closed.clone();
+                    let session = sessions.sessions.entry(*id).or_insert_with(|| cx.new(|cx| LibrarySession::new(backend, open_book, book_detail_closed, *id, cx)));
                     session.update(cx, |session, cx| session.set_importing(true, cx));
                 }
                 cx.notify();
@@ -234,7 +237,7 @@ impl Libraries {
 
             for (library_id, name, directory) in created {
                 let _progress = sessions.update_in(cx, |_, window, cx| crate::services::ImportProgressToast::start(backend.library(library_id), window, cx)).ok();
-                let result = backend.library(library_id).import_directory_contents(bokheim_backend::ROOT_DIR_ID, directory).await;
+                let result = backend.library(library_id).import_directory_contents(app::ROOT_DIR_ID, directory).await;
                 let _ = sessions.update(cx, |sessions, cx| {
                     if let Some(session) = sessions.sessions.get(&library_id) {
                         session.update(cx, |session, cx| session.set_importing(false, cx));
@@ -291,8 +294,9 @@ impl Libraries {
         crate::services::library_add_trace::mark(library_id, "session_creation_started");
         let backend = self.backend.clone();
         let open_book = self.open_book.clone();
+        let book_detail_closed = self.book_detail_closed.clone();
         if self.entries.iter().any(|entry| *entry.library_id() == library_id) {
-            self.sessions.entry(library_id).or_insert_with(|| cx.new(|cx| LibrarySession::new(backend, open_book, library_id, cx)));
+            self.sessions.entry(library_id).or_insert_with(|| cx.new(|cx| LibrarySession::new(backend, open_book, book_detail_closed, library_id, cx)));
         }
         self.selected_id = Some(library_id);
         crate::services::library_add_trace::mark(library_id, "selection_updated");
@@ -304,7 +308,7 @@ impl Libraries {
     }
 }
 
-fn import_failure_summary(failures: &[bokheim_backend::ImportFailure]) -> String {
+fn import_failure_summary(failures: &[app::ImportFailure]) -> String {
     let mut summary = failures.iter().take(3).map(crate::services::import_failure_message).collect::<Vec<_>>().join(". ");
     if failures.len() > 3 {
         summary.push_str(&format!(". {} more imports failed.", failures.len() - 3));
@@ -318,7 +322,7 @@ mod tests {
 
     #[test]
     fn import_warnings_limit_the_number_of_failures_shown() {
-        let failures = (1..=100).map(|i| bokheim_backend::ImportFailure { kind: bokheim_backend::ImportFailureKind::File, path: vec![format!("Book {i}.epub")], diagnostic: None }).collect::<Vec<_>>();
+        let failures = (1..=100).map(|i| app::ImportFailure { kind: app::ImportFailureKind::File, path: vec![format!("Book {i}.epub")], diagnostic: None }).collect::<Vec<_>>();
         assert_eq!(import_failure_summary(&failures), "Could not import “Book 1.epub”. Could not import “Book 2.epub”. Could not import “Book 3.epub”. 97 more imports failed.");
         assert_eq!(import_failure_summary(&failures[..1]), crate::services::import_failure_message(&failures[0]));
         assert_eq!(import_failure_summary(&[]), "");

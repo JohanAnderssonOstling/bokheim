@@ -1,1 +1,0 @@
-INSERT OR IGNORE INTO external_entity_alias(wikidata_id,alias) VALUES(?1,?2)

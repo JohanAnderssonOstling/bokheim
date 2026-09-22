@@ -1,1 +1,0 @@
-DELETE FROM book_dir

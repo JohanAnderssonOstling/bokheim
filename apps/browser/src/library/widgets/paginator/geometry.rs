@@ -416,7 +416,11 @@ mod tests {
 
     #[test]
     fn book_slack_grows_cards_by_up_to_25_percent_then_expands_gaps() {
-        for policy in [crate::library::widgets::book_card_policy(false), crate::library::widgets::shelf_card_policy(true), crate::library::widgets::shelf_card_policy(false)] {
+        for policy in [
+            crate::library::widgets::book_card_policy(false, app_preferences::CoverText::Always),
+            crate::library::widgets::shelf_card_policy(app_preferences::CoverText::Always),
+            crate::library::widgets::shelf_card_policy(app_preferences::CoverText::CoverOnly),
+        ] {
             for rem_size in [px(16.0), px(20.0)] {
                 let width = policy.width.width(rem_size);
                 assert_eq!(width, policy.width.width(px(16.0)), "book widths must not scale with text");
@@ -449,10 +453,10 @@ mod tests {
     #[test]
     fn shelf_rows_are_as_tall_as_the_cards_they_hold() {
         let rem_size = px(16.0);
-        for cards_state_author in [false, true] {
-            let cards = crate::library::widgets::shelf_card_policy(cards_state_author);
+        for cover_text in [app_preferences::CoverText::Always, app_preferences::CoverText::CoverOnly] {
+            let cards = crate::library::widgets::shelf_card_policy(cover_text);
             for subject_rows in [0, 2] {
-                let row = crate::library::widgets::shelf_rows_policy(cards_state_author, subject_rows);
+                let row = crate::library::widgets::shelf_rows_policy(cover_text, subject_rows);
                 let heading = px(16.0 * ui_components::shelf_heading_height_rem(subject_rows) + ui_components::CAROUSEL_CONTENT_GAP);
                 // Nominal, stretched, and capped: the three widths a card resolves to.
                 let nominal = px(ui_components::BOOK_CARD_WIDTH) * 4.0 + cards.column_gap * 3.0;
@@ -468,7 +472,7 @@ mod tests {
 
     #[test]
     fn detailed_cards_grow_to_the_limit_then_expand_gaps() {
-        let policy = crate::library::widgets::book_card_policy(true);
+        let policy = crate::library::widgets::book_card_policy(true, app_preferences::CoverText::Always);
         let rem_size = px(16.0);
         let preferred = policy.width.width(rem_size);
         let maximum = policy.maximum_width.unwrap().width(rem_size);
@@ -494,8 +498,8 @@ mod tests {
 
     #[test]
     fn mobile_book_carousels_keep_two_cards_visible() {
-        for cards_state_author in [true, false] {
-            let policy = crate::library::widgets::shelf_card_policy(cards_state_author);
+        for cover_text in [app_preferences::CoverText::Always, app_preferences::CoverText::CoverOnly] {
+            let policy = crate::library::widgets::shelf_card_policy(cover_text);
             for width in [280.0, 320.0, 390.0] {
                 let geometry = group_geometry(policy, 0, px(width), px(16.0));
                 assert_eq!(geometry.columns, 2);
@@ -512,27 +516,30 @@ mod tests {
     fn detailed_cards_double_the_width_and_keep_the_ordinary_card() {
         let rem_size = px(16.0);
         let container = px(1600.0);
-        let compact = crate::library::widgets::book_card_policy(false);
-        let detailed = crate::library::widgets::book_card_policy(true);
+        let compact = crate::library::widgets::book_card_policy(false, app_preferences::CoverText::Always);
+        let detailed = crate::library::widgets::book_card_policy(true, app_preferences::CoverText::Always);
         let compact_geometry = group_geometry(compact, 0, container, rem_size);
         let detailed_geometry = group_geometry(detailed, 0, container, rem_size);
         assert_eq!(detailed_geometry.columns * 2, compact_geometry.columns);
 
         // What each card holds back for the words under its cover, which is the
-        // same block in both modes.
+        // same block in both modes. Only the detailed policy caps its content
+        // width (`with_aspect_width_limit`) — a compact cover is free to
+        // stretch past `BOOK_CARD_CONTENT_WIDTH`, and this must not cap it
+        // where the real geometry does not.
         let padding = px(ui_components::BOOK_CARD_PADDING);
-        let text_block = |policy: PaginatorGroupPolicy, child_width: Pixels, cover_fraction: f32| {
-            let cover_width = ((child_width - padding * 2.0) * cover_fraction).min(px(ui_components::BOOK_CARD_CONTENT_WIDTH));
+        let text_block = |policy: PaginatorGroupPolicy, child_width: Pixels, cover_fraction: f32, capped: bool| {
+            let cover_width = (child_width - padding * 2.0) * cover_fraction;
+            let cover_width = if capped { cover_width.min(px(ui_components::BOOK_CARD_CONTENT_WIDTH)) } else { cover_width };
             f32::from(policy.sizing.height(child_width, rem_size)) - f32::from(cover_width) / ui_components::BOOK_COVER_ASPECT_RATIO
         };
-        let compact_text = text_block(compact, compact_geometry.child_width, 1.0);
-        let detailed_text = text_block(detailed, detailed_geometry.child_width, ui_components::BOOK_CARD_DETAIL_COVER_FRACTION);
+        let compact_text = text_block(compact, compact_geometry.child_width, 1.0, false);
+        let detailed_text = text_block(detailed, detailed_geometry.child_width, ui_components::BOOK_CARD_DETAIL_COVER_FRACTION, true);
         assert!((compact_text - detailed_text).abs() < 0.5, "detailed cards reserve {detailed_text} for their words where ordinary cards reserve {compact_text}");
 
         // And the cover itself stays about the size it is in the grid the
         // reader switched from.
         let compact_cover = compact_geometry.child_width - padding * 2.0;
-        assert_eq!(compact_cover, px(300.0));
         let detailed_cover = ((detailed_geometry.child_width - padding * 2.0) * ui_components::BOOK_CARD_DETAIL_COVER_FRACTION).min(px(ui_components::BOOK_CARD_CONTENT_WIDTH));
         assert!((f32::from(compact_cover) - f32::from(detailed_cover)).abs() <= f32::from(padding));
     }

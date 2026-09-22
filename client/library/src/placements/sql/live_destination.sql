@@ -1,1 +1,0 @@
-SELECT EXISTS(SELECT 1 FROM dir_paths WHERE id=?1)

@@ -1,6 +1,6 @@
 //! Orders enrichment phases and advances candidate pages after failures.
 use super::{DESCRIPTION_PROVIDER, OPEN_LIBRARY_AUTHOR_PROVIDER, OPEN_LIBRARY_COVER_PROVIDER};
-use crate::{BackendError, ContentHash, library::LibrarySession};
+use crate::{library::LibrarySession, BackendError, ContentHash};
 use library_database::AuthorEnrichmentCandidate;
 
 impl LibrarySession {
@@ -62,38 +62,14 @@ impl LibrarySession {
         }
         // Existing identifiers can supply descriptions/authors before any book
         // enters expensive inspection. Subjects reuse these cached responses.
-        pages!(
-            description_enrichment_candidates,
-            DESCRIPTION_PROVIDER,
-            |item: &(ContentHash, Vec<String>)| item.0,
-            enrich_description_candidates
-        );
-        pages!(
-            author_enrichment_candidates,
-            OPEN_LIBRARY_AUTHOR_PROVIDER,
-            |item: &AuthorEnrichmentCandidate| item.content_hash,
-            apply_author_candidates
-        );
+        pages!(description_enrichment_candidates, DESCRIPTION_PROVIDER, |item: &(ContentHash, Vec<String>)| item.0, enrich_description_candidates);
+        pages!(author_enrichment_candidates, OPEN_LIBRARY_AUTHOR_PROVIDER, |item: &AuthorEnrichmentCandidate| item.content_hash, apply_author_candidates);
         updated += self.enrich_subject_batch(scope).await?;
         // Also consume ISBNs found on pages whose local LCC completed subjects.
-        pages!(
-            description_enrichment_candidates,
-            DESCRIPTION_PROVIDER,
-            |item: &(ContentHash, Vec<String>)| item.0,
-            enrich_description_candidates
-        );
-        pages!(
-            author_enrichment_candidates,
-            OPEN_LIBRARY_AUTHOR_PROVIDER,
-            |item: &AuthorEnrichmentCandidate| item.content_hash,
-            apply_author_candidates
-        );
-        pages!(
-            cover_enrichment_candidates,
-            OPEN_LIBRARY_COVER_PROVIDER,
-            |item: &(ContentHash, Vec<String>)| item.0,
-            enrich_cover_candidates
-        );
+        pages!(description_enrichment_candidates, DESCRIPTION_PROVIDER, |item: &(ContentHash, Vec<String>)| item.0, enrich_description_candidates);
+        pages!(author_enrichment_candidates, OPEN_LIBRARY_AUTHOR_PROVIDER, |item: &AuthorEnrichmentCandidate| item.content_hash, apply_author_candidates);
+        pages!(cover_enrichment_candidates, OPEN_LIBRARY_COVER_PROVIDER, |item: &(ContentHash, Vec<String>)| item.0, enrich_cover_candidates);
+        pages!(audible_cover_candidates, "audible_covers_v1", |item: &(ContentHash, String, String)| item.0, enrich_audible_cover_candidates);
         Ok(updated)
     }
 }

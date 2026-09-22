@@ -1,1 +1,0 @@
-UPDATE book_unified_concept SET concept_id=910002 WHERE concept_id=910004

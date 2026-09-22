@@ -11,8 +11,6 @@ pub use asset_transfer::{LibraryTransfers, TransferOrigin, TransferState, Transf
 pub(crate) use asset_transfer::{TransferJob, TransferOperation, TransferQueue};
 
 mod authentication;
-#[cfg(target_arch = "wasm32")]
-pub(crate) mod web_upload;
 
 pub(crate) use library_runtime::transfer_history::queue_with_history;
 

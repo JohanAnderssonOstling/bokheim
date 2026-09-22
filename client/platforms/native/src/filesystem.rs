@@ -31,11 +31,22 @@ mod tests {
 }
 
 /// An owned source opened by the backend thread when its import reaches the file.
-pub struct ImportSource(Box<dyn FnOnce() -> ImportReaderFuture + Send>);
+pub struct ImportSource(Box<dyn FnOnce() -> ImportReaderFuture + Send>, Option<u64>);
 pub type ImportReader = Box<dyn std::io::Read + Send>;
 pub type ImportReaderFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<ImportReader, String>> + Send>>;
 impl ImportSource {
     /// The opener must not depend on the UI thread.
-    pub fn new(open: Box<dyn FnOnce() -> ImportReaderFuture + Send>) -> Self { Self(open) }
-    pub async fn open(self) -> Result<ImportReader, String> { (self.0)().await }
+    pub fn new(open: Box<dyn FnOnce() -> ImportReaderFuture + Send>) -> Self {
+        Self(open, None)
+    }
+    pub fn with_size_bytes(mut self, size: Option<u64>) -> Self {
+        self.1 = size;
+        self
+    }
+    pub fn size_bytes(&self) -> Option<u64> {
+        self.1
+    }
+    pub async fn open(self) -> Result<ImportReader, String> {
+        (self.0)().await
+    }
 }

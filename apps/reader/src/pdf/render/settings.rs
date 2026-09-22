@@ -1,7 +1,7 @@
 //! PDF appearance controls and their persisted settings.
 
 use gpui::prelude::*;
-use gpui::{Context, Window};
+use gpui::Context;
 use pdf_view_gpui::{MAX_VISIBLE_PAGE_COUNT, MIN_VISIBLE_PAGE_COUNT, PdfZoomMode};
 use ui_components as components;
 
@@ -45,46 +45,47 @@ impl PdfReaderView {
         crate::invalidation::notify(cx, Component::PdfShell, "trim_margins_changed");
     }
 
-    pub(super) fn render_settings(&self, window: &Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(super) fn render_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
         let zoom = self.pdf.read(cx).zoom();
         let zoom_mode = self.pdf.read(cx).zoom_mode();
         let visible_page_count = self.pdf.read(cx).visible_page_count();
         let trim_margins = ReaderSettings::preferences(cx).pdf_trim_margins;
-        components::reader_settings_dropdown(window.viewport_size().height, theme)
+        components::reader_settings_tab_body(theme)
+            .when(!cfg!(feature = "kobo"), |body| body.child(crate::shell::theme_picker::reader_theme_picker(cx, theme)))
             .child(
-                components::reader_settings_section("Page layout", theme)
-                    .child(components::reader_setting_row("Margins").child(components::reader_choice_button_group(
+                components::reader_settings_group(theme)
+                    .child(components::reader_setting_row_smallcaps("Margins", theme).child(components::reader_choice_button_group(
                         "pdf-margin-group",
                         [
-                            components::reader_choice_button("pdf-margin-off", "Off", !trim_margins).on_click(cx.listener(|this, _, _, cx| this.set_trim_margins(false, cx))),
-                            components::reader_choice_button("pdf-margin-auto", "Auto", trim_margins).on_click(cx.listener(|this, _, _, cx| this.set_trim_margins(true, cx))),
+                            components::reader_choice_button("pdf-margin-off", "Off", !trim_margins, theme).on_click(cx.listener(|this, _, _, cx| this.set_trim_margins(false, cx))),
+                            components::reader_choice_button("pdf-margin-auto", "Auto", trim_margins, theme).on_click(cx.listener(|this, _, _, cx| this.set_trim_margins(true, cx))),
                         ],
                     )))
                     .child(
-                        components::reader_setting_row("Fit").child(components::reader_choice_button_group(
+                        components::reader_setting_row_smallcaps("Fit", theme).child(components::reader_choice_button_group(
                             "pdf-fit-group",
                             [
-                                components::reader_choice_button("pdf-fit-width", "Fit width", matches!(zoom_mode, PdfZoomMode::FitWidth { .. }))
+                                components::reader_choice_button("pdf-fit-width", "Fit width", matches!(zoom_mode, PdfZoomMode::FitWidth { .. }), theme)
                                     .on_click(cx.listener(move |this, _, _, cx| this.set_zoom_mode(PdfZoomMode::FitWidth { columns: visible_page_count }, cx))),
-                                components::reader_choice_button("pdf-fit-zoom", "Zoom", matches!(zoom_mode, PdfZoomMode::Fixed { .. })).on_click(cx.listener(move |this, _, _, cx| this.set_zoom_mode(PdfZoomMode::Fixed { zoom }, cx))),
-                                components::reader_choice_button("pdf-fit-height", "Fit height", zoom_mode == PdfZoomMode::FitHeight).on_click(cx.listener(|this, _, _, cx| this.set_zoom_mode(PdfZoomMode::FitHeight, cx))),
+                                components::reader_choice_button("pdf-fit-zoom", "Zoom", matches!(zoom_mode, PdfZoomMode::Fixed { .. }), theme).on_click(cx.listener(move |this, _, _, cx| this.set_zoom_mode(PdfZoomMode::Fixed { zoom }, cx))),
+                                components::reader_choice_button("pdf-fit-height", "Fit height", zoom_mode == PdfZoomMode::FitHeight, theme).on_click(cx.listener(|this, _, _, cx| this.set_zoom_mode(PdfZoomMode::FitHeight, cx))),
                             ],
                         )),
                     )
                     .children(matches!(zoom_mode, PdfZoomMode::FitWidth { .. }).then(|| {
-                        components::reader_setting_row("Pages").child(components::reader_stepper_group(
-                            components::reader_stepper_button("pdf-pages-decrease", "−", theme).on_click(cx.listener(|this, _, _, cx| this.adjust_visible_page_count(-1, cx))),
+                        components::reader_setting_row("Pages").child(components::settings_stepper(
+                            components::settings_stepper_button("pdf-pages-decrease", "−", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_visible_page_count(-1, cx))),
                             visible_page_count.to_string(),
-                            components::reader_stepper_button("pdf-pages-increase", "+", theme).on_click(cx.listener(|this, _, _, cx| this.adjust_visible_page_count(1, cx))),
+                            components::settings_stepper_button("pdf-pages-increase", "+", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_visible_page_count(1, cx))),
                             theme,
                         ))
                     }))
                     .children(matches!(zoom_mode, PdfZoomMode::Fixed { .. }).then(|| {
-                        components::reader_setting_row("Zoom").child(components::reader_stepper_group(
-                            components::reader_stepper_button("pdf-zoom-out", "−", theme).tooltip("Zoom out (Ctrl+-)").on_click(cx.listener(|this, _, _, cx| this.adjust_zoom(-ZOOM_STEP, cx))),
+                        components::reader_setting_row("Zoom").child(components::settings_stepper(
+                            components::settings_stepper_button("pdf-zoom-out", "−", false, theme).tooltip("Zoom out (Ctrl+-)").on_click(cx.listener(|this, _, _, cx| this.adjust_zoom(-ZOOM_STEP, cx))),
                             format!("{:.0}%", zoom * 100.0),
-                            components::reader_stepper_button("pdf-zoom-in", "+", theme).tooltip("Zoom in (Ctrl++)").on_click(cx.listener(|this, _, _, cx| this.adjust_zoom(ZOOM_STEP, cx))),
+                            components::settings_stepper_button("pdf-zoom-in", "+", false, theme).tooltip("Zoom in (Ctrl++)").on_click(cx.listener(|this, _, _, cx| this.adjust_zoom(ZOOM_STEP, cx))),
                             theme,
                         ))
                     })),

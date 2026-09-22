@@ -1,1 +1,0 @@
-SELECT name FROM dir WHERE parent_id='dest' AND id!='self' AND deleted_at IS NULL

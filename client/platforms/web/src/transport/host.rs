@@ -77,7 +77,9 @@ impl State {
         self.owner.set(None);
     }
     fn fail(&self, error: &str) {
-        if self.fatal.borrow().is_some() { return; }
+        if self.fatal.borrow().is_some() {
+            return;
+        }
         *self.fatal.borrow_mut() = Some(error.to_owned());
         self.stop();
         self.clients.fail(error);
@@ -99,14 +101,18 @@ impl State {
     }
     fn receive(self: &Rc<Self>, id: u32, data: JsValue) {
         if let Some(error) = self.fatal.borrow().as_ref() {
-            if let Some(tab) = self.tabs.borrow().get(&id) { let _ = tab.control.raw.post_message(&super::failure(error)); }
+            if let Some(tab) = self.tabs.borrow().get(&id) {
+                let _ = tab.control.raw.post_message(&super::failure(error));
+            }
             return;
         }
         use super::control::HostEvent;
         match HostEvent::decode(&data) {
             Ok(HostEvent::Closed) => self.remove(id),
             Ok(HostEvent::Application) => {
-                if !self.application.receive(data) { self.remove(id); }
+                if !self.application.receive(data) {
+                    self.remove(id);
+                }
             }
             Ok(HostEvent::WorkerFailed { id: worker, error }) if self.owner.get() == Some(id) => {
                 let endpoint = self.endpoints.borrow().get(&worker).cloned();
@@ -115,7 +121,11 @@ impl State {
                 }
             }
             Ok(HostEvent::Register { lock, port }) => {
-                if !lock.starts_with(&self.lock_prefix) { port.close(); self.remove(id); return; }
+                if !lock.starts_with(&self.lock_prefix) {
+                    port.close();
+                    self.remove(id);
+                    return;
+                }
                 let tab = self.tabs.borrow().get(&id).cloned();
                 let Some(tab) = tab else { return };
                 if tab.data.borrow().is_some() {
@@ -169,18 +179,30 @@ pub struct WorkerHost {
 }
 impl WorkerHost {
     fn state(&self) -> Result<Rc<State>, JsValue> {
-        self.state.upgrade().filter(|state| state.generation.get() == self.generation && state.owner.get().is_some())
-            .ok_or_else(|| js_sys::Error::new("Worker host changed").into())
+        self.state.upgrade().filter(|state| state.generation.get() == self.generation && state.owner.get().is_some()).ok_or_else(|| js_sys::Error::new("Worker host changed").into())
     }
-    pub fn endpoint(&self, role: &str) -> Result<WorkerEndpoint, JsValue> { self.state()?.endpoint(role) }
-    pub fn clients(&self) -> Result<ClientRelay, JsValue> { Ok(self.state()?.clients.clone()) }
-    pub fn fail(&self, error: &str) { if let Ok(state) = self.state() { state.fail(error); } }
+    pub fn endpoint(&self, role: &str) -> Result<WorkerEndpoint, JsValue> {
+        self.state()?.endpoint(role)
+    }
+    pub fn clients(&self) -> Result<ClientRelay, JsValue> {
+        Ok(self.state()?.clients.clone())
+    }
+    pub fn fail(&self, error: &str) {
+        if let Ok(state) = self.state() {
+            state.fail(error);
+        }
+    }
     /// Restart the hosted services while retaining tab sessions. Application policy
     /// decides whether the failure is recoverable; stale generations cannot restart.
     pub fn restart(&self) {
-        if let Ok(state) = self.state() { state.stop(); state.elect(); }
+        if let Ok(state) = self.state() {
+            state.stop();
+            state.elect();
+        }
     }
-    pub fn is_current(&self) -> bool { self.state().is_ok() }
+    pub fn is_current(&self) -> bool {
+        self.state().is_ok()
+    }
 }
 
 /// Elects a live tab and owns the workers hosted by it.
@@ -208,7 +230,9 @@ impl SharedWorkerHost {
         let weak = Rc::downgrade(&self.0);
         move |message| {
             if let Some(state) = weak.upgrade() {
-                for tab in state.tabs.borrow().values() { let _ = tab.control.raw.post_message(&message); }
+                for tab in state.tabs.borrow().values() {
+                    let _ = tab.control.raw.post_message(&message);
+                }
             }
         }
     }
@@ -217,11 +241,15 @@ impl SharedWorkerHost {
         move |error| {
             let weak = weak.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                if let Some(state) = weak.upgrade() { state.fail(&error); }
+                if let Some(state) = weak.upgrade() {
+                    state.fail(&error);
+                }
             });
         }
     }
-    pub fn fail(&self, error: &str) { self.0.fail(error); }
+    pub fn fail(&self, error: &str) {
+        self.0.fail(error);
+    }
     pub fn connect(&self, port: MessagePort) {
         if let Some(error) = self.0.fatal.borrow().as_ref() {
             let _ = port.post_message(&super::failure(error));

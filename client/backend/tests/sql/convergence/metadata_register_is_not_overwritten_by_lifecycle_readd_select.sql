@@ -1,1 +1,0 @@
-SELECT b.title, COALESCE((SELECT group_concat(credit.name, ', ') FROM (SELECT name FROM book_contributor WHERE book_row_id=b.row_id AND role=X'617574' ORDER BY position) credit), ''), COALESCE((SELECT description FROM book_description WHERE book_row_id=b.row_id),'') FROM book b WHERE b.content_hash=?1

@@ -2,13 +2,13 @@ use super::error::SyncError;
 use super::error::SyncResult;
 use super::transfer::{TransferOrigin, TransferQueue};
 use account_client::ServerUrl;
+use library_database::Database;
 use library_files::asset_store::AssetStore;
 use library_replica::TransferJobKind;
-use library_database::Database;
 use library_runtime::events::{LibraryEvent, LibraryEventSender};
 use library_runtime::interest::NotificationInterest;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use sync_common::ContentHash;
 use sync_common::{LibraryId, ReplicaId};
 use sync_engine::SyncOutcome;
@@ -163,6 +163,10 @@ impl LibrarySync {
         Ok((state || assets).then_some(PersistedSyncWork { assets }))
     }
 
+    pub(crate) fn has_pending_asset_work(&self) -> SyncResult<bool> {
+        self.database()?.has_pending_asset_work().map_err(|error| SyncError::failed(error.to_string()))
+    }
+
     pub fn is_signed_in(&self) -> bool {
         self.credentials.credentials().is_some()
     }
@@ -247,6 +251,9 @@ impl LibrarySync {
         let _activity = SyncActivity::begin(&self.metadata_activity, self.event_tx.as_ref());
         let (user, credentials) = self.sync_identity()?;
         let Some(exchange) = host::exchange(self, &user, credentials, SyncMode::Repair).await? else { return Ok(()) };
+        // Repair finishes its own workflow but is not a full-sync checkpoint.
+        // Any mutations it queued still keep the workflow pending.
+        self.database()?.finish_state_sync(None).map_err(SyncError::failed)?;
         if exchange.inventory_checked {
             self.inventory_checked.store(true, Ordering::Release);
         }
@@ -274,9 +281,7 @@ impl LibrarySync {
         // This checkpoint covers publishable state. Books awaiting upload keep
         // their mutations in the outbox; upload completion wakes another pass.
         let completed_at = u64::try_from(web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH)?.as_millis())?;
-        self.database()?
-            .finish_state_sync(if outbox_only { None } else { Some(completed_at) })
-            .map_err(SyncError::failed)?;
+        self.database()?.finish_state_sync(if outbox_only { None } else { Some(completed_at) }).map_err(SyncError::failed)?;
         if exchange.inventory_checked {
             self.inventory_checked.store(true, Ordering::Release);
         }
@@ -316,6 +321,10 @@ impl LibrarySync {
         self.transfer_queue.begin_producer(TransferJobKind::UploadThumbnail)
     }
 
+    pub(crate) fn download_error(&self, hash: ContentHash) -> Option<String> {
+        self.transfer_queue.download_error(hash)
+    }
+
     pub fn transfer_statuses(&self) -> Vec<crate::TransferStatus> {
         self.transfer_queue.statuses()
     }
@@ -329,7 +338,7 @@ impl LibrarySync {
         self.transfer_queue.history()
     }
 
-    pub fn request_download(&self, content_hash: ContentHash) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn request_download(&self, content_hash: ContentHash) -> SyncResult<()> {
         self.request_downloads(std::slice::from_ref(&content_hash))
     }
 
@@ -348,27 +357,17 @@ impl LibrarySync {
             notification_interest: self.notification_interest.clone(),
             availability_changed: self.availability_changed.clone(),
             db_path: self.db_path.clone(),
+            #[cfg(target_arch = "wasm32")]
+            progress_key: None,
         }
     }
 
-    /// Downloads one explicitly requested book without waiting behind
-    /// library-wide state or background asset reconciliation.
-    pub async fn download_requested(&self, content_hash: ContentHash) -> SyncResult<()> {
-        if !self.is_signed_in() {
-            return Err(SyncError::AuthenticationRequired);
-        }
-        let _interest = self.notification_interest.work();
-        let job = self.prepare_requested_download(&content_hash)?;
-        let Some(job) = job else { return Ok(()) };
-        let worker = self.transfer_worker();
-        worker.handle_job(job).await?;
-        // One explicit download is its own boundary.
-        worker.flush_availability_changes();
-        Ok(())
-    }
-
-    pub fn request_downloads(&self, content_hashes: &[ContentHash]) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn request_downloads(&self, content_hashes: &[ContentHash]) -> SyncResult<()> {
         self.database()?.sync_request_book_downloads(content_hashes, TransferOrigin::UserInitiated)?;
+        // Feed an already-running driver immediately, including while it backs off.
+        // The durable requests remain authoritative after interruption or restart.
+        let jobs = content_hashes.iter().map(|hash| self.prepare_requested_download(hash)).collect::<SyncResult<Vec<_>>>()?;
+        self.transfer_queue.enqueue(jobs.into_iter().flatten().collect());
         if let Some(tx) = &self.event_tx {
             for content_hash in content_hashes {
                 let _ = tx.try_send(LibraryEvent::DownloadStatusChanged { content_hash: *content_hash, state: crate::DownloadState::Queued });

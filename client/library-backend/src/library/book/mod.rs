@@ -84,9 +84,12 @@ impl LibrarySession {
             return host::remote(self, hash, &info).await;
         }
         match self.request_download(hash).await? {
-            DownloadState::Downloaded => host::local(self, hash, &info).await?.ok_or_else(|| BackendError::operation("book is unavailable")),
-            DownloadState::NotDownloaded => Err(BackendError::operation(format!("book is unavailable for download: {hash}"))),
-            DownloadState::Queued | DownloadState::Downloading(_) => Err(BackendError::operation(format!("book download did not complete: {hash}"))),
+            DownloadState::Downloaded => host::local(self, hash, &info).await?.ok_or_else(|| BackendError::message("book is unavailable")),
+            DownloadState::NotDownloaded => Err(BackendError::message(format!("book is unavailable for download: {hash}"))),
+            DownloadState::Queued | DownloadState::Downloading(_) => Err(BackendError::message(format!("book download did not complete: {hash}"))),
         }
     }
 }
+
+#[cfg(target_arch = "wasm32")]
+pub mod web_reader;

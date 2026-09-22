@@ -1,1 +1,0 @@
-INSERT OR IGNORE INTO local_file_work(operation,content_hash,relative_path) VALUES(?1,?2,?3)

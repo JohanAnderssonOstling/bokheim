@@ -1,1 +1,0 @@
-SELECT book_metadata FROM book

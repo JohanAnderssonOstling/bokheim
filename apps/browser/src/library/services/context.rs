@@ -1,4 +1,4 @@
-use bokheim_backend::LibraryClient;
+use library_backend::LibraryClient;
 use futures_util::future::join_all;
 use gpui::{App, Context, Entity, FileDialogFilter, PathPromptOptions, Window};
 use library_model::BookLocator;
@@ -7,6 +7,9 @@ use sync_common::{ContentHash, DirId};
 
 use super::{LibraryUpdateBridge, UndoStack};
 pub(crate) type OpenBook = Rc<dyn Fn(BookLocator, String, Option<String>, &mut Window, &mut App)>;
+/// Notifies the owning shell that the cached book detail page just closed, so
+/// e.g. an audiobook dock expanded to show it can collapse back down.
+pub(crate) type BookDetailClosed = Rc<dyn Fn(&mut App)>;
 
 /// UI state associated with one selected library.
 ///
@@ -16,13 +19,14 @@ pub(crate) type OpenBook = Rc<dyn Fn(BookLocator, String, Option<String>, &mut W
 pub(crate) struct LibraryContext {
     backend: Rc<LibraryClient>,
     open_book: OpenBook,
+    book_detail_closed: BookDetailClosed,
     updates: Entity<LibraryUpdateBridge>,
     undo: UndoStack,
 }
 
 impl LibraryContext {
-    pub(crate) fn new(backend: Rc<LibraryClient>, open_book: OpenBook, updates: Entity<LibraryUpdateBridge>) -> Self {
-        Self { backend, open_book, updates, undo: UndoStack::default() }
+    pub(crate) fn new(backend: Rc<LibraryClient>, open_book: OpenBook, book_detail_closed: BookDetailClosed, updates: Entity<LibraryUpdateBridge>) -> Self {
+        Self { backend, open_book, book_detail_closed, updates, undo: UndoStack::default() }
     }
 
     pub(crate) fn backend(&self) -> &LibraryClient {
@@ -49,19 +53,29 @@ impl LibraryContext {
             let result = match selection.await {
                 Ok(Ok(Some(files))) => match files.into_iter().next() {
                     Some(file) => {
-                        let _progress = view.update_in(cx, |_, window, cx| crate::services::ImportProgressToast::start((*library).clone(), window, cx)).ok();
+                        // The browser coordinator owns its import notifications; native
+                        // imports retain an activity-scoped notification locally.
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let activity = uuid::Uuid::new_v4();
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let _progress = view.update_in(cx, |_, window, cx| crate::services::ImportProgressToast::start_for_activity((*library).clone(), activity, window, cx)).ok();
                         let result = {
                             let mut source = file.source;
                             source.path = vec![file.name.clone()];
                             let directory = crate::directory_import(gpui::SelectedDirectory { local_path: None, name: file.name, directories: Vec::new(), files: vec![source] });
-                            let result = library.import_directory_contents(parent_id, directory).await;
                             #[cfg(target_arch = "wasm32")]
                             {
+                                let result = library.import_directory_contents(parent_id, directory).await;
                                 let _ = result;
                                 Ok(())
                             }
                             #[cfg(not(target_arch = "wasm32"))]
-                            result.and_then(|failures| if failures.is_empty() { Ok(()) } else { Err(failures.iter().map(crate::services::import_failure_message).collect::<Vec<_>>().join("\n")) })
+                            {
+                                library
+                                    .import_directory_contents_with_activity(parent_id, directory, activity)
+                                    .await
+                                    .and_then(|failures| if failures.is_empty() { Ok(()) } else { Err(failures.iter().map(crate::services::import_failure_message).collect::<Vec<_>>().join("\n")) })
+                            }
                         };
                         result.map(|_| ())
                     }
@@ -87,6 +101,8 @@ impl LibraryContext {
     /// is the same import with the picker skipped.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn import_dropped_paths<C: 'static>(&self, parent_id: DirId, paths: Vec<std::path::PathBuf>, cx: &mut Context<C>) {
+        let started = std::time::Instant::now();
+        log::info!(target: "import_timing", "drop_received paths={}", paths.len());
         let library = self.backend.clone();
         let reader = cx.background_executor().clone();
         cx.spawn(async move |view, cx| {
@@ -98,13 +114,14 @@ impl LibraryContext {
             // prepare/finish protocol and emitted a contents refresh for each
             // file. Folders retain their existing root semantics and are
             // still imported independently.
-            let mut dropped_files = bokheim_backend::DirectoryImport { name: "Dropped files".to_owned(), directories: Vec::new(), files: Vec::new() };
+            let mut dropped_files = app::DirectoryImport { name: "Dropped files".to_owned(), directories: Vec::new(), files: Vec::new() };
             let mut dropped_file_count = 0usize;
             let scanned_paths = join_all(paths.into_iter().map(|path| {
                 let reader = reader.clone();
                 async move { reader.spawn(async move { scan_dropped_path(&path) }).await }
             }))
             .await;
+            log::info!(target: "import_timing", "drop_paths_prepared elapsed_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
             for scanned in scanned_paths {
                 match scanned {
                     Ok(import) => {
@@ -127,6 +144,7 @@ impl LibraryContext {
                 }
             }
             if !dropped_files.files.is_empty() {
+                log::info!(target: "import_timing", "drop_submitting files={} elapsed_ms={:.3}", dropped_files.files.len(), started.elapsed().as_secs_f64() * 1000.0);
                 match library.import_directory_contents(parent_id, dropped_files).await {
                     Ok(errors) => {
                         imported += dropped_file_count.saturating_sub(errors.len());
@@ -134,6 +152,7 @@ impl LibraryContext {
                     }
                     Err(error) => failures.push(error),
                 }
+                log::info!(target: "import_timing", "drop_import_returned elapsed_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
             }
             let _ = view.update_in(cx, |_, window, cx| {
                 if failures.is_empty() {
@@ -142,6 +161,8 @@ impl LibraryContext {
                 let summary = if imported > 0 { format!("Added {imported}, but {} item(s) could not be added. {}", failures.len(), failures[0]) } else { format!("Could not add dropped items. {}", failures[0]) };
                 crate::services::notify_warning("drop-import-warning", summary, window, cx);
             });
+            drop(_progress);
+            log::info!(target: "import_timing", "drop_finished elapsed_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
         })
         .detach();
     }
@@ -157,11 +178,15 @@ impl LibraryContext {
         let locator = BookLocator::new(*self.backend.id(), content_hash);
         (self.open_book)(locator, title, target, window, cx);
     }
+
+    pub(crate) fn notify_book_detail_closed(&self, cx: &mut App) {
+        (self.book_detail_closed)(cx);
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 struct DroppedImport {
-    directory: bokheim_backend::DirectoryImport,
+    directory: app::DirectoryImport,
     create_root: bool,
 }
 
@@ -179,11 +204,12 @@ fn scan_dropped_path(path: &std::path::Path) -> Result<DroppedImport, String> {
     }
     let name = path.file_name().ok_or_else(|| format!("{} has no file name", path.display()))?.to_string_lossy().into_owned();
     let path = path.to_path_buf();
-    let file = bokheim_backend::DirectoryImportFile {
+    let file = app::DirectoryImportFile {
         path: vec![name.clone()],
-        source: bokheim_backend::ImportSource::new(Box::new(move || Box::pin(async move { std::fs::File::open(&path).map(|file| Box::new(file) as bokheim_backend::DirectoryImportReader).map_err(|error| error.to_string()) }))),
+        source: app::ImportSource::new(Box::new(move || Box::pin(async move { std::fs::File::open(&path).map(|file| Box::new(file) as app::DirectoryImportReader).map_err(|error| error.to_string()) })))
+            .with_size_bytes(Some(metadata.len())),
     };
-    Ok(DroppedImport { directory: bokheim_backend::DirectoryImport { name, directories: Vec::new(), files: vec![file] }, create_root: false })
+    Ok(DroppedImport { directory: app::DirectoryImport { name, directories: Vec::new(), files: vec![file] }, create_root: false })
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -9,7 +9,10 @@ use web_sys::{DedicatedWorkerGlobalScope, MessageChannel};
 type Reply = Rc<RefCell<Option<oneshot::Sender<Result<Vec<u8>, String>>>>>;
 
 /// The pending sender is the single source of truth for settlement and cancellation.
-struct ReplyPort { port: Port, reply: Reply }
+struct ReplyPort {
+    port: Port,
+    reply: Reply,
+}
 impl Drop for ReplyPort {
     fn drop(&mut self) {
         if self.reply.borrow().is_some() {
@@ -47,7 +50,9 @@ pub fn request_with_source(bytes: Vec<u8>, source: JsValue) -> Result<BytesFutur
     let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
     let message = object(&[("transport", "cpu_request".into()), ("port", channel.port2().into()), ("bytes", bytes.clone().into()), ("source", source.clone())]);
     let transfer = Array::of2(&channel.port2(), &bytes.buffer());
-    if !source.is_undefined() { transfer.push(&super::field(&source, "port")); }
+    if !source.is_undefined() {
+        transfer.push(&super::field(&source, "port"));
+    }
     if let Err(error) = scope.post_message_with_transfer(&message, &transfer) {
         channel.port2().close();
         return Err(error_message(&error));

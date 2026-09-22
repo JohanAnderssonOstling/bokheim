@@ -1,1 +1,0 @@
-SELECT state_kind,state_key,state_subkey FROM sync_state_version WHERE (state_kind,state_key,state_subkey)>(?1,?2,?3) ORDER BY state_kind,state_key,state_subkey LIMIT 256

@@ -12,11 +12,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if code_only {
         // Isolate code matching from pre-existing display-route label conflicts.
         // IDs, parent edges and every selector remain identical to the database.
-        definitions = definitions.iter().map(|c| UnifiedConceptDefinition::new(
-            c.concept_id(), format!("Subject {}", c.concept_id()), c.parent_ids().to_vec(),
-            ["lcc", "bisac", "ddc"].into_iter().map(|s| (s.to_owned(), c.source_selectors(s).to_vec())).collect(),
-            c.source_labels().to_vec(),
-        )).collect();
+        definitions = definitions
+            .iter()
+            .map(|c| {
+                UnifiedConceptDefinition::new(
+                    c.concept_id(),
+                    format!("Subject {}", c.concept_id()),
+                    c.parent_ids().to_vec(),
+                    ["lcc", "bisac", "ddc"].into_iter().map(|s| (s.to_owned(), c.source_selectors(s).to_vec())).collect(),
+                    c.source_labels().to_vec(),
+                )
+            })
+            .collect();
     }
     let taxonomy = UnifiedTaxonomy::from_concepts(definitions)?;
     let mut output = csv::Writer::from_writer(std::io::stdout());

@@ -17,7 +17,7 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::rc::Rc;
 
-use bokheim_backend::LibraryClient;
+use library_backend::LibraryClient;
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, FocusHandle, Focusable, IntoElement, KeyDownEvent, Render, SharedString, Subscription, Window, div};
 use gpui_component::menu::DropdownMenu as _;
@@ -67,9 +67,6 @@ impl ShelfSort {
 pub(crate) trait ShelfSource: 'static {
     /// Prefix for the page's element ids.
     const ID: &'static str;
-    /// Whether a card on these shelves names its author. False where the row's
-    /// own heading already does, which is what makes an author's rows shorter.
-    const CARDS_STATE_AUTHOR: bool;
     /// How many rows of subject chips a heading reserves beside its title. Zero
     /// where the rows have nothing to qualify, which is what keeps Home's
     /// headings as short as the name they state.
@@ -134,7 +131,11 @@ impl<S: ShelfSource> ShelfPage<S> {
     pub(crate) fn new(ui: LibraryContext, cx: &mut Context<Self>) -> Self {
         let paginator = cx.new(|_| Paginator::new(format!("{}-rows", S::ID), []));
         let updates = ui.updates();
-        let update_subscriptions = vec![cx.subscribe(&updates, |page, _, _: &LibraryContentsChanged, cx| page.refresh(cx)), cx.subscribe(&updates, |_, _, _: &LibraryScanChanged, cx| cx.notify())];
+        let update_subscriptions = vec![
+            cx.subscribe(&updates, |page, _, _: &LibraryContentsChanged, cx| page.refresh(cx)),
+            cx.subscribe(&updates, |_, _, _: &LibraryScanChanged, cx| cx.notify()),
+            cx.observe_global::<crate::stores::CoverTextSetting>(|page, cx| page.refresh_cover_text(cx)),
+        ];
         let mut page = Self {
             ui,
             rows: Vec::new(),
@@ -168,7 +169,7 @@ impl<S: ShelfSource> ShelfPage<S> {
             if S::ID == "home" {
                 crate::services::library_add_trace::mark(library_id, "home_response_received");
             }
-            let _ = page.update(cx, |page, cx| {
+            cx.defer_update(page, move |page, cx| {
                 if !page.refresh.is_current(generation) {
                     return;
                 }
@@ -253,7 +254,7 @@ impl<S: ShelfSource> ShelfPage<S> {
         // An accent edge marks a non-default order as applied, matching how the
         // browse page marks its own filters. It is not the selected treatment:
         // this is a dropdown trigger, not a thing chosen in the toolbar.
-        let trigger = components::topbar_icon_action_button(format!("{}-sort", S::ID), "Sort", IconName::Settings2, theme).when(selected != default_sort, |button| button.border_color(theme.accent).text_color(theme.accent));
+        let trigger = components::outlined_icon_button(format!("{}-sort", S::ID), "Sort", IconName::Settings2, theme).when(selected != default_sort, |button| button.border_color(theme.accent).text_color(theme.accent));
         Some(
             trigger
                 .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
@@ -322,8 +323,7 @@ impl<S: ShelfSource> ShelfPage<S> {
                         card.update(cx, |card, _| card.replace_row(book, None));
                         card
                     }
-                    None if S::CARDS_STATE_AUTHOR => BookCardView::create(book, self.ui.clone(), cx),
-                    None => BookCardView::create_on_author_shelf(book, self.ui.clone(), cx),
+                    None => BookCardView::create(book, self.ui.clone(), cx),
                 };
                 entry.cards.push(card);
             }
@@ -331,20 +331,9 @@ impl<S: ShelfSource> ShelfPage<S> {
             // discards what it has prefetched. When the same books are still
             // here in the same order, there is nothing to rebuild.
             if !shelf_unchanged {
-                let children = entry
-                    .cards
-                    .iter()
-                    .map(|card| {
-                        let card = card.clone();
-                        let prepared_card = card.clone();
-                        let open_card = card.clone();
-                        PaginatorChild::new(move |_, _| div().w_full().min_w_0().child(card.clone()).into_any_element()).with_activate(move |window, cx| BookCardView::activate(&open_card, window, cx)).with_prepare(move |window, cx| {
-                            let resolution = BookCardView::thumbnail_resolution(window);
-                            prepared_card.update(cx, |card, cx| card.prepare(resolution, cx))
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                entry.shelf.update(cx, |shelf, cx| shelf.set_groups([PaginatorGroup::new(shelf_card_policy(S::CARDS_STATE_AUTHOR), children)], cx));
+                let children = Self::shelf_children(&entry.cards);
+                let cover_text = crate::stores::current_cover_text(cx);
+                entry.shelf.update(cx, |shelf, cx| shelf.set_groups([PaginatorGroup::new(shelf_card_policy(cover_text), children)], cx));
             }
             self.rows.push(entry);
         }
@@ -353,6 +342,42 @@ impl<S: ShelfSource> ShelfPage<S> {
         }
         let groups = self.row_groups(cx);
         self.paginator.update(cx, |paginator, cx| paginator.set_groups(groups, cx));
+    }
+
+    /// One shelf's cards as the paginator wants them, in the order the shelf
+    /// holds them. Shared between `install`, which builds this the first time
+    /// a shelf's books change, and the "cover text" observer, which rebuilds
+    /// it for every shelf when the reserved row height has to change with it.
+    fn shelf_children(cards: &[Entity<BookCardView>]) -> Vec<PaginatorChild> {
+        cards
+            .iter()
+            .map(|card| {
+                let card = card.clone();
+                let prepared_card = card.clone();
+                let open_card = card.clone();
+                PaginatorChild::new(move |_, _| div().w_full().min_w_0().child(card.clone()).into_any_element()).with_activate(move |window, cx| BookCardView::activate(&open_card, window, cx)).with_prepare(move |window, cx| {
+                    let resolution = BookCardView::thumbnail_resolution(window);
+                    prepared_card.update(cx, |card, cx| card.prepare(resolution, cx))
+                })
+            })
+            .collect()
+    }
+
+    /// Rebuilds every shelf's row height and the page's own row heights for
+    /// the current "cover text" setting.
+    ///
+    /// Unlike `install`, this cannot skip a shelf whose books are unchanged —
+    /// the setting changed, not the books, so every shelf's reserved height is
+    /// stale regardless of whether its cards are.
+    fn refresh_cover_text(&mut self, cx: &mut Context<Self>) {
+        let cover_text = crate::stores::current_cover_text(cx);
+        for entry in &self.rows {
+            let children = Self::shelf_children(&entry.cards);
+            entry.shelf.update(cx, |shelf, cx| shelf.set_groups([PaginatorGroup::new(shelf_card_policy(cover_text), children)], cx));
+        }
+        let groups = self.row_groups(cx);
+        self.paginator.update(cx, |paginator, cx| paginator.set_groups(groups, cx));
+        cx.notify();
     }
 
     /// The rows, as one group of full-width children.
@@ -386,7 +411,7 @@ impl<S: ShelfSource> ShelfPage<S> {
         if children.is_empty() {
             return Vec::new();
         }
-        vec![PaginatorGroup::new(shelf_rows_policy(S::CARDS_STATE_AUTHOR, S::SUBJECT_ROWS), children)]
+        vec![PaginatorGroup::new(shelf_rows_policy(crate::stores::current_cover_text(cx), S::SUBJECT_ROWS), children)]
     }
 
     /// Up and down walk the rows and turn the page at the edges; left and right
@@ -519,7 +544,7 @@ impl<S: ShelfSource> ShelfPage<S> {
         let can_previous = paginator.can_previous();
         let can_next = paginator.can_next();
         let previous = has_previous.then(|| {
-            components::carousel_arrow_button(format!("{}-previous", S::ID), "Previous", IconName::ChevronUp, theme)
+            components::outlined_icon_button(format!("{}-previous", S::ID), "Previous", IconName::ChevronUp, theme)
                 .disabled(!can_previous)
                 .on_click(cx.listener(|page, _, _, cx| {
                     page.paginator.update(cx, |paginator, cx| paginator.previous_with_axis(PaginatorAxis::Vertical, cx));
@@ -527,7 +552,7 @@ impl<S: ShelfSource> ShelfPage<S> {
                 .into_any_element()
         });
         let next = has_next.then(|| {
-            components::carousel_arrow_button(format!("{}-next", S::ID), "Next", IconName::ChevronDown, theme)
+            components::outlined_icon_button(format!("{}-next", S::ID), "Next", IconName::ChevronDown, theme)
                 .disabled(!can_next)
                 .on_click(cx.listener(|page, _, _, cx| {
                     page.paginator.update(cx, |paginator, cx| paginator.next_with_axis(PaginatorAxis::Vertical, cx));
@@ -539,7 +564,7 @@ impl<S: ShelfSource> ShelfPage<S> {
             .when(self.search_open, |controls| controls.flex_1())
             .children(self.search_open.then(|| div().flex_1().min_w(gpui::rems(8.0)).child(self.search_field.as_ref().expect("search field exists while the search is open").render())))
             .child(
-                components::topbar_icon_action_button(format!("{}-search", S::ID), search_label, IconName::Search, theme)
+                components::outlined_icon_button(format!("{}-search", S::ID), search_label, IconName::Search, theme)
                     .when(self.search_open || !self.search.is_empty(), |button| button.bg(theme.accent).text_color(theme.accent_text))
                     .on_click(cx.listener(|page, _, window, cx| page.toggle_search(window, cx))),
             )
@@ -548,7 +573,8 @@ impl<S: ShelfSource> ShelfPage<S> {
         Some(
             components::browser_topbar(theme)
                 .child(if components::uses_mobile_navigation(window) {
-                    components::mobile_navigation_heading(title, components::mobile_back_button(theme).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::DismissSettings), cx)))
+                    let back = (!components::has_native_back_button()).then(|| components::mobile_back_button(theme).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::DismissSettings), cx)));
+                    components::mobile_navigation_heading(title, back)
                 } else {
                     components::browser_topbar_left().child(components::browser_page_title(title, S::count_label(self.rows.len()), theme))
                 })
@@ -566,7 +592,7 @@ fn shelf_controls(id: &SharedString, shelf: &Entity<Paginator>, theme: component
     let (has_previous, has_next, can_previous, can_next) = (state.has_previous(), state.has_next(), state.can_previous(), state.can_next());
     let previous = has_previous.then(|| {
         let shelf = shelf.clone();
-        components::carousel_arrow_button(format!("shelf-{id}-previous"), "Previous", IconName::ChevronLeft, theme)
+        components::outlined_icon_button(format!("shelf-{id}-previous"), "Previous", IconName::ChevronLeft, theme)
             .disabled(!can_previous)
             .on_click(move |_, _, cx| {
                 shelf.update(cx, |shelf, cx| shelf.previous(cx));
@@ -575,7 +601,7 @@ fn shelf_controls(id: &SharedString, shelf: &Entity<Paginator>, theme: component
     });
     let next = has_next.then(|| {
         let shelf = shelf.clone();
-        components::carousel_arrow_button(format!("shelf-{id}-next"), "Next", IconName::ChevronRight, theme)
+        components::outlined_icon_button(format!("shelf-{id}-next"), "Next", IconName::ChevronRight, theme)
             .disabled(!can_next)
             .on_click(move |_, _, cx| {
                 shelf.update(cx, |shelf, cx| shelf.next(cx));

@@ -15,3 +15,4 @@ pub(crate) mod persistence;
 pub(crate) mod search;
 pub(crate) mod state_panel;
 pub(crate) mod toolbar;
+pub(crate) mod theme_picker;

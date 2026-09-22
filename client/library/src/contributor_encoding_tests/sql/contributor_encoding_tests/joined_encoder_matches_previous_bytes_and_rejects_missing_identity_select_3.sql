@@ -1,1 +1,0 @@
-SELECT legacy_contributors(1)

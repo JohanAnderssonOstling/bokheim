@@ -1,1 +1,0 @@
-SELECT trash_origin_dir_id FROM book WHERE content_hash=?1

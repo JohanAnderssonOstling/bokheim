@@ -1,5 +1,5 @@
 //! One playback owner and one ordered restoration writer per application.
-use bokheim_backend::AppClient;
+use app::AppClient;
 use futures_util::{
     FutureExt,
     future::{LocalBoxFuture, Shared},
@@ -394,7 +394,7 @@ impl PlaybackController {
             return;
         }
         self.stop_current(cx);
-        let metadata = bokheim_backend::PlaybackMetadata { title, author: String::new(), narrator: None, duration_ms: 0, chapters: vec![], cover: vec![] };
+        let metadata = app::PlaybackMetadata { title, author: String::new(), narrator: None, duration_ms: 0, chapters: vec![], cover: vec![] };
         let record = ActiveAudiobook::new(locator, 0, 1.0, metadata);
         self.install(record, session, false, cx);
         self.save_current(true, cx);
@@ -645,14 +645,14 @@ mod tests {
 
     fn stopped_controller(cx: &mut gpui::TestAppContext) -> (Entity<PlaybackController>, async_channel::Receiver<Save>, tempfile::TempDir) {
         let directory = tempfile::tempdir().unwrap();
-        let launch = bokheim_backend::host::BackendLaunch::initialize(bokheim_backend::AppDataLocation::native_path(directory.path())).unwrap();
+        let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
         let (backend, _) = AppClient::start_native(launch).unwrap();
         let (controller, writes, library) = opening_controller(cx);
         let record = ActiveAudiobook::new(
             BookLocator::new(library, "d".repeat(64).parse().unwrap()),
             42_000,
             1.25,
-            bokheim_backend::PlaybackMetadata { title: "Recoverable book".into(), author: "Author".into(), narrator: None, duration_ms: 100_000, chapters: vec![], cover: vec![] },
+            app::PlaybackMetadata { title: "Recoverable book".into(), author: "Author".into(), narrator: None, duration_ms: 100_000, chapters: vec![], cover: vec![] },
         );
         controller.update(cx, |controller, cx| {
             let session = reader_ui::restore_audiobook(&record, backend.library(library), cx);

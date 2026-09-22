@@ -946,12 +946,11 @@ impl ButtonVariant {
                 colors.color.mix_oklab(cx.theme().transparent, 0.3)
             }
             .into(),
-            Self::Ghost => if cx.theme().mode.is_dark() {
-                cx.theme().secondary.lighten(0.1).opacity(0.8)
-            } else {
-                cx.theme().secondary.darken(0.1).opacity(0.8)
-            }
-            .into(),
+            // Ghost is Default with no resting fill or border, so its hover
+            // should read the same themed token Default's does rather than
+            // deriving an untheme-able tint from `secondary` — a theme that
+            // repaints `button_hover` otherwise has no effect on Ghost.
+            Self::Ghost => cx.theme().tokens.button_hover.into(),
             Self::Link => cx.theme().transparent.into(),
             Self::Text => cx.theme().transparent.into(),
         };
@@ -998,12 +997,7 @@ impl ButtonVariant {
                     cx.theme().tokens.button_secondary_active.into()
                 }
             }
-            Self::Ghost => if cx.theme().mode.is_dark() {
-                cx.theme().secondary.lighten(0.2).opacity(0.8)
-            } else {
-                cx.theme().secondary.darken(0.2).opacity(0.8)
-            }
-            .into(),
+            Self::Ghost => cx.theme().tokens.button_active.into(),
             Self::Danger => {
                 if outline {
                     self.outline_background(ButtonStyleState::Active, cx)

@@ -294,6 +294,15 @@ pub(super) async fn post_thumbnail_batch(State(state): State<AppState>, user: Au
     server_wire_http::response(&headers, response)
 }
 
+pub(super) async fn post_thumbnail_presence(State(state): State<AppState>, user: AuthUser, Path(library_id): Path<LibraryId>, headers: HeaderMap, body: Bytes) -> Result<Response, StatusCode> {
+    let request: sync_common::api::assets::ThumbnailPresenceRequest = server_wire_http::decode_request(&headers, &body, wire::MAX_DECODED_REQUEST_BYTES)?;
+    if request.content_hashes.is_empty() || request.content_hashes.len() > sync_common::api::assets::MAX_THUMBNAIL_PRESENCE_ENTRIES { return Err(StatusCode::BAD_REQUEST); }
+    let mut seen = HashSet::with_capacity(request.content_hashes.len());
+    if request.content_hashes.iter().any(|hash| !seen.insert(*hash)) { return Err(StatusCode::BAD_REQUEST); }
+    let present = state.assets.thumbnail_presence(&user.user_id, &library_id, &request.content_hashes).await.map_err(asset_error)?;
+    server_wire_http::response(&headers, sync_common::api::assets::ThumbnailPresenceResponse { present })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{parse_range, response_headers, ByteRange};

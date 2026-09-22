@@ -1,1 +1,0 @@
-DELETE FROM origin_audit

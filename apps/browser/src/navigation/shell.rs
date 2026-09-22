@@ -14,9 +14,10 @@ use ui_components as components;
 
 use super::sidebar::Sidebar;
 use super::{GlobalPages, Libraries, LibrarySummary, Navigate, Route};
-use crate::library::OpenBook;
+use crate::library::{BookDetailClosed, OpenBook};
 use crate::services::AppServices;
 use crate::stores::Preferences;
+use crate::universal::sync::SyncPage;
 
 pub struct BrowserShell {
     #[cfg(not(target_arch = "wasm32"))]
@@ -26,6 +27,7 @@ pub struct BrowserShell {
     route: Route,
     content_footer: Option<gpui::AnyView>,
     pending_folder: Option<(LibraryId, sync_common::DirId, String)>,
+    pending_subject: Option<(LibraryId, String, String)>,
     libraries: Entity<Libraries>,
     global_pages: GlobalPages,
     navigation: Entity<Sidebar>,
@@ -34,6 +36,10 @@ pub struct BrowserShell {
 }
 
 impl BrowserShell {
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn apply_sync_event(&mut self, event: crate::SyncEvent, cx: &mut Context<Self>) {
+        self.global_pages.apply_sync_event(event, cx);
+    }
     pub(crate) fn set_content_footer(&mut self, footer: Option<gpui::AnyView>, cx: &mut Context<Self>) {
         if self.content_footer.as_ref().map(|view| view.entity_id()) == footer.as_ref().map(|view| view.entity_id()) {
             return;
@@ -55,14 +61,14 @@ impl BrowserShell {
         self.libraries.update(cx, |libraries, cx| libraries.set_library_view(view, cx));
     }
     /// Builds the browser around the restored session and starts background subscriptions.
-    pub fn new(services: AppServices, open_book: OpenBook, preferences: Entity<Preferences>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(services: AppServices, sync_state: Entity<crate::SyncState>, open_book: OpenBook, book_detail_closed: BookDetailClosed, preferences: Entity<Preferences>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let libraries = services.startup.libraries.iter().map(|entry| LibrarySummary::from_entry(&entry)).collect::<Vec<_>>();
         let active_library_id = libraries.first().map(|entry| *entry.library_id());
         let shell = cx.entity().downgrade();
         let navigate_callback: Navigate = std::rc::Rc::new(move |route, window, cx| {
             let _ = shell.update(cx, |shell, cx| shell.navigate(route, window, cx));
         });
-        let libraries = cx.new(|cx| Libraries::new(services.backend.clone(), open_book.clone(), libraries, active_library_id, navigate_callback.clone(), cx));
+        let libraries = cx.new(|cx| Libraries::new(services.backend.clone(), open_book.clone(), book_detail_closed, libraries, active_library_id, navigate_callback.clone(), cx));
         let session = libraries.read(cx).selected_session();
         let route = if let Some(session) = session {
             session.read(cx).focus_handle(cx).focus(window, cx);
@@ -76,6 +82,7 @@ impl BrowserShell {
         let navigation_subscription = cx.observe(&navigation, |_, _, cx| cx.notify());
         let library_subscription = cx.observe_in(&libraries, window, |shell, libraries, window, cx| {
             shell.open_pending_folder(window, cx);
+            shell.open_pending_subject(window, cx);
             let session = libraries.read(cx).selected_session();
             if matches!(shell.route, Route::Library(_)) {
                 if let Some(session) = session {
@@ -85,7 +92,10 @@ impl BrowserShell {
             }
             cx.notify();
         });
-        let global_pages = GlobalPages::new(services.clone(), preferences, libraries.clone());
+        // Sync state belongs to the application shell, not to Settings. The
+        // page stays alive across navigation and Settings only renders it.
+        let sync_page = cx.new(|cx| SyncPage::new(services.clone(), sync_state, libraries.clone(), window, cx));
+        let global_pages = GlobalPages::new(preferences, libraries.clone(), sync_page);
         Self {
             #[cfg(not(target_arch = "wasm32"))]
             services,
@@ -94,6 +104,7 @@ impl BrowserShell {
             route,
             content_footer: None,
             pending_folder: None,
+            pending_subject: None,
             libraries,
             global_pages,
             navigation,
@@ -138,6 +149,25 @@ impl BrowserShell {
         let (_, directory_id, title) = self.pending_folder.take().unwrap();
         self.route = Route::Library(super::LibraryRoute::Folders);
         session.update(cx, |session, cx| session.open_folder(directory_id, title, window, cx));
+        cx.notify();
+    }
+
+    pub(crate) fn open_subject(&mut self, library_id: LibraryId, location: String, label: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.pending_subject = Some((library_id, location, label));
+        self.libraries.update(cx, |libraries, cx| libraries.select_library(library_id, cx));
+        self.open_pending_subject(window, cx);
+    }
+
+    fn open_pending_subject(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((library_id, _, _)) = &self.pending_subject else { return };
+        let libraries = self.libraries.read(cx);
+        if libraries.selected_id() != Some(*library_id) {
+            return;
+        }
+        let Some(session) = libraries.selected_session() else { return };
+        let (_, location, label) = self.pending_subject.take().unwrap();
+        self.route = Route::Library(super::LibraryRoute::Subjects);
+        session.update(cx, |session, cx| session.open_subject(location, label, window, cx));
         cx.notify();
     }
 
@@ -211,7 +241,7 @@ impl BrowserShell {
                     session.update(cx, |session, cx| session.navigate(route, window, cx));
                 }
             }
-            Route::Global(route) => self.global_pages.reveal(route, window, cx),
+            Route::Global(route) => self.global_pages.prepare(route, cx),
         }
         cx.notify();
     }
@@ -264,22 +294,26 @@ impl Render for BrowserShell {
                 Some(session) => session.into_any_element(),
                 None => self.empty_libraries(cx),
             },
-            Route::Global(global) => components::library_section_content().child(self.global_pages.page(global, window, cx)).into_any_element(),
+            Route::Global(global) => components::library_section_content().child(self.global_pages.page(global, cx)).into_any_element(),
         };
         let compact_navigation = components::WindowWidthClass::for_window(window).is_compact();
-        let mobile_heading = components::uses_mobile_navigation(window)
-            .then(|| match route {
-                Route::Library(super::LibraryRoute::Home) => Some("Home"),
-                Route::Global(super::GlobalRoute::Settings) => Some("Settings"),
-                // Browse pages own their current folder or subject title.
-                _ => None,
-            })
-            .flatten()
-            .map(|title| {
+        let mobile_heading = components::uses_mobile_navigation(window).then(|| route).and_then(|route| match route {
+            // Home is the root of the mobile tab bar: there is nothing to go
+            // back to, so its heading never has a back button.
+            Route::Library(super::LibraryRoute::Home) => {
                 let theme = components::browser_theme(cx);
-                let back = components::mobile_back_button(theme).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::DismissSettings), cx));
-                components::mobile_navigation_bar(title, back, theme)
-            });
+                Some(components::mobile_navigation_bar("Home", None, theme))
+            }
+            Route::Global(super::GlobalRoute::Settings) => {
+                let theme = components::browser_theme(cx);
+                // The OS back button/gesture already does this on native
+                // mobile; only compact-width web needs the on-screen one.
+                let back = (!components::has_native_back_button()).then(|| components::mobile_back_button(theme).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::DismissSettings), cx)));
+                Some(components::mobile_navigation_bar("Settings", back, theme))
+            }
+            // Browse pages own their current folder or subject title.
+            _ => None,
+        });
         let content = gpui::div()
             .flex_1()
             .min_w_0()
@@ -292,17 +326,25 @@ impl Render for BrowserShell {
         let safe_area = window.insets().safe_area;
         let sidebar = self.navigation.clone();
         let navigation = sidebar.read(cx).render_navigation(sidebar.clone(), route, compact_navigation, safe_area, cx);
+        // A plain flex sibling rather than an absolute overlay, so the dock
+        // takes its own space instead of painting over other content. On
+        // compact windows `page` is a column, so the dock goes between
+        // `content` and `navigation` to sit above the bottom nav bar rather
+        // than below it; on wide windows `page` is sidebar-beside-content
+        // row, so the dock instead goes below the whole row, at the outer level.
+        let footer = || self.content_footer.clone().map(|footer| gpui::div().w_full().flex_none().child(footer));
         let page = if compact_navigation {
-            gpui::div().flex_1().min_h_0().min_w_0().flex().flex_col().pt(safe_area.top).child(content).child(navigation).into_any_element()
+            gpui::div().flex_1().min_h_0().min_w_0().flex().flex_col().pt(safe_area.top).child(content).children(footer()).child(navigation).into_any_element()
         } else {
             components::browser_body().pt(safe_area.top).child(navigation).child(content).into_any_element()
         };
 
         let more_overlay = compact_navigation.then(|| sidebar.read(cx).more_overlay(sidebar.clone(), route, safe_area, cx)).flatten();
-        // The children are built as `flex_1().min_h_0()`, which only resolves to a
-        // real height inside a column. Without this the whole shell laid out at
-        // zero height: correct widths, nothing painted.
-        let footer = self.content_footer.clone().map(|footer| gpui::div().absolute().left_0().right_0().bottom_0().child(footer));
-        gpui::div().size_full().relative().flex().flex_col().child(page).children(footer).children(more_overlay).children(sidebar.read(cx).library_switcher_overlay(sidebar.clone(), cx)).into_any_element()
+        // On compact windows the bottom nav bar already reserves `safe_area.bottom`
+        // beneath itself, and the dock sits above that bar; on wide windows there
+        // is no such bar below the dock, so it needs its own bottom padding to
+        // clear the OS gesture/button bar.
+        let outer_footer = (!compact_navigation).then(footer).flatten().map(|footer| footer.pb(safe_area.bottom));
+        gpui::div().size_full().relative().flex().flex_col().child(page).children(outer_footer).children(more_overlay).children(sidebar.read(cx).library_switcher_overlay(sidebar.clone(), cx)).into_any_element()
     }
 }

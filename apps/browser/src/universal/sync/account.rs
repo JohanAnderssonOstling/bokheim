@@ -3,21 +3,26 @@
 use gpui::Context;
 
 use super::SyncPage;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::services::UiFuture;
-use bokheim_backend::AppClient;
+#[cfg(not(target_arch = "wasm32"))]
+use app::AppClient;
 
-pub(super) type CloudSnapshot = bokheim_backend::AccountSnapshot;
+pub(super) type CloudSnapshot = app::AccountSnapshot;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn snapshot(backend: &AppClient) -> UiFuture<CloudSnapshot> {
     let backend = backend.clone();
     Box::pin(async move { backend.account_snapshot().await })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn login(backend: &AppClient, email: String, password: String) -> UiFuture<CloudSnapshot> {
     let backend = backend.clone();
     Box::pin(async move { backend.login(email, password).await })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn verify_email(backend: &AppClient, email: String, pin: String) -> UiFuture<CloudSnapshot> {
     let backend = backend.clone();
     Box::pin(async move { backend.verify_email(email, pin).await })
@@ -35,12 +40,23 @@ impl SyncPage {
         }
         self.refresh_scheduled = true;
         let timer = cx.background_executor().timer(std::time::Duration::from_millis(200));
+        #[cfg(target_arch = "wasm32")]
+        let events = self.events.clone();
         cx.spawn(async move |page, cx| {
             timer.await;
-            let _ = page.update(cx, |page, cx| {
-                page.refresh_scheduled = false;
-                page.refresh_with_feedback(false, cx);
-            });
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = events.try_send(super::SyncEvent::AccountRefreshDue);
+                let _ = (page, cx);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                super::after_browser_callback(cx).await;
+                let _ = page.update(cx, |page, cx| {
+                    page.refresh_scheduled = false;
+                    page.refresh_with_feedback(false, cx);
+                });
+            }
         })
         .detach();
     }
@@ -54,43 +70,47 @@ impl SyncPage {
         }
         self.activity = super::AccountActivity::Refreshing;
         self.error = None;
-        if show_feedback {
+        // Signed out, this reloads the local library list and storage usage,
+        // not anything account-related; showing "Refreshing…" would imply
+        // account/network activity that isn't happening.
+        if show_feedback && self.state.read(cx).account_status.signed_in() {
             self.message = Some("Refreshing…".into());
         }
         cx.notify();
-        let operation = snapshot(&self.services.backend);
-        self.task = Some(cx.spawn(async move |page, cx| {
-            let result = operation.await;
-            let _ = page.update(cx, |page, cx| match result {
-                Ok(snapshot) => page.apply_snapshot(snapshot, None, cx),
-                Err(error) => page.apply_error(error, cx),
-            });
-        }));
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = self.events.try_send(super::SyncEvent::AccountRefreshRequested);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let operation = snapshot(&self.services.backend);
+            self.task = Some(cx.spawn(async move |page, cx| {
+                let result = operation.await;
+                super::after_browser_callback(cx).await;
+                let _ = page.update(cx, |page, cx| match result {
+                    Ok(snapshot) => page.apply_snapshot(snapshot, None, cx),
+                    Err(error) => page.apply_error(error, cx),
+                });
+            }));
+        }
     }
 
-    fn apply_snapshot(&mut self, snapshot: CloudSnapshot, message: Option<&str>, cx: &mut Context<Self>) {
-        let next_account_status = snapshot.account;
-        let identity_changed = self.account_status.signed_in() != next_account_status.signed_in() || self.account_status.email() != next_account_status.email();
-        self.account_status = next_account_status;
+    pub(super) fn apply_snapshot(&mut self, snapshot: CloudSnapshot, message: Option<&str>, cx: &mut Context<Self>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.state.update(cx, |state, cx| state.apply_account_snapshot(&snapshot, cx));
         #[cfg(target_arch = "wasm32")]
-        if self.account_status.signed_in() {
+        let _ = snapshot;
+        let account_status = self.state.read(cx).account_status.clone();
+        #[cfg(target_arch = "wasm32")]
+        if account_status.signed_in() {
             self.web_authentication = None;
         }
-        if identity_changed {
-            let account_status = self.account_status.clone();
-            self.identity.update(cx, |identity, cx| identity.set_account_status(account_status, cx));
-            // Arriving at an account is what the form was for. A password change
-            // does not get here — the identity is the same afterwards — so that
-            // form closes when its own screen is done with.
-            #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
-            if self.account_status.signed_in() {
-                self.access_open = false;
-            }
+        self.identity.update(cx, |identity, cx| identity.set_account_status(account_status.clone(), cx));
+        // The form was for reaching an account; close it after sign-in.
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        if account_status.signed_in() {
+            self.access_open = false;
         }
-        self.storage_usage = snapshot.storage_usage;
-        self.sync_statuses = std::sync::Arc::new(snapshot.sync_statuses);
-        self.local_storage_usage = std::sync::Arc::new(snapshot.local_storage_usage);
-        self.server_storage_usage = snapshot.server_storage_usage.map(std::sync::Arc::new);
         self.activity = super::AccountActivity::Idle;
         self.error = None;
         self.message = message.map(Into::into);
@@ -109,6 +129,7 @@ impl SyncPage {
         cx.notify();
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn start_snapshot_operation(&mut self, progress: &'static str, success: &'static str, reveal_password_reset_on_error: bool, operation: UiFuture<CloudSnapshot>, cx: &mut Context<Self>) {
         if self.is_busy() {
             return;
@@ -122,6 +143,7 @@ impl SyncPage {
         cx.notify();
         self.task = Some(cx.spawn(async move |page, cx| {
             let result = operation.await;
+            super::after_browser_callback(cx).await;
             let _ = page.update(cx, |page, cx| match result {
                 Ok(snapshot) => {
                     page.login_failed = false;
@@ -136,9 +158,23 @@ impl SyncPage {
     }
 
     pub(super) fn start_logout(&mut self, cx: &mut Context<Self>) {
-        let backend = self.services.backend.clone();
-        let operation = Box::pin(async move { backend.logout().await });
-        self.start_snapshot_operation("Signing out…", "Signed out", false, operation, cx);
+        #[cfg(target_arch = "wasm32")]
+        {
+            if self.is_busy() {
+                return;
+            }
+            self.activity = super::AccountActivity::AccountRequest;
+            self.error = None;
+            self.message = Some("Signing out…".into());
+            cx.notify();
+            let _ = self.events.try_send(super::SyncEvent::LogoutRequested);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let backend = self.services.backend.clone();
+            let operation = Box::pin(async move { backend.logout().await });
+            self.start_snapshot_operation("Signing out…", "Signed out", false, operation, cx);
+        }
     }
 }
 
@@ -147,24 +183,35 @@ impl SyncPage {
         if !self.asset_storage_pending.insert(library_id) {
             return;
         }
-        let backend = self.services.backend.clone();
-        cx.spawn(async move |page, cx| {
-            let result = backend.set_library_asset_storage(library_id, enabled).await;
-            let _ = page.update(cx, |page, cx| {
-                page.asset_storage_pending.remove(&library_id);
-                match result {
-                    Ok(()) => {
-                        for status in std::sync::Arc::make_mut(&mut page.sync_statuses).iter_mut().filter(|status| status.library_id == library_id) {
-                            status.asset_storage_enabled = enabled;
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = self.events.try_send(super::SyncEvent::AssetStorageRequested { library_id, enabled });
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let backend = self.services.backend.clone();
+            cx.spawn(async move |page, cx| {
+                let result = backend.set_library_asset_storage(library_id, enabled).await;
+                super::after_browser_callback(cx).await;
+                let _ = page.update(cx, |page, cx| {
+                    page.asset_storage_pending.remove(&library_id);
+                    match result {
+                        Ok(()) => {
+                            page.state.update(cx, |state, cx| {
+                                for status in state.sync_statuses.iter_mut().filter(|status| status.library_id == library_id) {
+                                    status.asset_storage_enabled = enabled;
+                                }
+                                cx.notify();
+                            });
+                            page.schedule_refresh(cx);
                         }
-                        page.schedule_refresh(cx);
+                        Err(error) => page.error = Some(error.into()),
                     }
-                    Err(error) => page.error = Some(error.into()),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
         cx.notify();
     }
 }

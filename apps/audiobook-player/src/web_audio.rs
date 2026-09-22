@@ -43,27 +43,20 @@ pub(crate) struct AudioEngine {
     browser: BrowserAudio,
     // Keep the callback valid until dispose has detached browser event handlers.
     _save: Closure<dyn FnMut(f64, f64)>,
-    _source: bokheim_backend::BrowserAudiobook,
+    _source: app::BrowserAudiobook,
 }
 
 impl AudioEngine {
-    pub fn open(source: bokheim_backend::BrowserAudiobook, book: &AudiobookBook, initial: Duration, updates: async_channel::Sender<PlaybackPosition>) -> Result<Self, String> {
+    pub fn open(source: app::BrowserAudiobook, book: &AudiobookBook, initial: Duration, updates: async_channel::Sender<PlaybackPosition>) -> Result<Self, String> {
         let metadata = js_sys::JSON::parse(&serde_json::json!({"title": book.title, "artist": book.author.clone().unwrap_or_default()}).to_string()).map_err(|e| format!("{e:?}"))?;
         let save = Closure::new(move |position: f64, progress: f64| {
             if let Some(position) = crate::browser_position_update(position, progress) {
                 let _ = updates.try_send(position);
             }
         });
-        let browser = BrowserAudio::new(
-            &source.url,
-            book.cover.as_ref().map(|cover| cover.bytes()).unwrap_or_default(),
-            &metadata,
-            initial.min(book.duration).as_secs_f64(),
-            save.as_ref().unchecked_ref(),
-            &source.direct_config()?,
-            &source.renewal(),
-        )
-        .map_err(|e| format!("Could not initialize browser audio: {e:?}"))?;
+        let browser =
+            BrowserAudio::new(&source.url, book.cover.as_ref().map(|cover| cover.bytes()).unwrap_or_default(), &metadata, initial.min(book.duration).as_secs_f64(), save.as_ref().unchecked_ref(), &source.direct_config()?, &source.renewal())
+                .map_err(|e| format!("Could not initialize browser audio: {e:?}"))?;
         Ok(Self { browser, _save: save, _source: source })
     }
     pub fn play(&self) {

@@ -1,3 +1,0 @@
-INSERT INTO source_concept_mapping(source_system_id,source_version,source_code,concept_id,mapping_type,mapper_version) VALUES(?1,?2,?3,?4,?5,?6)
-            ON CONFLICT(source_system_id,source_version,source_code,concept_id) DO UPDATE SET mapping_type=excluded.mapping_type,mapper_version=excluded.mapper_version
-            WHERE mapping_type IS NOT excluded.mapping_type OR mapper_version IS NOT excluded.mapper_version

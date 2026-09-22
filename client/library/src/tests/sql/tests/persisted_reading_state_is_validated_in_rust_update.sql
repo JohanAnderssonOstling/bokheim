@@ -1,1 +1,0 @@
-UPDATE book SET read_progress=150 WHERE content_hash=printf('%064x',1)

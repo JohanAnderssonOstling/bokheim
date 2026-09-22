@@ -1,7 +1,7 @@
 # Book identity
 
 A PDF identity is the BLAKE3 hash of its original bytes, before Bokheim writes
-`BokheimContentHash` into its catalog. Metadata edits retain the marker and
+`BokheimContentHash` into its document root. Metadata edits retain the marker and
 therefore the identity. An external tool that deletes the marker removes this
 persistence guarantee.
 
@@ -20,13 +20,13 @@ read-only and unparseable PDFs, and audio that cannot be fingerprinted. That
 audio is also audio `enrich_m4b` refuses to rewrite, so its bytes stay stable.
 All identity readers use this same rule. If an external tool later changes such a
 file, its byte identity changes.
-PDF updates append a catalog revision without rewriting original streams.
+PDF updates append a document-root revision without rewriting original streams.
 Bokheim never writes to an M4B at all: the identity is derived, and enrichment
 belongs in the library database, where a wrong result can be reverted without
 touching a file the user owns.
 
 Encrypted PDFs that open with an empty password are supported. The appended
-catalog uses the original encryption key; the encryption dictionary, file IDs,
+root uses the original encryption key; the encryption dictionary, file IDs,
 permissions and original bytes are preserved. PDFs requiring a non-empty
 password use byte identity without modification. Reader annotations are stored
 in the library database and do not rewrite the PDF.

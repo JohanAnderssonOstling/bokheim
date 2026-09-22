@@ -1,6 +1,0 @@
-await-holding-invalid-types = [
-    "bokheim_backend::storage::database::DatabaseConnection",
-    "rusqlite::Connection",
-    "rusqlite::Transaction",
-    "rusqlite::Savepoint",
-]

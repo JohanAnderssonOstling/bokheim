@@ -1,10 +1,8 @@
 //! The shape of one book's page.
 //!
-//! Everything here is constrained to the same measure. That is the whole design
-//! decision, arrived at the long way: sizing the hero to its cover and the blurb
-//! to its prose gave every block a different left and right edge, and the page
-//! read as a pile of panels rather than as one page about one book. One width,
-//! one column, every block starting and ending on the same two lines.
+//! Compact pages use one measure. At expanded widths, the cover and contents
+//! keep that measure on the left while the description gains its own reading
+//! column on the right.
 //!
 //! These functions style and lay out. What a button does, which entry the reader
 //! is inside, and whether the file is on the device are the page's business.
@@ -13,8 +11,8 @@ use gpui::prelude::*;
 use gpui::{Div, SharedString, div, px, rems};
 
 use crate::{
-    BOOK_DETAIL_COVER_FRACTION, BOOK_DETAIL_DESCRIPTION_LINE_HEIGHT_EM, BOOK_DETAIL_DESCRIPTION_SIZE, BOOK_DETAIL_HERO_GAP, BOOK_DETAIL_PAGE_WIDTH_REM, BOOK_DETAIL_SECTION_GAP, BOOK_DETAIL_SUBTITLE_SIZE, BOOK_DETAIL_TITLE_SIZE, BOOK_COVER_WIDTH,
-    BrowserTheme, SPACE_LG, SPACE_SM, SPACE_XS, TEXT_LG, TEXT_SM, TEXT_XS,
+    BOOK_COVER_WIDTH, BOOK_DETAIL_COVER_FRACTION, BOOK_DETAIL_DESCRIPTION_LINE_HEIGHT_EM, BOOK_DETAIL_DESCRIPTION_SIZE, BOOK_DETAIL_HERO_GAP, BOOK_DETAIL_PAGE_WIDTH_REM, BOOK_DETAIL_SECTION_GAP,
+    BOOK_DETAIL_WIDE_PAGE_WIDTH_REM, BrowserTheme, SPACE_LG, SPACE_SM, SPACE_XS, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD,
 };
 
 /// The page, with its one measure centred in whatever width it is given. Wider
@@ -32,6 +30,13 @@ pub fn book_detail_page() -> Div {
 /// line.
 pub fn book_detail_measure() -> Div {
     div().w_full().max_w(rems(BOOK_DETAIL_PAGE_WIDTH_REM)).min_w_0().flex().flex_col().gap(px(BOOK_DETAIL_SECTION_GAP))
+}
+
+/// The expanded-page measure. Its two children are still individually limited
+/// to the compact measure, so the extra width creates a second column rather
+/// than longer prose lines.
+pub fn book_detail_wide_measure() -> Div {
+    div().w_full().max_w(rems(BOOK_DETAIL_WIDE_PAGE_WIDTH_REM)).min_w_0().flex().flex_col()
 }
 
 /// The cover and the words beside it. The two stand side by side at every width
@@ -60,23 +65,15 @@ pub fn book_detail_title(title: impl Into<SharedString>, subtitle: Option<&str>,
         .flex()
         .flex_col()
         .gap(px(SPACE_XS))
-        .child(div().text_size(rems(BOOK_DETAIL_TITLE_SIZE)).text_color(theme.text).child(title.into()))
-        .children(subtitle.filter(|subtitle| !subtitle.trim().is_empty()).map(|subtitle| div().text_size(rems(BOOK_DETAIL_SUBTITLE_SIZE)).text_color(theme.text_muted).child(subtitle.to_owned())))
+        .child(div().text_size(rems(TITLE_MD)).text_color(theme.text).child(title.into()))
+        .children(subtitle.filter(|subtitle| !subtitle.trim().is_empty()).map(|subtitle| div().text_size(rems(TEXT_MD)).text_color(theme.text_muted).child(subtitle.to_owned())))
 }
 
 /// One credited line: "Narrated by", "Translated by", the authors themselves.
 /// The role is stated rather than implied by position, because a page that lists
 /// four names in a column says nothing about which of them wrote it.
 pub fn book_detail_credit_line(role: Option<impl Into<SharedString>>, theme: BrowserTheme) -> Div {
-    div()
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .items_baseline()
-        .gap(px(SPACE_XS))
-        .text_size(rems(TEXT_SM))
-        .text_color(theme.text_muted)
-        .children(role.map(|role| div().flex_none().child(role.into())))
+    div().flex().flex_row().flex_wrap().items_baseline().gap(px(SPACE_XS)).text_size(rems(TEXT_SM)).text_color(theme.text_muted).children(role.map(|role| div().flex_none().child(role.into())))
 }
 
 /// A name that goes somewhere — an author's own page.
@@ -129,12 +126,21 @@ pub fn book_detail_actions() -> Div {
     div().flex().flex_row().flex_wrap().items_center().gap(px(SPACE_SM))
 }
 
-/// What is in the book, then what the book is. They stack in one column at
-/// every width: two columns of prose need more than the measure a page of prose
-/// is set to, and widening the page to hold them made the hero above them a
-/// narrow header over a wide body.
+/// The compact page's sections, in reading order.
 pub fn book_detail_sections() -> Div {
     div().w_full().min_w_0().flex().flex_col().gap(px(SPACE_LG))
+}
+
+/// The expanded page's two columns. A flex layout lets them shrink gracefully
+/// inside a window close to the expanded breakpoint.
+pub fn book_detail_columns() -> Div {
+    div().w_full().min_w_0().flex().flex_row().items_start().gap(px(BOOK_DETAIL_SECTION_GAP))
+}
+
+/// One column in the expanded detail page. Both columns preserve the compact
+/// page's maximum measure.
+pub fn book_detail_column() -> Div {
+    div().flex_1().min_w_0().max_w(rems(BOOK_DETAIL_PAGE_WIDTH_REM)).flex().flex_col().gap(px(BOOK_DETAIL_SECTION_GAP))
 }
 
 pub fn book_detail_section() -> Div {
@@ -177,5 +183,10 @@ mod tests {
     fn a_cover_never_takes_more_than_half_the_hero() {
         assert!(BOOK_DETAIL_COVER_FRACTION <= 0.5);
         assert!(BOOK_COVER_WIDTH / (BOOK_DETAIL_PAGE_WIDTH_REM * 16.0) < BOOK_DETAIL_COVER_FRACTION, "at the page's full measure the cover is at its natural width, not the cap");
+    }
+
+    #[test]
+    fn wide_detail_measure_holds_two_compact_columns_and_a_gutter() {
+        assert!(BOOK_DETAIL_WIDE_PAGE_WIDTH_REM > BOOK_DETAIL_PAGE_WIDTH_REM * 2.0);
     }
 }

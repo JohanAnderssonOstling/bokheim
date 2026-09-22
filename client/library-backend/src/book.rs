@@ -9,7 +9,10 @@ pub struct ResolvedBookData {
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub enum BookSource {
-    Local { capability: String, length: u64 },
+    Local {
+        capability: String,
+        length: u64,
+    },
     Remote {
         source: crate::library::RemoteFile,
         #[serde(with = "serde_bytes")]

@@ -23,7 +23,7 @@ use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
 
 use application_shell::ApplicationRoot;
-use bokheim_backend::{AppClient, AppStartupState, host::BackendLaunch};
+use app::{AppClient, AppStartupState, host::BackendLaunch};
 #[cfg(feature = "kobo")]
 use browser_ui::SaveKoboAutoRotate;
 use browser_ui::{AppServices, AppStartup};
@@ -239,10 +239,11 @@ pub fn open_ui(
         .open_window(
             WindowOptions {
                 window_bounds: Some(browser_bounds),
-                titlebar: options.persist_window_geometry.then(|| gpui::TitlebarOptions { title: Some(SharedString::from(bokheim_backend::APP_NAME)), ..Default::default() }),
+                titlebar: options.persist_window_geometry.then(|| gpui::TitlebarOptions { title: Some(SharedString::from(app::APP_NAME)), ..Default::default() }),
                 focus: true,
                 app_id,
                 icon,
+                window_decorations: cfg!(all(target_os = "linux", feature = "desktop", not(feature = "mobile"))).then_some(gpui::WindowDecorations::Client),
                 ..Default::default()
             },
             move |window, cx| {
@@ -284,9 +285,9 @@ pub fn open_ui(
                         .detach();
                     }
                     #[cfg(feature = "kobo")]
-                    return ApplicationRoot::new(services, application_backend, bokheim_backend::APP_NAME, playback_restore_path_for_root, kobo_auto_rotate, window, cx);
+                    return ApplicationRoot::new(services, application_backend, app::APP_NAME, playback_restore_path_for_root, kobo_auto_rotate, window, cx);
                     #[cfg(not(feature = "kobo"))]
-                    ApplicationRoot::new(services, application_backend, bokheim_backend::APP_NAME, playback_restore_path_for_root, window, cx)
+                    ApplicationRoot::new(services, application_backend, app::APP_NAME, playback_restore_path_for_root, window, cx)
                 });
                 *application_root.borrow_mut() = Some(application.downgrade());
                 let content = platform_content(application, cx);
@@ -318,9 +319,17 @@ fn open_extra_window(services: AppServices, backend: AppClient, playback_restore
     let (app_id, icon) = desktop_window_identity();
     let bounds = Bounds::centered(None, size(px(1240.0), px(820.0)), cx);
     let result = cx.open_window(
-        WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar: Some(gpui::TitlebarOptions { title: Some(bokheim_backend::APP_NAME.into()), ..Default::default() }), focus: true, app_id, icon, ..Default::default() },
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(gpui::TitlebarOptions { title: Some(app::APP_NAME.into()), ..Default::default() }),
+            focus: true,
+            app_id,
+            icon,
+            window_decorations: cfg!(all(target_os = "linux", feature = "desktop", not(feature = "mobile"))).then_some(gpui::WindowDecorations::Client),
+            ..Default::default()
+        },
         move |window, cx| {
-            let application = cx.new(|cx| ApplicationRoot::new(services, backend, bokheim_backend::APP_NAME, playback_restore_path, window, cx));
+            let application = cx.new(|cx| ApplicationRoot::new(services, backend, app::APP_NAME, playback_restore_path, window, cx));
             let target_application = application.downgrade();
             window.defer(cx, move |window, cx| {
                 let _ = target_application.update(cx, |application, cx| application.open_window_target(target, window, cx));

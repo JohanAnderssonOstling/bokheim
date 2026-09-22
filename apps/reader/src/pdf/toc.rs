@@ -6,8 +6,8 @@
 //! page lookup and the active-entry search all agree on identity without
 //! anything having to be stored twice.
 
+use book_model::{BookTocEntry, pdf_toc_page};
 use gpui_component::tree::TreeItem;
-use book_model::{pdf_toc_page, BookTocEntry};
 
 const TOC_ID_PREFIX: &str = "pdf-toc-";
 
@@ -56,9 +56,16 @@ impl PdfTocState {
     /// order, so a chapter and the section opening it both starting on one
     /// page resolve to the section.
     pub(crate) fn entry_at(&self, page_index: usize) -> Option<String> {
+        self.ordinal_at(page_index).map(toc_id)
+    }
+
+    /// Depth-first ordinal of the entry covering `page_index`, for reading
+    /// position. Matches the sidebar identity, so stored ordinals agree with
+    /// what the contents panel shows.
+    pub(crate) fn ordinal_at(&self, page_index: usize) -> Option<usize> {
         let mut best = None;
         best_entry_at(&self.entries, page_index, 0, &mut 0, &mut best);
-        best.map(|(_, _, order)| toc_id(order))
+        best.map(|(_, _, order)| order)
     }
 
     pub(crate) fn page_of(&self, id: &str) -> Option<usize> {
@@ -173,6 +180,15 @@ mod tests {
     fn entries_sharing_a_page_resolve_to_the_innermost() {
         let toc = sample();
         assert_eq!(toc.entry_at(12).as_deref(), Some("pdf-toc-2"), "a section opening its chapter's page wins over the chapter");
+    }
+
+    #[test]
+    fn ordinals_match_sidebar_identity() {
+        let toc = sample();
+        assert_eq!(toc.ordinal_at(0), Some(0));
+        assert_eq!(toc.ordinal_at(12), Some(2));
+        assert_eq!(toc.ordinal_at(41), Some(3));
+        assert_eq!(toc.ordinal_at(11), toc.entry_at(11).and_then(|id| toc_order(&id)), "ordinal and id resolve through the same search");
     }
 
     #[test]

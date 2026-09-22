@@ -1,1 +1,0 @@
-SELECT SUM(length(bytes)) FROM block

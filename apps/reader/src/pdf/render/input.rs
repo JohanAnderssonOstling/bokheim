@@ -1,19 +1,22 @@
 //! PDF implementations of shared navigation commands.
 
 use gpui::{Context, Window};
+use ui_components as components;
 
 use crate::invalidation::Component;
 use crate::shell::input::CommandTarget;
 use crate::shell::search::SearchBarTarget;
-use crate::shell::state_panel::{self, SidebarPanel};
-use crate::shell::toolbar::ToolbarTarget;
+use crate::shell::state_panel::{self, SidebarTab};
+use crate::shell::toolbar::SidebarTarget;
 use crate::{CloseSearch, DecreaseScale, FocusReaderSearch, IncreaseScale, NextLine, NextPage, PreviousLine, PreviousPage, ReturnToLibrary, ToggleSearch, ToggleToc};
 
 use super::{PdfReaderView, ZOOM_STEP};
 
 impl CommandTarget<PreviousPage> for PdfReaderView {
-    fn execute(&mut self, _: &PreviousPage, _: &mut Window, cx: &mut Context<Self>) {
-        self.chrome.hide(cx);
+    fn execute(&mut self, _: &PreviousPage, window: &mut Window, cx: &mut Context<Self>) {
+        if components::uses_mobile_navigation(window) {
+            self.chrome.hide(cx);
+        }
         if self.pdf.read(cx).can_previous_page() {
             self.pdf.update(cx, |pdf, cx| pdf.previous_page(cx));
         }
@@ -21,8 +24,10 @@ impl CommandTarget<PreviousPage> for PdfReaderView {
 }
 
 impl CommandTarget<NextPage> for PdfReaderView {
-    fn execute(&mut self, _: &NextPage, _: &mut Window, cx: &mut Context<Self>) {
-        self.chrome.hide(cx);
+    fn execute(&mut self, _: &NextPage, window: &mut Window, cx: &mut Context<Self>) {
+        if components::uses_mobile_navigation(window) {
+            self.chrome.hide(cx);
+        }
         if self.pdf.read(cx).can_next_page() {
             self.pdf.update(cx, |pdf, cx| pdf.next_page(cx));
         }
@@ -30,15 +35,19 @@ impl CommandTarget<NextPage> for PdfReaderView {
 }
 
 impl CommandTarget<PreviousLine> for PdfReaderView {
-    fn execute(&mut self, _: &PreviousLine, _: &mut Window, cx: &mut Context<Self>) {
-        self.chrome.hide(cx);
+    fn execute(&mut self, _: &PreviousLine, window: &mut Window, cx: &mut Context<Self>) {
+        if components::uses_mobile_navigation(window) {
+            self.chrome.hide(cx);
+        }
         self.pdf.update(cx, |pdf, cx| pdf.previous_item(cx));
     }
 }
 
 impl CommandTarget<NextLine> for PdfReaderView {
-    fn execute(&mut self, _: &NextLine, _: &mut Window, cx: &mut Context<Self>) {
-        self.chrome.hide(cx);
+    fn execute(&mut self, _: &NextLine, window: &mut Window, cx: &mut Context<Self>) {
+        if components::uses_mobile_navigation(window) {
+            self.chrome.hide(cx);
+        }
         self.pdf.update(cx, |pdf, cx| pdf.next_item(cx));
     }
 }
@@ -46,8 +55,7 @@ impl CommandTarget<NextLine> for PdfReaderView {
 impl CommandTarget<ToggleToc> for PdfReaderView {
     fn execute(&mut self, _: &ToggleToc, _: &mut Window, cx: &mut Context<Self>) {
         self.chrome.show(cx);
-        let visible = !self.sidebar.shows(SidebarPanel::Contents);
-        state_panel::set_contents_visible(&mut self.sidebar, visible, cx);
+        state_panel::select_tab(&mut self.sidebar, SidebarTab::Contents, cx);
         crate::invalidation::notify(cx, Component::PdfShell, "toc_visibility_changed");
     }
 }

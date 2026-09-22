@@ -1,7 +1,7 @@
-use catalog_model::{AuthorName, AuthorNameError};
-use content_address::ContentHash;
 use crate::BookTocEntry;
 use book_model::AuthorId;
+use book_model::{AuthorName, AuthorNameError};
+use content_address::ContentHash;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 
@@ -196,8 +196,8 @@ pub struct LibraryBrowseQuery {
     pub languages: Vec<String>,
     /// Drops books at or past [`FINISHED_PROGRESS_THRESHOLD`].
     ///
-    /// Applied to the visible book set before subject compaction so finished
-    /// books do not keep otherwise empty branches or singleton chains open.
+    /// Applied after subject compaction so hiding finished books does not
+    /// change which branches or single-child chains are collapsed.
     /// Facet counts continue to describe the location including finished books.
     #[serde(default)]
     pub hide_finished: bool,
@@ -238,10 +238,6 @@ impl AuthorSubject {
 pub struct AuthorSummary {
     pub id: AuthorId,
     pub name: AuthorName,
-    /// The filing form — "Ekman, Kerstin" — that the index sorts and groups by.
-    /// Falls back to the display name for books that carry no `file-as`, so
-    /// this is never empty and callers never have to decide again.
-    pub sort_name: String,
     /// Every book credited to this identity, which is what the row states.
     /// `books` is capped by the query, so the two disagree for a prolific
     /// author and the count is the one to render.
@@ -252,7 +248,7 @@ pub struct AuthorSummary {
     /// than all of them.
     pub books: Vec<BookCardRow>,
     /// What this author writes about: the subjects most of their books are
-    /// filed under, most-credited first and capped by the query, which the
+    /// filed under, most-credited first and capped for display, which the
     /// index draws as chips beside the name.
     pub subjects: Vec<AuthorSubject>,
 }
@@ -389,7 +385,7 @@ pub struct BookDetail {
 
 /// One library search with title matches kept ahead of distinct author-only
 /// matches. A book that matches both is returned only in `title_matches`.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LibrarySearchResult {
     pub title_matches: Vec<BookCardRow>,
     pub author_matches: Vec<BookCardRow>,
@@ -443,22 +439,16 @@ impl FolderSort {
 }
 
 impl AuthorSummary {
-    /// `sort_name` is the stored filing form, if the source had one. An empty
-    /// or absent one resolves to the display name here, once, so that every
-    /// caller filing, grouping or sorting by it gets the same answer.
-    pub fn try_new(id: AuthorId, name: String, sort_name: Option<String>, book_count: usize, books: Vec<BookCardRow>, subjects: Vec<AuthorSubject>) -> Result<Self, AuthorNameError> {
+    /// Authors file under their display name.
+    pub fn try_new(id: AuthorId, name: String, book_count: usize, books: Vec<BookCardRow>, subjects: Vec<AuthorSubject>) -> Result<Self, AuthorNameError> {
         let name = AuthorName::parse(&name)?;
-        let sort_name = sort_name.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty()).unwrap_or_else(|| name.as_str().to_owned());
-        Ok(Self { id, name, sort_name, book_count, books, subjects })
+        Ok(Self { id, name, book_count, books, subjects })
     }
     pub fn id(&self) -> AuthorId {
         self.id
     }
     pub fn name(&self) -> &AuthorName {
         &self.name
-    }
-    pub fn sort_name(&self) -> &str {
-        &self.sort_name
     }
     pub fn book_count(&self) -> usize {
         self.book_count
@@ -474,8 +464,8 @@ impl AuthorSummary {
 impl AuthorSort {
     pub fn sort(self, authors: &mut [AuthorSummary]) {
         match self {
-            Self::Name => authors.sort_by_cached_key(|author| (author.sort_name.to_lowercase(), author.sort_name.clone(), author.id.to_string())),
-            Self::BookCount => authors.sort_by_cached_key(|author| (Reverse(author.book_count), author.sort_name.to_lowercase(), author.sort_name.clone(), author.id.to_string())),
+            Self::Name => authors.sort_by_cached_key(|author| (author.name.as_str().to_lowercase(), author.name.as_str().to_owned(), author.id.to_string())),
+            Self::BookCount => authors.sort_by_cached_key(|author| (Reverse(author.book_count), author.name.as_str().to_lowercase(), author.name.as_str().to_owned(), author.id.to_string())),
         }
     }
 }
@@ -486,24 +476,16 @@ mod tests {
     use book_model::agent_id_from_migration_seed;
 
     #[test]
-    fn author_summary_uses_sort_name_fallback_and_distinct_identity() {
+    fn author_summary_keeps_display_name_and_distinct_identity() {
         let id = agent_id_from_migration_seed(b"Kerstin Ekman");
-        let author = AuthorSummary::try_new(id, "Kerstin Ekman".to_owned(), Some("Ekman, Kerstin".to_owned()), 9, Vec::new(), Vec::new()).unwrap();
+        let author = AuthorSummary::try_new(id, "Kerstin Ekman".to_owned(), 9, Vec::new(), Vec::new()).unwrap();
 
         assert_eq!(author.name().as_str(), "Kerstin Ekman", "the display name is what the reader sees");
-        assert_eq!(author.sort_name(), "Ekman, Kerstin");
-
-        let id = agent_id_from_migration_seed(b"Susanna Clarke");
-        let blank = AuthorSummary::try_new(id, "Susanna Clarke".to_owned(), Some("   ".to_owned()), 2, Vec::new(), Vec::new()).unwrap();
-        let absent = AuthorSummary::try_new(id, "Susanna Clarke".to_owned(), None, 2, Vec::new(), Vec::new()).unwrap();
-
-        assert_eq!(blank.sort_name(), "Susanna Clarke");
-        assert_eq!(absent.sort_name(), "Susanna Clarke");
 
         let first_id = agent_id_from_migration_seed(b"first Alex Smith");
         let second_id = agent_id_from_migration_seed(b"second Alex Smith");
-        let first = AuthorSummary::try_new(first_id, "Alex Smith".to_owned(), None, 1, Vec::new(), Vec::new()).unwrap();
-        let second = AuthorSummary::try_new(second_id, "Alex Smith".to_owned(), None, 2, Vec::new(), Vec::new()).unwrap();
+        let first = AuthorSummary::try_new(first_id, "Alex Smith".to_owned(), 1, Vec::new(), Vec::new()).unwrap();
+        let second = AuthorSummary::try_new(second_id, "Alex Smith".to_owned(), 2, Vec::new(), Vec::new()).unwrap();
 
         assert_eq!(first.name(), second.name());
         assert_ne!(first.id(), second.id());
@@ -512,21 +494,21 @@ mod tests {
     }
 
     #[test]
-    fn sorting_by_name_orders_by_the_filing_form() {
-        let author = |display: &str, sort: &str| AuthorSummary::try_new(agent_id_from_migration_seed(display.as_bytes()), display.to_owned(), Some(sort.to_owned()), 1, Vec::new(), Vec::new()).unwrap();
-        let mut authors = vec![author("Kerstin Ekman", "Ekman, Kerstin"), author("Susanna Clarke", "Clarke, Susanna"), author("Peter Englund", "Englund, Peter")];
+    fn sorting_by_name_orders_by_the_display_name() {
+        let author = |display: &str| AuthorSummary::try_new(agent_id_from_migration_seed(display.as_bytes()), display.to_owned(), 1, Vec::new(), Vec::new()).unwrap();
+        let mut authors = vec![author("Kerstin Ekman"), author("Susanna Clarke"), author("Peter Englund")];
 
         AuthorSort::Name.sort(&mut authors);
 
-        assert_eq!(authors.iter().map(AuthorSummary::sort_name).collect::<Vec<_>>(), vec!["Clarke, Susanna", "Ekman, Kerstin", "Englund, Peter"]);
+        assert_eq!(authors.iter().map(|author| author.name().as_str()).collect::<Vec<_>>(), vec!["Kerstin Ekman", "Peter Englund", "Susanna Clarke"]);
     }
 
     #[test]
     fn author_name_sort_is_case_insensitive_and_deterministic() {
         let mut authors = vec![
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"zelda"), "zelda".to_string(), None, 3, Vec::new(), Vec::new()).unwrap(),
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"Alice"), "Alice".to_string(), None, 1, Vec::new(), Vec::new()).unwrap(),
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"alice"), "alice".to_string(), None, 2, Vec::new(), Vec::new()).unwrap(),
+            AuthorSummary::try_new(agent_id_from_migration_seed(b"zelda"), "zelda".to_string(), 3, Vec::new(), Vec::new()).unwrap(),
+            AuthorSummary::try_new(agent_id_from_migration_seed(b"Alice"), "Alice".to_string(), 1, Vec::new(), Vec::new()).unwrap(),
+            AuthorSummary::try_new(agent_id_from_migration_seed(b"alice"), "alice".to_string(), 2, Vec::new(), Vec::new()).unwrap(),
         ];
 
         AuthorSort::Name.sort(&mut authors);
@@ -536,9 +518,9 @@ mod tests {
     #[test]
     fn author_book_count_sort_uses_name_as_a_deterministic_tie_breaker() {
         let mut authors = vec![
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"Zelda"), "Zelda".to_string(), None, 2, Vec::new(), Vec::new()).unwrap(),
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"Alice"), "Alice".to_string(), None, 7, Vec::new(), Vec::new()).unwrap(),
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"Bob"), "Bob".to_string(), None, 2, Vec::new(), Vec::new()).unwrap(),
+            AuthorSummary::try_new(agent_id_from_migration_seed(b"Zelda"), "Zelda".to_string(), 2, Vec::new(), Vec::new()).unwrap(),
+            AuthorSummary::try_new(agent_id_from_migration_seed(b"Alice"), "Alice".to_string(), 7, Vec::new(), Vec::new()).unwrap(),
+            AuthorSummary::try_new(agent_id_from_migration_seed(b"Bob"), "Bob".to_string(), 2, Vec::new(), Vec::new()).unwrap(),
         ];
 
         AuthorSort::BookCount.sort(&mut authors);

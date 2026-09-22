@@ -1,1 +1,0 @@
-DELETE FROM rejected_asset_upload WHERE rejected_at<=?1

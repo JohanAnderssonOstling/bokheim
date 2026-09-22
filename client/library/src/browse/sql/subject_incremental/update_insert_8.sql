@@ -1,1 +1,0 @@
-INSERT INTO subject_browse_book VALUES(?1,?2)

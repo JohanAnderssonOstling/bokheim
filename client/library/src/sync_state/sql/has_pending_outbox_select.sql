@@ -1,1 +1,0 @@
-SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='sync_outbox' AND type='table')

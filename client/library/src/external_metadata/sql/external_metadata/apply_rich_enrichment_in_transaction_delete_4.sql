@@ -1,1 +1,0 @@
-DELETE FROM external_entity WHERE wikidata_id=?1 AND NOT EXISTS(SELECT 1 FROM book_external_entity reference WHERE reference.wikidata_id=external_entity.wikidata_id)

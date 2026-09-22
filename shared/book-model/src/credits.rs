@@ -5,7 +5,7 @@
 //! policy that treats a whole [`BookMetadata`] value as a single
 //! last-writer-wins register lives with the mutation protocol, not here.
 
-use crate::{Collection, Identifier, LanguageTag, MarcRelatorCode, BookDate, BookProperty, BookSubject, BookTitle};
+use crate::{BookDate, BookSubject, Identifier, LanguageTag, MarcRelatorCode};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
@@ -119,18 +119,17 @@ impl<'de> Deserialize<'de> for PublisherCredit {
 pub struct Contributor {
     contributor_id: ContributorId,
     name: String,
-    sort_name: Option<String>,
     role: MarcRelatorCode,
 }
 
 impl Contributor {
     #[cfg(feature = "random-ids")]
-    pub fn new(name: impl AsRef<str>, sort_name: Option<String>, role: MarcRelatorCode) -> Result<Self, BookMetadataError> {
-        Self::with_id(ContributorId::new_v4(), name, sort_name, role)
+    pub fn new(name: impl AsRef<str>, role: MarcRelatorCode) -> Result<Self, BookMetadataError> {
+        Self::with_id(ContributorId::new_v4(), name, role)
     }
 
-    pub fn with_id(contributor_id: ContributorId, name: impl AsRef<str>, sort_name: Option<String>, role: MarcRelatorCode) -> Result<Self, BookMetadataError> {
-        Ok(Self { contributor_id, name: normalized_book_text(name.as_ref())?, sort_name: sort_name.map(|value| normalized_book_text(&value)).transpose()?, role })
+    pub fn with_id(contributor_id: ContributorId, name: impl AsRef<str>, role: MarcRelatorCode) -> Result<Self, BookMetadataError> {
+        Ok(Self { contributor_id, name: normalized_book_text(name.as_ref())?, role })
     }
 
     pub const fn contributor_id(&self) -> ContributorId {
@@ -145,10 +144,6 @@ impl Contributor {
         &self.name
     }
 
-    pub fn sort_name(&self) -> Option<&str> {
-        self.sort_name.as_deref()
-    }
-
     pub const fn role_code(&self) -> MarcRelatorCode {
         self.role
     }
@@ -160,12 +155,11 @@ impl<'de> Deserialize<'de> for Contributor {
         struct EncodedContributor {
             contributor_id: ContributorId,
             name: String,
-            sort_name: Option<String>,
             role: MarcRelatorCode,
         }
 
         let encoded = EncodedContributor::deserialize(deserializer)?;
-        Self::with_id(encoded.contributor_id, encoded.name, encoded.sort_name, encoded.role).map_err(serde::de::Error::custom)
+        Self::with_id(encoded.contributor_id, encoded.name, encoded.role).map_err(serde::de::Error::custom)
     }
 }
 
@@ -178,27 +172,21 @@ pub struct BookMetadata {
     pub languages: Vec<LanguageTag>,
     pub dates: Vec<BookDate>,
     pub subjects: Vec<BookSubject>,
-    pub collections: Vec<Collection>,
-    pub alternate_titles: Vec<BookTitle>,
-    pub rights: Vec<String>,
-    pub sources: Vec<String>,
-    pub types: Vec<String>,
-    pub formats: Vec<String>,
-    pub relations: Vec<String>,
-    pub coverage: Vec<String>,
-    pub properties: Vec<BookProperty>,
 }
 
 impl BookMetadata {
     /// Promote ISBNs embedded in uncontrolled subject metadata while preserving
-    /// declarations and existing identifier provenance.
+    /// declarations and existing identifiers.
     pub fn infer_embedded_subject_isbns(&mut self) -> Result<(), BookMetadataError> {
         for subject in &self.subjects {
-            if !subject.source().rsplit(':').next().is_some_and(|source| source.eq_ignore_ascii_case("subject"))
-                || subject.authority().is_some_and(|authority| !authority.eq_ignore_ascii_case("isbn")) { continue; }
+            if !subject.source().rsplit(':').next().is_some_and(|source| source.eq_ignore_ascii_case("subject")) || subject.authority().is_some_and(|authority| !authority.eq_ignore_ascii_case("isbn")) {
+                continue;
+            }
             for isbn in crate::canonical::isbns_in_text(subject.name()) {
-                if self.identifiers.iter().any(|identifier| identifier.scheme() == &crate::Scheme::Isbn && identifier.canonical_value().as_deref() == Some(isbn.as_str())) { continue; }
-                self.identifiers.push(Identifier::new(isbn, crate::Scheme::Isbn, crate::Scope::Book, "embedded-subject-isbn")?);
+                if self.identifiers.iter().any(|identifier| identifier.scheme() == &crate::Scheme::Isbn && identifier.canonical_value().as_deref() == Some(isbn.as_str())) {
+                    continue;
+                }
+                self.identifiers.push(Identifier::new(isbn, crate::Scheme::Isbn, crate::Scope::Book)?);
             }
         }
         Ok(())
@@ -208,6 +196,7 @@ impl BookMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BookRecord {
     pub title: String,
+    pub subtitle: Option<String>,
     pub contributors: Vec<Contributor>,
     pub description: String,
     pub book: BookMetadata,
@@ -220,13 +209,46 @@ impl BookRecord {
 }
 
 /// One entry in a book's own hierarchical navigation document. It is
-/// shared by library ingestion and catalogue inspection; UI contracts only
+/// shared by library ingestion and library inspection; UI contracts only
 /// project it at their process boundary.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookTocEntry {
     pub title: String,
     pub target: String,
     pub children: Vec<BookTocEntry>,
+}
+
+/// A synchronized navigation document: the book's own entries, plus an
+/// audiobook's total duration when the writer knows it. The duration is what
+/// turns the last chapter's start into its end, so a replica that only
+/// receives entries can show navigation but cannot play the book.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookTocDocument {
+    pub entries: Vec<BookTocEntry>,
+    pub duration_ms: Option<u64>,
+}
+
+impl BookTocDocument {
+    pub fn entries(entries: Vec<BookTocEntry>) -> Self {
+        Self { entries, duration_ms: None }
+    }
+}
+
+#[cfg(test)]
+mod toc_document_tests {
+    use super::*;
+
+    fn entry(title: &str, target: &str) -> BookTocEntry {
+        BookTocEntry { title: title.into(), target: target.into(), children: Vec::new() }
+    }
+
+    #[test]
+    fn document_round_trips_with_and_without_duration() {
+        let without_duration = BookTocDocument::entries(vec![entry("One", "audiobook-position-ms:0")]);
+        assert_eq!(serde_json::from_str::<BookTocDocument>(&serde_json::to_string(&without_duration).unwrap()).unwrap(), without_duration);
+        let with_duration = BookTocDocument { entries: vec![entry("One", "audiobook-position-ms:0")], duration_ms: Some(1000) };
+        assert_eq!(serde_json::from_str::<BookTocDocument>(&serde_json::to_string(&with_duration).unwrap()).unwrap(), with_duration);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

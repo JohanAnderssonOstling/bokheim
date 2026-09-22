@@ -15,8 +15,8 @@ use image::RgbaImage;
 use kurbo::{Point, Size};
 
 use crate::paint::{GpuiCommandPainter, ImageCache, PaintCommand, paint_commands};
-use gpui::AppContext;
 use crate::text::{GlyphStore, GpuiTextCache, TextShapeCacheStats};
+use gpui::AppContext;
 
 /// A window point in the note's own coordinates, which is where its geometry
 /// and therefore its hit testing live.

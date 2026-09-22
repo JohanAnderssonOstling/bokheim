@@ -1,0 +1,34 @@
+-- Separate practical family guidance from explicitly academic LCC topics.
+-- Broad mixed-purpose selectors remain on the neutral family subject.
+PRAGMA foreign_keys=ON;
+BEGIN IMMEDIATE;
+DELETE FROM concept_parent WHERE concept_id='unified:58230c8c-2901-5882-8224-7bd7dd8d600f' AND parent_concept_id='unified:fe4a0f70-fd4b-581a-86b7-a07e3f99febc';
+UPDATE concept SET preferred_label='Family, Marriage & Life Stages' WHERE concept_id='unified:db804dff-8e30-5061-874c-e868a674f971';
+UPDATE concept_parent SET parent_concept_id='unified:fe4a0f70-fd4b-581a-86b7-a07e3f99febc' WHERE concept_id='unified:db804dff-8e30-5061-874c-e868a674f971' AND parent_concept_id='unified:cda1e88b-3726-5432-a836-452af66a0696';
+INSERT INTO concept VALUES('bokheim:family-studies:history','Family History & Comparative Studies');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal,display_order) VALUES('bokheim:family-studies:history','unified:db804dff-8e30-5061-874c-e868a674f971',0,0);
+INSERT INTO concept VALUES('bokheim:family-studies:research','Family Research & Demography');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal,display_order) VALUES('bokheim:family-studies:research','unified:db804dff-8e30-5061-874c-e868a674f971',0,0);
+INSERT INTO concept VALUES('bokheim:family-studies:policy','Family Policy & Children’s Rights');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal,display_order) VALUES('bokheim:family-studies:policy','unified:db804dff-8e30-5061-874c-e868a674f971',0,0);
+DELETE FROM source_selector WHERE concept_id='unified:db804dff-8e30-5061-874c-e868a674f971' AND system_id='lcc' AND selector='HQ503..HQ519@4';
+INSERT INTO source_selector VALUES('bokheim:family-studies:history','lcc','HQ503..HQ519@4',0);
+DELETE FROM source_selector WHERE concept_id='unified:db804dff-8e30-5061-874c-e868a674f971' AND system_id='lcc' AND selector='HQ531..HQ727@4';
+INSERT INTO source_selector VALUES('bokheim:family-studies:history','lcc','HQ531..HQ727@4',1);
+DELETE FROM source_selector WHERE concept_id='unified:db804dff-8e30-5061-874c-e868a674f971' AND system_id='lcc' AND selector='HQ728';
+INSERT INTO source_selector VALUES('bokheim:family-studies:research','lcc','HQ728',0);
+DELETE FROM source_selector WHERE concept_id='unified:db804dff-8e30-5061-874c-e868a674f971' AND system_id='lcc' AND selector='HQ759.98';
+INSERT INTO source_selector VALUES('bokheim:family-studies:research','lcc','HQ759.98',1);
+DELETE FROM source_selector WHERE concept_id='unified:db804dff-8e30-5061-874c-e868a674f971' AND system_id='lcc' AND selector='HQ1001..HQ1006@3';
+INSERT INTO source_selector VALUES('bokheim:family-studies:policy','lcc','HQ1001..HQ1006@3',0);
+DELETE FROM source_selector WHERE concept_id='unified:db804dff-8e30-5061-874c-e868a674f971' AND system_id='lcc' AND selector='HQ1001..HQ1006@4';
+INSERT INTO source_selector VALUES('bokheim:family-studies:policy','lcc','HQ1001..HQ1006@4',1);
+DELETE FROM source_selector WHERE concept_id='unified:db804dff-8e30-5061-874c-e868a674f971' AND system_id='lcc' AND selector='HQ789..HQ792.2@5';
+INSERT INTO source_selector VALUES('bokheim:family-studies:policy','lcc','HQ789..HQ792.2@5',2);
+DELETE FROM source_selector WHERE concept_id='unified:db804dff-8e30-5061-874c-e868a674f971' AND system_id='lcc' AND selector='HQ731..HQ743@5';
+INSERT INTO source_selector VALUES('bokheim:family:forms-kinship','lcc','HQ731..HQ743@5',0);
+DELETE FROM source_selector WHERE concept_id='unified:db804dff-8e30-5061-874c-e868a674f971' AND system_id='lcc' AND selector='HQ768..HQ778.4@5';
+INSERT INTO source_selector VALUES('bokheim:family:parenting-children','lcc','HQ768..HQ778.4@5',0);
+DELETE FROM source_selector WHERE concept_id='unified:db804dff-8e30-5061-874c-e868a674f971' AND system_id='lcc' AND selector='HQ745';
+INSERT INTO source_selector VALUES('bokheim:family:romantic-relationships','lcc','HQ745',0);
+COMMIT;

@@ -1,1 +1,0 @@
-UPDATE book SET hidden_at=1 WHERE content_hash=?1

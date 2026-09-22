@@ -232,7 +232,7 @@ ISBN-10 and ISBN-13 representations are normalized to the same ISBN-13 key.
 One input can return multiple matches when Open Library maps it to multiple
 works. Classifications state whether they came from the exact edition or its
 work; authors likewise state edition/work provenance. The server never silently
-resolves catalog ambiguity. Library clients only apply an author identity when
+resolves authority ambiguity. Library clients only apply an author identity when
 the ISBN resolves to exactly one work and the scanned credit matches exactly
 one returned author after name normalization.
 
@@ -262,17 +262,15 @@ sudo systemctl enable --now bokheim-metadata.service
 The production host runs an older Debian glibc than some development machines.
 A host-native release built against newer glibc can fail before startup with an
 error such as `GLIBC_2.43 not found`. The host has musl installed, so build the
-metadata and catalogue binaries for the portable target when building off host:
+metadata binary for the portable target when building off host:
 
 ```sh
 rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl -p metadata-server
-cargo build --release --target x86_64-unknown-linux-musl -p catalog-server
 ```
 
 Use the artifacts from
-`target/x86_64-unknown-linux-musl/release/metadata-server` and
-`target/x86_64-unknown-linux-musl/release/catalog-server`. Verify before
+`target/x86_64-unknown-linux-musl/release/metadata-server`. Verify before
 staging:
 
 ```sh
@@ -280,23 +278,20 @@ file target/x86_64-unknown-linux-musl/release/metadata-server
 ldd target/x86_64-unknown-linux-musl/release/metadata-server || true
 ```
 
-The passwordless metadata/catalogue activation helper validates service health
+The passwordless metadata activation helper validates service health
 after installation and rolls back on failure. A libc-loader error is a build
 artifact problem, not a service health problem; rebuild for musl (or build
 directly on the Debian host) before retrying activation.
 
 Production Caddy exposes only the bounded client endpoints at
 `https://meta.bokheim.se` and proxies them directly to this loopback service.
-Desktop clients therefore remain independent of catalogue availability. The
-catalogue service may still use `BOKHEIM_METADATA_URL=http://127.0.0.1:8091`
-for its own internal metadata needs.
 
 ### Passwordless deployments
 
 Provision the deployment user once from a trusted checkout:
 
 ```sh
-sudo servers/metadata/deploy/provision-metadata-catalog-deploy.sh johan
+sudo servers/metadata/deploy/provision-metadata-deploy.sh johan
 ```
 
 The provisioner installs a root-owned deployment program and grants only that
@@ -304,7 +299,7 @@ exact program passwordless elevation. Routine activations can then run
 unattended with:
 
 ```sh
-sudo -n /usr/local/sbin/bokheim-deploy-metadata-catalog
+sudo -n /usr/local/sbin/bokheim-deploy-metadata
 ```
 
 Do not make systemd units or deployment programs writable by the deployment
@@ -349,13 +344,13 @@ Deleted records remove their metadata, title keys, ISBNs and classifications.
 Rich responses fill missing subject headings and an absent
 summary when the LC records supply one unique summary. Existing values are
 preserved. When Open Library title/author lookup has no match, the edition-identity
-response can contain an optional `catalog_subjects` result. It requires a
+response can contain an optional `authority_subjects` result. It requires a
 compatible author and title, rejects conflicting subtitles/volume qualifiers,
 and accepts multiple LC records only when their normalized LCC codes agree.
 Truncated candidate lists cannot establish agreement. This result carries LC
 control numbers and classifications; it never assigns an ISBN or OL edition.
 Both books without ISBNs and ISBN lookup misses consume it in enrichment. The
-conversion lives in `metadata-contract::catalog_subjects` for reuse outside the
+conversion lives in `metadata-contract::authority_subjects` for reuse outside the
 client. Existing Open Library matches and ambiguous identities are preserved.
 
 The output is published only after a successful integrity check, and an
@@ -627,9 +622,9 @@ Both queues preserve popularity ordering and retry state, even with separate cac
 Completed LibraryThing attempts are never reset by an LC handoff. Its existing 50-request
 daily foreground reserve remains unchanged.
 
-## Wikidata catalog ingestion
+## Wikidata authority ingestion
 
-Wikidata is ingested offline directly into the existing relational catalog:
+Wikidata is ingested offline directly into the existing relational authority store:
 `edition`, `edition_isbn`, `edition_bibliography`, `edition_author`, `author`,
 `author_identifier`, `edition_classification`, `isbn_classification`, and
 `title_author_classification`. There is no separate runtime Wikidata lookup
@@ -640,12 +635,12 @@ resumable import checkpoint and completion status.
 python3 index-wikidata-authors.py EXTRACTED_BUNDLE OL_AUTHORS.txt.gz INPUT.sqlite \
   --openlibrary-dump-date 2026-07-31
 python3 extend-wikidata-bibliography.py EXTRACTED_BUNDLE INPUT.sqlite
-cp --reflink=auto CATALOG.sqlite STAGING.sqlite
-metadata-server ingest-wikidata CATALOG.sqlite INPUT.sqlite STAGING.sqlite
+cp --reflink=auto AUTHORITIES.sqlite STAGING.sqlite
+metadata-server ingest-wikidata AUTHORITIES.sqlite INPUT.sqlite STAGING.sqlite
 ```
 
 The input SQLite file is temporary ingestion input and is not needed for serving.
-The importer reconciles identities against the existing catalog in bounded
+The importer reconciles identities against the existing authority store in bounded
 batches. It preserves populated names and conflicting classifications. Direct
 LCC and DDC assertions populate the existing classification tables; inferred
 topic codes are not automatically applied. Ordinary ISBN and title/author
@@ -665,20 +660,20 @@ identity. Uncertain authors remain separate identities. Full profiles are
 persisted in the normal author table.
 
 Startup refuses unfinished ingestion. Validate the completed staging snapshot
-before activating it through the normal catalog deployment path. Split snapshots
+before activating it through the normal metadata deployment path. Split snapshots
 retain the relational data and completion marker. Refresh cached misses after
 activation. No book files are modified.
 
 The bibliography extension checkpoints two passes over the existing extracted
 bundle: book fields first, then names for referenced publisher QIDs. It
 retains explicit titles/subtitles and unambiguous book years. Existing
-populated catalog fields win. It imports ISBN-less book/literary-work types,
+populated authority fields win. It imports ISBN-less book/literary-work types,
 editions, and directly classified books; P50 alone does not turn every
 scientific article into a book.
 
 ISBN-less books have ordinary edition/bibliography/author/classification
 rows but no fabricated ISBN. Exact normalized title plus compatible author
-lookup can return `catalog_subjects` with provider `wikidata`; conflicting codes
+lookup can return `authority_subjects` with provider `wikidata`; conflicting codes
 must reach consensus. These are subject matches, not edition identity matches.
 The shared metadata-contract validator supports this provider; clients need a
 build containing that validator to apply these new subject-only results.
@@ -699,5 +694,89 @@ part of the ingestion signature, so a resume cannot silently change scope.
 
 Take the copy only after stopping its writer and checkpointing SQLite WAL (or
 use SQLite backup). Do not change the live input's bibliography completion flag.
-Publish the verified core catalog first. Optional bibliography work can resume
+Publish the verified core snapshot first. Optional bibliography work can resume
 from its existing chunk checkpoints and build a later full snapshot.
+
+
+## Audiobook enrichment
+
+Clients send recording evidence to `POST /v2/audiobooks/audible` on
+`meta.bokheim.se`. The server discovers candidate ASINs through Audible's US
+and UK catalog APIs. Website fallback preserves the requested region with
+`ipRedirectOverride=true`, avoiding geolocation redirects to another storefront's
+homepage. It prefers Audnexus (`api.audnex.us/books/{ASIN}` and
+`/books/{ASIN}/chapters`, with `region`) for recording metadata and precise
+chapters, and falls back to Audible when those lookups fail validation or are
+unavailable. Audnexus aggregates Audible data; agreement between these providers
+is not treated as independent evidence.
+
+Book and chapter responses must match the requested ASIN and region. Audnexus
+chapter data must be marked accurate and pass the same complete, non-overlapping
+timeline and declared-runtime checks as Audible. Title, recording, ambiguity, and chapter-alignment rules govern selection and
+replacement. Explicit `(Unabridged)`/`(Abridged)` annotations constrain recording
+type without becoming part of the title. Regional encodings count as the same
+recording only when title, credits, every chapter label, and every chapter
+boundary agree (at most 250 ms difference per boundary).
+Rounded runtime alone cannot supply chapter boundaries. A supported recording
+can fill missing ASIN/ISBN, publisher, and description fields without a chapter
+replacement. Existing metadata is preserved.
+
+Filename-style titles such as `Paul Bushkovitch - A Concise History of Russia`
+produce an additional suffix-only discovery query. Matching discards the prefix
+only if its normalized name tokens exactly match a returned catalogue author.
+The local title and author metadata are not rewritten by this search heuristic.
+
+Chapter headings that repeat the book title with a numeric track or part suffix
+are treated as generic. A complete generated `Chapter 1…N` sequence can yield to
+provider names while retaining local positions despite numbering conflicts only when all start and end times
+agree within 250 ms, with at least five entries and three distinct durations.
+This handles credits and interludes numbered as chapters by the file exporter;
+names-only changes preserve every local timestamp. When names-only alignment is
+not available, a supported recording with descriptive provider headings can
+import its TOC if `abs(provider_ms - local_ms) / local_ms <= 0.01`. Matching,
+differing, or absent ISBNs and different track counts do not veto this rule.
+Provider starts are retained without scaling; entries starting beyond the local
+audio end are omitted and the final end is clamped to the local duration. This
+accepts recording-level duration agreement; it does not prove every internal
+boundary matches. Policy `audible_v2` records the changed acceptance behavior.
+Metadata success does not imply a TOC improvement: inspect
+`chapter_plan.renamed` and `chapter_plan.method` separately.
+
+Each candidate records `metadata_provider` and `chapter_provider`; the full
+response, outcome, retry deadline, and diagnostic detail are stored in
+`audible_enrichment_jobs`. `unavailable` is a service failure, not a negative
+match. The library actor keeps failed requests scheduled, respecting the
+five-minute retry deadline even after upload preparation completes. Ambiguous
+and no-match results require an explicit refresh rather than a repeating loop.
+
+Inspect or retry a local library with the optimized maintenance command:
+
+```sh
+cargo run --release -p library-backend --example audiobook_enrichment -- /absolute/library.db status
+cargo run --release -p library-backend --example audiobook_enrichment -- /absolute/library.db retry
+cargo run --release -p library-backend --example audiobook_enrichment -- /absolute/library.db refresh
+cargo run --release -p library-backend --example audiobook_enrichment -- /absolute/library.db refresh https://meta.bokheim.se CONTENT_HASH
+```
+
+`retry` attempts due jobs once. `refresh` explicitly rechecks visible recordings, including previous matches
+and ambiguous results. It claims each recording atomically without stealing
+active claims or releasing a globally pending batch for another client to take. Both use `https://meta.bokheim.se` by default; an optional
+URL selects a verification server, followed optionally by one visible content
+hash to limit the refresh or retry. They use the same typed claim and atomic
+application operations as the app, and never edit audiobook files.
+
+Caddy must allow `/v2/audiobooks/audible`. Deployment verification posts `{}` to
+the public endpoint and requires HTTP 422 from its typed request extractor;
+this checks routing without contacting providers. A browser OPTIONS preflight
+check also requires CORS support for the public, credential-free JSON POST. An HTTP 404 fails deployment
+verification even if `/health` is healthy.
+
+LC live ISBN lookup preserves MARC `020$z` values separately from exact edition
+ISBNs (`020$a`). A `$z` hit supplies work-level classifications and subject headings
+only when its title (including volume qualifiers) and at least one author agree
+with the requested ISBN's bibliography in the identity snapshot. Missing,
+conflicting, or truncated identity evidence is rejected; multiple matching LC
+records remain ambiguous. These matches carry
+`loc_api_related_isbn_verified_title_author` provenance and do not replace ISBNs.
+The parser upgrade expires old cached misses once and requeues completed LC misses;
+existing positive results and request throttling are preserved.

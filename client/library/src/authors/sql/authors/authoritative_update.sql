@@ -1,1 +1,0 @@
-UPDATE author_identity SET preferred_name=?1,normalized_name=?2,is_provisional=0 WHERE id=?3 AND (preferred_name IS NOT ?1 OR normalized_name IS NOT ?2 OR is_provisional IS NOT 0)

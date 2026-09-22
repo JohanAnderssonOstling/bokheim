@@ -1,1 +1,0 @@
-UPDATE book_contributor SET author_identity_id=999999 WHERE book_row_id=1 AND position=0

@@ -45,6 +45,18 @@ node --test apps/web-gpui/scripts/compatibility.test.mjs
 node apps/web-gpui/scripts/compatibility.browser-test.mjs
 ```
 
+After building an optimized release bundle, run the Chromium Settings async
+regression from the repository root:
+
+```sh
+BOKHEIM_TEST_DIST=/absolute/path/to/release/dist \
+  node apps/web-gpui/scripts/settings-async.browser-test.mjs
+```
+
+It serves that bundle with cross-origin isolation, delays database-worker
+replies until after Settings opens, and checks that the account form still opens
+without a GPUI borrow panic. `CHROMIUM_PATH` overrides the Chromium executable.
+
 Browser Back dispatches the same `DismissSettings` action as native Android:
 the focused page dismisses its modal/search or climbs one breadcrumb level,
 the shell handles its overlays and global pages, and the application closes
@@ -140,7 +152,7 @@ covers.
 After building the web bundle, test thumbnail extraction with:
 
 ```sh
-node client/backend/scripts/test-pdf-thumbnails.mjs
+node client/app/scripts/test-pdf-thumbnails.mjs
 ```
 
 This requires Playwright Chromium and Python Pillow and accepts
@@ -219,7 +231,7 @@ workers and transfers no JS objects between parser threads.
 Validate the actual Rust file source across browser parser workers with:
 
 ```sh
-bash client/backend/scripts/test-epub-range-reader.sh
+bash client/app/scripts/test-epub-range-reader.sh
 ```
 
 Set `PLAYWRIGHT_MODULE` and `CHROMIUM_PATH` if Playwright or Chromium are installed
@@ -234,7 +246,7 @@ the harness discards openings and reads completed after closure. The HTTP sessio
 real authentication refresh endpoint for both metadata and range requests.
 
 ```sh
-cargo test --release -p bokheim-backend --no-default-features --features watcher --lib remote_file_refreshes_expiring_and_rejected_tokens_over_http
+cargo test --release -p app --no-default-features --features watcher --lib remote_file_refreshes_expiring_and_rejected_tokens_over_http
 ```
 
 Rust's `rust-src` component and a matching wasm-bindgen CLI are
@@ -244,13 +256,13 @@ can override their default locations.
 To also benchmark actual EPUB opening and chapter reads in WASM parser workers:
 
 ```sh
-REMOTE_FILE_BENCHMARK=1 bash client/backend/scripts/test-epub-range-reader.sh
+REMOTE_FILE_BENCHMARK=1 bash client/app/scripts/test-epub-range-reader.sh
 ```
 
 The benchmark injects 80 ms per HTTP request and reports elapsed time, request
 count, and bytes transferred over three trials. `REMOTE_FILE_BENCHMARK_LATENCY_MS`
 changes that delay; `REMOTE_FILE_BENCHMARK_REPORT` saves the detailed JSON report.
-See [the benchmark fixture and recorded comparison](../../client/backend/tests/remote-file-browser/BENCHMARK.md).
+See [the benchmark fixture and recorded comparison](../../client/library-backend/crates/book-access/tests/remote-file-browser/BENCHMARK.md).
 
 ## Tabs across web deployments
 
@@ -263,7 +275,7 @@ assets so live tabs can still request them after a release switch.
 Run the full-app Firefox regression after building:
 
 ```sh
-node client/backend/scripts/test-web-release-tabs.mjs
+node client/app/scripts/test-web-release-tabs.mjs
 ```
 
 It serves two release URLs on one origin and checks that both tabs share one

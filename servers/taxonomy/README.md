@@ -69,7 +69,7 @@ would exceed 64 KiB, are split into consecutive bounded requests. The client
 combines them only when every response has the same taxonomy release ID.
 
 The native client records classifications in `book_subject_code` before it
-attempts unified assignment. Local-file imports, catalog imports, and
+attempts unified assignment. Local-file imports, authority imports, and
 multi-book subject enrichment then collect the codes absent from the installed
 taxonomy and make one request for the operation. Returned concepts are merged
 transactionally into the device-local SQLite taxonomy, the in-process matcher

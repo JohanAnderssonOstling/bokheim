@@ -9,8 +9,8 @@ fi
 building=$1
 core=$2
 current=/home/johan/data/openlibrary/current.sqlite
-release=/var/lib/bokheim-deploy/metadata-catalog-incoming
-deploy=/usr/local/sbin/bokheim-deploy-metadata-catalog
+release=/var/lib/bokheim-deploy/metadata-incoming
+deploy=/usr/local/sbin/bokheim-deploy-metadata
 
 for path in "${building}" "${core}"; do
     [[ ${path} == /* ]] || { echo "paths must be absolute" >&2; exit 2; }
@@ -80,7 +80,6 @@ sqlite3 "${temporary}" \
      DROP TABLE IF EXISTS wikidata_subclass_stage;
      INSERT OR REPLACE INTO snapshot(singleton,schema_version,dump_date,imported_at_ms,edition_records,work_records,author_records)
        VALUES(1,8,'2026-07-31',${imported_at_ms},${edition_count},${work_count},${author_count});
-     INSERT OR REPLACE INTO metadata_metric(name,value) VALUES('core_open_library_popularity',1);
      INSERT INTO import_checkpoint(phase,records_read,completed) VALUES('snapshot_finalize',0,1)
        ON CONFLICT(phase) DO UPDATE SET records_read=0,completed=1;
      COMMIT;
@@ -91,7 +90,7 @@ sqlite3 "${temporary}" \
 integrity=$(sqlite3 -readonly "${temporary}" 'PRAGMA integrity_check;')
 [[ ${integrity} == ok ]] || { echo "core snapshot integrity check failed: ${integrity}" >&2; exit 1; }
 
-for required in metadata-server catalog-server opds.json; do
+for required in metadata-server; do
     [[ -f ${release}/${required} && ! -L ${release}/${required} ]] || { echo "missing staged release artifact: ${required}" >&2; exit 1; }
 done
 
@@ -124,4 +123,4 @@ mv -Tf "${current}.next" "${current}"
 sudo -n "${deploy}"
 
 trap - EXIT
-echo "Open Library and popularity schema-v8 snapshot activated; schema-v9 Wikidata build continues."
+echo "Open Library schema-v8 snapshot activated; schema-v9 Wikidata build continues."

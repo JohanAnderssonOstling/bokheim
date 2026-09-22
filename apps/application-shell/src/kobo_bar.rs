@@ -1,7 +1,7 @@
 //! Kobo device chrome sits above the browser, independently of browser routes.
 mod battery;
-use bokheim_backend::AppClient;
-use bokheim_backend::{BluetoothRequest, BluetoothStatus, WifiNetwork, WifiPhase, WifiRequest, WifiSecurity, WifiSnapshot};
+use app::AppClient;
+use app::{BluetoothRequest, BluetoothStatus, WifiNetwork, WifiPhase, WifiRequest, WifiSecurity, WifiSnapshot};
 use gpui::prelude::*;
 use gpui::{Context, Entity, Render, Window, px};
 use gpui_component::{

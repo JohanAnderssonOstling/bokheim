@@ -15,12 +15,7 @@ fi
 
 required_files=(
     sync-server
-    catalog-server
-    pdfium/libpdfium.so
-    pdfium/LICENSE
-    opds.json
     bokheim-sync.service
-    bokheim-catalogs.service
 )
 
 for file in "${required_files[@]}"; do
@@ -30,7 +25,7 @@ for file in "${required_files[@]}"; do
     fi
 done
 
-if [[ ! -x ${source_root}/sync-server || ! -x ${source_root}/catalog-server ]]; then
+if [[ ! -x ${source_root}/sync-server ]]; then
     echo "staged server binaries must be executable" >&2
     exit 1
 fi
@@ -65,22 +60,11 @@ systemctl stop bokheim-sync.service
 
 install -o root -g root -m 0755 "${source_root}/sync-server" \
     /usr/local/bin/sync-server
-install -o root -g root -m 0755 "${source_root}/catalog-server" \
-    /usr/local/bin/catalog-server
-install -d -o root -g root -m 0755 /usr/local/bin/pdfium
-install -o root -g root -m 0644 "${source_root}/pdfium/libpdfium.so" /usr/local/bin/pdfium/libpdfium.so
-install -o root -g root -m 0644 "${source_root}/pdfium/LICENSE" /usr/local/bin/pdfium/LICENSE
-
-install -d -o root -g root -m 0755 /usr/local/share/catalog-providers
-install -o root -g root -m 0644 "${source_root}/opds.json" \
-    /usr/local/share/catalog-providers/opds.json
 rm -f -- /etc/bokheim/disposable-email-domains \
     /usr/local/share/bokheim/disposable-email-domains
 
 install -o root -g root -m 0644 "${source_root}/bokheim-sync.service" \
     /etc/systemd/system/bokheim-sync.service
-install -o root -g root -m 0644 "${source_root}/bokheim-catalogs.service" \
-    /etc/systemd/system/bokheim-catalogs.service
 
 # This development deployment intentionally starts from an empty metadata
 # database. Physical content-addressed assets remain on the large disk.
@@ -93,32 +77,26 @@ systemctl disable --now bokheim-gc.timer >/dev/null 2>&1 || true
 rm -f -- /etc/systemd/system/bokheim-gc.service /etc/systemd/system/bokheim-gc.timer /etc/tmpfiles.d/bokheim.conf
 systemctl daemon-reload
 systemctl restart bokheim-sync.service
-systemctl restart bokheim-catalogs.service
 
 sync_ready=false
-catalog_ready=false
 for _ in $(seq 1 30); do
     if curl --fail --silent \
         --unix-socket /run/bokheim/sync.sock \
         http://localhost/api/ready | grep -Fqx ok; then
         sync_ready=true
     fi
-    if curl --fail --silent \
-        http://127.0.0.1:8090/health | grep -Fqx ok; then
-        catalog_ready=true
-    fi
-    if [[ ${sync_ready} == true && ${catalog_ready} == true ]]; then
+    if [[ ${sync_ready} == true ]]; then
         break
     fi
     sleep 1
 done
 
-if [[ ${sync_ready} != true || ${catalog_ready} != true ]]; then
+if [[ ${sync_ready} != true ]]; then
     echo "deployment did not become healthy" >&2
-    systemctl --no-pager --full status bokheim-sync.service bokheim-catalogs.service >&2 || true
+    systemctl --no-pager --full status bokheim-sync.service >&2 || true
     journalctl -u bokheim-sync.service -n 40 --no-pager -o cat >&2 || true
     exit 1
 fi
 
 echo "Bokheim server deployment installed and healthy."
-systemctl --no-pager --full status bokheim-sync.service bokheim-catalogs.service
+systemctl --no-pager --full status bokheim-sync.service

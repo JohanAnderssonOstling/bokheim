@@ -1,1 +1,0 @@
-UPDATE book_dir SET is_downloaded=0 WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1)

@@ -1,1 +1,0 @@
-DELETE FROM book_value WHERE book_row_id=?1

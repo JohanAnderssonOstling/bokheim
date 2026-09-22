@@ -8,9 +8,10 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use bokheim_backend::LibraryClient;
+use library_backend::LibraryClient;
+use book_model::{AnnotationStyle};
+use library_backend::{ReaderAnnotation};
 use gpui::App;
-use book_model::{AnnotationStyle, ReaderAnnotation};
 
 use crate::shell::persistence::MutationWriter;
 
@@ -171,6 +172,8 @@ mod tests {
             note: String::new(),
             created_at: 0,
             modified_at: 0,
+            toc_ordinal: None,
+            progress: None,
         }
     }
 

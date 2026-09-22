@@ -1,1 +1,0 @@
-UPDATE sync_state_version SET changed_at=?1 WHERE state_kind='metadata'

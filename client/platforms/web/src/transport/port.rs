@@ -30,7 +30,6 @@ impl Drop for Port {
     }
 }
 
-
 #[cfg(feature = "web-runtime-tests")]
 pub async fn lifecycle_contract() -> Result<bool, wasm_bindgen::JsValue> {
     use std::{cell::RefCell, rc::Rc};
@@ -38,10 +37,22 @@ pub async fn lifecycle_contract() -> Result<bool, wasm_bindgen::JsValue> {
     let channel = web_sys::MessageChannel::new()?;
     let message_resource = resource.clone();
     let error_resource = resource.clone();
-    let port = Port::listen(channel.port1(), move |_| { let _ = &message_resource; }, move || { let _ = &error_resource; });
-    if Rc::strong_count(&resource) != 3 { return Ok(false); }
+    let port = Port::listen(
+        channel.port1(),
+        move |_| {
+            let _ = &message_resource;
+        },
+        move || {
+            let _ = &error_resource;
+        },
+    );
+    if Rc::strong_count(&resource) != 3 {
+        return Ok(false);
+    }
     drop(port);
-    if Rc::strong_count(&resource) != 1 || channel.port1().onmessage().is_some() || channel.port1().onmessageerror().is_some() { return Ok(false); }
+    if Rc::strong_count(&resource) != 1 || channel.port1().onmessage().is_some() || channel.port1().onmessageerror().is_some() {
+        return Ok(false);
+    }
     channel.port2().close();
 
     // Releasing the owner during its own callback must be safe too.
@@ -51,11 +62,19 @@ pub async fn lifecycle_contract() -> Result<bool, wasm_bindgen::JsValue> {
     let captured = resource.clone();
     let (reply, response) = futures_channel::oneshot::channel();
     let mut reply = Some(reply);
-    *owner.borrow_mut() = Some(Port::listen(channel.port1(), move |data| {
-        let _ = &captured;
-        if let Some(owner) = weak.upgrade() { owner.borrow_mut().take(); }
-        if let Some(reply) = reply.take() { let _ = reply.send(data.as_string().as_deref() == Some("payload")); }
-    }, || {}));
+    *owner.borrow_mut() = Some(Port::listen(
+        channel.port1(),
+        move |data| {
+            let _ = &captured;
+            if let Some(owner) = weak.upgrade() {
+                owner.borrow_mut().take();
+            }
+            if let Some(reply) = reply.take() {
+                let _ = reply.send(data.as_string().as_deref() == Some("payload"));
+            }
+        },
+        || {},
+    ));
     channel.port2().post_message(&"payload".into())?;
     let delivered = response.await.unwrap_or(false);
     channel.port2().close();

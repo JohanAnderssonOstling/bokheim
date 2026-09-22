@@ -13,7 +13,9 @@ async fn browser_delay(milliseconds: u32) {
         fn set_timeout(callback: &js_sys::Function, milliseconds: u32) -> Result<i32, JsValue>;
     }
     let delay = js_sys::Promise::new(&mut |resolve, reject| {
-        if let Err(error) = set_timeout(&resolve, milliseconds) { let _ = reject.call1(&JsValue::UNDEFINED, &error); }
+        if let Err(error) = set_timeout(&resolve, milliseconds) {
+            let _ = reject.call1(&JsValue::UNDEFINED, &error);
+        }
     });
     let _ = wasm_bindgen_futures::JsFuture::from(delay).await;
 }
@@ -73,6 +75,21 @@ impl MetadataClient {
         self.artwork(&format!("b/isbn/{isbn}-L.jpg?default=false")).await
     }
 
+    /// Fetch artwork only after the library has selected this recording.
+    pub async fn audible_cover(&self, asin: &str, region: &str) -> Result<Option<Vec<u8>>, MetadataClientError> {
+        if asin.len() != 10 || !asin.bytes().all(|b| b.is_ascii_alphanumeric()) || !matches!(region, "us" | "uk") {
+            return Err(MetadataClientError::new("invalid audiobook artwork identity"));
+        }
+        Self::with_deadline(35_000, async {
+            let response = self.http.get(self.endpoint(&format!("v2/audiobooks/audible?region={region}&asin={asin}"))?).send().await.map_err(MetadataClientError::new)?;
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            Self::response_bytes(response.error_for_status().map_err(MetadataClientError::new)?, 4 * 1024 * 1024).await.map(Some)
+        })
+        .await
+    }
+
     async fn artwork(&self, path: &str) -> Result<Option<Vec<u8>>, MetadataClientError> {
         let mut last = LAST_COVER_REQUEST.lock().await;
         // Keep the anonymous Covers API at no more than one request per second.
@@ -114,15 +131,24 @@ impl MetadataClient {
 
     pub async fn audible_lookup(&self, request: &metadata_contract::audible::LookupRequest) -> Result<metadata_contract::audible::LookupResponse, MetadataClientError> {
         let body = serde_json::to_vec(request).map_err(MetadataClientError::new)?;
-        if body.len() > metadata_contract::audible::MAX_LOOKUP_REQUEST_BYTES { return Err(MetadataClientError::new("audiobook request exceeds size limit")); }
+        if body.len() > metadata_contract::audible::MAX_LOOKUP_REQUEST_BYTES {
+            return Err(MetadataClientError::new("audiobook request exceeds size limit"));
+        }
         Self::with_deadline(60_000, async {
-            let response = self.http.post(self.endpoint("v2/audiobooks/audible")?)
+            let response = self
+                .http
+                .post(self.endpoint("v2/audiobooks/audible")?)
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(body).send().await.map_err(MetadataClientError::new)?
-                .error_for_status().map_err(MetadataClientError::new)?;
+                .body(body)
+                .send()
+                .await
+                .map_err(MetadataClientError::new)?
+                .error_for_status()
+                .map_err(MetadataClientError::new)?;
             let bytes = Self::response_bytes(response, 8 * 1024 * 1024).await?;
             serde_json::from_slice(&bytes).map_err(MetadataClientError::new)
-        }).await
+        })
+        .await
     }
 
     async fn with_timeout<T>(operation: impl std::future::Future<Output = Result<T, MetadataClientError>>) -> Result<T, MetadataClientError> {

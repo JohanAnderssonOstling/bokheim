@@ -1,0 +1,22 @@
+PRAGMA foreign_keys=ON;
+BEGIN IMMEDIATE;
+
+-- 53. Secret and benevolent societies.
+INSERT INTO concept VALUES ('bokheim:societies:general','Societies—General'),('bokheim:societies:secret','Secret Societies'),('bokheim:societies:freemasons','Freemasonry'),('bokheim:societies:odd-fellows','Odd Fellows'),('bokheim:societies:pythias','Knights of Pythias'),('bokheim:societies:benevolent','Benevolent & Friendly Societies'),('bokheim:societies:clubs','Clubs'),('bokheim:societies:youth-special','Youth & Special-Class Societies');
+INSERT INTO concept_parent VALUES ('bokheim:societies:general','unified:4b0eeddf-777d-5eda-b482-2cbb182a8dfa',0,100),('bokheim:societies:secret','unified:4b0eeddf-777d-5eda-b482-2cbb182a8dfa',0,200),('bokheim:societies:freemasons','unified:4b0eeddf-777d-5eda-b482-2cbb182a8dfa',0,300),('bokheim:societies:odd-fellows','unified:4b0eeddf-777d-5eda-b482-2cbb182a8dfa',0,400),('bokheim:societies:pythias','unified:4b0eeddf-777d-5eda-b482-2cbb182a8dfa',0,500),('bokheim:societies:benevolent','unified:4b0eeddf-777d-5eda-b482-2cbb182a8dfa',0,600),('bokheim:societies:clubs','unified:4b0eeddf-777d-5eda-b482-2cbb182a8dfa',0,700),('bokheim:societies:youth-special','unified:4b0eeddf-777d-5eda-b482-2cbb182a8dfa',0,800);
+DELETE FROM source_selector WHERE concept_id='unified:4b0eeddf-777d-5eda-b482-2cbb182a8dfa';
+INSERT INTO source_selector VALUES ('bokheim:societies:general','bisac','SOC038000',0),('bokheim:societies:general','lcc','HS1..HS100.9@3',0),('bokheim:societies:secret','lcc','HS101..HS350.9@3',0),('bokheim:societies:freemasons','lcc','HS351..HS949.9@3',0),('bokheim:societies:odd-fellows','lcc','HS950..HS1199.9@3',0),('bokheim:societies:pythias','lcc','HS1200..HS1499.9@3',0),('bokheim:societies:benevolent','lcc','HS1500..HS2499.9@3',0),('bokheim:societies:clubs','lcc','HS2500..HS3249.9@3',0),('bokheim:societies:youth-special','lcc','HS3250..HS3371@3',0);
+
+-- 59. Buddhist sacred texts.
+INSERT INTO concept VALUES ('bokheim:buddhist-texts:literature','Buddhist Literature & Collections'),('bokheim:buddhist-texts:canon-history','Buddhist Canon—History, Translation & Preservation'),('bokheim:buddhist-texts:pitakas','Buddhist Canon by Piṭaka'),('bokheim:buddhist-texts:versions','Buddhist Canon by Version'),('bokheim:buddhist-texts:continuations','Modern Continuations of the Buddhist Canon');
+INSERT INTO concept_parent VALUES ('bokheim:buddhist-texts:literature','bokheim:buddhism:texts-literature',0,100),('bokheim:buddhist-texts:canon-history','bokheim:buddhism:texts-literature',0,200),('bokheim:buddhist-texts:pitakas','bokheim:buddhism:texts-literature',0,300),('bokheim:buddhist-texts:versions','bokheim:buddhism:texts-literature',0,400),('bokheim:buddhist-texts:continuations','bokheim:buddhism:texts-literature',0,500);
+DELETE FROM source_selector WHERE concept_id='bokheim:buddhism:texts-literature';
+INSERT INTO source_selector VALUES ('bokheim:buddhist-texts:literature','bisac','REL007030',0),('bokheim:buddhist-texts:literature','lcc','BQ1001..BQ1099.9@3',0),('bokheim:buddhist-texts:canon-history','lcc','BQ1100..BQ1139.9@4',0),('bokheim:buddhist-texts:pitakas','lcc','BQ1140..BQ1169.9@4',0),('bokheim:buddhist-texts:versions','lcc','BQ1170..BQ3349.9@4',0),('bokheim:buddhist-texts:continuations','lcc','BQ3350..BQ3370@4',0);
+
+-- 61. Folklore, separated into broad substantive subject groups.
+INSERT INTO concept VALUES ('bokheim:folklore:general','Folklore—General, Theory & Folk Literature'),('bokheim:folklore:private-life','Folklore of Private Life, Customs & Dress'),('bokheim:folklore:supernatural','Supernatural Beings, Forces & Beliefs'),('bokheim:folklore:nature','Animal, Plant & Mineral Folklore');
+INSERT INTO concept_parent VALUES ('bokheim:folklore:general','unified:014392ef-28b9-5528-bfd0-9fdb93d2d7cf',0,100),('bokheim:folklore:private-life','unified:014392ef-28b9-5528-bfd0-9fdb93d2d7cf',0,200),('bokheim:folklore:supernatural','unified:014392ef-28b9-5528-bfd0-9fdb93d2d7cf',0,300),('bokheim:folklore:nature','unified:014392ef-28b9-5528-bfd0-9fdb93d2d7cf',0,400);
+DELETE FROM source_selector WHERE concept_id='unified:014392ef-28b9-5528-bfd0-9fdb93d2d7cf';
+INSERT INTO source_selector VALUES ('bokheim:folklore:general','lcc','GR1..GR419.9@2',0),('bokheim:folklore:private-life','lcc','GR420..GR499.9@3',0),('bokheim:folklore:supernatural','lcc','GR500..GR699.9@3',0),('bokheim:folklore:nature','lcc','GR700..GR950@3',0);
+
+COMMIT;

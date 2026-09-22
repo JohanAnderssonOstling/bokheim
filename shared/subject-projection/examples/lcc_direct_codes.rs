@@ -10,10 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("usage: lcc_direct_codes TAXONOMY.sqlite3 CODE_USAGE.sqlite3 CONCEPT_ID...".into());
     }
     let taxonomy = UnifiedTaxonomy::from_concepts(read_unified_taxonomy_sqlite(Path::new(&args[1]))?)?;
-    let targets = args[3..]
-        .iter()
-        .map(|value| value.parse::<i64>())
-        .collect::<Result<HashSet<_>, _>>()?;
+    let targets = args[3..].iter().map(|value| value.parse::<i64>()).collect::<Result<HashSet<_>, _>>()?;
     let db = rusqlite::Connection::open_with_flags(&args[2], rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut query = db.prepare("SELECT notation,uses FROM code_usage WHERE scheme=2 ORDER BY uses DESC")?;
     let mut output = csv::WriterBuilder::new().delimiter(b'\t').from_writer(std::io::stdout());

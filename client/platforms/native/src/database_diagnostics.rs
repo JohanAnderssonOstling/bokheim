@@ -124,7 +124,21 @@ impl std::fmt::Display for StatementLabel {
 fn fingerprint(sql: &[u8]) -> StatementLabel {
     let hash = sql.iter().fold(0xcbf29ce484222325_u64, |hash, byte| (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3));
     let first = sql.split(|c| c.is_ascii_whitespace()).find(|word| !word.is_empty()).unwrap_or_default();
-    let verb = [include_str!("sql/database_diagnostics/fingerprint_select.sql"), "INSERT", "UPDATE", "DELETE", "BEGIN", include_str!("sql/database_diagnostics/fingerprint_commit.sql"), include_str!("sql/database_diagnostics/fingerprint_rollback.sql"), "PRAGMA", "CREATE", "WITH"].into_iter().find(|word| first.eq_ignore_ascii_case(word.as_bytes())).unwrap_or("OTHER");
+    let verb = [
+        include_str!("sql/database_diagnostics/fingerprint_select.sql"),
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "BEGIN",
+        include_str!("sql/database_diagnostics/fingerprint_commit.sql"),
+        include_str!("sql/database_diagnostics/fingerprint_rollback.sql"),
+        "PRAGMA",
+        "CREATE",
+        "WITH",
+    ]
+    .into_iter()
+    .find(|word| first.eq_ignore_ascii_case(word.as_bytes()))
+    .unwrap_or("OTHER");
     StatementLabel(verb, hash)
 }
 

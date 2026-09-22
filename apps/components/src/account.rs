@@ -20,21 +20,22 @@ const METER_HEIGHT: f32 = 10.0;
 /// is happening", which the dot beside it already says.
 const ACTIVITY_PROGRESS_WIDTH: f32 = 96.0;
 /// The initial beside the address in the header chip.
-const ACCOUNT_AVATAR_SIZE: f32 = 24.0;
+const ACCOUNT_AVATAR_SIZE_REM: f32 = 1.5;
 /// How much header an address may take before it truncates.
 const ACCOUNT_CHIP_MAX_WIDTH: f32 = 256.0;
 const EVENT_DOT_SIZE: f32 = 8.0;
 const PROGRESS_HEIGHT: f32 = 3.0;
 /// Keeps a library row the height it had when its name was a button, so the
 /// list reads at the same rhythm as the rest of the account section.
-const LIBRARY_NAME_HEIGHT: f32 = 40.0;
+const LIBRARY_NAME_HEIGHT_REM: f32 = 2.5;
 /// The label column of a library's facts. Wide enough for the longest of them —
 /// "On this device" — so every value in the list starts at the same x and the
 /// column can be read downwards.
-const LIBRARY_FACT_LABEL_WIDTH: f32 = 112.0;
+const LIBRARY_FACT_LABEL_WIDTH_REM: f32 = 7.0;
+const LIBRARY_FACT_LABEL_MAX_WIDTH: f32 = 160.0;
 /// The height a fact's value keeps whatever it carries, so a row of text and a
 /// row holding a control sit on the same rhythm.
-const LIBRARY_FACT_HEIGHT: f32 = 24.0;
+const LIBRARY_FACT_HEIGHT_REM: f32 = 1.5;
 
 /// Who is signed in, as the control in the account group's header.
 ///
@@ -46,36 +47,16 @@ const LIBRARY_FACT_HEIGHT: f32 = 24.0;
 /// The address truncates rather than wrapping; the caller gives the button the
 /// full address as its tooltip, because a header cannot grow.
 pub fn account_chip(id: impl Into<gpui::ElementId>, initial: impl Into<SharedString>, email: impl Into<SharedString>, theme: BrowserTheme) -> Button {
-    crate::base_button(id)
-        .ghost()
-        .h(px(crate::SETTINGS_CONTROL_HEIGHT))
-        .max_w(px(ACCOUNT_CHIP_MAX_WIDTH))
-        .px(px(SPACE_XS))
-        .rounded(px(crate::RADIUS_SM))
-        .border_1()
-        .border_color(theme.border)
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(SPACE_SM))
-                .min_w_0()
-                .child(
-                    div()
-                        .w(px(ACCOUNT_AVATAR_SIZE))
-                        .h(px(ACCOUNT_AVATAR_SIZE))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(theme.accent)
-                        .text_color(theme.accent_text)
-                        .text_size(gpui::rems(TEXT_XS))
-                        .child(initial.into()),
-                )
-                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(TEXT_XS)).text_color(theme.text).child(email.into())),
-        )
+    crate::base_button(id).ghost().h(gpui::rems(crate::SETTINGS_CONTROL_SIZE_REM)).min_h(px(32.0)).max_w(px(ACCOUNT_CHIP_MAX_WIDTH)).px(px(SPACE_XS)).rounded(px(crate::RADIUS_SM)).border_1().border_color(theme.border).child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(SPACE_SM))
+            .min_w_0()
+            .child(div().w(gpui::rems(ACCOUNT_AVATAR_SIZE_REM)).h(gpui::rems(ACCOUNT_AVATAR_SIZE_REM)).flex_none().flex().items_center().justify_center().bg(theme.accent).text_color(theme.accent_text).text_size(gpui::rems(TEXT_XS)).child(initial.into()))
+            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(TEXT_XS)).text_color(theme.text).child(email.into())),
+    )
 }
 
 /// The quota as a figure rather than a sentence: the used amount is the largest
@@ -88,15 +69,7 @@ pub fn storage_figures(used: impl Into<SharedString>, of_quota: impl Into<Shared
         .items_baseline()
         .justify_between()
         .gap(px(SPACE_MD))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_baseline()
-                .gap(px(SPACE_XS))
-                .child(div().text_size(gpui::rems(TITLE_LG)).child(used.into()))
-                .child(div().text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(of_quota.into())),
-        )
+        .child(div().flex().flex_row().items_baseline().gap(px(SPACE_XS)).child(div().text_size(gpui::rems(TITLE_LG)).child(used.into())).child(div().text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(of_quota.into())))
         .child(div().text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(available.into()))
 }
 
@@ -149,7 +122,7 @@ pub fn library_usage_list(rows: impl IntoIterator<Item = Div>, theme: BrowserThe
 /// The list with no libraries in it. A line of its own rather than an empty
 /// group, which would read as something that failed to load.
 pub fn library_usage_empty(text: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().w_full().px(px(SPACE_MD)).py(px(SPACE_SM)).min_h(px(LIBRARY_NAME_HEIGHT)).flex().items_center().text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(text.into())
+    div().w_full().px(px(SPACE_MD)).py(px(SPACE_SM)).min_h(gpui::rems(LIBRARY_NAME_HEIGHT_REM)).flex().items_center().text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(text.into())
 }
 
 /// What a library is doing right now, drawn under its name in the usage list.
@@ -186,7 +159,7 @@ pub fn library_activity_note(state_color: Hsla, text: impl Into<SharedString>, c
 /// It carries no inset of its own: the row it sits in owns the inset, and a
 /// name that padded itself was being unpadded again at the call site.
 pub fn library_usage_name(name: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().w_full().min_w_0().h(px(LIBRARY_NAME_HEIGHT)).flex().items_center().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(TEXT_SM)).text_color(theme.text).child(name.into())
+    div().w_full().min_w_0().min_h(gpui::rems(LIBRARY_NAME_HEIGHT_REM)).flex().items_center().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(TEXT_SM)).text_color(theme.text).child(name.into())
 }
 
 /// One library: its name, the facts about it, and whatever it is doing.
@@ -203,7 +176,19 @@ pub fn library_usage_name(name: impl Into<SharedString>, theme: BrowserTheme) ->
 /// their own, which put a checkbox 32px from the group edge while the name it
 /// belonged to sat at 16px.
 pub fn library_usage_row(name: impl Into<SharedString>, facts: impl IntoIterator<Item = (SharedString, AnyElement)>, activity: impl IntoIterator<Item = Div>, compact: bool, theme: BrowserTheme) -> Div {
-    let title = div().w_full().min_w_0().min_h(px(LIBRARY_FACT_HEIGHT)).flex().items_center().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(TEXT_SM)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(name.into());
+    let title = div()
+        .w_full()
+        .min_w_0()
+        .min_h(gpui::rems(LIBRARY_FACT_HEIGHT_REM))
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .text_size(gpui::rems(TEXT_SM))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme.text)
+        .child(name.into());
     let mut list = div().w_full().flex().flex_col().gap(px(SPACE_XS));
     for (label, value) in facts {
         list = list.child(library_fact(label, value, compact, theme));
@@ -224,17 +209,13 @@ pub fn library_usage_row(name: impl Into<SharedString>, facts: impl IntoIterator
 fn library_fact(label: SharedString, value: AnyElement, compact: bool, theme: BrowserTheme) -> Div {
     let unlabelled = label.is_empty();
     let label = div().flex_none().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(label);
-    let value = div().flex_1().min_w_0().min_h(px(LIBRARY_FACT_HEIGHT)).flex().flex_row().items_center().overflow_hidden().text_size(gpui::rems(TEXT_XS)).text_color(theme.text).child(value);
+    let value = div().flex_1().min_w_0().min_h(gpui::rems(LIBRARY_FACT_HEIGHT_REM)).flex().flex_row().items_center().overflow_hidden().text_size(gpui::rems(TEXT_XS)).text_color(theme.text).child(value);
     // A control that names itself keeps the value column but takes no label.
     // Stacked, an empty label is an empty line, so only the value is drawn.
     if compact && unlabelled {
         return div().w_full().flex().child(value);
     }
-    if compact {
-        div().w_full().flex().flex_col().gap(px(SPACE_XXS)).child(label).child(value)
-    } else {
-        div().w_full().flex().flex_row().items_center().gap(px(SPACE_MD)).child(label.w(px(LIBRARY_FACT_LABEL_WIDTH))).child(value)
-    }
+    if compact { div().w_full().flex().flex_col().gap(px(SPACE_XXS)).child(label).child(value) } else { div().w_full().flex().flex_row().items_center().gap(px(SPACE_MD)).child(label.w(gpui::rems(LIBRARY_FACT_LABEL_WIDTH_REM)).max_w(px(LIBRARY_FACT_LABEL_MAX_WIDTH))).child(value) }
 }
 
 /// Vertical rhythm for the storage block/// The signed-out form: a title, the inputs, the actions, and whatever the last

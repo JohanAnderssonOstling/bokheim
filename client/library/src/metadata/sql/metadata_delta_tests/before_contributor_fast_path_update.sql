@@ -1,1 +1,0 @@
-UPDATE book SET title=?2 WHERE content_hash=?1 AND title IS NOT ?2

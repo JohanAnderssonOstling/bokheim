@@ -1,1 +1,0 @@
-SELECT file FROM pragma_database_list WHERE name='main'

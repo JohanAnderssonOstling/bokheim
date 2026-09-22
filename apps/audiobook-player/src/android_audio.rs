@@ -56,7 +56,7 @@ struct Status {
 }
 struct Session {
     read_generation: AtomicU64,
-    control: Option<bokheim_backend::AudioStreamControl>,
+    control: Option<app::AudioStreamControl>,
     release: (async_channel::Sender<()>, async_channel::Receiver<()>),
     stop_error: Mutex<Option<String>>,
     reader: Mutex<Option<Box<dyn ReadSeek>>>,
@@ -119,7 +119,7 @@ pub(crate) struct AudioEngine {
 }
 impl AudioEngine {
     pub(crate) fn open(
-        mut reader: Box<dyn ReadSeek>, file: Option<std::fs::File>, control: Option<bokheim_backend::AudioStreamControl>, book: &AudiobookBook, initial: Duration, updates: async_channel::Sender<PlaybackPosition>,
+        mut reader: Box<dyn ReadSeek>, file: Option<std::fs::File>, control: Option<app::AudioStreamControl>, book: &AudiobookBook, initial: Duration, updates: async_channel::Sender<PlaybackPosition>,
     ) -> Result<Self, String> {
         BRIDGE.get().ok_or("Android audio bridge is not initialized")?;
         #[cfg(any(target_os = "android", target_os = "linux"))]

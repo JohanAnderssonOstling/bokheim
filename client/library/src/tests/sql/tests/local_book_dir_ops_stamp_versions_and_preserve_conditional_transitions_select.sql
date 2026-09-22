@@ -1,1 +1,0 @@
-SELECT changed_at, replica_seq FROM sync_state_version WHERE state_kind='placement' AND state_key=printf('%064x',1) AND state_subkey=?1

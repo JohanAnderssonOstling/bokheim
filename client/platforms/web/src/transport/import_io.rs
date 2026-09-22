@@ -1,4 +1,10 @@
 use wasm_bindgen::prelude::*;
+const SHORT_WRITE: &str = "Short import write: browser storage is full";
+
+pub fn storage_full(error: &JsValue) -> bool {
+    js_sys::Reflect::get(error, &"name".into()).ok().and_then(|name| name.as_string()).as_deref() == Some("QuotaExceededError")
+        || error.as_string().as_deref() == Some(SHORT_WRITE)
+}
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_name = String)]
@@ -42,7 +48,7 @@ impl ImportIo {
 impl OpenFile {
     pub fn write(&self, bytes: &[u8], offset: u64) -> Result<(), JsValue> {
         if self.0.write(bytes, offset as f64)? != bytes.len() {
-            return Err(JsValue::from_str("Short import write: browser storage is full"));
+            return Err(JsValue::from_str(SHORT_WRITE));
         }
         Ok(())
     }
@@ -54,7 +60,9 @@ pub struct ImportSource(Option<Box<dyn FnOnce() -> JsValue + Send>>);
 pub type ImportReader = std::pin::Pin<Box<dyn futures_util::io::AsyncRead>>;
 pub type ImportReaderFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<ImportReader, String>>>>;
 impl ImportSource {
-    pub fn from_export(export: Option<Box<dyn FnOnce() -> JsValue + Send>>) -> Self { Self(export) }
+    pub fn from_export(export: Option<Box<dyn FnOnce() -> JsValue + Send>>) -> Self {
+        Self(export)
+    }
     pub fn into_file(self) -> Result<web_sys::File, String> {
         let export = self.0.ok_or("Selected file cannot be transferred to the import worker")?;
         export().dyn_into().map_err(|_| "Selected source is not a browser file".to_owned())

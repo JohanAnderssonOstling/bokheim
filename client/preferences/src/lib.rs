@@ -5,6 +5,8 @@ pub const FONT_SIZE_MIN: f32 = 8.0;
 pub const FONT_SIZE_MAX: f32 = 64.0;
 pub const LINE_WIDTH_MIN: f64 = 200.0;
 pub const LINE_WIDTH_MAX: f64 = 1200.0;
+pub const LINE_WIDTH_CH_MIN: f64 = 20.0;
+pub const LINE_WIDTH_CH_MAX: f64 = 100.0;
 pub const ZOOM_MIN: f64 = 0.5;
 pub const ZOOM_MAX: f64 = 3.0;
 pub const LINE_HEIGHT_MIN: f32 = 1.0;
@@ -15,6 +17,8 @@ pub const PDF_PAGE_COUNT_MIN: u8 = 1;
 pub const PDF_PAGE_COUNT_MAX: u8 = 6;
 pub const COLUMN_COUNT_MIN: u8 = 1;
 pub const COLUMN_COUNT_MAX: u8 = 4;
+pub const READER_SPACING_MIN: f32 = 0.0;
+pub const READER_SPACING_MAX: f32 = 200.0;
 /// The slowest and fastest narration the time-stretcher is asked for. Beyond
 /// this range speech stops being speech.
 pub const AUDIOBOOK_SPEED_MIN: f64 = 0.5;
@@ -43,17 +47,8 @@ pub enum ApplicationTheme {
     Cool,
 }
 
-/// Which of a theme's two palettes to draw. Always the platform's own answer.
-///
-/// There used to be an `ApplicationAppearance` preference in front of this —
-/// System, Light or Dark — and it is gone. Light and dark are not a taste
-/// choice the way the tint is: an application that stays light while the
-/// desktop goes dark at sunset is wrong, and the setting existed mostly to let
-/// someone correct it. Following the system is the answer that is right by
-/// default, so it is now the only answer.
-///
-/// Platforms that cannot report an appearance — the Kobo build — report light,
-/// which is the right answer for e-ink.
+/// Which of a theme's two palettes to draw. Existing profiles follow the
+/// platform until a specific palette is selected in settings.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResolvedAppearance {
@@ -98,8 +93,11 @@ pub const INTERFACE_FONT_FAMILY: &str = "Libertinus Serif";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowsingPreferences {
     theme: ApplicationTheme,
+    #[serde(default)]
+    appearance_override: Option<ResolvedAppearance>,
     ui_font_size_px: UiFontSize,
     library_view: LibraryView,
+    cover_text: CoverText,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,7 +126,7 @@ impl LibraryView {
 
 impl Default for BrowsingPreferences {
     fn default() -> Self {
-        Self { theme: ApplicationTheme::default(), ui_font_size_px: UiFontSize(UI_FONT_SIZE_DEFAULT), library_view: LibraryView::Covers }
+        Self { theme: ApplicationTheme::default(), appearance_override: None, ui_font_size_px: UiFontSize(UI_FONT_SIZE_DEFAULT), library_view: LibraryView::Covers, cover_text: CoverText::Always }
     }
 }
 
@@ -137,11 +135,49 @@ impl BrowsingPreferences {
         self.theme
     }
 
+    pub fn appearance_override(&self) -> Option<ResolvedAppearance> {
+        self.appearance_override
+    }
+
     pub fn ui_font_size_px(&self) -> u8 {
         self.ui_font_size_px.get()
     }
     pub fn library_view(&self) -> LibraryView {
         self.library_view
+    }
+    pub fn cover_text(&self) -> CoverText {
+        self.cover_text
+    }
+}
+
+/// Whether a compact book card names its title under the cover, or leaves
+/// that to the cover itself.
+///
+/// `CoverOnly` still needs every book to have something to read — a book with
+/// no cover art gets a generated one with its title set on it, rather than
+/// the plain placeholder, which under this setting would otherwise be the
+/// only anonymous tile in the grid.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverText {
+    #[default]
+    Always,
+    CoverOnly,
+}
+
+impl CoverText {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Always => "Always",
+            Self::CoverOnly => "Cover only",
+        }
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::Always => "Title and subtitle under every cover.",
+            Self::CoverOnly => "Covers carry their own title; a book with no cover art gets a generated one.",
+        }
     }
 }
 
@@ -149,16 +185,23 @@ impl BrowsingPreferences {
 #[serde(tag = "preference", content = "value", rename_all = "snake_case")]
 pub enum BrowsingPreferencePatch {
     Theme(ApplicationTheme),
+    Palette(ApplicationTheme, ResolvedAppearance),
     UiFontSizePx(u8),
     LibraryView(LibraryView),
+    CoverText(CoverText),
 }
 
 impl BrowsingPreferencePatch {
     pub fn apply(self, preferences: &mut BrowsingPreferences) -> Result<(), PreferenceValueError> {
         match self {
             Self::Theme(value) => preferences.theme = value,
+            Self::Palette(theme, appearance) => {
+                preferences.theme = theme;
+                preferences.appearance_override = Some(appearance);
+            }
             Self::UiFontSizePx(value) => preferences.ui_font_size_px = UiFontSize::new(value)?,
             Self::LibraryView(value) => preferences.library_view = value,
+            Self::CoverText(value) => preferences.cover_text = value,
         }
         Ok(())
     }
@@ -214,6 +257,10 @@ pub enum ReaderTextAlignment {
 pub struct ReaderPreferences {
     font_size_px: FontSize,
     max_line_width_px: LineWidth,
+    #[serde(default = "default_min_line_width_ch")]
+    min_line_width_ch: LineWidthCh,
+    #[serde(default = "default_max_line_width_ch")]
+    max_line_width_ch: LineWidthCh,
     zoom: Zoom,
     line_height: LineHeight,
     flow: ReaderFlow,
@@ -221,6 +268,12 @@ pub struct ReaderPreferences {
     text_alignment: ReaderTextAlignment,
     hyphenation: bool,
     max_column_count: ColumnCount,
+    #[serde(default = "default_reader_spacing")]
+    horizontal_margin_px: ReaderSpacing,
+    #[serde(default = "default_reader_spacing")]
+    vertical_margin_px: ReaderSpacing,
+    #[serde(default = "default_reader_spacing")]
+    min_column_gap_px: ReaderSpacing,
     /// Which end of the PDF layout is held fixed; the rest is derived.
     pdf_zoom_mode: PdfZoomMode,
     /// How many PDF pages sit side by side under [`PdfZoomMode::FitWidth`].
@@ -237,6 +290,14 @@ pub struct ReaderPreferences {
 
 const fn default_audiobook_speed() -> AudiobookSpeed {
     AudiobookSpeed(1.0)
+}
+
+const fn default_min_line_width_ch() -> LineWidthCh {
+    LineWidthCh(45.0)
+}
+
+const fn default_max_line_width_ch() -> LineWidthCh {
+    LineWidthCh(65.0)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -304,10 +365,16 @@ macro_rules! bounded_float {
 
 bounded_float!(FontSize, f32, "font size", FONT_SIZE_MIN, FONT_SIZE_MAX);
 bounded_float!(LineWidth, f64, "line width", LINE_WIDTH_MIN, LINE_WIDTH_MAX);
+bounded_float!(LineWidthCh, f64, "line width in ch", LINE_WIDTH_CH_MIN, LINE_WIDTH_CH_MAX);
 bounded_float!(Zoom, f64, "zoom", ZOOM_MIN, ZOOM_MAX);
 bounded_float!(LineHeight, f32, "line height", LINE_HEIGHT_MIN, LINE_HEIGHT_MAX);
 bounded_float!(PdfZoom, f32, "PDF zoom", PDF_ZOOM_MIN, PDF_ZOOM_MAX);
 bounded_float!(AudiobookSpeed, f64, "audiobook speed", AUDIOBOOK_SPEED_MIN, AUDIOBOOK_SPEED_MAX);
+bounded_float!(ReaderSpacing, f32, "reader spacing", READER_SPACING_MIN, READER_SPACING_MAX);
+
+const fn default_reader_spacing() -> ReaderSpacing {
+    ReaderSpacing(0.0)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -364,6 +431,8 @@ impl Default for ReaderPreferences {
         Self {
             font_size_px: FontSize(20.0),
             max_line_width_px: LineWidth(600.0),
+            min_line_width_ch: default_min_line_width_ch(),
+            max_line_width_ch: default_max_line_width_ch(),
             zoom: Zoom(1.0),
             line_height: LineHeight(1.5),
             flow: ReaderFlow::Paginated,
@@ -371,6 +440,9 @@ impl Default for ReaderPreferences {
             text_alignment: ReaderTextAlignment::Publisher,
             hyphenation: true,
             max_column_count: ColumnCount(2),
+            horizontal_margin_px: default_reader_spacing(),
+            vertical_margin_px: default_reader_spacing(),
+            min_column_gap_px: default_reader_spacing(),
             pdf_zoom_mode: PdfZoomMode::FitWidth,
             pdf_page_count: PdfPageCount(1),
             pdf_zoom: PdfZoom(1.0),
@@ -386,6 +458,12 @@ impl ReaderPreferences {
     }
     pub fn max_line_width_px(self) -> f64 {
         self.max_line_width_px.get()
+    }
+    pub fn min_line_width_ch(self) -> f64 {
+        self.min_line_width_ch.get()
+    }
+    pub fn max_line_width_ch(self) -> f64 {
+        self.max_line_width_ch.get()
     }
     pub fn zoom(self) -> f64 {
         self.zoom.get()
@@ -407,6 +485,15 @@ impl ReaderPreferences {
     }
     pub fn max_column_count(self) -> u8 {
         self.max_column_count.get()
+    }
+    pub fn horizontal_margin_px(self) -> f32 {
+        self.horizontal_margin_px.get()
+    }
+    pub fn vertical_margin_px(self) -> f32 {
+        self.vertical_margin_px.get()
+    }
+    pub fn min_column_gap_px(self) -> f32 {
+        self.min_column_gap_px.get()
     }
     pub fn pdf_zoom_mode(self) -> PdfZoomMode {
         self.pdf_zoom_mode
@@ -432,6 +519,26 @@ impl ReaderPreferences {
         self.max_line_width_px = LineWidth::new(value)?;
         Ok(())
     }
+    pub fn set_min_line_width_ch(&mut self, value: f64) -> Result<(), PreferenceValueError> {
+        let value = LineWidthCh::new(value)?;
+        // Treat the endpoints as a movable range: honour the edited endpoint
+        // and bring the other one along if it would otherwise cross it.
+        if value.get() > self.max_line_width_ch.get() {
+            self.max_line_width_ch = value;
+        }
+        self.min_line_width_ch = value;
+        Ok(())
+    }
+    pub fn set_max_line_width_ch(&mut self, value: f64) -> Result<(), PreferenceValueError> {
+        let value = LineWidthCh::new(value)?;
+        // See `set_min_line_width_ch`: setting the maximum below the minimum
+        // moves the minimum instead of rejecting or clamping the request.
+        if value.get() < self.min_line_width_ch.get() {
+            self.min_line_width_ch = value;
+        }
+        self.max_line_width_ch = value;
+        Ok(())
+    }
     pub fn set_zoom(&mut self, value: f64) -> Result<(), PreferenceValueError> {
         self.zoom = Zoom::new(value)?;
         Ok(())
@@ -454,6 +561,18 @@ impl ReaderPreferences {
     }
     pub fn set_max_column_count(&mut self, value: u8) -> Result<(), PreferenceValueError> {
         self.max_column_count = ColumnCount::new(value)?;
+        Ok(())
+    }
+    pub fn set_horizontal_margin_px(&mut self, value: f32) -> Result<(), PreferenceValueError> {
+        self.horizontal_margin_px = ReaderSpacing::new(value)?;
+        Ok(())
+    }
+    pub fn set_vertical_margin_px(&mut self, value: f32) -> Result<(), PreferenceValueError> {
+        self.vertical_margin_px = ReaderSpacing::new(value)?;
+        Ok(())
+    }
+    pub fn set_min_column_gap_px(&mut self, value: f32) -> Result<(), PreferenceValueError> {
+        self.min_column_gap_px = ReaderSpacing::new(value)?;
         Ok(())
     }
     pub fn set_pdf_zoom_mode(&mut self, value: PdfZoomMode) {
@@ -481,6 +600,8 @@ impl ReaderPreferences {
 pub enum ReaderPreferencePatch {
     FontSizePx(f32),
     MaxLineWidthPx(f64),
+    MinLineWidthCh(f64),
+    MaxLineWidthCh(f64),
     Zoom(f64),
     LineHeight(f32),
     Flow(ReaderFlow),
@@ -488,6 +609,9 @@ pub enum ReaderPreferencePatch {
     TextAlignment(ReaderTextAlignment),
     Hyphenation(bool),
     MaxColumnCount(u8),
+    HorizontalMarginPx(f32),
+    VerticalMarginPx(f32),
+    MinColumnGapPx(f32),
     PdfZoomMode(PdfZoomMode),
     PdfPageCount(u8),
     PdfZoom(f32),
@@ -500,6 +624,8 @@ impl ReaderPreferencePatch {
         match self {
             Self::FontSizePx(value) => preferences.set_font_size_px(value),
             Self::MaxLineWidthPx(value) => preferences.set_max_line_width_px(value),
+            Self::MinLineWidthCh(value) => preferences.set_min_line_width_ch(value),
+            Self::MaxLineWidthCh(value) => preferences.set_max_line_width_ch(value),
             Self::Zoom(value) => preferences.set_zoom(value),
             Self::LineHeight(value) => preferences.set_line_height(value),
             Self::Flow(value) => {
@@ -519,6 +645,9 @@ impl ReaderPreferencePatch {
                 Ok(())
             }
             Self::MaxColumnCount(value) => preferences.set_max_column_count(value),
+            Self::HorizontalMarginPx(value) => preferences.set_horizontal_margin_px(value),
+            Self::VerticalMarginPx(value) => preferences.set_vertical_margin_px(value),
+            Self::MinColumnGapPx(value) => preferences.set_min_column_gap_px(value),
             Self::PdfZoomMode(value) => {
                 preferences.set_pdf_zoom_mode(value);
                 Ok(())
@@ -543,6 +672,9 @@ mod tests {
         let browsing = BrowsingPreferencePatch::LibraryView(LibraryView::Detailed);
         assert_eq!(serde_json::to_value(browsing).unwrap(), serde_json::json!({ "preference": "library_view", "value": "detailed" }));
 
+        let palette = BrowsingPreferencePatch::Palette(ApplicationTheme::Cool, ResolvedAppearance::Dark);
+        assert_eq!(serde_json::to_value(palette).unwrap(), serde_json::json!({ "preference": "palette", "value": ["cool", "dark"] }));
+
         let reader = ReaderPreferencePatch::PdfZoomMode(PdfZoomMode::FitHeight);
         assert_eq!(serde_json::to_value(reader).unwrap(), serde_json::json!({ "preference": "pdf_zoom_mode", "value": "fit_height" }));
 
@@ -554,5 +686,37 @@ mod tests {
     fn incomplete_profiles_are_rejected() {
         assert!(serde_json::from_str::<BrowsingPreferences>("{}").is_err());
         assert!(serde_json::from_str::<ReaderPreferences>("{}").is_err());
+    }
+
+    #[test]
+    fn palette_patch_saves_both_choices_and_old_profiles_follow_system() {
+        let mut saved = serde_json::to_value(BrowsingPreferences::default()).unwrap();
+        saved.as_object_mut().unwrap().remove("appearance_override");
+        let mut preferences: BrowsingPreferences = serde_json::from_value(saved).unwrap();
+        assert_eq!(preferences.appearance_override(), None);
+        BrowsingPreferencePatch::Palette(ApplicationTheme::Cool, ResolvedAppearance::Dark).apply(&mut preferences).unwrap();
+        assert_eq!(preferences.theme(), ApplicationTheme::Cool);
+        assert_eq!(preferences.appearance_override(), Some(ResolvedAppearance::Dark));
+        let restored: BrowsingPreferences = serde_json::from_value(serde_json::to_value(preferences).unwrap()).unwrap();
+        assert_eq!(restored.appearance_override(), Some(ResolvedAppearance::Dark));
+    }
+
+    #[test]
+    fn older_reader_profiles_get_zero_spacing_and_new_values_are_bounded() {
+        let mut saved = serde_json::to_value(ReaderPreferences::default()).unwrap();
+        let object = saved.as_object_mut().unwrap();
+        object.remove("horizontal_margin_px");
+        object.remove("vertical_margin_px");
+        object.remove("min_column_gap_px");
+        let restored: ReaderPreferences = serde_json::from_value(saved).unwrap();
+        assert_eq!(restored.horizontal_margin_px(), 0.0);
+        assert_eq!(restored.vertical_margin_px(), 0.0);
+        assert_eq!(restored.min_column_gap_px(), 0.0);
+
+        let mut updated = restored;
+        ReaderPreferencePatch::MinColumnGapPx(80.0).apply(&mut updated).unwrap();
+        assert_eq!(updated.min_column_gap_px(), 80.0);
+        assert!(ReaderPreferencePatch::HorizontalMarginPx(f32::NAN).apply(&mut updated).is_err());
+        assert!(ReaderPreferencePatch::VerticalMarginPx(READER_SPACING_MAX + 1.0).apply(&mut updated).is_err());
     }
 }

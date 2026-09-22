@@ -1,1 +1,0 @@
-DELETE FROM sync_outbox; DELETE FROM payload_audit;

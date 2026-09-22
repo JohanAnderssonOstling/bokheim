@@ -1,1 +1,0 @@
-SELECT bokheim_mutation('metadata',content_hash,title,contributors_for_book(row_id),book_metadata) FROM book ORDER BY row_id

@@ -56,19 +56,10 @@ pub fn contents_panel(theme: BrowserTheme) -> Div {
 /// reader's sidebar is inside a tree that toggles an entry when its row is
 /// clicked — so the title takes the mouse down and stops it, and navigation
 /// stays separable from expansion. A surface with nothing else on the row can
-/// pass a bare string instead.
+/// pass a bare string instead. Reader titles wrap to two lines at most.
 pub fn contents_title(id: impl Into<ElementId>, title: impl Into<SharedString>, theme: BrowserTheme) -> Stateful<Div> {
     let _ = theme;
-    div()
-        .id(id)
-        .flex_1()
-        .min_w_0()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_ellipsis()
-        .cursor_pointer()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(title.into())
+    div().id(id).flex_1().min_w_0().whitespace_normal().line_height(gpui::relative(1.2)).line_clamp(2).text_ellipsis().cursor_pointer().on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(title.into())
 }
 
 /// The disclosure, for a surface whose row already opens the entry: drawn, and

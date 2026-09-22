@@ -1,1 +1,0 @@
-INSERT INTO book_dir(dir_id,book_row_id,file_name) VALUES('dest',?1,?2)

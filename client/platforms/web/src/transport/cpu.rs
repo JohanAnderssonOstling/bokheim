@@ -23,9 +23,9 @@ use wasm_bindgen::prelude::*;
 use web_sys::Worker;
 
 use super::{error_message, BytesFuture};
+use crate::transport::endpoint::{OwnedEndpoint, WorkerEndpoint};
 use crate::transport::protocol::{CpuEvent, CpuRequest};
 use client_platform_runtime::coordinator::CpuJobs;
-use crate::transport::endpoint::{WorkerEndpoint, OwnedEndpoint};
 
 type Reply = oneshot::Sender<Result<Vec<u8>, String>>;
 struct Job {
@@ -72,12 +72,16 @@ impl Service {
             let Some(service) = service.upgrade() else {
                 return;
             };
-            if service.state.borrow().worker.as_ref().is_some_and(|worker| worker.accepts(generation)) { service.receive(generation, data); }
+            if service.state.borrow().worker.as_ref().is_some_and(|worker| worker.accepts(generation)) {
+                service.receive(generation, data);
+            }
         };
         let service = Rc::downgrade(self);
         let failed = move |message: String| {
             if let Some(service) = service.upgrade() {
-                if service.state.borrow().worker.as_ref().is_some_and(|worker| worker.accepts(generation)) { service.fail(js_sys::Error::new(&message).into()); }
+                if service.state.borrow().worker.as_ref().is_some_and(|worker| worker.accepts(generation)) {
+                    service.fail(js_sys::Error::new(&message).into());
+                }
             }
         };
         let endpoint = OwnedEndpoint::listen(worker, message, failed, "CPU worker stopped", "Invalid CPU worker message");
@@ -86,7 +90,9 @@ impl Service {
         let (cancel, cancelled) = oneshot::channel();
         self.state.borrow_mut().worker = Some(Connection::new(endpoint, generation, cancel));
         wasm_bindgen_futures::spawn_local(async move {
-            if client_platform_runtime::pending::until_cancelled(client_platform_runtime::executor::sleep(startup_timeout), cancelled).await.is_none() { return; }
+            if client_platform_runtime::pending::until_cancelled(client_platform_runtime::executor::sleep(startup_timeout), cancelled).await.is_none() {
+                return;
+            }
             if let Some(service) = service.upgrade() {
                 if service.state.borrow().worker.as_ref().is_some_and(|worker| worker.waiting(generation)) {
                     service.fail("CPU worker startup timed out".into());
@@ -99,20 +105,33 @@ impl Service {
     fn receive(&self, generation: u64, message: JsValue) {
         let event = match CpuEvent::decode(&message) {
             Ok(event) => event,
-            Err(error) => { self.fail(error.into()); return; }
+            Err(error) => {
+                self.fail(error.into());
+                return;
+            }
         };
         match event {
-            CpuEvent::Failed(error) => { self.fail(error.into()); return; }
+            CpuEvent::Failed(error) => {
+                self.fail(error.into());
+                return;
+            }
             CpuEvent::Ready => {
                 let mut state = self.state.borrow_mut();
-                if let Some(worker) = state.worker.as_mut() { worker.ready(generation); }
+                if let Some(worker) = state.worker.as_mut() {
+                    worker.ready(generation);
+                }
                 state.policy.ready();
-            },
+            }
             CpuEvent::Reply { id, result } => {
                 let completed = self.state.borrow_mut().policy.complete(id);
                 match completed {
-                    Ok(job) => { let _ = job.reply.send(result); }
-                    Err(error) => { self.fail(error.into()); return; }
+                    Ok(job) => {
+                        let _ = job.reply.send(result);
+                    }
+                    Err(error) => {
+                        self.fail(error.into());
+                        return;
+                    }
                 }
             }
         }
@@ -129,7 +148,9 @@ impl Service {
             let (message, transfer) = CpuRequest { id, bytes, source: source.value() }.encode();
             if let Err(error) = worker.post_message_with_transfer(&message, &transfer) {
                 self.fail(error);
-            } else { source.transferred(); }
+            } else {
+                source.transferred();
+            }
         }
     }
 }
@@ -154,9 +175,7 @@ impl CpuService {
     pub fn request_source(&self, bytes: Vec<u8>, source: JsValue) -> BytesFuture {
         let source = crate::transport::request::Source::new(source);
         let Some(reservation) = self.0.budget.reserve(bytes.len()) else {
-            let error = if bytes.len() > self.0.budget.limit() {
-                "CPU request exceeds configured input byte limit"
-            } else { "CPU input queue byte limit exceeded; retry after queued work completes" };
+            let error = if bytes.len() > self.0.budget.limit() { "CPU request exceeds configured input byte limit" } else { "CPU input queue byte limit exceeded; retry after queued work completes" };
             return Box::pin(async move { Err(error.into()) });
         };
         let (sender, receiver) = oneshot::channel();
@@ -197,6 +216,11 @@ impl CpuService {
     }
 
     pub fn with_options(create_worker: impl Fn() -> Result<WorkerEndpoint, JsValue> + 'static, options: CpuWorkerOptions) -> Self {
-        Self(Rc::new(Service { budget: client_platform_runtime::byte_budget::ByteBudget::new(options.bytes), startup_timeout: options.startup_timeout, create_worker: Box::new(create_worker), state: RefCell::new(State { policy: CpuJobs::new(options.jobs), next: 1, worker: None, next_generation: 0 }) }))
+        Self(Rc::new(Service {
+            budget: client_platform_runtime::byte_budget::ByteBudget::new(options.bytes),
+            startup_timeout: options.startup_timeout,
+            create_worker: Box::new(create_worker),
+            state: RefCell::new(State { policy: CpuJobs::new(options.jobs), next: 1, worker: None, next_generation: 0 }),
+        }))
     }
 }

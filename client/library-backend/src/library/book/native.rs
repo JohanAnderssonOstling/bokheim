@@ -1,8 +1,8 @@
 //! Native book readers, filesystem availability, and playback resources.
 use super::*;
+use crate::library::ResolvedBook;
 #[cfg(target_os = "android")]
 use crate::BlobKind;
-use crate::library::ResolvedBook;
 pub(crate) type Opened = ResolvedBook;
 
 pub(super) fn supports_streaming(format: BookFormat) -> bool {
@@ -28,7 +28,7 @@ async fn refresh_local_path(library: &LibrarySession, content_hash: ContentHash)
 }
 
 async fn resolve_local(library: &LibrarySession, content_hash: ContentHash, info: &BookInfo) -> Result<Opened, BackendError> {
-    let mut path = info.path.clone().ok_or_else(|| BackendError::operation(format!("book placement not found: {content_hash}")))?;
+    let mut path = info.path.clone().ok_or_else(|| BackendError::message(format!("book placement not found: {content_hash}")))?;
     let format = info.format;
     if !matches!(format, BookFormat::Epub | BookFormat::Pdf | BookFormat::Mobi | BookFormat::M4b) {
         return Err(format!("the {} format is no longer supported", format.canonical_extension()).into());
@@ -75,7 +75,7 @@ async fn resolve_local(library: &LibrarySession, content_hash: ContentHash, info
 }
 
 pub(super) async fn remote(library: &LibrarySession, hash: ContentHash, info: &BookInfo) -> Result<Opened, BackendError> {
-    let path = info.path.clone().ok_or_else(|| BackendError::operation(format!("book placement not found: {hash}")))?;
+    let path = info.path.clone().ok_or_else(|| BackendError::message(format!("book placement not found: {hash}")))?;
     let RemoteDocument { source, prefix, pdf_metadata } = remote_document(library, hash).await?;
     let length = source.length;
     let account = library.sync().and_then(|sync| sync.account()).ok_or_else(|| BackendError::message("library account access is unavailable"))?;
@@ -84,7 +84,8 @@ pub(super) async fn remote(library: &LibrarySession, hash: ContentHash, info: &B
         let fetch = move |offset, length| {
             let account = account.clone();
             let source = source.clone();
-            Box::pin(async move { crate::library::remote_access::read_remote_file_typed(&reqwest::Client::new(), &account, library_id, &source, offset, length).await }) as book_access::FetchFuture<'static, Result<Vec<u8>, book_access::remote_file::RemoteFileError>>
+            Box::pin(async move { crate::library::remote_access::read_remote_file_typed(&reqwest::Client::new(), &account, library_id, &source, offset, length).await })
+                as book_access::FetchFuture<'static, Result<Vec<u8>, book_access::remote_file::RemoteFileError>>
         };
         let (reader, stream_control) = book_access::remote_file::native_audio_reader(length, prefix, fetch).map_err(BackendError::operation)?;
         return Ok(ResolvedBook::Audiobook(AudiobookBook {
@@ -98,7 +99,8 @@ pub(super) async fn remote(library: &LibrarySession, hash: ContentHash, info: &B
     let fetch = move |offset, length| {
         let account = account.clone();
         let source = source.clone();
-        Box::pin(async move { crate::library::remote_access::read_remote_file_typed(&reqwest::Client::new(), &account, library_id, &source, offset, length).await.map_err(|error| error.to_string()) }) as book_access::FetchFuture<'static, Result<Vec<u8>, String>>
+        Box::pin(async move { crate::library::remote_access::read_remote_file_typed(&reqwest::Client::new(), &account, library_id, &source, offset, length).await.map_err(|error| error.to_string()) })
+            as book_access::FetchFuture<'static, Result<Vec<u8>, String>>
     };
     let reader = book_access::remote_file::native_reader(length, prefix, fetch).map_err(BackendError::operation)?;
     let mut document = ResolvedBook::Document(crate::library::DocumentBook::new(path, info.format, reader));

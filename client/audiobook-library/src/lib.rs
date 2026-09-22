@@ -133,8 +133,7 @@ pub enum ChapterProviderId {
     Audnexus,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ChapterOrigin {
     EmbeddedM4b,
     Audnexus,

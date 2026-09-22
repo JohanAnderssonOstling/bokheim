@@ -157,7 +157,9 @@ fn insert_consensus(connection: &Connection, work_id: i64, support: &BTreeMap<(i
 fn stream_results(connection: &Connection, record_limit: Option<usize>, mut emit: impl FnMut(u64, Vec<WorkClassificationMatch>) -> Result<(), MetadataError>) -> Result<(), MetadataError> {
     // Per-ISBN maps below provide deterministic group and evidence ordering.
     // Additional SQL sort keys force a global temporary sort at full scale.
-    if record_limit == Some(0) { return Ok(()); }
+    if record_limit == Some(0) {
+        return Ok(());
+    }
     let ordering = " ORDER BY edition_isbn.isbn13";
     let mut base_statement = connection.prepare(&format!("SELECT edition_isbn.isbn13,edition.edition_id,edition.work_id,0,NULL,NULL FROM edition_isbn JOIN edition USING(edition_id){ordering}")).map_err(error)?;
     let mut exact_statement = connection.prepare(&format!("SELECT edition_isbn.isbn13,edition.edition_id,edition.work_id,1,classification.scheme,classification.notation FROM edition_isbn JOIN edition USING(edition_id) JOIN edition_classification AS classification USING(edition_id){ordering}")).map_err(error)?;
@@ -250,8 +252,9 @@ fn emit_built(isbn: i64, groups: &mut BTreeMap<(Option<i64>, i64), BuildMatch>, 
     let mut matches = std::mem::take(groups)
         .into_iter()
         .map(|((work_id, _), matched)| {
-            let classifications = metadata_contract::filter_classification_outliers(matched.classifications.into_iter().map(|((scheme, notation), source)| Classification { evidence: Vec::new(), scheme, notation, source }), classification_similarity_keys);
-            WorkClassificationMatch { open_library_work_id: work_id.map(|id| format!("OL{id}W")), exact_edition_ids: matched.edition_ids.into_iter().map(super::openlibrary::catalog_edition_key).collect(), classifications }
+            let classifications =
+                metadata_contract::filter_classification_outliers(matched.classifications.into_iter().map(|((scheme, notation), source)| Classification { evidence: Vec::new(), scheme, notation, source }), classification_similarity_keys);
+            WorkClassificationMatch { open_library_work_id: work_id.map(|id| format!("OL{id}W")), exact_edition_ids: matched.edition_ids.into_iter().map(super::openlibrary::authority_edition_key).collect(), classifications }
         })
         .collect();
     crate::loc_dump::merge_lcc(&mut matches, std::mem::take(lc_codes));
@@ -346,7 +349,7 @@ fn encode_matches(matches: &[WorkClassificationMatch]) -> Result<Vec<u8>, Metada
         bytes.extend_from_slice(&work_id.to_le_bytes());
         put_u16(&mut bytes, matched.exact_edition_ids.len())?;
         for id in &matched.exact_edition_ids {
-            bytes.extend_from_slice(&super::openlibrary::catalog_edition_id(id).ok_or_else(|| MetadataError("invalid edition identifier while building subject index".to_owned()))?.to_le_bytes());
+            bytes.extend_from_slice(&super::openlibrary::authority_edition_id(id).ok_or_else(|| MetadataError("invalid edition identifier while building subject index".to_owned()))?.to_le_bytes());
         }
         let active = matched.classifications.iter().filter(|c| c.scheme != ClassificationScheme::DeweyDecimal).collect::<Vec<_>>();
         put_u16(&mut bytes, active.len())?;
@@ -375,7 +378,7 @@ fn decode_matches(bytes: &[u8]) -> Result<Vec<WorkClassificationMatch>, Metadata
         let edition_count = take_u16(bytes, &mut cursor)?;
         let mut exact_edition_ids = Vec::with_capacity(edition_count);
         for _ in 0..edition_count {
-            exact_edition_ids.push(super::openlibrary::catalog_edition_key(take_i64(bytes, &mut cursor)?));
+            exact_edition_ids.push(super::openlibrary::authority_edition_key(take_i64(bytes, &mut cursor)?));
         }
         let classification_count = take_u16(bytes, &mut cursor)?;
         let mut classifications = Vec::with_capacity(classification_count);
@@ -443,9 +446,7 @@ mod legacy_dewey_tests {
     #[test]
     fn old_index_dewey_entries_are_consumed_but_not_returned() {
         // One work, no edition IDs, followed by a legacy Dewey code and an LCC code.
-        let bytes = [1,0, 255,255,255,255,255,255,255,255, 0,0, 2,0,
-                     2,1, 3,0, b'5',b'0',b'0',
-                     1,1, 4,0, b'E',b'7',b'5',b'7'];
+        let bytes = [1, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 2, 0, 2, 1, 3, 0, b'5', b'0', b'0', 1, 1, 4, 0, b'E', b'7', b'5', b'7'];
         let matches = super::decode_matches(&bytes).unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].classifications.len(), 1);

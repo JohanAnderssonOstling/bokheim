@@ -1,4 +1,4 @@
-//! A shared catalogue row must not precede its completed, account-owned upload.
+//! A shared book row must not precede its completed, account-owned upload.
 use sqlx::{Postgres, Transaction};
 use sync_common::{mutation_kind as kind, ContentHash, MutationRejectionReason as Reason, WireMutation};
 
@@ -21,7 +21,7 @@ pub(super) fn dependency(change: &WireMutation) -> Result<Option<ContentHash>, R
             }
             change.entity_key.parse::<ContentHash>().map(Some).map_err(|_| Reason::InvalidPayload)
         }
-        kind::ANNOTATION | kind::CATALOG_BOOK => reference
+        kind::ANNOTATION => reference
             .filter(|r| r.present).and_then(|r| r.content_hash).map(Some).ok_or(Reason::MissingDependency),
         _ => Ok(reference.filter(|r| r.present).and_then(|r| r.content_hash)),
     }
@@ -35,7 +35,7 @@ pub(super) async fn available(
     if hashes.is_empty() { return Ok(Default::default()); }
     // Use the same lock order as upload finalization and lifecycle cleanup:
     // library, then account. A concurrent purge/revision replacement must not
-    // invalidate admission between this check and the catalogue commit.
+    // invalidate admission between this check and the library commit.
     sqlx::query("SELECT user_id FROM user_storage_account WHERE user_id=$1 FOR UPDATE")
         .bind(user).fetch_optional(&mut **tx).await?;
     // Lifecycle references alone are not proof of upload. The upload endpoint

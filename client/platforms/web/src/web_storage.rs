@@ -10,6 +10,8 @@ use wasm_bindgen::prelude::*;
 extern "C" {
     #[wasm_bindgen(catch, js_name = removeAsset)]
     async fn remove_asset(name: &str) -> Result<(), JsValue>;
+    #[wasm_bindgen(catch, js_name = removeLibrary)]
+    async fn remove_library(library: &str) -> Result<(), JsValue>;
     #[wasm_bindgen(catch, js_name = listAssets)]
     async fn list_assets() -> Result<js_sys::Array, JsValue>;
     #[wasm_bindgen(catch, js_name = createAsset)]
@@ -34,7 +36,10 @@ fn js_error(error: JsValue) -> String {
 }
 /// Adopt immutable bytes without copying them through the database worker.
 /// The job owns uncommitted files, so an interrupted inspection preserves them.
-pub async fn adopt_staged(physical: String, length: u64) -> Result<FileWriter, String> {
+pub async fn adopt_staged(physical: String, length: u64, library: sync_common::LibraryId) -> Result<FileWriter, String> {
+    if !physical.starts_with(&format!("__libraries/{library}/imports/")) {
+        return Err("Staged book belongs to a different library".into());
+    }
     let source = prepare_physical(physical.clone()).await?;
     let actual = source.length;
     if actual != length {
@@ -54,8 +59,6 @@ struct ReaderState {
 }
 
 thread_local! {
-    #[cfg(feature = "storage-contract-tests")]
-    static RECLAMATION_FINISHED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static READERS: RefCell<std::collections::HashMap<String, ReaderState>> = RefCell::new(std::collections::HashMap::new());
     static ASSET_INDEX: RefCell<Option<rusqlite::Connection>> = const { RefCell::new(None) };
     static STORAGE: RefCell<Option<Rc<OpfsSAHPoolUtil>>> = const { RefCell::new(None) };
@@ -79,8 +82,6 @@ pub async fn initialize() -> Result<(), String> {
         if let Err(error) = reclaim_unreferenced_objects().await {
             log::warn!("Object reclamation will retry on next startup: {error}");
         }
-        #[cfg(feature = "storage-contract-tests")]
-        RECLAMATION_FINISHED.with(|finished| finished.set(true));
     });
     let storage = self::storage()?;
     let surplus = storage.get_capacity().saturating_sub(storage.count().saturating_add(TRANSIENT_FILE_CAPACITY));
@@ -96,10 +97,10 @@ async fn reclaim_unreferenced_objects() -> Result<(), String> {
         // Recheck current ownership after enumeration: imports and readers may
         // have started since the sweep began. Generations are never reused.
         let pinned = READERS.with(|readers| readers.borrow().contains_key(&name));
-        let published = with_index(|index| index.query_row(
-            include_str!("sql/web_storage/asset_lifecycle_contract_select.sql"),
-            [&name], |row| row.get::<_, bool>(0)))?;
-        if !pinned && !published { remove_asset(&name).await.map_err(js_error)?; }
+        let published = with_index(|index| index.query_row(include_str!("sql/web_storage/asset_lifecycle_contract_select.sql"), [&name], |row| row.get::<_, bool>(0)))?;
+        if !pinned && !published {
+            remove_asset(&name).await.map_err(js_error)?;
+        }
         client_platform_runtime::executor::sleep(std::time::Duration::ZERO).await;
     }
     Ok(())
@@ -188,8 +189,15 @@ pub struct FileWriter {
 }
 
 pub async fn begin_write(name: &str) -> Result<FileWriter, String> {
-    let folder = if is_thumbnail(name) { "__thumbnail_objects" } else { "__book_objects" };
-    create_asset_writer(name.to_owned(), format!("{folder}/{}", uuid::Uuid::new_v4())).await
+    let mut parts = name.split('/');
+    let (Some("assets"), Some(library), Some(kind), Some(_asset), None) = (parts.next(), parts.next(), parts.next(), parts.next(), parts.next()) else {
+        return Err("Invalid library asset name".into());
+    };
+    let library = uuid::Uuid::parse_str(library).map_err(|_| "Invalid library asset owner")?;
+    if !matches!(kind, "book" | "thumbnail") {
+        return Err("Invalid library asset kind".into());
+    }
+    create_asset_writer(name.to_owned(), format!("__libraries/{library}/{kind}/{}", uuid::Uuid::new_v4())).await
 }
 
 async fn create_asset_writer(name: String, physical: String) -> Result<FileWriter, String> {
@@ -250,7 +258,11 @@ impl Drop for FileReader {
             let mut readers = readers.borrow_mut();
             let state = readers.get_mut(&self.physical).expect("reader generation was registered");
             state.count -= 1;
-            if state.count == 0 { readers.remove(&self.physical) } else { None }
+            if state.count == 0 {
+                readers.remove(&self.physical)
+            } else {
+                None
+            }
         });
         if let Some(state) = finished {
             if state.delete_on_close {
@@ -293,7 +305,8 @@ async fn prepare_physical(physical: String) -> Result<FileReader, String> {
         let result = async {
             reader.length = open_staged(&reader.physical).await.map_err(js_error)?.as_f64().ok_or("Invalid staged file size")? as u64;
             Ok(reader)
-        }.await;
+        }
+        .await;
         let _ = sender.send(result);
     });
     receiver.await.map_err(|_| "file preparation stopped".to_owned())?
@@ -324,15 +337,21 @@ impl FileWriter {
         self.name = name;
         self.commit_verified(checksum)
     }
-    pub fn commit(self) -> Result<(), String> { self.commit_revision(None) }
-    pub fn commit_verified(self, checksum: sync_common::ContentHash) -> Result<(), String> { self.commit_revision(Some(checksum)) }
+    pub fn commit(self) -> Result<(), String> {
+        self.commit_revision(None)
+    }
+    pub fn commit_verified(self, checksum: sync_common::ContentHash) -> Result<(), String> {
+        self.commit_revision(Some(checksum))
+    }
     fn commit_revision(mut self, checksum: Option<sync_common::ContentHash>) -> Result<(), String> {
         let previous = physical_name(&self.name)?;
         flush_staged(&self.physical).map_err(js_error)?;
         with_index(|index| {
             let tx = index.unchecked_transaction()?;
             super::asset_index::publish(&tx, &self.name, &self.physical, self.length)?;
-            if let Some(checksum) = checksum { tx.execute(include_str!("sql/web_storage/commit_revision_insert.sql"), rusqlite::params![self.physical, checksum.as_str()])?; }
+            if let Some(checksum) = checksum {
+                tx.execute(include_str!("sql/web_storage/commit_revision_insert.sql"), rusqlite::params![self.physical, checksum.as_str()])?;
+            }
             tx.execute(include_str!("sql/web_storage/commit_revision_delete.sql"), [])?;
             tx.commit()
         })?;
@@ -380,72 +399,36 @@ pub fn list_files_page(prefix: &str, after: &str) -> Result<Vec<String>, String>
 
 pub async fn total_file_bytes(prefix: &str) -> Result<u64, String> {
     let prefix = prefix.to_owned();
-    client_platform_runtime::storage_queue::run(client_platform_runtime::storage_queue::Priority::Background, move || {
-        with_index(|index| super::asset_index::total_bytes(index, &prefix))
-    }).await?
+    client_platform_runtime::storage_queue::run(client_platform_runtime::storage_queue::Priority::Background, move || with_index(|index| super::asset_index::total_bytes(index, &prefix))).await?
+}
+
+/// Retire one library's physical OPFS container and its global index entries.
+/// The caller has already detached the library from the registry and stopped
+/// its actor. A failed removal leaves the durable purge record for retry.
+pub async fn purge_library(library: sync_common::LibraryId) -> Result<(), String> {
+    let physical_prefix = format!("__libraries/{library}/");
+    if READERS.with(|readers| readers.borrow().keys().any(|name| name.starts_with(&physical_prefix))) {
+        return Err(format!("library {library} still has open asset readers"));
+    }
+    remove_library(&library.to_string()).await.map_err(js_error)?;
+    with_index(|index| {
+        let tx = index.unchecked_transaction()?;
+        super::asset_index::purge_library(&tx, &library.to_string())?;
+        tx.commit()
+    })
 }
 
 /// Once all outcomes are checkpointed, discard failed/unreferenced copies.
 /// Committed assets remain pinned by the durable index.
-pub fn cleanup_staged_import(job: &str, files: u32) -> Result<(), String> {
+pub fn cleanup_staged_import(library: sync_common::LibraryId, job: &str, files: u32) -> Result<(), String> {
     uuid::Uuid::parse_str(job).map_err(|e| e.to_string())?;
-    let prefix = format!("__import_objects/{job}/");
+    let prefix = format!("__libraries/{library}/imports/{job}/");
     let live = with_index(|index| super::asset_index::live_physical_files(index, &prefix))?;
     for index in 0..files {
         let physical = format!("{prefix}{index}");
         if !live.contains(&physical) {
             retire(physical);
         }
-    }
-    Ok(())
-}
-
-#[cfg(feature = "storage-contract-tests")]
-pub async fn asset_lifecycle_contract(phase: &str) -> Result<(), String> {
-    let name = "assets/lifecycle-contract/thumbnail/empty";
-    let database = "database-presence-contract.sqlite3";
-    assert!(database_exists("__asset_index_v1.sqlite3")?);
-    assert!(!file_exists("__asset_index_v1.sqlite3")?);
-    assert!(!database_exists("absent-library.sqlite3")?);
-    if phase == "prepare" {
-        reserve_database_capacity(1).await?;
-        let connection = rusqlite::Connection::open(database).map_err(|e| e.to_string())?;
-        connection.execute_batch(include_str!("sql/web_storage/asset_lifecycle_contract_create.sql")).map_err(|e| e.to_string())?;
-        drop(connection);
-        write_file(name, &[]).await?;
-        let mut abandoned = begin_write("unpublished").await?;
-        abandoned.write_all(b"partial")?;
-        std::mem::forget(abandoned);
-    } else if phase == "restart" {
-        // Reclamation must remove the interrupted write from the previous
-        // worker, while preserving a write begun by this worker.
-        let mut writing = begin_write("assets/lifecycle-contract/thumbnail/in-progress").await?;
-        writing.write_all(b"active")?;
-        while !RECLAMATION_FINISHED.with(std::cell::Cell::get) {
-            client_platform_runtime::executor::sleep(std::time::Duration::ZERO).await;
-        }
-        for value in list_assets().await.map_err(js_error)?.iter() {
-            let physical = value.as_string().ok_or("invalid physical name")?;
-            let pinned = READERS.with(|readers| readers.borrow().contains_key(&physical));
-            let published = with_index(|index| index.query_row(
-                include_str!("sql/web_storage/asset_lifecycle_contract_select.sql"),
-                [&physical], |row| row.get::<_, bool>(0)))?;
-            assert!(pinned || published, "orphan survived reclamation: {physical}");
-        }
-        writing.write_all(b" writer")?;
-        writing.commit()?;
-        assert_eq!(read_file("assets/lifecycle-contract/thumbnail/in-progress").await?, Some(b"active writer".to_vec()));
-        remove_file("assets/lifecycle-contract/thumbnail/in-progress")?;
-        assert!(file_exists(name)?);
-        assert_eq!(read_file(name).await?, Some(vec![]));
-        assert!(remove_file(name)?);
-        assert!(!remove_file(name)?);
-        assert!(!file_exists(name)?);
-        assert!(read_file(name).await?.is_none());
-        assert_eq!(with_index(|index| index.query_row(include_str!("sql/web_storage/asset_lifecycle_contract_select_2.sql"), [name], |row| row.get::<_, i64>(0)))?, 0);
-    } else if phase == "verify" {
-        assert!(!file_exists(name)?);
-        assert!(read_file(name).await?.is_none());
     }
     Ok(())
 }

@@ -1,8 +1,9 @@
 //! EPUB annotation loading, editing, and renderer projection.
 
+use book_model::{AnnotationAnchor, AnnotationStyle};
+use library_backend::{ReaderAnnotation};
 use gpui::{Context, Window};
 use html_view_core::RendererCommand;
-use book_model::{AnnotationAnchor, AnnotationStyle, ReaderAnnotation};
 
 use crate::epub::{ReaderView, Selection, marks};
 use crate::invalidation::Component;
@@ -44,6 +45,10 @@ impl ReaderView {
             note: String::new(),
             created_at: now,
             modified_at: now,
+            // The selection is visible, so the viewport's entry is the
+            // selection's entry in every case but a stale position event.
+            toc_ordinal: self.toc.ordinal_of_active().map(|ordinal| ordinal as i64),
+            progress: None,
         };
         let overlay = marks::renderer_annotation(&annotation).expect("new EPUB annotation has an EPUB anchor");
         let annotation_id = annotation.id.clone();

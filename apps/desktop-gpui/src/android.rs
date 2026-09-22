@@ -1,4 +1,4 @@
-use bokheim_backend::{AppDataLocation, host::BackendLaunch};
+use app::{AppDataLocation, host::BackendLaunch};
 use gpui_android::AndroidApp;
 use jni::EnvUnowned;
 use jni::objects::{JObject, JString};
@@ -22,7 +22,7 @@ struct StorageAccess {
 
 static STORAGE_ACCESS: Mutex<(Option<async_channel::Sender<StorageAccess>>, Option<StorageAccess>)> = Mutex::new((None, None));
 
-pub(crate) fn watch_storage_access(backend: bokheim_backend::AppClient, private_root: std::path::PathBuf, cx: &mut gpui::App) {
+pub(crate) fn watch_storage_access(backend: app::AppClient, private_root: std::path::PathBuf, cx: &mut gpui::App) {
     let (sender, receiver) = async_channel::unbounded();
     {
         let mut state = STORAGE_ACCESS.lock().unwrap();
@@ -333,6 +333,16 @@ extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeWindowInsets<'
     unowned_env
         .with_env(|_| -> jni::errors::Result<()> {
             gpui_android::window_insets_changed(safe_left, safe_top, safe_right, safe_bottom, ime_left, ime_top, ime_right, ime_bottom);
+            Ok(())
+        })
+        .resolve::<jni::errors::LogErrorAndDefault>();
+}
+
+#[unsafe(no_mangle)]
+extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeReaderChromeRevealed<'caller>(mut unowned_env: EnvUnowned<'caller>, _activity: JObject<'caller>) {
+    unowned_env
+        .with_env(|_| -> jni::errors::Result<()> {
+            gpui_android::reader_chrome_revealed();
             Ok(())
         })
         .resolve::<jni::errors::LogErrorAndDefault>();

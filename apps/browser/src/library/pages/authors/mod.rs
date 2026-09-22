@@ -3,11 +3,10 @@
 //!
 //! It is Home's page with different rows — same paginator, same shelves, same
 //! cards — so it is [`ShelfPage`] with an author-shaped source. What is left
-//! here is the query and the two things the index says that Home does not: the
-//! subjects an author writes about, and that its cards need not repeat the name
-//! written above them.
+//! here is the query and the one thing the index says that Home does not: the
+//! subjects an author writes about.
 
-use bokheim_backend::LibraryClient;
+use library_backend::LibraryClient;
 use library_model::AuthorSort;
 
 use crate::library::pages::shelves::{ShelfFuture, ShelfPage, ShelfRow, ShelfSort, ShelfSource};
@@ -18,8 +17,6 @@ pub(crate) struct AuthorShelves;
 
 impl ShelfSource for AuthorShelves {
     const ID: &'static str = "authors";
-    // The name over the shelf says it once for every card under it.
-    const CARDS_STATE_AUTHOR: bool = false;
     // A name writes about more than fits on one line beside it.
     const SUBJECT_ROWS: usize = 2;
     const LOADING_MESSAGE: &'static str = "Loading authors…";

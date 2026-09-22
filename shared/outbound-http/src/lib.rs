@@ -12,7 +12,7 @@ const MAX_REDIRECTS: usize = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutboundNetworkPolicy {
-    /// Device-local clients may intentionally connect to a catalogue on their LAN.
+    /// Device-local clients may intentionally connect to an authority service on their LAN.
     AllowPrivate,
     /// Internet-facing services must never connect to local or reserved networks.
     PublicOnly,
@@ -153,7 +153,7 @@ mod tests {
 
     #[tokio::test]
     async fn redirect_targets_are_subject_to_the_same_public_policy() {
-        let public_origin = Url::parse("https://example.com/catalog").unwrap();
+        let public_origin = Url::parse("https://example.com/authority").unwrap();
         for location in ["http://127.0.0.1/admin", "http://[::1]/admin", "http://169.254.169.254/latest/meta-data/", "http://2130706433/admin"] {
             let redirect = public_origin.join(location).unwrap();
             let error = client_for_url(&redirect, OutboundNetworkPolicy::PublicOnly, "test", Duration::from_secs(1)).await.unwrap_err();

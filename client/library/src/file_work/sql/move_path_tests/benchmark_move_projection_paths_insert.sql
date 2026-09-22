@@ -1,1 +1,0 @@
-INSERT INTO local_file_projection VALUES(?1,'dir',?2)

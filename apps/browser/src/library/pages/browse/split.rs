@@ -39,6 +39,13 @@ impl BrowseSplitPlane {
         self.panes[0].page.update(cx, |page, cx| page.open_split_path(path, cx));
     }
 
+    /// Opens a subject chip by its raw location string rather than a `DirId`:
+    /// a subject has no directory, just the path segments joined by `" / "`
+    /// that the subject adapter already reads back out of `chip.id`.
+    pub(crate) fn open_subject(&mut self, location: String, label: String, cx: &mut Context<Self>) {
+        self.panes[0].page.update(cx, |page, cx| page.open_split_path(vec![super::adapter::BrowseCrumb { location, label }], cx));
+    }
+
     pub(crate) fn open_book_detail(&mut self, book: library_model::BookCardRow, path: Vec<super::adapter::BrowseCrumb>, cx: &mut Context<Self>) {
         self.panes[0].page.update(cx, |page, cx| page.open_book_detail(book, path, cx));
     }
@@ -101,6 +108,17 @@ impl<A: BrowseAdapter> BrowseSplitPlane<A> {
 
     fn add_page(&mut self, source: Entity<BrowsePage<A>>, side: BrowseSplitSide, path: Vec<super::adapter::BrowseCrumb>, cx: &mut Context<Self>) {
         let Some(source_index) = self.panes.iter().position(|pane| pane.page == source) else { return };
+        // The adjacent pane on the requested side, if one is already open,
+        // is navigated in place — "open left/right" means "show it over
+        // there", not "add yet another pane every time it's asked for".
+        let adjacent = match side {
+            BrowseSplitSide::Left => source_index.checked_sub(1),
+            BrowseSplitSide::Right => Some(source_index + 1),
+        };
+        if let Some(pane) = adjacent.and_then(|index| self.panes.get(index)) {
+            pane.page.update(cx, |page, cx| page.open_split_path(path, cx));
+            return;
+        }
         let index = match side {
             BrowseSplitSide::Left => source_index,
             BrowseSplitSide::Right => source_index + 1,

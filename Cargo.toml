@@ -1,30 +1,27 @@
 [workspace]
 resolver = "3"
 members = [
-    "client/backend",
+    "client/app",
+    "client/client-runtime",
     "client/library-backend",
-    "client/library-database",
-    "client/library-replica",
-    "client/library-registry",
-    "client/book-metadata",
-    "client/thumbnail",
+    "client/library-backend/crates/library-database",
+    "client/library-backend/crates/library-replica",
+    "client/app/crates/library-registry",
+    "client/library-backend/crates/book-metadata",
+    "client/library-backend/crates/thumbnail",
     "client/audiobook-library",
     "client/preferences",
     "client/library-model",
     "client/test-support",
     "shared/content-address",
     "shared/outbound-http",
-    "shared/catalog-model",
-    "shared/catalog-protocol",
     "shared/book-model",
     "shared/epub",
-    "shared/book-inspection",
+    "client/library-backend/crates/book-inspection",
     "shared/subject-projection",
-    "servers/opds-cache/crates/litteraturbanken",
-    "servers/opds-cache/crates/opds",
     "shared/account-contract",
-    "shared/catalog-core",
     "client/library-backend/crates/metadata-client",
+    "client/library-backend/crates/cpu-host",
     "shared/wire",
     "shared/protobuf-wire",
     "shared/metadata-contract",
@@ -32,8 +29,8 @@ members = [
     "shared/sync-common",
     "apps/desktop-gpui",
     "apps/web-gpui",
+    "apps/web-backend-worker",
     "apps/kobo-device",
-    "servers/opds-cache",
     "servers/metadata",
     "servers/taxonomy"
 ]
@@ -67,6 +64,7 @@ mobi = "0.8.0"
 encoding_rs = "0.8"
 
 [patch.crates-io]
+zip = { path = "vendor/zip" }
 gpui = { path = "../GPUI-Fork/crates/gpui" }
 pdfium-render = { path = "vendor/pdfium-render" }
 
@@ -74,6 +72,11 @@ pdfium-render = { path = "vendor/pdfium-render" }
 gpui = { path = "../GPUI-Fork/crates/gpui" }
 gpui_macros = { path = "../GPUI-Fork/crates/gpui_macros" }
 gpui_platform = { path = "../GPUI-Fork/crates/gpui_platform" }
+
+# See vendor/gpui-component/LOCAL-PATCHES.md.
+[patch."https://github.com/longbridge/gpui-component"]
+gpui-component = { path = "vendor/gpui-component/crates/ui" }
+gpui-component-assets = { path = "vendor/gpui-component/crates/assets" }
 
 # Temporary: note rendering needs unpushed HtmlViewCore work.
 [patch."https://github.com/JohanAnderssonOstling/HtmlEngine"]

@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build and deploy a prepared Bokheim host over SSH. The remote host must
-# already have the dependencies and service configuration installed by
-# install-server.sh; this script performs code/data upgrades only.
+# Build and deploy only the sync server over SSH. Catalogue and metadata
+# services have independent release lifecycles and must not gate a sync fix.
 
 script_directory=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repository_root=$(cd -- "${script_directory}/../../.." && pwd)
 host=${BOKHEIM_DEPLOY_HOST:-192.168.1.68}
 user=${BOKHEIM_DEPLOY_USER:-${USER}}
-remote_prefix=${BOKHEIM_DEPLOY_REMOTE_PREFIX:-/var/lib/bokheim-deploy/upload}
+remote_prefix=${BOKHEIM_DEPLOY_REMOTE_PREFIX:-/var/lib/bokheim-deploy/sync-upload}
 cargo_target=${BOKHEIM_DEPLOY_CARGO_TARGET:-x86_64-unknown-linux-musl}
-catalog_target=${BOKHEIM_CATALOG_CARGO_TARGET:-x86_64-unknown-linux-gnu}
 stage_only=false
 ssh_options=()
 if [[ -n ${BOKHEIM_DEPLOY_SSH_OPTS:-} ]]; then
@@ -22,13 +20,13 @@ if [[ ${1:-} == --help || ${1:-} == -h ]]; then
     cat <<'EOF'
 Usage: servers/sync/deploy/deploy-remote.sh [--stage-only]
 
-  --stage-only  Build and transfer a release without activating it.
+  --stage-only  Build and transfer the sync release without activating it.
 
 Environment:
   BOKHEIM_DEPLOY_HOST          SSH host (default: 192.168.1.68)
   BOKHEIM_DEPLOY_USER          SSH user (default: current user)
   BOKHEIM_DEPLOY_SSH_OPTS      Extra SSH options, space separated
-  BOKHEIM_DEPLOY_REMOTE_PREFIX Temporary directory prefix (default: /tmp/bokheim-deploy)
+  BOKHEIM_DEPLOY_REMOTE_PREFIX Temporary directory prefix (default: /var/lib/bokheim-deploy/sync-upload)
 EOF
     exit 0
 fi
@@ -60,30 +58,15 @@ trap cleanup EXIT
 
 echo "Building sync-server for ${cargo_target}..."
 cargo build --release --target "${cargo_target}" --manifest-path "${repository_root}/servers/sync/Cargo.toml" -p sync-server
-echo "Building catalog-server for ${catalog_target}..."
-python3 "${repository_root}/shared/pdfium/prepare.py" --target "${catalog_target}"
-cargo build --release --target "${catalog_target}" --manifest-path "${repository_root}/servers/opds-cache/Cargo.toml" -p catalog-server
-echo "Building metadata-server..."
-cargo build --release --target "${cargo_target}" --manifest-path "${repository_root}/Cargo.toml" -p metadata-server
 
 sync_binary=${repository_root}/servers/sync/target/${cargo_target}/release/sync-server
-catalog_binary=${repository_root}/target/${catalog_target}/release/catalog-server
-metadata_binary=${repository_root}/target/${cargo_target}/release/metadata-server
-for required in "${sync_binary}" "${catalog_binary}" "${metadata_binary}"; do
+for required in "${sync_binary}"; do
     if [[ ! -x ${required} ]]; then
         echo "missing executable release artifact: ${required}" >&2
         exit 1
     fi
 done
-# PDFium is a shared library, so the catalogue uses a dynamic GNU build.
-# Reject a build-machine glibc newer than the destination before transferring it.
-required_glibc=$(readelf --version-info "${catalog_binary}" "${repository_root}/.pdfium/${catalog_target}/libpdfium.so" | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' | sort -V | tail -n 1)
-remote_glibc=$(ssh "${ssh_options[@]}" "${remote}" 'getconf GNU_LIBC_VERSION' | awk '{print $2}')
-if [[ -z ${required_glibc} || -z ${remote_glibc} || $(printf '%s\n' "${required_glibc}" "${remote_glibc}" | sort -V | tail -n 1) != "${remote_glibc}" ]]; then
-    echo "Catalogue/PDFium requires glibc ${required_glibc:-unknown}; destination has ${remote_glibc:-unknown}. Build in a GNU environment compatible with the destination." >&2
-    exit 1
-fi
-for required in "${repository_root}/servers/opds-cache/opds.json" "${repository_root}/servers/sync/deploy/bokheim-sync.service" "${repository_root}/servers/opds-cache/deploy/bokheim-catalogs.service" "${repository_root}/servers/metadata/deploy/bokheim-metadata.service"; do
+for required in "${repository_root}/servers/sync/deploy/bokheim-sync.service"; do
     if [[ ! -f ${required} ]]; then
         echo "missing deployment file: ${required}" >&2
         exit 1
@@ -91,29 +74,23 @@ for required in "${repository_root}/servers/opds-cache/opds.json" "${repository_
 done
 
 install -m 0755 "${sync_binary}" "${stage}/sync-server"
-install -m 0755 "${catalog_binary}" "${stage}/catalog-server"
-python3 "${repository_root}/shared/pdfium/prepare.py" --target "${catalog_target}" --dest "${stage}/pdfium" --offline
-install -m 0755 "${metadata_binary}" "${stage}/metadata-server"
-install -m 0644 "${repository_root}/servers/opds-cache/opds.json" "${stage}/opds.json"
 install -m 0644 "${repository_root}/servers/sync/deploy/bokheim-sync.service" "${stage}/bokheim-sync.service"
-install -m 0644 "${repository_root}/servers/opds-cache/deploy/bokheim-catalogs.service" "${stage}/bokheim-catalogs.service"
-install -m 0644 "${repository_root}/servers/metadata/deploy/bokheim-metadata.service" "${stage}/bokheim-metadata.service"
 echo "Checking SSH access to ${remote}..."
 remote_stage=$(ssh "${ssh_options[@]}" "${remote}" "mktemp -d '${remote_prefix}.XXXXXX'")
 scp "${ssh_options[@]}" "${stage}"/* "${remote}:${remote_stage}/"
 ssh "${ssh_options[@]}" "${remote}" \
-    "if test -d /var/lib/bokheim-deploy/incoming; then mv /var/lib/bokheim-deploy/incoming /var/lib/bokheim-deploy/previous.\$\$; fi; mv '${remote_stage}' /var/lib/bokheim-deploy/incoming"
-remote_stage=/var/lib/bokheim-deploy/incoming
+    "chmod 0755 '${remote_stage}' && if test -d /var/lib/bokheim-deploy/sync-incoming; then mv /var/lib/bokheim-deploy/sync-incoming /var/lib/bokheim-deploy/sync-previous.\$\$; fi; mv '${remote_stage}' /var/lib/bokheim-deploy/sync-incoming"
+remote_stage=/var/lib/bokheim-deploy/sync-incoming
 
 if [[ ${stage_only} == true ]]; then
     keep_remote_stage=true
     echo "Release staged on ${remote}."
-    echo "Activate with: sudo /usr/local/sbin/bokheim-deploy-servers"
+    echo "Activate with: sudo /usr/local/sbin/bokheim-deploy-sync"
     exit 0
 fi
 
 echo "Installing staged release on ${remote}..."
-ssh "${ssh_options[@]}" "${remote}" "sudo -n /usr/local/sbin/bokheim-deploy-servers"
+ssh "${ssh_options[@]}" "${remote}" "sudo -n /usr/local/sbin/bokheim-deploy-sync"
 keep_remote_stage=true
 
 echo "Deployment completed successfully on ${remote}."

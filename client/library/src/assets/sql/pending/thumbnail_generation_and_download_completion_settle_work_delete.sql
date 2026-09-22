@@ -1,1 +1,0 @@
-DELETE FROM local_thumbnail_work

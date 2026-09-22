@@ -1,5 +1,7 @@
 //! Shared bibliographic normalization for ebook and audiobook discovery.
 use std::collections::BTreeSet;
+mod normalized;
+pub use normalized::{author_suffix, matching_author_count, NormalizedAuthor, NormalizedTitle};
 use unicode_normalization::UnicodeNormalization;
 
 pub fn bibliographic_match_key(value: &str) -> String {
@@ -27,11 +29,14 @@ pub fn bibliographic_match_key(value: &str) -> String {
 /// separated by other punctuation. Keep the legacy key for stored-index queries.
 pub fn title_apostrophe_variant(value: &str) -> String {
     let chars = value.chars().collect::<Vec<_>>();
-    chars.iter().enumerate().filter_map(|(i, &c)| {
-        let internal = matches!(c, '\'' | '’' | 'ʼ') && i > 0 && i + 1 < chars.len()
-            && chars[i - 1].is_alphanumeric() && chars[i + 1].is_alphanumeric();
-        (!internal).then_some(c)
-    }).collect()
+    chars
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &c)| {
+            let internal = matches!(c, '\'' | '’' | 'ʼ') && i > 0 && i + 1 < chars.len() && chars[i - 1].is_alphanumeric() && chars[i + 1].is_alphanumeric();
+            (!internal).then_some(c)
+        })
+        .collect()
 }
 
 pub fn bibliographic_title_match_key(value: &str) -> String {
@@ -40,12 +45,15 @@ pub fn bibliographic_title_match_key(value: &str) -> String {
 
 /// Honorifics affect display, not author identity. Handle surname-first credits too.
 pub fn author_name_match_key(value: &str) -> String {
-    value.split(',').map(|part| {
-        let key = bibliographic_match_key(part);
-        key.split_whitespace().skip_while(|word| matches!(*word,
-            "dr" | "doctor" | "prof" | "professor" | "mr" | "mrs" | "ms" | "miss" | "sir" | "dame" | "rev" | "reverend"))
-            .collect::<Vec<_>>().join(" ")
-    }).filter(|part| !part.is_empty()).collect::<Vec<_>>().join(" ")
+    value
+        .split(',')
+        .map(|part| {
+            let key = bibliographic_match_key(part);
+            key.split_whitespace().skip_while(|word| matches!(*word, "dr" | "doctor" | "prof" | "professor" | "mr" | "mrs" | "ms" | "miss" | "sir" | "dame" | "rev" | "reverend")).collect::<Vec<_>>().join(" ")
+        })
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn author_match_keys(value: &str) -> BTreeSet<String> {
@@ -58,27 +66,24 @@ pub fn author_match_keys(value: &str) -> BTreeSet<String> {
 }
 
 pub fn author_match_tokens(value: &str) -> BTreeSet<String> {
-    author_match_keys(value).into_iter().flat_map(|key| key.split_whitespace().map(str::to_owned).collect::<Vec<_>>()).filter(|token| token.len() > 1 && !matches!(token.as_str(), "jr" | "sr" | "ii" | "iii" | "iv" | "v")).collect()
+    NormalizedAuthor::new(value).candidate_tokens()
 }
 
 /// Compare author credits, allowing an omitted middle initial only. Full-name
 /// tokens and their order must agree; conflicting stated initials stay distinct.
 pub fn author_names_compatible(left: &str, right: &str) -> bool {
-    let left = author_match_keys(left);
-    let right = author_match_keys(right);
-    if !left.is_disjoint(&right) {
+    let left = NormalizedAuthor::new(left);
+    let right = NormalizedAuthor::new(right);
+    if !left.keys.is_disjoint(&right.keys) {
         return true;
     }
-    left.iter().any(|a| {
-        right.iter().any(|b| {
-            let mut a = a.split_whitespace().collect::<Vec<_>>();
-            let mut b = b.split_whitespace().collect::<Vec<_>>();
-            let suffix = |tokens: &mut Vec<&str>| {
-                if tokens.last().is_some_and(|s| matches!(*s, "jr" | "sr" | "ii" | "iii" | "iv")) { tokens.pop().map(str::to_owned) } else { None }
-            };
-            let a_suffix = suffix(&mut a);
-            let b_suffix = suffix(&mut b);
-            if a_suffix.is_some() && b_suffix.is_some() && a_suffix != b_suffix { return false; }
+    left.variants.iter().any(|a| {
+        right.variants.iter().any(|b| {
+            if a.suffix.is_some() && b.suffix.is_some() && a.suffix != b.suffix {
+                return false;
+            }
+            let a = a.words.iter().map(String::as_str).collect::<Vec<_>>();
+            let b = b.words.iter().map(String::as_str).collect::<Vec<_>>();
             if a.len() < 2 || b.len() < 2 || a[0] != b[0] || a.last() != b.last() || a[0].chars().count() < 2 || a.last().unwrap().chars().count() < 2 {
                 return false;
             }
@@ -157,19 +162,37 @@ pub fn title_substring_keys(value: &str, limit: usize) -> Vec<(String, usize)> {
     substrings
 }
 
+/// Words whose parenthetical placement must never hide a structural distinction.
+pub fn is_title_qualifier_word(word: &str) -> bool {
+    matches!(word, "volume" | "vol" | "part" | "book" | "abridged" | "abridgment" | "abridgement" | "adapted" | "adaptation" | "retold" | "retelling" | "workbook" | "activity" | "selections" | "solutions" | "answers")
+}
+
 pub fn title_qualifiers(title: &str) -> BTreeSet<String> {
     let normalized = bibliographic_match_key(title);
     let words = normalized.split_whitespace().collect::<Vec<_>>();
     let mut qualifiers = BTreeSet::new();
-    for (index,word) in words.iter().enumerate() {
-        if matches!(*word,"volume"|"vol"|"part"|"book") {
-            if let Some(number) = words.get(index+1).and_then(|s| match *s {
-                "i"|"one" => Some("1"), "ii"|"two" => Some("2"), "iii"|"three" => Some("3"), "iv"|"four" => Some("4"),
-                "v"|"five" => Some("5"), "vi"|"six" => Some("6"), "vii"|"seven" => Some("7"), "viii"|"eight" => Some("8"), "ix"|"nine" => Some("9"), "x"|"ten" => Some("10"),
-                s if s.bytes().all(|c| c.is_ascii_digit()) => Some(s), _ => None
-            }) { qualifiers.insert(format!("{}:{number}",if *word=="vol" {"volume"} else {word})); }
+    for (index, word) in words.iter().enumerate() {
+        if matches!(*word, "volume" | "vol" | "part" | "book") {
+            if let Some(number) = words.get(index + 1).and_then(|s| match *s {
+                "i" | "one" => Some("1"),
+                "ii" | "two" => Some("2"),
+                "iii" | "three" => Some("3"),
+                "iv" | "four" => Some("4"),
+                "v" | "five" => Some("5"),
+                "vi" | "six" => Some("6"),
+                "vii" | "seven" => Some("7"),
+                "viii" | "eight" => Some("8"),
+                "ix" | "nine" => Some("9"),
+                "x" | "ten" => Some("10"),
+                s if s.bytes().all(|c| c.is_ascii_digit()) => Some(s),
+                _ => None,
+            }) {
+                qualifiers.insert(format!("{}:{number}", if *word == "vol" { "volume" } else { word }));
+            }
         }
-        if matches!(*word,"abridged"|"abridgment"|"abridgement"|"adapted"|"adaptation"|"retold"|"retelling"|"workbook"|"activity"|"selections") { qualifiers.insert(word.to_string()); }
+        if matches!(*word, "abridged" | "abridgment" | "abridgement" | "adapted" | "adaptation" | "retold" | "retelling" | "workbook" | "activity" | "selections") {
+            qualifiers.insert(word.to_string());
+        }
     }
     qualifiers
 }
@@ -180,16 +203,19 @@ pub fn author_credits(values: &[String]) -> Vec<String> {
     for value in values {
         let mut parts = vec![value.trim().to_owned()];
         for separator in [" with ", " and ", " & ", ";"] {
-            parts = parts.into_iter().flat_map(|part| {
-                let mut result = Vec::new();
-                let mut rest = part.as_str();
-                while let Some(index) = rest.as_bytes().windows(separator.len()).position(|window| window.eq_ignore_ascii_case(separator.as_bytes())) {
-                    result.push(rest[..index].trim().to_owned());
-                    rest = &rest[index + separator.len()..];
-                }
-                result.push(rest.trim().to_owned());
-                result
-            }).collect();
+            parts = parts
+                .into_iter()
+                .flat_map(|part| {
+                    let mut result = Vec::new();
+                    let mut rest = part.as_str();
+                    while let Some(index) = rest.as_bytes().windows(separator.len()).position(|window| window.eq_ignore_ascii_case(separator.as_bytes())) {
+                        result.push(rest[..index].trim().to_owned());
+                        rest = &rest[index + separator.len()..];
+                    }
+                    result.push(rest.trim().to_owned());
+                    result
+                })
+                .collect();
         }
         for part in parts {
             let chunks = part.split(',').map(str::trim).collect::<Vec<_>>();
@@ -199,9 +225,13 @@ pub fn author_credits(values: &[String]) -> Vec<String> {
                 let mut names = vec![format!("{} {} {}", chunks[1], chunks[0], chunks[2])];
                 names.extend(chunks[3..].iter().map(|s| (*s).to_owned()));
                 names
-            } else { vec![part] };
+            } else {
+                vec![part]
+            };
             for name in expanded {
-                if !name.is_empty() && !credits.contains(&name) { credits.push(name); }
+                if !name.is_empty() && !credits.contains(&name) {
+                    credits.push(name);
+                }
             }
         }
     }

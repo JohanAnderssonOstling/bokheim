@@ -1,1 +1,0 @@
-SELECT COUNT(*) FROM sync_outbox WHERE state_kind LIKE 'directory_%' AND state_key=?1

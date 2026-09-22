@@ -60,25 +60,39 @@ pub(crate) fn isbns_in_text(text: &str) -> Vec<String> {
     let mut found = std::collections::BTreeSet::new();
     let mut consumed_until = 0;
     for start in 0..chars.len() {
-        let isbn_label = start >= 4 && chars[start - 4..start].iter().collect::<String>().eq_ignore_ascii_case("isbn")
-            && (start == 4 || !chars[start - 5].is_alphanumeric());
-        if start < consumed_until || !chars[start].is_ascii_digit() || (start > 0 && chars[start - 1].is_alphanumeric() && !isbn_label) { continue; }
+        let isbn_label = start >= 4 && chars[start - 4..start].iter().collect::<String>().eq_ignore_ascii_case("isbn") && (start == 4 || !chars[start - 5].is_alphanumeric());
+        if start < consumed_until || !chars[start].is_ascii_digit() || (start > 0 && chars[start - 1].is_alphanumeric() && !isbn_label) {
+            continue;
+        }
         // A hyphen inside a longer numeric token is not a new ISBN boundary.
-        if start > 1 && separator(chars[start - 1]) && !chars[start - 1].is_whitespace() && chars[start - 2].is_ascii_digit() { continue; }
+        if start > 1 && separator(chars[start - 1]) && !chars[start - 1].is_whitespace() && chars[start - 2].is_ascii_digit() {
+            continue;
+        }
         let mut compact = String::new();
         let mut candidate = None;
         for end in start..chars.len() {
             let c = chars[end];
-            if c.is_ascii_digit() || matches!(c, 'x' | 'X') { compact.push(c); }
-            else if separator(c) { continue; }
-            else { break; }
-            if compact.len() > 13 { break; }
+            if c.is_ascii_digit() || matches!(c, 'x' | 'X') {
+                compact.push(c);
+            } else if separator(c) {
+                continue;
+            } else {
+                break;
+            }
+            if compact.len() > 13 {
+                break;
+            }
             let boundary = chars.get(end + 1).is_none_or(|c| !c.is_alphanumeric() && !matches!(c, '-' | '‐' | '‑' | '–'));
             if boundary && (compact.len() == 10 || (compact.len() == 13 && (compact.starts_with("978") || compact.starts_with("979")))) {
-                if let Some(isbn) = canonical_isbn(&compact) { candidate = Some((isbn, end + 1)); }
+                if let Some(isbn) = canonical_isbn(&compact) {
+                    candidate = Some((isbn, end + 1));
+                }
             }
         }
-        if let Some((isbn, end)) = candidate { found.insert(isbn); consumed_until = end; }
+        if let Some((isbn, end)) = candidate {
+            found.insert(isbn);
+            consumed_until = end;
+        }
     }
     found.into_iter().collect()
 }
@@ -88,7 +102,15 @@ mod embedded_isbn_tests {
     use super::*;
     #[test]
     fn embedded_isbns_accept_titles_labels_and_common_separators() {
-        for text in ["9780131103627 The C Programming Language", "The C Programming Language (ISBN: 978-0-13-110362-7)", "ISBN-13: 978 0 13 110362 7", "ISBN: 978‑0‑13‑110362‑7", "urn:isbn:9780131103627", "ISBN9780131103627", "9780131103627, 9780131103627"] {
+        for text in [
+            "9780131103627 The C Programming Language",
+            "The C Programming Language (ISBN: 978-0-13-110362-7)",
+            "ISBN-13: 978 0 13 110362 7",
+            "ISBN: 978‑0‑13‑110362‑7",
+            "urn:isbn:9780131103627",
+            "ISBN9780131103627",
+            "9780131103627, 9780131103627",
+        ] {
             assert_eq!(isbns_in_text(text), vec!["9780131103627"], "{text}");
         }
         assert_eq!(isbns_in_text("ISBN-10: 0-8044-2957-X"), vec!["080442957X"]);
@@ -101,18 +123,17 @@ mod embedded_isbn_tests {
         }
     }
     #[test]
-    fn promotion_preserves_subjects_and_explicit_identifier_provenance() {
+    fn promotion_preserves_subjects_and_explicit_identifiers() {
         use crate::*;
         let subject = BookSubject::new(None, "ISBN: 9780131103627 The C Programming Language", "dc:subject", None, None).unwrap();
         let mut metadata = BookMetadata { subjects: vec![subject.clone()], ..BookMetadata::default() };
         metadata.infer_embedded_subject_isbns().unwrap();
         metadata.infer_embedded_subject_isbns().unwrap();
         assert_eq!(metadata.identifiers.len(), 1);
-        assert_eq!(metadata.identifiers[0].source(), "embedded-subject-isbn");
         assert_eq!(metadata.subjects, vec![subject]);
-        metadata.identifiers = vec![Identifier::new("9780131103627", Scheme::Isbn, Scope::Edition, "explicit").unwrap()];
+        metadata.identifiers = vec![Identifier::new("9780131103627", Scheme::Isbn, Scope::Edition).unwrap()];
         metadata.infer_embedded_subject_isbns().unwrap();
         assert_eq!(metadata.identifiers.len(), 1);
-        assert_eq!(metadata.identifiers[0].source(), "explicit");
+        assert_eq!(metadata.identifiers[0], Identifier::new("9780131103627", Scheme::Isbn, Scope::Edition).unwrap());
     }
 }

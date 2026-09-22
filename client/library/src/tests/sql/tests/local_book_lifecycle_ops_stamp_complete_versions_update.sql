@@ -1,1 +1,0 @@
-UPDATE book SET deleted_at=1 WHERE content_hash=printf('%064x',1)

@@ -30,6 +30,12 @@ impl Service {
         let job = self.0.borrow_mut().policy.take_finished(key, id, connection_failed);
         self.reply(job, result);
     }
+    fn progress(&self, key: &str, id: u32, fraction: f64) {
+        let message = object(&[("kind", "progress".into()), ("fraction", fraction.into())]);
+        self.0.borrow_mut().policy.report_progress(key, id, fraction, |port| {
+            let _ = port.raw.post_message(&message);
+        });
+    }
 }
 
 /// Shared transfer ports, completion delivery and callback cleanup in Rust.
@@ -65,6 +71,7 @@ impl TransferService {
                     drop(cancelled);
                 }
                 Ok(TransferEvent::Complete) => service.finish(&message_key, id, false, data),
+                Ok(TransferEvent::Progress(fraction)) => service.progress(&message_key, id, fraction),
                 Err(error) => service.finish(&message_key, id, true, object(&[("kind", "error".into()), ("error", error.into())])),
             }
         };
@@ -88,6 +95,8 @@ impl TransferService {
             if let Err(error) = port.post_message(&object(&[("kind", "run".into())])) {
                 self.0.finish(&key, id, true, object(&[("kind", "error".into()), ("error", error_message(&error).into())]));
             }
+        } else if let Some(fraction) = self.0 .0.borrow().policy.latest_progress(&key) {
+            let _ = port.post_message(&object(&[("kind", "progress".into()), ("fraction", fraction.into())]));
         }
     }
 

@@ -6,4 +6,4 @@
 
 pub(crate) mod preferences;
 
-pub(crate) use preferences::Preferences;
+pub(crate) use preferences::{CoverTextSetting, Preferences, current_cover_text};

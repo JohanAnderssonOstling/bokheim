@@ -1,14 +1,14 @@
 use super::*;
 use crate::{BlobKind, DownloadProgress, DownloadState, RelativeBookPath, ServerUrl};
-use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Response, StatusCode};
 use axum::routing::{get, post, put};
+use axum::Router;
 use library_database::TransferOutcome;
 use reqwest::Client;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use test_support::fixture_content_hash;
 
 const TEST_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -69,7 +69,7 @@ fn transfer_statuses_are_aggregated_with_stable_batch_progress() {
 fn completed_batch_history_survives_queue_recreation() {
     let root = tempfile::tempdir().unwrap();
     let history_path = root.path().join("transfer-history-v1.msgpack");
-    let db = library_database::Database::open(root.path().join("history.sqlite3").to_str().unwrap()).unwrap();
+    let db = Arc::new(library_database::Database::open(root.path().join("history.sqlite3").to_str().unwrap()).unwrap());
     let queue = queue_with_history(&db, history_path.clone());
     let hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     queue.reconcile(vec![queued_upload(hash, TransferOrigin::Background)]);
@@ -170,7 +170,7 @@ fn only_one_scheduler_owns_the_queue() {
 }
 
 /// The upload path deliberately does not inspect book format; the library is
-/// a catalogue of the user's files, not an upload trust boundary. What it
+/// an inventory of the user's files, not an upload trust boundary. What it
 /// must still refuse is bytes that do not match the content hash they claim
 /// to be, and it must refuse them before any network I/O.
 #[tokio::test]
@@ -199,7 +199,7 @@ async fn upload_rejects_empty_books_without_network_io() {
 
     let error = worker.upload_blob(&hash).await.unwrap_err();
 
-    assert!(matches!(error, TransferError::Rejected(message) if message.contains("local book is empty")));
+    assert!(matches!(error, TransferError::Rejected(message) if message.to_string().contains("local book is empty")));
 }
 
 #[test]
@@ -271,7 +271,7 @@ async fn batch_negotiation_completes_existing_revisions_without_local_file_reads
 async fn upload_reader_selects_the_exact_revision_among_multiple_placements() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("original.m4b");
-    std::fs::write(&source, include_bytes!("../../../../backend/tests/fixtures/embedded-cover.m4b")).unwrap();
+    std::fs::write(&source, include_bytes!("../../../../app/tests/fixtures/embedded-cover.m4b")).unwrap();
     let identity = book_identity::ensure(&source).unwrap();
     let original = std::fs::read(&source).unwrap();
     let mut edited = original.clone();
@@ -294,8 +294,12 @@ async fn upload_reader_selects_the_exact_revision_among_multiple_placements() {
 /// touch the owner.
 fn worker_with_placement(root: &Path, server_url: ServerUrl, content_hash: &ContentHash) -> (TransferWorker, library_database::Database) {
     // Placement rows name Shelf/ files; materialize the directory the way
-    // placement recovery would so file reads resolve.
+    // placement recovery would so file reads resolve. The ownership marker
+    // must match `d1` too, or later directory-work reconciliation (queued
+    // whenever a placed book finishes downloading) sees an unmarked folder
+    // and renames it aside instead of recognizing it as already correct.
     std::fs::create_dir_all(root.join("Shelf")).unwrap();
+    std::fs::write(root.join("Shelf/.biblos_uuid"), test_support::fixture_dir_id("d1").to_string()).unwrap();
     let db_path = root.join(crate::APP_HIDDEN_LIBRARY_DB_PATH);
     let database = library_database::Database::open(&db_path).unwrap();
     database.initialize_library().unwrap();
@@ -324,7 +328,7 @@ fn worker_with_placement(root: &Path, server_url: ServerUrl, content_hash: &Cont
 }
 
 #[tokio::test]
-async fn complete_download_publishes_directly_and_other_placements_copy_from_it_with_asset_storage_disabled() {
+async fn complete_download_publishes_directly_and_the_reader_prefers_it_with_asset_storage_disabled() {
     let bytes = b"a complete epub payload stored by the common transfer worker".to_vec();
     let content_hash = ContentHash::new(&blake3::hash(&bytes).to_hex().as_str());
     let saw_request = Arc::new(AtomicBool::new(false));
@@ -367,7 +371,11 @@ async fn complete_download_publishes_directly_and_other_placements_copy_from_it_
     _pool.queue_directory_work(&crate::ROOT_DIR_ID).unwrap();
     worker.assets.run_file_jobs(&_pool).await.unwrap();
     assert_eq!(std::fs::read(root.path().join("Shelf/book.epub")).unwrap(), bytes);
-    assert_eq!(std::fs::read(root.path().join("second.epub")).unwrap(), bytes);
+    // "second.epub" has no local bytes and nothing materializes it; the
+    // reader must still resolve to the downloaded placement instead of
+    // failing on the empty one.
+    assert!(!root.path().join("second.epub").exists());
+    assert_eq!(_pool.local_book_info(&content_hash).unwrap().path.as_deref(), Some("/Shelf/book.epub"));
     assert!(saw_request.load(Ordering::SeqCst));
     assert_eq!(worker.assets.read(BlobKind::Book, &content_hash).unwrap().unwrap(), bytes);
     assert_eq!(_pool.thumbnail_work_state(&content_hash).unwrap().unwrap().0, "pending", "download completion must persist cover work");
@@ -405,7 +413,7 @@ async fn book_download_rejects_a_missing_transfer_checksum() {
 async fn book_revision_download_and_upload_verify_checksum_separately_from_identity() {
     let fixture = tempfile::tempdir().unwrap();
     let path = fixture.path().join("book.m4b");
-    std::fs::write(&path, include_bytes!("../../../../backend/tests/fixtures/embedded-cover.m4b")).unwrap();
+    std::fs::write(&path, include_bytes!("../../../../app/tests/fixtures/embedded-cover.m4b")).unwrap();
     let identity = book_identity::ensure(&path).unwrap();
     let bytes = std::fs::read(path).unwrap();
     let checksum = ContentHash::new(blake3::hash(&bytes).to_hex().as_str());
@@ -443,7 +451,7 @@ async fn book_revision_download_and_upload_verify_checksum_separately_from_ident
     assert_eq!(worker.assets.read(BlobKind::Book, &identity).unwrap().unwrap(), bytes);
     worker.upload_blob(&identity).await.unwrap();
     assert!(!uploaded.load(Ordering::SeqCst), "a completed download is not upload intent");
-    &pool.queue_book_upload(&identity, &checksum, bytes.len().unwrap() as u64);
+    &pool.queue_book_upload(&identity, &checksum, bytes.len() as u64);
     worker.upload_blob(&identity).await.unwrap();
     assert!(uploaded.load(Ordering::SeqCst));
     server.abort();
@@ -537,6 +545,19 @@ async fn corrupt_remote_blob_invalidates_remote_fact_and_resolves_request() {
 #[cfg(feature = "app-integration-tests")]
 #[tokio::test]
 async fn detached_transfers_refresh_once_and_keep_failures_in_the_queue() {
+    #[derive(Clone, Debug)]
+    struct Persistence;
+    impl account_client::SessionPersistence for Persistence {
+        fn load_account_session(&self) -> std::io::Result<Option<account_client::Session>> {
+            Ok(None)
+        }
+        fn save_account_session(&self, _: &account_client::Session) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn clear_account_session(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
     // Successful refresh, revoked refresh, transient refresh failure, and an
     // access token rejected even after refresh all run without a sync caller.
     for (refresh_status, reject_again) in [(StatusCode::OK, false), (StatusCode::UNAUTHORIZED, false), (StatusCode::SERVICE_UNAVAILABLE, false), (StatusCode::OK, true)] {
@@ -587,8 +608,7 @@ async fn detached_transfers_refresh_once_and_keep_failures_in_the_queue() {
         std::fs::create_dir_all(root.path().join(crate::APP_HIDDEN_DIR)).unwrap();
         let hash = fixture_content_hash(75);
         let (mut worker, pool) = worker_with_placement(root.path(), url.clone(), &hash);
-        let persistence = crate::app::BackendContext::initialize(crate::AppDataLocation::native_path(root.path().join("account"))).unwrap();
-        let account = crate::DeviceAccountSession::load(persistence, url.clone()).unwrap();
+        let account = library_runtime::account::LibraryAccountSession::load(Persistence, url.clone()).unwrap();
         account.set(account_client::Session::try_new_with_tokens(url, "transfer-user".into(), "reader@example.com".into(), TEST_TOKEN.into(), Some(now + 3600), Some("r".repeat(43)), Some(now + 7200)).unwrap()).unwrap();
         worker.credentials = account.shared_sync_credentials();
         worker.account = Some(account.library_account());
@@ -845,7 +865,7 @@ async fn upload_applies_response_despite_account_switch() {
         let hash = ContentHash::new(blake3::hash(bytes).to_hex().as_str());
         let (worker, pool) = worker_with_placement(root.path(), ServerUrl::parse(&format!("http://{address}")).unwrap(), &hash);
         std::fs::write(root.path().join("Shelf/book.epub"), bytes).unwrap();
-        &pool.queue_book_upload(&hash, &hash, bytes.len().unwrap() as u64);
+        &pool.queue_book_upload(&hash, &hash, bytes.len() as u64);
         let change_account = async {
             started.notified().await;
             release.notify_one();
@@ -896,7 +916,7 @@ async fn a_scan_during_upload_keeps_the_new_version_queued() {
         pool.touch_all_placement_hashes();
         release.notify_one();
     };
-    &pool.queue_book_upload(&hash, &hash, bytes.len().unwrap() as u64);
+    &pool.queue_book_upload(&hash, &hash, bytes.len() as u64);
     let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async { tokio::join!(worker.upload_blob(&hash), change_version) }).await.unwrap();
     assert!(matches!(result, Err(TransferError::Retryable(_))), "{result:?}");
     assert!(pool.remote_asset_hashes(BlobKind::Book).unwrap().is_empty());
@@ -952,7 +972,7 @@ async fn rejected_book_upload_is_durably_suppressed() {
     let (worker, pool) = worker_with_placement(root.path(), ServerUrl::parse(&format!("http://{address}")).unwrap(), &content_hash);
     std::fs::write(root.path().join("Shelf/book.epub"), bytes).unwrap();
 
-    &pool.queue_book_upload(&content_hash, &content_hash, bytes.len().unwrap() as u64);
+    &pool.queue_book_upload(&content_hash, &content_hash, bytes.len() as u64);
     worker.clone().run(vec![TransferJob::upload_blob(content_hash, TransferOrigin::Background)]).await.unwrap();
 
     assert!(pool.rejected_asset_upload_hashes(BlobKind::Book).unwrap().contains(&content_hash));
@@ -970,7 +990,11 @@ async fn rejected_thumbnail_upload_does_not_suppress_its_peers() {
         put(move |body: axum::body::Bytes| async move {
             let request: sync_common::api::assets::ThumbnailBatchUploadRequest = sync_common::transport::decode(&body, sync_common::wire::MAX_DECODED_REQUEST_BYTES).unwrap();
             assert_eq!(request.thumbnails.len(), 1);
-            if request.thumbnails[0].content_hash == rejected { StatusCode::FORBIDDEN } else { StatusCode::OK }
+            if request.thumbnails[0].content_hash == rejected {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::OK
+            }
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1092,7 +1116,7 @@ async fn upload_keeps_verified_reader_across_negotiation() {
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let (worker, pool) = worker_with_placement(root.path(), ServerUrl::parse(&format!("http://{address}")).unwrap(), &hash);
     std::fs::write(source, bytes).unwrap();
-    &pool.queue_book_upload(&hash, &hash, bytes.len().unwrap() as u64);
+    &pool.queue_book_upload(&hash, &hash, bytes.len() as u64);
     worker.upload_blob(&hash).await.unwrap();
     assert!(negotiated.load(Ordering::SeqCst));
     server.abort();
@@ -1147,9 +1171,10 @@ async fn thumbnail_availability_only_queues_missing_locally_authored_covers() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(root.path().join(crate::APP_HIDDEN_DIR)).unwrap();
     let (worker, pool) = worker_with_placement(root.path(), ServerUrl::parse(&format!("http://{address}")).unwrap(), &hash);
-    // Thumbnail uploads are only eligible with a local book intent behind
-    // them; the fixture queues one the way planning would have seen it.
-    &pool.queue_book_upload(&hash, &hash, 1).unwrap();
+    // A cover becomes uploadable after its parent book has reached the
+    // server. Its local upload intent has already been consumed by then.
+    pool.record_remote_asset(BlobKind::Book, &hash).unwrap();
+    pool.execute("DELETE FROM sync_outbox WHERE state_kind='book_lifecycle' AND state_key=?1", [hash.as_str()]).unwrap();
     pool.complete_thumbnail_work(&hash, true).unwrap();
     // Planning negotiates over a snapshot and the session commits before
     // asserting, exactly like the production planning pass.
@@ -1277,7 +1302,7 @@ async fn book_batch_streams_multiple_files_and_preserves_per_book_outcomes() {
         let mut claimed = Vec::new();
         for (i, (&hash, bytes)) in identities.iter().zip(&payloads).enumerate() {
             let checksum = ContentHash::new(blake3::hash(bytes).to_hex().as_str());
-            &pool.queue_book_upload(&hash, &checksum, bytes.len().unwrap() as u64);
+            &pool.queue_book_upload(&hash, &checksum, bytes.len() as u64);
             let intent = pool.book_upload_intent(&hash).unwrap().unwrap();
             let intent = library_replica::BookUploadIntent { id: intent.id, content_hash: intent.content_hash, checksum: intent.checksum, size_bytes: intent.size_bytes };
             claimed.push(asset_transfer::ClaimedTransferJob { id: i as u64, job: TransferJob::upload_book_intent(intent, true, TransferOrigin::Background) });
@@ -1315,6 +1340,56 @@ async fn book_batch_streams_multiple_files_and_preserves_per_book_outcomes() {
         }
         server.abort();
     }
+}
+
+#[tokio::test]
+async fn large_book_uploads_run_together_and_commit_without_waiting_for_drain() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join(crate::APP_HIDDEN_DIR)).unwrap();
+    let size = sync_common::book_batch::MAX_BOOK_BYTES as usize + 1;
+    let payloads = [vec![b'a'; size], vec![b'b'; size]];
+    let hashes = payloads.iter().map(|bytes| ContentHash::new(blake3::hash(bytes).to_hex().as_str())).collect::<Vec<_>>();
+    let rendezvous = Arc::new(tokio::sync::Barrier::new(2));
+    let library = test_support::fixture_library_id("library");
+    let app = Router::new()
+        .route(
+            &format!("/api/libraries/{library}/blobs/:hash"),
+            put(move |_: axum::body::Bytes| {
+                let rendezvous = rendezvous.clone();
+                async move {
+                    rendezvous.wait().await;
+                    StatusCode::OK
+                }
+            }),
+        )
+        .layer(axum::extract::DefaultBodyLimit::disable());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (worker, pool) = worker_with_placement(root.path(), ServerUrl::parse(&format!("http://{address}")).unwrap(), &hashes[0]);
+    for (name, bytes) in ["book.epub", "second.epub"].into_iter().zip(&payloads) {
+        std::fs::write(root.path().join("Shelf").join(name), bytes).unwrap();
+    }
+    pool.seed_book(&hashes[1], None, 1, "epub");
+    pool.add_book_placement(&test_support::fixture_dir_id("d1"), &hashes[1], "second.epub", "", false);
+    let claimed = hashes
+        .iter()
+        .zip(&payloads)
+        .enumerate()
+        .map(|(index, (hash, bytes))| {
+            pool.queue_book_upload(hash, hash, bytes.len() as u64).unwrap();
+            let intent = pool.book_upload_intent(hash).unwrap().unwrap();
+            let intent = library_replica::BookUploadIntent { id: intent.id, content_hash: intent.content_hash, checksum: intent.checksum, size_bytes: intent.size_bytes };
+            asset_transfer::ClaimedTransferJob { id: index as u64, job: TransferJob::upload_book_intent(intent, true, TransferOrigin::Background) }
+        })
+        .collect::<Vec<_>>();
+    let snapshot = pool.transfer_snapshot(&hashes).unwrap();
+    let mut outcome = TransferOutcome::default();
+    let results = tokio::time::timeout(std::time::Duration::from_secs(20), worker.upload_claimed_books_with_refresh(&snapshot, &claimed, &mut outcome)).await.unwrap().unwrap();
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    assert!(outcome.writes.is_empty(), "large books commit individually");
+    assert_eq!(pool.remote_asset_hashes(BlobKind::Book).unwrap().len(), 2);
+    server.abort();
 }
 
 #[tokio::test]

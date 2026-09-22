@@ -13,15 +13,17 @@ pub fn app(service: MetadataService) -> Router {
         .route("/v2/classifications", post(rich_classifications))
         .route("/v2/enrichment", post(rich_enrichment))
         .route("/v2/edition-identities", post(edition_identities))
-        .route("/v2/audiobooks/audible", post(audible_lookup).layer(DefaultBodyLimit::max(metadata_contract::audible::MAX_LOOKUP_REQUEST_BYTES)))
+        .route("/v2/audiobooks/audible", post(audible_lookup).get(audible_cover).layer::<_, std::convert::Infallible>(DefaultBodyLimit::max(metadata_contract::audible::MAX_LOOKUP_REQUEST_BYTES)).layer(audiobook_cors()))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .layer(middleware::from_fn_with_state(service.clone(), record_request_metrics))
         .with_state(service)
 }
 
 async fn librarything_stats(State(service): State<MetadataService>) -> Response {
-    let Some(client) = service.librarything.clone() else { return axum::Json(serde_json::json!({"enabled":false})).into_response(); };
-    match tokio::task::spawn_blocking(move ||crate::librarything_background::stats(&client)).await {
+    let Some(client) = service.librarything.clone() else {
+        return axum::Json(serde_json::json!({"enabled":false})).into_response();
+    };
+    match tokio::task::spawn_blocking(move || crate::librarything_background::stats(&client)).await {
         Ok(Ok(stats)) => axum::Json(stats).into_response(),
         Ok(Err(e)) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -279,8 +281,58 @@ pub(crate) fn api_error(status: StatusCode, message: &str) -> Response {
     (status, [(header::CONTENT_TYPE, "text/plain; charset=utf-8")], message.to_owned()).into_response()
 }
 
+#[derive(serde::Deserialize)]
+struct AudibleCoverQuery {
+    region: String,
+    asin: String,
+}
+
+async fn audible_cover(axum::extract::Query(AudibleCoverQuery { region, asin }): axum::extract::Query<AudibleCoverQuery>) -> Response {
+    static CLIENT: std::sync::OnceLock<crate::audible::AudibleClient> = std::sync::OnceLock::new();
+    let client = CLIENT.get_or_init(crate::audible::AudibleClient::new);
+    match tokio::time::timeout(Duration::from_secs(30), client.cover(&region, &asin)).await {
+        Ok(Ok(Some(bytes))) => ([(header::CONTENT_TYPE, "application/octet-stream"), (header::CACHE_CONTROL, "public, max-age=21600")], bytes).into_response(),
+        Ok(Ok(None)) => StatusCode::NOT_FOUND.into_response(),
+        Ok(Err(error)) => api_error(StatusCode::BAD_GATEWAY, &error),
+        Err(_) => StatusCode::GATEWAY_TIMEOUT.into_response(),
+    }
+}
+
 async fn audible_lookup(axum::Json(request): axum::Json<metadata_contract::audible::LookupRequest>) -> axum::Json<metadata_contract::audible::LookupResponse> {
     static CLIENT: std::sync::OnceLock<crate::audible::AudibleClient> = std::sync::OnceLock::new();
     let client = CLIENT.get_or_init(crate::audible::AudibleClient::new);
-    axum::Json(client.lookup(request).await)
+    let response = client.lookup(request).await;
+    tracing::info!(status = ?response.status, asin = ?response.selected_asin, region = ?response.selected_region,
+        detail = %response.detail, "audiobook enrichment completed");
+    axum::Json(response)
+}
+
+fn audiobook_cors() -> tower_http::cors::CorsLayer {
+    // Public bibliographic lookups carry no cookies or account credentials.
+    tower_http::cors::CorsLayer::new().allow_origin(tower_http::cors::Any).allow_methods([axum::http::Method::POST, axum::http::Method::GET]).allow_headers([header::CONTENT_TYPE])
+}
+
+#[cfg(test)]
+mod audiobook_http_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn browser_preflight_and_invalid_request_reach_the_audiobook_route() {
+        let router = Router::new().route("/v2/audiobooks/audible", post(audible_lookup).get(audible_cover).layer(audiobook_cors()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v2/audiobooks/audible", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        let preflight =
+            client.request(reqwest::Method::OPTIONS, &url).header("Origin", "https://app.bokheim.se").header("Access-Control-Request-Method", "POST").header("Access-Control-Request-Headers", "content-type").send().await.unwrap();
+        assert!(preflight.status().is_success());
+        assert_eq!(preflight.headers()["access-control-allow-origin"], "*");
+        assert_eq!(preflight.headers()["access-control-allow-methods"], "POST");
+        let invalid = client.post(&url).header("Origin", "https://app.bokheim.se").header("Content-Type", "application/json").body("{}").send().await.unwrap();
+        assert_eq!(invalid.status().as_u16(), 422);
+        assert_eq!(invalid.headers()["access-control-allow-origin"], "*");
+        task.abort();
+    }
 }

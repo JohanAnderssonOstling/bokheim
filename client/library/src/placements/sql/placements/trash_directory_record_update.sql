@@ -1,1 +1,0 @@
-UPDATE book SET deleted_at=?2,purged_at=NULL,trash_origin_dir_id=?3 WHERE content_hash=?1

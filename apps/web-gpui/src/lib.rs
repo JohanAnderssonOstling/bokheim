@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use application_shell::ApplicationRoot;
-use bokheim_backend::AppClient;
+use app::AppClient;
 use browser_ui::{AppServices, AppStartup};
 use gpui::{App, AppContext, Bounds, SharedString, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
@@ -48,7 +48,7 @@ pub fn start() {
     });
 }
 
-async fn connect_backend() -> Result<(AppClient, bokheim_backend::AppStartupState), String> {
+async fn connect_backend() -> Result<(AppClient, app::AppStartupState), String> {
     const ATTEMPTS: usize = 6;
     let asset_base = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("__BOKHEIM_ASSET_BASE__")).ok().and_then(|value| value.as_string()).unwrap_or_else(|| "./pkg".to_owned());
     let broker_url = format!("{asset_base}/web_backend_worker_loader.js");
@@ -57,6 +57,7 @@ async fn connect_backend() -> Result<(AppClient, bokheim_backend::AppStartupStat
         match AppClient::connect_web(backend_connection::configuration(&broker_url)).await {
             Ok(initialized) => return Ok(initialized),
             Err(error) => {
+                let error = error.to_string();
                 let access_handle_conflict = error.contains("creating sync access handle");
                 last_error = error;
                 if !access_handle_conflict || attempt + 1 == ATTEMPTS {

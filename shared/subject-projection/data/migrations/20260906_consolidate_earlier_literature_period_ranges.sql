@@ -1,0 +1,20 @@
+-- Further literature period range consolidation; retain anonymous-work exceptions.
+PRAGMA foreign_keys=ON;
+BEGIN IMMEDIATE;
+DELETE FROM source_selector WHERE concept_id=4245 AND system_id='lcc' AND selector NOT LIKE '%..%' AND selector NOT LIKE '%-%' AND replace(upper(selector),' ','') GLOB 'PT[0-9]*' AND CAST(replace(substr(replace(upper(selector),' ',''),3),'E','X') AS REAL) BETWEEN 1799 AND 2592;
+INSERT INTO source_selector VALUES(4245,'lcc','PT1799..PT2592@2',1);
+DELETE FROM source_selector WHERE concept_id=12702 AND system_id='lcc' AND selector NOT LIKE '%..%' AND selector NOT LIKE '%-%' AND replace(upper(selector),' ','') GLOB 'PT[0-9]*' AND CAST(replace(substr(replace(upper(selector),' ',''),3),'E','X') AS REAL) BETWEEN 1501 AND 1695;
+INSERT INTO source_selector VALUES(12702,'lcc','PT1501..PT1695@2',0);
+DELETE FROM source_selector WHERE concept_id=12707 AND system_id='lcc' AND selector NOT LIKE '%..%' AND selector NOT LIKE '%-%' AND replace(upper(selector),' ','') GLOB 'PQ[0-9]*' AND CAST(replace(substr(replace(upper(selector),' ',''),3),'E','X') AS REAL) BETWEEN 4561 AND 4639;
+INSERT INTO source_selector VALUES(12707,'lcc','PQ4561..PQ4639@2',0);
+DELETE FROM source_selector WHERE concept_id=12708 AND system_id='lcc' AND selector NOT LIKE '%..%' AND selector NOT LIKE '%-%' AND replace(upper(selector),' ','') GLOB 'PQ[0-9]*' AND CAST(replace(substr(replace(upper(selector),' ',''),3),'E','X') AS REAL) BETWEEN 4675 AND 4734;
+INSERT INTO source_selector VALUES(12708,'lcc','PQ4675..PQ4734@2',0);
+DELETE FROM source_selector WHERE concept_id=12714 AND system_id='lcc' AND selector NOT LIKE '%..%' AND selector NOT LIKE '%-%' AND replace(upper(selector),' ','') GLOB 'PQ[0-9]*' AND CAST(replace(substr(replace(upper(selector),' ',''),3),'E','X') AS REAL) BETWEEN 6500 AND 6576;
+INSERT INTO source_selector VALUES(12714,'lcc','PQ6500..PQ6576@2',0);
+DELETE FROM source_selector WHERE concept_id=3912 AND system_id='lcc' AND selector NOT LIKE '%..%' AND selector NOT LIKE '%-%' AND replace(upper(selector),' ','') GLOB 'PR[0-9]*' AND CAST(replace(substr(replace(upper(selector),' ',''),3),'E','X') AS REAL) BETWEEN 3291 AND 3785;
+DELETE FROM source_selector WHERE concept_id=3912 AND system_id='lcc' AND selector='PR3291..PR3785@0';
+INSERT INTO source_selector VALUES(3912,'lcc','PR3291..PR3785@2',0);
+DELETE FROM source_selector WHERE concept_id=3915 AND system_id='lcc' AND selector NOT LIKE '%..%' AND selector NOT LIKE '%-%' AND replace(upper(selector),' ','') GLOB 'PR[0-9]*' AND CAST(replace(substr(replace(upper(selector),' ',''),3),'E','X') AS REAL) BETWEEN 3991 AND 5990;
+DELETE FROM source_selector WHERE concept_id=3915 AND system_id='lcc' AND selector='PR3991..PR5990@0';
+INSERT INTO source_selector VALUES(3915,'lcc','PR3991..PR5990@2',0);
+COMMIT;

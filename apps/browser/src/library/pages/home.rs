@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use bokheim_backend::LibraryClient;
+use library_backend::LibraryClient;
 
 use crate::library::pages::shelves::{ShelfFuture, ShelfPage, ShelfRow, ShelfSort, ShelfSource};
 
@@ -18,8 +18,6 @@ pub(crate) struct HomeShelves;
 
 impl ShelfSource for HomeShelves {
     const ID: &'static str = "home";
-    // Home is the whole library, so a card has to say whose book it is.
-    const CARDS_STATE_AUTHOR: bool = true;
     const LOADING_MESSAGE: &'static str = "Loading library…";
 
     // Home declares no orders, so it is never asked for one.

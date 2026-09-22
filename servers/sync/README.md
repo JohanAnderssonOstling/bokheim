@@ -110,9 +110,9 @@ service; synchronization and account contracts remain versioned binary wire
 messages.
 
 `GET /api/admin/services` collects bounded JSON operational snapshots from the
-local catalogue and metadata services for the same authenticated dashboard.
+local authority and metadata services for the same authenticated dashboard.
 The default targets are `http://127.0.0.1:8090/` and
-`http://127.0.0.1:8091/`. `BOKHEIM_ADMIN_CATALOG_URL` and
+`http://127.0.0.1:8091/`. `BOKHEIM_ADMIN_AUTHORITY_URL` and
 `BOKHEIM_ADMIN_METADATA_URL` may override them with literal loopback HTTP base
 URLs, or an empty value may disable a section. Redirects, non-loopback targets,
 credentials, queries, responses over 1 MiB, and requests exceeding five seconds

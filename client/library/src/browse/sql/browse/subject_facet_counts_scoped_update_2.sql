@@ -1,1 +1,0 @@
-UPDATE main.browse_projection_state SET dirty=dirty WHERE projection='subject_ownership'

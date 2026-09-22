@@ -1,0 +1,53 @@
+-- Collapse existing leaf ranges plus their enumerated tails into complete
+-- schedule spans.
+PRAGMA foreign_keys=ON;
+BEGIN IMMEDIATE;
+
+DELETE FROM source_selector WHERE concept_id=11476 AND system_id='lcc';
+INSERT INTO source_selector VALUES(11476,'lcc','BT750..BT811');
+DELETE FROM source_selector WHERE concept_id=11490 AND system_id='lcc';
+INSERT INTO source_selector VALUES(11490,'lcc','BT595..BT680');
+DELETE FROM source_selector WHERE concept_id=9162 AND system_id='lcc';
+INSERT INTO source_selector VALUES(9162,'lcc','TK5105..TK5105.45');
+DELETE FROM source_selector WHERE concept_id=9720 AND system_id='lcc';
+INSERT INTO source_selector VALUES(9720,'lcc','GB400.4..GB400.42.Z');
+DELETE FROM source_selector WHERE concept_id=9862 AND system_id='lcc';
+INSERT INTO source_selector VALUES(9862,'lcc','QL365.3..QL365.6');
+DELETE FROM source_selector WHERE concept_id=3417 AND system_id='lcc';
+INSERT INTO source_selector VALUES(3417,'lcc','E300..E453');
+DELETE FROM source_selector WHERE concept_id=3870 AND system_id='lcc';
+INSERT INTO source_selector VALUES(3870,'lcc','PT8060..PT8098');
+DELETE FROM source_selector WHERE concept_id=4951 AND system_id='lcc';
+INSERT INTO source_selector VALUES(4951,'lcc','QA9..QA10.3');
+DELETE FROM source_selector WHERE concept_id=5063 AND system_id='lcc';
+INSERT INTO source_selector VALUES(5063,'lcc','GR420..GR950');
+DELETE FROM source_selector WHERE concept_id=6448 AND system_id='lcc';
+INSERT INTO source_selector VALUES(6448,'lcc','PQ4161..PQ4185');
+DELETE FROM source_selector WHERE concept_id=8657 AND system_id='lcc';
+INSERT INTO source_selector VALUES(8657,'lcc','RA1221..RA1223.Z');
+DELETE FROM source_selector WHERE concept_id=9342 AND system_id='lcc';
+INSERT INTO source_selector VALUES(9342,'lcc','BF1750..BF1773');
+DELETE FROM source_selector WHERE concept_id=3406 AND system_id='lcc';
+INSERT INTO source_selector VALUES(3406,'lcc','E891..E914');
+DELETE FROM source_selector WHERE concept_id=8117 AND system_id='lcc';
+INSERT INTO source_selector VALUES(8117,'lcc','RK656..RK666');
+DELETE FROM source_selector WHERE concept_id=9228 AND system_id='lcc';
+INSERT INTO source_selector VALUES(9228,'lcc','QB475..QB479.55.Z');
+DELETE FROM source_selector WHERE concept_id=12264 AND system_id='lcc';
+INSERT INTO source_selector VALUES(12264,'lcc','HM826..HM826.25');
+DELETE FROM source_selector WHERE concept_id=6671 AND system_id='lcc';
+INSERT INTO source_selector VALUES(6671,'lcc','TJ782..TJ793.3');
+DELETE FROM source_selector WHERE concept_id=6940 AND system_id='lcc';
+INSERT INTO source_selector VALUES(6940,'lcc','MT220..MT258');
+DELETE FROM source_selector WHERE concept_id=10206 AND system_id='lcc';
+INSERT INTO source_selector VALUES(10206,'lcc','DL701..DL704.5');
+DELETE FROM source_selector WHERE concept_id=10277 AND system_id='lcc';
+INSERT INTO source_selector VALUES(10277,'lcc','DT107.821..DT107.87');
+DELETE FROM source_selector WHERE concept_id=10334 AND system_id='lcc';
+INSERT INTO source_selector VALUES(10334,'lcc','DS911..DS911.86');
+DELETE FROM source_selector WHERE concept_id=10723 AND system_id='lcc';
+INSERT INTO source_selector VALUES(10723,'lcc','DT620..DT620.9.Z');
+DELETE FROM source_selector WHERE concept_id=11132 AND system_id='lcc';
+INSERT INTO source_selector VALUES(11132,'lcc','B155..B158');
+
+COMMIT;

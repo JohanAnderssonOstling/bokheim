@@ -1,1 +1,0 @@
-SELECT identity.stable_id,contributor.name,contributor.role FROM book_contributor contributor JOIN author_identity identity ON identity.id=contributor.author_identity_id WHERE contributor.book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND contributor.role IN (?2,?3) ORDER BY contributor.position

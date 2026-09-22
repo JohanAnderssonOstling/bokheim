@@ -7,16 +7,13 @@ use gpui_component::alert::Alert;
 
 use crate::{BrowserTheme, SPACE_SM, SPACE_XS, Scrollable, ScrollableElement, TEXT_LG, TEXT_XS, TITLE_MD};
 
+/// A full-size vertical flex boundary for page and viewport content.
+///
 /// Fills the parent's layout box and permits both axes to shrink inside flex
 /// parents. GPUI's `size_full` alone retains the default minimum size, which can
 /// make nested panes or virtual-list viewports overflow instead of shrinking.
-fn full_size() -> Div {
-    div().size_full().min_h_0().min_w_0()
-}
-
-/// A full-size vertical flex boundary for page and viewport content.
 pub fn full_size_column() -> Div {
-    full_size().flex().flex_col()
+    div().size_full().min_h_0().min_w_0().flex().flex_col()
 }
 
 /// Takes the remaining height in a vertical flex parent and establishes a new
@@ -30,9 +27,14 @@ pub fn absolute_full_size() -> Div {
     div().absolute().inset_0().size_full()
 }
 
+/// The window-sized page root: full-size column, clipped, dressed in the theme.
+fn page_root(theme: BrowserTheme) -> Div {
+    full_size_column().relative().overflow_hidden().bg(theme.page_bg).text_color(theme.text)
+}
+
 /// The window-sized application root shared by browser views.
 pub fn app_page(font_family: impl Into<SharedString>, font_size_px: u8, theme: BrowserTheme) -> Div {
-    full_size_column().relative().overflow_hidden().bg(theme.page_bg).text_color(theme.text).font_family(font_family).text_size(px(font_size_px as f32))
+    page_root(theme).font_family(font_family).text_size(px(font_size_px as f32))
 }
 
 /// A reader-window root using the application-wide interface typography.
@@ -40,8 +42,13 @@ pub fn reader_app_page(window: &mut Window, cx: &App, theme: BrowserTheme) -> Di
     let application_theme = Theme::global(cx);
     let font_size = application_theme.font_size;
     let font_family = application_theme.font_family.clone();
-    window.set_rem_size(font_size);
-    full_size_column().relative().overflow_hidden().bg(theme.page_bg).text_color(theme.text).font_family(font_family).text_size(font_size)
+    sync_reader_rem_size(window, cx);
+    page_root(theme).font_family(font_family).text_size(font_size)
+}
+
+/// Set the reader's rem before measuring toolbar-dependent overlay geometry.
+pub fn sync_reader_rem_size(window: &mut Window, cx: &App) {
+    window.set_rem_size(Theme::global(cx).font_size);
 }
 
 /// Error presentation for a browser section.

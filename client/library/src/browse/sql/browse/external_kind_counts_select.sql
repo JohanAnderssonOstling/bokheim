@@ -1,2 +1,0 @@
-SELECT COUNT(DISTINCT reference.book_row_id),COUNT(DISTINCT CASE WHEN card.downloaded THEN reference.book_row_id END)
-         FROM book_external_entity reference JOIN book_cards card ON card.book_row_id=reference.book_row_id WHERE reference.kind=?1

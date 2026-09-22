@@ -8,11 +8,11 @@ publish = false
 crate-type = ["cdylib"]
 
 [features]
-web-runtime-tests = ["bokheim-backend/web-runtime-tests", "client-platform-web/web-runtime-tests"]
+web-runtime-tests = ["app/web-runtime-tests", "client-platform-web/web-runtime-tests"]
 
 [dependencies]
 book-model = { path = "../../shared/book-model" }
-bokheim-backend = { path = "../../client/backend", default-features = false }
+app = { path = "../../client/app", default-features = false }
 console_error_panic_hook = "0.1"
 futures-channel = "0.3"
 futures-util = "0.3"

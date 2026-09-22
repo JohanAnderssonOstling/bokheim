@@ -21,7 +21,7 @@ impl LibrarySummary {
         }
     }
 
-    pub(crate) fn from_entry(entry: &bokheim_backend::LibraryEntry) -> Self {
+    pub(crate) fn from_entry(entry: &app::LibraryEntry) -> Self {
         Self {
             library_id: *entry.library_id(),
             library_name: entry.library_name().to_owned(),

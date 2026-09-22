@@ -1,1 +1,0 @@
-SELECT bd.dir_id,bd.file_name FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id WHERE b.content_hash=?1 AND bd.deleted_at IS NULL AND b.deleted_at IS NULL

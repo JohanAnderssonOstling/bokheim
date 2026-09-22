@@ -1,1 +1,0 @@
-DELETE FROM local_book_upload WHERE id=?1 AND content_hash=?2 AND checksum=?3

@@ -1,85 +1,14 @@
 use super::super::{
-    building_path, canonical_isbn13, dump_date, error, fs, open_library_id, params, valid_open_library_description, AuthorRecord, BTreeSet, BufRead, BufReader, Connection, EditionRecord, File, KeyReference, MetadataError,
-    MultiGzDecoder, OptionalExtension, Path, SystemTime, UnicodeNormalization, WorkRecord, BUILDER_SCHEMA_VERSION, IMPORT_CACHE_KIB, LCC_SCHEME, LEGACY_QUERY_SCHEMA_VERSION, MAX_NOTATION_BYTES, MAX_TITLE_SUBSTRINGS_PER_QUERY,
-    OL_PERSON_KIND, OL_PLACE_KIND, OPEN_LIBRARY_CHECKPOINT_RECORDS, SCHEMA_VERSION, UNIX_EPOCH, WIKIDATA_SCHEMA_VERSION,
+    building_path, canonical_isbn13, dump_date, error, fs, open_library_id, params, valid_open_library_description, AuthorRecord, BTreeSet, Connection, EditionRecord, KeyReference, MetadataError, OptionalExtension, Path, SystemTime,
+    WorkRecord, BUILDER_SCHEMA_VERSION, IMPORT_CACHE_KIB, LCC_SCHEME, MAX_NOTATION_BYTES, MAX_TITLE_SUBSTRINGS_PER_QUERY, SCHEMA_VERSION, UNIX_EPOCH,
 };
 use super::pipeline::read_open_library_resumable;
-use super::wikidata::{checkpoint_records, import_wikidata};
 
 pub fn import_snapshot(editions_path: &Path, works_path: &Path, authors_path: &Path, output_path: &Path, record_limit: Option<usize>) -> Result<(), MetadataError> {
-    import_snapshot_inner(editions_path, works_path, authors_path, None, None, output_path, record_limit)
+    import_snapshot_inner(editions_path, works_path, authors_path, output_path, record_limit)
 }
 
-pub fn import_snapshot_with_popularity(editions_path: &Path, works_path: &Path, authors_path: &Path, ratings_path: &Path, reading_log_path: &Path, output_path: &Path, record_limit: Option<usize>) -> Result<(), MetadataError> {
-    import_snapshot_inner(editions_path, works_path, authors_path, None, Some((ratings_path, reading_log_path)), output_path, record_limit)
-}
-
-/// Creates a new schema-v8 snapshot from an immutable bibliography snapshot
-/// while streaming only the ratings and reading-log dumps. The source is never
-/// opened for writing, so this can safely run beside the serving process.
-pub fn add_popularity_to_snapshot(source_path: &Path, ratings_path: &Path, reading_log_path: &Path, output_path: &Path, record_limit: Option<usize>) -> Result<(), MetadataError> {
-    if output_path.exists() {
-        return Err(MetadataError(format!("output already exists: {}", output_path.display())));
-    }
-    let building_path = building_path(output_path);
-    if building_path.exists() {
-        return Err(MetadataError(format!("unfinished popularity snapshot already exists: {}", building_path.display())));
-    }
-    if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent).map_err(error)?;
-    }
-    fs::copy(source_path, &building_path).map_err(error)?;
-    let result = (|| {
-        let mut connection = Connection::open(&building_path).map_err(error)?;
-        configure_import(&connection)?;
-        let source_schema = connection.query_row("SELECT schema_version FROM snapshot WHERE singleton=1", (), |row| row.get::<_, i64>(0)).map_err(error)?;
-        if !matches!(source_schema, LEGACY_QUERY_SCHEMA_VERSION | SCHEMA_VERSION | WIKIDATA_SCHEMA_VERSION) {
-            return Err(MetadataError(format!("cannot add popularity to metadata schema {source_schema}; expected {LEGACY_QUERY_SCHEMA_VERSION}, {SCHEMA_VERSION}, or {WIKIDATA_SCHEMA_VERSION}")));
-        }
-        let has_wikidata = connection.query_row("SELECT EXISTS(SELECT 1 FROM entity LIMIT 1)", (), |row| row.get::<_, bool>(0)).map_err(error)?;
-        connection
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS work_popularity(
-                    work_id INTEGER PRIMARY KEY,
-                    want_to_read_count INTEGER NOT NULL DEFAULT 0,
-                    currently_reading_count INTEGER NOT NULL DEFAULT 0,
-                    already_read_count INTEGER NOT NULL DEFAULT 0,
-                    rating_count INTEGER NOT NULL DEFAULT 0,
-                    rating_sum INTEGER NOT NULL DEFAULT 0
-                 );
-                 DELETE FROM import_checkpoint WHERE phase IN ('ratings','reading_log','snapshot_finalize');",
-            )
-            .map_err(error)?;
-        import_work_popularity(&mut connection, ratings_path, reading_log_path, record_limit)?;
-        let imported_at_ms = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).map_err(error)?.as_millis()).map_err(error)?;
-        let output_schema = if has_wikidata { WIKIDATA_SCHEMA_VERSION } else { SCHEMA_VERSION };
-        connection.execute("UPDATE snapshot SET schema_version=?1,imported_at_ms=?2 WHERE singleton=1", params![output_schema, imported_at_ms]).map_err(error)?;
-        connection.execute("INSERT OR REPLACE INTO metadata_metric(name,value) VALUES('core_open_library_popularity',1)", ()).map_err(error)?;
-        connection.execute_batch("VACUUM; ANALYZE; PRAGMA optimize;").map_err(error)?;
-        let integrity: String = connection.query_row("PRAGMA integrity_check", (), |row| row.get(0)).map_err(error)?;
-        if integrity != "ok" {
-            return Err(MetadataError(format!("metadata database integrity check failed: {integrity}")));
-        }
-        connection.execute("INSERT INTO import_checkpoint(phase,records_read,completed) VALUES('snapshot_finalize',0,1) ON CONFLICT(phase) DO UPDATE SET records_read=0,completed=1", ()).map_err(error)?;
-        connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;").map_err(error)?;
-        Ok(())
-    })();
-    if let Err(failure) = result {
-        return Err(failure);
-    }
-    fs::rename(&building_path, output_path).map_err(error)?;
-    Ok(())
-}
-
-pub fn import_rich_snapshot_with_popularity(
-    editions_path: &Path, works_path: &Path, authors_path: &Path, wikidata_path: &Path, ratings_path: &Path, reading_log_path: &Path, output_path: &Path, record_limit: Option<usize>,
-) -> Result<(), MetadataError> {
-    import_snapshot_inner(editions_path, works_path, authors_path, Some(wikidata_path), Some((ratings_path, reading_log_path)), output_path, record_limit)
-}
-
-pub(crate) fn import_snapshot_inner(
-    editions_path: &Path, works_path: &Path, authors_path: &Path, wikidata_path: Option<&Path>, popularity_paths: Option<(&Path, &Path)>, output_path: &Path, record_limit: Option<usize>,
-) -> Result<(), MetadataError> {
+pub(crate) fn import_snapshot_inner(editions_path: &Path, works_path: &Path, authors_path: &Path, output_path: &Path, record_limit: Option<usize>) -> Result<(), MetadataError> {
     if output_path.exists() {
         return Err(MetadataError(format!("output already exists: {}", output_path.display())));
     }
@@ -91,12 +20,12 @@ pub(crate) fn import_snapshot_inner(
     let mut connection = Connection::open(&building_path).map_err(error)?;
     configure_import(&connection)?;
     if resuming {
-        validate_import_inputs(&connection, &building_path, editions_path, works_path, authors_path, wikidata_path, popularity_paths, record_limit)?;
+        validate_import_inputs(&connection, &building_path, editions_path, works_path, authors_path, record_limit)?;
         println!("resuming metadata snapshot build {}", building_path.display());
     } else {
         let transaction = connection.transaction().map_err(error)?;
         create_schema(&transaction)?;
-        register_import_inputs(&transaction, editions_path, works_path, authors_path, wikidata_path, popularity_paths, record_limit)?;
+        register_import_inputs(&transaction, editions_path, works_path, authors_path, record_limit)?;
         transaction.commit().map_err(error)?;
     }
     let result = (|| {
@@ -115,14 +44,8 @@ pub(crate) fn import_snapshot_inner(
             .map_err(error)?;
         let work_count = import_works(&mut connection, works_path, record_limit)?;
         import_work_titles(&mut connection, works_path, record_limit)?;
-        if let Some((ratings_path, reading_log_path)) = popularity_paths {
-            import_work_popularity(&mut connection, ratings_path, reading_log_path, record_limit)?;
-        }
         connection.execute_batch("CREATE INDEX IF NOT EXISTS edition_author_by_author ON edition_author(author_id); CREATE INDEX IF NOT EXISTS work_author_by_author ON work_author(author_id);").map_err(error)?;
         let author_count = import_authors(&mut connection, authors_path, record_limit)?;
-        if let Some(wikidata_path) = wikidata_path {
-            import_wikidata(&mut connection, wikidata_path, record_limit)?;
-        }
         // `edition_by_work` is also required by the work-title branch of the
         // edition-identity lookup, so it is part of the shipped read schema.
         connection.execute_batch("DROP INDEX IF EXISTS edition_author_by_author; DROP INDEX IF EXISTS work_author_by_author;").map_err(error)?;
@@ -133,11 +56,10 @@ pub(crate) fn import_snapshot_inner(
             let edition_count = i64::try_from(edition_count).map_err(error)?;
             let work_count = i64::try_from(work_count).map_err(error)?;
             let author_count = i64::try_from(author_count).map_err(error)?;
-            let snapshot_schema_version = if wikidata_path.is_some() { WIKIDATA_SCHEMA_VERSION } else { SCHEMA_VERSION };
             connection
                 .execute(
                     "INSERT OR REPLACE INTO snapshot(singleton,schema_version,dump_date,imported_at_ms,edition_records,work_records,author_records) VALUES(1,?1,?2,?3,?4,?5,?6)",
-                    params![snapshot_schema_version, dump_date, imported_at_ms, edition_count, work_count, author_count],
+                    params![SCHEMA_VERSION, dump_date, imported_at_ms, edition_count, work_count, author_count],
                 )
                 .map_err(error)?;
             connection.execute_batch("VACUUM; ANALYZE; PRAGMA optimize;").map_err(error)?;
@@ -162,9 +84,13 @@ pub(crate) fn completed_phase(connection: &Connection, phase: &str) -> Result<Op
     connection.query_row("SELECT records_read FROM import_checkpoint WHERE phase=?1 AND completed=1", [phase], |row| row.get(0)).optional().map_err(error)
 }
 
-pub(crate) fn register_import_inputs(connection: &Connection, editions: &Path, works: &Path, authors: &Path, wikidata: Option<&Path>, popularity: Option<(&Path, &Path)>, record_limit: Option<usize>) -> Result<(), MetadataError> {
-    connection.execute("INSERT INTO import_setting(singleton,record_limit,rich) VALUES(1,?1,?2)", params![record_limit.map(i64::try_from).transpose().map_err(error)?, i64::from(wikidata.is_some())]).map_err(error)?;
-    for (name, path) in [("editions", Some(editions)), ("works", Some(works)), ("authors", Some(authors)), ("wikidata", wikidata), ("ratings", popularity.map(|value| value.0)), ("reading_log", popularity.map(|value| value.1))] {
+pub(crate) fn checkpoint_records(connection: &Connection, phase: &str) -> Result<i64, MetadataError> {
+    Ok(connection.query_row("SELECT records_read FROM import_checkpoint WHERE phase=?1", [phase], |row| row.get(0)).optional().map_err(error)?.unwrap_or(0))
+}
+
+pub(crate) fn register_import_inputs(connection: &Connection, editions: &Path, works: &Path, authors: &Path, record_limit: Option<usize>) -> Result<(), MetadataError> {
+    connection.execute("INSERT INTO import_setting(singleton,record_limit) VALUES(1,?1)", params![record_limit.map(i64::try_from).transpose().map_err(error)?]).map_err(error)?;
+    for (name, path) in [("editions", Some(editions)), ("works", Some(works)), ("authors", Some(authors))] {
         if let Some(path) = path {
             let (path, size_bytes, modified_ms) = import_input_identity(path)?;
             connection.execute("INSERT INTO import_input(name,path,size_bytes,modified_ms) VALUES(?1,?2,?3,?4)", params![name, path, size_bytes, modified_ms]).map_err(error)?;
@@ -173,9 +99,7 @@ pub(crate) fn register_import_inputs(connection: &Connection, editions: &Path, w
     Ok(())
 }
 
-pub(crate) fn validate_import_inputs(
-    connection: &Connection, building: &Path, editions: &Path, works: &Path, authors: &Path, wikidata: Option<&Path>, popularity: Option<(&Path, &Path)>, record_limit: Option<usize>,
-) -> Result<(), MetadataError> {
+pub(crate) fn validate_import_inputs(connection: &Connection, building: &Path, editions: &Path, works: &Path, authors: &Path, record_limit: Option<usize>) -> Result<(), MetadataError> {
     let builder_version = connection.query_row("SELECT value FROM metadata_metric WHERE name='builder_schema_version'", (), |row| row.get::<_, i64>(0)).optional().map_err(error)?;
     if builder_version != Some(BUILDER_SCHEMA_VERSION) {
         return Err(MetadataError(format!(
@@ -186,12 +110,12 @@ pub(crate) fn validate_import_inputs(
     }
     let expected_limit = record_limit.map(i64::try_from).transpose().map_err(error)?;
     let settings = connection
-        .query_row("SELECT record_limit,rich FROM import_setting WHERE singleton=1", (), |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, bool>(1)?)))
+        .query_row("SELECT record_limit FROM import_setting WHERE singleton=1", (), |row| row.get::<_, Option<i64>>(0))
         .map_err(|failure| MetadataError(format!("unfinished snapshot cannot be resumed (missing compatible checkpoint schema): {failure}")))?;
-    if settings != (expected_limit, wikidata.is_some()) {
-        return Err(MetadataError("unfinished snapshot was created with a different record limit or import mode".to_owned()));
+    if settings != expected_limit {
+        return Err(MetadataError("unfinished snapshot was created with a different record limit".to_owned()));
     }
-    for (name, path) in [("editions", Some(editions)), ("works", Some(works)), ("authors", Some(authors)), ("wikidata", wikidata), ("ratings", popularity.map(|value| value.0)), ("reading_log", popularity.map(|value| value.1))] {
+    for (name, path) in [("editions", Some(editions)), ("works", Some(works)), ("authors", Some(authors))] {
         let Some(path) = path else { continue };
         let identity = import_input_identity(path)?;
         let stored = connection.query_row("SELECT path,size_bytes,modified_ms FROM import_input WHERE name=?1", [name], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))).optional().map_err(error)?;
@@ -228,7 +152,6 @@ pub(crate) fn import_editions(connection: &mut Connection, path: &Path, limit: O
         let mut classification_insert = transaction.prepare_cached("INSERT INTO edition_classification_stage(edition_id,scheme,notation) VALUES(?1,?2,?3)").map_err(error)?;
         let mut work_classification_insert = transaction.prepare_cached("INSERT INTO edition_work_classification_stage(work_id,scheme,notation) VALUES(?1,?2,?3)").map_err(error)?;
         let mut author_insert = transaction.prepare_cached("INSERT INTO edition_author_stage(edition_id,position,author_id) VALUES(?1,?2,?3)").map_err(error)?;
-        let mut entity_insert = transaction.prepare_cached("INSERT INTO edition_entity_evidence_stage(edition_id,kind,name,normalized_name) VALUES(?1,?2,?3,?4)").map_err(error)?;
         for record in records {
             let Some(edition_id) = open_library_id(&record.key, 'M') else { continue };
             let mut isbns = BTreeSet::new();
@@ -250,8 +173,9 @@ pub(crate) fn import_editions(connection: &mut Connection, path: &Path, limit: O
                 if !normalized_title.is_empty() {
                     bibliography_insert.execute(params![edition_id, title, normalized_title, record.publish_date.as_deref().and_then(book_year)]).map_err(error)?;
                     if let Some(subtitle) = record.subtitle.as_deref().map(compact_text).filter(|s| !s.is_empty() && s.len() <= 4096) {
-                        transaction.execute("INSERT OR REPLACE INTO edition_subtitle VALUES(?1,?2,?3)",
-                            params![edition_id, subtitle, metadata_contract::matching::bibliographic_title_match_key(&format!("{title}: {subtitle}"))]).map_err(error)?;
+                        transaction
+                            .execute("INSERT OR REPLACE INTO edition_subtitle VALUES(?1,?2,?3)", params![edition_id, subtitle, metadata_contract::matching::bibliographic_title_match_key(&format!("{title}: {subtitle}"))])
+                            .map_err(error)?;
                     }
                     for (position, publisher) in record.publishers.into_iter().enumerate() {
                         let publisher = compact_text(&publisher);
@@ -264,8 +188,6 @@ pub(crate) fn import_editions(connection: &mut Connection, path: &Path, limit: O
             }
             insert_classifications(&mut classification_insert, edition_id, LCC_SCHEME, &record.lc_classifications)?;
             insert_author_references(&mut author_insert, edition_id, record.authors)?;
-            insert_entity_evidence(&mut entity_insert, edition_id, OL_PLACE_KIND, record.subject_places)?;
-            insert_entity_evidence(&mut entity_insert, edition_id, OL_PERSON_KIND, record.subject_people)?;
         }
         Ok(())
     })?;
@@ -295,8 +217,7 @@ fn import_edition_identities(connection: &mut Connection, path: &Path, limit: Op
             }
             bibliography_insert.execute(params![edition_id, title, normalized_title, record.publish_date.as_deref().and_then(book_year)]).map_err(error)?;
             if let Some(subtitle) = record.subtitle.as_deref().map(compact_text).filter(|s| !s.is_empty() && s.len() <= 4096) {
-                transaction.execute("INSERT OR REPLACE INTO edition_subtitle VALUES(?1,?2,?3)",
-                    params![edition_id, subtitle, metadata_contract::matching::bibliographic_title_match_key(&format!("{title}: {subtitle}"))]).map_err(error)?;
+                transaction.execute("INSERT OR REPLACE INTO edition_subtitle VALUES(?1,?2,?3)", params![edition_id, subtitle, metadata_contract::matching::bibliographic_title_match_key(&format!("{title}: {subtitle}"))]).map_err(error)?;
             }
             for (position, publisher) in record.publishers.into_iter().enumerate() {
                 let publisher = compact_text(&publisher);
@@ -317,7 +238,6 @@ fn import_works(connection: &mut Connection, path: &Path, limit: Option<usize>) 
         let mut description_insert = transaction.prepare_cached("INSERT INTO work_description_stage(work_id,description) VALUES(?1,?2)").map_err(error)?;
         let mut classification_insert = transaction.prepare_cached("INSERT INTO work_classification_stage(work_id,scheme,notation) VALUES(?1,?2,?3)").map_err(error)?;
         let mut author_insert = transaction.prepare_cached("INSERT INTO work_author_stage(work_id,position,author_id) VALUES(?1,?2,?3)").map_err(error)?;
-        let mut entity_insert = transaction.prepare_cached("INSERT INTO work_entity_evidence_stage(work_id,kind,name,normalized_name) VALUES(?1,?2,?3,?4)").map_err(error)?;
         let mut referenced = transaction.prepare_cached("SELECT EXISTS(SELECT 1 FROM edition WHERE work_id=?1)").map_err(error)?;
         for record in records {
             let Some(work_id) = open_library_id(&record.key, 'W') else { continue };
@@ -329,8 +249,7 @@ fn import_works(connection: &mut Connection, path: &Path, limit: Option<usize>) 
                 if !normalized_title.is_empty() {
                     bibliography_insert.execute(params![work_id, title, normalized_title]).map_err(error)?;
                     if let Some(subtitle) = record.subtitle.as_deref().map(compact_text).filter(|s| !s.is_empty() && s.len() <= 4096) {
-                        transaction.execute("INSERT OR REPLACE INTO work_subtitle VALUES(?1,?2,?3)",
-                            params![work_id, subtitle, metadata_contract::matching::bibliographic_title_match_key(&format!("{title}: {subtitle}"))]).map_err(error)?;
+                        transaction.execute("INSERT OR REPLACE INTO work_subtitle VALUES(?1,?2,?3)", params![work_id, subtitle, metadata_contract::matching::bibliographic_title_match_key(&format!("{title}: {subtitle}"))]).map_err(error)?;
                     }
                 }
             }
@@ -339,8 +258,6 @@ fn import_works(connection: &mut Connection, path: &Path, limit: Option<usize>) 
             }
             insert_classifications(&mut classification_insert, work_id, LCC_SCHEME, &record.lc_classifications)?;
             insert_author_references(&mut author_insert, work_id, record.authors)?;
-            insert_entity_evidence(&mut entity_insert, work_id, OL_PLACE_KIND, record.subject_places)?;
-            insert_entity_evidence(&mut entity_insert, work_id, OL_PERSON_KIND, record.subject_people)?;
         }
         Ok(())
     })?;
@@ -366,114 +283,14 @@ fn import_work_titles(connection: &mut Connection, path: &Path, limit: Option<us
             let normalized_title = metadata_contract::matching::bibliographic_title_match_key(&title);
             if !normalized_title.is_empty() {
                 insert.execute(params![work_id, title, normalized_title]).map_err(error)?;
-                    if let Some(subtitle) = record.subtitle.as_deref().map(compact_text).filter(|s| !s.is_empty() && s.len() <= 4096) {
-                        transaction.execute("INSERT OR REPLACE INTO work_subtitle VALUES(?1,?2,?3)",
-                            params![work_id, subtitle, metadata_contract::matching::bibliographic_title_match_key(&format!("{title}: {subtitle}"))]).map_err(error)?;
-                    }
+                if let Some(subtitle) = record.subtitle.as_deref().map(compact_text).filter(|s| !s.is_empty() && s.len() <= 4096) {
+                    transaction.execute("INSERT OR REPLACE INTO work_subtitle VALUES(?1,?2,?3)", params![work_id, subtitle, metadata_contract::matching::bibliographic_title_match_key(&format!("{title}: {subtitle}"))]).map_err(error)?;
+                }
             }
         }
         Ok(())
     })?;
     materialize_work_titles(connection)
-}
-
-pub(crate) fn import_work_popularity(connection: &mut Connection, ratings_path: &Path, reading_log_path: &Path, limit: Option<usize>) -> Result<(), MetadataError> {
-    read_tsv_resumable(connection, ratings_path, limit, "ratings", |transaction, lines| {
-        let mut retained = transaction.prepare_cached("SELECT EXISTS(SELECT 1 FROM edition WHERE work_id=?1)").map_err(error)?;
-        let mut update = transaction
-            .prepare_cached(
-                "INSERT INTO work_popularity(work_id,rating_count,rating_sum) VALUES(?1,1,?2)
-                 ON CONFLICT(work_id) DO UPDATE SET rating_count=rating_count+1,rating_sum=rating_sum+excluded.rating_sum",
-            )
-            .map_err(error)?;
-        for line in lines {
-            let fields = line.trim_end().split('\t').collect::<Vec<_>>();
-            let Some(work_id) = fields.first().and_then(|value| open_library_id(value, 'W')) else { continue };
-            let Some(rating) = fields.get(2).and_then(|value| value.parse::<i64>().ok()).filter(|value| (1..=5).contains(value)) else { continue };
-            if retained.query_row([work_id], |row| row.get::<_, bool>(0)).map_err(error)? {
-                update.execute(params![work_id, rating]).map_err(error)?;
-            }
-        }
-        Ok(())
-    })?;
-    read_tsv_resumable(connection, reading_log_path, limit, "reading_log", |transaction, lines| {
-        let mut retained = transaction.prepare_cached("SELECT EXISTS(SELECT 1 FROM edition WHERE work_id=?1)").map_err(error)?;
-        let mut update = transaction
-            .prepare_cached(
-                "INSERT INTO work_popularity(work_id,want_to_read_count,currently_reading_count,already_read_count)
-                 VALUES(?1,?2,?3,?4)
-                 ON CONFLICT(work_id) DO UPDATE SET
-                   want_to_read_count=want_to_read_count+excluded.want_to_read_count,
-                   currently_reading_count=currently_reading_count+excluded.currently_reading_count,
-                   already_read_count=already_read_count+excluded.already_read_count",
-            )
-            .map_err(error)?;
-        for line in lines {
-            let fields = line.trim_end().split('\t').collect::<Vec<_>>();
-            let Some(work_id) = fields.first().and_then(|value| open_library_id(value, 'W')) else { continue };
-            let counts = match fields.get(2).copied() {
-                Some("Want to Read") => (1_i64, 0_i64, 0_i64),
-                Some("Currently Reading") => (0, 1, 0),
-                Some("Already Read") => (0, 0, 1),
-                _ => continue,
-            };
-            if retained.query_row([work_id], |row| row.get::<_, bool>(0)).map_err(error)? {
-                update.execute(params![work_id, counts.0, counts.1, counts.2]).map_err(error)?;
-            }
-        }
-        Ok(())
-    })?;
-    let retained: i64 = connection.query_row("SELECT COUNT(*) FROM work_popularity", (), |row| row.get(0)).map_err(error)?;
-    println!("retained popularity aggregates for {retained} ISBN-linked works");
-    Ok(())
-}
-
-pub(crate) fn read_tsv_resumable(
-    connection: &mut Connection, path: &Path, limit: Option<usize>, phase: &str, mut import_batch: impl FnMut(&rusqlite::Transaction<'_>, Vec<String>) -> Result<(), MetadataError>,
-) -> Result<usize, MetadataError> {
-    if let Some(records) = completed_phase(connection, phase)? {
-        return usize::try_from(records).map_err(error);
-    }
-    let resume_at = usize::try_from(checkpoint_records(connection, phase)?).map_err(error)?;
-    let mut reader = BufReader::with_capacity(1024 * 1024, MultiGzDecoder::new(BufReader::with_capacity(1024 * 1024, File::open(path).map_err(error)?)));
-    let mut line = String::new();
-    let mut count = 0_usize;
-    while count < resume_at {
-        line.clear();
-        if reader.read_line(&mut line).map_err(error)? == 0 {
-            return Err(MetadataError(format!("cannot resume {phase} at record {resume_at}: dump ended after {count} records")));
-        }
-        count += 1;
-    }
-    loop {
-        let mut lines = Vec::with_capacity(OPEN_LIBRARY_CHECKPOINT_RECORDS);
-        let mut finished = limit.is_some_and(|limit| count >= limit);
-        while lines.len() < OPEN_LIBRARY_CHECKPOINT_RECORDS && !finished {
-            line.clear();
-            if reader.read_line(&mut line).map_err(error)? == 0 {
-                finished = true;
-                break;
-            }
-            count += 1;
-            lines.push(line.clone());
-            if limit.is_some_and(|limit| count >= limit) {
-                finished = true;
-            }
-        }
-        let transaction = connection.transaction().map_err(error)?;
-        import_batch(&transaction, lines)?;
-        transaction
-            .execute(
-                "INSERT INTO import_checkpoint(phase,records_read,completed) VALUES(?1,?2,?3)
-                 ON CONFLICT(phase) DO UPDATE SET records_read=excluded.records_read,completed=excluded.completed",
-                params![phase, i64::try_from(count).map_err(error)?, i64::from(finished)],
-            )
-            .map_err(error)?;
-        transaction.commit().map_err(error)?;
-        if finished {
-            return Ok(count);
-        }
-    }
 }
 
 fn import_authors(connection: &mut Connection, path: &Path, limit: Option<usize>) -> Result<usize, MetadataError> {
@@ -530,16 +347,13 @@ fn materialize_editions(connection: &mut Connection) -> Result<(), MetadataError
                  SELECT work_id,scheme,notation FROM edition_work_classification_stage ORDER BY work_id,scheme,notation;
              INSERT OR IGNORE INTO edition_author(edition_id,position,author_id)
                  SELECT edition_id,position,author_id FROM edition_author_stage ORDER BY edition_id,position;
-             INSERT OR IGNORE INTO edition_entity_evidence(edition_id,kind,name,normalized_name)
-                 SELECT edition_id,kind,name,normalized_name FROM edition_entity_evidence_stage ORDER BY edition_id,kind,name;
              DROP TABLE edition_stage;
              DROP TABLE edition_isbn_stage;
              DROP TABLE edition_bibliography_stage;
              DROP TABLE edition_publisher_stage;
              DROP TABLE edition_classification_stage;
              DROP TABLE edition_work_classification_stage;
-             DROP TABLE edition_author_stage;
-             DROP TABLE edition_entity_evidence_stage;",
+             DROP TABLE edition_author_stage;",
         )
         .map_err(error)?;
     mark_materialized(&transaction, "editions_materialize")?;
@@ -577,8 +391,6 @@ fn materialize_works(connection: &mut Connection) -> Result<(), MetadataError> {
                  SELECT work_id,scheme,notation FROM work_classification_stage ORDER BY work_id,scheme,notation;
              INSERT OR IGNORE INTO work_author(work_id,position,author_id)
                  SELECT work_id,position,author_id FROM work_author_stage ORDER BY work_id,position;
-             INSERT OR IGNORE INTO work_entity_evidence(work_id,kind,name,normalized_name)
-                 SELECT work_id,kind,name,normalized_name FROM work_entity_evidence_stage ORDER BY work_id,kind,name;
              INSERT OR REPLACE INTO work_bibliography(work_id,title,normalized_title)
                  SELECT work_id,title,normalized_title FROM work_bibliography_stage ORDER BY normalized_title,work_id;
              INSERT OR REPLACE INTO work_description(work_id,description)
@@ -586,8 +398,7 @@ fn materialize_works(connection: &mut Connection) -> Result<(), MetadataError> {
              DROP TABLE work_classification_stage;
              DROP TABLE work_bibliography_stage;
              DROP TABLE work_description_stage;
-             DROP TABLE work_author_stage;
-             DROP TABLE work_entity_evidence_stage;",
+             DROP TABLE work_author_stage;",
         )
         .map_err(error)?;
     mark_materialized(&transaction, "works_materialize")?;
@@ -653,48 +464,13 @@ pub(crate) fn insert_classifications(statement: &mut rusqlite::CachedStatement<'
     Ok(())
 }
 
-pub(crate) fn insert_entity_evidence(statement: &mut rusqlite::CachedStatement<'_>, owner_id: i64, kind: i64, values: Vec<String>) -> Result<(), MetadataError> {
-    for name in values {
-        let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
-        if name.is_empty() || name.len() > 4_096 {
-            continue;
-        }
-        let normalized_name = normalize_entity_heading(kind, &name);
-        if normalized_name.is_empty() {
-            continue;
-        }
-        statement.execute(params![owner_id, kind, name, normalized_name]).map_err(error)?;
-    }
-    Ok(())
-}
-
-pub(crate) fn normalize_entity_heading(kind: i64, value: &str) -> String {
-    let value = if kind == OL_PERSON_KIND { strip_person_dates(value) } else { value };
-    value.nfkc().flat_map(char::to_lowercase).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-pub(crate) fn strip_person_dates(value: &str) -> &str {
-    let trimmed = value.trim();
-    let Some(open) = trimmed.rfind(" (") else { return trimmed };
-    let Some(dates) = trimmed.get(open + 2..trimmed.len().saturating_sub(1)) else { return trimmed };
-    if trimmed.ends_with(')') && dates.chars().all(|character| character.is_ascii_digit() || matches!(character, '-' | '?' | ' ')) && dates.contains('-') {
-        trimmed[..open].trim()
-    } else {
-        trimmed
-    }
-}
-
 pub(crate) fn compact_text(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Locale-independent key for conservative equality matching. Punctuation and
 /// accents are not edition identity; token order is retained.
-pub(crate) use metadata_contract::matching::{bibliographic_match_key, author_match_keys, author_match_tokens};
-
-pub(crate) fn title_substring_keys(value: &str) -> Vec<(String, usize)> {
-    metadata_contract::matching::title_substring_keys(value, MAX_TITLE_SUBSTRINGS_PER_QUERY)
-}
+pub(crate) use metadata_contract::matching::{author_match_keys, author_match_tokens, bibliographic_match_key};
 
 pub(crate) fn book_year(value: &str) -> Option<i32> {
     let mut years = BTreeSet::new();

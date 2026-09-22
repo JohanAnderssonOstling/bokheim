@@ -115,7 +115,7 @@ venv/
 # Local books, large test assets, and external reference checkouts
 *.epub
 /TestData/
-/client/backend/tests/test_folder/
+/client/app/tests/test_folder/
 /reference/plato/
 /data-analysis/
 

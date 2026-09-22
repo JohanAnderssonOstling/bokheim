@@ -28,6 +28,7 @@ pub fn native_windows_available() -> bool {
 pub enum NewWindowTarget {
     Book { locator: library_model::BookLocator, title: String },
     Folder { library_id: sync_common::LibraryId, directory_id: sync_common::DirId, title: String },
+    Subject { library_id: sync_common::LibraryId, location: String, label: String },
 }
 
 #[derive(Clone, Debug, PartialEq, gpui::Action)]
@@ -36,14 +37,12 @@ pub struct OpenInNewWindow(pub NewWindowTarget);
 
 /// A picker may provide just a local root. Enumerate it only when copying its
 /// contents into a library; library registration consumes the root directly.
-async fn prepare_directory_import(selected: gpui::SelectedDirectory, executor: &gpui::BackgroundExecutor) -> Result<bokheim_backend::DirectoryImport, String> {
+async fn prepare_directory_import(selected: gpui::SelectedDirectory, executor: &gpui::BackgroundExecutor) -> Result<app::DirectoryImport, String> {
     #[cfg(not(target_arch = "wasm32"))]
     let selected = match selected.local_path.as_ref() {
         Some(path) => {
             let path = path.clone();
-            let mut contents = executor.spawn(async move {
-                gpui::SelectedDirectory::from_path(&path, BOOK_IMPORT_EXTENSIONS).map_err(|error| format!("{error:#}"))
-            }).await?;
+            let mut contents = executor.spawn(async move { gpui::SelectedDirectory::from_path(&path, BOOK_IMPORT_EXTENSIONS).map_err(|error| format!("{error:#}")) }).await?;
             contents.name = selected.name;
             contents
         }
@@ -54,32 +53,38 @@ async fn prepare_directory_import(selected: gpui::SelectedDirectory, executor: &
     Ok(directory_import(selected))
 }
 
-fn directory_import(selected: gpui::SelectedDirectory) -> bokheim_backend::DirectoryImport {
-    bokheim_backend::DirectoryImport {
+fn directory_import(selected: gpui::SelectedDirectory) -> app::DirectoryImport {
+    app::DirectoryImport {
         name: selected.name,
         directories: selected.directories,
         files: selected.files.into_iter().map(|mut file| {
+            let path = file.path.clone();
             #[cfg(target_arch = "wasm32")]
-            let source = bokheim_backend::ImportSource::from_export(file.take_browser_file());
-            bokheim_backend::DirectoryImportFile {
-                path: file.path.clone(),
-                #[cfg(target_arch = "wasm32")]
-                source,
-                #[cfg(not(target_arch = "wasm32"))]
-                source: bokheim_backend::ImportSource::new(Box::new(move || Box::pin(async move { file.open().await.map_err(|error| error.to_string()) }))),
-            }
+            let source = app::ImportSource::from_export(file.take_browser_file());
+            #[cfg(not(target_arch = "wasm32"))]
+            let source = {
+                let size_bytes = file.size_bytes;
+                app::ImportSource::new(Box::new(move || Box::pin(async move { file.open().await.map_err(|error| error.to_string()) }))).with_size_bytes(size_bytes)
+            };
+            app::DirectoryImportFile { path, source }
         }).collect(),
     }
 }
 
 pub use navigation::{GlobalRoute, LibraryRoute, Route};
-pub use root::{BrowserRoot, OpenBookRequested};
+pub use root::{BookDetailDismissed, BrowserRoot, OpenBookRequested};
 #[cfg(feature = "kobo")]
 pub use services::SaveKoboAutoRotate;
 pub use services::{AppServices, AppStartup};
+#[cfg(target_arch = "wasm32")]
+pub use universal::sync::SyncEvent;
+pub use universal::sync::SyncState;
 pub use services::{LibraryRemovalHook, LibraryRemovalPreparation, library_is_being_removed};
 
-actions!(bokheim_browser, [DismissSettings, ShowSettings, DecreaseUiFontSize, IncreaseUiFontSize, ActivateAuthor, PreviousDestination, NextDestination, OpenLibrarySwitcher, FocusNextSetting, FocusPreviousSetting, OpenContextMenu, UndoLibraryAction]);
+actions!(
+    bokheim_browser,
+    [DismissSettings, ShowSettings, DecreaseUiFontSize, IncreaseUiFontSize, ActivateAuthor, PreviousDestination, NextDestination, OpenLibrarySwitcher, FocusNextSetting, FocusPreviousSetting, OpenContextMenu, UndoLibraryAction]
+);
 
 pub fn bind_keys(cx: &mut App) {
     // Number shortcuts follow the order drawn by the navigation rail.

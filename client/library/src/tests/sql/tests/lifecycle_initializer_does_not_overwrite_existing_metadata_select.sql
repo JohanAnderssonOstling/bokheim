@@ -1,1 +1,0 @@
-SELECT book.title, book_contributor.name FROM book JOIN book_contributor ON book_contributor.book_row_id=book.row_id AND book_contributor.position=0 WHERE book.content_hash=printf('%064x',1)

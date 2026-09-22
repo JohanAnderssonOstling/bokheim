@@ -1,1 +1,0 @@
-SELECT bokheim_mutation('book_lifecycle',content_hash,2,'',X'',X'',0,'',NULL),2 FROM book WHERE content_hash=?1

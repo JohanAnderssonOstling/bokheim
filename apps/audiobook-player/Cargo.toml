@@ -12,11 +12,11 @@ native-rodio = ["dep:rodio", "rodio/playback"]
 path = "src/lib.rs"
 
 [dependencies]
+library-backend = { path = "../../client/library-backend" }
 book-model = { path = "../../shared/book-model" }
 async-channel = "2"
 audiobook-library = { path = "../../client/audiobook-library" }
-book-metadata = { path = "../../client/book-metadata" }
-bokheim-backend = { path = "../../client/backend", default-features = false }
+app = { path = "../../client/app", default-features = false }
 library-model = { path = "../../client/library-model" }
 ui-components = { path = "../components" }
 gpui.workspace = true

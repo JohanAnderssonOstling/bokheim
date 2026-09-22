@@ -4,7 +4,7 @@
 //! rendering concern: the preference crate is linked by the backend, which has
 //! no business holding ninety-odd colour literals. What crosses that boundary
 //! — and what would cross the wire if the theme ever synced between devices —
-//! is [`ApplicationTheme`], one enum discriminant. An older client then draws
+//! is the theme and optional appearance choice. An older client then draws
 //! its own tested palette instead of rendering hexes no contrast test on that
 //! machine has ever seen.
 //!
@@ -21,6 +21,8 @@
 //! `warning_bg` was written but never read back. It is now derived from the
 //! palette by [`BrowserTheme::from_palette`], and the gpui-component theme is
 //! written *from* it purely to dress the vendored widgets — never read back.
+
+use std::rc::Rc;
 
 use app_preferences::{ApplicationTheme, BrowsingPreferences, ResolvedAppearance};
 use gpui::{App, Hsla, px};
@@ -83,6 +85,24 @@ mod palettes;
 /// holds the Oklch seeds and writes `theme/palettes.rs`. The application never
 /// does colour arithmetic; it reads literals.
 pub use palettes::palette;
+
+/// The selected square shown by both Browse and Reader settings.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct SelectedPalette(pub ApplicationTheme, pub ResolvedAppearance);
+
+impl gpui::Global for SelectedPalette {}
+
+/// Installed by the browser preference store so reader controls save through
+/// the same backend path as Browse settings.
+pub struct PaletteSelectionHandler(pub Rc<dyn Fn(ApplicationTheme, ResolvedAppearance, &mut App)>);
+
+impl gpui::Global for PaletteSelectionHandler {}
+
+pub fn select_palette(theme: ApplicationTheme, appearance: ResolvedAppearance, cx: &mut App) {
+    if let Some(handler) = cx.try_global::<PaletteSelectionHandler>().map(|handler| handler.0.clone()) {
+        handler(theme, appearance, cx);
+    }
+}
 
 fn platform_palette(theme: ApplicationTheme, appearance: ResolvedAppearance) -> ApplicationPalette {
     #[cfg(feature = "kobo")]
@@ -197,7 +217,7 @@ impl BrowserTheme {
             accent_wash_hover: colour(palette.active_highlight_hover),
             accent_hover: colour(palette.accent_hover),
             accent_active: colour(palette.accent_active),
-            hover: colour(0xfaeecf),
+            hover: gpui::rgba(palette.hover_overlay).into(),
             shadow,
             overlay_scrim,
             danger: colour(palette.danger_text),
@@ -221,11 +241,9 @@ pub fn browser_theme(cx: &App) -> BrowserTheme {
     cx.try_global::<BrowserTheme>().copied().unwrap_or_default()
 }
 
-/// Which palette to draw, straight from the platform.
-///
-/// On Linux this comes from the XDG desktop portal's `color-scheme`; the Kobo
-/// platform always reports light, which is the right answer for e-ink. There is
-/// no preference in front of this any more — see [`ResolvedAppearance`].
+/// The platform appearance used until the user selects a theme square.
+/// On Linux this comes from the XDG desktop portal's `color-scheme`; Kobo
+/// always reports light for its e-ink display.
 pub fn resolved_appearance(cx: &App) -> ResolvedAppearance {
     #[cfg(feature = "kobo")]
     {
@@ -245,12 +263,20 @@ pub fn resolved_appearance(cx: &App) -> ResolvedAppearance {
 /// The single point where appearance becomes visible. Nothing else writes
 /// `gpui_component::Theme`.
 pub fn apply_appearance(preferences: &BrowsingPreferences, cx: &mut App) {
-    let resolved = resolved_appearance(cx);
+    let resolved = preferences.appearance_override().unwrap_or_else(|| resolved_appearance(cx));
     let theme = BrowserTheme::from_palette(platform_palette(preferences.theme(), resolved));
+    cx.set_global(SelectedPalette(preferences.theme(), resolved));
     cx.set_global(theme);
 
     let application_theme = Theme::global_mut(cx);
     application_theme.notification.placement = gpui::Anchor::BottomRight;
+    #[cfg(not(feature = "kobo"))]
+    {
+        application_theme.mode = match resolved {
+            ResolvedAppearance::Light => gpui_component::ThemeMode::Light,
+            ResolvedAppearance::Dark => gpui_component::ThemeMode::Dark,
+        };
+    }
     #[cfg(feature = "kobo")]
     {
         application_theme.mode = gpui_component::ThemeMode::Light;

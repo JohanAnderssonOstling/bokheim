@@ -97,8 +97,6 @@ pub mod mutation_value {
         ReadingPosition(super::ReadingPosition),
         #[prost(message, tag = "7")]
         Annotation(super::Annotation),
-        #[prost(message, tag = "10")]
-        CatalogBook(super::CatalogBook),
         #[prost(message, tag = "11")]
         Metadata(super::BookRecord),
         #[prost(string, tag = "12")]
@@ -190,6 +188,10 @@ pub struct Annotation {
     pub modified_at: u64,
     #[prost(bool, tag = "9")]
     pub deleted: bool,
+    #[prost(int64, optional, tag = "10")]
+    pub toc_ordinal: ::core::option::Option<i64>,
+    #[prost(float, optional, tag = "11")]
+    pub progress: ::core::option::Option<f32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct AnnotationAnchor {
@@ -226,15 +228,6 @@ pub struct PdfAnnotationRect {
     #[prost(float, tag = "4")]
     pub height: f32,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct CatalogBook {
-    #[prost(string, tag = "1")]
-    pub edition_id: ::prost::alloc::string::String,
-    #[prost(string, optional, tag = "2")]
-    pub work_id: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, tag = "3")]
-    pub content_hash: ::prost::alloc::string::String,
-}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BookRecord {
     #[prost(string, tag = "1")]
@@ -243,6 +236,8 @@ pub struct BookRecord {
     pub contributors: ::prost::alloc::vec::Vec<Contributor>,
     #[prost(message, optional, tag = "4")]
     pub book: ::core::option::Option<BookMetadata>,
+    #[prost(string, optional, tag = "5")]
+    pub subtitle: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Contributor {
@@ -250,8 +245,6 @@ pub struct Contributor {
     pub contributor_id: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub name: ::prost::alloc::string::String,
-    #[prost(string, optional, tag = "3")]
-    pub sort_name: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(bytes = "vec", tag = "4")]
     pub role: ::prost::alloc::vec::Vec<u8>,
 }

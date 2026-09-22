@@ -1,1 +1,0 @@
-SELECT id,parent_id,name,deleted_at IS NOT NULL FROM dir

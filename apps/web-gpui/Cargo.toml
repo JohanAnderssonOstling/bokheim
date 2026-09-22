@@ -8,7 +8,7 @@ publish = false
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-bokheim-backend = { path = "../../client/backend", default-features = false }
+app = { path = "../../client/app", default-features = false }
 application-shell = { path = "../application-shell", default-features = false, features = ["audiobooks"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]

@@ -1,1 +1,0 @@
-INSERT INTO book_dir(dir_id, book_row_id, file_name, local_hash, is_downloaded) VALUES (?1, (SELECT row_id FROM book WHERE content_hash=?3), 'a.epub', '', 0), (?2, (SELECT row_id FROM book WHERE content_hash=?3), 'b.epub', '', 0)

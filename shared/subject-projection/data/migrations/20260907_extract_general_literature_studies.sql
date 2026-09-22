@@ -1,0 +1,36 @@
+-- Apply approved general-literature extractions, 2026-09-07.
+-- Reuse existing writing and criticism subjects; retain broad residual ranges.
+PRAGMA foreign_keys=ON;
+BEGIN IMMEDIATE;
+INSERT INTO concept(concept_id,preferred_label) VALUES(52306,'Themed Literary Collections');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal) VALUES(52306,4280,0);
+INSERT INTO lcc_selector(concept_id,selector) VALUES(52306,'PN6071');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal) VALUES(3843,4383,1);
+UPDATE lcc_range SET concept_id=3843,end_value='3383' WHERE class_letters='PN' AND start_value='3355' AND end_value='3383' AND concept_id=4383;
+INSERT INTO concept(concept_id,preferred_label) VALUES(52307,'History of Fiction');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal) VALUES(52307,4383,0);
+UPDATE lcc_range SET concept_id=52307,end_value='3503.2' WHERE class_letters='PN' AND start_value='3451' AND end_value='3503' AND concept_id=4383;
+INSERT INTO concept(concept_id,preferred_label) VALUES(52308,'Fiction Theory');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal) VALUES(52308,4383,0);
+UPDATE lcc_range SET concept_id=52308,end_value='3352' WHERE class_letters='PN' AND start_value='3329' AND end_value='3352' AND concept_id=4383;
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal) VALUES(4358,4383,1);
+INSERT INTO lcc_range(class_letters,start_value,end_value,concept_id) VALUES('PN','3433','3433.8',4358);
+INSERT INTO concept(concept_id,preferred_label) VALUES(52309,'Literary Reference');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal) VALUES(52309,4369,0);
+INSERT INTO lcc_range(class_letters,start_value,end_value,concept_id) VALUES('PN','41','44.5',52309);
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal) VALUES(4354,4383,1);
+INSERT INTO lcc_selector(concept_id,selector) VALUES(4354,'PN3448.D4');
+INSERT INTO lcc_selector(concept_id,selector) VALUES(4358,'PN3435');
+INSERT INTO concept(concept_id,preferred_label) VALUES(52310,'Modernism in Literature');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal) VALUES(52310,8293,0);
+INSERT INTO lcc_selector(concept_id,selector) VALUES(52310,'PN56.M54');
+INSERT INTO concept(concept_id,preferred_label) VALUES(52311,'Literature & Psychoanalysis');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal) VALUES(52311,8293,0);
+INSERT INTO lcc_selector(concept_id,selector) VALUES(52311,'PN56.P92');
+INSERT INTO concept(concept_id,preferred_label) VALUES(52312,'Travel in Literature');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal) VALUES(52312,8293,0);
+INSERT INTO lcc_selector(concept_id,selector) VALUES(52312,'PN56.T7');
+INSERT INTO concept(concept_id,preferred_label) VALUES(52313,'Women as Literary Characters');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal) VALUES(52313,8293,0);
+INSERT INTO lcc_selector(concept_id,selector) VALUES(52313,'PN56.5.W64');
+COMMIT;

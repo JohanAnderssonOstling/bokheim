@@ -65,11 +65,11 @@ type LocalSocketName = str_buf::StrBuf<23>;
 type BssidStr = str_buf::StrBuf<17>;
 type SsidStr = str_buf::StrBuf<32>;
 
-use std::os::unix::net::UnixDatagram;
-use std::{fs, io, path, net};
-use core::{str, time};
-use core::sync::atomic::{AtomicU32, Ordering};
 use core::fmt::{self, Write};
+use core::sync::atomic::{AtomicU32, Ordering};
+use core::{str, time};
+use std::os::unix::net::UnixDatagram;
+use std::{fs, io, net, path};
 
 ///Suffix Generator for socket name
 ///
@@ -93,12 +93,10 @@ pub struct Options<S: SuffixGenerator> {
     ///Method to generate socket name to bind to.
     ///
     ///When not used, it uses static counter
-    pub suffix: S
+    pub suffix: S,
 }
 
-static DEFAULT_OPTIONS: Options<()> = Options {
-    suffix: ()
-};
+static DEFAULT_OPTIONS: Options<()> = Options { suffix: () };
 
 fn local_socket_name(generator: &impl SuffixGenerator) -> LocalSocketName {
     let mut name = LocalSocketName::new();
@@ -131,10 +129,7 @@ impl WpaControllerBuilder<'static> {
     ///- `root` - `/var/run/wpa_supplicant/`
     ///- `read_timeout` - `Some(Duration::from_secs(10))`
     pub const fn new() -> Self {
-        Self {
-            root: DEFAULT_ROOT,
-            read_timeout: Some(time::Duration::from_secs(10)),
-        }
+        Self { root: DEFAULT_ROOT, read_timeout: Some(time::Duration::from_secs(10)) }
     }
 }
 
@@ -143,10 +138,7 @@ impl<'a> WpaControllerBuilder<'a> {
     #[allow(clippy::needless_lifetimes)]
     ///Changes root folder
     pub const fn set_root<'b>(self, new: &'b str) -> WpaControllerBuilder<'b> {
-        WpaControllerBuilder {
-            root: new,
-            read_timeout: self.read_timeout,
-        }
+        WpaControllerBuilder { root: new, read_timeout: self.read_timeout }
     }
 
     #[inline]
@@ -187,9 +179,7 @@ impl WpaControlReq {
     ///
     ///Panics on overflow.
     pub const fn raw(text: &str) -> Self {
-        Self {
-            buf: str_buf::StrBuf::from_str(text)
-        }
+        Self { buf: str_buf::StrBuf::from_str(text) }
     }
 
     #[inline]
@@ -299,7 +289,6 @@ impl WpaControlReq {
         Self::raw("REMOVE_NETWORK all")
     }
 
-
     #[inline]
     ///Creates SAVE_CONFIG request
     pub fn save_config() -> Self {
@@ -313,7 +302,6 @@ impl fmt::Debug for WpaControlReq {
         fmt::Debug::fmt(&self.buf, fmt)
     }
 }
-
 
 #[derive(Copy, Clone, Debug)]
 ///Indicates success of command
@@ -390,7 +378,7 @@ pub enum WpaState {
     ///supplicant receives message 1/2).
     GroupHandshake,
     ///Connected and authenticated.
-    Completed
+    Completed,
 }
 
 impl WpaState {
@@ -430,7 +418,7 @@ pub struct WpaStatus {
     ///Interface IP address, available if connected
     pub ip: Option<net::IpAddr>,
     ///SSID used by interface on successful connection.
-    pub ssid: Option<String>
+    pub ssid: Option<String>,
 }
 
 impl WpaStatus {
@@ -466,14 +454,9 @@ impl WpaStatus {
             }
         }
 
-        state.map(|state| Self {
-            state,
-            ip,
-            ssid,
-        })
+        state.map(|state| Self { state, ip, ssid })
     }
 }
-
 
 ///Network's flag, describing its current state.
 #[derive(Clone, Copy, Debug, Default)]
@@ -484,18 +467,14 @@ pub struct WpaNetworkFlags {
     ///Indicates that network is disabled.
     pub disabled: bool,
     ///Network is part of p2p persistent group. Google what it means.
-    pub p2p_persistent: bool
+    pub p2p_persistent: bool,
 }
 
 impl WpaNetworkFlags {
     #[inline(always)]
     ///Parses network flags from flags string
     pub fn from_str(mut text: &str) -> Self {
-        let mut result = WpaNetworkFlags {
-            current: false,
-            disabled: false,
-            p2p_persistent: false,
-        };
+        let mut result = WpaNetworkFlags { current: false, disabled: false, p2p_persistent: false };
 
         if !text.is_empty() {
             while let Some(start_flag) = text.strip_prefix('[') {
@@ -545,12 +524,7 @@ impl<'a> Iterator for WpaNetworkList<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let line = self.lines.next()?;
         let mut parts = line.splitn(4, '\t');
-        let network = WpaNetwork {
-            id: Id(parts.next().unwrap().parse().ok()?),
-            ssid: parts.next()?.to_owned(),
-            bssid: parts.next()?.to_owned(),
-            flags: WpaNetworkFlags::from_str(parts.next().unwrap_or("")),
-        };
+        let network = WpaNetwork { id: Id(parts.next().unwrap().parse().ok()?), ssid: parts.next()?.to_owned(), bssid: parts.next()?.to_owned(), flags: WpaNetworkFlags::from_str(parts.next().unwrap_or("")) };
         Some(network)
     }
 }
@@ -568,7 +542,7 @@ pub enum WpaAuth {
     ///WPA-PSK
     WpaPsk,
     ///Open network
-    Open
+    Open,
 }
 
 impl WpaAuth {
@@ -579,7 +553,7 @@ impl WpaAuth {
             Self::WpaEap => "WPA-EAP",
             Self::Wpa2Psk => "WPA2-PSK",
             Self::WpaPsk => "WPA-PSK",
-            Self::Open => "OPEN"
+            Self::Open => "OPEN",
         }
     }
 }
@@ -599,7 +573,7 @@ pub enum WpaEncryption {
     ///Old WPA's encryption
     TKIP,
     ///Modern AES based encryption for WPA2
-    CCMP
+    CCMP,
 }
 
 impl WpaEncryption {
@@ -653,7 +627,7 @@ impl WpaScanResultFlags {
                 WpaEncryption::WEP
             } else {
                 WpaEncryption::NONE
-            }
+            },
         }
     }
 }
@@ -727,7 +701,7 @@ impl<'a> Iterator for WpaScanResults<'a> {
                 let mut ssid = SsidStr::new();
                 ssid.push_str(parts.next()?);
                 ssid
-            }
+            },
         };
 
         Some(result)
@@ -790,9 +764,7 @@ impl<'a> WpaControlMessage<'a> {
         let line = lines.next().unwrap();
         let header = utils::split::<4>(line, '/')?;
         if header[0] == "network id" && header[1] == "ssid" && header[2] == "bssid" && header[3] == "flags" {
-            Some(WpaNetworkList {
-                lines
-            })
+            Some(WpaNetworkList { lines })
         } else {
             None
         }
@@ -805,13 +777,10 @@ impl<'a> WpaControlMessage<'a> {
         let header = utils::split::<5>(line, '/')?;
         //bssid / frequency / signal level / flags / ssid
         if header[0] == "bssid" && header[1] == "frequency" && header[2] == "signal level" && header[3] == "flags" && header[4] == "ssid" {
-            Some(WpaScanResults {
-                lines
-            })
+            Some(WpaScanResults { lines })
         } else {
             None
         }
-
     }
 }
 
@@ -865,20 +834,14 @@ impl WpaController {
         let _ = fs::remove_file(&local);
 
         let socket = UnixDatagram::bind(&local)?;
-        let this = Self {
-            socket,
-            local,
-        };
+        let this = Self { socket, local };
         this.socket.connect(path)?;
         Ok(this)
     }
 
     ///Wraps controller with builtin buffer.
     pub fn into_buffered(self) -> BufferedWpaController {
-        BufferedWpaController {
-            inner: self,
-            buffer: [0; BUF_SIZE],
-        }
+        BufferedWpaController { inner: self, buffer: [0; BUF_SIZE] }
     }
 
     #[inline]
@@ -897,18 +860,16 @@ impl WpaController {
                     }
                     let msg = match core::str::from_utf8(&buffer[..len]) {
                         Ok(msg) => msg.trim_end_matches('\n'),
-                        Err(error) => break Err(io::Error::new(io::ErrorKind::InvalidData, error))
+                        Err(error) => break Err(io::Error::new(io::ErrorKind::InvalidData, error)),
                     };
 
-                    break Ok(Some(WpaControlMessage {
-                        raw: msg,
-                    }))
-                },
+                    break Ok(Some(WpaControlMessage { raw: msg }));
+                }
                 Err(error) => match error.kind() {
                     io::ErrorKind::Interrupted => continue,
                     io::ErrorKind::TimedOut => break Ok(None),
                     _ => break Err(error),
-                }
+                },
             }
         }
     }
@@ -933,9 +894,9 @@ impl WpaController {
                     } else if msg.as_fail().is_some() {
                         break Some(Ok(Err(())));
                     } else {
-                        continue
+                        continue;
                     }
-                },
+                }
                 Ok(None) => break None,
                 Err(error) => return Some(Err(error)),
             }
@@ -982,7 +943,7 @@ impl WpaController {
                     Some(Err(error)) => return Err(error),
                     None => return Err(io::Error::new(io::ErrorKind::Other, format!("set_network id={} psk {} had no ok/fail reply", id.0, wpa_pass))),
                 }
-            },
+            }
             None => {
                 self.request(WpaControlReq::set_network(id, "key_mgmt", "NONE"))?;
                 match self.recv_req_result(buffer) {
@@ -991,7 +952,7 @@ impl WpaController {
                     Some(Err(error)) => return Err(error),
                     None => return Err(io::Error::new(io::ErrorKind::Other, format!("set_network id={} key_mgmt NONE had no ok/fail reply", id.0))),
                 }
-            },
+            }
         }
 
         if hidden {

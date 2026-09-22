@@ -72,7 +72,7 @@ impl Request {
                     state.reading.set(false);
                 });
             }
-            Ok(NetworkCommand::Pull) => {},
+            Ok(NetworkCommand::Pull) => {}
             Err(error) => self.fail(js_sys::TypeError::new(&error).into()),
         }
     }

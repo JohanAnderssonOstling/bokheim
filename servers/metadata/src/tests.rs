@@ -2,7 +2,6 @@ use super::*;
 use crate::http::load_operational_stats;
 use crate::identity::edition_candidate_query;
 use crate::import::core::{completed_phase, configure_import, create_schema, import_editions, register_import_inputs};
-use crate::import::wikidata::import_wikidata;
 use crate::query::install_query_deadline;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -15,19 +14,6 @@ fn dump(path: &Path, records: &[serde_json::Value]) {
         writeln!(gzip, "/type\t/key\t1\t2026-08-01T00:00:00.000000\t{record}").unwrap();
     }
     gzip.finish().unwrap();
-}
-
-fn tsv_dump(path: &Path, lines: &[&str]) {
-    let file = File::create(path).unwrap();
-    let mut gzip = GzEncoder::new(file, Compression::fast());
-    for line in lines {
-        writeln!(gzip, "{line}").unwrap();
-    }
-    gzip.finish().unwrap();
-}
-
-fn entity_claim(id: &str) -> serde_json::Value {
-    serde_json::json!({"mainsnak":{"datavalue":{"value":{"id":id}}}})
 }
 
 pub(super) fn snapshot_from(directory: &Path, edition_records: &[serde_json::Value], work_records: &[serde_json::Value], author_records: &[serde_json::Value]) -> PathBuf {
@@ -44,15 +30,6 @@ pub(super) fn snapshot_from(directory: &Path, edition_records: &[serde_json::Val
 
 fn edition_query(title: &str, publishers: Vec<String>, book_year: Option<i32>) -> EditionIdentityRequest {
     EditionIdentityRequest { queries: vec![EditionIdentityQuery { query_id: "query".to_owned(), title: title.to_owned(), authors: vec!["Alex Smith".to_owned()], publishers, book_year }] }
-}
-
-fn wikidata_dump(path: &Path, records: &[serde_json::Value]) {
-    let mut file = File::create(path).unwrap();
-    writeln!(file, "[").unwrap();
-    for (index, record) in records.iter().enumerate() {
-        writeln!(file, "{record}{}", if index + 1 == records.len() { "" } else { "," }).unwrap();
-    }
-    writeln!(file, "]").unwrap();
 }
 
 #[test]
@@ -79,7 +56,7 @@ fn edition_identity_candidate_query_uses_title_and_work_indexes() {
                  ANALYZE;",
         )
         .unwrap();
-    let query = edition_candidate_query(1);
+    let query = edition_candidate_query(1, "book_year");
     let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {query}")).unwrap();
     let plan = statement
         .query_map(params![0, "the example book", 16, i64::try_from(MAX_RAW_TITLE_CANDIDATES).unwrap(), i64::try_from(MAX_RAW_TITLE_CANDIDATES).unwrap(), i64::try_from(MAX_REVERSE_TITLE_CANDIDATES + 1).unwrap()], |row| {
@@ -121,7 +98,7 @@ fn split_snapshot_routes_subject_rich_and_identity_workloads() {
     let identities = temporary.path().join("identities.sqlite");
     split_snapshot(&database, &subjects, &rich, &identities).unwrap();
 
-    let service = MetadataService::open_with_stores(&subjects, &rich, &identities, None::<&Path>, None::<&Path>).unwrap();
+    let service = MetadataService::open_with_stores(&subjects, &rich, &identities, None::<&Path>).unwrap();
     let classified = service.lookup(ClassificationRequest { isbns: vec!["9780306406157".to_owned()] }).unwrap();
     assert_eq!(classified.results[0].status, LookupStatus::Matched);
     assert!(classified.results[0].matches[0].classifications.is_empty());
@@ -242,7 +219,7 @@ fn description_sidecar_enriches_a_legacy_core_without_changing_it() {
 }
 
 #[test]
-fn author_profile_sidecar_enriches_explicit_authorship_without_altering_the_core_schema() {
+fn snapshot_enrichment_links_explicit_authorship() {
     let temporary = tempfile::tempdir().unwrap();
     let database = snapshot_from(
         temporary.path(),
@@ -254,21 +231,16 @@ fn author_profile_sidecar_enriches_explicit_authorship_without_altering_the_core
             "key": "/works/OL10W", "authors": [{"author": {"key": "/authors/OL20A"}}]
         })],
         &[serde_json::json!({
-            "key": "/authors/OL20A", "name": "Alex Smith", "bio": {"value": "Author biography"}
+            "key": "/authors/OL20A", "name": "Alex Smith"
         })],
     );
-    let profile = temporary.path().join("author-profiles.sqlite");
-    import_author_profile_snapshot(&temporary.path().join("ol_dump_authors_2026-08-01.txt.gz"), &profile, "2026-08-01", None).unwrap();
 
-    let service = MetadataService::open_with_supplements(&database, None::<&Path>, Some(&profile)).unwrap();
+    let service = MetadataService::open(&database).unwrap();
     let response = service.enrich_rich(MetadataEnrichmentRequest { isbns: vec!["9780306406157".to_owned()] }).unwrap();
     let author = &response.results[0].matches[0].authors[0];
     assert_eq!(author.open_library_author_id, "OL20A");
     assert_eq!(author.name.as_deref(), Some("Alex Smith"));
-    assert_eq!(author.biography.as_deref(), Some("Author biography"));
 
-    let profile_connection = Connection::open(profile).unwrap();
-    assert!(!profile_connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('work_author','edition_author'))", (), |row| row.get::<_, bool>(0)).unwrap());
     let core_connection = Connection::open(database).unwrap();
     assert!(!core_connection.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('author') WHERE name='biography')", (), |row| row.get::<_, bool>(0)).unwrap());
     assert_eq!(core_connection.query_row("SELECT COUNT(*) FROM work_author WHERE work_id=10 AND author_id=20", (), |row| row.get::<_, i64>(0)).unwrap(), 1);
@@ -297,64 +269,37 @@ fn database_query_deadline_interrupts_expensive_sql() {
 }
 
 #[test]
-fn popularity_snapshot_uses_current_schema_without_resolved_wikidata_entities() {
+fn snapshot_import_uses_current_schema() {
     let temporary = tempfile::tempdir().unwrap();
     let editions = temporary.path().join("ol_dump_editions_2026-08-01.txt.gz");
     let works = temporary.path().join("ol_dump_works_2026-08-01.txt.gz");
     let authors = temporary.path().join("ol_dump_authors_2026-08-01.txt.gz");
-    let ratings = temporary.path().join("ol_dump_ratings_2026-08-01.txt.gz");
-    let reading_log = temporary.path().join("ol_dump_reading-log_2026-08-01.txt.gz");
-    let database = temporary.path().join("popularity.sqlite");
+    let database = temporary.path().join("snapshot.sqlite");
     dump(
         &editions,
         &[serde_json::json!({
             "key": "/books/OL1M", "works": [{"key": "/works/OL10W"}],
-            "title": "Example", "isbn_13": ["9780306406157"], "subject_places": ["Paris"]
+            "title": "Example", "isbn_13": ["9780306406157"]
         })],
     );
     dump(&works, &[serde_json::json!({"key": "/works/OL10W", "title": "Example", "description": {"type": "/type/text", "value": "Open Library summary."}})]);
     dump(&authors, &[]);
-    tsv_dump(&ratings, &["/works/OL10W\t/books/OL1M\t5\t2026-01-01"]);
-    tsv_dump(&reading_log, &["/works/OL10W\t/books/OL1M\tWant to Read\t2026-01-01"]);
 
-    import_snapshot_with_popularity(&editions, &works, &authors, &ratings, &reading_log, &database, None).unwrap();
+    import_snapshot(&editions, &works, &authors, &database, None).unwrap();
     let validation = Connection::open(&database).unwrap();
     assert_eq!(validation.query_row("SELECT schema_version FROM snapshot WHERE singleton=1", (), |row| row.get::<_, i64>(0)).unwrap(), SCHEMA_VERSION);
-    assert_eq!(validation.query_row("SELECT COUNT(*) FROM entity", (), |row| row.get::<_, i64>(0)).unwrap(), 0);
-    assert_eq!(validation.query_row("SELECT rating_count FROM work_popularity WHERE work_id=10", (), |row| row.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(
+        validation.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE '%_stage'", (), |row| row.get::<_, i64>(0)).unwrap(),
+        0,
+        "all append-only import staging tables must be removed from the immutable snapshot"
+    );
     drop(validation);
 
     let service = MetadataService::open(&database).unwrap();
     let response = service.enrich_rich(MetadataEnrichmentRequest { isbns: vec!["9780306406157".to_owned()] }).unwrap();
-    assert_eq!(response.results[0].matches[0].popularity.as_ref().map(|value| value.rating_sum), Some(5));
     assert_eq!(response.results[0].matches[0].description.as_deref(), Some("Open Library summary."));
     let classified = service.classify_rich(MetadataEnrichmentRequest { isbns: vec!["9780306406157".to_owned()] }).unwrap();
     assert_eq!(classified.results[0].matches[0].description.as_deref(), Some("Open Library summary."));
-    assert!(response.places.is_empty());
-    assert!(response.people.is_empty());
-}
-
-#[test]
-fn popularity_can_be_added_without_rescanning_open_library() {
-    let temporary = tempfile::tempdir().unwrap();
-    let source = snapshot_from(temporary.path(), &[serde_json::json!({"key": "/books/OL1M", "works": [{"key": "/works/OL10W"}], "isbn_13": ["9780306406157"]})], &[serde_json::json!({"key": "/works/OL10W", "title": "Example"})], &[]);
-    let source_connection = Connection::open(&source).unwrap();
-    source_connection.execute("UPDATE snapshot SET schema_version=7 WHERE singleton=1", ()).unwrap();
-    source_connection.execute("DROP TABLE work_popularity", ()).unwrap();
-    drop(source_connection);
-    let ratings = temporary.path().join("ratings.txt.gz");
-    let reading_log = temporary.path().join("reading-log.txt.gz");
-    let output = temporary.path().join("with-popularity.sqlite");
-    tsv_dump(&ratings, &["/works/OL10W\t/books/OL1M\t4\t2026-01-01"]);
-    tsv_dump(&reading_log, &["/works/OL10W\t/books/OL1M\tAlready Read\t2026-01-01"]);
-
-    add_popularity_to_snapshot(&source, &ratings, &reading_log, &output, None).unwrap();
-
-    let source_connection = Connection::open(&source).unwrap();
-    assert_eq!(source_connection.query_row("SELECT schema_version FROM snapshot", (), |row| row.get::<_, i64>(0)).unwrap(), 7);
-    let output_connection = Connection::open(&output).unwrap();
-    assert_eq!(output_connection.query_row("SELECT schema_version FROM snapshot", (), |row| row.get::<_, i64>(0)).unwrap(), SCHEMA_VERSION);
-    assert_eq!(output_connection.query_row("SELECT already_read_count FROM work_popularity WHERE work_id=10", (), |row| row.get::<_, i64>(0)).unwrap(), 1);
 }
 
 #[test]
@@ -363,9 +308,6 @@ fn snapshot_enrichment_resolves_work_authors_and_external_ids() {
     let editions = temporary.path().join("ol_dump_editions_2026-08-01.txt.gz");
     let works = temporary.path().join("ol_dump_works_2026-08-01.txt.gz");
     let authors = temporary.path().join("ol_dump_authors_2026-08-01.txt.gz");
-    let wikidata = temporary.path().join("wikidata-2026-08-01.json");
-    let ratings = temporary.path().join("ol_dump_ratings_2026-08-01.txt.gz");
-    let reading_log = temporary.path().join("ol_dump_reading-log_2026-08-01.txt.gz");
     let database = temporary.path().join("snapshot.sqlite");
     dump(
         &editions,
@@ -373,8 +315,7 @@ fn snapshot_enrichment_resolves_work_authors_and_external_ids() {
             serde_json::json!({
                 "key": "/books/OL1M", "works": [{"key": "/works/OL10W"}], "authors": [{"key": "/authors/OL100A"}],
                 "title": "The Example Book", "publishers": ["North Wind Press"], "publish_date": "2004",
-                "isbn_13": ["9780306406157"], "dewey_decimal_class": ["005.1"],
-                "subject_places": ["Paris"], "subject_people": ["Ada Lovelace (1815-1852)"]
+                "isbn_13": ["9780306406157"], "dewey_decimal_class": ["005.1"]
             }),
             serde_json::json!({
                 "key": "/books/OL2M", "works": [{"key": "/works/OL10W"}],
@@ -389,8 +330,7 @@ fn snapshot_enrichment_resolves_work_authors_and_external_ids() {
     dump(
         &works,
         &[serde_json::json!({
-            "key": "/works/OL10W", "title": "Canonical Example Work", "authors": [{"author": {"key": "/authors/OL100A"}}], "lc_classifications": ["QA76.6"],
-            "subject_places": ["France", "Paris"], "subject_people": ["Charles Babbage"]
+            "key": "/works/OL10W", "title": "Canonical Example Work", "authors": [{"author": {"key": "/authors/OL100A"}}], "lc_classifications": ["QA76.6"]
         })],
     );
     dump(
@@ -399,49 +339,22 @@ fn snapshot_enrichment_resolves_work_authors_and_external_ids() {
             "key": "/authors/OL100A", "name": "Alex Smith", "remote_ids": {"viaf": "12345", "wikidata": "Q42"}
         })],
     );
-    wikidata_dump(
-        &wikidata,
-        &[
-            serde_json::json!({"id":"Q90","labels":{"en":{"value":"Paris"}},"aliases":{},"claims":{"P31":[entity_claim("Q515")],"P131":[entity_claim("Q161741")],"P17":[entity_claim("Q142")],"P625":[{"mainsnak":{"datavalue":{"value":{"latitude":48.8566,"longitude":2.3522}}}}]}}),
-            serde_json::json!({"id":"Q161741","labels":{"en":{"value":"Île-de-France"}},"aliases":{},"claims":{"P131":[entity_claim("Q142")]}}),
-            serde_json::json!({"id":"Q142","labels":{"en":{"value":"France"}},"aliases":{},"claims":{"P31":[entity_claim("Q6256")],"P30":[entity_claim("Q46")]}}),
-            serde_json::json!({"id":"Q46","labels":{"en":{"value":"Europe"}},"aliases":{},"claims":{"P31":[entity_claim("Q5107")]}}),
-            serde_json::json!({"id":"Q7259","labels":{"en":{"value":"Ada Lovelace"}},"aliases":{},"claims":{"P31":[entity_claim("Q5")]}}),
-            serde_json::json!({"id":"Q1510","labels":{"en":{"value":"Charles Babbage"}},"aliases":{},"claims":{"P31":[entity_claim("Q5")]}}),
-            serde_json::json!({"id":"Q999999999","labels":{"en":{"value":"Unreferenced City"}},"aliases":{"en":[{"value":"Unused place"}]},"claims":{"P31":[entity_claim("Q515")],"P17":[entity_claim("Q142")]}}),
-        ],
-    );
-    tsv_dump(&ratings, &["/works/OL10W\t/books/OL1M\t5\t2026-01-01", "/works/OL10W\t\\N\t3\t2026-01-02", "/works/OL999W\t\\N\t5\t2026-01-03"]);
-    tsv_dump(
-        &reading_log,
-        &[
-            "/works/OL10W\t/books/OL1M\tWant to Read\t2026-01-01",
-            "/works/OL10W\t\\N\tWant to Read\t2026-01-02",
-            "/works/OL10W\t\\N\tCurrently Reading\t2026-01-03",
-            "/works/OL10W\t\\N\tAlready Read\t2026-01-04",
-            "/works/OL999W\t\\N\tAlready Read\t2026-01-05",
-        ],
-    );
-
-    import_rich_snapshot_with_popularity(&editions, &works, &authors, &wikidata, &ratings, &reading_log, &database, None).unwrap();
+    import_snapshot(&editions, &works, &authors, &database, None).unwrap();
     let validation = Connection::open(&database).unwrap();
-    assert_eq!(validation.query_row("SELECT schema_version FROM snapshot WHERE singleton=1", (), |row| row.get::<_, i64>(0)).unwrap(), WIKIDATA_SCHEMA_VERSION);
+    assert_eq!(validation.query_row("SELECT schema_version FROM snapshot WHERE singleton=1", (), |row| row.get::<_, i64>(0)).unwrap(), SCHEMA_VERSION);
     assert_eq!(
         validation.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE '%_stage'", (), |row| row.get::<_, i64>(0)).unwrap(),
         0,
         "all append-only import staging tables must be removed from the immutable snapshot"
     );
     assert_eq!(
-        validation
-            .query_row("SELECT COUNT(*) FROM import_checkpoint WHERE phase IN ('editions_materialize','works_materialize','work_titles_materialize','authors_materialize','wikidata_materialize') AND completed=1", (), |row| row
-                .get::<_, i64>(0))
-            .unwrap(),
-        5
+        validation.query_row("SELECT COUNT(*) FROM import_checkpoint WHERE phase IN ('editions_materialize','works_materialize','work_titles_materialize','authors_materialize') AND completed=1", (), |row| row.get::<_, i64>(0)).unwrap(),
+        4
     );
     let service = MetadataService::open(&database).unwrap();
     let operations = load_operational_stats(&service.state).unwrap();
     assert_eq!(operations.status, "available");
-    assert_eq!(operations.schema_version, WIKIDATA_SCHEMA_VERSION);
+    assert_eq!(operations.schema_version, SCHEMA_VERSION);
     assert!(operations.database_bytes > 0);
     assert!(operations.edition_records > 0);
     assert!(operations.work_records > 0);
@@ -464,14 +377,7 @@ fn snapshot_enrichment_resolves_work_authors_and_external_ids() {
 
     let rich = service.enrich_rich(MetadataEnrichmentRequest { isbns: vec!["9780306406157".to_owned()] }).unwrap();
     let matched = &rich.results[0].matches[0];
-    assert_eq!(matched.places.iter().map(|place| (&place.name, place.source)).collect::<Vec<_>>(), vec![(&"France".to_owned(), EntitySource::Work), (&"Paris".to_owned(), EntitySource::ExactEdition)]);
-    assert_eq!(matched.people.len(), 2);
-    assert_eq!(matched.places.iter().find(|place| place.name == "Paris").and_then(|place| place.wikidata_id.as_deref()), Some("Q90"));
-    assert_eq!(matched.people.iter().find(|person| person.name.starts_with("Ada Lovelace")).and_then(|person| person.wikidata_id.as_deref()), Some("Q7259"));
-    assert!(rich.places.iter().any(|place| place.wikidata_id == "Q90" && place.country_ids == ["Q142"]));
-    assert!(rich.places.iter().any(|place| place.wikidata_id == "Q46"));
-    assert!(rich.people.iter().any(|person| person.wikidata_id == "Q7259"));
-    assert_eq!(matched.popularity, Some(metadata_contract::WorkPopularity { want_to_read_count: 2, currently_reading_count: 1, already_read_count: 1, rating_count: 2, rating_sum: 8 }));
+    assert_eq!(matched.authors.len(), 1);
     let identity = service
         .resolve_editions(EditionIdentityRequest {
             queries: vec![
@@ -494,43 +400,6 @@ fn snapshot_enrichment_resolves_work_authors_and_external_ids() {
         assert_eq!(result.status, EditionIdentityStatus::Matched);
         assert_eq!(result.matched.as_ref().and_then(|matched| matched.open_library_work_id.as_deref()), Some("OL10W"));
     }
-    let retained = Connection::open(&database).unwrap().query_row("SELECT COUNT(*) FROM entity WHERE wikidata_id=999999999", (), |row| row.get::<_, i64>(0)).unwrap();
-    assert_eq!(retained, 0, "unreferenced Wikidata geography must be pruned from the snapshot");
-}
-
-#[test]
-fn wikidata_scan_resumes_from_committed_record_checkpoint() {
-    let temporary = tempfile::tempdir().unwrap();
-    let wikidata = temporary.path().join("wikidata.json");
-    wikidata_dump(
-        &wikidata,
-        &[
-            serde_json::json!({"id":"Q90","labels":{"en":{"value":"Paris"}},"aliases":{},"claims":{"P31":[entity_claim("Q515")],"P17":[entity_claim("Q142")]}}),
-            serde_json::json!({"id":"Q142","labels":{"en":{"value":"France"}},"aliases":{},"claims":{"P31":[entity_claim("Q6256")],"P30":[entity_claim("Q46")]}}),
-            serde_json::json!({"id":"Q46","labels":{"en":{"value":"Europe"}},"aliases":{},"claims":{"P31":[entity_claim("Q5107")]}}),
-        ],
-    );
-    let database = temporary.path().join("resumable.sqlite");
-    let mut connection = Connection::open(&database).unwrap();
-    configure_import(&connection).unwrap();
-    create_schema(&connection).unwrap();
-    connection
-        .execute_batch(
-            "INSERT INTO work_entity_evidence(work_id,kind,name,normalized_name) VALUES(1,1,'Paris','paris');
-                 INSERT INTO entity_stage(wikidata_id,kind,label,fictional) VALUES(90,1,'Paris',0);
-                 INSERT INTO place_country_stage(place_id,country_id) VALUES(90,142);
-                 INSERT INTO wikidata_candidate_stage(kind,normalized_name,wikidata_id) VALUES(1,'paris',90);
-                 INSERT INTO import_checkpoint(phase,records_read,completed) VALUES('wikidata_scan',1,0);",
-        )
-        .unwrap();
-
-    assert_eq!(import_wikidata(&mut connection, &wikidata, None).unwrap(), 3);
-    assert_eq!(completed_phase(&connection, "wikidata_scan").unwrap(), Some(3));
-    assert_eq!(completed_phase(&connection, "wikidata_finalize").unwrap(), Some(3));
-    assert_eq!(completed_phase(&connection, "wikidata_materialize").unwrap(), Some(0));
-    let retained = connection.query_row("SELECT group_concat(wikidata_id,',') FROM (SELECT wikidata_id FROM entity ORDER BY wikidata_id)", (), |row| row.get::<_, String>(0)).unwrap();
-    assert_eq!(retained, "46,90,142");
-    assert_eq!(import_wikidata(&mut connection, &wikidata, None).unwrap(), 3, "a completed materialized phase is idempotent");
 }
 
 #[test]
@@ -587,11 +456,16 @@ fn edition_identity_resolves_an_edition_that_has_no_linked_work() {
 #[test]
 fn edition_identity_excludes_ddc_only_and_invalid_lcc_candidates_before_ranking() {
     let temporary = tempfile::tempdir().unwrap();
-    let database = snapshot_from(temporary.path(), &[
-        serde_json::json!({"key":"/books/OL1M", "title":"Example LCC Book", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9780306406157"], "lc_classifications":["E757 .A37 1985"]}),
-        serde_json::json!({"key":"/books/OL2M", "title":"Example LCC Book", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9780821338278"], "dewey_decimal_class":["B"]}),
-        serde_json::json!({"key":"/books/OL3M", "title":"Example LCC Book", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9783161484100"], "lc_classifications":["invalid"], "dewey_decimal_class":["973"]}),
-    ], &[], &[serde_json::json!({"key":"/authors/OL100A", "name":"Alex Smith"})]);
+    let database = snapshot_from(
+        temporary.path(),
+        &[
+            serde_json::json!({"key":"/books/OL1M", "title":"Example LCC Book", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9780306406157"], "lc_classifications":["E757 .A37 1985"]}),
+            serde_json::json!({"key":"/books/OL2M", "title":"Example LCC Book", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9780821338278"], "dewey_decimal_class":["B"]}),
+            serde_json::json!({"key":"/books/OL3M", "title":"Example LCC Book", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9783161484100"], "lc_classifications":["invalid"], "dewey_decimal_class":["973"]}),
+        ],
+        &[],
+        &[serde_json::json!({"key":"/authors/OL100A", "name":"Alex Smith"})],
+    );
     let service = MetadataService::open(&database).unwrap();
     let response = service.resolve_editions(edition_query("Example LCC Book", Vec::new(), None)).unwrap();
     assert_eq!(response.results[0].status, EditionIdentityStatus::Matched);
@@ -805,13 +679,7 @@ fn edition_identity_accepts_one_work_after_author_matched_editions_are_collapsed
 
     let response = service
         .resolve_editions(EditionIdentityRequest {
-            queries: vec![EditionIdentityQuery {
-                query_id: "same-work".to_owned(),
-                title: "Delphi Complete Works of Homer".to_owned(),
-                authors: vec!["Homer".to_owned()],
-                publishers: vec!["Delphi Classics".to_owned()],
-                book_year: None,
-            }],
+            queries: vec![EditionIdentityQuery { query_id: "same-work".to_owned(), title: "Delphi Complete Works of Homer".to_owned(), authors: vec!["Homer".to_owned()], publishers: vec!["Delphi Classics".to_owned()], book_year: None }],
         })
         .unwrap();
 
@@ -843,9 +711,8 @@ fn edition_identity_combines_inferred_author_and_year_to_remove_other_candidates
         &[serde_json::json!({"key": "/authors/OL100A", "name": "Jeff Erickson"}), serde_json::json!({"key": "/authors/OL200A", "name": "Fethi Rabhi"})],
     );
     let service = MetadataService::open(&database).unwrap();
-    let request = EditionIdentityRequest {
-        queries: vec![EditionIdentityQuery { query_id: "noisy-filename".to_owned(), title: "Algorithms".to_owned(), authors: vec!["Jeff Erickson".to_owned()], publishers: Vec::new(), book_year: Some(2019) }],
-    };
+    let request =
+        EditionIdentityRequest { queries: vec![EditionIdentityQuery { query_id: "noisy-filename".to_owned(), title: "Algorithms".to_owned(), authors: vec!["Jeff Erickson".to_owned()], publishers: Vec::new(), book_year: Some(2019) }] };
 
     let response = service.resolve_editions(request).unwrap();
     assert_eq!(response.results[0].status, EditionIdentityStatus::Matched);
@@ -986,9 +853,8 @@ fn edition_identity_combines_classification_sources_and_suggests_only_one_editio
     );
     let service = MetadataService::open(&database).unwrap();
 
-    let response = service
-        .resolve_editions(EditionIdentityRequest { queries: vec![EditionIdentityQuery { query_id: "query".to_owned(), title: "The Example Book".to_owned(), authors: Vec::new(), publishers: Vec::new(), book_year: None }] })
-        .unwrap();
+    let response =
+        service.resolve_editions(EditionIdentityRequest { queries: vec![EditionIdentityQuery { query_id: "query".to_owned(), title: "The Example Book".to_owned(), authors: Vec::new(), publishers: Vec::new(), book_year: None }] }).unwrap();
     assert_eq!(response.results[0].status, EditionIdentityStatus::Ambiguous);
     assert_eq!(response.results[0].candidates.len(), 1);
     assert_eq!(response.results[0].candidates[0].open_library_work_id.as_deref(), Some("OL10W"));
@@ -1040,12 +906,7 @@ fn classification_lookup_prefers_direct_work_codes_to_sibling_codes() {
 
     let response = service.lookup(ClassificationRequest { isbns: vec!["9780306406157".to_owned()] }).unwrap();
     let classifications = &response.results[0].matches[0].classifications;
-    assert_eq!(
-        classifications,
-        &[
-            Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "PN1993".to_owned(), source: ClassificationSource::Work },
-        ]
-    );
+    assert_eq!(classifications, &[Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "PN1993".to_owned(), source: ClassificationSource::Work },]);
 }
 
 #[test]
@@ -1069,10 +930,7 @@ fn classification_lookup_prefers_exact_edition_codes_to_work_and_sibling_codes()
     let service = MetadataService::open(&database).unwrap();
 
     let response = service.lookup(ClassificationRequest { isbns: vec!["9780306406157".to_owned()] }).unwrap();
-    assert_eq!(
-        response.results[0].matches[0].classifications,
-        vec![Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "E169.1.F539".to_owned(), source: ClassificationSource::ExactEdition }]
-    );
+    assert_eq!(response.results[0].matches[0].classifications, vec![Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "E169.1.F539".to_owned(), source: ClassificationSource::ExactEdition }]);
 }
 
 #[test]
@@ -1109,7 +967,7 @@ fn unfinished_build_from_an_older_builder_is_rejected_without_being_mutated() {
     let connection = Connection::open(&building).unwrap();
     configure_import(&connection).unwrap();
     create_schema(&connection).unwrap();
-    register_import_inputs(&connection, &editions, &works, &authors, None, None, None).unwrap();
+    register_import_inputs(&connection, &editions, &works, &authors, None).unwrap();
     connection
         .execute_batch(
             "DROP INDEX work_bibliography_by_title;
@@ -1131,18 +989,31 @@ fn unfinished_build_from_an_older_builder_is_rejected_without_being_mutated() {
 #[test]
 fn loc_dump_extends_existing_sqlite_and_mmap_isbn_lookup() {
     let temp = tempfile::tempdir().unwrap();
-    let database = snapshot_from(temp.path(), &[
-        serde_json::json!({"key":"/books/OL1M","works":[{"key":"/works/OL1W"}],"isbn_13":["9780306406157"],"dewey_decimal_class":["940"]}),
-        serde_json::json!({"key":"/books/OL2M","works":[{"key":"/works/OL2W"}],"isbn_13":["9780062097729"]}),
-        serde_json::json!({"key":"/books/OL3M","works":[{"key":"/works/OL3W"}],"isbn_13":["9780062097729"]})
-    ], &[], &[]);
+    let database = snapshot_from(
+        temp.path(),
+        &[
+            serde_json::json!({"key":"/books/OL1M","works":[{"key":"/works/OL1W"}],"isbn_13":["9780306406157"],"dewey_decimal_class":["940"]}),
+            serde_json::json!({"key":"/books/OL2M","works":[{"key":"/works/OL2W"}],"isbn_13":["9780062097729"]}),
+            serde_json::json!({"key":"/books/OL3M","works":[{"key":"/works/OL3W"}],"isbn_13":["9780062097729"]}),
+        ],
+        &[],
+        &[],
+    );
     let connection = Connection::open(&database).unwrap();
-    connection.execute_batch("CREATE TABLE isbn_lcc(isbn13 INTEGER,notation TEXT,lc_record_id TEXT,PRIMARY KEY(isbn13,notation,lc_record_id)) WITHOUT ROWID;
-        INSERT INTO isbn_lcc VALUES(9780306406157,'DC161','lc1'),(9780306406157,'DC161','lc2'),(9780131103627,'QA76.73.C15','lc3'),(9780062097729,'E169','lc4');").unwrap();
-    connection.execute_batch("CREATE TABLE lc_record(lc_record_id TEXT PRIMARY KEY,metadata TEXT); CREATE TABLE lc_record_isbn(isbn13 INTEGER,lc_record_id TEXT,PRIMARY KEY(isbn13,lc_record_id)) WITHOUT ROWID;
-        INSERT INTO lc_record_isbn VALUES(9780306406157,'lc1'),(9780131103627,'lc3');").unwrap();
-    let extra = serde_json::json!({"descriptions":["An LC catalog summary."],"subjects":[{"source":"library_of_congress","authority":"lcsh","components":["France","History"],"authority_uri":null}]}).to_string();
-    connection.execute("INSERT INTO lc_record VALUES('lc1',?1),('lc3',?1)",[extra]).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE isbn_lcc(isbn13 INTEGER,notation TEXT,lc_record_id TEXT,PRIMARY KEY(isbn13,notation,lc_record_id)) WITHOUT ROWID;
+        INSERT INTO isbn_lcc VALUES(9780306406157,'DC161','lc1'),(9780306406157,'DC161','lc2'),(9780131103627,'QA76.73.C15','lc3'),(9780062097729,'E169','lc4');",
+        )
+        .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE lc_record(lc_record_id TEXT PRIMARY KEY,metadata TEXT); CREATE TABLE lc_record_isbn(isbn13 INTEGER,lc_record_id TEXT,PRIMARY KEY(isbn13,lc_record_id)) WITHOUT ROWID;
+        INSERT INTO lc_record_isbn VALUES(9780306406157,'lc1'),(9780131103627,'lc3');",
+        )
+        .unwrap();
+    let extra = serde_json::json!({"descriptions":["An LC authority summary."],"subjects":[{"source":"library_of_congress","authority":"lcsh","components":["France","History"],"authority_uri":null}]}).to_string();
+    connection.execute("INSERT INTO lc_record VALUES('lc1',?1),('lc3',?1)", [extra]).unwrap();
     drop(connection);
     let service = MetadataService::open(&database).unwrap();
     let request = ClassificationRequest { isbns: vec!["0-306-40615-2".into(), "9780131103627".into(), "9780062097729".into(), "invalid".into()] };
@@ -1150,43 +1021,47 @@ fn loc_dump_extends_existing_sqlite_and_mmap_isbn_lookup() {
     assert_eq!(response.results[0].status, LookupStatus::Matched);
     assert_eq!(response.results[0].matches[0].exact_edition_ids, vec!["OL1M"]);
     let codes = &response.results[0].matches[0].classifications;
-    assert_eq!(codes.iter().filter(|c| c.notation == "DC161").count(),1);
+    assert_eq!(codes.iter().filter(|c| c.notation == "DC161").count(), 1);
     assert!(codes.iter().all(|c| c.scheme != ClassificationScheme::DeweyDecimal));
     assert_eq!(response.results[1].status, LookupStatus::Matched);
-    assert_eq!(response.results[1].matches[0].open_library_work_id,None);
+    assert_eq!(response.results[1].matches[0].open_library_work_id, None);
     assert!(response.results[1].matches[0].exact_edition_ids.is_empty());
-    assert_eq!(response.results[1].matches[0].classifications[0].notation,"QA76.73.C15");
-    assert_eq!(response.results[2].status,LookupStatus::Ambiguous);
+    assert_eq!(response.results[1].matches[0].classifications[0].notation, "QA76.73.C15");
+    assert_eq!(response.results[2].status, LookupStatus::Ambiguous);
     assert!(response.results[2].matches.iter().all(|m| m.classifications.is_empty()));
-    assert_eq!(response.results[3].status,LookupStatus::InvalidIsbn);
+    assert_eq!(response.results[3].status, LookupStatus::InvalidIsbn);
     for enrich in [service.enrich_rich(MetadataEnrichmentRequest { isbns: request.isbns.clone() }).unwrap(), service.classify_rich(MetadataEnrichmentRequest { isbns: request.isbns.clone() }).unwrap()] {
-        assert!(enrich.results[0].matches[0].classifications.iter().any(|c| c.notation=="DC161"));
-        assert_eq!(enrich.results[1].matches[0].classifications[0].notation,"QA76.73.C15");
-        assert_eq!(enrich.results[1].matches[0].description.as_deref(),Some("An LC catalog summary."));
-        assert_eq!(enrich.results[1].matches[0].subjects[0].source,"library_of_congress");
+        assert!(enrich.results[0].matches[0].classifications.iter().any(|c| c.notation == "DC161"));
+        assert_eq!(enrich.results[1].matches[0].classifications[0].notation, "QA76.73.C15");
+        assert_eq!(enrich.results[1].matches[0].description.as_deref(), Some("An LC authority summary."));
+        assert_eq!(enrich.results[1].matches[0].subjects[0].source, "library_of_congress");
     }
-    let index=temp.path().join("subjects.idx");
-    build_subject_index(&database,&index).unwrap();
-    let indexed=MetadataService::open(&database).unwrap().with_subject_index(&index).unwrap();
-    assert_eq!(serde_json::to_value(response).unwrap(),serde_json::to_value(indexed.lookup(request.clone()).unwrap()).unwrap());
-    let subjects=temp.path().join("subjects.sqlite");let rich=temp.path().join("rich.sqlite");let identities=temp.path().join("identities.sqlite");
-    split_snapshot(&database,&subjects,&rich,&identities).unwrap();
-    let split=MetadataService::open_with_stores(subjects,rich,identities,None::<PathBuf>,None::<PathBuf>).unwrap();
-    assert_eq!(split.lookup(request.clone()).unwrap().results[1].matches[0].classifications[0].notation,"QA76.73.C15");
-    assert_eq!(split.enrich_rich(MetadataEnrichmentRequest { isbns: request.isbns }).unwrap().results[1].matches[0].description.as_deref(),Some("An LC catalog summary."));
+    let index = temp.path().join("subjects.idx");
+    build_subject_index(&database, &index).unwrap();
+    let indexed = MetadataService::open(&database).unwrap().with_subject_index(&index).unwrap();
+    assert_eq!(serde_json::to_value(response).unwrap(), serde_json::to_value(indexed.lookup(request.clone()).unwrap()).unwrap());
+    let subjects = temp.path().join("subjects.sqlite");
+    let rich = temp.path().join("rich.sqlite");
+    let identities = temp.path().join("identities.sqlite");
+    split_snapshot(&database, &subjects, &rich, &identities).unwrap();
+    let split = MetadataService::open_with_stores(subjects, rich, identities, None::<PathBuf>).unwrap();
+    assert_eq!(split.lookup(request.clone()).unwrap().results[1].matches[0].classifications[0].notation, "QA76.73.C15");
+    assert_eq!(split.enrich_rich(MetadataEnrichmentRequest { isbns: request.isbns }).unwrap().results[1].matches[0].description.as_deref(), Some("An LC authority summary."));
 }
 
 pub(super) fn duplicate_work_fixture(path: &Path, candidate_title: &str, candidate_author: &str) -> PathBuf {
-    snapshot_from(path, &[
-        serde_json::json!({"key":"/books/OL1M","works":[{"key":"/works/OL10W"}],"title":"Empire of Wealth","isbn_13":["9780061847646"],"authors":[{"key":"/authors/OL1A"}]}),
-        serde_json::json!({"key":"/books/OL2M","works":[{"key":"/works/OL20W"}],"title":candidate_title,"isbn_13":["9780060093624"],"authors":[{"key":"/authors/OL2A"}],"lc_classifications":["HC103 .G673 2004"]})
-    ], &[
-        serde_json::json!({"key":"/works/OL10W","title":"Empire of Wealth","authors":[{"author":{"key":"/authors/OL1A"}}]}),
-        serde_json::json!({"key":"/works/OL20W","title":"An Empire of Wealth","authors":[{"author":{"key":"/authors/OL2A"}}]})
-    ], &[
-        serde_json::json!({"key":"/authors/OL1A","name":"John Steele Gordon"}),
-        serde_json::json!({"key":"/authors/OL2A","name":candidate_author})
-    ])
+    snapshot_from(
+        path,
+        &[
+            serde_json::json!({"key":"/books/OL1M","works":[{"key":"/works/OL10W"}],"title":"Empire of Wealth","isbn_13":["9780061847646"],"authors":[{"key":"/authors/OL1A"}]}),
+            serde_json::json!({"key":"/books/OL2M","works":[{"key":"/works/OL20W"}],"title":candidate_title,"isbn_13":["9780060093624"],"authors":[{"key":"/authors/OL2A"}],"lc_classifications":["HC103 .G673 2004"]}),
+        ],
+        &[
+            serde_json::json!({"key":"/works/OL10W","title":"Empire of Wealth","authors":[{"author":{"key":"/authors/OL1A"}}]}),
+            serde_json::json!({"key":"/works/OL20W","title":"An Empire of Wealth","authors":[{"author":{"key":"/authors/OL2A"}}]}),
+        ],
+        &[serde_json::json!({"key":"/authors/OL1A","name":"John Steele Gordon"}), serde_json::json!({"key":"/authors/OL2A","name":candidate_author})],
+    )
 }
 
 #[test]
@@ -1196,27 +1071,27 @@ fn duplicate_work_recovers_lcc_preserving_identity_and_provenance_in_all_stores(
     let subjects = temp.path().join("subjects.sqlite");
     let rich = temp.path().join("rich.sqlite");
     let identity = temp.path().join("identity.sqlite");
-    split_snapshot(&database,&subjects,&rich,&identity).unwrap();
+    split_snapshot(&database, &subjects, &rich, &identity).unwrap();
     let index = temp.path().join("subjects.idx");
-    build_subject_index_limited(&subjects,&index,None).unwrap();
-    for service in [MetadataService::open(&database).unwrap(), MetadataService::open_with_stores(&subjects,&rich,&identity,None::<PathBuf>,None::<PathBuf>).unwrap().with_subject_index(&index).unwrap()] {
+    build_subject_index_limited(&subjects, &index, None).unwrap();
+    for service in [MetadataService::open(&database).unwrap(), MetadataService::open_with_stores(&subjects, &rich, &identity, None::<PathBuf>).unwrap().with_subject_index(&index).unwrap()] {
         let response = service.lookup(ClassificationRequest { isbns: vec!["9780061847646".into()] }).unwrap();
         let matched = &response.results[0].matches[0];
-        assert_eq!(response.results[0].canonical_isbn13.as_deref(),Some("9780061847646"));
-        assert_eq!(matched.open_library_work_id.as_deref(),Some("OL10W"));
-        assert_eq!(matched.exact_edition_ids,vec!["OL1M"]);
-        assert_eq!(matched.classifications.len(),1);
+        assert_eq!(response.results[0].canonical_isbn13.as_deref(), Some("9780061847646"));
+        assert_eq!(matched.open_library_work_id.as_deref(), Some("OL10W"));
+        assert_eq!(matched.exact_edition_ids, vec!["OL1M"]);
+        assert_eq!(matched.classifications.len(), 1);
         let c = &matched.classifications[0];
-        assert_eq!(c.notation,"HC103");
-        assert_eq!(c.source,ClassificationSource::Work);
-        assert_eq!(c.evidence[0].isbn13,"9780060093624");
-        assert_eq!(c.evidence[0].open_library_work_id,"OL20W");
-        for enriched in [service.classify_rich(MetadataEnrichmentRequest{isbns:vec!["9780061847646".into()]}).unwrap(),service.enrich_rich(MetadataEnrichmentRequest{isbns:vec!["9780061847646".into()]}).unwrap()] {
-            assert_eq!(enriched.results[0].matches[0].classifications,matched.classifications);
+        assert_eq!(c.notation, "HC103");
+        assert_eq!(c.source, ClassificationSource::Work);
+        assert_eq!(c.evidence[0].isbn13, "9780060093624");
+        assert_eq!(c.evidence[0].open_library_work_id, "OL20W");
+        for enriched in [service.classify_rich(MetadataEnrichmentRequest { isbns: vec!["9780061847646".into()] }).unwrap(), service.enrich_rich(MetadataEnrichmentRequest { isbns: vec!["9780061847646".into()] }).unwrap()] {
+            assert_eq!(enriched.results[0].matches[0].classifications, matched.classifications);
             let encoded = metadata_contract::encode_v2_response(&enriched).unwrap();
             let decoded = metadata_contract::decode_v2_response(&encoded, metadata_contract::MAX_RESPONSE_BYTES).unwrap();
             assert_eq!(decoded.results[0].matches[0].classifications, matched.classifications);
-            let merged = metadata_contract::merge_rich_work_matches(&decoded.results[0].matches, |_,_| Vec::new());
+            let merged = metadata_contract::merge_rich_work_matches(&decoded.results[0].matches, |_, _| Vec::new());
             assert_eq!(merged.classifications, matched.classifications);
         }
     }
@@ -1224,103 +1099,116 @@ fn duplicate_work_recovers_lcc_preserving_identity_and_provenance_in_all_stores(
 
 #[test]
 fn duplicate_work_rejects_different_authors_adaptations_and_volumes() {
-    for (title,author) in [
-        ("An Empire of Wealth","John Smith"),
-        ("An Empire of Wealth: Study Guide","John Steele Gordon"),
-        ("An Empire of Wealth (Abridged)","John Steele Gordon"),
-        ("An Empire of Wealth II","John Steele Gordon"),
-        ("An Empire of Wealth: Volume 2","John Steele Gordon"),
+    for (title, author) in [
+        ("An Empire of Wealth", "John Smith"),
+        ("An Empire of Wealth: Study Guide", "John Steele Gordon"),
+        ("An Empire of Wealth (Abridged)", "John Steele Gordon"),
+        ("An Empire of Wealth II", "John Steele Gordon"),
+        ("An Empire of Wealth: Volume 2", "John Steele Gordon"),
     ] {
-        let temp=tempfile::tempdir().unwrap();
-        let database=duplicate_work_fixture(temp.path(),title,author);
-        let response=MetadataService::open(database).unwrap().lookup(ClassificationRequest{isbns:vec!["9780061847646".into()]}).unwrap();
-        assert!(response.results[0].matches[0].classifications.is_empty(),"{title} / {author}");
+        let temp = tempfile::tempdir().unwrap();
+        let database = duplicate_work_fixture(temp.path(), title, author);
+        let response = MetadataService::open(database).unwrap().lookup(ClassificationRequest { isbns: vec!["9780061847646".into()] }).unwrap();
+        assert!(response.results[0].matches[0].classifications.is_empty(), "{title} / {author}");
     }
 }
 
 #[test]
-fn duplicate_work_leaves_conflicting_codes_unresolved_and_keeps_existing_lcc() {
-    let temp=tempfile::tempdir().unwrap();
-    let database=duplicate_work_fixture(temp.path(),"An Empire of Wealth","John Steele Gordon");
-    let c=Connection::open(&database).unwrap();
-    c.execute("INSERT INTO edition_classification(edition_id,scheme,notation) VALUES(2,?1,'D1')",[LCC_SCHEME]).unwrap();
-    c.execute_batch("INSERT INTO edition VALUES(3,30); INSERT INTO edition_isbn VALUES(9780306406157,3); INSERT INTO edition_bibliography VALUES(3,'Empire of Wealth','empire of wealth',2005); INSERT INTO edition_author VALUES(3,0,2);").unwrap();
-    c.execute("INSERT INTO edition_classification(edition_id,scheme,notation) VALUES(3,?1,'HC103')",[LCC_SCHEME]).unwrap();
-    let request=|| ClassificationRequest{isbns:vec!["9780061847646".into()]};
-    assert!(MetadataService::open(&database).unwrap().lookup(request()).unwrap().results[0].matches[0].classifications.is_empty());
-    c.execute("INSERT INTO edition_classification(edition_id,scheme,notation) VALUES(1,?1,'E1')",[LCC_SCHEME]).unwrap();
-    let response=MetadataService::open(database).unwrap().lookup(request()).unwrap();
-    assert_eq!(response.results[0].matches[0].classifications[0].notation,"E1");
+fn duplicate_work_collects_differing_codes_and_keeps_existing_lcc() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = duplicate_work_fixture(temp.path(), "An Empire of Wealth", "John Steele Gordon");
+    let c = Connection::open(&database).unwrap();
+    c.execute("INSERT INTO edition_classification(edition_id,scheme,notation) VALUES(2,?1,'D1')", [LCC_SCHEME]).unwrap();
+    c.execute_batch("INSERT INTO edition VALUES(3,30); INSERT INTO edition_isbn VALUES(9780306406157,3); INSERT INTO edition_bibliography VALUES(3,'Empire of Wealth','empire of wealth',2005); INSERT INTO edition_author VALUES(3,0,2);")
+        .unwrap();
+    c.execute("INSERT INTO edition_classification(edition_id,scheme,notation) VALUES(3,?1,'HC103')", [LCC_SCHEME]).unwrap();
+    let request = || ClassificationRequest { isbns: vec!["9780061847646".into()] };
+    let recovered = MetadataService::open(&database).unwrap().lookup(request()).unwrap();
+    let codes = &recovered.results[0].matches[0].classifications;
+    assert!(codes.iter().any(|c| c.notation == "D1"));
+    assert!(codes.iter().any(|c| c.notation == "HC103"));
+    assert!(codes.iter().all(|c| !c.evidence.is_empty()));
+    c.execute("INSERT INTO edition_classification(edition_id,scheme,notation) VALUES(1,?1,'E1')", [LCC_SCHEME]).unwrap();
+    let response = MetadataService::open(database).unwrap().lookup(request()).unwrap();
+    assert_eq!(response.results[0].matches[0].classifications[0].notation, "E1");
     assert!(response.results[0].matches[0].classifications[0].evidence.is_empty());
 }
 
 #[test]
 fn duplicate_work_uses_lc_dump_evidence_in_split_identity_store() {
-    let temp=tempfile::tempdir().unwrap();
-    let database=duplicate_work_fixture(temp.path(),"An Empire of Wealth","John Steele Gordon");
-    let c=Connection::open(&database).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let database = duplicate_work_fixture(temp.path(), "An Empire of Wealth", "John Steele Gordon");
+    let c = Connection::open(&database).unwrap();
     c.execute_batch("DELETE FROM edition_classification; DELETE FROM edition_work_classification; CREATE TABLE isbn_lcc(isbn13 INTEGER,notation TEXT,lc_record_id TEXT,PRIMARY KEY(isbn13,notation,lc_record_id)) WITHOUT ROWID; INSERT INTO isbn_lcc VALUES(9780060093624,'HC103','LC1');").unwrap();
-    c.execute("INSERT INTO edition_classification VALUES(1,?1,'330.973')",[1_i64]).unwrap();
-    let subjects=temp.path().join("subjects.sqlite");let rich=temp.path().join("rich.sqlite");let identity=temp.path().join("identity.sqlite");
-    split_snapshot(&database,&subjects,&rich,&identity).unwrap();
-    let service=MetadataService::open_with_stores(&subjects,&rich,&identity,None::<PathBuf>,None::<PathBuf>).unwrap();
-    let result=service.lookup(ClassificationRequest{isbns:vec!["9780061847646".into()]}).unwrap();
-    let codes=&result.results[0].matches[0].classifications;
-    assert!(!codes.iter().any(|c| c.notation=="330.973"));
-    assert!(codes.iter().any(|c| c.notation=="HC103" && c.evidence[0].isbn13=="9780060093624"));
+    c.execute("INSERT INTO edition_classification VALUES(1,?1,'330.973')", [1_i64]).unwrap();
+    let subjects = temp.path().join("subjects.sqlite");
+    let rich = temp.path().join("rich.sqlite");
+    let identity = temp.path().join("identity.sqlite");
+    split_snapshot(&database, &subjects, &rich, &identity).unwrap();
+    let service = MetadataService::open_with_stores(&subjects, &rich, &identity, None::<PathBuf>).unwrap();
+    let result = service.lookup(ClassificationRequest { isbns: vec!["9780061847646".into()] }).unwrap();
+    let codes = &result.results[0].matches[0].classifications;
+    assert!(!codes.iter().any(|c| c.notation == "330.973"));
+    assert!(codes.iter().any(|c| c.notation == "HC103" && c.evidence[0].isbn13 == "9780060093624"));
 }
 
 #[test]
 fn duplicate_work_does_not_pick_an_arbitrary_match_from_truncated_candidates() {
-    let temp=tempfile::tempdir().unwrap();
-    let database=duplicate_work_fixture(temp.path(),"An Empire of Wealth","John Steele Gordon");
-    let c=Connection::open(&database).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let database = duplicate_work_fixture(temp.path(), "An Empire of Wealth", "John Steele Gordon");
+    let c = Connection::open(&database).unwrap();
     for id in 100..230 {
-        c.execute("INSERT INTO edition VALUES(?1,?1)",[id]).unwrap();
-        c.execute("INSERT INTO edition_bibliography VALUES(?1,'Empire of Wealth','empire of wealth',2000)",[id]).unwrap();
-        c.execute("INSERT INTO edition_author VALUES(?1,0,2)",[id]).unwrap();
+        c.execute("INSERT INTO edition VALUES(?1,?1)", [id]).unwrap();
+        c.execute("INSERT INTO edition_bibliography VALUES(?1,'Empire of Wealth','empire of wealth',2000)", [id]).unwrap();
+        c.execute("INSERT INTO edition_author VALUES(?1,0,2)", [id]).unwrap();
     }
-    let result=MetadataService::open(database).unwrap().lookup(ClassificationRequest{isbns:vec!["9780061847646".into()]}).unwrap();
+    let result = MetadataService::open(database).unwrap().lookup(ClassificationRequest { isbns: vec!["9780061847646".into()] }).unwrap();
     assert!(result.results[0].matches[0].classifications.is_empty());
 }
 
 #[test]
 fn duplicate_work_filters_unrelated_authors_before_candidate_limit() {
-    let temp=tempfile::tempdir().unwrap();
-    let database=duplicate_work_fixture(temp.path(),"An Empire of Wealth","John Steele Gordon");
-    let c=Connection::open(&database).unwrap();
-    c.execute("INSERT INTO author VALUES(99,'Unrelated Writer')",[]).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let database = duplicate_work_fixture(temp.path(), "An Empire of Wealth", "John Steele Gordon");
+    let c = Connection::open(&database).unwrap();
+    c.execute("INSERT INTO author VALUES(99,'Unrelated Writer')", []).unwrap();
     for id in 100..400 {
-        c.execute("INSERT INTO edition VALUES(?1,?1)",[id]).unwrap();
-        c.execute("INSERT INTO edition_bibliography VALUES(?1,'Empire of Wealth','empire of wealth',2000)",[id]).unwrap();
-        c.execute("INSERT INTO edition_author VALUES(?1,0,99)",[id]).unwrap();
+        c.execute("INSERT INTO edition VALUES(?1,?1)", [id]).unwrap();
+        c.execute("INSERT INTO edition_bibliography VALUES(?1,'Empire of Wealth','empire of wealth',2000)", [id]).unwrap();
+        c.execute("INSERT INTO edition_author VALUES(?1,0,99)", [id]).unwrap();
     }
-    let result=MetadataService::open(database).unwrap().lookup(ClassificationRequest{isbns:vec!["9780061847646".into()]}).unwrap();
-    assert_eq!(result.results[0].matches[0].classifications[0].notation,"HC103");
+    let result = MetadataService::open(database).unwrap().lookup(ClassificationRequest { isbns: vec!["9780061847646".into()] }).unwrap();
+    assert_eq!(result.results[0].matches[0].classifications[0].notation, "HC103");
 }
 
 #[test]
 fn single_classified_sibling_is_used_until_another_sibling_has_codes() {
-    let temp=tempfile::tempdir().unwrap();
-    let database=snapshot_from(temp.path(),&[
-        serde_json::json!({"key":"/books/OL1M","works":[{"key":"/works/OL10W"}],"title":"Example","isbn_13":["9780306406157"]}),
-        serde_json::json!({"key":"/books/OL2M","works":[{"key":"/works/OL10W"}],"title":"Example","isbn_13":["9780821338278"],"lc_classifications":["HE2751 .A1","HE2751.A2"],"dewey_decimal_class":["385"]}),
-        serde_json::json!({"key":"/books/OL3M","works":[{"key":"/works/OL10W"}],"title":"Example","isbn_13":["9783161484100"]})
-    ],&[serde_json::json!({"key":"/works/OL10W","title":"Example"})],&[]);
-    for conflicting in [false,true] {
+    let temp = tempfile::tempdir().unwrap();
+    let database = snapshot_from(
+        temp.path(),
+        &[
+            serde_json::json!({"key":"/books/OL1M","works":[{"key":"/works/OL10W"}],"title":"Example","isbn_13":["9780306406157"]}),
+            serde_json::json!({"key":"/books/OL2M","works":[{"key":"/works/OL10W"}],"title":"Example","isbn_13":["9780821338278"],"lc_classifications":["HE2751 .A1","HE2751.A2"],"dewey_decimal_class":["385"]}),
+            serde_json::json!({"key":"/books/OL3M","works":[{"key":"/works/OL10W"}],"title":"Example","isbn_13":["9783161484100"]}),
+        ],
+        &[serde_json::json!({"key":"/works/OL10W","title":"Example"})],
+        &[],
+    );
+    for conflicting in [false, true] {
         if conflicting {
-            Connection::open(&database).unwrap().execute("INSERT INTO edition_classification VALUES(3,?1,'D1')",[LCC_SCHEME]).unwrap();
+            Connection::open(&database).unwrap().execute("INSERT INTO edition_classification VALUES(3,?1,'D1')", [LCC_SCHEME]).unwrap();
         }
-        let index=temp.path().join(if conflicting {"conflict.idx"}else{"single.idx"});
-        build_subject_index_limited(&database,&index,None).unwrap();
-        for service in [MetadataService::open(&database).unwrap(),MetadataService::open(&database).unwrap().with_subject_index(&index).unwrap()] {
-            let response=service.lookup(ClassificationRequest{isbns:vec!["9780306406157".into()]}).unwrap();
-            let codes=&response.results[0].matches[0].classifications;
-            if conflicting {assert!(codes.is_empty());}
-            else {
-                assert_eq!(codes.len(),1);
-                assert!(codes.iter().any(|c|c.notation=="HE2751" && c.source==ClassificationSource::Work));
-                assert!(!codes.iter().any(|c|c.notation=="385"));
+        let index = temp.path().join(if conflicting { "conflict.idx" } else { "single.idx" });
+        build_subject_index_limited(&database, &index, None).unwrap();
+        for service in [MetadataService::open(&database).unwrap(), MetadataService::open(&database).unwrap().with_subject_index(&index).unwrap()] {
+            let response = service.lookup(ClassificationRequest { isbns: vec!["9780306406157".into()] }).unwrap();
+            let codes = &response.results[0].matches[0].classifications;
+            if conflicting {
+                assert!(codes.is_empty());
+            } else {
+                assert_eq!(codes.len(), 1);
+                assert!(codes.iter().any(|c| c.notation == "HE2751" && c.source == ClassificationSource::Work));
+                assert!(!codes.iter().any(|c| c.notation == "385"));
             }
         }
     }
@@ -1328,24 +1216,35 @@ fn single_classified_sibling_is_used_until_another_sibling_has_codes() {
 
 #[test]
 fn edition_identity_tries_main_title_before_long_subtitle_expansion() {
-    let temp=tempfile::tempdir().unwrap();
-    let database=duplicate_work_fixture(temp.path(),"An Empire of Wealth","John Steele Gordon");
-    let response=MetadataService::open(database).unwrap().resolve_editions(EditionIdentityRequest{queries:vec![EditionIdentityQuery{
-        query_id:"main".into(),title:format!("An Empire of Wealth: {}", "a very long descriptive subtitle about the political social and economic history of a nation ".repeat(3)),
-        authors:vec!["John Steele Gordon".into()],publishers:Vec::new(),book_year:None
-    }]}).unwrap();
-    assert_eq!(response.results[0].status,EditionIdentityStatus::Matched);
-    assert_eq!(response.results[0].matched.as_ref().unwrap().open_library_edition_id,"OL2M");
+    let temp = tempfile::tempdir().unwrap();
+    let database = duplicate_work_fixture(temp.path(), "An Empire of Wealth", "John Steele Gordon");
+    let response = MetadataService::open(database)
+        .unwrap()
+        .resolve_editions(EditionIdentityRequest {
+            queries: vec![EditionIdentityQuery {
+                query_id: "main".into(),
+                title: format!("An Empire of Wealth: {}", "a very long descriptive subtitle about the political social and economic history of a nation ".repeat(3)),
+                authors: vec!["John Steele Gordon".into()],
+                publishers: Vec::new(),
+                book_year: None,
+            }],
+        })
+        .unwrap();
+    assert_eq!(response.results[0].status, EditionIdentityStatus::Matched);
+    assert_eq!(response.results[0].matched.as_ref().unwrap().open_library_edition_id, "OL2M");
 }
 
 #[test]
 fn edition_identity_preserves_volume_when_searching_main_title() {
-    let temp=tempfile::tempdir().unwrap();
-    let database=duplicate_work_fixture(temp.path(),"An Empire of Wealth: Volume 2","John Steele Gordon");
-    let response=MetadataService::open(database).unwrap().resolve_editions(EditionIdentityRequest{queries:vec![EditionIdentityQuery{
-        query_id:"volume".into(),title:"An Empire of Wealth: Volume 4: A long subtitle".into(),authors:vec!["John Steele Gordon".into()],publishers:Vec::new(),book_year:None
-    }]}).unwrap();
-    assert_eq!(response.results[0].status,EditionIdentityStatus::NoMatch);
+    let temp = tempfile::tempdir().unwrap();
+    let database = duplicate_work_fixture(temp.path(), "An Empire of Wealth: Volume 2", "John Steele Gordon");
+    let response = MetadataService::open(database)
+        .unwrap()
+        .resolve_editions(EditionIdentityRequest {
+            queries: vec![EditionIdentityQuery { query_id: "volume".into(), title: "An Empire of Wealth: Volume 4: A long subtitle".into(), authors: vec!["John Steele Gordon".into()], publishers: Vec::new(), book_year: None }],
+        })
+        .unwrap();
+    assert_eq!(response.results[0].status, EditionIdentityStatus::NoMatch);
 }
 
 #[test]
@@ -1377,38 +1276,41 @@ fn edition_identity_preserves_conflicting_years_even_for_duplicate_isbns() {
 
 #[test]
 fn lc_title_author_fallback_works_in_combined_and_split_stores() {
-    let temp=tempfile::tempdir().unwrap();
-    let database=snapshot_from(temp.path(),&[],&[],&[]);
-    let c=Connection::open(&database).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let database = snapshot_from(temp.path(), &[], &[], &[]);
+    let c = Connection::open(&database).unwrap();
     c.execute_batch("CREATE TABLE lc_record(lc_record_id TEXT PRIMARY KEY,metadata TEXT); CREATE TABLE lc_record_lcc(lc_record_id TEXT,notation TEXT); CREATE TABLE lc_title(title_key TEXT,lc_record_id TEXT,PRIMARY KEY(title_key,lc_record_id)); INSERT INTO lc_record_lcc VALUES('123','DC161'); INSERT INTO lc_title VALUES('french history','123');").unwrap();
-    c.execute("INSERT INTO lc_record VALUES('123',?1)",[serde_json::json!({"title":"French history","main_title":"French history","authors":["Smith, Alex"]}).to_string()]).unwrap();
+    c.execute("INSERT INTO lc_record VALUES('123',?1)", [serde_json::json!({"title":"French history","main_title":"French history","authors":["Smith, Alex"]}).to_string()]).unwrap();
     drop(c);
-    let request=edition_query("French history",vec![],None);
-    let service=MetadataService::open(&database).unwrap();
-    let response=service.resolve_editions(request.clone()).unwrap();
-    assert_eq!(response.results[0].status,EditionIdentityStatus::NoMatch);
+    let request = edition_query("French history", vec![], None);
+    let service = MetadataService::open(&database).unwrap();
+    let response = service.resolve_editions(request.clone()).unwrap();
+    assert_eq!(response.results[0].status, EditionIdentityStatus::NoMatch);
     assert!(response.results[0].matched.is_none());
-    assert_eq!(response.results[0].catalog_subjects.as_ref().unwrap().record_ids,vec!["123"]);
-    let subjects=temp.path().join("subjects.sqlite");let rich=temp.path().join("rich.sqlite");let identities=temp.path().join("identities.sqlite");
-    split_snapshot(&database,&subjects,&rich,&identities).unwrap();
-    let split=MetadataService::open_with_stores(subjects,rich,identities,None::<PathBuf>,None::<PathBuf>).unwrap();
-    assert_eq!(serde_json::to_value(response).unwrap(),serde_json::to_value(split.resolve_editions(request).unwrap()).unwrap());
+    assert_eq!(response.results[0].authority_subjects.as_ref().unwrap().record_ids, vec!["123"]);
+    let subjects = temp.path().join("subjects.sqlite");
+    let rich = temp.path().join("rich.sqlite");
+    let identities = temp.path().join("identities.sqlite");
+    split_snapshot(&database, &subjects, &rich, &identities).unwrap();
+    let split = MetadataService::open_with_stores(subjects, rich, identities, None::<PathBuf>).unwrap();
+    assert_eq!(serde_json::to_value(response).unwrap(), serde_json::to_value(split.resolve_editions(request).unwrap()).unwrap());
 }
 
 #[test]
 fn edition_identity_returns_separate_subtitle_and_prefers_full_title() {
     let temporary = tempfile::tempdir().unwrap();
-    let database = snapshot_from(temporary.path(), &[
-        serde_json::json!({"key":"/books/OL1M", "title":"Logic", "subtitle":"A Very Short Introduction", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9780306406157"], "lc_classifications":["BC71 .P75 2000"]}),
-        serde_json::json!({"key":"/books/OL2M", "title":"Logic", "authors":[{"key":"/authors/OL200A"}], "isbn_13":["9780821338278"], "lc_classifications":["BC108"]}),
-    ], &[], &[
-        serde_json::json!({"key":"/authors/OL100A", "name":"Graham Priest"}),
-        serde_json::json!({"key":"/authors/OL200A", "name":"Other Author"}),
-    ]);
+    let database = snapshot_from(
+        temporary.path(),
+        &[
+            serde_json::json!({"key":"/books/OL1M", "title":"Logic", "subtitle":"A Very Short Introduction", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9780306406157"], "lc_classifications":["BC71 .P75 2000"]}),
+            serde_json::json!({"key":"/books/OL2M", "title":"Logic", "authors":[{"key":"/authors/OL200A"}], "isbn_13":["9780821338278"], "lc_classifications":["BC108"]}),
+        ],
+        &[],
+        &[serde_json::json!({"key":"/authors/OL100A", "name":"Graham Priest"}), serde_json::json!({"key":"/authors/OL200A", "name":"Other Author"})],
+    );
     let service = MetadataService::open(&database).unwrap();
-    let response = service.resolve_editions(EditionIdentityRequest { queries: vec![EditionIdentityQuery {
-        query_id: "logic".into(), title: "Logic: A Very Short Introduction".into(), authors: vec![], publishers: vec![], book_year: None,
-    }] }).unwrap();
+    let response =
+        service.resolve_editions(EditionIdentityRequest { queries: vec![EditionIdentityQuery { query_id: "logic".into(), title: "Logic: A Very Short Introduction".into(), authors: vec![], publishers: vec![], book_year: None }] }).unwrap();
     let result = &response.results[0];
     let candidates = result.matched.iter().chain(result.candidates.iter()).collect::<Vec<_>>();
     assert_eq!(candidates.len(), 1);
@@ -1423,16 +1325,28 @@ fn edition_identity_returns_separate_subtitle_and_prefers_full_title() {
 #[test]
 fn edition_identity_matches_possessive_apostrophe_before_substrings() {
     let temporary = tempfile::tempdir().unwrap();
-    let database = snapshot_from(temporary.path(), &[
-        serde_json::json!({"key":"/books/OL1M", "title":"The Startup Owners Manual", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9780984999309"], "lc_classifications":["HD62.5 .B53 2012"]}),
-        serde_json::json!({"key":"/books/OL2M", "title":"Manual", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9780306406157"], "lc_classifications":["BC108"]}),
-    ], &[], &[serde_json::json!({"key":"/authors/OL100A", "name":"Steve Blank and Bob Dorf"})]);
+    let database = snapshot_from(
+        temporary.path(),
+        &[
+            serde_json::json!({"key":"/books/OL1M", "title":"The Startup Owners Manual", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9780984999309"], "lc_classifications":["HD62.5 .B53 2012"]}),
+            serde_json::json!({"key":"/books/OL2M", "title":"Manual", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9780306406157"], "lc_classifications":["BC108"]}),
+        ],
+        &[],
+        &[serde_json::json!({"key":"/authors/OL100A", "name":"Steve Blank and Bob Dorf"})],
+    );
     let service = MetadataService::open(&database).unwrap();
     for apostrophe in ["'", "’", "ʼ"] {
-        let response = service.resolve_editions(EditionIdentityRequest { queries: vec![EditionIdentityQuery {
-            query_id: "startup".into(), title: format!("The Startup Owner{apostrophe}s Manual: The Step-by-Step Guide for Building a Great Company"),
-            authors: vec!["Blank, Steve".into(), "Dorf, Bob".into()], publishers: vec![], book_year: None,
-        }] }).unwrap();
+        let response = service
+            .resolve_editions(EditionIdentityRequest {
+                queries: vec![EditionIdentityQuery {
+                    query_id: "startup".into(),
+                    title: format!("The Startup Owner{apostrophe}s Manual: The Step-by-Step Guide for Building a Great Company"),
+                    authors: vec!["Blank, Steve".into(), "Dorf, Bob".into()],
+                    publishers: vec![],
+                    book_year: None,
+                }],
+            })
+            .unwrap();
         let matched = response.results[0].matched.as_ref().unwrap();
         assert_eq!(matched.open_library_edition_id, "OL1M");
     }
@@ -1441,9 +1355,12 @@ fn edition_identity_matches_possessive_apostrophe_before_substrings() {
 #[test]
 fn rebuild_existing_titles_backfills_subtitles_without_changing_source() {
     let temp = tempfile::tempdir().unwrap();
-    let source = snapshot_from(temp.path(), &[
-        serde_json::json!({"key":"/books/OL1M","title":"Owner’s Manual","subtitle":"A Practical Guide","works":[{"key":"/works/OL10W"}],"isbn_13":["9780306406157"],"lc_classifications":["HD62.5"]})
-    ], &[serde_json::json!({"key":"/works/OL10W","title":"Owner’s Manual","subtitle":"A Practical Guide"})], &[]);
+    let source = snapshot_from(
+        temp.path(),
+        &[serde_json::json!({"key":"/books/OL1M","title":"Owner’s Manual","subtitle":"A Practical Guide","works":[{"key":"/works/OL10W"}],"isbn_13":["9780306406157"],"lc_classifications":["HD62.5"]})],
+        &[serde_json::json!({"key":"/works/OL10W","title":"Owner’s Manual","subtitle":"A Practical Guide"})],
+        &[],
+    );
     let c = Connection::open(&source).unwrap();
     c.execute_batch("DROP TABLE edition_subtitle; DROP TABLE work_subtitle; UPDATE edition_bibliography SET normalized_title='owner s manual'; UPDATE work_bibliography SET normalized_title='owner s manual';").unwrap();
     drop(c);
@@ -1452,12 +1369,13 @@ fn rebuild_existing_titles_backfills_subtitles_without_changing_source() {
     crate::rebuild_titles(&source, &temp.path().join("ol_dump_editions_2026-08-01.txt.gz"), &temp.path().join("ol_dump_works_2026-08-01.txt.gz"), &output).unwrap();
     assert_eq!(original, std::fs::read(&source).unwrap());
     let c = Connection::open(&output).unwrap();
-    assert_eq!(c.query_row("SELECT normalized_title FROM edition_bibliography", [], |r| r.get::<_,String>(0)).unwrap(), "owners manual");
-    assert_eq!(c.query_row("SELECT normalized_title FROM work_subtitle", [], |r| r.get::<_,String>(0)).unwrap(), "owners manual a practical guide");
+    assert_eq!(c.query_row("SELECT normalized_title FROM edition_bibliography", [], |r| r.get::<_, String>(0)).unwrap(), "owners manual");
+    assert_eq!(c.query_row("SELECT normalized_title FROM work_subtitle", [], |r| r.get::<_, String>(0)).unwrap(), "owners manual a practical guide");
     for title in ["Owners Manual: A Practical Guide", "Owner's Manual: A Practical Guide", "Owner’s Manual: A Practical Guide"] {
-        let result = MetadataService::open(&output).unwrap().resolve_editions(EditionIdentityRequest { queries: vec![EditionIdentityQuery {
-            query_id:"test".into(),title:title.into(),authors:vec![],publishers:vec![],book_year:None
-        }]}).unwrap();
+        let result = MetadataService::open(&output)
+            .unwrap()
+            .resolve_editions(EditionIdentityRequest { queries: vec![EditionIdentityQuery { query_id: "test".into(), title: title.into(), authors: vec![], publishers: vec![], book_year: None }] })
+            .unwrap();
         assert_eq!(result.results[0].candidates[0].subtitle.as_deref(), Some("A Practical Guide"));
     }
 }
@@ -1465,18 +1383,20 @@ fn rebuild_existing_titles_backfills_subtitles_without_changing_source() {
 #[test]
 fn edition_identity_fallback_waits_for_usable_candidates_and_preserves_ambiguity() {
     let temporary = tempfile::tempdir().unwrap();
-    let database = snapshot_from(temporary.path(), &[
-        serde_json::json!({"key":"/books/OL1M", "title":"Logic", "subtitle":"Rejected Author", "authors":[{"key":"/authors/OL200A"}], "isbn_13":["9780306406157"], "lc_classifications":["BC71"]}),
-        serde_json::json!({"key":"/books/OL2M", "title":"Logic", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9780821338278"], "lc_classifications":["BC108"]}),
-        serde_json::json!({"key":"/books/OL3M", "title":"Reason", "subtitle":"Unusable Code", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9783161484100"], "lc_classifications":["BC71"]}),
-        serde_json::json!({"key":"/books/OL4M", "title":"Reason", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9780984999309"], "lc_classifications":["BC108"]}),
-        serde_json::json!({"key":"/books/OL5M", "title":"Thinking", "subtitle":"Conflicting Subjects", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9780306406157"], "lc_classifications":["BC71"]}),
-        serde_json::json!({"key":"/books/OL6M", "title":"Thinking", "subtitle":"Conflicting Subjects", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9780821338278"], "lc_classifications":["BC108"]}),
-        serde_json::json!({"key":"/books/OL7M", "title":"Thinking", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9783161484100"], "lc_classifications":["BC177"], "publishers":["Preferred Publisher"]}),
-    ], &[], &[
-        serde_json::json!({"key":"/authors/OL100A", "name":"Alex Smith"}),
-        serde_json::json!({"key":"/authors/OL200A", "name":"Other Writer"}),
-    ]);
+    let database = snapshot_from(
+        temporary.path(),
+        &[
+            serde_json::json!({"key":"/books/OL1M", "title":"Logic", "subtitle":"Rejected Author", "authors":[{"key":"/authors/OL200A"}], "isbn_13":["9780306406157"], "lc_classifications":["BC71"]}),
+            serde_json::json!({"key":"/books/OL2M", "title":"Logic", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9780821338278"], "lc_classifications":["BC108"]}),
+            serde_json::json!({"key":"/books/OL3M", "title":"Reason", "subtitle":"Unusable Code", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9783161484100"], "lc_classifications":["BC71"]}),
+            serde_json::json!({"key":"/books/OL4M", "title":"Reason", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9780984999309"], "lc_classifications":["BC108"]}),
+            serde_json::json!({"key":"/books/OL5M", "title":"Thinking", "subtitle":"Conflicting Subjects", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9780306406157"], "lc_classifications":["BC71"]}),
+            serde_json::json!({"key":"/books/OL6M", "title":"Thinking", "subtitle":"Conflicting Subjects", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9780821338278"], "lc_classifications":["BC108"]}),
+            serde_json::json!({"key":"/books/OL7M", "title":"Thinking", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9783161484100"], "lc_classifications":["BC177"], "publishers":["Preferred Publisher"]}),
+        ],
+        &[],
+        &[serde_json::json!({"key":"/authors/OL100A", "name":"Alex Smith"}), serde_json::json!({"key":"/authors/OL200A", "name":"Other Writer"})],
+    );
     // Leave a raw classification row so SQL finds the candidate, but the
     // evidence resolver must reject it rather than stopping title fallback.
     let connection = Connection::open(&database).unwrap();
@@ -1490,16 +1410,16 @@ fn edition_identity_fallback_waits_for_usable_candidates_and_preserves_ambiguity
         ("unknown-author", "Logic: Rejected Author", vec![]),
         ("exhausted", "Logic: Rejected Author", vec!["Unrelated Person"]),
         ("empty", "", vec![]),
-    ].into_iter().map(|(id,title,authors)| EditionIdentityQuery {
-        query_id:id.into(), title:title.into(), authors:authors.into_iter().map(str::to_owned).collect(),
-        publishers:vec!["Preferred Publisher".into()], book_year:None,
-    }).collect();
+    ]
+    .into_iter()
+    .map(|(id, title, authors)| EditionIdentityQuery { query_id: id.into(), title: title.into(), authors: authors.into_iter().map(str::to_owned).collect(), publishers: vec!["Preferred Publisher".into()], book_year: None })
+    .collect();
     let results = service.resolve_editions(EditionIdentityRequest { queries }).unwrap().results;
-    assert_eq!(results.iter().map(|r| r.query_id.as_str()).collect::<Vec<_>>(), vec!["author","code","ambiguous","unknown-author","exhausted","empty"]);
+    assert_eq!(results.iter().map(|r| r.query_id.as_str()).collect::<Vec<_>>(), vec!["author", "code", "ambiguous", "unknown-author", "exhausted", "empty"]);
     assert_eq!(results[0].matched.as_ref().unwrap().open_library_edition_id, "OL2M");
     assert_eq!(results[1].matched.as_ref().unwrap().open_library_edition_id, "OL4M");
     assert_eq!(results[2].status, EditionIdentityStatus::Ambiguous);
-    assert_eq!(results[2].candidates.iter().map(|c| c.open_library_edition_id.as_str()).collect::<Vec<_>>(), vec!["OL5M","OL6M"]);
+    assert_eq!(results[2].candidates.iter().map(|c| c.open_library_edition_id.as_str()).collect::<Vec<_>>(), vec!["OL5M", "OL6M"]);
     assert_eq!(results[3].status, EditionIdentityStatus::Ambiguous);
     assert_eq!(results[3].candidates.len(), 1);
     assert_eq!(results[3].candidates[0].open_library_edition_id, "OL1M");
@@ -1509,105 +1429,135 @@ fn edition_identity_fallback_waits_for_usable_candidates_and_preserves_ambiguity
 
 #[test]
 fn wikidata_ingestion_persists_books_and_authors_without_runtime_source() {
-    let temp=tempfile::tempdir().unwrap();let database=snapshot_from(temp.path(),&[],&[],&[]);
-    let sidecar=temp.path().join("wikidata.sqlite");let c=Connection::open(&sidecar).unwrap();c.execute_batch(include_str!("../wikidata-author-schema.sql")).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let database = snapshot_from(temp.path(), &[], &[], &[]);
+    let sidecar = temp.path().join("wikidata.sqlite");
+    let c = Connection::open(&sidecar).unwrap();
+    c.execute_batch(include_str!("../wikidata-author-schema.sql")).unwrap();
     c.execute_batch("INSERT INTO state VALUES('status','building'),('schema_version','1'),('ol_dump_date','2026-08-01');INSERT INTO isbn VALUES('9780306406157','Q10');INSERT INTO profile VALUES('Q10','Wikidata book','[]',NULL,NULL,'[]',NULL,NULL);INSERT INTO classification VALUES('Q10','lcc','QA76.6','P8360',0,'Q10');INSERT INTO profile VALUES('Q1','Alex Smith','[]',NULL,NULL,'[]',NULL,NULL);INSERT INTO credit VALUES('Q10','Q1',0);INSERT INTO isbn_author VALUES('9780306406157','Q10','Q10','Q1','Q10');").unwrap();
-    let staging=temp.path().join("ingested.sqlite");
-    std::fs::copy(&database,&staging).unwrap();
-    assert!(ingest_wikidata_catalog(&MetadataService::open(&database).unwrap(),&sidecar,&staging).is_err());
-    c.execute("UPDATE state SET value='complete' WHERE key='status'",[]).unwrap();drop(c);
-    ingest_wikidata_catalog(&MetadataService::open(&database).unwrap(),&sidecar,&staging).unwrap();
+    let staging = temp.path().join("ingested.sqlite");
+    std::fs::copy(&database, &staging).unwrap();
+    assert!(ingest_wikidata_authorities(&MetadataService::open(&database).unwrap(), &sidecar, &staging).is_err());
+    c.execute("UPDATE state SET value='complete' WHERE key='status'", []).unwrap();
+    drop(c);
+    ingest_wikidata_authorities(&MetadataService::open(&database).unwrap(), &sidecar, &staging).unwrap();
     std::fs::remove_file(&sidecar).unwrap();
-    let service=MetadataService::open(&staging).unwrap();
-    let response=service.enrich(MetadataEnrichmentRequest{isbns:vec!["9780306406157".into()]}).unwrap();
-    assert_eq!(response.results[0].status,LookupStatus::Matched);
-    assert_eq!(response.results[0].matches[0].authors[0].identity_key(),"wikidata:Q1");
-    let response=service.enrich_rich(MetadataEnrichmentRequest{isbns:vec!["9780306406157".into()]}).unwrap();
-    assert_eq!(response.results[0].matches[0].exact_edition_ids,vec!["wikidata:Q10"]);
-    let response=service.enrich_rich(MetadataEnrichmentRequest{isbns:vec!["0-306-40615-2".into(),"bad".into(),"9780306406157".into()]}).unwrap();
-    assert_eq!(response.results.len(),3);
-    assert_eq!(response.results[0].requested_isbn,"0-306-40615-2");
-    assert_eq!(response.results[0].status,LookupStatus::Matched);
-    assert_eq!(response.results[1].status,LookupStatus::InvalidIsbn);
-    assert_eq!(response.results[2].matches[0].authors[0].identity_key(),"wikidata:Q1");
+    let service = MetadataService::open(&staging).unwrap();
+    let response = service.enrich(MetadataEnrichmentRequest { isbns: vec!["9780306406157".into()] }).unwrap();
+    assert_eq!(response.results[0].status, LookupStatus::Matched);
+    assert_eq!(response.results[0].matches[0].authors[0].identity_key(), "wikidata:Q1");
+    let response = service.enrich_rich(MetadataEnrichmentRequest { isbns: vec!["9780306406157".into()] }).unwrap();
+    assert_eq!(response.results[0].matches[0].exact_edition_ids, vec!["wikidata:Q10"]);
+    let response = service.enrich_rich(MetadataEnrichmentRequest { isbns: vec!["0-306-40615-2".into(), "bad".into(), "9780306406157".into()] }).unwrap();
+    assert_eq!(response.results.len(), 3);
+    assert_eq!(response.results[0].requested_isbn, "0-306-40615-2");
+    assert_eq!(response.results[0].status, LookupStatus::Matched);
+    assert_eq!(response.results[1].status, LookupStatus::InvalidIsbn);
+    assert_eq!(response.results[2].matches[0].authors[0].identity_key(), "wikidata:Q1");
     drop(service);
-    let service=MetadataService::open(&staging).unwrap();
-    let response=service.lookup(ClassificationRequest{isbns:vec!["9780306406157".into()]}).unwrap();
-    assert_eq!(response.results[0].status,LookupStatus::Matched);
-    assert_eq!(Connection::open(&staging).unwrap().query_row("SELECT name FROM author WHERE author_id=-1",[],|r|r.get::<_,String>(0)).unwrap(),"Alex Smith");
-    let c=Connection::open(&staging).unwrap();
-    assert_eq!(c.query_row("SELECT edition_id FROM edition_isbn WHERE isbn13=9780306406157",[],|r|r.get::<_,i64>(0)).unwrap(),-10);
-    assert_eq!(c.query_row("SELECT notation FROM isbn_classification WHERE isbn13=9780306406157 AND scheme=2",[],|r|r.get::<_,String>(0)).unwrap(),"QA76.6");
-    assert!(c.query_row("SELECT COUNT(*) FROM title_author_classification WHERE normalized_title='wikidata book' AND scheme=2",[],|r|r.get::<_,i64>(0)).unwrap()>0);
-    let response=service.resolve_editions(EditionIdentityRequest{queries:vec![EditionIdentityQuery{query_id:"wd".into(),title:"Wikidata book".into(),authors:vec!["Alex Smith".into()],publishers:vec![],book_year:None}]}).unwrap();
-    assert_eq!(response.results[0].matched.as_ref().unwrap().canonical_isbn13,"9780306406157");
+    let service = MetadataService::open(&staging).unwrap();
+    let response = service.lookup(ClassificationRequest { isbns: vec!["9780306406157".into()] }).unwrap();
+    assert_eq!(response.results[0].status, LookupStatus::Matched);
+    assert_eq!(Connection::open(&staging).unwrap().query_row("SELECT name FROM author WHERE author_id=-1", [], |r| r.get::<_, String>(0)).unwrap(), "Alex Smith");
+    let c = Connection::open(&staging).unwrap();
+    assert_eq!(c.query_row("SELECT edition_id FROM edition_isbn WHERE isbn13=9780306406157", [], |r| r.get::<_, i64>(0)).unwrap(), -10);
+    assert_eq!(c.query_row("SELECT notation FROM isbn_classification WHERE isbn13=9780306406157 AND scheme=2", [], |r| r.get::<_, String>(0)).unwrap(), "QA76.6");
+    assert!(c.query_row("SELECT COUNT(*) FROM title_author_classification WHERE normalized_title='wikidata book' AND scheme=2", [], |r| r.get::<_, i64>(0)).unwrap() > 0);
+    let response =
+        service.resolve_editions(EditionIdentityRequest { queries: vec![EditionIdentityQuery { query_id: "wd".into(), title: "Wikidata book".into(), authors: vec!["Alex Smith".into()], publishers: vec![], book_year: None }] }).unwrap();
+    assert_eq!(response.results[0].matched.as_ref().unwrap().canonical_isbn13, "9780306406157");
     assert!(response.results[0].matched.as_ref().unwrap().open_library_edition_id.is_empty());
-
-
 }
 
 #[test]
 fn wikidata_author_corroboration_uses_identity_store_in_split_deployments() {
-    let temp=tempfile::tempdir().unwrap();let database=snapshot_from(temp.path(),&[serde_json::json!({"key":"/books/OL1M","title":"Book","isbn_13":["9780306406157"],"authors":[{"key":"/authors/OL1A"}]})],&[],&[serde_json::json!({"key":"/authors/OL1A","name":"Alex Smith"})]);
-    let sidecar=temp.path().join("wikidata.sqlite");let c=Connection::open(&sidecar).unwrap();c.execute_batch(include_str!("../wikidata-author-schema.sql")).unwrap();
-    c.execute_batch("INSERT INTO state VALUES('status','complete'),('schema_version','1'),('ol_dump_date','2026-08-01');INSERT INTO isbn VALUES('9780306406157','Q10');INSERT INTO profile VALUES('Q1','Alex Smith','[]',NULL,NULL,'[]',NULL,NULL);INSERT INTO credit VALUES('Q10','Q1',0);INSERT INTO isbn_author VALUES('9780306406157','Q10','Q10','Q1','Q10');").unwrap();drop(c);
-    let subjects=temp.path().join("subjects.sqlite");let rich=temp.path().join("rich.sqlite");let identities=temp.path().join("identities.sqlite");split_snapshot(&database,&subjects,&rich,&identities).unwrap();
-    let mut results=Vec::new();
-    for (i,service) in [MetadataService::open(&database).unwrap(),MetadataService::open_with_stores(subjects.clone(),rich.clone(),identities.clone(),None::<PathBuf>,None::<PathBuf>).unwrap()].into_iter().enumerate() {
-        let target=temp.path().join(format!("ingested-{i}.sqlite"));
-        std::fs::copy(&database,&target).unwrap();
-        ingest_wikidata_catalog(&service,&sidecar,&target).unwrap();
-        let service=MetadataService::open(&target).unwrap();let response=service.enrich_rich(MetadataEnrichmentRequest{isbns:vec!["9780306406157".into()]}).unwrap();
-        assert!(response.results[0].matches[0].authors[0].identifiers.is_empty());results.push(serde_json::to_value(response).unwrap());
+    let temp = tempfile::tempdir().unwrap();
+    let database =
+        snapshot_from(temp.path(), &[serde_json::json!({"key":"/books/OL1M","title":"Book","isbn_13":["9780306406157"],"authors":[{"key":"/authors/OL1A"}]})], &[], &[serde_json::json!({"key":"/authors/OL1A","name":"Alex Smith"})]);
+    let sidecar = temp.path().join("wikidata.sqlite");
+    let c = Connection::open(&sidecar).unwrap();
+    c.execute_batch(include_str!("../wikidata-author-schema.sql")).unwrap();
+    c.execute_batch("INSERT INTO state VALUES('status','complete'),('schema_version','1'),('ol_dump_date','2026-08-01');INSERT INTO isbn VALUES('9780306406157','Q10');INSERT INTO profile VALUES('Q1','Alex Smith','[]',NULL,NULL,'[]',NULL,NULL);INSERT INTO credit VALUES('Q10','Q1',0);INSERT INTO isbn_author VALUES('9780306406157','Q10','Q10','Q1','Q10');").unwrap();
+    drop(c);
+    let subjects = temp.path().join("subjects.sqlite");
+    let rich = temp.path().join("rich.sqlite");
+    let identities = temp.path().join("identities.sqlite");
+    split_snapshot(&database, &subjects, &rich, &identities).unwrap();
+    let mut results = Vec::new();
+    for (i, service) in [MetadataService::open(&database).unwrap(), MetadataService::open_with_stores(subjects.clone(), rich.clone(), identities.clone(), None::<PathBuf>).unwrap()].into_iter().enumerate() {
+        let target = temp.path().join(format!("ingested-{i}.sqlite"));
+        std::fs::copy(&database, &target).unwrap();
+        ingest_wikidata_authorities(&service, &sidecar, &target).unwrap();
+        let service = MetadataService::open(&target).unwrap();
+        let response = service.enrich_rich(MetadataEnrichmentRequest { isbns: vec!["9780306406157".into()] }).unwrap();
+        assert!(response.results[0].matches[0].authors[0].identifiers.is_empty());
+        results.push(serde_json::to_value(response).unwrap());
     }
-    results[0]["snapshot"]["imported_at_ms"]=serde_json::json!(0);results[1]["snapshot"]["imported_at_ms"]=serde_json::json!(0);
-    assert_eq!(results[0],results[1]);
+    results[0]["snapshot"]["imported_at_ms"] = serde_json::json!(0);
+    results[1]["snapshot"]["imported_at_ms"] = serde_json::json!(0);
+    assert_eq!(results[0], results[1]);
 }
 
 #[test]
 fn wikidata_ingestion_fills_missing_schemes_and_links_authors_without_overwriting_existing_data() {
-    let temp=tempfile::tempdir().unwrap();
-    let base=snapshot_from(temp.path(),&[serde_json::json!({"key":"/books/OL1M","title":"Existing book","isbn_13":["9780306406157"],"lc_classifications":["QA1"],"authors":[{"key":"/authors/OL1A"}]})],&[],&[serde_json::json!({"key":"/authors/OL1A","name":"Alex Smith"})]);
-    let input=temp.path().join("source.sqlite");let c=Connection::open(&input).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let base = snapshot_from(
+        temp.path(),
+        &[serde_json::json!({"key":"/books/OL1M","title":"Existing book","isbn_13":["9780306406157"],"lc_classifications":["QA1"],"authors":[{"key":"/authors/OL1A"}]})],
+        &[],
+        &[serde_json::json!({"key":"/authors/OL1A","name":"Alex Smith"})],
+    );
+    let input = temp.path().join("source.sqlite");
+    let c = Connection::open(&input).unwrap();
     c.execute_batch(include_str!("../wikidata-author-schema.sql")).unwrap();
-    c.execute_batch("INSERT INTO state VALUES('status','complete'),('schema_version','1'),('ol_dump_date','2026-08-01');
+    c.execute_batch(
+        "INSERT INTO state VALUES('status','complete'),('schema_version','1'),('ol_dump_date','2026-08-01');
         INSERT INTO isbn VALUES('9780306406157','Q10');
         INSERT INTO profile VALUES('Q1','Alexander Smith','[\"A. Smith\"]',1900,1980,'[{\"authority\":\"openlibrary\",\"value\":\"OL1A\"}]','Portrait.jpg',NULL);
         INSERT INTO credit VALUES('Q10','Q1',0);
         INSERT INTO isbn_author VALUES('9780306406157','Q10','Q10','Q1','Q10');
-        INSERT INTO classification VALUES('Q10','lcc','QA1','P8360',0,'Q10'),('Q10','lcc','QA2','P8360',0,'Q10'),('Q10','ddc','510','P1036',0,'Q10');").unwrap();drop(c);
-    let target=temp.path().join("catalog.sqlite");std::fs::copy(&base,&target).unwrap();
-    ingest_wikidata_catalog(&MetadataService::open(&base).unwrap(),&input,&target).unwrap();
+        INSERT INTO classification VALUES('Q10','lcc','QA1','P8360',0,'Q10'),('Q10','lcc','QA2','P8360',0,'Q10'),('Q10','ddc','510','P1036',0,'Q10');",
+    )
+    .unwrap();
+    drop(c);
+    let target = temp.path().join("authorities.sqlite");
+    std::fs::copy(&base, &target).unwrap();
+    ingest_wikidata_authorities(&MetadataService::open(&base).unwrap(), &input, &target).unwrap();
     std::fs::remove_file(&input).unwrap();
-    let service=MetadataService::open(&target).unwrap();
-    let result=service.enrich_rich(MetadataEnrichmentRequest{isbns:vec!["9780306406157".into()]}).unwrap().results.remove(0);
-    assert_eq!(result.matches[0].authors[0].name.as_deref(),Some("Alex Smith"));
-    assert!(result.matches[0].authors[0].identifiers.iter().any(|i|i.authority=="wikidata" && i.value=="Q1"));
-    assert!(result.matches[0].classifications.iter().any(|c|c.notation=="QA1"));
-    assert!(!result.matches[0].classifications.iter().any(|c|c.notation=="QA2"));
-    let db=Connection::open(&target).unwrap();
-    assert_eq!(db.query_row("SELECT COUNT(*) FROM isbn_classification WHERE isbn13=9780306406157 AND scheme=2 AND notation='QA1'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
-    assert_eq!(db.query_row("SELECT COUNT(*) FROM isbn_classification WHERE isbn13=9780306406157 AND scheme=1 AND notation='510'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
-    assert!(db.query_row("SELECT COUNT(*) FROM title_author_classification WHERE normalized_title='existing book' AND scheme=1 AND notation='510'",[],|r|r.get::<_,i64>(0)).unwrap()>0);
-    assert_eq!(db.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('isbn_catalog_record','catalog_author')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
-    assert_eq!(db.query_row("SELECT birth_year FROM author WHERE author_id=1",[],|r|r.get::<_,i64>(0)).unwrap(),1900);
+    let service = MetadataService::open(&target).unwrap();
+    let result = service.enrich_rich(MetadataEnrichmentRequest { isbns: vec!["9780306406157".into()] }).unwrap().results.remove(0);
+    assert_eq!(result.matches[0].authors[0].name.as_deref(), Some("Alex Smith"));
+    assert!(result.matches[0].authors[0].identifiers.iter().any(|i| i.authority == "wikidata" && i.value == "Q1"));
+    assert!(result.matches[0].classifications.iter().any(|c| c.notation == "QA1"));
+    assert!(!result.matches[0].classifications.iter().any(|c| c.notation == "QA2"));
+    let db = Connection::open(&target).unwrap();
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM isbn_classification WHERE isbn13=9780306406157 AND scheme=2 AND notation='QA1'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM isbn_classification WHERE isbn13=9780306406157 AND scheme=1 AND notation='510'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    assert!(db.query_row("SELECT COUNT(*) FROM title_author_classification WHERE normalized_title='existing book' AND scheme=1 AND notation='510'", [], |r| r.get::<_, i64>(0)).unwrap() > 0);
+    assert_eq!(db.query_row("SELECT birth_year FROM author WHERE author_id=1", [], |r| r.get::<_, i64>(0)).unwrap(), 1900);
     drop(db);
     drop(service);
-    let subjects=temp.path().join("split-subjects.sqlite");let rich=temp.path().join("split-rich.sqlite");let identities=temp.path().join("split-identity.sqlite");
-    split_snapshot(&target,&subjects,&rich,&identities).unwrap();
-    let split=MetadataService::open_with_stores(subjects,rich,identities,None::<PathBuf>,None::<PathBuf>).unwrap();
-    let response=split.enrich_rich(MetadataEnrichmentRequest{isbns:vec!["9780306406157".into()]}).unwrap();
-    assert_eq!(serde_json::to_value(&response.results[0]).unwrap(),serde_json::to_value(&result).unwrap());
-    let c=Connection::open(&target).unwrap();c.execute("UPDATE wikidata_ingestion SET status='building'",[]).unwrap();
+    let subjects = temp.path().join("split-subjects.sqlite");
+    let rich = temp.path().join("split-rich.sqlite");
+    let identities = temp.path().join("split-identity.sqlite");
+    split_snapshot(&target, &subjects, &rich, &identities).unwrap();
+    let split = MetadataService::open_with_stores(subjects, rich, identities, None::<PathBuf>).unwrap();
+    let response = split.enrich_rich(MetadataEnrichmentRequest { isbns: vec!["9780306406157".into()] }).unwrap();
+    assert_eq!(serde_json::to_value(&response.results[0]).unwrap(), serde_json::to_value(&result).unwrap());
+    let c = Connection::open(&target).unwrap();
+    c.execute("UPDATE wikidata_ingestion SET status='building'", []).unwrap();
     assert!(MetadataService::open(&target).is_err());
 }
 
 #[test]
 fn wikidata_bibliography_descriptions_and_books_without_isbn_survive_split() {
-    let temp=tempfile::tempdir().unwrap();let base=snapshot_from(temp.path(),&[],&[],&[]);
-    let input=temp.path().join("input.sqlite");let c=Connection::open(&input).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let base = snapshot_from(temp.path(), &[], &[], &[]);
+    let input = temp.path().join("input.sqlite");
+    let c = Connection::open(&input).unwrap();
     c.execute_batch(include_str!("../wikidata-author-schema.sql")).unwrap();
-    c.execute_batch("INSERT INTO state VALUES('status','complete'),('schema_version','1'),('ol_dump_date','2026-08-01'),('bibliography_status','complete');
+    c.execute_batch(
+        "INSERT INTO state VALUES('status','complete'),('schema_version','1'),('ol_dump_date','2026-08-01'),('bibliography_status','complete');
         CREATE TABLE bibliography(book TEXT PRIMARY KEY,title TEXT,subtitle TEXT,book_year INTEGER);
         CREATE TABLE book_publisher(book TEXT,publisher TEXT,name TEXT);
         INSERT INTO bibliography VALUES('Q10','Logic','A careful introduction',2001),('Q20','Ancient letters','Collected correspondence',1850);
@@ -1616,50 +1566,129 @@ fn wikidata_bibliography_descriptions_and_books_without_isbn_survive_split() {
         INSERT INTO isbn VALUES('9780306406157','Q10');
         INSERT INTO credit VALUES('Q10','Q1',0),('Q20','Q1',0);
         INSERT INTO isbn_author VALUES('9780306406157','Q10','Q10','Q1','Q10');
-        INSERT INTO classification VALUES('Q10','lcc','BC71','P8360',0,'Q10'),('Q20','lcc','D52','P8360',0,'Q20');").unwrap();drop(c);
-    let target=temp.path().join("target.sqlite");std::fs::copy(&base,&target).unwrap();
-    ingest_wikidata_catalog(&MetadataService::open(base).unwrap(),&input,&target).unwrap();
-    let subjects=temp.path().join("subjects.sqlite");let rich=temp.path().join("rich.sqlite");let identity=temp.path().join("identity.sqlite");
-    split_snapshot(&target,&subjects,&rich,&identity).unwrap();
+        INSERT INTO classification VALUES('Q10','lcc','BC71','P8360',0,'Q10'),('Q20','lcc','D52','P8360',0,'Q20');",
+    )
+    .unwrap();
+    drop(c);
+    let target = temp.path().join("target.sqlite");
+    std::fs::copy(&base, &target).unwrap();
+    ingest_wikidata_authorities(&MetadataService::open(base).unwrap(), &input, &target).unwrap();
+    let subjects = temp.path().join("subjects.sqlite");
+    let rich = temp.path().join("rich.sqlite");
+    let identity = temp.path().join("identity.sqlite");
+    split_snapshot(&target, &subjects, &rich, &identity).unwrap();
     std::fs::remove_file(input).unwrap();
-    for service in [MetadataService::open(&target).unwrap(),MetadataService::open_with_stores(subjects,rich,identity,None::<PathBuf>,None::<PathBuf>).unwrap()] {
-        let response=service.enrich_rich(MetadataEnrichmentRequest{isbns:vec!["9780306406157".into()]}).unwrap();
-        assert_eq!(response.results[0].matches[0].description.as_deref(),Some("A book about logic"));
-        let query=|title:&str,author:&str|EditionIdentityQuery{query_id:"test".into(),title:title.into(),authors:vec![author.into()],publishers:vec!["Example Press".into()],book_year:Some(2001)};
-        let response=service.resolve_editions(EditionIdentityRequest{queries:vec![query("Logic: A careful introduction","Jane Smith")]}).unwrap();
-        let matched=response.results[0].matched.as_ref().unwrap();
-        assert_eq!(matched.subtitle.as_deref(),Some("A careful introduction"));assert!(matched.matched_publisher && matched.matched_book_year);
-        let q=query("Ancient letters: Collected correspondence","Jane Smith");
-        let response=service.resolve_editions(EditionIdentityRequest{queries:vec![q.clone()]}).unwrap();
-        assert!(response.results[0].matched.is_none());assert!(response.results[0].candidates.is_empty());
-        let matched=response.results[0].catalog_subjects.as_ref().unwrap();assert_eq!(matched.record_ids,vec!["Q20"]);
-        let metadata=metadata_contract::catalog_subjects::classification_record(&q,matched).unwrap();
-        assert!(metadata.exact_edition_ids.is_empty());assert_eq!(metadata.classifications[0].evidence[0].method,"wikidata_title_author:Q20");
-        assert!(service.resolve_editions(EditionIdentityRequest{queries:vec![query("Ancient letters","Unrelated Person")]}).unwrap().results[0].catalog_subjects.is_none());
+    for service in [MetadataService::open(&target).unwrap(), MetadataService::open_with_stores(subjects, rich, identity, None::<PathBuf>).unwrap()] {
+        let response = service.enrich_rich(MetadataEnrichmentRequest { isbns: vec!["9780306406157".into()] }).unwrap();
+        assert_eq!(response.results[0].matches[0].description.as_deref(), Some("A book about logic"));
+        let query = |title: &str, author: &str| EditionIdentityQuery { query_id: "test".into(), title: title.into(), authors: vec![author.into()], publishers: vec!["Example Press".into()], book_year: Some(2001) };
+        let response = service.resolve_editions(EditionIdentityRequest { queries: vec![query("Logic: A careful introduction", "Jane Smith")] }).unwrap();
+        let matched = response.results[0].matched.as_ref().unwrap();
+        assert_eq!(matched.subtitle.as_deref(), Some("A careful introduction"));
+        assert!(matched.matched_publisher && matched.matched_book_year);
+        let q = query("Ancient letters: Collected correspondence", "Jane Smith");
+        let response = service.resolve_editions(EditionIdentityRequest { queries: vec![q.clone()] }).unwrap();
+        assert!(response.results[0].matched.is_none());
+        assert!(response.results[0].candidates.is_empty());
+        let matched = response.results[0].authority_subjects.as_ref().unwrap();
+        assert_eq!(matched.record_ids, vec!["Q20"]);
+        let metadata = metadata_contract::authority_subjects::classification_record(&q, matched).unwrap();
+        assert!(metadata.exact_edition_ids.is_empty());
+        assert_eq!(metadata.classifications[0].evidence[0].method, "wikidata_title_author:Q20");
+        assert!(service.resolve_editions(EditionIdentityRequest { queries: vec![query("Ancient letters", "Unrelated Person")] }).unwrap().results[0].authority_subjects.is_none());
     }
-    let c=Connection::open(target).unwrap();
-    assert_eq!(c.query_row("SELECT COUNT(*) FROM edition_isbn WHERE edition_id=-20",[],|r|r.get::<_,i64>(0)).unwrap(),0);
-    assert!(c.query_row("SELECT COUNT(*) FROM title_author_classification WHERE normalized_title='ancient letters'",[],|r|r.get::<_,i64>(0)).unwrap()>0);
+    let c = Connection::open(target).unwrap();
+    assert_eq!(c.query_row("SELECT COUNT(*) FROM edition_isbn WHERE edition_id=-20", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    assert!(c.query_row("SELECT COUNT(*) FROM title_author_classification WHERE normalized_title='ancient letters'", [], |r| r.get::<_, i64>(0)).unwrap() > 0);
 }
 
 #[test]
 fn wikidata_isbn_fast_path_defers_unrelated_authors_and_incomplete_bibliography() {
-    let temp=tempfile::tempdir().unwrap();let base=snapshot_from(temp.path(),&[],&[],&[]);
-    let input=temp.path().join("input.sqlite");let c=Connection::open(&input).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let base = snapshot_from(temp.path(), &[], &[], &[]);
+    let input = temp.path().join("input.sqlite");
+    let c = Connection::open(&input).unwrap();
     c.execute_batch(include_str!("../wikidata-author-schema.sql")).unwrap();
-    c.execute_batch("INSERT INTO state VALUES('status','complete'),('schema_version','1'),('ol_dump_date','2026-08-01'),('bibliography_status','building');
+    c.execute_batch(
+        "INSERT INTO state VALUES('status','complete'),('schema_version','1'),('ol_dump_date','2026-08-01'),('bibliography_status','building');
         INSERT INTO profile VALUES('Q10','Fast book','[]',NULL,NULL,'[]',NULL,NULL),('Q1','Jane Smith','[]',NULL,NULL,'[]',NULL,NULL),('Q2','Other Author','[]',NULL,NULL,'[]',NULL,NULL);
         INSERT INTO isbn VALUES('9780306406157','Q10');
         INSERT INTO credit VALUES('Q10','Q1',0),('Q20','Q2',0);
         INSERT INTO isbn_author VALUES('9780306406157','Q10','Q10','Q1','Q10');
-        INSERT INTO classification VALUES('Q10','lcc','BC71','P8360',0,'Q10');").unwrap();
-    let target=temp.path().join("target.sqlite");std::fs::copy(&base,&target).unwrap();
-    let service=MetadataService::open(base).unwrap();
-    assert!(ingest_wikidata_catalog(&service,&input,&target).is_err());
-    c.execute("INSERT INTO state VALUES('ingestion_scope','isbn')",[]).unwrap();drop(c);
-    ingest_wikidata_catalog(&service,&input,&target).unwrap();
-    let response=MetadataService::open(&target).unwrap().enrich_rich(MetadataEnrichmentRequest{isbns:vec!["9780306406157".into()]}).unwrap();
-    assert_eq!(response.results[0].matches[0].authors[0].identity_key(),"wikidata:Q1");
-    assert_eq!(response.results[0].matches[0].classifications[0].notation,"BC71");
-    let c=Connection::open(target).unwrap();assert_eq!(c.query_row("SELECT count(*) FROM author WHERE author_id=-2",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        INSERT INTO classification VALUES('Q10','lcc','BC71','P8360',0,'Q10');",
+    )
+    .unwrap();
+    let target = temp.path().join("target.sqlite");
+    std::fs::copy(&base, &target).unwrap();
+    let service = MetadataService::open(base).unwrap();
+    assert!(ingest_wikidata_authorities(&service, &input, &target).is_err());
+    c.execute("INSERT INTO state VALUES('ingestion_scope','isbn')", []).unwrap();
+    drop(c);
+    ingest_wikidata_authorities(&service, &input, &target).unwrap();
+    let response = MetadataService::open(&target).unwrap().enrich_rich(MetadataEnrichmentRequest { isbns: vec!["9780306406157".into()] }).unwrap();
+    assert_eq!(response.results[0].matches[0].authors[0].identity_key(), "wikidata:Q1");
+    assert_eq!(response.results[0].matches[0].classifications[0].notation, "BC71");
+    let c = Connection::open(target).unwrap();
+    assert_eq!(c.query_row("SELECT count(*) FROM author WHERE author_id=-2", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[test]
+fn edition_identity_supports_legacy_publication_year_with_and_without_subtitles() {
+    let temporary = tempfile::tempdir().unwrap();
+    let database = snapshot_from(
+        temporary.path(),
+        &[serde_json::json!({"key":"/books/OL1M", "title":"Example History", "subtitle":"A Short Guide", "publish_date":"2004", "authors":[{"key":"/authors/OL100A"}], "isbn_13":["9780306406157"], "lc_classifications":["DC38"]})],
+        &[],
+        &[serde_json::json!({"key":"/authors/OL100A", "name":"Alex Smith"})],
+    );
+    // DDC keeps the edition eligible, while its LCC must come from the
+    // title/author supplement. This exercises both year-column reads.
+    Connection::open(&database)
+        .unwrap()
+        .execute_batch(
+            "UPDATE edition_classification SET scheme=1,notation='944'; INSERT INTO title_author_classification VALUES('example history','a short guide','alex smith',2004,'',2,'DC38'),('example history','','alex smith',2004,'',2,'DC38');",
+        )
+        .unwrap();
+    for legacy in [false, true] {
+        if legacy {
+            Connection::open(&database).unwrap().execute_batch("ALTER TABLE edition_bibliography RENAME COLUMN book_year TO publication_year; ALTER TABLE title_author_classification RENAME COLUMN book_year TO publication_year;").unwrap();
+        }
+        let service = MetadataService::open(&database).unwrap();
+        let mut query = edition_query("Example History: A Short Guide", vec![], Some(2004));
+        // Lookup and the classification supplement share omitted-suffix matching.
+        query.queries[0].authors = vec!["Alex Smith Junior".into()];
+        let response = service.resolve_editions(query).unwrap();
+        let matched = response.results[0].matched.as_ref().expect("matching title, author and year");
+        assert_eq!(matched.book_year, Some(2004));
+        assert!(matched.matched_book_year);
+        assert!(matched.classifications.iter().any(|c| c.notation == "DC38"));
+        assert_eq!(matched.subtitle.as_deref(), Some("A Short Guide"));
+    }
+    Connection::open(&database).unwrap().execute_batch("DROP TABLE edition_subtitle; DROP TABLE work_subtitle;").unwrap();
+    let service = MetadataService::open(&database).unwrap();
+    let response = service.resolve_editions(edition_query("Example History", vec![], Some(2004))).unwrap();
+    assert!(response.results[0].matched.as_ref().unwrap().matched_book_year);
+}
+
+#[test]
+fn edition_identity_ranks_matching_authors_not_credit_list_length() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = snapshot_from(
+        tmp.path(),
+        &[
+            serde_json::json!({"key":"/books/OL1M","title":"Example History","authors":[{"key":"/authors/OL100A"}],"isbn_13":["9780306406157"],"lc_classifications":["DC38"]}),
+            serde_json::json!({"key":"/books/OL2M","title":"Example History","authors":[{"key":"/authors/OL100A"},{"key":"/authors/OL101A"},{"key":"/authors/OL102A"}],"isbn_13":["9780140328721"],"lc_classifications":["DC161"]}),
+        ],
+        &[],
+        &[serde_json::json!({"key":"/authors/OL100A","name":"Alex Smith"}), serde_json::json!({"key":"/authors/OL101A","name":"Casey Roe"}), serde_json::json!({"key":"/authors/OL102A","name":"Narrator Person"})],
+    );
+    let service = MetadataService::open(&db).unwrap();
+    let mut q = edition_query("Example History", vec![], None);
+    q.queries[0].authors.push("Casey Roe".into());
+    let r = service.resolve_editions(q.clone()).unwrap();
+    assert_eq!(r.results[0].matched.as_ref().unwrap().open_library_edition_id, "OL2M");
+    q.queries[0].authors.pop();
+    assert_eq!(service.resolve_editions(q.clone()).unwrap().results[0].status, EditionIdentityStatus::Ambiguous);
+    q.queries[0].authors = vec!["Jordan Smith".into()];
+    assert_eq!(service.resolve_editions(q).unwrap().results[0].status, EditionIdentityStatus::NoMatch);
 }

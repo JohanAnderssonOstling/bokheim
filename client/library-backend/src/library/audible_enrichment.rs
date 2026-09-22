@@ -1,6 +1,6 @@
 //! One bounded Audible attempt per member of the current enrichment batch.
-use crate::BackendError;
 use crate::library::LibrarySession;
+use crate::BackendError;
 use metadata_contract::audible::{LookupResponse, LookupStatus};
 #[cfg(test)]
 use std::time::Duration;
@@ -29,6 +29,15 @@ impl LibrarySession {
             });
             let committed = self.db.resolve_audible_batch(&job, &response, now() + 300, now()).map_err(BackendError::operation)?;
             if committed {
+                if response.status == LookupStatus::Unavailable {
+                    log::warn!("Audiobook enrichment unavailable for {}: {}; retry scheduled", job.request.title, response.detail);
+                } else {
+                    log::info!("Audiobook enrichment for {}: {:?}: {}", job.request.title, response.status, response.detail);
+                }
+                if response.status == LookupStatus::Supported {
+                    // Refresh readers without emitting a new preparation request.
+                    self.publish_update(library_model::LibraryUpdate::Contents);
+                }
                 self.sync_wake.wake();
             }
         }

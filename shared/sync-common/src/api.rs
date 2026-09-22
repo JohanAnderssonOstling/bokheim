@@ -18,14 +18,20 @@ pub mod assets {
     }
     impl BookRanges {
         pub fn byte_count(&self, length: u64) -> Option<usize> {
-            if self.ranges.is_empty() || self.ranges.len() > 128 { return None; }
+            if self.ranges.is_empty() || self.ranges.len() > 128 {
+                return None;
+            }
             let mut end = 0;
             let mut total = 0usize;
             for &(offset, count) in &self.ranges {
-                if count == 0 || offset < end { return None; }
+                if count == 0 || offset < end {
+                    return None;
+                }
                 end = offset.checked_add(count as u64)?;
                 total = total.checked_add(count)?;
-                if end > length || total > MAX_BOOK_BUNDLE_BYTES { return None; }
+                if end > length || total > MAX_BOOK_BUNDLE_BYTES {
+                    return None;
+                }
             }
             Some(total)
         }
@@ -46,8 +52,18 @@ pub mod assets {
     }
 
     pub const MAX_BLOB_MANIFEST_ENTRIES: usize = 4096;
+    pub const MAX_THUMBNAIL_PRESENCE_ENTRIES: usize = MAX_BLOB_MANIFEST_ENTRIES;
     pub const MAX_THUMBNAIL_BATCH_ENTRIES: usize = 16;
     pub const MAX_THUMBNAIL_BATCH_BYTES: usize = MAX_THUMBNAIL_BATCH_ENTRIES * crate::MAX_THUMBNAIL_BYTES as usize;
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct ThumbnailPresenceRequest {
+        pub content_hashes: Vec<ContentHash>,
+    }
+    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct ThumbnailPresenceResponse {
+        pub present: Vec<ContentHash>,
+    }
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct BlobManifestEntry {
@@ -257,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn library_catalogue_contract_preserves_stable_ids_and_names() {
+    fn library_contract_preserves_stable_ids_and_names() {
         let request = libraries::LibraryNameRequest { library_id: crate::LibraryId::parse_str("11111111-1111-4111-8111-111111111111").unwrap(), library_name: "History".to_string() };
         let summary = libraries::LibrarySummary { library_id: request.library_id.clone(), library_name: request.library_name.clone() };
         assert_eq!(round_trip(&request), request);

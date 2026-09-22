@@ -3,7 +3,7 @@
 mod dependencies;
 pub use dependencies::dependency_index;
 
-pub type MetadataResult<T> = Result<T, Box<dyn std::error::Error>>;
+pub type MetadataResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 use lopdf::xref::{Xref, XrefEntry, XrefType};
 use lopdf::{Dictionary, Document, Object, ObjectId, ObjectStream, Reader, Stream};
 use std::{
@@ -33,11 +33,11 @@ fn load_windows(reader: impl Read + Seek, pages: usize, both_ends: bool) -> Meta
         let _ = source.graph(info, 0);
     }
     let root = source.document.trailer.get(b"Root")?.as_reference()?;
-    let catalog = source.object(root)?.as_dict()?.clone();
-    if let Ok(metadata) = catalog.get(b"Metadata").cloned() {
+    let root_dict = source.object(root)?.as_dict()?.clone();
+    if let Ok(metadata) = root_dict.get(b"Metadata").cloned() {
         source.graph(metadata, 0)?;
     }
-    let page_root = catalog.get(b"Pages")?.as_reference()?;
+    let page_root = root_dict.get(b"Pages")?.as_reference()?;
     let mut remaining = pages;
     let mut number = 0;
     source.pages(page_root, &mut remaining, &mut HashSet::new(), 0, false, &mut number)?;
@@ -65,10 +65,15 @@ fn cover_indexed(reader: impl Read + Seek) -> MetadataResult<Document> {
     let root = source.document.trailer.get(b"Root")?.as_reference()?;
     let page_root = source.object(root)?.as_dict()?.get(b"Pages")?.as_reference()?;
     source.pages(page_root, &mut 1, &mut HashSet::new(), 0, false, &mut 0)?;
-    let page = source.document.objects.values().find_map(|object| {
-        let page = object.as_dict().ok()?;
-        (page.get(b"BokheimInspectionPage").and_then(Object::as_i64).ok() == Some(1)).then(|| page.clone())
-    }).ok_or("PDF has no first page")?;
+    let page = source
+        .document
+        .objects
+        .values()
+        .find_map(|object| {
+            let page = object.as_dict().ok()?;
+            (page.get(b"BokheimInspectionPage").and_then(Object::as_i64).ok() == Some(1)).then(|| page.clone())
+        })
+        .ok_or("PDF has no first page")?;
     source.cover_aux(&page)?;
     Ok(source.document)
 }
@@ -78,37 +83,59 @@ fn cover_indexed(reader: impl Read + Seek) -> MetadataResult<Document> {
 // number in their header. Use those only when all inherited page properties are
 // already present on that first page; never guess missing objects.
 fn cover_linearized(reader: impl Read + Seek) -> MetadataResult<Document> {
-    let mut source = Source { reader, length:0, base:0, document:Document::new(), loading:HashSet::new(), walked:HashSet::new(), retained:0, spans:BTreeMap::new(), reads:Vec::new(), index_only:false, include_images:true, offset_hint:None, offset_searches:0 };
+    let mut source = Source {
+        reader,
+        length: 0,
+        base: 0,
+        document: Document::new(),
+        loading: HashSet::new(),
+        walked: HashSet::new(),
+        retained: 0,
+        spans: BTreeMap::new(),
+        reads: Vec::new(),
+        index_only: false,
+        include_images: true,
+        offset_hint: None,
+        offset_searches: 0,
+    };
     source.length = source.reader.seek(SeekFrom::End(0))?;
-    let header = source.range(0,65536)?;
-    if !header.starts_with(b"%PDF-") { return Err("not a linearized PDF".into()); }
+    let header = source.range(0, 65536)?;
+    if !header.starts_with(b"%PDF-") {
+        return Err("not a linearized PDF".into());
+    }
     let obj = header.windows(3).position(|w| w == b"obj").ok_or("missing linearization object")?;
-    let start = header[..obj].iter().rposition(|b| matches!(b,b'\n'|b'\r')).map_or(0,|i|i+1);
+    let start = header[..obj].iter().rposition(|b| matches!(b, b'\n' | b'\r')).map_or(0, |i| i + 1);
     let mut words = header[start..obj].split(|b| b.is_ascii_whitespace()).filter(|w| !w.is_empty());
-    let id = (u32::try_from(number(words.next())?)?,u16::try_from(number(words.next())?)?);
-    let linearized = parse_object(&header[start..],id)?;
+    let id = (u32::try_from(number(words.next())?)?, u16::try_from(number(words.next())?)?);
+    let linearized = parse_object(&header[start..], id)?;
     let linearized = linearized.as_dict()?;
-    if !linearized.has(b"Linearized") || u64::try_from(linearized.get(b"L")?.as_i64()?)? != source.length { return Err("invalid linearization header".into()); }
-    let page_id = (u32::try_from(linearized.get(b"O")?.as_i64()?)?,0);
+    if !linearized.has(b"Linearized") || u64::try_from(linearized.get(b"L")?.as_i64()?)? != source.length {
+        return Err("invalid linearization header".into());
+    }
+    let page_id = (u32::try_from(linearized.get(b"O")?.as_i64()?)?, 0);
     let offset = xref_tables(&header).next().ok_or("missing first-page xref")?;
-    let (xref,trailer) = table(&header[offset..])?;
-    if trailer.has(b"Encrypt") { return Err("encrypted first-page recovery unsupported".into()); }
-    source.document.reference_table = xref; source.document.trailer = trailer;
+    let (xref, trailer) = table(&header[offset..])?;
+    if trailer.has(b"Encrypt") {
+        return Err("encrypted first-page recovery unsupported".into());
+    }
+    source.document.reference_table = xref;
+    source.document.trailer = trailer;
     let page = source.object(page_id)?.as_dict()?.clone();
-    if page.get(b"Type")?.as_name()? != b"Page" || !page.has(b"MediaBox") || !page.has(b"CropBox") || !page.has(b"Resources") || !page.has(b"Rotate") { return Err("first-page recovery requires self-contained page properties".into()); }
-    source.pages(page_id,&mut 1,&mut HashSet::new(),0,false,&mut 0)?;
+    if page.get(b"Type")?.as_name()? != b"Page" || !page.has(b"MediaBox") || !page.has(b"CropBox") || !page.has(b"Resources") || !page.has(b"Rotate") {
+        return Err("first-page recovery requires self-contained page properties".into());
+    }
+    source.pages(page_id, &mut 1, &mut HashSet::new(), 0, false, &mut 0)?;
     source.cover_aux(&page)?;
     Ok(source.document)
 }
 
-fn xref_tables(bytes: &[u8]) -> impl Iterator<Item=usize> + '_ {
-    bytes.windows(5).enumerate().filter_map(|(index,w)|
-        (w.starts_with(b"xref") && w[4].is_ascii_whitespace() && (index == 0 || bytes[index-1].is_ascii_whitespace())).then_some(index))
+fn xref_tables(bytes: &[u8]) -> impl Iterator<Item = usize> + '_ {
+    bytes.windows(5).enumerate().filter_map(|(index, w)| (w.starts_with(b"xref") && w[4].is_ascii_whitespace() && (index == 0 || bytes[index - 1].is_ascii_whitespace())).then_some(index))
 }
 
-/// Load only the trailer and catalog. Book identity must not require
+/// Load only the trailer and document root. Book identity must not require
 /// decoding page content, fonts, images, or attachments.
-pub fn catalog(reader: impl Read + Seek) -> MetadataResult<Document> {
+pub fn document_root(reader: impl Read + Seek) -> MetadataResult<Document> {
     let mut source = open(reader)?;
     let root = source.document.trailer.get(b"Root")?.as_reference()?;
     source.object(root)?;
@@ -116,7 +143,21 @@ pub fn catalog(reader: impl Read + Seek) -> MetadataResult<Document> {
 }
 
 fn open<R: Read + Seek>(reader: R) -> MetadataResult<Source<R>> {
-    let mut source = Source { reader, length: 0, base: 0, document: Document::new(), loading: HashSet::new(), walked: HashSet::new(), retained: 0, spans: BTreeMap::new(), reads: Vec::new(), index_only: false, include_images: false, offset_hint: None, offset_searches: 0 };
+    let mut source = Source {
+        reader,
+        length: 0,
+        base: 0,
+        document: Document::new(),
+        loading: HashSet::new(),
+        walked: HashSet::new(),
+        retained: 0,
+        spans: BTreeMap::new(),
+        reads: Vec::new(),
+        index_only: false,
+        include_images: false,
+        offset_hint: None,
+        offset_searches: 0,
+    };
     source.length = source.reader.seek(SeekFrom::End(0))?;
     let header = source.range(0, 1024)?;
     source.base = header.windows(5).position(|bytes| bytes == b"%PDF-").ok_or("invalid PDF header")? as u64;
@@ -132,11 +173,20 @@ fn open<R: Read + Seek>(reader: R) -> MetadataResult<Source<R>> {
         let mut repaired = false;
         for index in xref_tables(&bytes) {
             let candidate = begin + index as u64;
-            if candidate == offset { continue; }
-            source.document = Document::new(); source.retained = 0;
-            if source.references(candidate).is_ok() { offset = candidate; repaired = true; break; }
+            if candidate == offset {
+                continue;
+            }
+            source.document = Document::new();
+            source.retained = 0;
+            if source.references(candidate).is_ok() {
+                offset = candidate;
+                repaired = true;
+                break;
+            }
         }
-        if !repaired { return Err(original); }
+        if !repaired {
+            return Err(original);
+        }
     }
     source.document.xref_start = offset as usize;
     source.document.max_id = source.document.reference_table.entries.keys().copied().max().unwrap_or(0);
@@ -145,8 +195,7 @@ fn open<R: Read + Seek>(reader: R) -> MetadataResult<Source<R>> {
     }
     if let Ok(encryption) = source.document.trailer.get(b"Encrypt").cloned() {
         source.graph(encryption, 0)?;
-        source.document.authenticate_raw_password(b"")
-            .map_err(|_| "PDF requires a non-empty password or uses unsupported encryption")?;
+        source.document.authenticate_raw_password(b"").map_err(|_| "PDF requires a non-empty password or uses unsupported encryption")?;
         source.document.encryption_state = Some(lopdf::EncryptionState::decode(&source.document, b"")?);
     }
     Ok(source)
@@ -169,7 +218,9 @@ struct Source<R> {
 }
 impl<R: Read + Seek> Source<R> {
     fn cover_aux(&mut self, page: &Dictionary) -> MetadataResult<()> {
-        if let Ok(group) = page.get(b"Group") { self.graph(group.clone(),0)?; }
+        if let Ok(group) = page.get(b"Group") {
+            self.graph(group.clone(), 0)?;
+        }
         // Cover extraction deliberately ignores annotations, including their resources.
         Ok(())
     }
@@ -233,17 +284,23 @@ impl<R: Read + Seek> Source<R> {
         }
     }
     fn header_at(&mut self, offset: u64, id: ObjectId) -> MetadataResult<bool> {
-        if offset >= self.length { return Ok(false); }
+        if offset >= self.length {
+            return Ok(false);
+        }
         Ok(object_header(&self.range(offset, 128)?, id))
     }
 
     fn object_at(&mut self, offset: u64, id: ObjectId) -> MetadataResult<(Object, usize)> {
         // A correct recorded header always wins over a recovery hint, including
         // when different incremental revisions have different displacements.
-        if self.header_at(offset, id)? { return self.at(offset, id); }
+        if self.header_at(offset, id)? {
+            return self.at(offset, id);
+        }
         if let Some(candidate) = self.offset_hint.and_then(|hint| offset.checked_add_signed(hint)) {
             if self.header_at(candidate, id)? {
-                if let Ok(object) = self.at(candidate, id) { return Ok(object); }
+                if let Ok(object) = self.at(candidate, id) {
+                    return Ok(object);
+                }
             }
         }
         if self.offset_searches >= MAX_OFFSET_SEARCHES {
@@ -252,11 +309,15 @@ impl<R: Read + Seek> Source<R> {
         self.offset_searches += 1;
         let begin = offset.saturating_sub(OFFSET_RECOVERY_RADIUS).min(self.length);
         let bytes = self.range(begin, (OFFSET_RECOVERY_RADIUS * 2 + 128) as usize)?;
-        let candidates = bytes.iter().enumerate().filter_map(|(index, byte)| {
-            let boundary = index == 0 || bytes[index - 1].is_ascii_whitespace();
-            (boundary && byte.is_ascii_digit() && object_header(&bytes[index..], id))
-                .then_some(begin + index as u64)
-        }).filter(|candidate| candidate.abs_diff(offset) <= OFFSET_RECOVERY_RADIUS).collect::<Vec<_>>();
+        let candidates = bytes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, byte)| {
+                let boundary = index == 0 || bytes[index - 1].is_ascii_whitespace();
+                (boundary && byte.is_ascii_digit() && object_header(&bytes[index..], id)).then_some(begin + index as u64)
+            })
+            .filter(|candidate| candidate.abs_diff(offset) <= OFFSET_RECOVERY_RADIUS)
+            .collect::<Vec<_>>();
         // Do not guess between duplicate object definitions in the search window.
         if candidates.len() != 1 {
             return Err("invalid PDF object offset: no unique matching header within recovery window".into());
@@ -399,7 +460,9 @@ impl<R: Read + Seek> Source<R> {
                 kids => kids,
             };
             let mut children = kids.as_array()?.clone();
-            if reverse { children.reverse(); }
+            if reverse {
+                children.reverse();
+            }
             for child in children {
                 if *remaining == 0 {
                     break;
@@ -437,7 +500,9 @@ impl<R: Read + Seek> Source<R> {
             if [b"Parent".as_slice(), b"FontFile", b"FontFile3", b"Metadata"].contains(&key.as_slice()) {
                 continue;
             }
-            if !self.include_images && [b"SMask".as_slice(), b"Mask", b"FontFile2"].contains(&key.as_slice()) { continue; }
+            if !self.include_images && [b"SMask".as_slice(), b"Mask", b"FontFile2"].contains(&key.as_slice()) {
+                continue;
+            }
             self.graph(value.clone(), depth + 1)?;
         }
         Ok(())
@@ -462,14 +527,17 @@ fn object_header(bytes: &[u8], id: ObjectId) -> bool {
     let mut rest = bytes;
     for expected in [u64::from(id.0), u64::from(id.1)] {
         let end = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
-        if end == 0 || number(Some(&rest[..end])).ok() != Some(expected) { return false; }
+        if end == 0 || number(Some(&rest[..end])).ok() != Some(expected) {
+            return false;
+        }
         rest = &rest[end..];
         let spaces = rest.iter().take_while(|byte| byte.is_ascii_whitespace()).count();
-        if spaces == 0 { return false; }
+        if spaces == 0 {
+            return false;
+        }
         rest = &rest[spaces..];
     }
-    rest.strip_prefix(b"obj").is_some_and(|tail| tail.first().is_some_and(|byte|
-        byte.is_ascii_whitespace() || b"<[/()%".contains(byte)))
+    rest.strip_prefix(b"obj").is_some_and(|tail| tail.first().is_some_and(|byte| byte.is_ascii_whitespace() || b"<[/()%".contains(byte)))
 }
 
 fn parse_object(bytes: &[u8], id: ObjectId) -> lopdf::Result<Object> {
@@ -629,16 +697,21 @@ fn stream_start(bytes: &[u8]) -> Option<usize> {
     Some(index)
 }
 
-
 /// Read only Info/XMP and the page-tree root, never page streams or images.
 pub fn metadata(reader: impl Read + Seek) -> MetadataResult<Document> {
     let mut source = open(reader)?;
-    if let Ok(info) = source.document.trailer.get(b"Info").cloned() { let _ = source.graph(info, 0); }
+    if let Ok(info) = source.document.trailer.get(b"Info").cloned() {
+        let _ = source.graph(info, 0);
+    }
     let root = source.document.trailer.get(b"Root")?.as_reference()?;
-    let catalog = source.object(root)?.as_dict()?.clone();
-    if let Ok(metadata) = catalog.get(b"Metadata").cloned() { let _ = source.graph(metadata, 0); }
-    let pages = catalog.get(b"Pages")?.as_reference()?;
-    if source.object(pages)?.as_dict()?.get(b"Count")?.as_i64()? <= 0 { return Err("PDF book contains no pages".into()); }
+    let root_dict = source.object(root)?.as_dict()?.clone();
+    if let Ok(metadata) = root_dict.get(b"Metadata").cloned() {
+        let _ = source.graph(metadata, 0);
+    }
+    let pages = root_dict.get(b"Pages")?.as_reference()?;
+    if source.object(pages)?.as_dict()?.get(b"Count")?.as_i64()? <= 0 {
+        return Err("PDF book contains no pages".into());
+    }
     Ok(source.document)
 }
 
@@ -705,5 +778,4 @@ mod tests {
         let (xref, _) = table(b"xref\n0 1\n0000000000 65536 f\ntrailer\n<</Size 1>>").unwrap();
         assert!(matches!(xref.get(0), Some(XrefEntry::Free)));
     }
-
 }

@@ -30,9 +30,17 @@ async fn committed_pages_notify_before_the_next_http_page_finishes() {
     let exchange = manager.synchronize_state();
     tokio::pin!(exchange);
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        tokio::select! {
-            result = &mut exchange => panic!("second page must remain blocked: {result:?}"),
-            event = updates.recv() => assert!(matches!(event.unwrap(), LibraryEvent::ContentsChanged)),
+        // The exchange also announces its own start (`TransferStatusChanged`)
+        // before any page is fetched; only `ContentsChanged` confirms the
+        // first page actually committed ahead of the blocked second page.
+        loop {
+            tokio::select! {
+                result = &mut exchange => panic!("second page must remain blocked: {result:?}"),
+                event = updates.recv() => match event.unwrap() {
+                    LibraryEvent::ContentsChanged => break,
+                    _ => continue,
+                },
+            }
         }
     })
     .await
@@ -326,7 +334,10 @@ async fn push_and_pull_pagination_advance_in_the_same_exchange_loop() {
         let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap().as_millis() as u64;
         for sequence in 1..=sync_common::MAX_PUSH_MUTATIONS as u64 + 1 {
             let mutation = reading_change(sequence, sequence, "epubcfi(/6/2)", now);
-            manager.database.enqueue_outbox_reading_change(&mutation.mutation_id.to_string(), fixture_content_hash(sequence).as_str(), &sync_common::wire::encode(&mutation.body).unwrap(), i64::try_from(mutation.changed_at).unwrap()).unwrap();
+            manager
+                .database
+                .enqueue_outbox_reading_change(&mutation.mutation_id.to_string(), fixture_content_hash(sequence).as_str(), &sync_common::wire::encode(&mutation.body).unwrap(), i64::try_from(mutation.changed_at).unwrap())
+                .unwrap();
         }
     }
 
@@ -375,7 +386,10 @@ async fn transient_rejection_does_not_starve_later_push_pages() {
     {
         for sequence in 1..=sync_common::MAX_PUSH_MUTATIONS as u64 + 1 {
             let mutation = reading_change(sequence, sequence, "epubcfi(/6/2)", sequence);
-            manager.database.enqueue_outbox_reading_change(&mutation.mutation_id.to_string(), fixture_content_hash(sequence).as_str(), &sync_common::wire::encode(&mutation.body).unwrap(), i64::try_from(mutation.changed_at).unwrap()).unwrap();
+            manager
+                .database
+                .enqueue_outbox_reading_change(&mutation.mutation_id.to_string(), fixture_content_hash(sequence).as_str(), &sync_common::wire::encode(&mutation.body).unwrap(), i64::try_from(mutation.changed_at).unwrap())
+                .unwrap();
         }
     }
 

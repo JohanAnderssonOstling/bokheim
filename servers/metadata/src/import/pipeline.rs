@@ -2,14 +2,7 @@ use super::super::{
     error, mpsc, params, thread, BufRead, BufReader, Connection, DeserializeOwned, File, IndexedParallelIterator, IntoParallelIterator, MetadataError, MultiGzDecoder, ParallelIterator, Path, OPEN_LIBRARY_CHECKPOINT_RECORDS,
     PIPELINE_BUFFERED_BATCHES, PIPELINE_PARSE_RECORDS,
 };
-use super::core::completed_phase;
-use super::wikidata::{checkpoint_records, wikidata_json_line, wikidata_reader};
-
-#[derive(Clone, Copy)]
-pub(crate) enum DumpFormat {
-    OpenLibraryGzip,
-    Wikidata,
-}
+use super::core::{checkpoint_records, completed_phase};
 
 struct RawJsonBatch {
     end_count: usize,
@@ -26,18 +19,18 @@ struct ParsedJsonBatch<T> {
 pub(crate) fn read_open_library_resumable<T: DeserializeOwned + Send>(
     connection: &mut Connection, path: &Path, limit: Option<usize>, phase: &str, mut import_batch: impl FnMut(&rusqlite::Transaction<'_>, Vec<T>) -> Result<(), MetadataError>,
 ) -> Result<usize, MetadataError> {
-    read_json_resumable(connection, path, limit, phase, OPEN_LIBRARY_CHECKPOINT_RECORDS, DumpFormat::OpenLibraryGzip, &mut import_batch)
+    read_json_resumable(connection, path, limit, phase, OPEN_LIBRARY_CHECKPOINT_RECORDS, &mut import_batch)
 }
 
 fn read_json_resumable<T: DeserializeOwned + Send>(
-    connection: &mut Connection, path: &Path, limit: Option<usize>, phase: &str, batch_size: usize, format: DumpFormat, import_batch: &mut impl FnMut(&rusqlite::Transaction<'_>, Vec<T>) -> Result<(), MetadataError>,
+    connection: &mut Connection, path: &Path, limit: Option<usize>, phase: &str, batch_size: usize, import_batch: &mut impl FnMut(&rusqlite::Transaction<'_>, Vec<T>) -> Result<(), MetadataError>,
 ) -> Result<usize, MetadataError> {
-    read_json_resumable_mapped(connection, path, limit, phase, batch_size, PIPELINE_PARSE_RECORDS, format, &Some, import_batch)
+    read_json_resumable_mapped(connection, path, limit, phase, batch_size, PIPELINE_PARSE_RECORDS, &Some, import_batch)
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn read_json_resumable_mapped<T: DeserializeOwned + Send, U: Send>(
-    connection: &mut Connection, path: &Path, limit: Option<usize>, phase: &str, batch_size: usize, parse_batch_size: usize, format: DumpFormat, transform: &(impl Fn(T) -> Option<U> + Sync),
+    connection: &mut Connection, path: &Path, limit: Option<usize>, phase: &str, batch_size: usize, parse_batch_size: usize, transform: &(impl Fn(T) -> Option<U> + Sync),
     import_batch: &mut impl FnMut(&rusqlite::Transaction<'_>, Vec<U>) -> Result<(), MetadataError>,
 ) -> Result<usize, MetadataError> {
     if let Some(records) = completed_phase(connection, phase)? {
@@ -52,7 +45,7 @@ pub(crate) fn read_json_resumable_mapped<T: DeserializeOwned + Send, U: Send>(
         let (parsed_sender, parsed_receiver) = mpsc::sync_channel(PIPELINE_BUFFERED_BATCHES);
         let reader_path = path_owned.clone();
         let reader_phase = phase_owned.clone();
-        let reader = scope.spawn(move || read_raw_json_batches(&reader_path, format, resume_at, limit, parse_batch_size, &reader_phase, raw_sender));
+        let reader = scope.spawn(move || read_raw_json_batches(&reader_path, resume_at, limit, parse_batch_size, &reader_phase, raw_sender));
         let parser_path = path_owned.clone();
         let parser = scope.spawn(move || parse_json_batches::<T, U>(&parser_path, raw_receiver, parsed_sender, transform));
 
@@ -77,10 +70,7 @@ pub(crate) fn read_json_resumable_mapped<T: DeserializeOwned + Send, U: Send>(
                 transaction.commit().map_err(error)?;
                 last_commit = pending_end;
                 if pending_end > 0 && pending_end.is_multiple_of(1_000_000) {
-                    match format {
-                        DumpFormat::OpenLibraryGzip => println!("read {pending_end} records from {}", path.display()),
-                        DumpFormat::Wikidata => println!("read {pending_end} Wikidata entities from {}", path.display()),
-                    }
+                    println!("read {pending_end} records from {}", path.display());
                 }
                 Ok(pending_end)
             })();
@@ -102,28 +92,21 @@ pub(crate) fn read_json_resumable_mapped<T: DeserializeOwned + Send, U: Send>(
     })
 }
 
-fn read_raw_json_batches(path: &Path, format: DumpFormat, resume_at: usize, limit: Option<usize>, batch_size: usize, phase: &str, sender: mpsc::SyncSender<RawJsonBatch>) -> Result<(), MetadataError> {
-    let (mut reader, directly_resumed): (Box<dyn BufRead>, bool) = match format {
-        DumpFormat::OpenLibraryGzip => (Box::new(BufReader::with_capacity(1024 * 1024, MultiGzDecoder::new(BufReader::with_capacity(1024 * 1024, File::open(path).map_err(error)?)))), false),
-        DumpFormat::Wikidata => wikidata_reader(path, resume_at)?,
-    };
+fn read_raw_json_batches(path: &Path, resume_at: usize, limit: Option<usize>, batch_size: usize, phase: &str, sender: mpsc::SyncSender<RawJsonBatch>) -> Result<(), MetadataError> {
+    let mut reader = BufReader::with_capacity(1024 * 1024, MultiGzDecoder::new(BufReader::with_capacity(1024 * 1024, File::open(path).map_err(error)?)));
     let mut line = String::new();
-    let mut count = if directly_resumed { resume_at } else { 0 };
+    let mut count = 0;
     while count < resume_at {
         line.clear();
         if reader.read_line(&mut line).map_err(error)? == 0 {
             return Err(MetadataError(format!("cannot resume {phase} at record {resume_at}: dump ended after {count} records")));
         }
-        if dump_json_line(format, &line).is_some() {
+        if open_library_json_line(&line).is_some() {
             count += 1;
         }
     }
     if resume_at > 0 {
-        if directly_resumed {
-            println!("resumed {phase} stream directly at indexed record {resume_at}");
-        } else {
-            println!("resumed {phase} stream at record {resume_at} after replaying the compressed input");
-        }
+        println!("resumed {phase} stream at record {resume_at} after replaying the compressed input");
     }
     loop {
         let mut records = Vec::with_capacity(batch_size);
@@ -134,7 +117,7 @@ fn read_raw_json_batches(path: &Path, format: DumpFormat, resume_at: usize, limi
                 finished = true;
                 break;
             }
-            let Some(json) = dump_json_line(format, &line) else { continue };
+            let Some(json) = open_library_json_line(&line) else { continue };
             records.push(json.to_owned());
             count += 1;
             if limit.is_some_and(|limit| count >= limit) {
@@ -172,13 +155,6 @@ fn parse_json_batches<T: DeserializeOwned + Send, U: Send>(path: &Path, receiver
         }
     }
     Ok(())
-}
-
-pub(crate) fn dump_json_line(format: DumpFormat, line: &str) -> Option<&str> {
-    match format {
-        DumpFormat::OpenLibraryGzip => open_library_json_line(line),
-        DumpFormat::Wikidata => wikidata_json_line(line),
-    }
 }
 
 fn open_library_json_line(line: &str) -> Option<&str> {

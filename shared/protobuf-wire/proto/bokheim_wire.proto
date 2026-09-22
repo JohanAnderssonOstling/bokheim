@@ -44,7 +44,7 @@ message MapEntry {
 // values form the mutation compatibility baseline: never renumber or reuse
 // them. Additive fields must remain optional or have a safe zero default.
 message MutationValue {
-  reserved 8, 9;
+  reserved 8, 9, 10;
   oneof kind {
     string directory_name = 1;
     string directory_parent = 2;
@@ -53,7 +53,6 @@ message MutationValue {
     Placement placement = 5;
     ReadingPosition reading_position = 6;
     Annotation annotation = 7;
-    CatalogBook catalog_book = 10;
     BookRecord metadata = 11;
     string description = 12;
     bytes pdf_reader_metadata = 13; // Versioned JSON geometry, keyed by exact checksum.
@@ -124,6 +123,8 @@ message Annotation {
   uint64 created_at = 7;
   uint64 modified_at = 8;
   bool deleted = 9;
+  optional int64 toc_ordinal = 10;
+  optional float progress = 11;
 }
 
 message AnnotationAnchor {
@@ -151,23 +152,18 @@ enum AnnotationStyle {
   ANNOTATION_STYLE_STRIKETHROUGH = 4;
 }
 
-message CatalogBook {
-  string edition_id = 1;
-  optional string work_id = 2;
-  string content_hash = 3;
-}
-
 message BookRecord {
   string title = 1;
   repeated Contributor contributors = 2;
   reserved 3;
   reserved "description"; // Description is an independent sync register.
   BookMetadata book = 4;
+  optional string subtitle = 5;
 }
 message Contributor {
   string contributor_id = 1;
   string name = 2;
-  optional string sort_name = 3;
+  reserved 3;
   bytes role = 4;
 }
 message BookMetadata {

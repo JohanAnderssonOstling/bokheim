@@ -60,7 +60,7 @@ struct AudioChunk {
 struct SharedState {
     buffering: AtomicBool,
     output_lost: AtomicBool,
-    stream_control: Option<bokheim_backend::AudioStreamControl>,
+    stream_control: Option<app::AudioStreamControl>,
     decoder_stopped: AtomicBool,
     resume_blocks: usize,
     generation: AtomicU64,
@@ -124,7 +124,7 @@ impl SharedState {
 pub struct AudioEngine {
     #[cfg(feature = "kobo")]
     recovery: Mutex<Option<OutputRecovery>>,
-    stream_control: Option<bokheim_backend::AudioStreamControl>,
+    stream_control: Option<app::AudioStreamControl>,
     #[cfg(not(feature = "kobo"))]
     _output: MixerDeviceSink,
     #[cfg(not(feature = "kobo"))]
@@ -140,7 +140,7 @@ pub struct AudioEngine {
 }
 
 impl AudioEngine {
-    pub fn open(reader: Box<dyn ReadSeek>, duration: Duration, stream_control: Option<bokheim_backend::AudioStreamControl>) -> Result<Self, String> {
+    pub fn open(reader: Box<dyn ReadSeek>, duration: Duration, stream_control: Option<app::AudioStreamControl>) -> Result<Self, String> {
         let _opening = crate::OpeningTiming::new("audio_engine_open");
         let decoder_timing = crate::OpeningTiming::new("decoder_init");
         let decoder = open_decoder(reader)?;
@@ -229,7 +229,22 @@ impl AudioEngine {
         if self.recovery.lock().expect("audio recovery lock poisoned").is_some() {
             return true;
         }
-        self.is_playing() && self.state.buffering.load(Ordering::Acquire)
+        if !self.state.buffering.load(Ordering::Acquire) {
+            return false;
+        }
+        // Not `is_playing()`: right after a seek the sink is legitimately
+        // empty until the decoder's fresh samples arrive, which made
+        // `is_playing()` — and so buffering, defined in terms of it — read
+        // false for exactly the window buffering describes, leaving the
+        // transport stuck showing "paused" while genuinely refilling.
+        #[cfg(not(feature = "kobo"))]
+        {
+            !self.player.is_paused() && !self.state.playback_finished()
+        }
+        #[cfg(feature = "kobo")]
+        {
+            self.output.is_playing() && !self.state.playback_finished()
+        }
     }
 
     pub fn take_output_lost(&self) -> bool {
@@ -486,7 +501,7 @@ fn read_decoder_block(decoder: &mut impl Iterator<Item = f32>, block_samples: us
 }
 
 fn decode_worker(
-    mut decoder: AudioDecoder, channels: NonZeroU16, sample_rate: NonZeroU32, request_rx: Receiver<DecoderRequest>, audio_tx: Sender<AudioChunk>, state: Arc<SharedState>, stream: Option<bokheim_backend::AudioStreamControl>,
+    mut decoder: AudioDecoder, channels: NonZeroU16, sample_rate: NonZeroU32, request_rx: Receiver<DecoderRequest>, audio_tx: Sender<AudioChunk>, state: Arc<SharedState>, stream: Option<app::AudioStreamControl>,
 ) -> Result<(), String> {
     let mut stretch = TimeStretch::new(sample_rate.get(), channels.get()).map_err(|error| error.to_string())?;
     let mut tempo = 1.0;
@@ -998,7 +1013,7 @@ mod tests {
             std::process::Command::new("/bin/sh").args(["-c", script]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn().unwrap()
         }
         let mut state = test_state(0, 42_000_000);
-        let control = bokheim_backend::AudioStreamControl::default();
+        let control = app::AudioStreamControl::default();
         Arc::get_mut(&mut state).unwrap().stream_control = Some(control.clone());
         let (samples, receiver) = bounded(BUFFERED_BLOCKS);
         for _ in 0..8 {
@@ -1216,7 +1231,7 @@ mod tests {
         struct StallingReader {
             data: Cursor<Vec<u8>>,
             stall: Arc<AtomicBool>,
-            control: bokheim_backend::AudioStreamControl,
+            control: app::AudioStreamControl,
             started: std::sync::mpsc::Sender<()>,
         }
         impl Read for StallingReader {
@@ -1256,7 +1271,7 @@ mod tests {
             .output()
             .expect("this integration test requires ffmpeg");
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let control = bokheim_backend::AudioStreamControl::default();
+        let control = app::AudioStreamControl::default();
         let stall = Arc::new(AtomicBool::new(false));
         let (started, waiting) = std::sync::mpsc::channel();
         let decoder = open_decoder(Box::new(StallingReader { data: Cursor::new(std::fs::read(&path).unwrap()), stall: stall.clone(), control: control.clone(), started })).unwrap();

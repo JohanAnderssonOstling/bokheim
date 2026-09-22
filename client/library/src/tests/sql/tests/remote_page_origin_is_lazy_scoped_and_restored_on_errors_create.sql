@@ -1,3 +1,0 @@
-CREATE TEMP TABLE origin_audit(value TEXT);
-      CREATE TEMP TRIGGER origin_insert AFTER INSERT ON main.sync_metadata WHEN NEW.change_origin IS NOT NULL BEGIN INSERT INTO origin_audit VALUES(NEW.change_origin); END;
-      CREATE TEMP TRIGGER origin_update AFTER UPDATE OF change_origin ON main.sync_metadata WHEN NEW.change_origin IS NOT OLD.change_origin BEGIN INSERT INTO origin_audit VALUES(NEW.change_origin); END;

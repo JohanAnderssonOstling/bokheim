@@ -91,6 +91,15 @@ impl TocState {
             .map(|resolved| resolved.link.clone())
     }
 
+    /// Depth-first ordinal of the entry the reader is inside, for reading
+    /// position. Resolutions are stored in TOC order, so the index is the
+    /// ordinal; duplicate links resolve to their first entry, matching
+    /// `active_title`.
+    pub(crate) fn ordinal_of_active(&self) -> Option<usize> {
+        let active = self.active_link.as_ref()?;
+        self.resolutions.iter().position(|resolved| &resolved.link == active)
+    }
+
     /// The title of the active entry, searched depth-first through the tree.
     pub(crate) fn active_title(&self) -> Option<String> {
         fn find(entries: &[TocEntry], active: &str) -> Option<String> {
@@ -135,6 +144,18 @@ mod tests {
         let toc = sample();
         assert_eq!(toc.resolutions.len(), 3, "a child entry must be resolved alongside its parent");
         assert_eq!(toc.resolutions.iter().map(|entry| entry.link.as_str()).collect::<Vec<_>>(), vec!["ch1.xhtml", "ch1.xhtml#part2", "ch2.xhtml"]);
+    }
+
+    #[test]
+    fn active_ordinal_follows_toc_order() {
+        let mut toc = sample();
+        assert_eq!(toc.ordinal_of_active(), None, "no position means no ordinal");
+        toc.set_active_link(Some("ch1.xhtml#part2".to_owned()));
+        assert_eq!(toc.ordinal_of_active(), Some(1), "the nested entry is second in depth-first order");
+        toc.set_active_link(Some("ch2.xhtml".to_owned()));
+        assert_eq!(toc.ordinal_of_active(), Some(2));
+        toc.set_active_link(Some("gone.xhtml".to_owned()));
+        assert_eq!(toc.ordinal_of_active(), None, "unknown links resolve to nothing, not a guess");
     }
 
     #[test]

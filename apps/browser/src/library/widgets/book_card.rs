@@ -8,7 +8,7 @@ use web_time::Instant;
 const COVER_FADE_DURATION: Duration = Duration::from_millis(180);
 
 use gpui::prelude::*;
-use gpui::{Anchor, AppContext, Context, DismissEvent, Entity, Focusable as _, IntoElement, Pixels, Point, PromptLevel, Render, RenderImage, Subscription, Task, Window, anchored, deferred, px};
+use gpui::{Anchor, App, AppContext, Context, DismissEvent, Entity, Focusable as _, IntoElement, Pixels, Point, PromptLevel, Render, RenderImage, Subscription, Task, Window, anchored, deferred, px};
 use gpui_component::menu::PopupMenu;
 use gpui_component::tag::Tag;
 use gpui_component::{IconName, Sizable, Size};
@@ -44,6 +44,20 @@ pub(crate) enum BookPlacement {
 pub(crate) type PlaceBook = std::rc::Rc<dyn Fn(sync_common::ContentHash, DirId, BookPlacement, &mut gpui::App)>;
 pub(crate) type RemoveBook = std::rc::Rc<dyn Fn(sync_common::ContentHash, DirId, String, &mut Window, &mut gpui::App)>;
 
+/// A decoded cover's width over its height, for boxing it at its own
+/// proportions instead of the placeholder's.
+fn cover_aspect_ratio(image: &RenderImage) -> f32 {
+    let size = image.size(0);
+    size.width.0.max(1) as f32 / size.height.0.max(1) as f32
+}
+
+/// Which of the generated cover's fixed jacket colours a book with no art
+/// gets. Keyed off the content hash rather than drawn at random, so a book
+/// generates the same cover every time it is shown.
+fn generated_cover_variant(content_hash: sync_common::ContentHash) -> usize {
+    content_hash.as_str().bytes().fold(0usize, |acc, byte| acc.wrapping_add(byte as usize))
+}
+
 pub(crate) fn loaded_cover_from_jpeg(bytes: Vec<u8>) -> Option<LoadedCover> {
     if !bytes.starts_with(&[0xff, 0xd8, 0xff]) {
         return None;
@@ -65,7 +79,7 @@ pub(crate) fn loaded_cover_from_jpeg(bytes: Vec<u8>) -> Option<LoadedCover> {
 #[derive(Clone)]
 enum CoverState {
     Pending,
-    Loaded(LoadedCover, bokheim_backend::ThumbnailResolution),
+    Loaded(LoadedCover, app::ThumbnailResolution),
     Missing,
 }
 
@@ -85,9 +99,6 @@ pub(crate) struct BookCardView {
     /// up, and a card answering that with hover reports where the pointer went
     /// rather than what is selected.
     marquee: bool,
-    /// Whether the card names its author. False on a shelf that is already one
-    /// person's, where the line would repeat the name above it.
-    states_author: bool,
     /// Whether the card is drawn in its detailed mode: twice as wide, with the
     /// blurb beside the cover instead of nothing but the title under it. Pushed
     /// in by the page, exactly like the cursor — the grid decides how wide a
@@ -109,7 +120,6 @@ pub(crate) struct BookCardView {
     open_detail: Option<OpenBookDetail>,
     cover_task: Option<Task<()>>,
     cover_updates: Option<Subscription>,
-    download_state: bokheim_backend::DownloadState,
     _download_updates: Subscription,
     download_task: Option<Task<()>>,
     source_directory: Option<DirId>,
@@ -117,6 +127,10 @@ pub(crate) struct BookCardView {
     remove_book: Option<RemoveBook>,
     context_menu: Option<BookCardContextMenu>,
     context_menu_subscription: Option<Subscription>,
+    /// Repaints the card when the "cover text" setting changes, so an
+    /// already-visible card hides or shows its title without waiting for
+    /// some unrelated event to trigger a redraw.
+    _cover_text_updates: Subscription,
 }
 
 struct BookCardContextMenu {
@@ -128,10 +142,10 @@ impl BookCardView {
     pub(crate) fn title(&self) -> &str {
         &self.book.title
     }
-    pub(crate) fn thumbnail_resolution(window: &Window) -> bokheim_backend::ThumbnailResolution {
+    pub(crate) fn thumbnail_resolution(window: &Window) -> app::ThumbnailResolution {
         let logical_width = gpui::px(components::BOOK_CARD_CONTENT_WIDTH);
         let physical_width = f32::from(logical_width) * window.scale_factor();
-        if physical_width <= bokheim_backend::ThumbnailResolution::Browse.width() as f32 { bokheim_backend::ThumbnailResolution::Browse } else { bokheim_backend::ThumbnailResolution::HighDensity }
+        if physical_width <= app::ThumbnailResolution::Browse.width() as f32 { app::ThumbnailResolution::Browse } else { app::ThumbnailResolution::HighDensity }
     }
 
     pub(crate) fn create(row: BookCardRow, ui: LibraryContext, cx: &mut impl AppContext) -> Entity<Self> {
@@ -153,27 +167,16 @@ impl BookCardView {
         })
     }
 
-    /// A card for a shelf that is already filed under one person — the author
-    /// index. It states no author, because the name over the shelf says it once
-    /// for every card under it, and the card is shorter by that line.
-    pub(crate) fn create_on_author_shelf(row: BookCardRow, ui: LibraryContext, cx: &mut impl AppContext) -> Entity<Self> {
-        cx.new(|cx| {
-            let mut card = Self::new(row, ui, None, cx);
-            card.states_author = false;
-            card
-        })
-    }
-
     fn new(row: BookCardRow, ui: LibraryContext, source_directory: Option<DirId>, cx: &mut Context<Self>) -> Self {
         let cover_updates = Self::subscribe_to_cover_updates(&ui, row.content_hash, cx);
-        let download_state = Self::row_download_state(&row);
+        ui.updates().update(cx, |updates, cx| updates.track_download(row.content_hash, row.downloaded, row.download_requested, cx));
         let download_updates = Self::subscribe_to_download_updates(&ui, row.content_hash, cx);
+        let cover_text_updates = cx.observe_global::<crate::stores::CoverTextSetting>(|_, cx| cx.notify());
         Self {
             book: row,
             focused: false,
             selected: false,
             marquee: false,
-            states_author: true,
             detailed: false,
             cover_loaded_at: None,
             cover: CoverState::Pending,
@@ -181,7 +184,6 @@ impl BookCardView {
             open_detail: None,
             cover_task: None,
             cover_updates: Some(cover_updates),
-            download_state,
             _download_updates: download_updates,
             download_task: None,
             source_directory,
@@ -189,6 +191,7 @@ impl BookCardView {
             remove_book: None,
             context_menu: None,
             context_menu_subscription: None,
+            _cover_text_updates: cover_text_updates,
         }
     }
 
@@ -236,38 +239,24 @@ impl BookCardView {
 
     pub(crate) fn replace_row(&mut self, row: BookCardRow, source_directory: Option<DirId>) {
         debug_assert_eq!(self.book.content_hash, row.content_hash);
-        self.download_state = Self::row_download_state(&row);
         self.book = row;
         self.source_directory = source_directory;
     }
 
-    fn row_download_state(row: &BookCardRow) -> bokheim_backend::DownloadState {
-        if row.downloaded {
-            bokheim_backend::DownloadState::Downloaded
-        } else if row.download_requested {
-            bokheim_backend::DownloadState::Queued
-        } else {
-            bokheim_backend::DownloadState::NotDownloaded
-        }
-    }
-
     fn download(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.download_state, bokheim_backend::DownloadState::NotDownloaded) || self.download_task.is_some() {
+        let content_hash = self.book.content_hash;
+        if !matches!(self.ui.updates().read(cx).download_state(content_hash), Some(app::DownloadState::NotDownloaded)) || self.download_task.is_some() {
             return;
         }
-        let content_hash = self.book.content_hash;
-        self.download_state = bokheim_backend::DownloadState::Queued;
+        self.ui.updates().update(cx, |updates, cx| updates.watch_download(content_hash, cx));
         let library = self.ui.backend().clone();
         let operation = async move { library.download_book(content_hash).await };
         self.download_task = Some(cx.spawn(async move |card, cx| {
             let result = operation.await;
             let _ = card.update_in(cx, |card, window, cx| {
                 card.download_task.take();
-                match result {
-                    Ok(state) => card.download_state = state,
-                    Err(error) => {
-                        crate::services::notify_error("book-download-error", format!("Could not download book: {error}"), window, cx);
-                    }
+                if let Err(error) = result {
+                    crate::services::notify_error("book-download-error", format!("Could not download book: {error}"), window, cx);
                 }
                 cx.notify();
             });
@@ -288,7 +277,6 @@ impl BookCardView {
         let updates = ui.updates();
         cx.subscribe(&updates, move |view, _, event: &LibraryDownloadChanged, cx| {
             if event.status.content_hash == content_hash {
-                view.download_state = event.status.state.clone();
                 cx.notify();
             }
         })
@@ -298,8 +286,7 @@ impl BookCardView {
         if matches!(self.cover, CoverState::Loaded(..)) {
             return;
         }
-        self.cover_updates.take();
-        // The scanner has committed a thumbnail, so any in-flight or missing
+        // The worker has committed a thumbnail, so any in-flight or missing
         // result is stale.
         self.cover = CoverState::Pending;
         // A prior asynchronous lookup may still be about to report "missing".
@@ -316,7 +303,7 @@ impl BookCardView {
         self.cover_updates = Some(Self::subscribe_to_cover_updates(&self.ui, self.book.content_hash, cx));
     }
 
-    fn load_cover(&mut self, resolution: bokheim_backend::ThumbnailResolution, cx: &mut Context<Self>) {
+    fn load_cover(&mut self, resolution: app::ThumbnailResolution, cx: &mut Context<Self>) {
         let content_hash = self.book.content_hash;
         let library = self.ui.backend().clone();
         let load = async move { library.thumbnail(content_hash, resolution).await };
@@ -327,7 +314,7 @@ impl BookCardView {
                 Ok(None) => Ok(None),
                 Err(error) => Err(error),
             };
-            let _ = view.update(cx, |view, cx| {
+            cx.defer_update(view, move |view, cx| {
                 view.cover_task.take();
                 if view.book.content_hash != content_hash {
                     return;
@@ -355,13 +342,18 @@ impl BookCardView {
         }));
     }
 
-    pub(crate) fn prepare(&mut self, resolution: bokheim_backend::ThumbnailResolution, cx: &mut Context<Self>) {
+    pub(crate) fn prepare(&mut self, resolution: app::ThumbnailResolution, cx: &mut Context<Self>) {
         let needs_cover = match &self.cover {
             CoverState::Pending => true,
-            CoverState::Loaded(_, loaded_resolution) => *loaded_resolution == bokheim_backend::ThumbnailResolution::Browse && resolution == bokheim_backend::ThumbnailResolution::HighDensity,
+            CoverState::Loaded(_, loaded_resolution) => *loaded_resolution == app::ThumbnailResolution::Browse && resolution == app::ThumbnailResolution::HighDensity,
             CoverState::Missing => false,
         };
         if needs_cover && self.cover_task.is_none() {
+            // Listen before the asynchronous read: a synced thumbnail can be
+            // published while that read is still reporting the old absence.
+            if matches!(self.cover, CoverState::Pending) {
+                self.listen_for_thumbnail(cx);
+            }
             self.load_cover(resolution, cx);
         }
     }
@@ -399,13 +391,43 @@ impl BookCardView {
         }
     }
 
+    /// Runs a confirmed book command from the card menu: one prompt, then the
+    /// backend call, with failures surfaced as toasts.
+    fn confirm_menu_action(
+        target: Entity<Self>,
+        title: String,
+        detail: String,
+        choices: [&str; 2],
+        error_id: &'static str,
+        error_prefix: String,
+        operation: impl std::future::Future<Output = Result<(), String>> + 'static,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let answer = window.prompt(PromptLevel::Warning, &title, Some(&detail), &choices, cx);
+        target.update(cx, |_, cx| {
+            cx.spawn(async move |card, cx| {
+                if answer.await.ok() != Some(0) {
+                    return;
+                }
+                if let Err(error) = operation.await {
+                    let _ = card.update_in(cx, |_, window, cx| {
+                        crate::services::notify_error(error_id, format!("{error_prefix}: {error}"), window, cx);
+                    });
+                }
+            })
+            .detach();
+        });
+    }
+
     fn open_context_menu(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let new_window = crate::OpenInNewWindow(crate::NewWindowTarget::Book { locator: library_model::BookLocator::new(*self.ui.backend().id(), self.book.content_hash), title: self.book.title.clone() });
         let source_directory = self.source_directory;
         let content_hash = self.book.content_hash;
         let title = self.book.title.clone();
-        let removal_title = title.clone();
         let removal_target = cx.entity();
+        let backend = self.ui.backend().clone();
+        let downloaded = matches!(self.ui.updates().read(cx).download_state(content_hash), Some(app::DownloadState::Downloaded));
         let place_book = self.place_book.clone();
         let remove_book = self.remove_book.clone();
         let menu = PopupMenu::build(window, cx, move |mut menu, _, _| {
@@ -426,42 +448,64 @@ impl BookCardView {
                     .item(components::menu_item_with_icon("Move to folder…", IconName::FolderOpen, move |_, _, cx| move_book(content_hash, source_directory, BookPlacement::Move, cx)))
                     .separator();
             }
-            if let (Some(source_directory), Some(remove_book)) = (source_directory, remove_book) {
-                menu.item(components::menu_item_with_icon("Remove from this folder", components::navigation_icon(components::NavigationIcon::Trash2), move |_, window, cx| {
-                    remove_book(content_hash, source_directory, format!("“{title}” remains available in its other folders. Its final placement moves to Trash."), window, cx);
-                }))
-            } else {
-                menu.item(components::menu_item_with_icon("Move to Trash", components::navigation_icon(components::NavigationIcon::Trash2), move |_, window, cx| {
-                    let choices = if source_directory.is_some() { ["Remove", "Cancel"] } else { ["Move to Trash", "Cancel"] };
-                    let answer = window.prompt(
-                        PromptLevel::Warning,
-                        if source_directory.is_some() { "Remove this book from the folder?" } else { "Move this book to Trash?" },
-                        Some(&format!("“{removal_title}” remains available in its other folders. Its final placement moves to Trash.")),
-                        &choices,
-                        cx,
-                    );
-                    removal_target.update(cx, |card, cx| {
-                        let library = card.ui.backend().clone();
-                        let operation = async move {
-                            match source_directory {
-                                Some(source_id) => library.remove_book_from_directory(content_hash, source_id).await.map(|_| ()),
-                                None => library.move_book_to_trash(content_hash).await,
-                            }
-                        };
-                        cx.spawn(async move |card, cx| {
-                            if answer.await.ok() != Some(0) {
-                                return;
-                            }
-                            if let Err(error) = operation.await {
-                                let _ = card.update_in(cx, |_, window, cx| {
-                                    crate::services::notify_error("book-trash-error", format!("Could not move book to Trash: {error}"), window, cx);
-                                });
-                            }
-                        })
-                        .detach();
-                    });
-                }))
+            if downloaded {
+                let library = backend.clone();
+                let evict_target = removal_target.clone();
+                menu = menu
+                    .item(components::menu_item_with_icon("Remove download", IconName::HardDrive, move |_, _window, cx| {
+                        let library = library.clone();
+                        let operation = async move { library.remove_local_book_copy(content_hash).await.map(|_| ()) };
+                        evict_target.update(cx, |_, cx| {
+                            cx.spawn(async move |card, cx| {
+                                if let Err(error) = operation.await {
+                                    let _ = card.update_in(cx, |_, window, cx| {
+                                        crate::services::notify_error("book-evict-error", format!("Could not remove download: {error}"), window, cx);
+                                    });
+                                }
+                            })
+                            .detach();
+                        });
+                    }))
+                    .separator();
             }
+            // Leaving a folder and leaving the library are separate commands:
+            // the first keeps the book in its other folders, the second moves
+            // it to Trash outright.
+            if source_directory.is_some() {
+                if let (Some(source_directory), Some(remove_book)) = (source_directory, remove_book) {
+                    let description = format!("“{title}” stays in its other folders. If this is its last folder, it moves to Trash.");
+                    menu = menu.item(components::menu_item_with_icon("Remove from folder", components::navigation_icon(components::NavigationIcon::Folder), move |_, window, cx| {
+                        remove_book(content_hash, source_directory, description.clone(), window, cx);
+                    }));
+                } else if let Some(source_id) = source_directory {
+                    let library = backend.clone();
+                    let direct_target = removal_target.clone();
+                    let detail = format!("“{title}” stays in its other folders. If this is its last folder, it moves to Trash.");
+                    menu = menu.item(components::menu_item_with_icon("Remove from folder", components::navigation_icon(components::NavigationIcon::Folder), move |_, window, cx| {
+                        let library = library.clone();
+                        let operation = async move { library.remove_book_from_directory(content_hash, source_id).await.map(|_| ()) };
+                        Self::confirm_menu_action(direct_target.clone(), "Remove this book from the folder?".to_owned(), detail.clone(), ["Remove", "Cancel"], "book-remove-error", "Could not remove book from folder".to_owned(), operation, window, cx);
+                    }));
+                }
+                let library = backend.clone();
+                let trash_target = removal_target.clone();
+                let detail = format!("“{title}” will be moved to Trash.");
+                menu = menu.item(components::menu_item_with_icon("Move to Trash", components::navigation_icon(components::NavigationIcon::Trash2), move |_, window, cx| {
+                    let library = library.clone();
+                    let operation = async move { library.move_book_to_trash(content_hash).await };
+                    Self::confirm_menu_action(trash_target.clone(), "Move this book to Trash?".to_owned(), detail.clone(), ["Move to Trash", "Cancel"], "book-trash-error", "Could not move book to Trash".to_owned(), operation, window, cx);
+                }));
+            } else {
+                let library = backend.clone();
+                let trash_target = removal_target.clone();
+                let detail = format!("“{title}” will be moved to Trash.");
+                menu = menu.item(components::menu_item_with_icon("Move to Trash", components::navigation_icon(components::NavigationIcon::Trash2), move |_, window, cx| {
+                    let library = library.clone();
+                    let operation = async move { library.move_book_to_trash(content_hash).await };
+                    Self::confirm_menu_action(trash_target.clone(), "Move this book to Trash?".to_owned(), detail.clone(), ["Move to Trash", "Cancel"], "book-trash-error", "Could not move book to Trash".to_owned(), operation, window, cx);
+                }));
+            }
+            menu
         });
         let subscription = cx.subscribe(&menu, |card, _, _: &DismissEvent, cx| {
             card.context_menu = None;
@@ -495,16 +539,22 @@ impl Render for BookCardView {
         let element_id = format!("book-card-{}", book.content_hash);
         let cover_id = format!("book-cover-{}", book.content_hash);
 
-        // A book with no author says nothing rather than saying it has none:
-        // the line still holds its height, so the grid stays aligned.
-        let author = book.author.clone();
+        let cover_text = if self.detailed { app_preferences::CoverText::Always } else { crate::stores::current_cover_text(cx) };
         let open_target = cx.entity();
-        let cover_frame = components::book_cover_frame(theme)
+        let cover_ratio = match &cover {
+            CoverState::Loaded(cover, _) => cover_aspect_ratio(&cover.image),
+            CoverState::Pending | CoverState::Missing => components::BOOK_COVER_ASPECT_RATIO,
+        };
+        let cover_frame = components::book_cover_frame(theme, cover_ratio)
             .id(cover_id)
             .on_click(move |_, window, cx| Self::activate(&open_target, window, cx))
             .child(match cover {
-                CoverState::Loaded(cover, _) => components::book_cover(theme).child(components::book_cover_image(format!("book-cover-art-{}", book.content_hash), cover.image, cover_opacity, highlighted, theme)),
-                CoverState::Pending => components::book_cover(theme),
+                CoverState::Loaded(cover, _) => components::book_cover(theme, cover_ratio).child(components::book_cover_image(format!("book-cover-art-{}", book.content_hash), cover.image, cover_opacity, highlighted, theme)),
+                CoverState::Pending => components::book_cover(theme, cover_ratio),
+                // A blank placeholder says nothing without the title line
+                // under it, so "cover only" replaces it with a generated
+                // cover that carries the title itself.
+                CoverState::Missing if cover_text == app_preferences::CoverText::CoverOnly => components::book_cover_generated(book.title.clone(), book.subtitle.as_deref(), generated_cover_variant(book.content_hash), theme),
                 CoverState::Missing => components::missing_book_cover(if book.format_category == library_model::LibraryFileTypeFilter::Audiobook { "Audiobook" } else { "No cover" }, theme),
             })
             .children(components::book_cover_progress(book.progress, theme))
@@ -514,10 +564,11 @@ impl Render for BookCardView {
 
         let context_menu = self.context_menu.as_ref().map(|active| deferred(anchored().position(active.position).snap_to_window_with_margin(px(8.0)).anchor(Anchor::TopLeft).child(active.menu.clone())).with_priority(1));
         let context_menu_target = cx.entity();
-        let (downloaded, download_pending) = match self.download_state {
-            bokheim_backend::DownloadState::Downloaded => (true, false),
-            bokheim_backend::DownloadState::Queued | bokheim_backend::DownloadState::Downloading(_) => (false, true),
-            bokheim_backend::DownloadState::NotDownloaded => (false, false),
+        let download_state = self.ui.updates().read(cx).download_state(book.content_hash).unwrap_or(app::DownloadState::Queued);
+        let (downloaded, download_pending) = match download_state {
+            app::DownloadState::Downloaded => (true, false),
+            app::DownloadState::Queued | app::DownloadState::Downloading(_) => (false, true),
+            app::DownloadState::NotDownloaded => (false, false),
         };
         let mut download_indicator = components::book_download_indicator(downloaded, download_pending, theme);
         if !downloaded && !download_pending {
@@ -553,25 +604,22 @@ impl Render for BookCardView {
             let description = components::book_card_description(format!("book-description-{}", book.content_hash), &book.description, theme);
             card.child(
                 components::book_card_detail_body()
-                    .child(components::book_card_detail_cover().child(cover_frame).child(
-                        components::book_card_text().child(components::book_card_detail_title().child(components::book_title_lines(book.title, book.subtitle.as_deref()))).child(components::book_card_metadata(
-                            author,
-                            download_indicator,
-                            theme,
-                        )),
-                    ))
+                    .child(components::book_card_detail_cover().child(cover_frame).child(components::book_card_text().child(components::book_card_title_row(book.title, book.subtitle.as_deref(), download_indicator))))
                     .child(components::book_card_detail_text().children(description)),
             )
-        } else if self.states_author {
-            card.child(cover_frame).child(components::book_card_text().child(components::book_card_title().child(components::book_title_lines(book.title, book.subtitle.as_deref()))).child(components::book_card_metadata(
-                author,
-                download_indicator,
-                theme,
-            )))
         } else {
-            card.child(cover_frame).child(components::book_card_text().child(components::book_card_title_row(book.title, book.subtitle.as_deref(), download_indicator)))
+            let card = card.child(cover_frame);
+            // No text block at all under "cover only", not an empty one: an
+            // empty child would still hold the cover-to-text gap open under
+            // a cover that has nothing under it. The download control goes
+            // with it — see `book_card_title_row`, which is the only place
+            // that draws one for a compact card.
+            match cover_text {
+                app_preferences::CoverText::Always => card.child(components::book_card_text_title_only().child(components::book_card_title_row(book.title, book.subtitle.as_deref(), download_indicator))),
+                app_preferences::CoverText::CoverOnly => card,
+            }
         };
 
-        card.children(context_menu).into_any_element()
+        components::book_card_cell().child(card.children(context_menu)).into_any_element()
     }
 }

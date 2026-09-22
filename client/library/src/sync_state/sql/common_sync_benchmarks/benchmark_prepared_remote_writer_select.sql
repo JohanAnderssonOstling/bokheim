@@ -1,1 +1,0 @@
-SELECT content_hash,title,book_metadata FROM book ORDER BY content_hash

@@ -1,1 +1,0 @@
-SELECT file_name, last_scan FROM book_dir ORDER BY file_name

@@ -9,13 +9,13 @@ pub struct ActiveAudiobook {
     pub locator: BookLocator,
     pub position_ms: u64,
     pub speed: f64,
-    pub metadata: bokheim_backend::PlaybackMetadata,
+    pub metadata: app::PlaybackMetadata,
 }
 
 impl ActiveAudiobook {
     pub const VERSION: u32 = 1;
 
-    pub fn new(locator: BookLocator, position_ms: u64, speed: f64, metadata: bokheim_backend::PlaybackMetadata) -> Self {
+    pub fn new(locator: BookLocator, position_ms: u64, speed: f64, metadata: app::PlaybackMetadata) -> Self {
         Self { version: Self::VERSION, session_id: uuid::Uuid::new_v4(), locator, position_ms, speed, metadata }
     }
 
@@ -42,7 +42,7 @@ pub struct PlaybackSession {
     #[cfg(target_os = "android")]
     release: Option<std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>>>>>,
     #[cfg(not(target_arch = "wasm32"))]
-    stream_control: Option<bokheim_backend::AudioStreamControl>,
+    stream_control: Option<app::AudioStreamControl>,
     resolve_task: Option<gpui::Task<()>>,
     load_task: Option<gpui::Task<()>>,
     save_speed: SaveSpeed,
@@ -156,7 +156,7 @@ impl PlaybackSession {
         true
     }
 
-    fn book_from_metadata(metadata: bokheim_backend::PlaybackMetadata) -> AudiobookBook {
+    fn book_from_metadata(metadata: app::PlaybackMetadata) -> AudiobookBook {
         let duration = Duration::from_millis(metadata.duration_ms);
         let mut chapters: Vec<_> = metadata.chapters.into_iter().map(|chapter| AudiobookChapter { title: chapter.title, start: Duration::from_millis(chapter.start_ms), end: Duration::from_millis(chapter.end_ms) }).collect();
         if chapters.is_empty() {
@@ -409,7 +409,7 @@ impl PlaybackSession {
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn load_source_at(&mut self, source: bokheim_backend::BrowserAudiobook, initial: Duration, cx: &mut Context<Self>) {
+    fn load_source_at(&mut self, source: app::BrowserAudiobook, initial: Duration, cx: &mut Context<Self>) {
         let result = (|| {
             let metadata = &source.metadata;
             let book = AudiobookBook {
@@ -434,7 +434,7 @@ impl PlaybackSession {
         if self.restore_cover.is_empty() {
             let cover_library = library.clone();
             self.cover_task = Some(cx.spawn(async move |this, cx| {
-                if let Ok(Some(bytes)) = cover_library.thumbnail(content_hash, bokheim_backend::ThumbnailResolution::Browse).await {
+                if let Ok(Some(bytes)) = cover_library.thumbnail(content_hash, app::ThumbnailResolution::Browse).await {
                     let _ = this.update(cx, |session, cx| {
                         if session.apply_cover(bytes) {
                             cx.notify();
@@ -541,7 +541,6 @@ impl PlaybackSession {
             }
         }
     }
-
 
     pub(super) fn new(rate: f64, position_updates: async_channel::Sender<PlaybackPosition>) -> Self {
         Self {
@@ -949,10 +948,10 @@ mod tests {
     fn final_snapshot_outlives_session_without_app_access() {
         let (mut session, _) = session();
         let record = ActiveAudiobook::new(
-            BookLocator::new(bokheim_backend::LibraryId::new_v4(), "b".repeat(64).parse().unwrap()),
+            BookLocator::new(app::LibraryId::new_v4(), "b".repeat(64).parse().unwrap()),
             0,
             1.0,
-            bokheim_backend::PlaybackMetadata { title: "Old title".into(), author: String::new(), narrator: None, duration_ms: 100_000, chapters: vec![], cover: vec![] },
+            app::PlaybackMetadata { title: "Old title".into(), author: String::new(), narrator: None, duration_ms: 100_000, chapters: vec![], cover: vec![] },
         );
         session.stop_playback();
         let snapshot = session.final_restoration_snapshot(record);
@@ -1077,7 +1076,7 @@ mod tests {
     #[test]
     fn reactivation_keeps_a_healthy_loading_source_and_applies_the_new_target() {
         let (mut session, _) = session();
-        let control = bokheim_backend::AudioStreamControl::default();
+        let control = app::AudioStreamControl::default();
         control.set_paused(true);
         session.stream_control = Some(control.clone());
         session.source_pending = true;
@@ -1123,15 +1122,15 @@ mod tests {
     #[gpui::test]
     fn restored_session_has_no_source_work_or_audio_until_play(cx: &mut gpui::TestAppContext) {
         let directory = tempfile::tempdir().unwrap();
-        let launch = bokheim_backend::host::BackendLaunch::initialize(bokheim_backend::AppDataLocation::native_path(directory.path())).unwrap();
-        let (backend, _) = bokheim_backend::AppClient::start_native(launch).unwrap();
+        let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
+        let (backend, _) = app::AppClient::start_native(launch).unwrap();
         // Intentionally absent library: restoration must not try to open it.
-        let locator = BookLocator::new(bokheim_backend::LibraryId::new_v4(), "b".repeat(64).parse().unwrap());
+        let locator = BookLocator::new(app::LibraryId::new_v4(), "b".repeat(64).parse().unwrap());
         let record = ActiveAudiobook::new(
             locator.clone(),
             42_000,
             1.25,
-            bokheim_backend::PlaybackMetadata { title: "Restored book".into(), author: "Author".into(), narrator: None, duration_ms: 100_000, chapters: vec![], cover: b"\x89PNG\r\n\x1a\ncover".to_vec() },
+            app::PlaybackMetadata { title: "Restored book".into(), author: "Author".into(), narrator: None, duration_ms: 100_000, chapters: vec![], cover: b"\x89PNG\r\n\x1a\ncover".to_vec() },
         );
         let library = backend.library(*locator.library_id());
         let playback = cx.new(|cx| PlaybackSession::restore(&record, library, Rc::new(|_, _| {}), cx));

@@ -1,1 +1,0 @@
-SELECT origin FROM local_book_versions WHERE content_hash=?1 AND checksum=?2

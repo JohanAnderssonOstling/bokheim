@@ -21,13 +21,16 @@ impl SessionSender {
         Self(Rc::new(Connection { worker, port, closed: Cell::new(false) }))
     }
     pub fn send(&self, bytes: &[u8]) -> Result<(), String> {
-        if self.0.closed.get() { return Err("Worker connection closed".into()); }
+        if self.0.closed.get() {
+            return Err("Worker connection closed".into());
+        }
         let bytes = js_sys::Uint8Array::from(bytes);
-        self.0.port.post_message_with_transferable(&bytes, &js_sys::Array::of1(&bytes.buffer()))
-            .map_err(|error| format!("{error:?}"))
+        self.0.port.post_message_with_transferable(&bytes, &js_sys::Array::of1(&bytes.buffer())).map_err(|error| format!("{error:?}"))
     }
     pub fn close(&self) {
-        if self.0.closed.replace(true) { return; }
+        if self.0.closed.replace(true) {
+            return;
+        }
         let _ = self.0.port.post_message(&"disconnect".into());
         self.0.port.set_onmessage(None);
         self.0.port.set_onmessageerror(None);
@@ -55,8 +58,7 @@ impl Session {
             }
         });
         let on_error = Closure::<dyn FnMut(JsValue)>::new(move |event| {
-            error(super::field(&event, "message").as_string().filter(|value| !value.is_empty())
-                .unwrap_or_else(|| "shared backend worker stopped or sent an unreadable message".into()));
+            error(super::field(&event, "message").as_string().filter(|value| !value.is_empty()).unwrap_or_else(|| "shared backend worker stopped or sent an unreadable message".into()));
         });
         sender.0.worker.set_onerror(Some(on_error.as_ref().unchecked_ref()));
         sender.0.port.set_onmessageerror(Some(on_error.as_ref().unchecked_ref()));
@@ -66,5 +68,7 @@ impl Session {
     }
 }
 impl Drop for Session {
-    fn drop(&mut self) { self.sender.close(); }
+    fn drop(&mut self) {
+        self.sender.close();
+    }
 }

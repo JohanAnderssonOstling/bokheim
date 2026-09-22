@@ -1,1 +1,0 @@
-SELECT format FROM book WHERE content_hash=?1

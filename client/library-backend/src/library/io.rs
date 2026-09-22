@@ -9,13 +9,9 @@ pub struct DirectoryImport {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use client_platform_native::filesystem::{
-    ImportReader as DirectoryImportReader, ImportReaderFuture as DirectoryImportReaderFuture, ImportSource,
-};
+pub use client_platform_native::filesystem::{ImportReader as DirectoryImportReader, ImportReaderFuture as DirectoryImportReaderFuture, ImportSource};
 #[cfg(target_arch = "wasm32")]
-pub use client_platform_web::transport::import_io::{
-    ImportReader as DirectoryImportReader, ImportReaderFuture as DirectoryImportReaderFuture, ImportSource,
-};
+pub use client_platform_web::transport::import_io::{ImportReader as DirectoryImportReader, ImportReaderFuture as DirectoryImportReaderFuture, ImportSource};
 
 /// A source capability and its path within the selected tree.
 pub struct DirectoryImportFile {

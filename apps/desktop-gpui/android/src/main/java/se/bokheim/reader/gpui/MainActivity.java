@@ -90,6 +90,7 @@ public final class MainActivity extends GameActivity {
     private PathPrompt pendingPathPrompt;
     private volatile boolean captureVolumeButtons;
     private boolean systemBarsVisible = true;
+    private boolean immersiveBarsHidden;
     private boolean keepScreenAwake;
     private Insets lastSafeAreaInsets;
     private Insets lastImeInsets;
@@ -142,6 +143,7 @@ public final class MainActivity extends GameActivity {
         int imeRight,
         int imeBottom
     );
+    private native void nativeReaderChromeRevealed();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -367,6 +369,23 @@ public final class MainActivity extends GameActivity {
                 WindowInsetsAnimationCompat.Callback.DISPATCH_MODE_CONTINUE_ON_SUBTREE
             ) {
                 @Override
+                public WindowInsetsAnimationCompat.BoundsCompat onStart(
+                    WindowInsetsAnimationCompat animation,
+                    WindowInsetsAnimationCompat.BoundsCompat bounds
+                ) {
+                    // The second system-bar animation after immersive mode has
+                    // settled is Android's own edge reveal. It is delivered
+                    // even on devices where transient bars do not relayout.
+                    if (!systemBarsVisible
+                        && immersiveBarsHidden
+                        && (animation.getTypeMask() & WindowInsetsCompat.Type.systemBars()) != 0) {
+                        immersiveBarsHidden = false;
+                        nativeReaderChromeRevealed();
+                    }
+                    return bounds;
+                }
+
+                @Override
                 public WindowInsetsCompat onProgress(
                     WindowInsetsCompat insets,
                     List<WindowInsetsAnimationCompat> runningAnimations
@@ -380,6 +399,9 @@ public final class MainActivity extends GameActivity {
     }
 
     private void publishWindowInsets(WindowInsetsCompat insets) {
+        if (!systemBarsVisible && !insets.isVisible(WindowInsetsCompat.Type.systemBars())) {
+            immersiveBarsHidden = true;
+        }
         Insets safeArea = insets.getInsets(
             WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()
         );

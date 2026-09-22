@@ -230,21 +230,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "alloc-no-stdlib"
-version = "2.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
-
-[[package]]
-name = "alloc-stdlib"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195"
-dependencies = [
- "alloc-no-stdlib",
-]
-
-[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -392,6 +377,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "app"
+version = "0.1.0"
+dependencies = [
+ "account-client",
+ "account-contract",
+ "app-preferences",
+ "async-channel",
+ "client-platform-desktop",
+ "client-platform-kobo",
+ "client-platform-native",
+ "client-platform-runtime",
+ "client-platform-web",
+ "client-runtime",
+ "env_logger",
+ "futures-channel",
+ "futures-util",
+ "getrandom 0.2.17",
+ "getrandom 0.4.2",
+ "js-sys",
+ "library-backend",
+ "library-registry",
+ "log",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "sync-common",
+ "tempfile",
+ "test-support",
+ "tokio",
+ "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
+ "zip",
+]
+
+[[package]]
 name = "app-preferences"
 version = "0.1.0"
 dependencies = [
@@ -403,8 +426,8 @@ dependencies = [
 name = "application-shell"
 version = "0.1.0"
 dependencies = [
+ "app",
  "async-channel",
- "bokheim-backend",
  "book-model",
  "browser-ui",
  "futures-util",
@@ -523,9 +546,13 @@ name = "asset-transfer"
 version = "0.1.0"
 dependencies = [
  "axum",
- "client-library",
+ "blake3",
+ "book-access",
+ "book-metadata",
+ "book-model",
  "client-platform-runtime",
  "client-platform-web",
+ "client-runtime",
  "futures-util",
  "library-database",
  "library-files",
@@ -581,7 +608,6 @@ dependencies = [
  "compression-core",
  "futures-io",
  "pin-project-lite",
- "tokio",
 ]
 
 [[package]]
@@ -723,17 +749,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atom_syndication"
-version = "0.12.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d48d93a31c932d58b9fd68664a904ae5b74bea37f06c5f68d5bec92f0cdd106d"
-dependencies = [
- "chrono",
- "diligent-date-parser",
- "quick-xml 0.41.0",
-]
-
-[[package]]
 name = "atomic"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -793,16 +808,16 @@ dependencies = [
 name = "audiobook-player"
 version = "0.1.0"
 dependencies = [
+ "app",
  "async-channel",
  "async-io",
  "audiobook-library",
- "bokheim-backend",
- "book-metadata",
  "book-model",
  "crossbeam-channel",
  "gpui",
  "gpui-component",
  "js-sys",
+ "library-backend",
  "library-model",
  "log",
  "rodio",
@@ -1168,74 +1183,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bokheim-backend"
-version = "0.1.0"
-dependencies = [
- "account-client",
- "account-contract",
- "app-preferences",
- "async-channel",
- "axum",
- "blake3",
- "book-access",
- "book-enrichment",
- "book-identity",
- "book-inspection",
- "book-metadata",
- "book-model",
- "client-library",
- "client-platform-android",
- "client-platform-desktop",
- "client-platform-kobo",
- "client-platform-native",
- "client-platform-runtime",
- "client-platform-web",
- "device-sqlite",
- "env_logger",
- "epub_provider",
- "futures-channel",
- "futures-util",
- "getrandom 0.2.17",
- "getrandom 0.3.4",
- "getrandom 0.4.2",
- "image 0.24.9",
- "include-sqlite-sql",
- "js-sys",
- "libc",
- "library-backend",
- "library-database",
- "library-model",
- "library-registry",
- "library-replica",
- "library-runtime",
- "log",
- "lopdf",
- "metadata-client",
- "metadata-contract",
- "reqwest",
- "rmp-serde",
- "rusqlite",
- "serde",
- "serde_bytes",
- "serde_json",
- "sqlx",
- "subject-projection",
- "sync-common",
- "sync-transport",
- "tempfile",
- "test-support",
- "thumbnail",
- "tokio",
- "tokio-tungstenite",
- "uuid",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "web-time",
- "zip",
-]
-
-[[package]]
 name = "book-access"
 version = "0.1.0"
 dependencies = [
@@ -1264,7 +1211,6 @@ name = "book-enrichment"
 version = "0.1.0"
 dependencies = [
  "book-model",
- "catalog-model",
  "metadata-contract",
  "serde",
  "serde_json",
@@ -1350,34 +1296,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "brotli"
-version = "8.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cc91aac060a7a1e25823bdccbfb6af1875b88f17c6daac97894eed8207166b3"
-dependencies = [
- "alloc-no-stdlib",
- "alloc-stdlib",
- "brotli-decompressor",
-]
-
-[[package]]
-name = "brotli-decompressor"
-version = "5.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a32acac15fe1967bc3986b2a6347dffc965602354ea6f450ad07e8bfd253583"
-dependencies = [
- "alloc-no-stdlib",
- "alloc-stdlib",
-]
-
-[[package]]
 name = "browser-ui"
 version = "0.1.0"
 dependencies = [
  "account-contract",
+ "app",
  "app-preferences",
  "async-channel",
- "bokheim-backend",
  "book-model",
  "chrono",
  "futures-util",
@@ -1391,6 +1316,7 @@ dependencies = [
  "html-view-gpui",
  "image 0.25.10",
  "js-sys",
+ "library-backend",
  "library-model",
  "log",
  "serde",
@@ -1520,84 +1446,6 @@ dependencies = [
  "rustix 1.1.4",
  "wayland-backend",
  "wayland-client",
-]
-
-[[package]]
-name = "catalog-core"
-version = "0.1.0"
-dependencies = [
- "axum",
- "blake3",
- "catalog-model",
- "futures-util",
- "getrandom 0.3.4",
- "image 0.24.9",
- "log",
- "outbound-http",
- "reqwest",
- "subject-projection",
- "tempfile",
- "thumbnail",
- "tokio",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "catalog-model"
-version = "0.1.0"
-dependencies = [
- "book-model",
- "serde",
- "serde_json",
- "unicode-normalization",
-]
-
-[[package]]
-name = "catalog-protocol"
-version = "0.1.0"
-dependencies = [
- "catalog-model",
- "serde",
-]
-
-[[package]]
-name = "catalog-server"
-version = "0.1.0"
-dependencies = [
- "axum",
- "blake3",
- "book-enrichment",
- "book-inspection",
- "book-model",
- "catalog-core",
- "catalog-model",
- "catalog-protocol",
- "futures-util",
- "image 0.24.9",
- "lopdf",
- "metadata-contract",
- "mobi",
- "opds",
- "protobuf-wire",
- "r2d2",
- "r2d2_sqlite",
- "reqwest",
- "roxmltree 0.20.0",
- "rusqlite",
- "serde",
- "serde_json",
- "subject-projection",
- "tempfile",
- "thumbnail",
- "tokio",
- "tower",
- "tower-http 0.5.2",
- "tracing",
- "tracing-subscriber",
- "url",
- "wire",
- "zip",
 ]
 
 [[package]]
@@ -1748,35 +1596,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "client-library"
-version = "0.1.0"
-dependencies = [
- "book-enrichment",
- "book-inspection",
- "book-metadata",
- "book-model",
- "catalog-model",
- "content-address",
- "include-sqlite-sql",
- "library-model",
- "library-replica",
- "log",
- "metadata-contract",
- "pdf-view-common",
- "rusqlite",
- "serde",
- "serde_bytes",
- "serde_json",
- "subject-projection",
- "sync-common",
- "taxonomy-contract",
- "tempfile",
- "test-support",
- "uuid",
- "web-time",
-]
-
-[[package]]
 name = "client-platform-android"
 version = "0.1.0"
 dependencies = [
@@ -1795,7 +1614,6 @@ name = "client-platform-kobo"
 version = "0.1.0"
 dependencies = [
  "kobo-device",
- "library-registry",
  "uuid",
 ]
 
@@ -1804,12 +1622,15 @@ name = "client-platform-native"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "client-platform-runtime",
+ "cpu-host",
  "futures-util",
  "libc",
  "log",
  "rusqlite",
  "rustls 0.23.38",
  "tempfile",
+ "thumbnail",
  "tokio",
  "tokio-tungstenite",
 ]
@@ -1834,10 +1655,12 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "client-platform-runtime",
+ "cpu-host",
  "futures-channel",
  "futures-util",
  "js-sys",
  "log",
+ "rmp-serde",
  "rusqlite",
  "sqlite-wasm-vfs",
  "sync-common",
@@ -1846,6 +1669,17 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "client-runtime"
+version = "0.1.0"
+dependencies = [
+ "client-platform-runtime",
+ "rmp-serde",
+ "rusqlite",
+ "serde",
+ "serde_bytes",
 ]
 
 [[package]]
@@ -1955,7 +1789,6 @@ version = "0.4.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "257c7085cbb71be72d8fb97edff08b03d86d5d9f2222b9cc34a6bec87093bc10"
 dependencies = [
- "brotli",
  "bzip2",
  "compression-core",
  "flate2",
@@ -2273,6 +2106,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "cpu-host"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "book-inspection",
+ "book-metadata",
+ "book-model",
+ "client-platform-runtime",
+ "client-runtime",
+ "image 0.24.9",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "thumbnail",
+ "uuid",
+]
+
+[[package]]
 name = "cpubits"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2548,10 +2399,10 @@ name = "desktop-gpui"
 version = "0.1.6"
 dependencies = [
  "anyhow",
+ "app",
  "application-shell",
  "async-channel",
  "audiobook-player",
- "bokheim-backend",
  "browser-ui",
  "fs2",
  "gpui",
@@ -2604,15 +2455,6 @@ dependencies = [
  "block-buffer 0.12.1",
  "const-oid",
  "crypto-common 0.2.2",
-]
-
-[[package]]
-name = "diligent-date-parser"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8ede7d79366f419921e2e2f67889c12125726692a313bffb474bd5f37a581e9"
-dependencies = [
- "chrono",
 ]
 
 [[package]]
@@ -3779,7 +3621,6 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.5.2"
-source = "git+https://github.com/longbridge/gpui-component?rev=88f102d13654fe25aa2fede076274b6b751a3704#88f102d13654fe25aa2fede076274b6b751a3704"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3827,7 +3668,6 @@ dependencies = [
 [[package]]
 name = "gpui-component-assets"
 version = "0.5.1"
-source = "git+https://github.com/longbridge/gpui-component?rev=88f102d13654fe25aa2fede076274b6b751a3704#88f102d13654fe25aa2fede076274b6b751a3704"
 dependencies = [
  "anyhow",
  "gpui",
@@ -3841,7 +3681,6 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.5.1"
-source = "git+https://github.com/longbridge/gpui-component?rev=88f102d13654fe25aa2fede076274b6b751a3704#88f102d13654fe25aa2fede076274b6b751a3704"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4258,21 +4097,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32069d97bb81e38fa67eab65e3393bf804bb85969f2bc06bf13f64aef5aba248"
 dependencies = [
  "hashbrown 0.17.0",
-]
-
-[[package]]
-name = "hayro-ccitt"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f4d0e94ddd48749f06bbe4e5389fb9799a0c45bcaf00495042076ef05e3241a"
-
-[[package]]
-name = "hayro-jbig2"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69374b3668dd45aeb3d3145cda68f2c7b4f223aaa2511e67d076f1c7d741388d"
-dependencies = [
- "hayro-ccitt",
 ]
 
 [[package]]
@@ -4836,7 +4660,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.57.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -5048,6 +4872,23 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "import-pipeline"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "book-model",
+ "client-runtime",
+ "getrandom 0.3.4",
+ "log",
+ "serde",
+ "serde_json",
+ "sync-common",
+ "tokio",
+ "uuid",
+ "web-time",
 ]
 
 [[package]]
@@ -5587,17 +5428,18 @@ dependencies = [
  "book-inspection",
  "book-metadata",
  "book-model",
- "catalog-model",
- "client-library",
  "client-platform-kobo",
  "client-platform-native",
  "client-platform-runtime",
  "client-platform-web",
+ "client-runtime",
+ "cpu-host",
  "crossbeam-channel",
  "futures-channel",
  "futures-util",
  "getrandom 0.3.4",
  "image 0.24.9",
+ "import-pipeline",
  "js-sys",
  "libc",
  "library-database",
@@ -5643,10 +5485,10 @@ dependencies = [
  "book-enrichment",
  "book-metadata",
  "book-model",
- "catalog-model",
  "client-platform-native",
  "client-platform-runtime",
  "client-platform-web",
+ "client-runtime",
  "device-sqlite",
  "include-sqlite-sql",
  "library-model",
@@ -5660,6 +5502,7 @@ dependencies = [
  "subject-projection",
  "sync-common",
  "uuid",
+ "web-time",
 ]
 
 [[package]]
@@ -5674,6 +5517,7 @@ dependencies = [
  "client-platform-native",
  "client-platform-runtime",
  "client-platform-web",
+ "client-runtime",
  "fs2",
  "futures-util",
  "library-database",
@@ -5703,7 +5547,6 @@ name = "library-model"
 version = "0.1.0"
 dependencies = [
  "book-model",
- "catalog-model",
  "content-address",
  "serde",
  "serde_json",
@@ -5731,7 +5574,6 @@ name = "library-replica"
 version = "0.1.0"
 dependencies = [
  "book-model",
- "catalog-model",
  "library-model",
  "pdf-view-common",
  "serde",
@@ -5747,22 +5589,20 @@ version = "0.1.0"
 dependencies = [
  "account-client",
  "async-channel",
- "client-library",
  "client-platform-native",
  "client-platform-runtime",
  "client-platform-web",
+ "client-runtime",
  "library-database",
  "library-model",
  "library-replica",
  "log",
  "rmp-serde",
  "serde",
- "serde_bytes",
  "serde_json",
  "sync-common",
  "sync-transport",
  "tempfile",
- "thumbnail",
  "tokio",
  "uuid",
  "web-time",
@@ -5873,18 +5713,6 @@ name = "litrs"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
-
-[[package]]
-name = "litteraturbanken"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "httpdate",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
-]
 
 [[package]]
 name = "lock_api"
@@ -6343,6 +6171,7 @@ dependencies = [
  "subject-projection",
  "tempfile",
  "tokio",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
  "unicode-normalization",
@@ -7212,31 +7041,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "opds"
-version = "0.1.0"
-dependencies = [
- "atom_syndication",
- "axum",
- "blake3",
- "book-model",
- "futures-util",
- "getrandom 0.3.4",
- "httpdate",
- "litteraturbanken",
- "log",
- "outbound-http",
- "quick-xml 0.41.0",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "urlencoding",
- "uuid",
- "zip",
-]
-
-[[package]]
 name = "open"
 version = "5.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7472,7 +7276,7 @@ dependencies = [
  "chrono",
  "console_error_panic_hook",
  "console_log",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "js-sys",
  "libloading",
  "log",
@@ -7885,7 +7689,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -8004,7 +7808,6 @@ version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
 dependencies = [
- "encoding_rs",
  "memchr",
 ]
 
@@ -8345,10 +8148,10 @@ version = "0.1.0"
 name = "reader-ui"
 version = "0.1.0"
 dependencies = [
+ "app",
  "app-preferences",
  "async-channel",
  "audiobook-player",
- "bokheim-backend",
  "book-model",
  "content-address",
  "futures-util",
@@ -8359,6 +8162,7 @@ dependencies = [
  "html-engine",
  "html-view-core",
  "html-view-gpui",
+ "library-backend",
  "library-model",
  "log",
  "pdf-reader-core",
@@ -8483,7 +8287,6 @@ version = "0.11.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd67538700a17451e7cba03ac727fb961abb7607553461627b97de0b89cf4a62"
 dependencies = [
- "async-compression",
  "base64 0.21.7",
  "bytes",
  "encoding_rs",
@@ -8876,7 +8679,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -9992,9 +9795,12 @@ dependencies = [
 name = "subject-projection"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "book-model",
  "csv",
  "rusqlite",
+ "serde",
+ "serde_json",
  "tempfile",
  "uuid",
 ]
@@ -10456,7 +10262,7 @@ dependencies = [
  "taxonomy-contract",
  "tokio",
  "tower",
- "tower-http 0.6.11",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
 ]
@@ -10468,7 +10274,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -10567,9 +10373,6 @@ version = "0.1.0"
 dependencies = [
  "epub_provider",
  "fast_image_resize",
- "flate2",
- "hayro-ccitt",
- "hayro-jbig2",
  "hayro-jpeg2000",
  "image 0.24.9",
  "jpeg-decoder",
@@ -10581,7 +10384,6 @@ dependencies = [
  "pdf-reader-core",
  "resvg 0.46.0",
  "tempfile",
- "ttf-parser",
  "zip",
 ]
 
@@ -10883,22 +10685,6 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
-]
-
-[[package]]
-name = "tower-http"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e9cd434a998747dd2c4276bc96ee2e0c7a2eadf3cae88e52be55a05fa9053f5"
-dependencies = [
- "bitflags 2.13.1",
- "bytes",
- "http 1.4.0",
- "http-body 1.0.1",
- "http-body-util",
- "pin-project-lite",
- "tower-layer",
- "tower-service",
 ]
 
 [[package]]
@@ -11688,11 +11474,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "web-backend-worker"
+version = "0.1.0"
+dependencies = [
+ "app",
+ "blake3",
+ "book-model",
+ "client-platform-runtime",
+ "client-platform-web",
+ "console_error_panic_hook",
+ "futures-channel",
+ "futures-util",
+ "js-sys",
+ "library-model",
+ "log",
+ "rmp-serde",
+ "sync-common",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "web-gpui"
 version = "0.1.0"
 dependencies = [
+ "app",
  "application-shell",
- "bokheim-backend",
  "browser-ui",
  "console_error_panic_hook",
  "gpui",
@@ -13347,8 +13155,6 @@ dependencies = [
 [[package]]
 name = "zip"
 version = "8.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
 dependencies = [
  "crc32fast",
  "flate2",

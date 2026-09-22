@@ -1,1 +1,0 @@
-SELECT COUNT(*) FROM write_audit WHERE table_name=?1

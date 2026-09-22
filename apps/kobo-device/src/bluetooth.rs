@@ -100,10 +100,7 @@ fn status() -> io::Result<Status> {
 }
 
 fn hardware_present() -> bool {
-    cfg!(target_arch = "arm")
-        && std::path::Path::new("/sbin/rtk_hciattach").is_file()
-        && std::path::Path::new("/dev/ttymxc1").exists()
-        && std::path::Path::new("/sys/module/8723ds").exists()
+    cfg!(target_arch = "arm") && std::path::Path::new("/sbin/rtk_hciattach").is_file() && std::path::Path::new("/dev/ttymxc1").exists() && std::path::Path::new("/sys/module/8723ds").exists()
 }
 
 fn ensure_controller() -> io::Result<()> {
@@ -169,16 +166,9 @@ fn list_devices() -> io::Result<Vec<Device>> {
         // `devices Connected` filter and returns "Too many arguments".
         // Query each known device through the BlueZ Device API exposed by
         // `info`, which also works for devices paired before Bokheim started.
-        device.connected = run_with_timeout(&["info", &device.address], INFO_TIMEOUT)
-            .ok()
-            .map(|output| String::from_utf8_lossy(&output).lines().any(|line| line.trim() == "Connected: yes"))
-            .unwrap_or(false);
+        device.connected = run_with_timeout(&["info", &device.address], INFO_TIMEOUT).ok().map(|output| String::from_utf8_lossy(&output).lines().any(|line| line.trim() == "Connected: yes")).unwrap_or(false);
     }
-    devices.sort_by(|left, right| {
-        right.connected.cmp(&left.connected)
-            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-            .then_with(|| left.address.cmp(&right.address))
-    });
+    devices.sort_by(|left, right| right.connected.cmp(&left.connected).then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase())).then_with(|| left.address.cmp(&right.address)));
     Ok(devices)
 }
 
@@ -219,11 +209,19 @@ fn parse_devices(text: &str) -> Vec<Device> {
         let mut fields = line.split_whitespace();
         let Some(device_marker) = fields.position(|field| field == "Device") else { continue };
         let Some(address) = fields.next() else { continue };
-        if device_marker > 0 && device_marker != 1 { continue }
-        if !is_device_address(address) { continue }
+        if device_marker > 0 && device_marker != 1 {
+            continue;
+        }
+        if !is_device_address(address) {
+            continue;
+        }
         let name = fields.collect::<Vec<_>>().join(" ");
-        if name.is_empty() || is_device_address(&name) || name.eq_ignore_ascii_case("unknown device") { continue }
-        if devices.iter().any(|device: &Device| device.address.eq_ignore_ascii_case(address)) { continue }
+        if name.is_empty() || is_device_address(&name) || name.eq_ignore_ascii_case("unknown device") {
+            continue;
+        }
+        if devices.iter().any(|device: &Device| device.address.eq_ignore_ascii_case(address)) {
+            continue;
+        }
         devices.push(Device { address: address.to_owned(), name, connected: false });
     }
     devices

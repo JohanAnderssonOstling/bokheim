@@ -1,1 +1,0 @@
-INSERT INTO sync_metadata(singleton, cloud_storage_enabled) VALUES(1, ?1) ON CONFLICT(singleton) DO UPDATE SET cloud_storage_enabled=excluded.cloud_storage_enabled WHERE cloud_storage_enabled IS NOT excluded.cloud_storage_enabled;

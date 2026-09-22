@@ -1,1 +1,0 @@
-SELECT path,concept_id,parent_path,label FROM curated.unified_concept_route ORDER BY path

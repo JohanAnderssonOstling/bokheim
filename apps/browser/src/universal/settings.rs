@@ -16,15 +16,12 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-#[cfg(not(feature = "kobo"))]
-use app_preferences::ApplicationTheme;
-use app_preferences::{BrowsingPreferencePatch, LibraryView, UI_FONT_SIZE_MAX, UI_FONT_SIZE_MIN};
+use app_preferences::{BrowsingPreferencePatch, CoverText, LibraryView, UI_FONT_SIZE_MAX, UI_FONT_SIZE_MIN};
 use gpui::prelude::*;
 use gpui::{Bounds, Context, Entity, FocusHandle, Focusable, IntoElement, Pixels, Render, ScrollHandle, SharedString, Window, px};
 use ui_components as components;
 
 use crate::navigation::Libraries;
-use crate::services::AppServices;
 use crate::stores::Preferences;
 use crate::universal::sync::SyncPage;
 use crate::{FocusNextSetting, FocusPreviousSetting};
@@ -83,8 +80,7 @@ pub(crate) struct SettingsPage {
 }
 
 impl SettingsPage {
-    pub(crate) fn new(services: AppServices, preferences: Entity<Preferences>, active_library: Entity<Libraries>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let account = cx.new(|cx| SyncPage::new(services.clone(), active_library.clone(), window, cx));
+    pub(crate) fn new(account: Entity<SyncPage>, preferences: Entity<Preferences>, active_library: Entity<Libraries>, cx: &mut Context<Self>) -> Self {
         let libraries = cx.new(|cx| crate::universal::sync::LibrariesView::new(account.clone(), cx));
         let mut selected = active_library.read(cx).selected_id();
         let library_changes = cx.observe(&active_library, move |_page, libraries, cx| {
@@ -97,34 +93,7 @@ impl SettingsPage {
         // Every section keeps its slot whether or not this build draws it, so a
         // section's identity does not depend on which features are compiled in.
         let sections = (0..SECTION_COUNT).map(|_| SettingsSection { focus: cx.focus_handle(), bounds: Rc::new(Cell::new(Bounds::default())) }).collect();
-        Self {
-            _library_changes: library_changes,
-            preferences,
-            account,
-            libraries,
-            error: None,
-            focus: cx.focus_handle(),
-            scroll: ScrollHandle::default(),
-            sections,
-        }
-    }
-
-    /// Puts focus on the page's first control, for a caller revealing the page.
-    ///
-    /// Focusing the page itself would leave the keyboard on a container that
-    /// answers to nothing; the page is a tab group, so one step from it descends
-    /// into the first control inside.
-    pub(crate) fn focus_first_control(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.focus.focus(window, cx);
-        // The controls join the tab order when the page is drawn, which on the
-        // first reveal has not happened yet, so the step inward waits for the
-        // frame that put them there. It is skipped if anything has taken focus
-        // in the meantime — a pointer, or a page revealed after this one.
-        cx.on_next_frame(window, |page, window, cx| {
-            if page.focus.is_focused(window) {
-                window.focus_next(cx);
-            }
-        });
+        Self { _library_changes: library_changes, preferences, account, libraries, error: None, focus: cx.focus_handle(), scroll: ScrollHandle::default(), sections }
     }
 
     /// Applies a preference, and on failure says which setting did not take and
@@ -140,8 +109,13 @@ impl SettingsPage {
         let current = match &patch {
             #[cfg(not(feature = "kobo"))]
             BrowsingPreferencePatch::Theme(_) => showing.theme().label().to_owned(),
+            BrowsingPreferencePatch::Palette(_, _) => {
+                let appearance = showing.appearance_override().unwrap_or_else(|| components::theme::resolved_appearance(cx));
+                format!("{} {}", showing.theme().label(), if appearance == app_preferences::ResolvedAppearance::Light { "light" } else { "dark" })
+            }
             BrowsingPreferencePatch::LibraryView(_) => showing.library_view().label().to_owned(),
             BrowsingPreferencePatch::UiFontSizePx(_) => format!("{}px", showing.ui_font_size_px()),
+            BrowsingPreferencePatch::CoverText(_) => showing.cover_text().label().to_owned(),
             _ => String::new(),
         };
         let result = self.preferences.update(cx, |preferences, cx| preferences.update_browsing(patch, cx));
@@ -157,12 +131,13 @@ impl SettingsPage {
         match patch {
             #[cfg(not(feature = "kobo"))]
             BrowsingPreferencePatch::Theme(_) => "Application theme",
+            BrowsingPreferencePatch::Palette(_, _) => "Application theme",
             BrowsingPreferencePatch::LibraryView(_) => "Book card style",
             BrowsingPreferencePatch::UiFontSizePx(_) => "UI font size",
+            BrowsingPreferencePatch::CoverText(_) => "Cover text",
             _ => "Setting",
         }
     }
-
 
     /// Moves focus one control forward, wrapping at the end of the page.
     fn focus_next(&mut self, _: &FocusNextSetting, window: &mut Window, cx: &mut Context<Self>) {
@@ -236,11 +211,12 @@ impl Render for SettingsPage {
 
         #[cfg(not(feature = "kobo"))]
         let application_themes = {
-            let mut application_themes = components::browser_settings_button_group(theme);
-            for (index, value) in ApplicationTheme::ALL.into_iter().enumerate() {
+            let selected = cx.try_global::<components::theme::SelectedPalette>().map(|selection| (selection.0, selection.1));
+            let mut application_themes = components::theme_picker_group();
+            for (index, (value, appearance)) in components::THEME_CHOICES.into_iter().enumerate() {
                 let entity = entity.clone();
-                application_themes = application_themes.child(components::browser_settings_choice_button(format!("application-theme-{index}"), value.label(), value == preferences.theme(), theme).on_click(move |_, _, cx| {
-                    entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::Theme(value), cx));
+                application_themes = application_themes.child(components::theme_picker_swatch(format!("application-theme-{index}"), value, appearance, selected == Some((value, appearance))).on_click(move |_, _, cx| {
+                    entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::Palette(value, appearance), cx));
                 }));
             }
 
@@ -249,15 +225,15 @@ impl Render for SettingsPage {
 
         let decrease_entity = entity.clone();
         let decrease_size = current_font_size.saturating_sub(1).max(minimum_font_size);
-        let decrease = components::browser_settings_font_size_button("decrease-ui-font-size", "−", current_font_size == minimum_font_size, theme).on_click(move |_, _, cx| {
+        let decrease = components::settings_stepper_button("decrease-ui-font-size", "−", current_font_size == minimum_font_size, theme).on_click(move |_, _, cx| {
             decrease_entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::UiFontSizePx(decrease_size), cx));
         });
         let increase_entity = entity.clone();
         let increase_size = current_font_size.saturating_add(1).min(maximum_font_size);
-        let increase = components::browser_settings_font_size_button("increase-ui-font-size", "+", current_font_size == maximum_font_size, theme).on_click(move |_, _, cx| {
+        let increase = components::settings_stepper_button("increase-ui-font-size", "+", current_font_size == maximum_font_size, theme).on_click(move |_, _, cx| {
             increase_entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::UiFontSizePx(increase_size), cx));
         });
-        let font_size = components::browser_settings_font_size_stepper(decrease, format!("{current_font_size}px"), increase, theme);
+        let font_size = components::settings_stepper(decrease, format!("{current_font_size}px"), increase, theme);
 
         let current_library_view = preferences.library_view();
         let library_views = {
@@ -271,12 +247,24 @@ impl Render for SettingsPage {
             choices
         };
 
-        // Book card style leads Appearance: it is the setting that changes the
-        // most of what is on screen, and it is the only one of the three whose
-        // effect is somewhere other than this page.
-        let appearance_settings = components::browser_settings_fieldset("Appearance", theme).child(components::browser_settings_compact_row("Book card style", library_views, theme));
+        let current_cover_text = preferences.cover_text();
+        let cover_texts = {
+            let mut choices = components::browser_settings_button_group(theme);
+            for (index, value) in [CoverText::Always, CoverText::CoverOnly].into_iter().enumerate() {
+                let entity = entity.clone();
+                choices = choices.child(components::browser_settings_choice_button(format!("cover-text-{index}"), value.label(), value == current_cover_text, theme).on_click(move |_, _, cx| {
+                    entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::CoverText(value), cx));
+                }));
+            }
+            choices
+        };
+
+        let appearance_settings = components::browser_settings_fieldset("Appearance", theme);
         #[cfg(not(feature = "kobo"))]
         let appearance_settings = appearance_settings.child(self.section(APPEARANCE_SECTION, components::browser_settings_compact_row("Application theme", application_themes, theme)));
+        let appearance_settings = appearance_settings
+            .child(components::browser_settings_compact_row("Book card style", library_views, theme))
+            .child(components::browser_settings_compact_row("Cover text", cover_texts, theme));
         let appearance_settings = appearance_settings.child(self.section(FONT_SIZE_SECTION, components::browser_settings_compact_row("UI font size", font_size, theme)));
         // Every preference on this page lives in this group, so this is where a
         // preference that would not save reports.

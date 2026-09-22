@@ -1,1 +1,0 @@
-INSERT INTO book(content_hash,format) VALUES(?1,'epub');

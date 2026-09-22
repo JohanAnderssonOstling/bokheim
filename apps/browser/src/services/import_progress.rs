@@ -1,9 +1,10 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use bokheim_backend::{LibraryClient, ScanProgress};
+use library_backend::LibraryClient;
 use futures_util::{FutureExt, select_biased};
 use gpui::{App, IntoElement, ParentElement, Styled, Window, div, px};
 use gpui_component::{WindowExt, notification::Notification, progress::Progress};
+use library_model::{DirectoryImportProgress, ImportFileStage};
 
 /// The import owns this guard; completion, failure, and cancellation all close
 /// its toast, even if the browse page that started the import has been closed.
@@ -33,14 +34,35 @@ impl ImportProgressToast {
         )
     }
 
-    fn start_with_reader<F: std::future::Future<Output = Result<Option<ScanProgress>, String>> + 'static>(mut read_progress: impl FnMut() -> F + 'static, window: &mut Window, cx: &mut App) -> Self {
+    /// Watches one native import activity so simultaneous imports do not
+    /// borrow the progress of whichever activity started first.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn start_for_activity(library: LibraryClient, activity: uuid::Uuid, window: &mut Window, cx: &mut App) -> Self {
+        Self::start_with_reader(
+            move || {
+                let library = library.clone();
+                async move { library.directory_import_progress_for(activity).await }
+            },
+            window,
+            cx,
+        )
+    }
+
+    fn start_with_reader<F: std::future::Future<Output = Result<Option<DirectoryImportProgress>, String>> + 'static>(mut read_progress: impl FnMut() -> F + 'static, window: &mut Window, cx: &mut App) -> Self {
         let id = gpui::SharedString::from(uuid::Uuid::new_v4().to_string());
         let progress = Rc::new(RefCell::new(presentation(None)));
         let content_progress = progress.clone();
         window.push_notification(
             Notification::new().id1::<Self>(id.clone()).autohide(false).title("Importing books").content(move |_, _, _| {
-                let (label, percent) = content_progress.borrow().clone();
-                div().w_full().flex().flex_col().gap(px(8.)).child(label).child(Progress::new("import-progress").loading(percent.is_none()).value(percent.unwrap_or_default())).into_any_element()
+                let status = content_progress.borrow().clone();
+                let mut content = div().w_full().flex().flex_col().gap(px(8.)).child(status.label);
+                if let Some(name) = status.book {
+                    content = content.child(div().w_full().child(name));
+                }
+                if let Some(stage) = status.stage {
+                    content = content.child(stage);
+                }
+                content.child(Progress::new("import-progress").loading(status.percent.is_none()).value(status.percent.unwrap_or_default())).into_any_element()
             }),
             cx,
         );
@@ -98,7 +120,7 @@ mod tests {
             gpui_component::Root::new(host, window, cx)
         });
         let first = cx.update(|window, cx| ImportProgressToast::start_with_reader(|| std::future::pending(), window, cx));
-        let second = cx.update(|window, cx| ImportProgressToast::start_with_reader(|| std::future::ready(Ok(Some(ScanProgress { total: 10, succeeded: 3, failed: 1 }))), window, cx));
+        let second = cx.update(|window, cx| ImportProgressToast::start_with_reader(|| std::future::ready(Ok(Some(DirectoryImportProgress { total: 10, succeeded: 3, failed: 1, current: None }))), window, cx));
         cx.run_until_parked();
         cx.update(|window, cx| assert_eq!(window.notifications(cx).len(), 2));
         drop(first);
@@ -115,39 +137,94 @@ mod tests {
 
     #[test]
     fn progress_counts_failed_books_as_processed_and_handles_unknown_totals() {
-        assert_eq!(presentation(None).1, None);
-        assert_eq!(presentation(Some(ScanProgress::default())).1, None);
-        let (label, percent) = presentation(Some(ScanProgress { total: 10, succeeded: 3, failed: 1 }));
-        assert_eq!(percent, Some(40.));
-        assert!(label.contains("4 of 10"));
-        assert!(label.contains("1 failed"));
+        assert_eq!(presentation(None).percent, None);
+        assert_eq!(presentation(Some(DirectoryImportProgress::default())).percent, None);
+        let status = presentation(Some(DirectoryImportProgress { total: 10, succeeded: 3, failed: 1, current: None }));
+        assert_eq!(status.percent, Some(40.));
+        assert!(status.label.contains("4 of 10"));
+        assert!(status.label.contains("1 failed"));
+    }
+
+    #[test]
+    fn current_book_has_copy_progress_but_later_stages_are_indeterminate() {
+        let mut progress = DirectoryImportProgress {
+            total: 3,
+            succeeded: 1,
+            failed: 0,
+            current: Some(library_model::ImportFileProgress { name: "History.m4b".into(), total_bytes: Some(200_000_000), stage: ImportFileStage::Copying { copied_bytes: 50_000_000 } }),
+        };
+        let status = presentation(Some(progress.clone()));
+        assert_eq!(status.label, "Book 2 of 3");
+        assert_eq!(status.book.as_deref(), Some("History.m4b"));
+        assert_eq!(status.stage.as_deref(), Some("Copying book · 50.0 / 200.0 MB"));
+        assert_eq!(status.percent, Some(25.));
+        progress.current.as_mut().unwrap().total_bytes = None;
+        assert_eq!(presentation(Some(progress.clone())).percent, None);
+        progress.current.as_mut().unwrap().stage = ImportFileStage::Identifying;
+        let status = presentation(Some(progress));
+        assert_eq!(status.percent, None);
+        assert_eq!(status.stage.as_deref(), Some("Identifying book…"));
     }
 }
 
-fn presentation(progress: Option<ScanProgress>) -> (String, Option<f32>) {
-    match progress.filter(|progress| progress.total > 0) {
-        Some(progress) => {
-            let completed = progress.succeeded.saturating_add(progress.failed).min(progress.total);
-            let failures = if progress.failed > 0 { format!(" · {} failed", progress.failed) } else { String::new() };
-            (format!("{completed} of {} books{failures}", progress.total), Some(100. * completed as f32 / progress.total as f32))
-        }
-        None => ("Preparing import…".into(), None),
-    }
+#[derive(Clone, Debug, PartialEq)]
+struct Presentation {
+    label: String,
+    book: Option<String>,
+    stage: Option<String>,
+    percent: Option<f32>,
+}
+
+fn presentation(progress: Option<DirectoryImportProgress>) -> Presentation {
+    let Some(progress) = progress.filter(|p| p.total > 0) else {
+        return Presentation { label: "Preparing import…".into(), book: None, stage: None, percent: None };
+    };
+    let completed = progress.succeeded.saturating_add(progress.failed).min(progress.total);
+    let failures = if progress.failed > 0 { format!(" · {} failed", progress.failed) } else { String::new() };
+    let Some(file) = progress.current else {
+        return Presentation { label: format!("{completed} of {} books{failures}", progress.total), book: None, stage: None, percent: Some(100. * completed as f32 / progress.total as f32) };
+    };
+    let (stage, percent) = match file.stage {
+        ImportFileStage::Preparing => ("Preparing book…".into(), None),
+        ImportFileStage::Copying { copied_bytes } => match file.total_bytes.filter(|total| *total > 0) {
+            Some(total) => (format!("Copying book · {:.1} / {:.1} MB", copied_bytes as f64 / 1_000_000., total as f64 / 1_000_000.), Some((100. * copied_bytes as f64 / total as f64).clamp(0., 100.) as f32)),
+            None => (format!("Copying book · {:.1} MB copied", copied_bytes as f64 / 1_000_000.), None),
+        },
+        ImportFileStage::Saving => ("Saving book to disk…".into(), None),
+        ImportFileStage::Identifying => ("Identifying book…".into(), None),
+        ImportFileStage::ReadingMetadata => ("Reading title, author and other metadata…".into(), None),
+        ImportFileStage::Publishing => ("Placing book in library folder…".into(), None),
+        ImportFileStage::AddingToLibrary => ("Adding book to library…".into(), None),
+    };
+    Presentation { label: format!("Book {} of {}{failures}", (completed + 1).min(progress.total), progress.total), book: Some(file.name), stage: Some(stage), percent }
 }
 
 /// One styled notification per coordinator job, including recovered imports.
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn watch_browser_imports(backend: Rc<bokheim_backend::AppClient>, window: &mut Window, cx: &mut App) -> gpui::Task<()> {
+pub(crate) fn watch_browser_imports(
+    backend: Rc<app::AppClient>,
+    sync_events: async_channel::Sender<crate::SyncEvent>,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui::Task<()> {
     use super::import_presentation::browser_presentation;
-    use bokheim_backend::ImportProgress;
+    use app::ImportProgress;
     use std::collections::BTreeMap;
     struct BrowserImport;
     let mut updates = backend.import_updates();
     window.spawn(cx, async move |cx| {
         let mut shown: BTreeMap<String, (Rc<RefCell<ImportProgress>>, gpui::WeakEntity<Notification>)> = BTreeMap::new();
+        let mut last_activity_refresh = None;
         loop {
             let snapshot = updates.borrow_and_update().clone();
+            let mut wake_activity = false;
             for (id, current) in snapshot {
+                let active = matches!(&current.state, app::ImportState::Queued | app::ImportState::Copying { .. } | app::ImportState::Adding { .. });
+                if active {
+                    let changed_phase = shown.get(&id).is_none_or(|(previous, _)| std::mem::discriminant(&previous.borrow().state) != std::mem::discriminant(&current.state));
+                    let refresh_due = last_activity_refresh.is_none_or(|last: web_time::Instant| last.elapsed() >= std::time::Duration::from_secs(1));
+                    wake_activity |= changed_phase || refresh_due;
+                }
                 if let Some((value, notification)) = shown.get(&id) {
                     if std::mem::discriminant(&value.borrow().state) == std::mem::discriminant(&current.state) {
                         if *value.borrow() != current {
@@ -157,8 +234,7 @@ pub(crate) fn watch_browser_imports(backend: Rc<bokheim_backend::AppClient>, win
                         continue;
                     }
                 }
-                let active = matches!(&current.state, bokheim_backend::ImportState::Queued | bokheim_backend::ImportState::Copying { .. } | bokheim_backend::ImportState::Adding { .. });
-                let retry = matches!(&current.state, bokheim_backend::ImportState::Paused { .. });
+                let retry = matches!(&current.state, app::ImportState::Paused { .. });
                 let title = current.name.clone();
                 let value = Rc::new(RefCell::new(current));
                 let content = value.clone();
@@ -187,6 +263,10 @@ pub(crate) fn watch_browser_imports(backend: Rc<bokheim_backend::AppClient>, win
                     }
                     Err(_) => return,
                 }
+            }
+            if wake_activity {
+                last_activity_refresh = Some(web_time::Instant::now());
+                let _ = sync_events.try_send(crate::SyncEvent::TransferRefreshWake);
             }
             if updates.changed().await.is_err() {
                 break;

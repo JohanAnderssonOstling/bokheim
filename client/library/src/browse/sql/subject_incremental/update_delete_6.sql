@@ -1,1 +1,0 @@
-DELETE FROM subject_browse_book WHERE location=?1

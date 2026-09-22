@@ -1,0 +1,15 @@
+-- Attach ten user-reviewed history and broad-section LCC labels to retained subjects.
+-- No new concepts, parent edges, permissive ranges or wildcards. Existing matches were preserved.
+PRAGMA foreign_keys = ON;
+BEGIN IMMEDIATE;
+INSERT OR IGNORE INTO source_selector(concept_id,system_id,selector,ordinal) SELECT 'unified:1fd4042d-5f0d-5835-ac17-9bc708487a6a','lcc','E184.A1',COALESCE(MAX(ordinal)+1,0) FROM source_selector WHERE concept_id='unified:1fd4042d-5f0d-5835-ac17-9bc708487a6a' AND system_id='lcc';
+INSERT OR IGNORE INTO source_selector(concept_id,system_id,selector,ordinal) SELECT 'bokheim:lcc-detail:1064721c-476a-5af4-9277-cd8d2a11b72c','lcc','T57-57.97',COALESCE(MAX(ordinal)+1,0) FROM source_selector WHERE concept_id='bokheim:lcc-detail:1064721c-476a-5af4-9277-cd8d2a11b72c' AND system_id='lcc';
+INSERT OR IGNORE INTO source_selector(concept_id,system_id,selector,ordinal) SELECT 'unified:3d37af1e-3f24-581f-8e49-ca78250004b2','lcc','DR435.K87',COALESCE(MAX(ordinal)+1,0) FROM source_selector WHERE concept_id='unified:3d37af1e-3f24-581f-8e49-ca78250004b2' AND system_id='lcc';
+INSERT OR IGNORE INTO source_selector(concept_id,system_id,selector,ordinal) SELECT 'unified:1fd4042d-5f0d-5835-ac17-9bc708487a6a','lcc','E184.M5',COALESCE(MAX(ordinal)+1,0) FROM source_selector WHERE concept_id='unified:1fd4042d-5f0d-5835-ac17-9bc708487a6a' AND system_id='lcc';
+INSERT OR IGNORE INTO source_selector(concept_id,system_id,selector,ordinal) SELECT 'unified:1fd4042d-5f0d-5835-ac17-9bc708487a6a','lcc','E184.S75',COALESCE(MAX(ordinal)+1,0) FROM source_selector WHERE concept_id='unified:1fd4042d-5f0d-5835-ac17-9bc708487a6a' AND system_id='lcc';
+INSERT OR IGNORE INTO source_selector(concept_id,system_id,selector,ordinal) SELECT 'unified:a10eef28-4e52-5753-90f5-7d766aa96a7d','lcc','BL1-2790',COALESCE(MAX(ordinal)+1,0) FROM source_selector WHERE concept_id='unified:a10eef28-4e52-5753-90f5-7d766aa96a7d' AND system_id='lcc';
+INSERT OR IGNORE INTO source_selector(concept_id,system_id,selector,ordinal) SELECT 'unified:1fd4042d-5f0d-5835-ac17-9bc708487a6a','lcc','E184.J5',COALESCE(MAX(ordinal)+1,0) FROM source_selector WHERE concept_id='unified:1fd4042d-5f0d-5835-ac17-9bc708487a6a' AND system_id='lcc';
+INSERT OR IGNORE INTO source_selector(concept_id,system_id,selector,ordinal) SELECT 'unified:8f2c2533-1a08-56ff-a786-52e091c4a82b','lcc','JN1-9692.2',COALESCE(MAX(ordinal)+1,0) FROM source_selector WHERE concept_id='unified:8f2c2533-1a08-56ff-a786-52e091c4a82b' AND system_id='lcc';
+INSERT OR IGNORE INTO source_selector(concept_id,system_id,selector,ordinal) SELECT 'unified:0742de33-0fcd-55b4-9e2b-ea238f4f92bc','lcc','DD290.29',COALESCE(MAX(ordinal)+1,0) FROM source_selector WHERE concept_id='unified:0742de33-0fcd-55b4-9e2b-ea238f4f92bc' AND system_id='lcc';
+INSERT OR IGNORE INTO source_selector(concept_id,system_id,selector,ordinal) SELECT 'unified:1fd4042d-5f0d-5835-ac17-9bc708487a6a','lcc','E178',COALESCE(MAX(ordinal)+1,0) FROM source_selector WHERE concept_id='unified:1fd4042d-5f0d-5835-ac17-9bc708487a6a' AND system_id='lcc';
+COMMIT;

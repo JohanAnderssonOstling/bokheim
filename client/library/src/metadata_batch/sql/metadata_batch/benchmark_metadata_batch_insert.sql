@@ -1,1 +1,0 @@
-INSERT INTO book_description(book_row_id,description) SELECT row_id,'Updated description' FROM book WHERE 1 ON CONFLICT(book_row_id) DO UPDATE SET description=excluded.description

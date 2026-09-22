@@ -1,1 +1,0 @@
-INSERT INTO rejected_asset_upload VALUES('book','book',unixepoch())

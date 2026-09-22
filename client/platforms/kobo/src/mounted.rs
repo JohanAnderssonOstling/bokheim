@@ -1,7 +1,4 @@
-use library_registry::LibraryEntry;
-const APP_HIDDEN_DIR: &str = ".bokheim";
-use library_registry::read_library_manifest;
-pub use library_registry::LIBRARY_MANIFEST_FILENAME;
+//! Mounted-device discovery and filesystem operations.
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -18,6 +15,28 @@ pub struct KoboDevice {
 }
 
 impl KoboDevice {
+    /// Inspect an explicitly selected mounted device.
+    pub fn from_mount(root: &Path) -> io::Result<Self> {
+        if !root.join(KOBO_MARKER_DIRECTORY).is_dir() {
+            return Err(io::Error::new(io::ErrorKind::NotFound, format!("Kobo is no longer mounted at {}", root.display())));
+        }
+        let root = root.canonicalize()?;
+        let volume = root.file_name().and_then(|name| name.to_str()).filter(|name| !name.is_empty()).unwrap_or("Kobo eReader");
+        Ok(Self { display_name: format!("Kobo eReader ({volume})"), root })
+    }
+
+    /// Validate the mount and create its library destination directory.
+    pub fn prepare_libraries_dir(&self) -> io::Result<PathBuf> {
+        let device = Self::from_mount(&self.root)?;
+        let libraries_dir = device.libraries_dir();
+        fs::create_dir_all(&libraries_dir)?;
+        let libraries_dir = libraries_dir.canonicalize()?;
+        if !libraries_dir.starts_with(&device.root) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Kobo libraries directory escapes the mounted device"));
+        }
+        Ok(libraries_dir)
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -31,13 +50,6 @@ impl KoboDevice {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct KoboTransferSummary {
-    pub libraries: usize,
-    pub copied_files: usize,
-    pub unchanged_files: usize,
-}
-
 pub fn detect_kobo_devices() -> Vec<KoboDevice> {
     let mut candidates = BTreeSet::new();
     if let Some(path) = std::env::var_os("BOKHEIM_KOBO_MOUNT") {
@@ -45,17 +57,7 @@ pub fn detect_kobo_devices() -> Vec<KoboDevice> {
     }
     platform_mount_candidates(&mut candidates);
 
-    candidates
-        .into_iter()
-        .filter_map(|root| {
-            if !root.join(KOBO_MARKER_DIRECTORY).is_dir() {
-                return None;
-            }
-            let root = root.canonicalize().ok()?;
-            let volume = root.file_name().and_then(|name| name.to_str()).filter(|name| !name.is_empty()).unwrap_or("Kobo eReader");
-            Some(KoboDevice { display_name: format!("Kobo eReader ({volume})"), root })
-        })
-        .collect()
+    candidates.into_iter().filter_map(|root| KoboDevice::from_mount(&root).ok()).collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -92,79 +94,10 @@ fn decode_mount_field(value: &str) -> String {
     value.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\")
 }
 
-pub fn transfer_libraries_to_kobo(device: &KoboDevice, libraries: &[LibraryEntry]) -> io::Result<KoboTransferSummary> {
-    let device_root = device.root.canonicalize()?;
-    if !device_root.join(KOBO_MARKER_DIRECTORY).is_dir() {
-        return Err(io::Error::new(io::ErrorKind::NotFound, format!("Kobo is no longer mounted at {}", device.root.display())));
-    }
-    let libraries_dir = device_root.join(KOBO_LIBRARIES_PATH);
-    fs::create_dir_all(&libraries_dir)?;
-    let libraries_dir = libraries_dir.canonicalize()?;
-    if !libraries_dir.starts_with(&device_root) {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "Kobo libraries directory escapes the mounted device"));
-    }
-
-    let mut summary = KoboTransferSummary::default();
-    for library in libraries {
-        transfer_library(library, &libraries_dir, &mut summary)?;
-        summary.libraries += 1;
-    }
-    Ok(summary)
-}
-
-fn transfer_library(library: &LibraryEntry, libraries_dir: &Path, summary: &mut KoboTransferSummary) -> io::Result<()> {
-    let source = Path::new(library.storage_locator()).canonicalize()?;
-    let source_manifest = read_library_manifest(&source).map_err(invalid_data)?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("library has no {LIBRARY_MANIFEST_FILENAME}: {}", source.display())))?;
-    if &source_manifest.0 != library.library_id() {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("library manifest identifies {}, but the registry identifies {}", source_manifest.0, library.library_id())));
-    }
-
-    let destination = libraries_dir.join(library.library_id().to_string());
-    fs::create_dir_all(&destination)?;
-    let destination = destination.canonicalize()?;
-    if !destination.starts_with(libraries_dir) {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "library destination escapes the Kobo libraries directory"));
-    }
-    if source == destination {
-        return Ok(());
-    }
-    if let Some((destination_id, _)) = read_library_manifest(&destination).map_err(invalid_data)? {
-        if destination_id != *library.library_id() {
-            return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("destination {} belongs to library {}", destination.display(), destination_id)));
-        }
-    }
-
-    copy_library_tree(&source, &destination, true, summary)?;
-    copy_file_if_changed(&source.join(LIBRARY_MANIFEST_FILENAME), &destination.join(LIBRARY_MANIFEST_FILENAME), summary)?;
-    Ok(())
-}
-
-fn copy_library_tree(source: &Path, destination: &Path, is_root: bool, summary: &mut KoboTransferSummary) -> io::Result<()> {
-    for child in fs::read_dir(source)? {
-        let child = child?;
-        let name = child.file_name();
-        if is_root && (name == APP_HIDDEN_DIR || name == LIBRARY_MANIFEST_FILENAME) {
-            continue;
-        }
-        let file_type = child.file_type()?;
-        if file_type.is_symlink() {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("refusing to transfer symbolic link {}", child.path().display())));
-        }
-        let target = destination.join(&name);
-        if file_type.is_dir() {
-            fs::create_dir_all(&target)?;
-            copy_library_tree(&child.path(), &target, false, summary)?;
-        } else if file_type.is_file() {
-            copy_file_if_changed(&child.path(), &target, summary)?;
-        }
-    }
-    Ok(())
-}
-
-fn copy_file_if_changed(source: &Path, destination: &Path, summary: &mut KoboTransferSummary) -> io::Result<()> {
+/// Copy a file using temporary-file replacement; return whether its contents changed.
+pub fn copy_file_if_changed(source: &Path, destination: &Path) -> io::Result<bool> {
     if destination.is_file() && files_equal(source, destination)? {
-        summary.unchanged_files += 1;
-        return Ok(());
+        return Ok(false);
     }
     let parent = destination.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "transfer destination has no parent"))?;
     fs::create_dir_all(parent)?;
@@ -201,8 +134,7 @@ fn copy_file_if_changed(source: &Path, destination: &Path, summary: &mut KoboTra
         }
     }
     result?;
-    summary.copied_files += 1;
-    Ok(())
+    Ok(true)
 }
 
 fn files_equal(left: &Path, right: &Path) -> io::Result<bool> {
@@ -223,8 +155,4 @@ fn files_equal(left: &Path, right: &Path) -> io::Result<bool> {
             return Ok(true);
         }
     }
-}
-
-fn invalid_data(error: Box<dyn std::error::Error>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, error.to_string())
 }

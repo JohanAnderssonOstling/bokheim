@@ -1,1 +1,0 @@
-DELETE FROM asset_work WHERE id=?1

@@ -144,7 +144,7 @@ impl PostgresSyncRepository {
         Ok(StateInventoryResponse { missing })
     }
 
-    /// Deletes server-side catalogue and synchronization state while retaining
+    /// Deletes server-side library and synchronization state while retaining
     /// physical book and thumbnail objects in the asset store.
     pub async fn delete_library(&self, user_id: &str, library_id: &sync_common::LibraryId) -> Result<bool, SyncError> {
         let phase_started = std::time::Instant::now();

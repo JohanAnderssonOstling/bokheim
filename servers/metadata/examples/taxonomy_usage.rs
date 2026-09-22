@@ -12,21 +12,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     subject_projection::install_unified_taxonomy_concepts(concepts)?;
     let connection = Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     connection.execute_batch("PRAGMA temp_store=FILE; PRAGMA cache_size=-32768")?;
-    let has_compact_usage = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='code_usage')",
-        [],
-        |row| row.get::<_, bool>(0),
-    )?;
+    let has_compact_usage = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='code_usage')", [], |row| row.get::<_, bool>(0))?;
     if has_compact_usage {
-        let has_metadata = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='cache_metadata')", [],
-            |row| row.get::<_, bool>(0),
-        )?;
+        let has_metadata = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='cache_metadata')", [], |row| row.get::<_, bool>(0))?;
         if has_metadata {
-            let full_notation = connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM cache_metadata WHERE key='normalization_version' AND value='2')", [],
-                |row| row.get::<_, bool>(0),
-            )?;
+            let full_notation = connection.query_row("SELECT EXISTS(SELECT 1 FROM cache_metadata WHERE key='normalization_version' AND value='2')", [], |row| row.get::<_, bool>(0))?;
             if !full_notation {
                 return Err("classification cache uses obsolete truncating normalization; rebuild it with rebuild-code-usage.py before refreshing taxonomy usage".into());
             }
@@ -48,14 +38,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)))?;
     let mut counts = HashMap::<String, i64>::new();
     let mut contributions = HashMap::<String, Vec<(String, i64)>>::new();
-    let concept_by_path = subject_projection::unified_taxonomy_routes()
-        .into_iter()
-        .map(|route| (route.path().to_owned(), route.concept_id().to_owned()))
-        .collect::<HashMap<_, _>>();
+    let concept_by_path = subject_projection::unified_taxonomy_routes().into_iter().map(|route| (route.path().to_owned(), route.concept_id().to_owned())).collect::<HashMap<_, _>>();
     // A complete cache can contain millions of codes: stream match rows rather
     // than retaining a second copy of every matched path in memory.
-    let mut match_writer = match_output.map(std::fs::File::create).transpose()?
-        .map(|file| csv::WriterBuilder::new().delimiter(b'\t').from_writer(std::io::BufWriter::new(file)));
+    let mut match_writer = match_output.map(std::fs::File::create).transpose()?.map(|file| csv::WriterBuilder::new().delimiter(b'\t').from_writer(std::io::BufWriter::new(file)));
     if let Some(file) = &mut match_writer {
         file.write_record(["scheme", "notation", "uses", "concept_id", "path"])?;
     }
@@ -82,7 +68,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Input is already ranked by uses and notation. Keep only the
             // diagnostic top 20, not millions of full call numbers per branch.
             let top = contributions.entry(path).or_default();
-            if top.len() < 20 { top.push((notation.clone(), uses)); }
+            if top.len() < 20 {
+                top.push((notation.clone(), uses));
+            }
         }
     }
     let taxonomy = Connection::open_with_flags(taxonomy_database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;

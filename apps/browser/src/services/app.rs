@@ -1,4 +1,4 @@
-use bokheim_backend::AppClient;
+use app::AppClient;
 #[cfg(feature = "kobo")]
 use gpui::App;
 use std::rc::Rc;
@@ -9,9 +9,9 @@ pub type SaveKoboAutoRotate = Rc<dyn Fn(bool, &mut App)>;
 /// Data the backend resolves once, before the first window is built.
 #[derive(Clone)]
 pub struct AppStartup {
-    pub libraries: Vec<bokheim_backend::LibraryEntry>,
+    pub libraries: Vec<app::LibraryEntry>,
     pub browsing_preferences: app_preferences::BrowsingPreferences,
-    pub account_status: bokheim_backend::AccountStatus,
+    pub account_status: app::AccountStatus,
 }
 
 #[derive(Clone)]
@@ -19,6 +19,8 @@ pub struct AppServices {
     pub(crate) browsing_preferences: Rc<std::cell::RefCell<app_preferences::BrowsingPreferences>>,
     pub(crate) backend: Rc<AppClient>,
     pub(crate) startup: Rc<AppStartup>,
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) sync_events: Option<async_channel::Sender<crate::universal::sync::SyncEvent>>,
     #[cfg(feature = "kobo")]
     pub(crate) save_kobo_auto_rotate: SaveKoboAutoRotate,
 }
@@ -38,9 +40,17 @@ impl AppServices {
             browsing_preferences: Rc::new(std::cell::RefCell::new(startup.browsing_preferences.clone())),
             backend: Rc::new(backend),
             startup: Rc::new(startup),
+            #[cfg(target_arch = "wasm32")]
+            sync_events: None,
             #[cfg(feature = "kobo")]
             save_kobo_auto_rotate,
         }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn with_sync_events(mut self, events: async_channel::Sender<crate::SyncEvent>) -> Self {
+        self.sync_events = Some(events);
+        self
     }
 
     #[cfg(feature = "kobo")]

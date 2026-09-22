@@ -1,1 +1,0 @@
-UPDATE book SET title=title,read_progress=read_progress

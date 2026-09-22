@@ -1,0 +1,4 @@
+-- Parent ranges are valid fallback coverage. Matching descendants take
+-- precedence in the runtime, so having children is not grounds for deleting
+-- a parent selector. Removing such ranges leaves uncovered schedule gaps.
+-- Intentionally no destructive cleanup here.

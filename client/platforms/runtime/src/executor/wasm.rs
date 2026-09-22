@@ -51,7 +51,12 @@ impl Drop for Timer {
 
 pub async fn sleep(duration: Duration) {
     let (reply, elapsed) = futures_channel::oneshot::channel();
-    let _timer = Timer::new(duration, Closure::once(move || { let _ = reply.send(()); }));
+    let _timer = Timer::new(
+        duration,
+        Closure::once(move || {
+            let _ = reply.send(());
+        }),
+    );
     let _ = elapsed.await;
 }
 
@@ -71,21 +76,34 @@ pub async fn timer_lifecycle_contract() -> bool {
     for _ in 0..32 {
         let captured = resource.clone();
         let timer = Timer::new(Duration::from_secs(60), Closure::once(move || drop(captured)));
-        if Rc::strong_count(&resource) != 2 { return false; }
+        if Rc::strong_count(&resource) != 2 {
+            return false;
+        }
         drop(timer);
-        if Rc::strong_count(&resource) != 1 { return false; }
+        if Rc::strong_count(&resource) != 1 {
+            return false;
+        }
     }
     let captured = resource.clone();
     let (reply, elapsed) = futures_channel::oneshot::channel();
-    let timer = Timer::new(Duration::from_millis(1), Closure::once(move || {
-        drop(captured);
-        let _ = reply.send(());
-    }));
-    if elapsed.await.is_err() { return false; }
+    let timer = Timer::new(
+        Duration::from_millis(1),
+        Closure::once(move || {
+            drop(captured);
+            let _ = reply.send(());
+        }),
+    );
+    if elapsed.await.is_err() {
+        return false;
+    }
     drop(timer);
-    if Rc::strong_count(&resource) != 1 { return false; }
+    if Rc::strong_count(&resource) != 1 {
+        return false;
+    }
     let mut cancelled = Box::pin(sleep(Duration::from_secs(60)));
-    if !futures_util::poll!(cancelled.as_mut()).is_pending() { return false; }
+    if !futures_util::poll!(cancelled.as_mut()).is_pending() {
+        return false;
+    }
     drop(cancelled);
     let captured = resource.clone();
     let task = BackendExecutor::default().spawn(async move {
@@ -93,19 +111,24 @@ pub async fn timer_lifecycle_contract() -> bool {
         sleep(Duration::from_secs(300)).await;
     });
     sleep(Duration::ZERO).await;
-    if Rc::strong_count(&resource) != 2 { return false; }
+    if Rc::strong_count(&resource) != 2 {
+        return false;
+    }
     drop(task);
     sleep(Duration::ZERO).await;
-    if Rc::strong_count(&resource) != 1 { return false; }
-    timeout(Duration::from_secs(60), async { 7 }).await == Ok(7)
-        && timeout(Duration::from_millis(1), std::future::pending::<()>()).await == Err(BackendTimeout)
+    if Rc::strong_count(&resource) != 1 {
+        return false;
+    }
+    timeout(Duration::from_secs(60), async { 7 }).await == Ok(7) && timeout(Duration::from_millis(1), std::future::pending::<()>()).await == Err(BackendTimeout)
 }
 
 /// Works in both window and worker contexts, with a single-worker fallback.
 pub fn available_parallelism() -> usize {
-    js_sys::Reflect::get(&js_sys::global(), &"navigator".into()).ok()
+    js_sys::Reflect::get(&js_sys::global(), &"navigator".into())
+        .ok()
         .and_then(|navigator| js_sys::Reflect::get(&navigator, &"hardwareConcurrency".into()).ok())
         .and_then(|value| value.as_f64())
         .filter(|value| value.is_finite() && *value >= 1.0)
-        .map(|value| value as usize).unwrap_or(1)
+        .map(|value| value as usize)
+        .unwrap_or(1)
 }

@@ -3,25 +3,25 @@
 //! The worker carries everything a drain needs except storage: queue,
 //! credentials, account, assets, and events. Durable effects never cross as
 //! connections or callbacks. Each driver opens its own commit connection to
-//! the library file from the stored path, snapshots the due hashes, runs the
-//! queue to rest, and commits the recorded outcome; SQLite serializes the
-//! writers and every replayed write is guarded and idempotent.
+//! the library file from the stored path, snapshots the due hashes, runs one
+//! claimed batch, and commits its outcome; SQLite serializes the writers and
+//! every replayed write is guarded and idempotent.
 //!
 //! The worker is `'static`, so planning pages can detach a driver and keep
 //! metadata exchange moving while slow asset HTTP is still in flight.
-use super::{TransferError, TransferRunResult};
+use super::{TransferError, TransferOperation, TransferRunResult};
 use asset_transfer::runner::{TransferHost, TransferRunner};
 use asset_transfer::{ClaimedTransferJob, TransferJob, TransferQueue};
 use futures_util::future::LocalBoxFuture;
-use library_database::BookPlacement;
-use library_database::{BookUploadIntent, Database, TransferOutcome, TransferSnapshot};
+use library_database::{BookUploadIntent, Database, TransferOutcome, TransferSnapshot, TransferWrite};
 use library_files::asset_store::AssetStore;
+use library_replica::BlobKind;
 use library_runtime::account::{LibraryAccount, SharedSyncCredentials};
 use library_runtime::events::{LibraryEvent, LibraryEventSender};
 use library_runtime::interest::NotificationInterest;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use sync_common::LibraryId;
+use std::sync::Arc;
+use sync_common::{ContentHash, LibraryId};
 
 #[derive(Clone)]
 pub(crate) struct TransferWorker {
@@ -36,6 +36,8 @@ pub(crate) struct TransferWorker {
     pub(crate) notification_interest: NotificationInterest,
     pub(crate) availability_changed: Arc<AtomicBool>,
     pub(crate) db_path: std::path::PathBuf,
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) progress_key: Option<String>,
 }
 
 impl TransferWorker {
@@ -59,16 +61,46 @@ impl TransferWorker {
         TransferRunner { queue: &self.queue, host: self }
     }
 
-    /// Snapshot, drain, and commit one pass over everything currently due.
+    /// Snapshot, drain, and commit one claimed batch.
     /// The outcome commits even when the drain reports an error; records are
     /// idempotent replays of the guarded commits.
     async fn drain_pass(&self) -> TransferRunResult {
         let database = self.commit_connection()?;
         let snapshot = database.transfer_snapshot(&self.queue.due_hashes())?;
         let mut outcome = TransferOutcome::default();
-        let result = self.runner().drain_ready(&snapshot, &mut outcome).await;
-        let commit = database.commit_transfer_outcome(&outcome).map_err(TransferError::from);
+        let result = self.runner().drain_one_batch(&snapshot, &mut outcome).await;
+        // A stale member's next planning pass simply re-queues it; this batch
+        // path only needs the commit to have happened, not stayed current.
+        let commit = database.commit_transfer_outcome(&outcome).map_err(TransferError::from).and_then(|_| self.publish_committed_downloads(&database, &outcome));
+        self.flush_availability_changes();
         result.and(commit)
+    }
+
+    /// Final availability is announced only after its SQLite outcome commits.
+    /// Progress is transient, but completion must agree with a new subscriber's
+    /// durable snapshot and with refreshed book rows.
+    fn publish_committed_downloads(&self, database: &Database, outcome: &TransferOutcome) -> Result<(), TransferError> {
+        let mut hashes = std::collections::HashSet::<ContentHash>::new();
+        for write in &outcome.writes {
+            match write {
+                TransferWrite::CompleteDownload { hash }
+                | TransferWrite::CancelDownload { hash }
+                | TransferWrite::CompleteRetainedDownload { hash, .. }
+                | TransferWrite::CompleteLocalBookRequest { hash } => {
+                    hashes.insert(*hash);
+                }
+                TransferWrite::CompleteDownloadedBook { completion, .. } => {
+                    hashes.insert(completion.snapshot.content_hash);
+                }
+                _ => {}
+            }
+        }
+        for hash in hashes {
+            let present = self.assets.exists(BlobKind::Book, &hash)?;
+            let state = database.transfer_download_state(&hash, present)?;
+            self.send_download_status(hash, state);
+        }
+        Ok(())
     }
 
     /// Drive due batches until the queue idles, holding the scheduler while
@@ -171,12 +203,22 @@ impl TransferWorker {
     /// outcome before returning.
     pub(super) async fn execute_owned_job(&self, job: TransferJob) -> Result<(), TransferError> {
         let hash = *job.status_fields().1;
+        let download = matches!(&job.operation, TransferOperation::DownloadBlob { .. });
         let database = self.commit_connection()?;
         let snapshot = database.transfer_snapshot(&[hash])?;
         let mut outcome = TransferOutcome::default();
         let result = self.execute_job(&snapshot, job, &mut outcome).await;
-        let commit = database.commit_transfer_outcome(&outcome).map_err(TransferError::from);
-        result.and(commit)
+        let commit = database.commit_transfer_outcome(&outcome).map_err(TransferError::from).and_then(|current| if current { self.publish_committed_downloads(&database, &outcome) } else { Err(TransferError::retryable("local bytes changed before the job could be confirmed")) });
+        let result = result.and(commit);
+        if download && result.is_err() {
+            if let Ok(present) = self.assets.exists(BlobKind::Book, &hash) {
+                if let Ok(state) = database.transfer_download_state(&hash, present) {
+                    self.send_download_status(hash, state);
+                }
+            }
+        }
+        self.flush_availability_changes();
+        result
     }
 
     /// Announces, once per drained queue, that the set of locally available
@@ -217,6 +259,6 @@ impl TransferHost for TransferWorker {
         self.send_transfer_status_changed();
     }
     fn flush(&self) {
-        self.flush_availability_changes();
+        // Availability is published by the commit owner, after durable state.
     }
 }

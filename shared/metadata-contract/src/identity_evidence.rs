@@ -29,13 +29,19 @@ pub fn filename_identity_evidence_with_title(title: &str, anchor: &str) -> Editi
 /// Recognize a second subtitle that repeats the first subtitle's whole-word prefix.
 fn overlapping_subtitles(value: &str) -> Option<String> {
     let parts = value.split('_').filter(|part| !part.is_empty()).map(str::trim).collect::<Vec<_>>();
-    if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) { return None; }
+    if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
+        return None;
+    }
     let first = crate::matching::bibliographic_match_key(parts[1]);
     let later = title_without_parenthetical_segments(parts[2], true);
     // A repeated subtitle prefix can have a trailing publisher suffix.
     let later = crate::matching::bibliographic_match_key(later.split(['-', '–', '—']).next()?.trim());
-    if later.split_whitespace().count() < 2 { return None; }
-    if first != later && !first.strip_prefix(&later).is_some_and(|rest| rest.starts_with(' ')) { return None; }
+    if later.split_whitespace().count() < 2 {
+        return None;
+    }
+    if first != later && !first.strip_prefix(&later).is_some_and(|rest| rest.starts_with(' ')) {
+        return None;
+    }
     Some(format!("{}: {}", parts[0], parts[1]))
 }
 
@@ -43,9 +49,7 @@ fn parse_identity_evidence(title: &str, filename: bool, anchor: Option<&str>) ->
     // Only underscore groups followed by whitespace can mark a subtitle.
     // Other groups are filename punctuation, not additional subtitle candidates.
     let title = title.trim_end();
-    let title = title.rsplit_once(" -- ").filter(|(_, tag)|
-        tag.replace('’', "'").eq_ignore_ascii_case("Anna's Archive"))
-        .map_or(title, |(title, _)| title);
+    let title = title.rsplit_once(" -- ").filter(|(_, tag)| tag.replace('’', "'").eq_ignore_ascii_case("Anna's Archive")).map_or(title, |(title, _)| title);
     let production = clean_production_title(title).replace(';', ": ");
     let trimmed = production.trim();
     let mut stripped = title_without_parenthetical_segments(trimmed, true);
@@ -59,21 +63,20 @@ fn parse_identity_evidence(title: &str, filename: bool, anchor: Option<&str>) ->
     }
     let cleaned = stripped;
 
-    let groups = cleaned.match_indices('_').filter(|(index, _)|
-        *index == 0 || cleaned.as_bytes()[index - 1] != b'_')
+    let groups = cleaned
+        .match_indices('_')
+        .filter(|(index, _)| *index == 0 || cleaned.as_bytes()[index - 1] != b'_')
         .map(|(start, _)| {
             let end = start + cleaned[start..].bytes().take_while(|byte| *byte == b'_').count();
             (start, end)
-        }).collect::<Vec<_>>();
+        })
+        .collect::<Vec<_>>();
     let candidates = groups.iter().copied().filter(|(_, end)| cleaned[*end..].starts_with(char::is_whitespace)).collect::<Vec<_>>();
     let subtitle_normalized = if let Some(title) = overlapping_subtitles(&cleaned) {
         title
     } else if let [(start, end)] = candidates.as_slice() {
         format!("{}: {}", cleaned[..*start].replace('_', " "), cleaned[*end..].trim_start().replace('_', " "))
-    } else if candidates.len() > 1 && anchor.is_some_and(|anchor|
-        !anchor.trim().is_empty()
-            && crate::matching::bibliographic_match_key(&cleaned[..candidates[0].0])
-                == crate::matching::bibliographic_match_key(anchor)) {
+    } else if candidates.len() > 1 && anchor.is_some_and(|anchor| !anchor.trim().is_empty() && crate::matching::bibliographic_match_key(&cleaned[..candidates[0].0]) == crate::matching::bibliographic_match_key(anchor)) {
         let mut parts = Vec::new();
         let mut previous = 0;
         for (start, end) in &candidates {
@@ -81,19 +84,22 @@ fn parse_identity_evidence(title: &str, filename: bool, anchor: Option<&str>) ->
             previous = *end;
         }
         parts.push(cleaned[previous..].replace('_', " ").trim().to_owned());
-        if parts.iter().all(|part| !part.is_empty()) { parts.join(": ") } else { cleaned.replace('_', " ") }
+        if parts.iter().all(|part| !part.is_empty()) {
+            parts.join(": ")
+        } else {
+            cleaned.replace('_', " ")
+        }
     } else if groups.len() > 1 {
         cleaned.replace('_', " ")
-    } else { cleaned };
+    } else {
+        cleaned
+    };
     let trimmed = subtitle_normalized.trim();
     // Structured archive filenames explicitly delimit title, credits and year.
     let fields = trimmed.split(" -- ").map(str::trim).collect::<Vec<_>>();
     if fields.len() >= 3 && !fields[0].is_empty() && !fields[1].is_empty() {
         if let Some(year) = fields[2].parse::<i32>().ok().filter(|year| (1450..=2100).contains(year)) {
-            return EditionIdentityEvidence {
-                title: fields[0].to_owned(), author: Some(fields[1].to_owned()),
-                book_year: Some(year),
-            };
+            return EditionIdentityEvidence { title: fields[0].to_owned(), author: Some(fields[1].to_owned()), book_year: Some(year) };
         }
     }
     let segments = parenthetical_segments(title);
@@ -117,12 +123,14 @@ fn parse_identity_evidence(title: &str, filename: bool, anchor: Option<&str>) ->
         let key = token.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect::<String>();
         matches!(key.as_str(), "itebooks" | "ibooker" | "zliborg" | "zlibrary" | "libgenli")
     };
-    let clean_tokens = tokens.iter().enumerate().filter_map(|(index, token)| {
-        let metadata_separator = matches!(*token, "-" | "–" | "—")
-            && (tokens.get(index + 1).is_some_and(|next| distribution_tag(next))
-                || index.checked_sub(1).is_some_and(|previous| distribution_tag(tokens[previous])));
-        (!distribution_tag(token) && !metadata_separator && !token.chars().all(|c| c == '_')).then_some(*token)
-    }).collect::<Vec<_>>();
+    let clean_tokens = tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| {
+            let metadata_separator = matches!(*token, "-" | "–" | "—") && (tokens.get(index + 1).is_some_and(|next| distribution_tag(next)) || index.checked_sub(1).is_some_and(|previous| distribution_tag(tokens[previous])));
+            (!distribution_tag(token) && !metadata_separator && !token.chars().all(|c| c == '_')).then_some(*token)
+        })
+        .collect::<Vec<_>>();
     let cleaned = clean_tokens.join(" ").trim().to_owned();
     let mut title = if cleaned.is_empty() { stripped.to_owned() } else { cleaned };
     if let Some(by) = rfind_ascii_case_insensitive(&title, " by ") {
@@ -141,8 +149,7 @@ fn parse_identity_evidence(title: &str, filename: bool, anchor: Option<&str>) ->
     // A whole title written as hyphen-delimited words is filename formatting.
     // Require several words; preserve ordinary compounds and numeric ranges.
     let parts = title.split('-').map(str::trim).collect::<Vec<_>>();
-    if parts.len() >= 4 && parts.iter().all(|part| !part.is_empty()
-        && part.chars().all(|c| c.is_alphabetic() || matches!(c, '\'' | '’'))) {
+    if parts.len() >= 4 && parts.iter().all(|part| !part.is_empty() && part.chars().all(|c| c.is_alphabetic() || matches!(c, '\'' | '’'))) {
         title = parts.join(" ");
     }
     EditionIdentityEvidence { title, author: inferred_author, book_year: inferred_year }
@@ -152,9 +159,7 @@ fn parse_identity_evidence(title: &str, filename: bool, anchor: Option<&str>) ->
 fn clean_production_title(title: &str) -> String {
     let title = title.trim();
     let lower = title.to_ascii_lowercase();
-    let title = [".ebook-een", " ebook-een", ".een", " een"]
-        .iter().find_map(|suffix| lower.strip_suffix(suffix).map(|base| &title[..base.len()]))
-        .unwrap_or(title);
+    let title = [".ebook-een", " ebook-een", ".een", " een"].iter().find_map(|suffix| lower.strip_suffix(suffix).map(|base| &title[..base.len()])).unwrap_or(title);
     let mut words = Vec::new();
     for word in title.split_whitespace() {
         let parts = word.split('.').collect::<Vec<_>>();
@@ -171,14 +176,19 @@ fn clean_production_title(title: &str) -> String {
                 normalized.push_str(part);
             }
             words.push(normalized);
-        } else { words.push(word.to_owned()); }
+        } else {
+            words.push(word.to_owned());
+        }
     }
     let mut cleaned = Vec::new();
     let mut i = 0;
     while i < words.len() {
         if words[i].bytes().all(|b| b.is_ascii_digit()) && words.get(i + 1).is_some_and(|word| word.eq_ignore_ascii_case("dpi")) {
             i += 2;
-        } else { cleaned.push(words[i].as_str()); i += 1; }
+        } else {
+            cleaned.push(words[i].as_str());
+            i += 1;
+        }
     }
     cleaned.join(" ")
 }
@@ -192,12 +202,16 @@ fn delimited_segments(value: &str) -> Vec<(usize, usize)> {
     for (index, character) in value.char_indices() {
         match character {
             '(' | '[' => {
-                if stack.is_empty() { start = index; }
+                if stack.is_empty() {
+                    start = index;
+                }
                 stack.push(character);
             }
             ')' | ']' if !stack.is_empty() => {
                 stack.pop();
-                if stack.is_empty() { spans.push((start, index + 1)); }
+                if stack.is_empty() {
+                    spans.push((start, index + 1));
+                }
             }
             _ => {}
         }
@@ -219,8 +233,12 @@ pub fn without_leading_bracket_segments(title: &str) -> &str {
 pub fn without_leading_bracket_noise(title: &str) -> &str {
     let mut rest = title.trim_start();
     loop {
-        let Some((0, end)) = delimited_segments(rest).first().copied() else { return rest; };
-        if !title_without_parenthetical_segments(&rest[..end], true).is_empty() { return rest; }
+        let Some((0, end)) = delimited_segments(rest).first().copied() else {
+            return rest;
+        };
+        if !title_without_parenthetical_segments(&rest[..end], true).is_empty() {
+            return rest;
+        }
         rest = rest[end..].trim_start();
     }
 }
@@ -232,8 +250,7 @@ fn title_without_parenthetical_segments(title: &str, keep_edition_notes: bool) -
         outside.push_str(&title[previous..start]);
         let inside = &title[start + 1..end - 1];
         let key = crate::matching::bibliographic_match_key(inside);
-        if key.split_whitespace().any(|word| matches!(word, "volume" | "vol" | "book" | "part" | "abridged" | "adaptation" | "retold" | "selections" | "solutions" | "answers")
-            || (keep_edition_notes && matches!(word, "edition" | "ed" | "revised" | "revision" | "unabridged" | "translation" | "translated"))) {
+        if key.split_whitespace().any(|word| crate::matching::is_title_qualifier_word(word) || (keep_edition_notes && matches!(word, "edition" | "ed" | "revised" | "revision" | "unabridged" | "translation" | "translated"))) {
             outside.push(' ');
             outside.push_str(&title[start..end]);
         }
@@ -248,9 +265,7 @@ fn rfind_ascii_case_insensitive(value: &str, needle: &str) -> Option<usize> {
 }
 
 fn parenthetical_segments(value: &str) -> Vec<String> {
-    delimited_segments(value).into_iter()
-        .map(|(start, end)| value[start + 1..end - 1].trim())
-        .filter(|value| !value.is_empty()).map(str::to_owned).collect()
+    delimited_segments(value).into_iter().map(|(start, end)| value[start + 1..end - 1].trim()).filter(|value| !value.is_empty()).map(str::to_owned).collect()
 }
 
 fn plausible_book_year(value: &str) -> Option<i32> {
@@ -259,7 +274,8 @@ fn plausible_book_year(value: &str) -> Option<i32> {
 
 fn looks_like_person_name(value: &str) -> bool {
     const PARTICLES: &[&str] = &["al", "bin", "da", "de", "del", "den", "der", "di", "du", "la", "le", "van", "von"];
-    const NON_NAMES: &[&str] = &["abridged", "answers", "solutions", "book", "edition", "guide", "histories", "illustrated", "introduction", "introductions", "manual", "novel", "revised", "series", "textbook", "translation", "unabridged", "volume"];
+    const NON_NAMES: &[&str] =
+        &["abridged", "answers", "solutions", "book", "edition", "guide", "histories", "illustrated", "introduction", "introductions", "manual", "novel", "revised", "series", "textbook", "translation", "unabridged", "volume"];
     let words = value.split_whitespace().collect::<Vec<_>>();
     if !(2..=5).contains(&words.len()) || words.iter().any(|word| NON_NAMES.contains(&word.to_lowercase().as_str())) {
         return false;
@@ -273,24 +289,65 @@ fn looks_like_person_name(value: &str) -> bool {
     })
 }
 
+/// Recover an author prefix only after a returned candidate corroborates both
+/// the name and the remaining title. This supplies verification evidence, not
+/// an edition ISBN or a replacement for known local author credits.
+pub fn verified_author_prefix_query(query: &crate::EditionIdentityQuery, result: &crate::EditionIdentityResult) -> Option<crate::EditionIdentityQuery> {
+    use crate::matching::{author_credits, matching_author_count, NormalizedTitle};
+    if query.query_id != result.query_id || result.candidates_truncated || !query.authors.is_empty() {
+        return None;
+    }
+    for separator in [" - ", " – ", " — "] {
+        let Some((prefix, rest)) = query.title.split_once(separator) else {
+            continue;
+        };
+        let authors = author_credits(&[prefix.trim().to_owned()]);
+        if authors.is_empty() || rest.trim().is_empty() {
+            continue;
+        }
+        let cleaned = edition_identity_evidence(&rest.replace('：', ":").replace('_', " ")).title;
+        let local = NormalizedTitle::new(&cleaned);
+        if local.full.len() < 5 {
+            continue;
+        }
+        let supported = result.matched.iter().chain(&result.candidates).any(|candidate| {
+            let remote = NormalizedTitle::new(&candidate.full_title());
+            matching_author_count(&authors, &candidate.authors) > 0
+                && local.qualifiers == remote.qualifiers
+                && (local.full == remote.full || (local.subtitle.is_none() && local.full == remote.main) || (remote.subtitle.is_none() && local.main == remote.full))
+        });
+        if supported {
+            let mut verified = query.clone();
+            verified.title = cleaned;
+            verified.authors = authors;
+            return Some(verified);
+        }
+    }
+    None
+}
 
-/// Validate surname_title_words against returned catalog evidence.
+/// Validate surname_title_words against returned authority evidence.
 /// Only underscore-delimited filenames qualify; ordinary prose is not split.
 pub fn filename_surname_title_matches(filename_title: &str, candidate_title: &str, authors: &[String]) -> bool {
-    let Some((surname, rest)) = filename_title.trim().split_once('_') else { return false; };
-    if surname.chars().count() < 2 || !surname.chars().all(char::is_alphabetic) { return false; }
+    let Some((surname, rest)) = filename_title.trim().split_once('_') else {
+        return false;
+    };
+    if surname.chars().count() < 2 || !surname.chars().all(char::is_alphabetic) {
+        return false;
+    }
     let title = edition_identity_evidence(&rest.replace('_', " ")).title;
     let key = crate::matching::bibliographic_match_key(&title);
-    if key.is_empty() || key != crate::matching::bibliographic_match_key(candidate_title) { return false; }
+    if key.is_empty() || key != crate::matching::bibliographic_match_key(candidate_title) {
+        return false;
+    }
     let surname = crate::matching::bibliographic_match_key(surname);
     crate::matching::author_credits(authors).iter().any(|author| {
         crate::matching::author_match_keys(author).iter().any(|key| {
-            let words = key.split_whitespace().filter(|word| !matches!(*word, "jr" | "sr" | "ii" | "iii" | "iv")).collect::<Vec<_>>();
+            let words = key.split_whitespace().filter(|word| crate::matching::author_suffix(word).is_none()).collect::<Vec<_>>();
             words.len() >= 2 && words.last().copied() == Some(surname.as_str())
         })
     })
 }
-
 
 /// Parenthetical edition/language labels are secondary evidence for subjects.
 /// Keep structural volume/adaptation distinctions and all non-parenthetical text.
@@ -397,8 +454,7 @@ mod delimiter_tests {
 
     #[test]
     fn cleans_release_dots_and_scan_resolution() {
-        assert_eq!(edition_identity_evidence("Understanding.Surveillance.Technologies.Spy.Devices.Their.Origins.and.Applications.eBook-EEn").title,
-            "Understanding Surveillance Technologies Spy Devices Their Origins and Applications");
+        assert_eq!(edition_identity_evidence("Understanding.Surveillance.Technologies.Spy.Devices.Their.Origins.and.Applications.eBook-EEn").title, "Understanding Surveillance Technologies Spy Devices Their Origins and Applications");
         assert_eq!(edition_identity_evidence("The.Geeks.of.Modern.War.EEn").title, "The Geeks of Modern War");
         assert_eq!(edition_identity_evidence("Operating System Concepts (7th Edition) 600 dpi").title, "Operating System Concepts (7th Edition)");
         assert_eq!(edition_identity_evidence("A 300 DPI Scanned Book").title, "A Scanned Book");
@@ -411,8 +467,7 @@ mod delimiter_tests {
 
     #[test]
     fn brackets_extract_identity_and_remove_distribution_notes() {
-        assert_eq!(edition_identity_evidence("Algorithms [Jeff Erickson] [2019] [electronic resource]"),
-            EditionIdentityEvidence { title: "Algorithms".into(), author: Some("Jeff Erickson".into()), book_year: Some(2019) });
+        assert_eq!(edition_identity_evidence("Algorithms [Jeff Erickson] [2019] [electronic resource]"), EditionIdentityEvidence { title: "Algorithms".into(), author: Some("Jeff Erickson".into()), book_year: Some(2019) });
         assert_eq!(edition_identity_evidence("History [z-lib.org]").title, "History");
         assert_eq!(edition_identity_evidence("History [scan (archive)]").title, "History");
         assert_eq!(edition_identity_evidence("History (scan [archive])").title, "History");

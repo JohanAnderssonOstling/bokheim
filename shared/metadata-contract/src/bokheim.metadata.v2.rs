@@ -42,7 +42,7 @@ pub struct EditionIdentityResult {
     #[prost(bool, tag = "5")]
     pub candidates_truncated: bool,
     #[prost(message, optional, tag = "6")]
-    pub catalog_subjects: ::core::option::Option<CatalogSubjectMatch>,
+    pub authority_subjects: ::core::option::Option<AuthoritySubjectMatch>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EditionIdentityMatch {
@@ -80,10 +80,6 @@ pub struct EnrichmentResponse {
     pub snapshot: ::core::option::Option<Snapshot>,
     #[prost(message, repeated, tag = "2")]
     pub results: ::prost::alloc::vec::Vec<IsbnResult>,
-    #[prost(message, repeated, tag = "3")]
-    pub places: ::prost::alloc::vec::Vec<PlaceEntity>,
-    #[prost(message, repeated, tag = "4")]
-    pub people: ::prost::alloc::vec::Vec<PersonEntity>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Snapshot {
@@ -115,12 +111,6 @@ pub struct WorkMatch {
     pub classifications: ::prost::alloc::vec::Vec<Classification>,
     #[prost(message, repeated, tag = "4")]
     pub authors: ::prost::alloc::vec::Vec<Author>,
-    #[prost(message, repeated, tag = "5")]
-    pub places: ::prost::alloc::vec::Vec<EntityReference>,
-    #[prost(message, repeated, tag = "6")]
-    pub people: ::prost::alloc::vec::Vec<EntityReference>,
-    #[prost(message, optional, tag = "7")]
-    pub popularity: ::core::option::Option<WorkPopularity>,
     /// Plain-text Open Library work description, when the snapshot has one.
     #[prost(string, optional, tag = "8")]
     pub description: ::core::option::Option<::prost::alloc::string::String>,
@@ -137,21 +127,6 @@ pub struct SubjectHeading {
     pub components: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(string, optional, tag = "4")]
     pub authority_uri: ::core::option::Option<::prost::alloc::string::String>,
-}
-/// Aggregated public activity for a work. No patron-level rows leave the
-/// snapshot importer.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct WorkPopularity {
-    #[prost(uint64, tag = "1")]
-    pub want_to_read_count: u64,
-    #[prost(uint64, tag = "2")]
-    pub currently_reading_count: u64,
-    #[prost(uint64, tag = "3")]
-    pub already_read_count: u64,
-    #[prost(uint64, tag = "4")]
-    pub rating_count: u64,
-    #[prost(uint64, tag = "5")]
-    pub rating_sum: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Classification {
@@ -176,8 +151,6 @@ pub struct Author {
     pub source: i32,
     #[prost(uint32, tag = "5")]
     pub position: u32,
-    #[prost(string, optional, tag = "6")]
-    pub biography: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AuthorIdentifier {
@@ -185,47 +158,6 @@ pub struct AuthorIdentifier {
     pub authority: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub value: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct EntityReference {
-    #[prost(string, optional, tag = "1")]
-    pub wikidata_id: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, tag = "2")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(enumeration = "EntitySource", tag = "3")]
-    pub source: i32,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct PlaceEntity {
-    #[prost(string, tag = "1")]
-    pub wikidata_id: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub label: ::prost::alloc::string::String,
-    #[prost(string, repeated, tag = "3")]
-    pub aliases: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(string, repeated, tag = "4")]
-    pub parent_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(string, repeated, tag = "5")]
-    pub country_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(sint32, optional, tag = "6")]
-    pub latitude_e7: ::core::option::Option<i32>,
-    #[prost(sint32, optional, tag = "7")]
-    pub longitude_e7: ::core::option::Option<i32>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct PersonEntity {
-    #[prost(string, tag = "1")]
-    pub wikidata_id: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub label: ::prost::alloc::string::String,
-    #[prost(string, repeated, tag = "3")]
-    pub aliases: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(sint32, optional, tag = "4")]
-    pub birth_year: ::core::option::Option<i32>,
-    #[prost(sint32, optional, tag = "5")]
-    pub death_year: ::core::option::Option<i32>,
-    #[prost(bool, tag = "6")]
-    pub fictional: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -419,36 +351,6 @@ impl AuthorSource {
         }
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum EntitySource {
-    Unspecified = 0,
-    ExactEdition = 1,
-    Work = 2,
-}
-impl EntitySource {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "ENTITY_SOURCE_UNSPECIFIED",
-            Self::ExactEdition => "ENTITY_SOURCE_EXACT_EDITION",
-            Self::Work => "ENTITY_SOURCE_WORK",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "ENTITY_SOURCE_UNSPECIFIED" => Some(Self::Unspecified),
-            "ENTITY_SOURCE_EXACT_EDITION" => Some(Self::ExactEdition),
-            "ENTITY_SOURCE_WORK" => Some(Self::Work),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ClassificationEvidence {
     #[prost(string, tag = "1")]
@@ -462,7 +364,7 @@ pub struct ClassificationEvidence {
 }
 
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct CatalogSubjectMatch {
+pub struct AuthoritySubjectMatch {
     #[prost(string, tag = "6")]
     pub main_title: String,
     #[prost(string, tag = "1")]

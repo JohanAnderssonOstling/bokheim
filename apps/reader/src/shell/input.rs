@@ -55,8 +55,14 @@ pub(crate) fn bind_reader_keys(cx: &mut App) {
         KeyBinding::new("ctrl-f", ToggleSearch, Some("Reader")),
         KeyBinding::new("escape", CloseSearch, Some("Reader")),
         // Backspace leaves the book the same way the toolbar's library button
-        // does, so the keyboard and the chrome cannot drift apart.
+        // does, so the keyboard and the chrome cannot drift apart. The OS back
+        // button/gesture does the same on native mobile, where the on-screen
+        // back button is hidden.
         KeyBinding::new("backspace", ReturnToLibrary, Some("Reader")),
+        #[cfg(feature = "mobile")]
+        KeyBinding::new("back", ReturnToLibrary, Some("Reader")),
+        #[cfg(target_os = "android")]
+        KeyBinding::new("f24", ToggleToc, None),
     ]);
 }
 

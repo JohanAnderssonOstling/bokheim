@@ -1,5 +1,4 @@
 use super::runtime::{normalize_source_label, UnifiedTaxonomyRuntime};
-use super::UnifiedConceptRoute;
 use book_model::BookSubject;
 use std::collections::BTreeSet;
 
@@ -9,41 +8,69 @@ pub(super) fn matching_hierarchy_paths(runtime: &UnifiedTaxonomyRuntime, subject
     if authority != "fast" && !source.ends_with("/#fast") {
         return BTreeSet::new();
     }
-    let components = subject.name().split("--").map(normalize_source_label).filter(|component| !component.is_empty()).collect::<Vec<_>>();
+    let mut components = subject.name().split("--").map(normalize_source_label).filter(|component| !component.is_empty()).collect::<Vec<_>>();
     if components.len() < 2 {
         return BTreeSet::new();
     }
-    runtime.routes.keys().filter(|path| components_fit_route_suffix(runtime, &components, path)).cloned().collect()
+    components.sort();
+    // A matching route must end in one of the heading's labels. Use the label
+    // index to avoid constructing and searching every path in the taxonomy.
+    let candidates = components.iter().filter_map(|label| runtime.labels.get(label)).flatten().flat_map(|concept| runtime.routes.ids_for_concept(*concept)).copied().collect::<BTreeSet<_>>();
+    candidates.into_iter().filter(|id| components_fit_route_suffix(runtime, &components, *id)).map(|id| runtime.routes.path(id)).collect()
 }
 
-fn components_fit_route_suffix(runtime: &UnifiedTaxonomyRuntime, components: &[String], path: &str) -> bool {
-    let labels = path.split(" / ").collect::<Vec<_>>();
-    if labels.len() < components.len() {
-        return false;
+fn components_fit_route_suffix(runtime: &UnifiedTaxonomyRuntime, components: &[String], id: usize) -> bool {
+    let mut labels = Vec::with_capacity(components.len());
+    let mut current = Some(id);
+    for _ in components {
+        let Some(route) = current else { return false };
+        labels.push(normalize_source_label(runtime.routes.label(route)));
+        current = runtime.routes.parent(route);
     }
-    let prefixes = (labels.len() - components.len()..labels.len()).map(|index| labels[..=index].join(" / ")).collect::<Vec<_>>();
-    let Some(routes) = prefixes.iter().map(|prefix| runtime.routes.get(prefix)).collect::<Option<Vec<_>>>() else { return false };
-    components_match_routes(runtime, components, &routes, 0, &mut vec![false; routes.len()])
+    labels.sort();
+    labels == components
 }
 
-fn components_match_routes(runtime: &UnifiedTaxonomyRuntime, components: &[String], routes: &[&UnifiedConceptRoute], component_index: usize, used_routes: &mut [bool]) -> bool {
-    if component_index == components.len() {
-        return true;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime_index::{build_runtime, UnifiedConceptDefinition};
+    use std::collections::BTreeMap;
+
+    fn runtime() -> UnifiedTaxonomyRuntime {
+        let concepts = [(1, "History", vec![]), (2, "Geography", vec![]), (3, "Myanmar / Burma", vec![1, 2]), (4, "Modern", vec![3])]
+            .into_iter()
+            .map(|(id, label, parents)| UnifiedConceptDefinition::new(id, label.into(), parents, BTreeMap::new(), vec![]))
+            .collect();
+        build_runtime(concepts, false).unwrap()
     }
-    for (route_index, route) in routes.iter().enumerate() {
-        if used_routes[route_index] {
-            continue;
-        }
-        let component = &components[component_index];
-        let matches = normalize_source_label(route.label()) == *component || runtime.source_labels.get(component).is_some_and(|ids| ids.contains(&route.concept_id()));
-        if !matches {
-            continue;
-        }
-        used_routes[route_index] = true;
-        if components_match_routes(runtime, components, routes, component_index + 1, used_routes) {
-            return true;
-        }
-        used_routes[route_index] = false;
+
+    fn heading(name: &str) -> BookSubject {
+        BookSubject::new(None, name, "dc:subject", Some("fast".into()), None).unwrap()
     }
-    false
+
+    #[test]
+    fn hierarchy_matching_follows_whole_labels_and_keeps_parallel_routes() {
+        let runtime = runtime();
+        assert_eq!(matching_hierarchy_paths(&runtime, &heading("Myanmar / Burma -- History")), BTreeSet::from(["History / Myanmar / Burma".into()]));
+        assert_eq!(matching_hierarchy_paths(&runtime, &heading("Modern -- Myanmar / Burma")), BTreeSet::from(["Geography / Myanmar / Burma / Modern".into(), "History / Myanmar / Burma / Modern".into(),]));
+        assert!(matching_hierarchy_paths(&runtime, &heading("History -- Modern")).is_empty(), "components must cover adjacent route nodes");
+    }
+
+    #[test]
+    fn repeated_components_require_separate_ancestor_occurrences() {
+        let runtime = runtime();
+        assert!(matching_hierarchy_paths(&runtime, &heading("History -- History")).is_empty());
+        let repeated = build_runtime(
+            vec![
+                UnifiedConceptDefinition::new(1, "History".into(), vec![], BTreeMap::new(), vec![]),
+                UnifiedConceptDefinition::new(2, "Places".into(), vec![1], BTreeMap::new(), vec![]),
+                UnifiedConceptDefinition::new(3, "History".into(), vec![2], BTreeMap::new(), vec![]),
+            ],
+            false,
+        )
+        .unwrap();
+        assert_eq!(matching_hierarchy_paths(&repeated, &heading("History -- Places -- History")), BTreeSet::from(["History / Places / History".into()]));
+        assert!(matching_hierarchy_paths(&repeated, &heading("History -- History -- History")).is_empty());
+    }
 }

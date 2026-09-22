@@ -29,7 +29,7 @@ message EditionIdentityResult {
   optional EditionIdentityMatch matched = 3;
   repeated EditionIdentityMatch candidates = 4;
   bool candidates_truncated = 5;
-  optional CatalogSubjectMatch catalog_subjects = 6;
+  optional AuthoritySubjectMatch authority_subjects = 6;
 }
 
 message EditionIdentityMatch {
@@ -51,8 +51,7 @@ message EditionIdentityMatch {
 message EnrichmentResponse {
   Snapshot snapshot = 1;
   repeated IsbnResult results = 2;
-  repeated PlaceEntity places = 3;
-  repeated PersonEntity people = 4;
+  reserved 3, 4;
 }
 
 message Snapshot {
@@ -73,9 +72,7 @@ message WorkMatch {
   repeated string exact_edition_ids = 2;
   repeated Classification classifications = 3;
   repeated Author authors = 4;
-  repeated EntityReference places = 5;
-  repeated EntityReference people = 6;
-  optional WorkPopularity popularity = 7;
+  reserved 5, 6, 7;
   // Plain-text Open Library work description, when the snapshot has one.
   optional string description = 8;
   repeated SubjectHeading subjects = 9;
@@ -86,16 +83,6 @@ message SubjectHeading {
   string authority = 2;
   repeated string components = 3;
   optional string authority_uri = 4;
-}
-
-// Aggregated public activity for a work. No patron-level rows leave the
-// snapshot importer.
-message WorkPopularity {
-  uint64 want_to_read_count = 1;
-  uint64 currently_reading_count = 2;
-  uint64 already_read_count = 3;
-  uint64 rating_count = 4;
-  uint64 rating_sum = 5;
 }
 
 message Classification {
@@ -111,37 +98,12 @@ message Author {
   repeated AuthorIdentifier identifiers = 3;
   AuthorSource source = 4;
   uint32 position = 5;
-  optional string biography = 6;
+  reserved 6;
 }
 
 message AuthorIdentifier {
   string authority = 1;
   string value = 2;
-}
-
-message EntityReference {
-  optional string wikidata_id = 1;
-  string name = 2;
-  EntitySource source = 3;
-}
-
-message PlaceEntity {
-  string wikidata_id = 1;
-  string label = 2;
-  repeated string aliases = 3;
-  repeated string parent_ids = 4;
-  repeated string country_ids = 5;
-  optional sint32 latitude_e7 = 6;
-  optional sint32 longitude_e7 = 7;
-}
-
-message PersonEntity {
-  string wikidata_id = 1;
-  string label = 2;
-  repeated string aliases = 3;
-  optional sint32 birth_year = 4;
-  optional sint32 death_year = 5;
-  bool fictional = 6;
 }
 
 enum LookupStatus {
@@ -186,12 +148,6 @@ enum AuthorSource {
   AUTHOR_SOURCE_WORK = 2;
 }
 
-enum EntitySource {
-  ENTITY_SOURCE_UNSPECIFIED = 0;
-  ENTITY_SOURCE_EXACT_EDITION = 1;
-  ENTITY_SOURCE_WORK = 2;
-}
-
 message ClassificationEvidence {
   string method = 1;
   string isbn13 = 2;
@@ -199,7 +155,7 @@ message ClassificationEvidence {
   string open_library_edition_id = 4;
 }
 
-message CatalogSubjectMatch {
+message AuthoritySubjectMatch {
   string provider_id = 1;
   repeated string record_ids = 2;
   string title = 3;

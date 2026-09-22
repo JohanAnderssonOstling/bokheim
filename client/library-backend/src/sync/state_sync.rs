@@ -150,21 +150,5 @@ fn store_error(error: DatabaseError) -> StoreError {
     Box::new(error)
 }
 
-// Adapt feature-owned persistence errors to the host storage queue. These
-// connection adapters exist only for the wasm coordinator, which drives
-// storage through a serialized queue; native code uses Database methods.
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn apply_pull_page(conn: &mut rusqlite::Connection, page: &PullStateResponse) -> Result<bool, DatabaseError> {
-    client_library::sync_state::apply_pull_page(conn, page).map_err(DatabaseError::operation)
-}
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn inventory_checkpoint(conn: &rusqlite::Connection) -> Result<Option<StateCell>, DatabaseError> {
-    client_library::sync_state::inventory_checkpoint(conn).map_err(DatabaseError::operation)
-}
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn save_inventory_checkpoint(conn: &rusqlite::Connection, after: Option<StateCell>) -> Result<(), DatabaseError> {
-    client_library::sync_state::save_inventory_checkpoint(conn, after).map_err(DatabaseError::operation)
-}
-
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod account_tests;

@@ -3,39 +3,47 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Div, Element, ElementId, GlobalElementId, Image, ImageSource, Img, LayoutId, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels, RenderOnce, ScrollHandle, SharedString, Size, Stateful, Style, StyledImage, Window,
-    div, img, px,
+    App, Bounds, Div, Element, ElementId, FontWeight, GlobalElementId, Image, ImageSource, Img, LayoutId, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels, RenderOnce, ScrollHandle, SharedString, Size, Stateful, Style, StyledImage,
+    Window, div, img, px,
 };
+use gpui_component::IconName;
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants};
 use gpui_component::menu::PopupMenu;
 use gpui_component::popover::Popover;
-use gpui_component::{Disableable, ElementExt, Selectable};
-use gpui_component::IconName;
+use gpui_component::{ElementExt, Sizable};
 
 use crate::{
-    BrowserTheme, RADIUS_MD, RADIUS_SM, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_HEIGHT, SETTINGS_STEPPER_VALUE_WIDTH, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, ScrollableElement, TEXT_LG, TEXT_SM, TEXT_XS, browser_theme, menu_item,
+    BrowserTheme, RADIUS_MD, RADIUS_SM, SETTINGS_CONTROL_SIZE_REM, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, ScrollableElement, TEXT_SM, TEXT_XS, base_button, browser_theme, menu_item,
     outlined_text_button, scroll::Scrollable,
 };
 
-pub const READER_TOOLBAR_HEIGHT: f32 = crate::TOPBAR_HEIGHT;
-pub const READER_TOOLBAR_CONTROL_HEIGHT: f32 = crate::TOPBAR_ACTION_HEIGHT;
+/// The toolbar and its controls grow together with the UI font. The same 2rem
+/// step as `TOPBAR_ACTION_HEIGHT_REM`, kept under its own name because the
+/// toolbar's height feeds its own geometry math below.
+pub const READER_TOOLBAR_SIZE_REM: f32 = crate::TOPBAR_ACTION_HEIGHT / 16.0;
+pub fn reader_toolbar_size_px(window: &Window) -> f32 {
+    f32::from(gpui::rems(READER_TOOLBAR_SIZE_REM).to_pixels(window.rem_size()))
+}
+/// Height of the reader's mobile bottom bar. Shares the library shell's
+/// bottom-nav height rather than inventing a second size for the same kind of
+/// row.
+pub const READER_BOTTOM_BAR_HEIGHT: f32 = crate::BOTTOM_NAV_HEIGHT_REM * 16.0;
 const READER_SETTINGS_POPOVER_GAP: f32 = 4.0;
 const READER_SETTINGS_POPOVER_WINDOW_MARGIN: f32 = 8.0;
 const READER_SETTINGS_MAX_WIDTH: f32 = 400.0;
 const READER_SETTINGS_MAX_HEIGHT: f32 = 620.0;
-const READER_SETTINGS_PADDING_REM: f32 = 1.0;
-const READER_SETTINGS_GAP_REM: f32 = 13.0 / 16.0;
+const READER_SETTINGS_PADDING: f32 = 16.0;
+const READER_SETTINGS_GAP: f32 = 13.0;
 
 pub fn reader_toolbar(theme: BrowserTheme) -> Div {
-    div().h(px(READER_TOOLBAR_HEIGHT)).flex_none().w_full().min_w_0().px(px(crate::CONTENT_INSET)).flex().items_center().gap(px(SPACE_SM)).bg(theme.page_bg)
+    div().h(gpui::rems(READER_TOOLBAR_SIZE_REM)).flex_none().w_full().min_w_0().px(px(crate::CONTENT_INSET)).flex().items_center().gap(px(SPACE_SM)).bg(theme.page_bg).border_b_1().border_color(theme.rule)
 }
 
-pub fn reader_control_button(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: BrowserTheme) -> Button {
-    outlined_text_button(id, label).h(px(READER_TOOLBAR_CONTROL_HEIGHT)).rounded(px(RADIUS_SM)).border_color(theme.rule).bg(theme.page_bg)
-}
-
+/// `.ghost()`, not `outlined_icon_button`: the header's square icon buttons
+/// (back, close, search) sit borderless against the header's own bottom
+/// border, not individually outlined.
 pub fn reader_control_button_icon(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
-    crate::outlined_icon_button(id, label, icon, px(READER_TOOLBAR_CONTROL_HEIGHT), RADIUS_SM, theme).px_0().bg(theme.page_bg)
+    base_button(id).ghost().icon(icon).size(gpui::rems(READER_TOOLBAR_SIZE_REM)).rounded(px(RADIUS_SM)).px_0().bg(theme.page_bg).tooltip(label)
 }
 
 /// Chapter title beside progress, yielding space to the fixed toolbar controls.
@@ -43,32 +51,26 @@ pub fn reader_toolbar_title(title: impl Into<SharedString>) -> Div {
     div().flex_initial().min_w_0().max_w(px(520.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_align(gpui::TextAlign::Left).text_size(gpui::rems(TEXT_SM)).child(title.into())
 }
 
-pub fn reader_sidebar_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, enabled: bool) -> Button {
-    // Keep sidebar actions on the same native button path as the rest of the
-    // application. Size, padding, focus, hover, and disabled treatment then
-    // come from GPUI Component and the active application theme.
-    outlined_text_button(id, label).icon(icon).disabled(!enabled)
-}
-
-pub fn reader_choice_button(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool) -> Button {
-    // Selected segments use the primary/accent treatment; unselected segments
-    // remain neutral secondary controls.
-    // SPACE_XS, not SPACE_SM: a three-segment group is 49px per button inside
-    // SETTINGS_GROUP_WIDTH, and 8px of padding either side leaves too little for
-    // the longest label.
-    outlined_text_button(id, label).h(px(SETTINGS_CONTROL_HEIGHT)).flex_1().rounded(px(RADIUS_SM)).selected(selected).px(px(SPACE_XS)).when(selected, |button| button.primary())
+pub fn reader_choice_button(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
+    // Use the same selected-button path as the reader's active contents row:
+    // solid accent and inverted ink. `ButtonCustomVariant` is superseded by
+    // ButtonGroup's segment styling, which was why this previously rendered
+    // as the pale accent wash instead.
+    // The group below owns the joined outline and segment edges. These are
+    // deliberately plain children, with only the selected child receiving
+    // reader-specific colour refinement.
+    let base = base_button(id).label(label).with_size(gpui_component::Size::Small).h(gpui::rems(SETTINGS_CONTROL_SIZE_REM)).min_h(px(32.0)).flex_1().rounded(px(RADIUS_SM)).px(px(SPACE_XS));
+    crate::selectable_button(base, selected, theme).when(selected, |button| button.font_weight(FontWeight::SEMIBOLD))
 }
 
 pub fn reader_choice_button_group(id: impl Into<ElementId>, buttons: impl IntoIterator<Item = Button>) -> ButtonGroup {
-    ButtonGroup::new(id).children(buttons).outline().w(gpui::rems(crate::SETTINGS_GROUP_WIDTH / 16.0)).flex_none()
-}
-
-pub fn reader_square_button(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: BrowserTheme) -> Button {
-    reader_control_button(id, label, theme).w(px(34.0)).px_0().text_size(gpui::rems(TEXT_LG))
+    // Full width so the group's right edge lands on the steppers' right edge
+    // in the rows below; the flex_1 buttons stretch to fill it.
+    ButtonGroup::new(id).children(buttons).outline().w_full()
 }
 
 pub fn reader_match_count(text: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().flex_none().min_w(px(52.0)).text_align(gpui::TextAlign::Right).text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(text.into())
+    div().flex_none().min_w(gpui::rems(3.25)).text_align(gpui::TextAlign::Right).text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(text.into())
 }
 
 fn reader_settings_trigger(theme: BrowserTheme) -> gpui_component::button::Button {
@@ -84,7 +86,7 @@ pub fn reader_progress(label: impl Into<SharedString>, detail: impl Into<SharedS
     div()
         .id("reader-progress")
         .flex_none()
-        .w(px(44.0))
+        .w(gpui::rems(2.75))
         .px(px(SPACE_XS))
         .text_align(gpui::TextAlign::Right)
         .text_size(gpui::rems(TEXT_SM))
@@ -109,12 +111,30 @@ pub fn reader_pdf_scroll_surface(scroll_handle: &ScrollHandle, theme: BrowserThe
     reader_document_surface(theme).id("pdf-reader-scroll").track_scroll(scroll_handle).flex().items_start().justify_start()
 }
 
+/// The border between sidebar and document is drawn once, by the sidebar's
+/// own outer container (`reader_sidebar` in `shell/toolbar.rs`) — a tab body
+/// sits inside that border, not beside it, so it draws none of its own.
 pub fn reader_toc(theme: BrowserTheme) -> Div {
-    div().size_full().min_h_0().min_w_0().flex().flex_col().gap(px(SPACE_XXS)).p(px(crate::CONTENT_INSET)).bg(theme.page_bg).border_r_1().border_color(theme.rule)
+    div().size_full().min_h_0().min_w_0().flex().flex_col().gap(px(SPACE_XXS)).bg(theme.page_bg).on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+}
+
+/// Scrollable reader-sidebar panel: full size, themed surface, own scroll.
+fn reader_scroll_panel(theme: BrowserTheme) -> Scrollable<Div> {
+    div().size_full().min_h_0().min_w_0().overflow_y_scrollbar().flex().flex_col().bg(theme.page_bg)
 }
 
 pub fn reader_state_panel(theme: BrowserTheme) -> Scrollable<Div> {
-    div().size_full().min_h_0().min_w_0().overflow_y_scrollbar().flex().flex_col().gap(px(SPACE_SM)).p(px(crate::CONTENT_INSET)).bg(theme.page_bg).border_r_1().border_color(theme.rule)
+    reader_scroll_panel(theme).gap(px(SPACE_SM))
+}
+
+/// The reader settings tab body: the same sections `reader_settings_dropdown`
+/// draws as a popover, but full width/height for its tab rather than a fixed,
+/// shadowed panel — it lives inside the sidebar's border, not floating over
+/// it.
+pub fn reader_settings_tab_body(theme: BrowserTheme) -> Scrollable<Div> {
+    // Groups carry their own content padding, while their borders and fills
+    // reach the sidebar edges like the Contents and Notes rows.
+    reader_scroll_panel(theme)
 }
 
 pub fn reader_state_card(id: impl Into<ElementId>, selected: bool, theme: BrowserTheme) -> Stateful<Div> {
@@ -129,8 +149,8 @@ pub fn reader_state_card(id: impl Into<ElementId>, selected: bool, theme: Browse
         .border_1()
         .border_color(theme.rule)
         .bg(theme.page_bg)
-        .hover(|style| style.bg(theme.accent_wash))
-        .when(selected, |card| card.bg(theme.accent).text_color(theme.accent_text))
+        .hover(|style| style.bg(theme.hover))
+        .when(selected, |card| card.bg(theme.accent_wash))
 }
 
 pub fn reader_state_quote(text: impl Into<SharedString>) -> Div {
@@ -139,10 +159,6 @@ pub fn reader_state_quote(text: impl Into<SharedString>) -> Div {
 
 pub fn reader_state_note(text: impl Into<SharedString>, theme: BrowserTheme) -> Div {
     div().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(text.into())
-}
-
-pub fn reader_state_actions() -> Div {
-    div().flex().flex_wrap().items_center().gap(px(SPACE_XS))
 }
 
 /// Smallest note field, in the absence of a note. Below two rows the box reads
@@ -165,7 +181,10 @@ pub const READER_NOTE_MAX_ROWS: usize = 40;
 /// height its anchor allows does anything scroll, and then it is the panel, so
 /// a note is never a small scrolling box inside a panel with room to spare.
 pub fn reader_annotation_editor(note: impl IntoElement, theme: BrowserTheme) -> Scrollable<Stateful<Div>> {
-    div()
+    // The panel is `modal_surface` plus editor geometry: an absolute `min_0`
+    // pair and `relative` come along, neither of which moves an
+    // absolutely-placed, content-sized panel.
+    crate::modal_surface(theme)
         .id("reader-annotation-editor")
         .w(px(360.0))
         .max_w_full()
@@ -187,11 +206,8 @@ pub fn reader_annotation_editor(note: impl IntoElement, theme: BrowserTheme) -> 
         .child(div().w_full().flex_none().p(px(SPACE_XS)).rounded(px(RADIUS_SM)).border_1().border_color(theme.rule).bg(theme.page_bg).child(note))
 }
 
-/// The height of a control in the annotation editor.
-///
-/// Shorter than a toolbar control: the panel floats over the words being read,
-/// and every row of chrome it adds is a row of the book it covers.
-pub const READER_ANNOTATION_ACTION_HEIGHT: f32 = 28.0;
+/// Editor controls run at `SETTINGS_CONTROL_SIZE_REM`, the shared settings
+/// geometry, rather than a third name for the same 2rem step.
 
 /// The highlight palette, in hue order.
 ///
@@ -207,16 +223,7 @@ pub const READER_ANNOTATION_ACTION_HEIGHT: f32 = 28.0;
 /// The values are canonical: an annotation stores the hex it was given, so this
 /// is the one place a colour may be named, and both the swatch and the renderer
 /// read it from here.
-pub const READER_ANNOTATION_COLORS: [(&str, &str); 8] = [
-    ("Yellow", "#f6c945"),
-    ("Orange", "#fb923c"),
-    ("Red", "#f87171"),
-    ("Pink", "#f472b6"),
-    ("Purple", "#c084fc"),
-    ("Blue", "#60a5fa"),
-    ("Teal", "#2dd4bf"),
-    ("Green", "#4ade80"),
-];
+pub const READER_ANNOTATION_COLORS: [(&str, &str); 8] = [("Yellow", "#f6c945"), ("Orange", "#fb923c"), ("Red", "#f87171"), ("Pink", "#f472b6"), ("Purple", "#c084fc"), ("Blue", "#60a5fa"), ("Teal", "#2dd4bf"), ("Green", "#4ade80")];
 
 /// The default a new annotation takes, and the fallback for an unreadable one,
 /// in the two spellings the readers need: EPUB stores and parses hex strings,
@@ -245,7 +252,7 @@ pub fn reader_annotation_color_group() -> Div {
 pub fn reader_annotation_color_swatch(id: impl Into<ElementId>, hex: &'static str, name: &'static str, selected: bool, theme: BrowserTheme) -> Stateful<Div> {
     div()
         .id(id)
-        .size(px(READER_ANNOTATION_ACTION_HEIGHT))
+        .size(gpui::rems(SETTINGS_CONTROL_SIZE_REM))
         .flex_none()
         .flex()
         .items_center()
@@ -260,20 +267,20 @@ pub fn reader_annotation_color_swatch(id: impl Into<ElementId>, hex: &'static st
 
 /// A compact text action in the annotation editor.
 pub fn reader_annotation_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
-    crate::selectable_button(outlined_text_button(id, label).h(px(READER_ANNOTATION_ACTION_HEIGHT)).rounded(px(RADIUS_SM)).border_color(theme.rule).bg(theme.page_bg), selected, theme)
+    crate::selectable_button(outlined_text_button(id, label).h(gpui::rems(SETTINGS_CONTROL_SIZE_REM)).rounded(px(RADIUS_SM)).border_color(theme.rule).bg(theme.page_bg), selected, theme)
 }
 
 /// Discarding an annotation, kept apart from the actions that keep it: an icon
 /// where the others are words, and the only thing in the panel wearing `danger`.
-pub fn reader_annotation_delete_button(id: impl Into<ElementId>, size: Pixels, theme: BrowserTheme) -> Button {
-    crate::outlined_icon_button(id, "Delete annotation", IconName::Delete, size, RADIUS_SM, theme).border_color(theme.rule).bg(theme.page_bg).text_color(theme.danger)
+pub fn reader_annotation_delete_button(id: impl Into<ElementId>, theme: BrowserTheme) -> Button {
+    crate::outlined_icon_button(id, "Delete annotation", IconName::Delete, theme).text_color(theme.danger)
 }
 
 /// Width of the disclosure column. Doubles as the row's left inset and as the
 /// per-depth indent step, so a nested title starts exactly where its parent's
 /// title does, one chevron further in.
-pub fn reader_settings_dropdown(viewport_height: Pixels, theme: BrowserTheme) -> Scrollable<Div> {
-    let available_height = (f32::from(viewport_height) - READER_TOOLBAR_HEIGHT - READER_SETTINGS_POPOVER_GAP - READER_SETTINGS_POPOVER_WINDOW_MARGIN).max(1.0);
+pub fn reader_settings_dropdown(window: &Window, theme: BrowserTheme) -> Scrollable<Div> {
+    let available_height = (f32::from(window.viewport_size().height) - reader_toolbar_size_px(window) - READER_SETTINGS_POPOVER_GAP - READER_SETTINGS_POPOVER_WINDOW_MARGIN).max(1.0);
     let max_height = available_height.min(READER_SETTINGS_MAX_HEIGHT);
     div()
         .on_mouse_down(MouseButton::Left, |_, _, cx| {
@@ -286,71 +293,56 @@ pub fn reader_settings_dropdown(viewport_height: Pixels, theme: BrowserTheme) ->
         .border_1()
         .border_color(theme.rule)
         .shadow(crate::overlay_shadow(theme))
-        .p(gpui::rems(READER_SETTINGS_PADDING_REM))
+        .p(px(READER_SETTINGS_PADDING))
         .flex()
         .flex_col()
-        .gap(gpui::rems(READER_SETTINGS_GAP_REM))
+        .gap(px(READER_SETTINGS_GAP))
         .bg(theme.page_bg)
 }
 
 pub fn reader_settings_section(label: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().w_full().flex().flex_col().gap(px(SPACE_XS)).child(div().pb(px(SPACE_XXS)).text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(label.into()))
+    reader_settings_group(theme).child(div().pb(px(SPACE_XXS)).text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(label.into()))
+}
+
+/// A settings group with no heading text, delineated by a border instead —
+/// for panels where the surrounding tabs or layout already make each group's
+/// purpose clear.
+pub fn reader_settings_group(theme: BrowserTheme) -> Div {
+    // Matching top/bottom padding keeps the first and last row equidistant
+    // from the group's own edges, so the group reads as centred rather than
+    // hugging its border. Horizontal padding lives here rather than on the
+    // tab body, so the border-bottom below it spans full width, edge to edge
+    // with the sidebar's own borders.
+    div().w_full().flex().flex_col().gap(px(SPACE_XS)).px(px(crate::CONTENT_INSET)).pt(px(SPACE_MD)).pb(px(SPACE_MD)).border_b_1().border_color(theme.rule)
 }
 
 pub fn reader_setting_row(label: impl Into<SharedString>) -> Div {
-    div().w_full().min_h(px(38.0)).flex().items_center().gap(px(SPACE_SM)).child(div().w(px(112.0)).flex_none().text_size(gpui::rems(TEXT_SM)).child(label.into())).child(div().flex_1())
+    div().w_full().min_h(gpui::rems(2.375)).flex().items_center().gap(px(SPACE_SM)).child(div().w(gpui::rems(7.0)).max_w(px(112.0)).flex_none().text_size(gpui::rems(TEXT_SM)).child(label.into())).child(div().flex_1())
 }
 
-fn reader_setting_value(value: impl Into<SharedString>, theme: BrowserTheme) -> Div {
+/// A button-group row: a small-caps label above a full-width choice group,
+/// rather than the stepper row's side-by-side label-and-value layout.
+pub fn reader_setting_row_smallcaps(label: impl Into<SharedString>, theme: BrowserTheme) -> Div {
     div()
-        .w(gpui::rems(SETTINGS_STEPPER_VALUE_WIDTH / 16.0))
-        .h(gpui::rems(SETTINGS_CONTROL_HEIGHT / 16.0))
+        .w_full()
         .flex()
-        .items_center()
-        .justify_center()
-        .bg(theme.page_bg)
-        .text_align(gpui::TextAlign::Center)
-        .text_size(gpui::rems(TEXT_SM))
-        .text_color(theme.text_muted)
-        .child(value.into())
-}
-
-pub fn reader_stepper_button(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: BrowserTheme) -> Button {
-    outlined_text_button(id, label).w(px(SETTINGS_CONTROL_HEIGHT)).h(px(SETTINGS_CONTROL_HEIGHT)).px_0().rounded(px(0.0)).border_0().bg(theme.page_bg).text_size(gpui::rems(TEXT_LG))
-}
-
-pub fn reader_stepper_group(decrement: Button, value: impl Into<SharedString>, increment: Button, theme: BrowserTheme) -> Div {
-    div()
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap(gpui::rems(SETTINGS_CONTROL_GAP / 16.0))
-        .overflow_hidden()
-        .rounded(px(RADIUS_SM))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.border)
-        .child(decrement)
-        .child(reader_setting_value(value, theme))
-        .child(increment)
+        .flex_col()
+        .gap(px(SPACE_XXS))
+        .child(div().text_size(gpui::rems(TEXT_XS)).font_features(crate::small_caps()).text_color(theme.text_muted).child(label.into()))
 }
 
 /// The query field. Grows with the bar instead of sitting at a fixed 260px:
 /// the search bar spans the window, and a stranded box with dead space beside
 /// it looks like a control that failed to lay out.
 pub fn reader_search_box(theme: BrowserTheme) -> Div {
-    div().flex_1().min_w_0().h(px(READER_TOOLBAR_CONTROL_HEIGHT)).overflow_hidden().rounded(px(RADIUS_SM)).border_1().border_color(theme.border).bg(theme.page_bg)
+    div().flex_1().min_w_0().h(gpui::rems(READER_TOOLBAR_SIZE_REM)).overflow_hidden().rounded(px(RADIUS_SM)).border_1().border_color(theme.border).bg(theme.page_bg)
 }
 
-/// Match navigation and dismissal. Icons rather than the `‹ › ×` glyphs these
-/// used to be: every other control in the reader is a phosphor icon, and text
-/// arrows sit on the baseline instead of centring in their button.
-pub fn reader_search_icon_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
-    crate::outlined_icon_button(id, label, icon, px(READER_TOOLBAR_CONTROL_HEIGHT), RADIUS_SM, theme).border_color(theme.rule).bg(theme.page_bg)
-}
-
+/// The search row: the toolbar's own shape, carrying the query field instead
+/// of document controls. (The toolbar's `min_w_0` comes along; inside a
+/// full-width row it can only help.)
 pub fn reader_search_bar(theme: BrowserTheme) -> Div {
-    div().h(px(READER_TOOLBAR_HEIGHT)).flex_none().w_full().px(px(crate::CONTENT_INSET)).flex().items_center().gap(px(SPACE_SM)).bg(theme.page_bg).border_b_1().border_color(theme.rule)
+    reader_toolbar(theme)
 }
 
 pub fn reader_footnote_panel(theme: BrowserTheme) -> Scrollable<Div> {
@@ -419,6 +411,15 @@ impl ReaderContextMenu {
     pub fn selection(mut self, on_highlight: impl Fn(&mut Window, &mut App) + 'static, on_cite: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self = self.begin_section();
         self.menu = self.menu.item(menu_item("Highlight", move |_, window, cx| on_highlight(window, cx))).item(menu_item("Cite", move |_, window, cx| on_cite(window, cx)));
+        self
+    }
+
+    /// The PDF reader has no citation format, but it shares the annotation
+    /// workflow with EPUB: a selection becomes a highlight whose editor holds
+    /// the optional note.
+    pub fn pdf_selection(mut self, on_highlight: impl Fn(&mut Window, &mut App) + 'static, on_copy: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self = self.begin_section();
+        self.menu = self.menu.item(menu_item("Highlight", move |_, window, cx| on_highlight(window, cx))).item(menu_item("Copy", move |_, window, cx| on_copy(window, cx)));
         self
     }
 
@@ -501,9 +502,9 @@ impl RenderOnce for ReaderImagePopup {
         let dismiss_modal = self.on_dismiss.clone();
         let dismiss_button = self.on_dismiss;
         let content = div().size_full().min_h_0().min_w_0().flex().flex_col().gap(px(SPACE_SM)).child(reader_state_note(self.uri, theme)).child(reader_content().child(reader_image_preview(self.image))).child(
-            reader_state_actions()
-                .child(reader_control_button("reader-image-copy", "Copy image", theme).on_click(move |_, window, cx| copy(window, cx)))
-                .child(reader_control_button("reader-image-close", "Close", theme).on_click(move |_, window, cx| dismiss_button(window, cx))),
+            crate::action_row()
+                .child(crate::topbar_action_button("reader-image-copy", "Copy image", IconName::Copy, theme).on_click(move |_, window, cx| copy(window, cx)))
+                .child(crate::topbar_action_button("reader-image-close", "Close", IconName::Close, theme).on_click(move |_, window, cx| dismiss_button(window, cx))),
         );
 
         ReaderModal::new(gpui::size(px(panel_width), px(panel_height)), content).on_dismiss(move |window, cx| dismiss_modal(window, cx))
@@ -560,6 +561,15 @@ pub fn reader_chrome_reveal() -> Stateful<Div> {
     div().id("reader-chrome-reveal").absolute().top_0().left_0().right_0().h(px(SPACE_SM))
 }
 
+/// Invisible strip along the left edge that brings a hidden sidebar back.
+///
+/// The sidebar is now the reader's only chrome and sits on the left, so this
+/// is where a pointer-driven reader reaches to bring it back — `top_0`'s
+/// counterpart for a reader whose chrome no longer lives along the top edge.
+pub fn reader_chrome_reveal_left() -> Stateful<Div> {
+    div().id("reader-chrome-reveal-left").absolute().top_0().bottom_0().left_0().w(px(SPACE_SM))
+}
+
 pub fn reader_content() -> Div {
     div().flex_1().min_h_0()
 }
@@ -572,11 +582,11 @@ pub fn reader_content() -> Div {
 /// document leaves paging keys working while settings are being adjusted.
 /// Without this the popover focuses itself and the reader's navigation keys go
 /// dead until the document is clicked again.
-pub fn reader_settings_popover(document_focus: Option<&gpui::FocusHandle>, theme: BrowserTheme) -> Popover {
+pub fn reader_settings_popover(document_focus: Option<&gpui::FocusHandle>, theme: BrowserTheme, window: &Window) -> Popover {
     // The trigger is vertically centered in the toolbar. Top-anchored GPUI
     // popovers begin at the trigger's top edge, so move this one past the
     // trigger and the remainder of the toolbar before drawing the panel.
-    let top_offset = (READER_TOOLBAR_HEIGHT + READER_TOOLBAR_CONTROL_HEIGHT) / 2.0 + READER_SETTINGS_POPOVER_GAP;
+    let top_offset = reader_toolbar_size_px(window) + READER_SETTINGS_POPOVER_GAP;
     Popover::new("reader-settings").anchor(gpui::Anchor::TopRight).top(px(top_offset)).p_0().when_some(document_focus, |popover, focus| popover.track_focus(focus)).trigger(reader_settings_trigger(theme).tooltip("Reader settings"))
 }
 
@@ -586,17 +596,19 @@ mod reader_settings_geometry_tests {
 
     #[test]
     fn settings_panel_begins_below_the_toolbar() {
-        let trigger_top = (READER_TOOLBAR_HEIGHT - READER_TOOLBAR_CONTROL_HEIGHT) / 2.0;
-        let top_offset = (READER_TOOLBAR_HEIGHT + READER_TOOLBAR_CONTROL_HEIGHT) / 2.0 + READER_SETTINGS_POPOVER_GAP;
+        let toolbar_size = READER_TOOLBAR_SIZE_REM * 16.0;
+        let trigger_top = 0.0;
+        let top_offset = toolbar_size + READER_SETTINGS_POPOVER_GAP;
 
-        assert_eq!(trigger_top + top_offset, READER_TOOLBAR_HEIGHT + READER_SETTINGS_POPOVER_GAP);
+        assert_eq!(trigger_top, 0.0, "reader controls must meet the top edge");
+        assert_eq!(trigger_top + top_offset, toolbar_size + READER_SETTINGS_POPOVER_GAP);
     }
 }
 
 const READER_SIDEBAR_MIN_WIDTH: f32 = 260.0;
 const READER_SIDEBAR_MAX_WIDTH: f32 = 520.0;
 
-fn clamp_reader_sidebar_width(width: f32) -> f32 {
+pub fn clamp_reader_sidebar_width(width: f32) -> f32 {
     width.clamp(READER_SIDEBAR_MIN_WIDTH, READER_SIDEBAR_MAX_WIDTH)
 }
 
@@ -655,7 +667,11 @@ impl RenderOnce for ReaderSplit {
             .overflow_hidden()
             .child(div().h_full().w(px(width)).min_w(px(width)).max_w(px(width)).flex_none().min_h_0().overflow_hidden().child(self.sidebar))
             .child(div().h_full().min_h_0().min_w_0().flex_1().overflow_hidden().child(self.document))
-            .child(div().id("reader-resize-handle").absolute().top_0().left(px(width - 4.0)).h_full().w(px(9.0)).cursor_col_resize().flex().justify_center().child(div().h_full().w(px(1.0)).bg(theme.border)).on_mouse_down(
+            // The divider is the sidebar's only outer boundary. Keep it a
+            // single `theme.rule` line, matching the sidebar header, tabs,
+            // and controls; the former sidebar border plus this handle made
+            // a visibly heavier two-tone seam.
+            .child(div().id("reader-resize-handle").absolute().top_0().left(px(width - 4.0)).h_full().w(px(9.0)).cursor_col_resize().flex().justify_center().child(div().h_full().w(px(1.0)).bg(theme.rule)).on_mouse_down(
                 MouseButton::Left,
                 move |_, _, cx| {
                     cx.stop_propagation();

@@ -1,1 +1,0 @@
-DELETE FROM library_subject WHERE path=?1 AND NOT EXISTS(SELECT 1 FROM subject_browse_member WHERE path=?1)

@@ -123,5 +123,5 @@ pub(crate) trait BrowseAdapter: Sized + 'static {
     fn prepare_book_detail(&mut self, _book: library_model::BookCardRow, _cover: Option<crate::library::widgets::LoadedCover>) {}
     fn clear_cached_book_detail(&mut self) {}
     fn show_cached_book_detail(&mut self) {}
-    fn hide_cached_book_detail(&mut self) {}
+    fn hide_cached_book_detail(&mut self, _cx: &mut App) {}
 }

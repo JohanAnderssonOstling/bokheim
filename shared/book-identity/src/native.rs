@@ -97,28 +97,28 @@ fn append_pdf_identity(file: &mut File, identity: ContentHash) -> io::Result<()>
     let count = file.read(&mut header)?;
     let base = header[..count].windows(5).position(|bytes| bytes == b"%PDF-").ok_or_else(|| invalid("invalid PDF header"))? as u64;
     file.seek(SeekFrom::Start(0))?;
-    let mut document = pdf_range_reader::catalog(&mut *file).map_err(invalid)?;
+    let mut document = pdf_range_reader::document_root(&mut *file).map_err(invalid)?;
     let root = document.trailer.get(b"Root").and_then(lopdf::Object::as_reference).map_err(invalid)?;
     let previous = document.xref_start;
-    let mut catalog = document.catalog().map_err(invalid)?.clone();
-    catalog.set(PDF_KEY, lopdf::Object::string_literal(identity.to_string()));
-    // Let lopdf escape/serialize the catalog and trailer. Only this catalog is
+    let mut root_dict = document.catalog().map_err(invalid)?.clone();
+    root_dict.set(PDF_KEY, lopdf::Object::string_literal(identity.to_string()));
+    // Let lopdf escape/serialize the root dictionary and trailer. Only this root is
     // rewritten; original streams and objects stay byte-for-byte in the prefix.
     document.objects.clear();
-    let mut catalog = lopdf::Object::Dictionary(catalog);
+    let mut root_object = lopdf::Object::Dictionary(root_dict);
     if let Some(state) = &document.encryption_state {
-        // Encrypt only the appended catalog with the original object key.
+        // Encrypt only the appended root with the original object key.
         // The existing Encrypt dictionary, file IDs and all original bytes stay intact.
-        lopdf::encryption::encrypt_object(state, root, &mut catalog).map_err(invalid)?;
+        lopdf::encryption::encrypt_object(state, root, &mut root_object).map_err(invalid)?;
     }
-    document.objects.insert(root, catalog);
+    document.objects.insert(root, root_object);
     document.reference_table.cross_reference_type = lopdf::xref::XrefType::CrossReferenceTable;
     document.trailer.remove(b"XRefStm");
     document.trailer.set("Prev", previous as i64);
     let mut serialized = Vec::new();
     document.save_to(&mut serialized)?;
     let object_header = format!("{} {} obj", root.0, root.1);
-    let object_start = serialized.windows(object_header.len()).position(|part| part == object_header.as_bytes()).ok_or_else(|| invalid("missing serialized PDF catalog"))?;
+    let object_start = serialized.windows(object_header.len()).position(|part| part == object_header.as_bytes()).ok_or_else(|| invalid("missing serialized PDF root"))?;
     let xref = serialized.windows(5).rposition(|part| part == b"\nxref").ok_or_else(|| invalid("missing serialized PDF xref"))?;
     let trailer = serialized.windows(8).rposition(|part| part == b"trailer\n").ok_or_else(|| invalid("missing serialized PDF trailer"))?;
     let startxref = serialized.windows(9).rposition(|part| part == b"startxref").ok_or_else(|| invalid("missing serialized PDF pointer"))?;

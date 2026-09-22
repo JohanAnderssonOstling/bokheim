@@ -5,7 +5,6 @@ edition = "2021"
 publish = false
 
 [features]
-storage-contract-tests = []
 web-runtime-tests = ["client-platform-web/web-runtime-tests", "book-access/web-runtime-tests", "client-platform-runtime/web-runtime-tests"]
 app-integration-tests = []
 default = ["desktop"]
@@ -15,29 +14,30 @@ watcher = ["scanner", "dep:notify"]
 kobo = ["client-platform-kobo/device"]
 
 [dependencies]
+client-runtime = { path = "../client-runtime" }
 book-model = { path = "../../shared/book-model" }
-catalog-model = { path = "../../shared/catalog-model" }
-library-files = { path = "../library-files" }
+library-files = { path = "crates/library-files" }
 client-platform-runtime = { path = "../platforms/runtime" }
-book-access = { path = "../book-access", features = ["pdf"] }
+book-access = { path = "crates/book-access", features = ["pdf"] }
 pdf-view-common = { path = "../../apps/reader/crates/pdf/view-common" }
-book-enrichment = { path = "../../shared/book-enrichment" }
-book-inspection = { path = "../../shared/book-inspection" }
+book-enrichment = { path = "crates/book-enrichment" }
+book-inspection = { path = "crates/book-inspection" }
 book-identity = { path = "../../shared/book-identity" }
-book-metadata = { path = "../book-metadata" }
-asset-transfer = { path = "../sync/asset-transfer" }
+book-metadata = { path = "crates/book-metadata" }
+cpu-host = { path = "crates/cpu-host" }
+asset-transfer = { path = "crates/asset-transfer" }
+import-pipeline = { path = "crates/import-pipeline" }
 metadata-client = { path = "crates/metadata-client" }
 library-model = { path = "../library-model" }
-client-library = { path = "../library", default-features = false, features = ["audiobook-metadata", "scanner"] }
-library-runtime = { path = "../library-runtime" }
-library-database = { path = "../library-database" }
+library-runtime = { path = "crates/library-runtime" }
+library-database = { path = "crates/library-database" }
 metadata-contract = { path = "../../shared/metadata-contract" }
 subject-projection = { path = "../../shared/subject-projection" }
-library-replica = { path = "../library-replica" }
+library-replica = { path = "crates/library-replica" }
 account-client = { path = "../account-client" }
 sync-engine = { path = "crates/sync-engine" }
-sync-transport = { path = "../sync/transport" }
-thumbnail = { path = "../thumbnail" }
+sync-transport = { path = "crates/sync-transport" }
+thumbnail = { path = "crates/thumbnail" }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

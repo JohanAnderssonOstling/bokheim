@@ -1,1 +1,0 @@
-SELECT checksum,size FROM source WHERE hash=?1

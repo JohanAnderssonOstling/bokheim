@@ -5,22 +5,33 @@
 //! running sessions for the current process.
 
 use crate::{BackendError, LibraryId};
+use std::{
+    collections::HashMap,
+    sync::{Mutex, MutexGuard},
+};
 
 use super::{LibraryHandle, LibraryRuntimeSpec};
 
 #[derive(Default)]
 pub struct LibraryDirectory {
-    sessions: library_runtime::directory::SessionDirectory<LibraryHandle>,
+    handles: Mutex<HashMap<LibraryId, LibraryHandle>>,
+    lifecycle: Mutex<()>,
 }
 
 impl LibraryDirectory {
     /// Serializes open/retire transitions with their registry-policy update.
     pub fn lock_lifecycle(&self) -> Result<std::sync::MutexGuard<'_, ()>, BackendError> {
-        self.sessions.lock_lifecycle().map_err(BackendError::operation)
+        self.lifecycle.lock().map_err(|_| BackendError::message("library lifecycle lock is poisoned"))
     }
 
     pub fn get(&self, id: &LibraryId) -> Result<LibraryHandle, BackendError> {
-        self.sessions.get(id).map_err(BackendError::operation)?.ok_or_else(|| BackendError::message(format!("library {id} is not open")))
+        self.try_get(id)?.ok_or_else(|| BackendError::message(format!("library {id} is not open")))
+    }
+
+    /// Resolves an optional runtime without treating a registered but
+    /// unavailable library as a directory failure.
+    pub fn try_get(&self, id: &LibraryId) -> Result<Option<LibraryHandle>, BackendError> {
+        Ok(self.lock_handles()?.get(id).cloned())
     }
 
     /// Opens exactly one session for this process. Holding the directory lock
@@ -33,17 +44,19 @@ impl LibraryDirectory {
     /// explicitly through `get`.
     pub fn ensure_open(&self, spec: LibraryRuntimeSpec, executor: &crate::executor::BackendExecutor) -> Result<bool, BackendError> {
         let id = spec.config.id;
-        self.sessions.insert_if_absent(id, || LibraryHandle::open(spec, executor)).map_err(|error| match error {
-            library_runtime::directory::InsertError::Directory(error) => BackendError::operation(error),
-            library_runtime::directory::InsertError::Open(error) => error,
-        })
+        let mut handles = self.lock_handles()?;
+        if handles.contains_key(&id) {
+            return Ok(false);
+        }
+        handles.insert(id, LibraryHandle::open(spec, executor)?);
+        Ok(true)
     }
 
     /// Removes a session from the process directory and tells its actor to
     /// stop. Registry changes remain app policy; retirement is session
     /// lifecycle and belongs here.
     pub fn retire(&self, id: &LibraryId) -> Result<(), BackendError> {
-        let handle = self.sessions.remove(id).map_err(BackendError::operation)?;
+        let handle = self.lock_handles()?.remove(id);
         if let Some(handle) = handle {
             handle.shutdown();
         }
@@ -51,7 +64,7 @@ impl LibraryDirectory {
     }
 
     pub fn all(&self) -> Result<Vec<LibraryHandle>, BackendError> {
-        self.sessions.all().map_err(BackendError::operation)
+        Ok(self.lock_handles()?.values().cloned().collect())
     }
 
     /// Collects presentation snapshots from the open library actors. The
@@ -66,8 +79,12 @@ impl LibraryDirectory {
         Ok(snapshots)
     }
 
-    pub fn shutdown_all(&mut self) {
-        for handle in self.sessions.drain() {
+    fn lock_handles(&self) -> Result<MutexGuard<'_, HashMap<LibraryId, LibraryHandle>>, BackendError> {
+        self.handles.lock().map_err(|_| BackendError::message("library directory lock is poisoned"))
+    }
+
+    pub fn shutdown_all(&self) {
+        for (_, handle) in self.handles.lock().unwrap_or_else(|error| error.into_inner()).drain() {
             handle.shutdown();
         }
     }

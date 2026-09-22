@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use bokheim_backend::{AppDataLocation, host::BackendLaunch};
-use bokheim_backend::host::LIBRARY_MANIFEST_FILENAME;
+use app::host::LIBRARY_MANIFEST_FILENAME;
+use app::{AppDataLocation, host::BackendLaunch};
 use gpui::Application;
 use gpui_kobo::{KoboExperienceMode, KoboPlatform, KoboPlatformOptions, PageButtonBehavior};
 
@@ -15,10 +15,7 @@ fn log_bluetooth_diagnostics() {
     fn log_directory(label: &str, path: &str) {
         match std::fs::read_dir(path) {
             Ok(entries) => {
-                let mut names = entries
-                    .filter_map(|entry| entry.ok())
-                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                    .collect::<Vec<_>>();
+                let mut names = entries.filter_map(|entry| entry.ok()).map(|entry| entry.file_name().to_string_lossy().into_owned()).collect::<Vec<_>>();
                 names.sort();
                 println!("KOBO_BLUETOOTH {label} path={path} entries={:?}", names);
             }
@@ -35,12 +32,7 @@ fn log_bluetooth_diagnostics() {
 
     fn log_command(label: &str, command: &str, arguments: &[&str]) {
         match std::process::Command::new(command).args(arguments).output() {
-            Ok(output) => println!(
-                "KOBO_BLUETOOTH command={command} label={label} status={} stdout={:?} stderr={:?}",
-                output.status,
-                String::from_utf8_lossy(&output.stdout).trim(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
+            Ok(output) => println!("KOBO_BLUETOOTH command={command} label={label} status={} stdout={:?} stderr={:?}", output.status, String::from_utf8_lossy(&output.stdout).trim(), String::from_utf8_lossy(&output.stderr).trim()),
             Err(error) => println!("KOBO_BLUETOOTH command={command} label={label} error={error}"),
         }
     }
@@ -50,12 +42,7 @@ fn log_bluetooth_diagnostics() {
     log_directory("network_class", "/sys/class/net");
     log_directory("firmware_rtl_bt", "/lib/firmware/rtl_bt");
     log_directory("firmware_root", "/lib/firmware");
-    for path in [
-        "/sys/class/rfkill/rfkill0/type",
-        "/sys/class/rfkill/rfkill0/name",
-        "/sys/class/rfkill/rfkill0/soft",
-        "/sys/class/rfkill/rfkill0/hard",
-    ] {
+    for path in ["/sys/class/rfkill/rfkill0/type", "/sys/class/rfkill/rfkill0/name", "/sys/class/rfkill/rfkill0/soft", "/sys/class/rfkill/rfkill0/hard"] {
         log_file("rfkill", path);
     }
     log_command("alsa_devices", "aplay", &["-l"]);
@@ -81,10 +68,17 @@ fn log_bluetooth_diagnostics() {
 fn main() {
     #[cfg(target_arch = "arm")]
     if std::env::args().nth(1).as_deref() == Some("--wifi-power-ioctl") {
-        let enabled = match std::env::args().nth(2).as_deref() { Some("0") => false, Some("1") => true, _ => std::process::exit(2) };
+        let enabled = match std::env::args().nth(2).as_deref() {
+            Some("0") => false,
+            Some("1") => true,
+            _ => std::process::exit(2),
+        };
         let status = match kobo_device::wifi::set_radio_power(enabled) {
             Ok(()) => 0,
-            Err(error) => { eprintln!("Kobo Wi-Fi power ioctl failed: {error}"); 1 }
+            Err(error) => {
+                eprintln!("Kobo Wi-Fi power ioctl failed: {error}");
+                1
+            }
         };
         std::process::exit(status);
     }
@@ -99,7 +93,7 @@ fn main() {
     let libraries_dir = std::env::var_os("BOKHEIM_KOBO_LIBRARIES_DIR").map(PathBuf::from).unwrap_or_else(default_libraries_dir);
     let backend_context = backend_context.with_library_discovery(libraries_dir.clone(), "Kobo".to_owned(), fallback_library_dir(&libraries_dir));
     println!("KOBO_APP_STARTUP phase=libraries_ready elapsed_ms={}", startup_started.elapsed().as_millis());
-    bokheim_backend::init_logging();
+    app::init_logging();
     #[cfg(target_arch = "arm")]
     log_bluetooth_diagnostics();
 

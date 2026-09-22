@@ -36,11 +36,7 @@ impl Emphasis {
         if self == Self::NONE {
             return None;
         }
-        Some(HighlightStyle {
-            font_style: (self.italic > 0).then_some(FontStyle::Italic),
-            font_weight: (self.bold > 0).then_some(FontWeight::BOLD),
-            ..Default::default()
-        })
+        Some(HighlightStyle { font_style: (self.italic > 0).then_some(FontStyle::Italic), font_weight: (self.bold > 0).then_some(FontWeight::BOLD), ..Default::default() })
     }
 }
 

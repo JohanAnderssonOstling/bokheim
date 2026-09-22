@@ -1,1 +1,0 @@
-SELECT COUNT(*) FROM book_contributor WHERE author_identity_id=?1

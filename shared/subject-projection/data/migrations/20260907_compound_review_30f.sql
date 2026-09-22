@@ -1,0 +1,15 @@
+BEGIN IMMEDIATE;
+update concept set preferred_label='Computer Systems & Hardware' where concept_id=5574;
+update concept set preferred_label='IT Applications & Management' where concept_id=5577;
+update concept set preferred_label='Art Themes & Movements' where concept_id=5671;
+update concept set preferred_label='Teaching & Learning' where concept_id=5673;
+update concept set preferred_label='Architecture Theory & Practice' where concept_id=5698;
+update concept set preferred_label='Scientific Methods & Tools' where concept_id=5724;
+update concept set preferred_label='Home Building & Renovation' where concept_id=5919;
+update concept set preferred_label='Telecom & Broadcasting' where concept_id=5955;
+update concept set preferred_label='Library Systems & Services' where concept_id=6107;
+update concept set preferred_label='Comparative & Intl. IP Law' where concept_id=11740;
+update concept set preferred_label='Comparative Economic Law' where concept_id=11750;
+update concept set preferred_label='WWI: Mesopotamia, Kut & Assyria' where concept_id=10331;
+update concept set preferred_label='Naples & Two Sicilies History' where concept_id=10498;
+COMMIT;

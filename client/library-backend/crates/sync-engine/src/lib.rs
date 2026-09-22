@@ -92,11 +92,22 @@ pub struct SyncEngineConfig<'a, S: SyncStore> {
 
 impl<'a, S: SyncStore> SyncEngine<'a, S> {
     pub fn new(config: SyncEngineConfig<'a, S>) -> Self {
-        Self { store: config.store, http_client: config.http_client, library_id: config.library_id, replica_id: config.replica_id, credentials: config.credentials, inventory_checked: AtomicBool::new(config.inventory_checked.load(Ordering::Acquire)) }
+        Self {
+            store: config.store,
+            http_client: config.http_client,
+            library_id: config.library_id,
+            replica_id: config.replica_id,
+            credentials: config.credentials,
+            inventory_checked: AtomicBool::new(config.inventory_checked.load(Ordering::Acquire)),
+        }
     }
 
-    pub fn inventory_checked(&self) -> bool { self.inventory_checked.load(Ordering::Acquire) }
-    pub fn store(&self) -> &S { &self.store }
+    pub fn inventory_checked(&self) -> bool {
+        self.inventory_checked.load(Ordering::Acquire)
+    }
+    pub fn store(&self) -> &S {
+        &self.store
+    }
 
     /// Publish only committed local mutations. Exchange replies may contain a
     /// pull page, but an inactive library must neither apply nor advance it.
@@ -151,7 +162,9 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
 
     /// Independent, resumable repair. Ordinary exchange never awaits this audit.
     pub async fn repair_inventory(&self) -> Result<(), SyncError> {
-        if self.inventory_checked.load(Ordering::Acquire) { return Ok(()); }
+        if self.inventory_checked.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let mut after = self.store.inventory_checkpoint().await.map_err(SyncError::failed)?;
         loop {
             let mut trace = sync_transport::PerformanceTrace::new("inventory_page", "load_local");
@@ -232,9 +245,7 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
         Ok(validated.issues)
     }
 
-    async fn exchange_until_idle(
-        &self, credentials: &sync_transport::SyncCredentials, mut cursor: SyncCursor, remaining: &mut sync_common::PushBatcher, result: &mut SyncOutcome,
-    ) -> Result<(), SyncError> {
+    async fn exchange_until_idle(&self, credentials: &sync_transport::SyncCredentials, mut cursor: SyncCursor, remaining: &mut sync_common::PushBatcher, result: &mut SyncOutcome) -> Result<(), SyncError> {
         let mut page_number = 0_u64;
         loop {
             page_number += 1;
@@ -253,7 +264,9 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
             if let Err(error) = sync_transport::validate_pull_batch(&response.pull, cursor) {
                 // Preserve the old failure policy: a malformed pull response
                 // must not discard independently valid push acknowledgments.
-                if !completed.is_empty() { self.store.acknowledge_mutations(&completed).await.map_err(SyncError::failed)?; }
+                if !completed.is_empty() {
+                    self.store.acknowledge_mutations(&completed).await.map_err(SyncError::failed)?;
+                }
                 return Err(SyncError::failed(error));
             }
             cursor = response.pull.next_cursor;

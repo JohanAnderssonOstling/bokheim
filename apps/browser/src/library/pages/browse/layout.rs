@@ -157,6 +157,7 @@ pub(super) fn paginator_groups<A: BrowseAdapter>(
     chip_icon: components::NavigationIcon,
     books: Rc<Vec<Entity<A::Book>>>,
     detailed_books: bool,
+    cover_text: app_preferences::CoverText,
     cursor: Rc<Cell<Option<usize>>>,
     selected: Entity<BrowseSelectionState>,
     // The chip a drag is currently over, which is drawn as the drop it would be.
@@ -196,7 +197,7 @@ pub(super) fn paginator_groups<A: BrowseAdapter>(
                 let split_page = page.clone();
                 let menu_page = page.clone();
                 let menu_selected = selected.clone();
-                let height = rems(components::COMPACT_HIERARCHY_ITEM_HEIGHT_REM).to_pixels(window.rem_size()) + px(components::COMPACT_HIERARCHY_ITEM_HEIGHT_OFFSET);
+                let height = rems(components::COMPACT_HIERARCHY_ITEM_HEIGHT_REM).to_pixels(window.rem_size());
                 // Chips are declared first, so a chip's flat child index is its
                 // position in this list.
                 //
@@ -303,7 +304,7 @@ pub(super) fn paginator_groups<A: BrowseAdapter>(
         let child_index = chips.len() + book_index;
         let child = PaginatorChild::new(move |_, cx| {
             // Identified because a drag source has to be a stateful element.
-            let mut frame = div().id(SharedString::from(format!("browse-book-frame-{child_index}"))).w_full().min_w_0().child(rendered_book.clone());
+            let mut frame = div().id(SharedString::from(format!("browse-book-frame-{child_index}"))).w_full().h_full().min_w_0().child(rendered_book.clone());
             let selected_now = selected.read(cx).indices.clone();
             if let Some(source) = source
                 && let Some(targets) = drag_targets::<A>(child_index, &drag_chips, &drag_groups, &drag_books, &selected_now, source, cx)
@@ -323,7 +324,7 @@ pub(super) fn paginator_groups<A: BrowseAdapter>(
     let mut groups = Vec::with_capacity(2);
     if !chip_children.is_empty() {
         let policy =
-            PaginatorGroupPolicy::new(chip_width, PaginatorSizing::rems(rems(components::COMPACT_HIERARCHY_ITEM_HEIGHT_REM)).with_pixels(px(components::COMPACT_HIERARCHY_ITEM_HEIGHT_OFFSET)), px(components::COMPACT_HIERARCHY_ITEM_ROW_GAP))
+            PaginatorGroupPolicy::new(chip_width, PaginatorSizing::rems(rems(components::COMPACT_HIERARCHY_ITEM_HEIGHT_REM)), px(components::COMPACT_HIERARCHY_ITEM_ROW_GAP))
                 .with_gap(px(components::COMPACT_HIERARCHY_ITEM_ROW_GAP))
                 .intrinsic()
                 .flush_edges()
@@ -362,7 +363,7 @@ pub(super) fn paginator_groups<A: BrowseAdapter>(
         }
     }
     if !book_children.is_empty() {
-        groups.push(PaginatorGroup::new(book_card_policy(detailed_books), book_children));
+        groups.push(PaginatorGroup::new(book_card_policy(detailed_books, cover_text), book_children));
     }
     groups
 }

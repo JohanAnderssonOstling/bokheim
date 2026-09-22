@@ -1,1 +1,0 @@
-INSERT INTO book(content_hash, title, added_at, format) VALUES(?1, 'Reader state', 1, 'epub')

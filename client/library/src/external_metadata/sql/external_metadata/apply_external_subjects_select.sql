@@ -1,1 +1,0 @@
-SELECT book_metadata FROM book WHERE content_hash=?1 AND deleted_at IS NULL

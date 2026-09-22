@@ -74,15 +74,6 @@
 	}
 }
 
-{$BOKHEIM_CATALOG_DOMAIN} {
-	header {
-		Strict-Transport-Security "max-age=31536000"
-		-Server
-	}
-
-	reverse_proxy 127.0.0.1:8090
-}
-
 {$BOKHEIM_METADATA_DOMAIN:meta.bokheim.se} {
 	header {
 		Strict-Transport-Security "max-age=31536000"
@@ -90,7 +81,7 @@
 		-Server
 	}
 
-	@metadata_api path /health /v1/enrichment /v2/enrichment /v2/edition-identities
+	@metadata_api path /health /v1/enrichment /v2/enrichment /v2/edition-identities /v2/audiobooks/audible
 	handle @metadata_api {
 		reverse_proxy 127.0.0.1:8091
 	}

@@ -1,1 +1,0 @@
-UPDATE audible_enrichment_jobs SET status='resolving',claim_token=?2,lease_until=?3,updated_at=?4 WHERE content_hash=?1

@@ -1,6 +1,7 @@
 //! PDF projection of shared reader annotations.
 
-use book_model::{AnnotationStyle, ReaderAnnotation};
+use book_model::{AnnotationStyle};
+use library_backend::{ReaderAnnotation};
 use pdf_reader_core::NormalizedRect;
 use pdf_view_gpui::{PdfAnnotationOverlay, PdfAnnotationStyle};
 
@@ -62,6 +63,8 @@ pub(super) fn imported_annotations(content_hash: content_address::ContentHash, m
             note: a.note.clone(),
             created_at: 0,
             modified_at: 0,
+            toc_ordinal: None,
+            progress: None,
         })
         .collect()
 }

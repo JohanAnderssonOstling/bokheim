@@ -8,10 +8,16 @@ impl<T, C> Connection<T, C> {
     pub fn new(endpoint: T, generation: u64, startup: C) -> Self {
         Self { endpoint, generation, startup: Some(startup) }
     }
-    pub fn accepts(&self, generation: u64) -> bool { self.generation == generation }
-    pub fn waiting(&self, generation: u64) -> bool { self.accepts(generation) && self.startup.is_some() }
+    pub fn accepts(&self, generation: u64) -> bool {
+        self.generation == generation
+    }
+    pub fn waiting(&self, generation: u64) -> bool {
+        self.accepts(generation) && self.startup.is_some()
+    }
     pub fn ready(&mut self, generation: u64) {
-        if self.accepts(generation) { self.startup.take(); }
+        if self.accepts(generation) {
+            self.startup.take();
+        }
     }
 }
 #[cfg(test)]

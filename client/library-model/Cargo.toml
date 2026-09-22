@@ -10,7 +10,6 @@ random-ids = ["uuid/v4", "book-model/random-ids"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-catalog-model = { path = "../../shared/catalog-model" }
 content-address = { path = "../../shared/content-address" }
 book-model = { path = "../../shared/book-model", default-features = false }
 unicode-normalization.workspace = true

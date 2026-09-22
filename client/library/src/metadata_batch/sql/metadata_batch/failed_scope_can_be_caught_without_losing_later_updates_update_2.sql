@@ -1,1 +1,0 @@
-UPDATE book SET title='Retained' WHERE content_hash=?1

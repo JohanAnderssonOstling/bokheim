@@ -1,1 +1,0 @@
-UPDATE book_dir SET deleted_at=NULL,trash_origin_dir_id=NULL WHERE trash_origin_dir_id=?1

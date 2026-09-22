@@ -1,8 +1,9 @@
 //! PDF annotation loading, editing, navigation, and sidebar presentation.
 
+use book_model::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, annotation_progress};
+use library_backend::{ReaderAnnotation};
 use gpui::prelude::*;
-use gpui::{Context, Focusable, Window};
-use book_model::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, ReaderAnnotation};
+use gpui::{Context, Window};
 use pdf_reader_core::NormalizedRect;
 use ui_components as components;
 
@@ -11,7 +12,6 @@ use crate::invalidation::Component;
 use crate::pdf::marks::annotation_overlays;
 use crate::shell::annotation_editor;
 use crate::shell::persistence;
-use crate::shell::state_panel::{self, SidebarPanel};
 
 impl PdfReaderView {
     pub(super) fn load_reader_state(&self, cx: &mut Context<Self>) {
@@ -37,7 +37,9 @@ impl PdfReaderView {
         self.pdf.update(cx, |pdf, cx| pdf.set_annotations(overlays, cx));
     }
 
-    pub(super) fn create_annotation(&mut self, open_notes: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Mirrors EPUB's context-menu action: create a highlight and select it so
+    /// its editor is immediately available for an optional note.
+    pub(super) fn create_annotation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(selection) = self.pdf.read(cx).selection_snapshot() else { return };
         let rects = selection.rects.iter().map(|rect| PdfAnnotationRect::new(rect.left(), rect.top(), rect.width(), rect.height())).collect::<Vec<_>>();
         let anchor = AnnotationAnchor::pdf(PdfAnnotationAnchor::new(selection.page_index as u32, rects, None));
@@ -52,19 +54,13 @@ impl PdfReaderView {
             note: String::new(),
             created_at: now,
             modified_at: now,
+            toc_ordinal: self.toc.ordinal_at(selection.page_index).map(|ordinal| ordinal as i64),
+            progress: annotation_progress(selection.page_index as f64 + 1.0, self.page_count as f64),
         };
-        if open_notes {
-            self.annotation_popup_anchor = Some(window.mouse_position());
-            state_panel::select_panel(&mut self.sidebar, SidebarPanel::Annotations, cx);
-            self.pdf.update(cx, |pdf, cx| pdf.set_active_annotation(Some(annotation.id.clone()), cx));
-        }
         let annotation_id = annotation.id.clone();
         self.marks.prepend(annotation, "save PDF annotation");
-        if open_notes {
-            let note = self.marks.select(annotation_id);
-            self.annotation_note_input.update(cx, |input, cx| input.set_value(note, window, cx));
-            self.annotation_note_input.read(cx).focus_handle(cx).focus(window, cx);
-        }
+        let note = self.marks.select(annotation_id);
+        self.annotation_note_input.update(cx, |input, cx| input.set_value(note, window, cx));
         self.refresh_annotation_overlays(cx);
         crate::invalidation::notify(cx, Component::PdfShell, "annotation_created");
     }
@@ -122,11 +118,9 @@ impl PdfReaderView {
         });
     }
 
-    pub(super) fn render_annotations(&self, outline_available: bool, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let theme = components::browser_theme(cx);
+    pub(super) fn render_annotations_body(&self, theme: components::BrowserTheme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let target = cx.entity();
-        let panel = components::reader_state_panel(theme).child(self.render_sidebar_tabs(true, outline_available, cx));
-        panel
+        components::reader_state_panel(theme)
             .children(crate::shell::state_panel::reader_state_rows(
                 &target,
                 &self.marks,

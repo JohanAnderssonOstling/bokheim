@@ -1,1 +1,0 @@
-SELECT content_hash FROM book WHERE content_hash=printf('%064x',1)

@@ -1,6 +1,8 @@
 #![cfg(target_family = "wasm")]
 
-use bokheim_backend::{host::BackendWorkerHost, AppDataLocation, AppStartupState, host::AppWorkerClientMessage, host::AppWorkerStartupMessage, host::WorkerDispatchResult, host::WorkerSubscription, host::decode_worker_message, host::encode_worker_message};
+use app::{
+    AppDataLocation, AppStartupState, host::AppWorkerClientMessage, host::AppWorkerStartupMessage, host::BackendWorkerHost, host::WorkerDispatchResult, host::WorkerSubscription, host::decode_worker_message, host::encode_worker_message,
+};
 use futures_channel::oneshot;
 use futures_util::future::{Either, select};
 use std::cell::{Cell, RefCell};
@@ -20,7 +22,7 @@ thread_local! {
 enum StartupState {
     Initializing,
     Ready,
-    Failed(String),
+    Failed(app::BackendError),
 }
 
 fn worker_scope() -> DedicatedWorkerGlobalScope {
@@ -30,7 +32,7 @@ fn worker_scope() -> DedicatedWorkerGlobalScope {
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
 pub fn start() -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
-    bokheim_backend::host::web::network_client::install()?;
+    app::host::web::network_client::install()?;
     transport::install()?;
     wasm_bindgen_futures::spawn_local(async {
         finish_initialize(initialize().await);
@@ -38,13 +40,13 @@ pub fn start() -> Result<(), JsValue> {
     Ok(())
 }
 
-async fn initialize() -> Result<(BackendWorkerHost, AppStartupState), String> {
+async fn initialize() -> Result<(BackendWorkerHost, AppStartupState), app::BackendError> {
     let backend = BackendWorkerHost::initialize(AppDataLocation::PlatformLocal("bokheim".to_owned())).await?;
     let startup = backend.startup_state()?;
     Ok((backend, startup))
 }
 
-fn finish_initialize(result: Result<(BackendWorkerHost, AppStartupState), String>) {
+fn finish_initialize(result: Result<(BackendWorkerHost, AppStartupState), app::BackendError>) {
     match result {
         Ok((backend, _)) => {
             BACKEND.with(|slot| *slot.borrow_mut() = Some(backend));
@@ -55,7 +57,7 @@ fn finish_initialize(result: Result<(BackendWorkerHost, AppStartupState), String
         Err(error) => {
             STARTUP.with(|state| *state.borrow_mut() = StartupState::Failed(error.clone()));
             connect_pending_ports();
-            post_control("backend_failed", Some(&error));
+            post_control("backend_failed", Some(&error.to_string()));
             worker_scope().close();
         }
     }
@@ -85,28 +87,14 @@ pub fn connect(port: MessagePort) {
         return;
     }
 
-    let disconnected = install_request_handler(port.clone());
-    let diagnostics = bokheim_backend::host::subscribe_web_diagnostics();
-    let diagnostic_port = port.clone();
-    wasm_bindgen_futures::spawn_local(async move {
-        let mut disconnected = Box::pin(disconnected);
-        loop {
-            match select(Box::pin(diagnostics.recv()), disconnected).await {
-                Either::Left((Ok(message), pending_disconnect)) => {
-                    disconnected = pending_disconnect;
-                    if !post_message(&diagnostic_port, &AppWorkerStartupMessage::Diagnostic { message }) { break; }
-                }
-                Either::Left((Err(_), _)) | Either::Right(_) => break,
-            }
-        }
-    });
+    install_request_handler(port.clone());
     port.start();
     let startup = STARTUP.with(|state| match &*state.borrow() {
         StartupState::Initializing => unreachable!("initializing connections are queued"),
         StartupState::Ready => BACKEND.with(|slot| {
             slot.borrow()
                 .as_ref()
-                .ok_or_else(|| "backend is not initialized".to_owned())
+                .ok_or_else(|| app::BackendError::message("backend is not initialized"))
                 .and_then(BackendWorkerHost::startup_state)
                 .map(|startup| AppWorkerStartupMessage::Ready { startup })
                 .unwrap_or_else(|error| AppWorkerStartupMessage::Failed { error })
@@ -131,7 +119,9 @@ fn install_request_handler(port: MessagePort) -> oneshot::Receiver<()> {
     let on_message = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
         if event.data().as_string().as_deref() == Some("disconnect") {
             alive.set(false);
-            if let Some(disconnect) = disconnect.take() { let _ = disconnect.send(()); }
+            if let Some(disconnect) = disconnect.take() {
+                let _ = disconnect.send(());
+            }
             for (_, cancellation) in cancellations.borrow_mut().drain() {
                 let _ = cancellation.send(());
             }
@@ -166,25 +156,23 @@ fn install_request_handler(port: MessagePort) -> oneshot::Receiver<()> {
                 (Ok(request), Some(backend)) => {
                     let id = request.id;
                     if request.is_resolve_book() {
-                        let _ = post_message(
-                            &port,
-                            &AppWorkerStartupMessage::Diagnostic {
-                                message: format!("resolve_book phase=request_received request_id={id}"),
-                            },
-                        );
+                        let _ = post_message(&port, &AppWorkerStartupMessage::Diagnostic { message: format!("resolve_book phase=request_received request_id={id}") });
                     }
-                    web_sys::console::info_1(&JsValue::from_str(&format!(
-                        "backend phase=request_received id={id}"
-                    )));
+                    web_sys::console::info_1(&JsValue::from_str(&format!("backend phase=request_received id={id}")));
                     let dispatch = if let Some(cancelled) = playback_cancel.take() {
                         match select(Box::pin(backend.dispatch(request)), cancelled).await {
-                            Either::Left((result, pending)) => { playback_cancel = Some(pending); result }
+                            Either::Left((result, pending)) => {
+                                playback_cancel = Some(pending);
+                                result
+                            }
                             Either::Right(_) => return,
                         }
-                    } else { backend.dispatch(request).await };
+                    } else {
+                        backend.dispatch(request).await
+                    };
                     (id, dispatch)
                 }
-                (Ok(request), None) => (request.id, Err("backend is not initialized".to_owned())),
+                (Ok(request), None) => (request.id, Err(app::BackendError::message("backend is not initialized"))),
                 (Err(error), _) => (0, Err(error)),
             };
             let (result, subscription) = match dispatch {

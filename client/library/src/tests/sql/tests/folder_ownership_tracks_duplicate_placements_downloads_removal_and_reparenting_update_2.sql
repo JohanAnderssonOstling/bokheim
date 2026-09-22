@@ -1,1 +1,0 @@
-UPDATE book_dir SET deleted_at=1 WHERE dir_id=?1 AND book_row_id=?2

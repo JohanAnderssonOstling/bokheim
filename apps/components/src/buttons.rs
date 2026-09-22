@@ -1,18 +1,16 @@
 use gpui::prelude::*;
-use gpui::{ElementId, Length, SharedString, px};
+use gpui::{ElementId, SharedString, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Disableable, Icon, IconName, Sizable};
 
-use crate::{BrowserTheme, SPACE_MD, TEXT_SM, TOPBAR_ACTION_HEIGHT};
+use crate::{BrowserTheme, SPACE_MD, TEXT_SM, TOPBAR_ACTION_HEIGHT_REM};
 
 /// Common entry point for interactive controls.
 ///
 /// This is the shared base for all button-like controls, so pointer behavior
 /// stays consistent even when call sites use different variants.
 pub fn base_button(id: impl Into<ElementId>) -> Button {
-    Button::new(id)
-        .cursor_pointer()
-        .hover(|style| style.bg(BrowserTheme::default().hover))
+    Button::new(id).cursor_pointer().hover(|style| style.bg(BrowserTheme::default().hover))
 }
 
 /// Square, with a light border distinct from the background.
@@ -26,10 +24,13 @@ pub(crate) fn outlined_button(id: impl Into<ElementId>, theme: BrowserTheme) -> 
     base_button(id).outline().border_color(theme.rule)
 }
 
-/// An outlined square icon action. Semantic wrappers own their dimensions and
-/// any contextual colour or background treatment.
-pub fn outlined_icon_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: impl Into<Icon>, size: impl Into<Length> + Clone, radius: f32, theme: BrowserTheme) -> Button {
-    outlined_button(id, theme).icon(icon).size(size).rounded(px(radius)).tooltip(label)
+/// A borderless, 2rem square icon action on the page background, with a
+/// 1rem icon and ink text rather than an accent — the standard size and
+/// shape shared by every square icon button in the app (square corners, to
+/// match every other native surface and control). Semantic wrappers own any
+/// contextual state colour (hover, selection) on top of this baseline.
+pub fn outlined_icon_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: impl Into<Icon>, theme: BrowserTheme) -> Button {
+    base_button(id).text_color(theme.text).bg(theme.page_bg).icon(icon).size(gpui::rems(2.0)).tooltip(label)
 }
 
 /// A compact neutral outlined text button.
@@ -60,12 +61,12 @@ pub fn dialog_cancel_button(id: impl Into<ElementId>, label: impl Into<SharedStr
     base_button(id).label(label).secondary().outline()
 }
 
-pub fn primary_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, disabled: bool) -> Button {
-    base_button(id).label(label).icon(icon).primary().h(px(TOPBAR_ACTION_HEIGHT)).px(px(SPACE_MD)).disabled(disabled)
+pub fn primary_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: impl Into<gpui_component::Icon>, disabled: bool) -> Button {
+    base_button(id).label(label).icon(icon).primary().h(gpui::rems(TOPBAR_ACTION_HEIGHT_REM)).px(px(SPACE_MD)).disabled(disabled)
 }
 
 pub fn secondary_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, disabled: bool) -> Button {
-    base_button(id).label(label).icon(icon).secondary().outline().h(px(TOPBAR_ACTION_HEIGHT)).px(px(SPACE_MD)).disabled(disabled)
+    base_button(id).label(label).icon(icon).secondary().outline().h(gpui::rems(TOPBAR_ACTION_HEIGHT_REM)).px(px(SPACE_MD)).disabled(disabled)
 }
 
 /// A text action that carries no frame of its own, for the way out of a form

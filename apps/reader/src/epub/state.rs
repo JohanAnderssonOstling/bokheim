@@ -7,7 +7,7 @@ mod search;
 use std::{rc::Rc, sync::Arc};
 use web_time::Instant;
 
-use bokheim_backend::LibraryClient;
+use library_backend::LibraryClient;
 use gpui::prelude::*;
 use gpui::{App, Context, Window};
 use gpui_component::input::{InputEvent, InputState};
@@ -28,12 +28,15 @@ use app_preferences::LINE_WIDTH_MAX;
 
 pub(crate) fn renderer_initial_config(cx: &App) -> RendererInitialConfig {
     let preferences = ReaderSettings::preferences(cx).clone();
-    let column_width = if cfg!(feature = "kobo") { LINE_WIDTH_MAX } else { preferences.column_width };
+    // A phone owns its physical reading width. Start with one column and let
+    // the reader derive its width from the live viewport rather than carrying
+    // a desktop line-width preference into a narrow screen.
+    let column_width = if cfg!(any(feature = "kobo", target_os = "android")) { LINE_WIDTH_MAX } else { preferences.column_width };
     RendererInitialConfig {
         font_size: preferences.font_size,
         column_width,
         scale: preferences.scale,
-        max_column_count: cfg!(feature = "kobo").then_some(1),
+        max_column_count: Some(if cfg!(any(feature = "kobo", target_os = "android")) { 1 } else { preferences.max_column_count }),
         style_overrides: preferences.style_overrides(Some(library_theme_adaptation(cx))),
         paint_palette: library_paint_palette(cx),
         interaction_palette: library_interaction_palette(cx),
@@ -43,8 +46,7 @@ pub(crate) fn renderer_initial_config(cx: &App) -> RendererInitialConfig {
 
 impl ReaderView {
     pub(crate) fn new(
-        locator: BookLocator, title: String, library: Rc<LibraryClient>, book: Arc<crate::book::NativeBook>, preparation: html_view_core::RendererPreparation, close_reader: crate::CloseReader, window: &mut Window,
-        cx: &mut Context<Self>,
+        locator: BookLocator, title: String, _app: app::AppClient, library: Rc<LibraryClient>, book: Arc<crate::book::NativeBook>, preparation: html_view_core::RendererPreparation, close_reader: crate::CloseReader, window: &mut Window, cx: &mut Context<Self>,
     ) -> Self {
         let reader_started = Instant::now();
         startup_phase!("phase=reader_view_begin");
@@ -68,13 +70,14 @@ impl ReaderView {
 
         let mut reader = Self {
             #[cfg(feature = "kobo")]
-            brightness: cx.new(|cx| crate::shell::brightness::BrightnessControls::new(library.app().clone(), window, cx)),
+            brightness: cx.new(|cx| crate::shell::brightness::BrightnessControls::new(_app.clone(), window, cx)),
             locator,
             library,
             book_title: title.clone(),
             title,
             load_state: LoadState::Loading,
-            desired_column_count: if cfg!(feature = "kobo") { 1 } else { ReaderSettings::preferences(cx).max_column_count },
+            applied_palette: None,
+            desired_column_count: if cfg!(feature = "kobo") { 1 } else { u8::MAX },
             toc: TocState::default(),
             toc_tree,
             sidebar: SidebarState::from_preferences(cx),

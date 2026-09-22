@@ -1,1 +1,0 @@
-SELECT bokheim_mutation('directory_parent',id,parent_id),0 FROM dir WHERE id=?1

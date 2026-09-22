@@ -1,6 +1,6 @@
 use crate::session::{validate_email, validate_identity, AuthError, Session};
 use account_contract::{AccountSnapshotResponse, MeResponse};
-use sync_common::api::libraries::{DeleteLibraryResponse, LibrarySummary, LibraryNameRequest};
+use sync_common::api::libraries::{DeleteLibraryResponse, LibraryNameRequest, LibrarySummary};
 
 pub async fn current_account(session: &Session) -> Result<MeResponse, AuthError> {
     let account: MeResponse = binary_http::receive(reqwest::Client::builder().build()?.get(session.server_url().endpoint("api/auth/me")).bearer_auth(session.token())).await?;

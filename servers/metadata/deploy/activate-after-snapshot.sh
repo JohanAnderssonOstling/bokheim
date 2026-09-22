@@ -13,8 +13,8 @@ data_directory=$3
 build_script=$4
 importer=$5
 current=/home/johan/data/openlibrary/current.sqlite
-release=/var/lib/bokheim-deploy/metadata-catalog-incoming
-deploy=/usr/local/sbin/bokheim-deploy-metadata-catalog
+release=/var/lib/bokheim-deploy/metadata-incoming
+deploy=/usr/local/sbin/bokheim-deploy-metadata
 activate_wikidata=${BOKHEIM_ACTIVATE_WIKIDATA_SNAPSHOT:-false}
 
 for path in "${snapshot}" "${build_log}" "${data_directory}" "${build_script}" "${importer}"; do
@@ -85,7 +85,7 @@ if [[ ${schema} != 9 ]]; then
     exit 1
 fi
 
-for required in metadata-server catalog-server opds.json; do
+for required in metadata-server; do
     if [[ ! -f ${release}/${required} || -L ${release}/${required} ]]; then
         echo "missing or unsafe staged release artifact: ${required}" >&2
         exit 1
@@ -137,8 +137,4 @@ if ! sudo -n "${deploy}"; then
     exit 1
 fi
 
-curl --fail --silent --show-error --max-time 15 \
-    -H 'Content-Type: application/json' \
-    --data '{"isbns":["9780821338278"]}' \
-    https://catalogs.bokheim.se/api/metadata/enrichment/v2 >/dev/null
-echo "Rich metadata snapshot and staged metadata/catalogue release activated successfully."
+echo "Rich metadata snapshot and staged metadata release activated successfully."

@@ -1,1 +1,0 @@
-SELECT response_json FROM audible_enrichment_jobs

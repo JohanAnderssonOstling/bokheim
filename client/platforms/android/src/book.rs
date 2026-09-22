@@ -34,17 +34,26 @@ fn copy_after_persist_failure(mut failure: tempfile::PathPersistError, destinati
     let result = std::fs::File::open(&failure.path).and_then(|mut source| copy_book_noclobber(&mut source, destination));
     match result {
         Ok(()) => Ok(()), // Dropping the original TempPath removes the staging file.
-        Err(error) => { failure.error = error; Err(failure) }
+        Err(error) => {
+            failure.error = error;
+            Err(failure)
+        }
     }
 }
 
 fn copy_book_noclobber(source: &mut impl std::io::Read, destination: &Path) -> std::io::Result<()> {
     use std::io::Write as _;
-    struct PendingCopy<'a> { path: &'a Path, file: Option<std::fs::File>, complete: bool }
+    struct PendingCopy<'a> {
+        path: &'a Path,
+        file: Option<std::fs::File>,
+        complete: bool,
+    }
     impl Drop for PendingCopy<'_> {
         fn drop(&mut self) {
             drop(self.file.take());
-            if !self.complete { let _ = std::fs::remove_file(self.path); }
+            if !self.complete {
+                let _ = std::fs::remove_file(self.path);
+            }
         }
     }
     // Do not replace a file that appeared after the caller checked the name.
@@ -61,7 +70,9 @@ fn copy_book_noclobber(source: &mut impl std::io::Read, destination: &Path) -> s
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             result => result?,
         };
-        if count == 0 { break; }
+        if count == 0 {
+            break;
+        }
         output.write_all(&buffer[..count])?;
     }
     output.sync_all()?;
@@ -132,4 +143,3 @@ mod android_book_tests {
         assert!(!destination.exists());
     }
 }
-

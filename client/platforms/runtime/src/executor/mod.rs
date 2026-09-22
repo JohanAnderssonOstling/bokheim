@@ -51,7 +51,7 @@ pub use futures_util::future::LocalBoxFuture as BoxedBackendFuture;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{available_parallelism, run_blocking, spawn_detached, sleep, timeout, BackendExecutor, LibraryExecutor};
+pub use native::{available_parallelism, run_blocking, sleep, spawn_detached, timeout, BackendExecutor, LibraryExecutor};
 
 #[cfg(target_arch = "wasm32")]
 mod wasm;

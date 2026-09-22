@@ -78,6 +78,15 @@ impl AssetApplication {
         Self { pool: database.pool().clone(), store }
     }
 
+    pub async fn thumbnail_presence(&self, user_id: &str, library_id: &sync_common::LibraryId, hashes: &[ContentHash]) -> Result<Vec<ContentHash>, AssetError> {
+        self.require_library(user_id, library_id).await?;
+        let mut present = Vec::new();
+        for hash in hashes {
+            if self.store.size(user_id, AssetKind::Thumbnail, hash).await?.is_some() { present.push(*hash); }
+        }
+        Ok(present)
+    }
+
     async fn require_library(&self, user_id: &str, library_id: &sync_common::LibraryId) -> Result<(), AssetError> {
         let owned = sync_store::owns_library(&self.pool, user_id, library_id).await.map_err(|error| AssetError::Storage(error.to_string()))?;
         if owned {
@@ -258,7 +267,7 @@ mod tests {
         let pool = crate::test_support::isolated_pool("book_revisions", 4).await.expect("test database required");
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("book.m4b");
-        std::fs::write(&path, include_bytes!("../../../../../client/backend/tests/fixtures/embedded-cover.m4b")).unwrap();
+        std::fs::write(&path, include_bytes!("../../../../../client/app/tests/fixtures/embedded-cover.m4b")).unwrap();
         let identity = book_identity::ensure(&path).unwrap();
         let first = std::fs::read(&path).unwrap();
         let first_checksum = ContentHash::new(blake3::hash(&first).to_hex().as_str());

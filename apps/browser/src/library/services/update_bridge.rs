@@ -1,8 +1,9 @@
 //! Translates backend library updates into GPUI events.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
-use bokheim_backend::LibraryClient;
+use library_backend::LibraryClient;
 use gpui::{AppContext, Context, Entity, EventEmitter, Task};
 use library_model::LibraryUpdate;
 use sync_common::{ContentHash, LibraryId};
@@ -16,7 +17,7 @@ pub(crate) struct LibraryCoversChanged {
 }
 
 pub(crate) struct LibraryDownloadChanged {
-    pub(crate) status: bokheim_backend::BookDownloadStatus,
+    pub(crate) status: app::BookDownloadStatus,
 }
 
 impl LibraryCoversChanged {
@@ -27,6 +28,8 @@ impl LibraryCoversChanged {
 
 pub(crate) struct LibraryUpdateBridge {
     library: LibraryClient,
+    downloads: HashMap<ContentHash, app::DownloadState>,
+    download_watches: HashMap<ContentHash, Task<()>>,
     scanning: Option<bool>,
     importing: bool,
     book_count: Option<usize>,
@@ -40,11 +43,11 @@ impl EventEmitter<LibraryDownloadChanged> for LibraryUpdateBridge {}
 impl EventEmitter<LibraryScanChanged> for LibraryUpdateBridge {}
 
 impl LibraryUpdateBridge {
-    pub(crate) fn create<C: AppContext>(backend: Rc<bokheim_backend::AppClient>, library_id: LibraryId, cx: &mut C) -> Entity<Self> {
+    pub(crate) fn create<C: AppContext>(backend: Rc<app::AppClient>, library_id: LibraryId, cx: &mut C) -> Entity<Self> {
         cx.new(|cx| Self::new(backend, library_id, cx))
     }
 
-    fn new(backend: Rc<bokheim_backend::AppClient>, library_id: LibraryId, cx: &mut Context<Self>) -> Self {
+    fn new(backend: Rc<app::AppClient>, library_id: LibraryId, cx: &mut Context<Self>) -> Self {
         let library = backend.library(library_id);
         let update_library = library.clone();
         let task = cx.spawn(async move |bridge, cx| {
@@ -55,7 +58,7 @@ impl LibraryUpdateBridge {
                     return;
                 }
             };
-            let _ = bridge.update(cx, |bridge, cx| {
+            cx.defer_update(bridge.clone(), move |bridge, cx| {
                 bridge.scanning = Some(scanning);
                 cx.emit(LibraryScanChanged);
                 cx.notify();
@@ -71,10 +74,10 @@ impl LibraryUpdateBridge {
                 while let Ok(update) = updates.try_recv() {
                     batch.absorb(update);
                 }
-                let _ = bridge.update(cx, |bridge, cx| bridge.apply(batch, cx));
+                cx.defer_update(bridge.clone(), move |bridge, cx| bridge.apply(batch, cx));
             }
         });
-        let mut bridge = Self { library, scanning: None, importing: false, book_count: None, _updates: task, _book_count_request: None };
+        let mut bridge = Self { library, downloads: HashMap::new(), download_watches: HashMap::new(), scanning: None, importing: false, book_count: None, _updates: task, _book_count_request: None };
         bridge.refresh_book_count(cx);
         bridge
     }
@@ -101,12 +104,75 @@ impl LibraryUpdateBridge {
         self.book_count
     }
 
+    pub(crate) fn download_state(&self, content_hash: ContentHash) -> Option<app::DownloadState> {
+        self.downloads.get(&content_hash).cloned()
+    }
+
+    /// Book rows bootstrap the display only once. From then on this bridge's
+    /// backend subscription owns the state; a later browse response cannot
+    /// roll progress or completion back to an older row snapshot.
+    pub(crate) fn track_download(&mut self, content_hash: ContentHash, downloaded: bool, requested: bool, cx: &mut Context<Self>) {
+        self.downloads.entry(content_hash).or_insert_with(|| {
+            if downloaded {
+                app::DownloadState::Downloaded
+            } else if requested {
+                app::DownloadState::Queued
+            } else {
+                app::DownloadState::NotDownloaded
+            }
+        });
+        if requested {
+            self.watch_download(content_hash, cx);
+        }
+    }
+
+    pub(crate) fn watch_download(&mut self, content_hash: ContentHash, cx: &mut Context<Self>) {
+        if self.download_watches.contains_key(&content_hash) {
+            return;
+        }
+        let library = self.library.clone();
+        let task = cx.spawn(async move |bridge, cx| {
+            let (states, initial) = match library.download_changes(content_hash).await {
+                Ok(subscription) => subscription,
+                Err(error) => {
+                    log::warn!("cannot subscribe to download status for {content_hash}: {error}");
+                    cx.defer_update(bridge, move |bridge, _| {
+                        bridge.download_watches.remove(&content_hash);
+                    });
+                    return;
+                }
+            };
+            cx.defer_update(bridge.clone(), move |bridge, cx| bridge.set_download_state(content_hash, initial, cx));
+            while let Ok(state) = states.recv().await {
+                cx.defer_update(bridge.clone(), move |bridge, cx| bridge.set_download_state(content_hash, state, cx));
+            }
+            cx.defer_update(bridge, move |bridge, _| {
+                bridge.download_watches.remove(&content_hash);
+            });
+        });
+        self.download_watches.insert(content_hash, task);
+    }
+
+    fn set_download_state(&mut self, content_hash: ContentHash, state: app::DownloadState, cx: &mut Context<Self>) {
+        if matches!(self.downloads.get(&content_hash), Some(app::DownloadState::Downloaded))
+            && matches!(state, app::DownloadState::Queued | app::DownloadState::Downloading(_))
+        {
+            return;
+        }
+        if self.downloads.get(&content_hash) == Some(&state) {
+            return;
+        }
+        self.downloads.insert(content_hash, state.clone());
+        cx.emit(LibraryDownloadChanged { status: app::BookDownloadStatus::new(content_hash, state) });
+        cx.notify();
+    }
+
     fn refresh_book_count(&mut self, cx: &mut Context<Self>) {
         let library = self.library.clone();
         let load = async move { library.book_count().await };
         self._book_count_request = Some(cx.spawn(async move |bridge, cx| {
             let result = load.await;
-            let _ = bridge.update(cx, |bridge, cx| match result {
+            cx.defer_update(bridge, |bridge, cx| match result {
                 Ok(book_count) => {
                     if bridge.book_count != Some(book_count) {
                         bridge.book_count = Some(book_count);
@@ -138,7 +204,9 @@ impl LibraryUpdateBridge {
             cx.emit(LibraryCoversChanged { content_hashes: covers.into() });
         }
         for status in downloads {
-            cx.emit(LibraryDownloadChanged { status });
+            if !self.download_watches.contains_key(&status.content_hash) {
+                self.set_download_state(status.content_hash, status.state, cx);
+            }
         }
     }
 }
@@ -151,7 +219,7 @@ struct UpdateBatch {
     covers: Vec<ContentHash>,
     /// Kept per book: each status names a different book, or supersedes an
     /// earlier status for the same one.
-    downloads: Vec<bokheim_backend::BookDownloadStatus>,
+    downloads: Vec<app::BookDownloadStatus>,
     scanning: Option<bool>,
 }
 

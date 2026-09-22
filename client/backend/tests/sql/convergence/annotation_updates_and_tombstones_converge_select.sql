@@ -1,1 +1,0 @@
-SELECT note FROM annotation WHERE id=?1

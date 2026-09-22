@@ -1,1 +1,0 @@
-SELECT dirty FROM browse_projection_state WHERE projection='subject_ownership'

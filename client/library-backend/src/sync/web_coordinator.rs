@@ -3,6 +3,7 @@
 #![cfg(target_arch = "wasm32")]
 
 use serde::{Deserialize, Serialize};
+use library_runtime::events::{LibraryEvent, LibraryEventSender};
 use std::sync::atomic::{AtomicBool, Ordering};
 use sync_common::{LibraryId, MutationId, PullStateResponse, ReplicaId, StateCell, SyncCursor};
 use sync_engine::{StoreFuture, SyncStore};
@@ -40,76 +41,60 @@ enum StorageCommand {
     ApplyPullPage(PullStateResponse),
 }
 
-#[derive(Clone)]
-struct AccountStorage {
-    database: library_database::Database,
-}
-
-impl AccountStorage {
-    async fn command<T: crate::executor::BackendOutput>(
-        &self, operation: impl FnOnce(&mut rusqlite::Connection) -> Result<T, library_database::DatabaseError> + crate::executor::BackendSend + 'static,
-    ) -> Result<T, library_database::DatabaseError> {
-        self.database
-            .command(library_runtime::storage_queue::Priority::Background, move |conn| {
-                operation(conn)
-            })
-            .await
-    }
-}
-
-async fn storage_command(storage: &AccountStorage, bytes: &[u8]) -> Result<Vec<u8>, String> {
-    use library_database::DatabaseError;
+async fn storage_command(database: &library_database::Database, events: Option<&LibraryEventSender>, bytes: &[u8]) -> Result<Vec<u8>, String> {
     let command: StorageCommand = rmp_serde::from_slice(bytes).map_err(|error| error.to_string())?;
     macro_rules! reply {
         ($value:expr) => {
-            rmp_serde::to_vec_named(&$value.await.map_err(|error| error.to_string())?).map_err(|error| error.to_string())
+            rmp_serde::to_vec_named(&$value.map_err(|error| error.to_string())?).map_err(|error| error.to_string())
         };
     }
     match command {
-        StorageCommand::CursorRecoveryPending => reply!(storage.command(|conn| Ok(client_library::sync_state::cursor_recovery_pending(conn)?))),
-        StorageCommand::BeginCursorRecovery => reply!(storage.command(|conn| Ok(client_library::sync_state::begin_cursor_recovery(conn)?))),
-        StorageCommand::CompleteCursorRecovery => reply!(crate::sync::recovery::complete(|after| { storage.command(move |conn| Ok(client_library::sync_state::recover_state_page(conn, after.as_ref())?)) })),
-        StorageCommand::PullCursor => reply!(storage.command(|conn| Ok(client_library::sync_state::get_pull_cursor(conn)?))),
-        StorageCommand::InventoryCheckpoint => reply!(storage.command(|conn| crate::sync::inventory_checkpoint(conn))),
-        StorageCommand::SaveInventoryCheckpoint(after) => reply!(storage.command(move |conn| crate::sync::save_inventory_checkpoint(conn, after))),
-        StorageCommand::StateInventory(after) => reply!(storage.command(move |conn| Ok(client_library::sync_state::state_inventory_page(conn, after.as_ref())?))),
+        StorageCommand::CursorRecoveryPending => reply!(database.sync_cursor_recovery_pending()),
+        StorageCommand::BeginCursorRecovery => reply!(database.sync_begin_cursor_recovery()),
+        StorageCommand::CompleteCursorRecovery => {
+            let inserted = crate::sync::recovery::complete(database).await.map_err(|error| error.to_string())?;
+            rmp_serde::to_vec_named(&inserted).map_err(|error| error.to_string())
+        }
+        StorageCommand::PullCursor => reply!(database.sync_pull_cursor()),
+        StorageCommand::InventoryCheckpoint => reply!(database.sync_inventory_checkpoint()),
+        StorageCommand::SaveInventoryCheckpoint(after) => reply!(database.sync_save_inventory_checkpoint(after)),
+        StorageCommand::StateInventory(after) => reply!(database.sync_inventory_page(after.as_ref())),
         // The coordinator sends at most 256 cells in each command.
-        StorageCommand::EnqueueMissingStateCells(cells) => reply!(storage.command(move |conn| Ok(client_library::sync_state::enqueue_missing_state_cells(conn, &cells)?))),
-        StorageCommand::OutboxWatermark => reply!(storage.command(|conn| Ok(client_library::sync_state::outbox_watermark(conn)?))),
-        StorageCommand::PendingMutations { after, through } => reply!(storage.command(move |conn| client_library::sync_state::pending_mutations_page(conn, after, through).map_err(DatabaseError::operation))),
+        StorageCommand::EnqueueMissingStateCells(cells) => reply!(database.sync_enqueue_missing_state_cells(&cells)),
+        StorageCommand::OutboxWatermark => reply!(database.sync_outbox_watermark()),
+        StorageCommand::PendingMutations { after, through } => reply!(database.sync_pending_mutations_page(after, through)),
         StorageCommand::AcknowledgeMutations(ids) => {
             // One commit per bounded batch, rather than one OPFS flush per ID.
-            for ids in ids.chunks(256) {
-                let ids = ids.to_vec();
-                storage
-                    .command(move |conn| {
-                        let tx = conn.transaction()?;
-                        client_library::sync_state::acknowledge_mutations(&tx, &ids)?;
-                        tx.commit()?;
-                        Ok(())
-                    })
-                    .await
-                    .map_err(|error| error.to_string())?;
+            for chunk in ids.chunks(256) {
+                database.sync_acknowledge_mutations(chunk).map_err(|error| error.to_string())?;
             }
             rmp_serde::to_vec_named(&()).map_err(|error| error.to_string())
         }
         StorageCommand::ApplyPullPage(page) => {
-            storage.command(move |conn| crate::sync::apply_pull_page(conn, &page)).await.map_err(|error| error.to_string())?;
+            // Acknowledgement and apply stay separate commands on the browser
+            // protocol; empty ids apply without acknowledging.
+            let changed = database.sync_commit_pull_response(&[], &page).map_err(|error| error.to_string())?;
+            if changed {
+                if let Some(events) = events {
+                    let _ = events.try_send(LibraryEvent::ContentsChanged);
+                }
+            }
             rmp_serde::to_vec_named(&()).map_err(|error| error.to_string())
         }
     }
 }
 
 pub(crate) async fn synchronize(
-    database: library_database::Database, library_id: LibraryId, replica_id: ReplicaId, user_id: &str, credentials: &sync_transport::SyncCredentials, inventory_checked: &AtomicBool, outbox_only: bool, repair: bool,
+    database: library_database::Database, events: Option<LibraryEventSender>, library_id: LibraryId, replica_id: ReplicaId, user_id: &str, credentials: &sync_transport::SyncCredentials, inventory_checked: &AtomicBool, outbox_only: bool, repair: bool,
 ) -> Result<(sync_engine::SyncOutcome, bool), sync_engine::SyncError> {
     let input = SyncInput { outbox_only, repair, library_id, replica_id, server_url: credentials.server_url().to_string(), access_token: credentials.access_token().to_owned(), inventory_checked: inventory_checked.load(Ordering::Acquire) };
     let bytes = rmp_serde::to_vec_named(&input).map_err(|error| sync_engine::SyncError::Failed(error.to_string()))?;
-    let account_storage = AccountStorage { database };
-    let callback_storage = account_storage.clone();
+    let database = std::rc::Rc::new(database);
+    let callback_database = database.clone();
     let storage: client_platform_web::transport::BytesOperation = std::rc::Rc::new(move |bytes| {
-        let storage = callback_storage.clone();
-        Box::pin(async move { storage_command(&storage, &bytes).await })
+        let database = callback_database.clone();
+        let events = events.clone();
+        Box::pin(async move { storage_command(&database, events.as_ref(), &bytes).await })
     });
     let key = format!("{}|{user_id}|{library_id}|{}", credentials.server_url(), if repair { "repair" } else { "state" });
     let result = async {
@@ -119,7 +104,6 @@ pub(crate) async fn synchronize(
     }
     .await
     .map_err(sync_engine::SyncError::Failed)?;
-    account_storage.command(|_| Ok(())).await.map_err(|error| sync_engine::SyncError::Failed(error.to_string()))?;
     result.result.map(|mutation_issues| (sync_engine::SyncOutcome { mutation_issues }, result.inventory_checked))
 }
 

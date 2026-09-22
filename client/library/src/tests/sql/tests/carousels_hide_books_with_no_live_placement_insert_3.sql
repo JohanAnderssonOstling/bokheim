@@ -1,1 +1,0 @@
-INSERT INTO sync_state_version VALUES ('reading_position',?1,'',100,0,'test',1,'recent')

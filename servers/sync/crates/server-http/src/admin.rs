@@ -142,7 +142,7 @@ pub(crate) struct EngagementQuery {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct CatalogIdentityReviewQuery {
+pub(crate) struct AuthorityIdentityReviewQuery {
     source_id: Option<String>,
     status: Option<String>,
     limit: Option<u16>,
@@ -415,33 +415,33 @@ pub(crate) async fn services(State(state): State<AppState>, admin: AdminUser) ->
     json_response(state.operational_services.snapshot().await)
 }
 
-pub(crate) async fn catalog_process_action(State(state): State<AppState>, admin: AdminUser, Path(process): Path<String>, Json(action): Json<serde_json::Value>) -> Result<Response, StatusCode> {
-    if process != "catalogue_crawling" && process != "cover_downloads" && process != "enrichment"
+pub(crate) async fn authority_process_action(State(state): State<AppState>, admin: AdminUser, Path(process): Path<String>, Json(action): Json<serde_json::Value>) -> Result<Response, StatusCode> {
+    if !crate::operations::is_supported_authority_process(&process)
         || !action.get("action").and_then(serde_json::Value::as_str).is_some_and(|action| matches!(action, "pause" | "resume" | "run_now"))
     {
         return Err(StatusCode::BAD_REQUEST);
     }
-    audit(&state, &admin.user_id, "dashboard_catalog_process_changed").await?;
-    let response = state.operational_services.catalog_process_action(&process, &action).await.map_err(remote_admin_error)?;
+    audit(&state, &admin.user_id, "dashboard_authority_process_changed").await?;
+    let response = state.operational_services.authority_process_action(&process, &action).await.map_err(remote_admin_error)?;
     json_response(response)
 }
 
-pub(crate) async fn catalog_identity_reviews(State(state): State<AppState>, admin: AdminUser, Query(query): Query<CatalogIdentityReviewQuery>) -> Result<Response, StatusCode> {
-    audit(&state, &admin.user_id, "dashboard_catalog_identity_reviews_viewed").await?;
+pub(crate) async fn authority_identity_reviews(State(state): State<AppState>, admin: AdminUser, Query(query): Query<AuthorityIdentityReviewQuery>) -> Result<Response, StatusCode> {
+    audit(&state, &admin.user_id, "dashboard_authority_identity_reviews_viewed").await?;
     let limit = query.limit.unwrap_or(100);
     if !(1..=200).contains(&limit) {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let response = state.operational_services.catalog_identity_reviews(query.source_id.as_deref(), query.status.as_deref(), limit).await.map_err(remote_admin_error)?;
+    let response = state.operational_services.authority_identity_reviews(query.source_id.as_deref(), query.status.as_deref(), limit).await.map_err(remote_admin_error)?;
     json_response(response)
 }
 
-pub(crate) async fn catalog_identity_review_action(State(state): State<AppState>, admin: AdminUser, Path(review_id): Path<String>, Json(action): Json<serde_json::Value>) -> Result<Response, StatusCode> {
+pub(crate) async fn authority_identity_review_action(State(state): State<AppState>, admin: AdminUser, Path(review_id): Path<String>, Json(action): Json<serde_json::Value>) -> Result<Response, StatusCode> {
     if review_id.len() != 64 || !review_id.bytes().all(|byte| byte.is_ascii_hexdigit()) || !action.is_object() {
         return Err(StatusCode::BAD_REQUEST);
     }
-    audit(&state, &admin.user_id, "dashboard_catalog_identity_review_changed").await?;
-    let response = state.operational_services.catalog_identity_review_action(&review_id, &action).await.map_err(remote_admin_error)?;
+    audit(&state, &admin.user_id, "dashboard_authority_identity_review_changed").await?;
+    let response = state.operational_services.authority_identity_review_action(&review_id, &action).await.map_err(remote_admin_error)?;
     json_response(response)
 }
 
@@ -472,7 +472,7 @@ fn internal(error: sqlx::Error) -> StatusCode {
 }
 
 fn remote_admin_error(error: String) -> StatusCode {
-    tracing::warn!(%error, "administrator catalogue review request failed");
+    tracing::warn!(%error, "administrator authority review request failed");
     StatusCode::BAD_GATEWAY
 }
 

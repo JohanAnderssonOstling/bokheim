@@ -15,7 +15,7 @@ use sync_common::DirId;
 use ui_components as components;
 
 use super::adapter::{BrowseAdapter, BrowseCrumb, BrowseQuery, BrowseRequest};
-use super::controls::{BrowseBookOrder, BrowseFormatFilter, BrowseOptionsEvent, BrowseOptionsSelection, SearchField, browse_options_control};
+use super::controls::{BrowseBookOrder, BrowseFormatFilter, BrowseOptionsEvent, BrowseOptionsSelection, SearchField, browse_options_control, browse_options_sheet};
 use super::folder_actions::{FolderActions, FolderActionsEvent, FolderPlacement, FolderTargets};
 use crate::library::services::{LatestRequest, LibraryContentsChanged, LibraryDownloadChanged, LibraryScanChanged, LibraryUpdateBridge};
 use crate::library::widgets::{CursorMove, Paginator, PaginatorAxis, PaginatorContextMenu, PaginatorDropTargetChanged, PaginatorGroup, PaginatorMarqueeChanged, PaginatorSelectionChanged};
@@ -181,6 +181,8 @@ pub(crate) struct BrowsePage<A: BrowseAdapter> {
     focus: FocusHandle,
     search_field: Option<SearchField>,
     search_open: bool,
+    /// The compact bottom-sheet counterpart to the desktop sort/filter dropdown.
+    browse_options_sheet_open: bool,
     /// Which of the two card modes the grid is in. A view choice rather than a
     /// query one, so it lives beside the search box instead of in the sort and
     /// filter menu, and changing it never reloads.
@@ -200,6 +202,7 @@ pub(crate) struct BrowsePage<A: BrowseAdapter> {
     _paginator_drop_target: Option<Subscription>,
     _paginator_marquee: Option<Subscription>,
     _paginator_menu: Option<Subscription>,
+    _cover_text_updates: Subscription,
     split_enabled: bool,
     split_close_enabled: bool,
 }
@@ -212,6 +215,11 @@ impl<A: BrowseAdapter> BrowsePage<A> {
         &mut self.adapter
     }
 
+    #[cfg(test)]
+    pub(super) fn breadcrumb_labels(&self) -> Vec<&str> {
+        self.path.iter().map(|crumb| crumb.label.as_str()).collect()
+    }
+
     pub(super) fn new(adapter: A, config: BrowsePageConfig, cx: &mut Context<Self>) -> Self {
         let location = config.root_location.clone();
         let selection = BrowseSelection::new(&adapter);
@@ -220,6 +228,7 @@ impl<A: BrowseAdapter> BrowsePage<A> {
             let paginator = Paginator::new(format!("{}-browse-paginator", config.list_prefix), []).flow_axis(PaginatorAxis::Vertical);
             if selectable { paginator.selectable() } else { paginator }
         });
+        let cover_text_updates = cx.observe_global::<crate::stores::CoverTextSetting>(|page, cx| page.refresh_cover_text(cx));
         let mut page = Self {
             root_location: config.root_location,
             root_label: config.root_label,
@@ -237,6 +246,7 @@ impl<A: BrowseAdapter> BrowsePage<A> {
             focus: cx.focus_handle().tab_index(0).tab_stop(true),
             search_field: None,
             search_open: false,
+            browse_options_sheet_open: false,
             detailed_cards: false,
             selection,
             loaded: false,
@@ -253,6 +263,7 @@ impl<A: BrowseAdapter> BrowsePage<A> {
             _paginator_drop_target: None,
             _paginator_marquee: None,
             _paginator_menu: None,
+            _cover_text_updates: cover_text_updates,
             split_enabled: config.split_enabled,
             split_close_enabled: false,
         };
@@ -275,7 +286,7 @@ impl<A: BrowseAdapter> BrowsePage<A> {
         page.load(page.path.clone(), LoadIntent::Initial, cx);
         if let Some(changes) = config.changes {
             page._download_changes = Some(cx.subscribe(&changes, |page, _, event: &LibraryDownloadChanged, cx| {
-                if matches!(event.status.state, bokheim_backend::DownloadState::Downloaded | bokheim_backend::DownloadState::NotDownloaded) {
+                if matches!(event.status.state, app::DownloadState::Downloaded | app::DownloadState::NotDownloaded) {
                     page.refresh_contents(cx);
                 }
             }));
@@ -287,7 +298,7 @@ impl<A: BrowseAdapter> BrowsePage<A> {
     }
 
     fn reload(&mut self, cx: &mut Context<Self>) {
-        self.load(self.path.clone(), LoadIntent::Reload, cx);
+        self.load_at(self.path.clone(), self.location.clone(), LoadIntent::Reload, cx);
     }
 
     pub(super) fn download_child(&mut self, location: String, cx: &mut Context<Self>) {
@@ -318,7 +329,7 @@ impl<A: BrowseAdapter> BrowsePage<A> {
         if !self.adapter.refresh_on_library_changes() {
             return;
         }
-        self.load(self.path.clone(), LoadIntent::Refresh, cx);
+        self.load_at(self.path.clone(), self.location.clone(), LoadIntent::Refresh, cx);
     }
 
     fn handle_folder_action(&mut self, event: FolderActionsEvent, cx: &mut Context<Self>) {
@@ -387,11 +398,74 @@ impl<A: BrowseAdapter> BrowsePage<A> {
         description
     }
 
-    /// Opens the folder commands over a child, or over the selection it belongs
-    /// to. Only folder listings have these: an author or subject chip is a
-    /// query, not a directory, so adapters without folder actions get no menu.
+    /// Opens the folder commands over a child, or over the selection it
+    /// belongs to. Folder editing (rename, copy, move, trash) only exists on
+    /// folder listings: an author or subject chip is a query, not a
+    /// directory. Opening a single chip in a split pane is a browse concern
+    /// rather than a filesystem one, so it works on both.
+    /// Opens `child_id` in a split pane and dismisses the menu it was chosen
+    /// from. The split-action row's own click doesn't route through the
+    /// framework's confirm/dismiss path — it's a custom element with its own
+    /// handlers, not a plain menu item — so nothing closes the menu unless
+    /// this does it explicitly.
+    fn open_split_and_dismiss(&mut self, child_id: String, side: BrowseSplitSide, cx: &mut Context<Self>) {
+        self.request_split_child(child_id, side, cx);
+        self.chip_menu = None;
+        cx.notify();
+    }
+
     pub(super) fn open_items_menu(&mut self, child_index: usize, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(actions) = self.folder_actions.clone() else { return };
+        // Opening in a split pane only makes sense for one chip at a time: a
+        // book has nowhere to browse into, and a multi-selection has no one
+        // path to hand the other pane.
+        let selection = self.paginator.read(cx).selection();
+        let indices: Vec<usize> = if selection.contains(&child_index) { selection.iter().copied().collect() } else { vec![child_index] };
+        let chips = self.adapter.children();
+        let single_chip = match indices.as_slice() {
+            [index] => chips.get(*index).cloned(),
+            _ => None,
+        };
+        let split_target = single_chip.clone().filter(|_| self.can_split(window)).map(|chip| chip.id);
+        let split_page = cx.entity();
+
+        let Some(actions) = self.folder_actions.clone() else {
+            // No folder editing on this page (e.g. subject browsing): the
+            // menu is just the whole-chip opens for whatever chip was
+            // clicked — a new window, and a split pane.
+            if split_target.is_none() && single_chip.is_none() {
+                return;
+            }
+            let window_target = single_chip.filter(|_| crate::native_windows_available()).and_then(|chip| {
+                let library_id = *self.adapter.library_context()?.backend().id();
+                Some(crate::NewWindowTarget::Subject { library_id, location: chip.id, label: chip.name })
+            });
+            let menu = PopupMenu::build(window, cx, move |mut menu, _, _| {
+                if let Some(target) = window_target.clone() {
+                    menu = menu.item(components::menu_item_with_icon("Open in New Window", IconName::ExternalLink, move |_, window, cx| {
+                        window.dispatch_action(Box::new(crate::OpenInNewWindow(target.clone())), cx);
+                    }));
+                }
+                if let Some(child_id) = split_target.clone() {
+                    let left_page = split_page.clone();
+                    let right_page = split_page.clone();
+                    let left_child_id = child_id.clone();
+                    let right_child_id = child_id;
+                    menu = menu.item(components::menu_item_with_split_actions(
+                        "Open left",
+                        "Open right",
+                        move |_, cx| {
+                            let _ = left_page.update(cx, |page, cx| page.open_split_and_dismiss(left_child_id.clone(), BrowseSplitSide::Left, cx));
+                        },
+                        move |_, cx| {
+                            let _ = right_page.update(cx, |page, cx| page.open_split_and_dismiss(right_child_id.clone(), BrowseSplitSide::Right, cx));
+                        },
+                    ));
+                }
+                menu
+            });
+            self.show_menu(menu, position, window, cx);
+            return;
+        };
         let Some(targets) = self.menu_targets(child_index, cx) else { return };
         // Renaming is a single-folder command: there is one name to type.
         let rename = (targets.folders.len() == 1 && targets.books.is_empty()).then(|| {
@@ -422,20 +496,64 @@ impl<A: BrowseAdapter> BrowsePage<A> {
             .unwrap_or_default();
         let copy_actions = actions.clone();
         let move_actions = actions.clone();
+        let remove_actions = actions.clone();
+        let evict_actions = actions.clone();
         let trash_actions = actions.clone();
         let copy_targets = targets.clone();
         let move_targets = targets.clone();
+        let remove_targets = targets.clone();
+        let evict_targets = targets.clone();
+        let children = self.adapter.children();
+        // "Remove download" appears when anything selected still holds local
+        // bytes: a downloaded book, or a folder chip with downloaded books.
+        let can_evict = self
+            .adapter
+            .library_context()
+            .map(|ui| {
+                let bridge = ui.updates().read(cx);
+                targets.books.iter().any(|hash| matches!(bridge.download_state(*hash), Some(app::DownloadState::Downloaded)))
+            })
+            .unwrap_or(false)
+            || targets.folders.iter().any(|id| children.iter().any(|chip| DirId::parse_str(&chip.id).ok() == Some(*id) && chip.downloaded_book_count > 0));
+        let remove_description = (!targets.books.is_empty()).then(|| {
+            let mut description = if targets.books.len() == 1 { "1 book will leave this folder but stay in the library.".to_owned() } else { format!("{} books will leave this folder but stay in the library.", targets.books.len()) };
+            description.push_str(" A book reaches Trash only if this was the last folder holding it.");
+            description
+        });
         let trash_targets = targets;
         let menu = PopupMenu::build(window, cx, move |mut menu, _, _| {
+            // "Open" section: whole-item opens (new window, split pane) live
+            // together above a single separator, ahead of the folder-editing
+            // commands below.
+            let mut has_open_section = false;
             if crate::native_windows_available() && !window_targets.is_empty() {
                 let targets = window_targets.clone();
-                menu = menu
-                    .item(components::menu_item("Open in New Window", move |_, window, cx| {
-                        for target in &targets {
-                            window.dispatch_action(Box::new(crate::OpenInNewWindow(target.clone())), cx);
-                        }
-                    }))
-                    .separator();
+                menu = menu.item(components::menu_item_with_icon("Open in New Window", IconName::ExternalLink, move |_, window, cx| {
+                    for target in &targets {
+                        window.dispatch_action(Box::new(crate::OpenInNewWindow(target.clone())), cx);
+                    }
+                }));
+                has_open_section = true;
+            }
+            if let Some(child_id) = split_target.clone() {
+                let left_page = split_page.clone();
+                let right_page = split_page.clone();
+                let left_child_id = child_id.clone();
+                let right_child_id = child_id;
+                menu = menu.item(components::menu_item_with_split_actions(
+                    "Open left",
+                    "Open right",
+                    move |_, cx| {
+                        let _ = left_page.update(cx, |page, cx| page.open_split_and_dismiss(left_child_id.clone(), BrowseSplitSide::Left, cx));
+                    },
+                    move |_, cx| {
+                        let _ = right_page.update(cx, |page, cx| page.open_split_and_dismiss(right_child_id.clone(), BrowseSplitSide::Right, cx));
+                    },
+                ));
+                has_open_section = true;
+            }
+            if has_open_section {
+                menu = menu.separator();
             }
             if let Some((id, name)) = rename.clone() {
                 let rename_actions = actions.clone();
@@ -445,21 +563,41 @@ impl<A: BrowseAdapter> BrowsePage<A> {
             }
             let copy_actions = copy_actions.clone();
             let move_actions = move_actions.clone();
+            let remove_actions = remove_actions.clone();
+            let evict_actions = evict_actions.clone();
             let trash_actions = trash_actions.clone();
             let copy_targets = copy_targets.clone();
             let move_targets = move_targets.clone();
+            let remove_targets = remove_targets.clone();
+            let evict_targets = evict_targets.clone();
             let trash_targets = trash_targets.clone();
             let description = description.clone();
-            menu.item(components::menu_item_with_icon("Copy to folder…", IconName::Copy, move |_, _, cx| {
+            let remove_description = remove_description.clone();
+            menu = menu.item(components::menu_item_with_icon("Copy to folder…", IconName::Copy, move |_, _, cx| {
                 let targets = copy_targets.clone();
                 copy_actions.update(cx, |actions, cx| actions.open_copy_targets(targets, cx));
             }))
             .item(components::menu_item_with_icon("Move to folder…", components::navigation_icon(components::NavigationIcon::Folder), move |_, _, cx| {
                 let targets = move_targets.clone();
                 move_actions.update(cx, |actions, cx| actions.open_move_targets(targets, cx));
-            }))
-            .separator()
-            .item(components::menu_item_with_icon("Move to Trash", components::navigation_icon(components::NavigationIcon::Trash2), move |_, window, cx| {
+            }));
+            // Leaving a folder and leaving the library are separate commands:
+            // the first keeps the books in their other folders, the second
+            // moves the whole selection to Trash.
+            if let Some(description) = remove_description {
+                menu = menu.item(components::menu_item_with_icon("Remove from folder", components::navigation_icon(components::NavigationIcon::Folder), move |_, window, cx| {
+                    let targets = remove_targets.clone();
+                    remove_actions.update(cx, |actions, cx| actions.remove_books_from_folder(targets, description.clone(), window, cx));
+                }));
+            }
+            menu = menu.separator();
+            if can_evict {
+                menu = menu.item(components::menu_item_with_icon("Remove download", IconName::HardDrive, move |_, window, cx| {
+                    let targets = evict_targets.clone();
+                    evict_actions.update(cx, |actions, cx| actions.evict_downloads(targets, window, cx));
+                }));
+            }
+            menu.item(components::menu_item_with_icon("Move to Trash", components::navigation_icon(components::NavigationIcon::Trash2), move |_, window, cx| {
                 let targets = trash_targets.clone();
                 let description = description.clone();
                 trash_actions.update(cx, |actions, cx| actions.trash_targets(targets, description, window, cx));
@@ -532,8 +670,7 @@ impl<A: BrowseAdapter> BrowsePage<A> {
     /// same menu the toolbar's Add button drops down, at the pointer.
     pub(super) fn open_folder_menu(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(actions) = self.folder_actions.clone() else { return };
-        let has_current_folder = actions.read(cx).has_current_folder();
-        let menu = PopupMenu::build(window, cx, move |menu, _, _| FolderActions::add_menu_items(actions.clone(), menu, has_current_folder));
+        let menu = PopupMenu::build(window, cx, move |menu, _, _| FolderActions::add_menu_items(actions.clone(), menu));
         self.show_menu(menu, position, window, cx);
     }
 
@@ -703,9 +840,27 @@ impl<A: BrowseAdapter> BrowsePage<A> {
         }
     }
 
+    fn close_browse_options_sheet(&mut self, cx: &mut Context<Self>) {
+        self.browse_options_sheet_open = false;
+        cx.notify();
+    }
+
+    fn toggle_browse_options_sheet(&mut self, cx: &mut Context<Self>) {
+        self.browse_options_sheet_open = !self.browse_options_sheet_open;
+        cx.notify();
+    }
+
     /// Leaves the current folder for the one above it. Already at the root is
     /// not a failure, but it is unhandled, so the key falls through.
     fn open_parent(&mut self, cx: &mut Context<Self>) -> bool {
+        // A book detail has its own location, but deliberately not its own
+        // breadcrumb. Returning from it therefore reloads the unchanged folder
+        // path instead of popping the folder the book was opened from.
+        if self.adapter.custom_body().is_some() {
+            self.hide_cached_book_detail(cx);
+            self.open_path(self.path.clone(), cx);
+            return true;
+        }
         if self.path.is_empty() {
             return false;
         }
@@ -832,11 +987,22 @@ impl<A: BrowseAdapter> BrowsePage<A> {
             self.close_search(window, cx);
             return;
         }
+        // A detail page is a temporary view over the current folder path, not
+        // another segment in it. Escape returns to that path even at root.
+        if self.adapter.custom_body().is_some() {
+            self.hide_cached_book_detail(cx);
+            self.open_path(self.path.clone(), cx);
+            return;
+        }
         if self.path.is_empty() {
             cx.propagate();
             return;
         }
 
+        // Popping away from a book-detail crumb must also drop the cached
+        // detail body itself, or `custom_body()` keeps rendering it under the
+        // new path — harmless to call when detail wasn't showing.
+        self.hide_cached_book_detail(cx);
         let mut parent = self.path.clone();
         parent.pop();
         self.open_path(parent, cx);
@@ -882,17 +1048,21 @@ impl<A: BrowseAdapter> BrowsePage<A> {
         self.load(path, LoadIntent::Navigate, cx);
     }
 
-    /// Goes one step deeper into something that is not a place to browse — a
-    /// single book — so the trail ends on it and every way back out is the one
-    /// that already exists.
+    /// Opens a transient detail location without making it part of the folder
+    /// breadcrumb. The path remains the folder trail to which Close/Back return.
     pub(super) fn open_leaf(&mut self, crumb: BrowseCrumb, cx: &mut Context<Self>) {
-        let mut path = self.path.clone();
-        path.push(crumb);
-        self.open_path(path, cx);
+        self.load_at(self.path.clone(), crumb.location, LoadIntent::Navigate, cx);
     }
 
     fn load(&mut self, path: Vec<BrowseCrumb>, intent: LoadIntent, cx: &mut Context<Self>) {
         let location = path.last().map(|crumb| crumb.location.clone()).unwrap_or_else(|| self.root_location.clone());
+        self.load_at(path, location, intent, cx);
+    }
+
+    /// Loads `location` while preserving the independently displayed folder
+    /// trail. Normally location is the last crumb; book detail is the one
+    /// exception.
+    fn load_at(&mut self, path: Vec<BrowseCrumb>, location: String, intent: LoadIntent, cx: &mut Context<Self>) {
         if location != self.location {
             if let Some(actions) = &self.folder_actions {
                 actions.update(cx, |actions, cx| actions.cancel_move_selection(cx));
@@ -1013,13 +1183,13 @@ impl<A: BrowseAdapter> BrowsePage<A> {
         let page = cx.entity();
         let mut breadcrumb = components::folder_breadcrumb();
         if self.path.is_empty() {
-            breadcrumb = breadcrumb.child(self.breadcrumb_drop_target(components::folder_breadcrumb_root_item(self.root_label.clone(), true, theme), sync_common::ROOT_DIR_ID, page.clone()));
+            breadcrumb = breadcrumb.child(self.breadcrumb_drop_target(components::folder_breadcrumb_root_item(self.root_label.clone(), true, theme), sync_common::ROOT_DIR_ID, page.clone(), theme));
         } else {
             let root_page = page.clone();
             let root = components::folder_breadcrumb_root_item(self.root_label.clone(), false, theme).on_click(move |_, _, cx| {
                 root_page.update(cx, |page, cx| page.open_path(Vec::new(), cx));
             });
-            breadcrumb = breadcrumb.child(self.breadcrumb_drop_target(root, sync_common::ROOT_DIR_ID, page.clone()));
+            breadcrumb = breadcrumb.child(self.breadcrumb_drop_target(root, sync_common::ROOT_DIR_ID, page.clone(), theme));
         }
         for (index, crumb) in self.path.iter().enumerate() {
             let current = index + 1 == self.path.len();
@@ -1027,7 +1197,7 @@ impl<A: BrowseAdapter> BrowsePage<A> {
             let destination = DirId::parse_str(&crumb.location).ok();
             if current {
                 if let Some(destination) = destination {
-                    breadcrumb = breadcrumb.child(self.breadcrumb_drop_target(item, destination, page.clone()));
+                    breadcrumb = breadcrumb.child(self.breadcrumb_drop_target(item, destination, page.clone(), theme));
                 } else {
                     breadcrumb = breadcrumb.child(item);
                 }
@@ -1038,7 +1208,7 @@ impl<A: BrowseAdapter> BrowsePage<A> {
                     path_page.update(cx, |page, cx| page.open_path(path.clone(), cx));
                 });
                 if let Some(destination) = destination {
-                    breadcrumb = breadcrumb.child(self.breadcrumb_drop_target(item, destination, page.clone()));
+                    breadcrumb = breadcrumb.child(self.breadcrumb_drop_target(item, destination, page.clone(), theme));
                 } else {
                     breadcrumb = breadcrumb.child(item);
                 }
@@ -1047,10 +1217,32 @@ impl<A: BrowseAdapter> BrowsePage<A> {
         components::folder_breadcrumb_trail(breadcrumb).into_any_element()
     }
 
-    fn breadcrumb_drop_target(&self, item: BreadcrumbItem, _destination: DirId, _page: Entity<Self>) -> BreadcrumbItem {
-        // BreadcrumbItem is intentionally click-only in the component library.
-        // Folder drops remain available on folder cards and the page body.
-        item
+    /// Wires the same drop behavior a folder chip gets onto a breadcrumb
+    /// segment: an ancestor folder is exactly as valid a destination for a
+    /// drag as one shown in the grid below it.
+    ///
+    /// The chip grid's own drop highlight comes from the paginator's custom
+    /// hit-testing, which a handful of breadcrumb segments have no reason to
+    /// duplicate; a plain `.hover` fill is cheaper here and still lights the
+    /// segment while a drag sits over it, since GPUI tracks cursor position
+    /// for hover independently of whether a button is held for a drag.
+    fn breadcrumb_drop_target(&self, item: BreadcrumbItem, destination: DirId, page: Entity<Self>, theme: components::BrowserTheme) -> BreadcrumbItem {
+        let import_page = page.clone();
+        let drop_page = page;
+        item.with_interaction(move |item| {
+            let import_page = import_page.clone();
+            let drop_page = drop_page.clone();
+            item.hover(move |style| style.bg(theme.hover))
+                .on_drop::<gpui::ExternalPaths>(move |paths, _, cx| {
+                    let paths = paths.paths().to_vec();
+                    let _ = import_page.update(cx, |page, cx| page.import_dropped_paths(Some(destination), paths, cx));
+                })
+                .on_drop::<FolderTargets>(move |targets, window, cx| {
+                    let targets = targets.clone();
+                    let _ = drop_page.update(cx, |page, cx| page.drop_onto_folder(destination, targets, window, cx));
+                })
+                .can_drop(move |dragged, _, _| dragged.is::<gpui::ExternalPaths>() || dragged.downcast_ref::<FolderTargets>().is_some_and(|targets| !targets.folders.contains(&destination)))
+        })
     }
 
     fn paginator_groups(&self, cx: &mut Context<Self>) -> Vec<PaginatorGroup> {
@@ -1064,6 +1256,7 @@ impl<A: BrowseAdapter> BrowsePage<A> {
             self.adapter.child_icon(),
             self.adapter.books(),
             self.detailed_cards,
+            crate::stores::current_cover_text(cx),
             self.cursor.clone(),
             self.selected.clone(),
             self.drop_target.clone(),
@@ -1100,7 +1293,7 @@ impl<A: BrowseAdapter> BrowsePage<A> {
     fn navigation_heading(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         if components::uses_mobile_navigation(window) {
             let title = self.path.last().map(|crumb| crumb.label.clone()).unwrap_or_else(|| self.root_label.to_string());
-            let back = components::mobile_back_button(components::browser_theme(cx)).on_click(|_, window, cx| window.dispatch_action(Box::new(DismissSettings), cx));
+            let back = (!components::has_native_back_button()).then(|| components::mobile_back_button(components::browser_theme(cx)).on_click(|_, window, cx| window.dispatch_action(Box::new(DismissSettings), cx)));
             components::mobile_navigation_heading(title, back)
         } else {
             components::browser_topbar_left().child(self.breadcrumb(cx))
@@ -1114,29 +1307,50 @@ impl<A: BrowseAdapter> BrowsePage<A> {
         let search_button_label = if self.search_open { "Hide search" } else { "Search books or authors" };
         let browse_controls = self.adapter.controls().clone();
         let has_options = !browse_controls.collection_sorts.is_empty() || !browse_controls.book_sorts.is_empty() || !browse_controls.formats.is_empty() || !browse_controls.languages.is_empty() || browse_controls.supports_direct_child_books;
+        let compact = components::WindowWidthClass::for_window(window).is_compact();
         let close_split_page = page.clone();
         let split_page = page.clone();
         let controls = components::browser_topbar_right()
             .when(self.search_open, |controls| controls.flex_1())
             .children(self.search_open.then(|| div().flex_1().min_w(rems(8.0)).child(self.search_field.as_ref().expect("search field initialized above").render())))
             .child(
-                components::topbar_icon_action_button("toggle-browse-search", search_button_label, IconName::Search, theme)
+                components::outlined_icon_button("toggle-browse-search", search_button_label, IconName::Search, theme)
                     .when(self.search_open || !self.selection.search.is_empty(), |button| button.bg(theme.accent).text_color(theme.accent_text))
                     .on_click(move |_, window, cx| search_page.update(cx, |page, cx| page.toggle_search(window, cx))),
             )
             .children(self.folder_actions.as_ref().map(|actions| FolderActions::render_trigger(actions.clone(), cx)))
             .when(self.can_split(window), |controls| {
                 controls.child(
-                    components::topbar_icon_action_button("split-browse-page", "Open split pane", IconName::PanelLeft, theme)
+                    components::outlined_icon_button("split-browse-page", "Open split pane", IconName::PanelLeft, theme)
                         .debug_selector(|| "split-browse-button".into())
                         .on_click(move |_, _, cx| split_page.update(cx, |page, cx| page.request_split(BrowseSplitSide::Right, cx))),
                 )
             })
             .when(self.split_close_enabled && self.can_split(window), |controls| {
-                controls.child(components::topbar_icon_action_button("close-split-pane", "Close split pane", IconName::Close, theme).on_click(move |_, _, cx| close_split_page.update(cx, |page, cx| page.request_close_split(cx))))
+                controls.child(components::outlined_icon_button("close-split-pane", "Close split pane", IconName::Close, theme).on_click(move |_, _, cx| close_split_page.update(cx, |page, cx| page.request_close_split(cx))))
             })
-            .when(has_options, |controls| controls.child(browse_options_control(page.clone(), browse_controls, self.selection.options(), |page: &mut Self, event, cx| page.select_option(event, cx), theme)));
+            .when(has_options, |controls| {
+                controls.child(browse_options_control(
+                    page.clone(),
+                    browse_controls,
+                    self.selection.options(),
+                    |page: &mut Self, event, cx| page.select_option(event, cx),
+                    compact,
+                    |page: &mut Self, cx| page.toggle_browse_options_sheet(cx),
+                    theme,
+                ))
+            });
         components::browser_topbar(theme).child(self.navigation_heading(window, cx)).child(controls).into_any_element()
+    }
+
+    fn render_browse_options_sheet(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.browse_options_sheet_open {
+            return None;
+        }
+        let theme = components::browser_theme(cx);
+        let page = cx.entity();
+        let browse_controls = self.adapter.controls().clone();
+        Some(browse_options_sheet(page, browse_controls, self.selection.options(), |page: &mut Self, event, cx| page.select_option(event, cx), |page: &mut Self, cx| page.close_browse_options_sheet(cx), theme))
     }
 
     pub(super) fn can_split(&self, window: &Window) -> bool {
@@ -1145,6 +1359,19 @@ impl<A: BrowseAdapter> BrowsePage<A> {
 
     pub(super) fn set_split_close_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.split_close_enabled = enabled;
+        cx.notify();
+    }
+
+    /// Rebuilds the grid's row height for the current "cover text" setting.
+    ///
+    /// The cards themselves pick the change up on their own — see
+    /// `BookCardView`'s own global observer — but the row height the
+    /// paginator reserves for them is decided here, and has to be recomputed
+    /// alongside them or the grid keeps the old gap under a card that no
+    /// longer has anything in it.
+    fn refresh_cover_text(&mut self, cx: &mut Context<Self>) {
+        let groups = self.paginator_groups(cx);
+        self.paginator.update(cx, |paginator, cx| paginator.refresh_groups(groups, cx));
         cx.notify();
     }
 
@@ -1203,14 +1430,20 @@ impl<A: BrowseAdapter> BrowsePage<A> {
             self.adapter.prepare_book_detail(book.clone(), None);
         }
         self.adapter.show_cached_book_detail();
-        let mut path = path;
-        path.push(BrowseCrumb { location: super::library::book_location(book.content_hash), label: book.title });
-        self.open_path(path, cx);
+        self.load_at(path, super::library::book_location(book.content_hash), LoadIntent::Navigate, cx);
     }
 
     pub(crate) fn hide_cached_book_detail(&mut self, cx: &mut Context<Self>) {
-        self.adapter.hide_cached_book_detail();
+        self.adapter.hide_cached_book_detail(cx);
         cx.notify();
+    }
+
+    /// Leaves a discarded book's page for the folder it was opened from: the
+    /// detail has its own location but deliberately no breadcrumb of its own,
+    /// so returning reloads the unchanged folder path.
+    pub(crate) fn close_book_detail(&mut self, cx: &mut Context<Self>) {
+        self.hide_cached_book_detail(cx);
+        self.open_path(self.path.clone(), cx);
     }
 
     pub(crate) fn clear_cached_book_detail(&mut self, cx: &mut Context<Self>) {
@@ -1262,7 +1495,7 @@ impl<A: BrowseAdapter> BrowsePage<A> {
         }
     }
 
-    fn render_shell(&self, topbar: AnyElement, body: AnyElement, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_shell(&self, topbar: AnyElement, body: AnyElement, options_sheet: Option<AnyElement>, cx: &mut Context<Self>) -> gpui::Div {
         let folder_overlay = self.folder_actions.as_ref().and_then(|actions| FolderActions::render_overlay(actions.clone(), cx));
         let chip_menu = self.chip_menu.as_ref().map(|active| deferred(anchored().position(active.position).snap_to_window_with_margin(px(8.0)).anchor(Anchor::TopLeft).child(active.menu.clone())).with_priority(1).into_any_element());
         components::full_size_column()
@@ -1283,6 +1516,7 @@ impl<A: BrowseAdapter> BrowsePage<A> {
             .child(components::remaining_space_column().child(body))
             .children(chip_menu)
             .children(folder_overlay)
+            .children(options_sheet)
     }
 }
 
@@ -1292,22 +1526,19 @@ impl<A: BrowseAdapter> Render for BrowsePage<A> {
         if let Some(body) = self.adapter.custom_body() {
             let theme = components::browser_theme(cx);
             let page = cx.entity();
-            let close = components::topbar_icon_action_button("close-book-detail", "Close", IconName::Close, theme).on_click(move |_, _, cx| {
+            let close = components::outlined_icon_button("close-book-detail", "Close", IconName::Close, theme).on_click(move |_, _, cx| {
                 page.update(cx, |page, cx| {
                     page.hide_cached_book_detail(cx);
-                    if !page.path.is_empty() {
-                        let mut parent = page.path.clone();
-                        parent.pop();
-                        page.open_path(parent, cx);
-                    }
+                    page.open_path(page.path.clone(), cx);
                 });
             });
             let body = div().relative().size_full().child(body).child(div().absolute().top(px(12.0)).right(px(12.0)).child(close)).into_any_element();
-            self.render_shell(div().h(px(0.0)).flex_none().into_any_element(), body, cx)
+            self.render_shell(div().h(px(0.0)).flex_none().into_any_element(), body, None, cx)
         } else {
             let topbar = self.render_topbar(window, cx);
             let body = self.render_body(cx);
-            self.render_shell(topbar, body, cx)
+            let options_sheet = self.render_browse_options_sheet(cx);
+            self.render_shell(topbar, body, options_sheet, cx)
         }
     }
 }

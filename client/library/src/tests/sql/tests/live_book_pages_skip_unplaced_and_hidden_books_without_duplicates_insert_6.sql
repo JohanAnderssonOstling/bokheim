@@ -1,1 +1,0 @@
-INSERT INTO book_dir(book_row_id,dir_id,file_name,local_hash) VALUES(1,?1,'another.epub','')

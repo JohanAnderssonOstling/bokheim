@@ -1,2 +1,0 @@
-INSERT INTO subject_code_mapping(source_system_id,source_code,unified_path,mapper_version) VALUES(?1,?2,?3,?4)
-            ON CONFLICT(source_system_id,source_code,unified_path) DO UPDATE SET mapper_version=excluded.mapper_version WHERE mapper_version IS NOT excluded.mapper_version

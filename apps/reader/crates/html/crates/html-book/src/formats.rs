@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use epub_provider::{EpubCreator, EpubMetadata, EpubProvider};
-use html::resources::{ResourceProvider, TocEntry};
+use html::resources::{ResourceMetadata, ResourceProvider, TocEntry};
 use regex::{Captures, Regex};
 
 /// A container-neutral book ready for the native HTML renderer.
@@ -53,6 +53,10 @@ impl EpubHtmlProvider {
 impl ResourceProvider for EpubHtmlProvider {
     fn read_bytes(&self, uri: &str) -> io::Result<Vec<u8>> {
         self.epub.read_bytes(uri)
+    }
+
+    fn metadata(&self, uri: &str) -> io::Result<ResourceMetadata> {
+        Ok(ResourceMetadata { media_type: self.epub.resource_media_type(uri).map(str::to_owned), charset: None })
     }
 
     fn exists(&self, uri: &str) -> bool {
@@ -495,6 +499,7 @@ mod tests {
         let book = BookSource::from_epub_provider(epub).unwrap();
         let provider = book.provider();
         let document_uri = "OEBPS/Text/titlepage.xhtml";
+        assert_eq!(provider.metadata(document_uri).unwrap().media_type.as_deref(), Some("application/xhtml+xml"));
         let source = provider.read_string(document_uri).unwrap();
         assert!(source.contains(r#"xlink:href="../Images/cover.jpeg""#), "adapter must return unmodified book bytes");
 
@@ -514,6 +519,24 @@ mod tests {
         let html::resources::DecodedImage::Svg { bytes, .. } = pipeline.get_decoded(image_idx as u32).expect("decoded inline SVG") else { panic!("inline SVG must remain a vector resource") };
         let svg = std::str::from_utf8(bytes).expect("hydrated SVG remains UTF-8");
         assert!(svg.contains(r#"xlink:href="data:image/jpeg;base64,/9j/2Q==""#));
+    }
+
+    #[test]
+    fn epub_adapter_exposes_xhtml_manifest_type_for_html_named_chapter() {
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, bytes) in [
+            ("META-INF/container.xml", r#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#),
+            ("OEBPS/content.opf", r#"<package><manifest><item id="chapter" href="chapter.html" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#),
+            ("OEBPS/chapter.html", r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p><a id="page1"/>Text</p></body></html>"#),
+        ] {
+            archive.start_file(name, options).unwrap();
+            archive.write_all(bytes.as_bytes()).unwrap();
+        }
+        let book = BookSource::from_epub_provider(Arc::new(EpubProvider::try_from_reader(archive.finish().unwrap()).unwrap())).unwrap();
+        let uri = &book.document_uris[0];
+        assert_eq!(uri, "OEBPS/chapter.html");
+        assert_eq!(book.provider().metadata(uri).unwrap().media_type.as_deref(), Some("application/xhtml+xml"));
     }
 
     #[test]

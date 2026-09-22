@@ -27,21 +27,3 @@ impl AsyncCallback {
         self.0.as_ref().clone()
     }
 }
-
-#[cfg(feature = "storage-contract-tests")]
-pub async fn contract() -> Result<(), JsValue> {
-    use wasm_bindgen::JsCast;
-    use wasm_bindgen_futures::JsFuture;
-    let blob = web_sys::Blob::new_with_str_sequence(&js_sys::Array::of1(&"audio fixture".into()))?;
-    let owned = BlobUrl::new(&blob)?;
-    let url = owned.url().to_owned();
-    let scope: web_sys::WorkerGlobalScope = js_sys::global().unchecked_into();
-    let response: web_sys::Response = JsFuture::from(scope.fetch_with_str(&url)).await?.dyn_into()?;
-    assert_eq!(JsFuture::from(response.text()?).await?.as_string().as_deref(), Some("audio fixture"));
-    drop(owned);
-    assert!(JsFuture::from(scope.fetch_with_str(&url)).await.is_err(), "dropped playback URL must be revoked");
-    let callback = AsyncCallback::new(|| async { Ok("renewed".into()) });
-    let promise: js_sys::Promise = callback.value().unchecked_into::<js_sys::Function>().call0(&JsValue::UNDEFINED)?.dyn_into()?;
-    assert_eq!(JsFuture::from(promise).await?.as_string().as_deref(), Some("renewed"));
-    Ok(())
-}

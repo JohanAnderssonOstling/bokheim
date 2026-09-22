@@ -7,14 +7,15 @@ edition = "2024"
 default = []
 audiobooks = ["dep:audiobook-player"]
 native-audio = ["audiobook-player/native-rodio"]
-kobo = ["mobile", "dep:gpui_kobo", "bokheim-backend/kobo", "audiobooks", "audiobook-player/kobo", "ui-components/kobo"]
+kobo = ["mobile", "dep:gpui_kobo", "app/kobo", "audiobooks", "audiobook-player/kobo", "ui-components/kobo"]
 mobile = ["ui-components/mobile"]
 packaged-pdfium = ["pdf-reader-core/packaged-pdfium"]
 
 [dependencies]
+library-backend = { path = "../../client/library-backend" }
 content-address = { path = "../../shared/content-address" }
 app-preferences = { path = "../../client/preferences" }
-bokheim-backend = { path = "../../client/backend", default-features = false }
+app = { path = "../../client/app", default-features = false }
 async-channel = "2"
 futures-util = "0.3"
 ui-components = { path = "../components" }

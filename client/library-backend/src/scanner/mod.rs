@@ -8,4 +8,4 @@
 mod estimate;
 pub mod filesystem_scan;
 
-pub use estimate::{ estimate_folders_cancellable};
+pub use estimate::estimate_folders_cancellable;

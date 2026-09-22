@@ -1,24 +1,23 @@
-//! EPUB contents and annotation sidebars.
+//! EPUB contents, annotation, and settings sidebar tabs.
 
+use library_backend::ReaderAnnotation;
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Entity, IntoElement};
-use book_model::ReaderAnnotation;
+use gpui::{AnyElement, Context, Entity, IntoElement, Window};
 use ui_components as components;
 
 use crate::epub::ReaderView;
 use crate::invalidation::Component;
-use crate::shell::state_panel::{self, SidebarPanel};
+use crate::shell::state_panel::{self, SidebarTab};
 
 impl ReaderView {
-    fn render_sidebar_tabs(&self, show_annotations: bool, cx: &mut Context<Self>) -> AnyElement {
-        state_panel::reader_sidebar_tabs("reader-sidebar-tabs", &cx.entity(), show_annotations, true, cx, |annotations, this, cx| {
-            let panel = if annotations { SidebarPanel::Annotations } else { SidebarPanel::Contents };
-            state_panel::select_panel(&mut this.sidebar, panel, cx);
+    fn render_sidebar_tabs(&self, active: SidebarTab, theme: components::BrowserTheme, cx: &mut Context<Self>) -> AnyElement {
+        state_panel::reader_sidebar_tabs("reader-sidebar-tabs", &cx.entity(), active, true, theme, |tab, this, cx| {
+            state_panel::select_tab(&mut this.sidebar, tab, cx);
             crate::invalidation::notify(cx, Component::ReaderShell, "sidebar_tab_changed");
         })
     }
 
-    pub(super) fn render_toc(&self, entity: Entity<Self>, theme: components::BrowserTheme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_toc_body(&self, entity: Entity<Self>, theme: components::BrowserTheme) -> AnyElement {
         let toc = state_panel::reader_toc_tree(&self.toc_tree, &entity, theme, |link, window, this: &mut Self, cx| {
             this.navigate_to(link.to_owned(), cx);
             this.focus_document(window, cx);
@@ -28,13 +27,11 @@ impl ReaderView {
                 crate::invalidation::notify(cx, Component::ReaderShell, "toc_navigated");
             }
         });
-        components::reader_toc(theme).child(self.render_sidebar_tabs(false, cx)).child(toc).into_any_element()
+        components::reader_toc(theme).child(toc).into_any_element()
     }
 
-    pub(super) fn render_reader_state(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = components::browser_theme(cx);
+    fn render_annotations_body(&self, theme: components::BrowserTheme, cx: &mut Context<Self>) -> AnyElement {
         components::reader_state_panel(theme)
-            .child(self.render_sidebar_tabs(true, cx))
             .children(state_panel::reader_state_rows(
                 &cx.entity(),
                 &self.marks,
@@ -48,5 +45,17 @@ impl ReaderView {
                 |id, this: &mut Self, cx| this.delete_annotation(id, cx),
             ))
             .into_any_element()
+    }
+
+    /// The tab strip and the active tab's body — the two pieces
+    /// `shell::toolbar::reader_sidebar` places under its own header.
+    pub(super) fn render_sidebar(&self, active: SidebarTab, entity: Entity<Self>, theme: components::BrowserTheme, window: &Window, cx: &mut Context<Self>) -> (AnyElement, AnyElement) {
+        let tabs = self.render_sidebar_tabs(active, theme, cx);
+        let body = match active {
+            SidebarTab::Contents => self.render_toc_body(entity, theme),
+            SidebarTab::Annotations => self.render_annotations_body(theme, cx),
+            SidebarTab::Settings => self.render_settings_panel(cx),
+        };
+        (tabs, body)
     }
 }

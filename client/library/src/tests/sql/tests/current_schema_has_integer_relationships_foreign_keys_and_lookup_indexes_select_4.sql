@@ -1,1 +1,0 @@
-SELECT COUNT(*) FROM sqlite_schema WHERE type='index' AND name=?1

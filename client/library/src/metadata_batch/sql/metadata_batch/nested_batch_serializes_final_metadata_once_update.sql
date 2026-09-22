@@ -1,1 +1,0 @@
-UPDATE book SET title='Intermediate' WHERE content_hash=?1

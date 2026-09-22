@@ -17,7 +17,7 @@ async fn metadata_waits_for_the_audiobook_upload() {
 
 #[tokio::test]
 #[ignore = "requires SYNC_E2E_DATABASE_URL"]
-async fn an_old_catalogue_reference_is_not_an_upload_receipt() {
+async fn an_old_reference_is_not_an_upload_receipt() {
     let fixture = AudiobookFixture::new().await;
     sqlx::query("INSERT INTO user_blob_reference(user_id,content_hash,reference_count) VALUES($1,$2,1)")
         .bind(&fixture.user).bind(fixture.identity.as_str()).execute(&fixture.pool).await.unwrap();
@@ -129,7 +129,7 @@ impl AudiobookFixture {
         let database = PostgresDatabase::from_pool(pool.clone());
         let disk = tempfile::tempdir().unwrap();
         let source = disk.path().join("audio.m4b");
-        std::fs::write(&source, include_bytes!("../../../../../client/backend/tests/fixtures/embedded-cover.m4b")).unwrap();
+        std::fs::write(&source, include_bytes!("../../../../../client/app/tests/fixtures/embedded-cover.m4b")).unwrap();
         let identity = book_identity::ensure(&source).unwrap();
         let audio = std::fs::read(source).unwrap();
         let checksum = ContentHash::new(blake3::hash(&audio).to_hex().as_str());

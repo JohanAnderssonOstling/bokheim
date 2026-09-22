@@ -2,7 +2,7 @@
 const handles = new Map();
 const opening = new Map();
 async function stagedFile(name, create = false) {
-    if (!/^(__import_objects\/[0-9a-f-]{36}\/\d+|__(book|thumbnail)_objects\/[0-9a-f-]+)$/.test(name)) throw Error('Invalid staged file path');
+    if (!/^__libraries\/[0-9a-f-]{36}\/(?:imports\/[0-9a-f-]{36}\/\d+|(?:book|thumbnail)\/[0-9a-f-]{36})$/.test(name)) throw Error('Invalid staged file path');
     const parts = name.split('/');
     let directory = await navigator.storage.getDirectory();
     for (const component of parts.slice(0, -1)) directory = await directory.getDirectoryHandle(component, {create});
@@ -46,21 +46,47 @@ export function flushStaged(name) { handles.get(name).flush(); }
 export async function listAssets() {
     const root = await navigator.storage.getDirectory();
     const names = [];
-    for (const folder of ['__book_objects', '__thumbnail_objects']) {
-        let directory;
-        try { directory = await root.getDirectoryHandle(folder); }
-        catch (error) { if (error.name === 'NotFoundError') continue; throw error; }
-        for await (const name of directory.keys()) names.push(folder + '/' + name);
+    let libraries;
+    try { libraries = await root.getDirectoryHandle('__libraries'); }
+    catch (error) { if (error.name === 'NotFoundError') return names; throw error; }
+    for await (const [id, library] of libraries.entries()) {
+        if (library.kind !== 'directory') continue;
+        for (const kind of ['book', 'thumbnail']) {
+            let directory;
+            try { directory = await library.getDirectoryHandle(kind); }
+            catch (error) { if (error.name === 'NotFoundError') continue; throw error; }
+            for await (const name of directory.keys()) names.push(`__libraries/${id}/${kind}/${name}`);
+        }
     }
     return names;
 }
 export async function removeAsset(name) {
-    const [folder, file] = name.split('/');
+    if (!/^__libraries\/[0-9a-f-]{36}\/(?:imports\/[0-9a-f-]{36}\/\d+|(?:book|thumbnail)\/[0-9a-f-]{36})$/.test(name)) throw Error('Invalid asset file path');
+    const parts = name.split('/');
     try {
-        const directory = await (await navigator.storage.getDirectory()).getDirectoryHandle(folder);
-        await directory.removeEntry(file);
+        let directory = await navigator.storage.getDirectory();
+        for (const part of parts.slice(0, -1)) directory = await directory.getDirectoryHandle(part);
+        await directory.removeEntry(parts.at(-1));
     } catch (error) {
         // A reader retirement can remove the same orphan during enumeration.
+        if (error.name !== 'NotFoundError') throw error;
+    }
+}
+
+export async function removeLibrary(library) {
+    if (!/^[0-9a-f-]{36}$/.test(library)) throw Error('Invalid library id');
+    const prefix = `__libraries/${library}/`;
+    for (const [name, handle] of handles) {
+        if (name.startsWith(prefix)) {
+            handle.close();
+            handles.delete(name);
+        }
+    }
+    try {
+        const root = await navigator.storage.getDirectory();
+        const libraries = await root.getDirectoryHandle('__libraries');
+        await libraries.removeEntry(library, {recursive: true});
+    } catch (error) {
         if (error.name !== 'NotFoundError') throw error;
     }
 }

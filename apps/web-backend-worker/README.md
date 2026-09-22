@@ -13,7 +13,7 @@ This package owns the browser application's worker topology and entry points:
 CPU execution queues, transfer coordination, storage mechanisms, and network I/O.
 It accepts opaque payloads and callbacks and has no dependency on the backend.
 
-`bokheim-backend` owns application commands and workflows. Native and staged
+`app` owns application commands and workflows. Native and staged
 imports share `import_workflow`; `staged_import` uses typed storage and library
 interfaces for copy ordering, checkpoints, and recovery. `web` and
 `browser_import` translate browser capabilities and messages into backend operations.
@@ -26,6 +26,6 @@ Build the complete optimized application from the workspace root:
 BOKHEIM_WEB_OUTPUT_DIR=/tmp/bokheim-web ./apps/web-gpui/scripts/build.sh
 ```
 
-Worker contracts and browser checks remain under `client/backend/scripts`.
+Worker contracts and browser checks remain under `client/app/scripts`.
 `worker-test-support.mjs` selects this package for the CPU and coordinator examples;
-backend probes remain in `bokheim-backend`.
+backend probes remain in `app`.

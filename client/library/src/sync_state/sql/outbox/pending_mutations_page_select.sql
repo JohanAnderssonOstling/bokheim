@@ -1,1 +1,0 @@
-SELECT mutation_id,state_kind,state_key,body,changed_at,replica_seq,state_subkey FROM sync_outbox WHERE replica_seq>?1 AND replica_seq<=?2 ORDER BY replica_seq

@@ -1,1 +1,0 @@
-SELECT id,stable_id FROM author_identity WHERE stable_id=?1

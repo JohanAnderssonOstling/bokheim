@@ -1,9 +1,8 @@
 //! Account-backed remote reading owned by one library session.
 
-use super::{LibrarySession, RemoteFile};
+use super::{playback::DirectPlayback, LibrarySession, RemoteFile};
 use crate::BackendError;
 use crate::ContentHash;
-use client_library::runtime_contracts::DirectPlayback;
 
 impl LibrarySession {
     fn account(&self) -> Result<library_runtime::account::LibraryAccount, BackendError> {

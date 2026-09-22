@@ -49,14 +49,25 @@ pub struct Candidate {
     pub authors: Vec<String>,
     pub narrators: Vec<String>,
     pub publisher: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
     pub release_date: Option<String>,
     pub isbns: Vec<String>,
     pub abridged: Option<bool>,
-    pub catalogue_duration_ms: Option<u64>,
-    /// Measured from the provider chapter tree, not rounded catalogue minutes.
+    pub provider_duration_ms: Option<u64>,
+    /// Measured from the provider chapter tree, not rounded provider minutes.
     pub duration_ms: Option<u64>,
     pub chapters: Vec<Chapter>,
     pub source: DiscoverySource,
+    /// Provider provenance is independent of how the ASIN was discovered.
+    #[serde(default = "default_metadata_provider")]
+    pub metadata_provider: String,
+    #[serde(default)]
+    pub chapter_provider: Option<String>,
+}
+
+fn default_metadata_provider() -> String {
+    "audible".into()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,4 +122,4 @@ pub const MAX_LOOKUP_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 pub mod chapters;
 
 /// Bump whenever lookup or chapter policy requires reevaluating durable results.
-pub const POLICY_VERSION: &str = "audible_v1";
+pub const POLICY_VERSION: &str = "audible_v2";

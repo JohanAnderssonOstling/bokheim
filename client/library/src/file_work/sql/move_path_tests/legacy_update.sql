@@ -1,1 +1,0 @@
-UPDATE local_file_projection SET relative_path=?2 || substr(relative_path,length(?1)+1) WHERE substr(relative_path,1,length(?1))=?1

@@ -1,1 +1,0 @@
-INSERT INTO block VALUES(?1,0,?2,1)

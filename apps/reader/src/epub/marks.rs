@@ -6,8 +6,9 @@
 //! [`crate::shell::marks`]. What is here depends on EPUB CFIs, which no other
 //! reader has.
 
+use book_model::{AnnotationStyle};
+use library_backend::{ReaderAnnotation};
 use html_view_core::{AnnotationStyle as RendererAnnotationStyle, RendererAnnotation};
-use book_model::{AnnotationStyle, ReaderAnnotation};
 
 use crate::epub::Selection;
 
@@ -79,6 +80,8 @@ mod tests {
             note: String::new(),
             created_at: 0,
             modified_at: 0,
+            toc_ordinal: None,
+            progress: None,
         }
     }
 

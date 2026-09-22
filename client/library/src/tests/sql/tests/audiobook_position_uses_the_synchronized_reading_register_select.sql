@@ -1,1 +1,0 @@
-SELECT read_progress FROM book WHERE content_hash=printf('%064x',1)

@@ -1,1 +1,0 @@
-SELECT subject_path FROM book_subject_assignment WHERE system_id='lcc'

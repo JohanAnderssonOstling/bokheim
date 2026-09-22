@@ -1,1 +1,0 @@
-SELECT COALESCE((SELECT purged_at IS NOT NULL FROM book WHERE content_hash=?1),0)

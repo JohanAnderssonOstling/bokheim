@@ -11,10 +11,10 @@ macro_rules! startup_phase {
     };
 }
 
+mod book;
 mod epub;
 mod invalidation;
 mod pdf;
-mod book;
 mod settings;
 mod shell;
 mod windows;
@@ -33,7 +33,7 @@ pub use windows::AudiobookOpened;
 pub use windows::{CloseRequested, ReaderView, configure};
 
 #[cfg(feature = "audiobooks")]
-pub fn restore_audiobook(record: &ActiveAudiobook, library: bokheim_backend::LibraryClient, cx: &mut gpui::App) -> gpui::Entity<PlaybackSession> {
+pub fn restore_audiobook(record: &ActiveAudiobook, library: library_backend::LibraryClient, cx: &mut gpui::App) -> gpui::Entity<PlaybackSession> {
     use gpui::AppContext;
     let save_speed = std::rc::Rc::new(|speed, cx: &mut gpui::App| {
         settings::ReaderSettings::update(cx, |preferences| preferences.audiobook_speed = speed);

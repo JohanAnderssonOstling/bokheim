@@ -1,12 +1,12 @@
 //! Personal names written the other way round.
 //!
-//! Catalogues file people under their family name — "Yakobson, Alexander" —
-//! because that is how a shelf is ordered, and PDF `/Author` fields inherit the
-//! habit from whatever catalogue the file passed through. A reader wants the
-//! name as its owner writes it. The two forms are the same name, so the filing
-//! form is kept as a contributor's sort name rather than discarded.
+//! Authority files list people under their family name — "Yakobson, Alexander" —
+//! and PDF `/Author` fields inherit the habit from whatever file passed through.
+//! A reader wants the name as its owner writes it, and display order is what the
+//! index sorts by, so the inverted form is rewritten up front and only the
+//! reading-order name is ever stored.
 //!
-//! This lives here, below both ingestion and catalogue matching, because the
+//! This lives here, below both ingestion and authority matching, because the
 //! two used to answer the question separately: identity matching reordered
 //! names to compare them while ingestion stored whatever the file said, so the
 //! same person could match correctly and still be displayed backwards.
@@ -47,9 +47,7 @@ pub fn looks_like_organization(value: &str) -> bool {
         return true;
     }
     let key = comparison_key(value);
-    key.split_whitespace().any(|word| {
-        matches!(word, "association" | "committee" | "company" | "corporation" | "institute" | "press" | "society" | "university" | "inc" | "llc" | "ltd" | "department" | "ministry" | "office" | "bureau")
-    })
+    key.split_whitespace().any(|word| matches!(word, "association" | "committee" | "company" | "corporation" | "institute" | "press" | "society" | "university" | "inc" | "llc" | "ltd" | "department" | "ministry" | "office" | "bureau"))
 }
 
 /// Letters and digits only, lowercased, with everything else standing in for a

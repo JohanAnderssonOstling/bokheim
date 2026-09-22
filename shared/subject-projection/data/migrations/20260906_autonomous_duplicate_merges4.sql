@@ -1,0 +1,16 @@
+BEGIN IMMEDIATE;
+INSERT OR IGNORE INTO lcc_selector SELECT 4457,selector FROM lcc_selector WHERE concept_id=7842;
+DELETE FROM lcc_selector WHERE concept_id=7842;
+INSERT OR IGNORE INTO bisac_selector SELECT 4457,selector FROM bisac_selector WHERE concept_id=7842;
+DELETE FROM bisac_selector WHERE concept_id=7842;
+UPDATE lcc_range SET concept_id=4457 WHERE concept_id=7842;
+DELETE FROM concept_parent WHERE concept_id=7842;
+DELETE FROM concept WHERE concept_id=7842;
+INSERT OR IGNORE INTO lcc_selector SELECT 4256,selector FROM lcc_selector WHERE concept_id=8354;
+DELETE FROM lcc_selector WHERE concept_id=8354;
+INSERT OR IGNORE INTO bisac_selector SELECT 4256,selector FROM bisac_selector WHERE concept_id=8354;
+DELETE FROM bisac_selector WHERE concept_id=8354;
+UPDATE lcc_range SET concept_id=4256 WHERE concept_id=8354;
+DELETE FROM concept_parent WHERE concept_id=8354;
+DELETE FROM concept WHERE concept_id=8354;
+COMMIT;

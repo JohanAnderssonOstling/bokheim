@@ -1,15 +1,15 @@
 //! Execute shared policy in bounded background batches. File/HTTP work never
 //! runs inside a database command, and successful ISBN responses serve authors too.
-use super::application::{EnrichmentWrite, apply_enrichment_writes};
-use super::{OPEN_LIBRARY_EDITION_IDENTITY_PROVIDER, OPEN_LIBRARY_RICH_PROVIDER, enrichment_parallelism};
+use super::{enrichment_parallelism, OPEN_LIBRARY_EDITION_IDENTITY_PROVIDER, OPEN_LIBRARY_RICH_PROVIDER};
 
-use crate::{BackendError, library::LibrarySession};
-use client_library::prepared_enrichment as prepared;
+use crate::{library::LibrarySession, BackendError};
 use metadata_contract::MetadataEnrichmentRequest;
 use std::collections::{HashMap, HashSet};
 
-use futures_util::{StreamExt, stream};
 use book_enrichment::{SubjectPhase, SubjectStep};
+use futures_util::{stream, StreamExt};
+
+pub const INSPECTION_REVISION: i64 = book_enrichment::SUBJECT_PIPELINE_REVISION;
 
 impl LibrarySession {
     pub(super) async fn cached_metadata_enrichment(&self, request: &MetadataEnrichmentRequest) -> Result<metadata_contract::RichMetadataEnrichmentResponse, BackendError> {
@@ -19,6 +19,7 @@ impl LibrarySession {
         let mut missing = Vec::new();
         for (isbn, response) in cached {
             if let Some(response) = response {
+                let response: metadata_contract::RichMetadataEnrichmentResponse = serde_json::from_str(&response).map_err(BackendError::operation)?;
                 responses.push(response);
             } else {
                 missing.push(isbn);
@@ -26,43 +27,25 @@ impl LibrarySession {
         }
         if !missing.is_empty() {
             let response = self.metadata().enrichment(&MetadataEnrichmentRequest { isbns: missing.clone() }).await.map_err(BackendError::operation)?;
-            let mut writes: Vec<EnrichmentWrite> = Vec::new();
             for result in &response.results {
                 if !missing.contains(&result.requested_isbn) {
                     continue;
                 }
-                let places = result.matches.iter().flat_map(|m| m.places.iter().filter_map(|e| e.wikidata_id.as_ref())).collect::<HashSet<_>>();
-                let people = result.matches.iter().flat_map(|m| m.people.iter().filter_map(|e| e.wikidata_id.as_ref())).collect::<HashSet<_>>();
                 // Store only this ISBN's record, rather than cloning the whole
-                // batch once per ISBN. Retain the place graph for parent links.
-                let single = metadata_contract::RichMetadataEnrichmentResponse {
-                    snapshot: response.snapshot.clone(),
-                    results: vec![result.clone()],
-                    places: if places.is_empty() { Vec::new() } else { response.places.clone() },
-                    people: response.people.iter().filter(|p| people.contains(&p.wikidata_id)).cloned().collect(),
-                };
+                // batch once per ISBN.
+                let single = metadata_contract::RichMetadataEnrichmentResponse { snapshot: response.snapshot.clone(), results: vec![result.clone()] };
                 let isbn = result.requested_isbn.clone();
                 let json = serde_json::to_string(&single).map_err(BackendError::operation)?;
-                writes.push(Box::new(move |conn| {
-                    prepared::cache_isbn_json(conn, &isbn, &json)?;
-                    Ok(0)
-                }));
+                self.db.cache_isbn_json(library_database::IsbnCacheOutcome { isbn, json }).map_err(BackendError::operation)?;
             }
-            apply_enrichment_writes(self, writes).await?;
             responses.push(response);
         }
         let Some(mut combined) = responses.pop() else { return self.metadata().enrichment(request).await.map_err(BackendError::operation) };
         for response in responses {
             combined.results.extend(response.results);
-            combined.places.extend(response.places);
-            combined.people.extend(response.people);
         }
         combined.results.sort_by(|a, b| a.requested_isbn.cmp(&b.requested_isbn));
         combined.results.dedup_by(|a, b| a.requested_isbn == b.requested_isbn);
-        combined.places.sort_by(|a, b| a.wikidata_id.cmp(&b.wikidata_id));
-        combined.places.dedup_by(|a, b| a.wikidata_id == b.wikidata_id);
-        combined.people.sort_by(|a, b| a.wikidata_id.cmp(&b.wikidata_id));
-        combined.people.dedup_by(|a, b| a.wikidata_id == b.wikidata_id);
         Ok(combined)
     }
 
@@ -112,8 +95,8 @@ impl LibrarySession {
                             }
                             SubjectStep::LookupIsbns(isbns) => {
                                 let exact_isbns = job.book.identifiers.iter().filter(|id| id.scheme() == &book_model::Scheme::Isbn).filter_map(|id| book_enrichment::metadata_isbn(id.value())).collect();
-                                let reference_isbns = book_enrichment::related_isbn::lookup_candidates(&job.book.properties).into_iter().collect();
-                                isbn_jobs.push(client_library::external_metadata::RichEnrichmentCandidate { content_hash: job.hash, isbns, exact_isbns, reference_isbns, classification_count: job.book.subjects.len() });
+                                let reference_isbns = book_enrichment::related_isbn::lookup_candidates(&job.book.identifiers).into_iter().collect();
+                                isbn_jobs.push(library_database::RichEnrichmentCandidate { content_hash: job.hash, isbns, exact_isbns, reference_isbns, classification_count: job.book.subjects.len() });
                                 stage_providers.insert(job.hash, OPEN_LIBRARY_RICH_PROVIDER);
                             }
                             SubjectStep::SearchTitleAuthor => {
@@ -126,10 +109,8 @@ impl LibrarySession {
                             }
                             step @ (SubjectStep::InspectPages | SubjectStep::InspectOcr) => {
                                 let ocr = matches!(step, SubjectStep::InspectOcr);
-                                let marker = if ocr { "inspection:ocr-pass" } else { "inspection:page-pass" };
-                                let cached = job.book.properties.iter().any(|p| p.property() == marker && p.value() == book_inspection::evidence::INSPECTION_VERSION.to_string());
                                 let supported = crate::worker_cpu::inspection_capabilities().supports(job.format, ocr);
-                                if cached || !supported {
+                                if !supported {
                                     job.pipeline.finish_step();
                                     continue;
                                 }
@@ -156,7 +137,7 @@ impl LibrarySession {
                         match outcome {
                             Ok(Some(evidence)) => {
                                 // Persist each finished inspection without waiting for a slower sibling.
-                                updated += apply_enrichment_writes(self, vec![Box::new(move |conn| prepared::merge_pages(conn, hash, &evidence).map(usize::from))]).await?;
+                                updated += usize::from(self.db.merge_evidence_pages(library_database::MergeEvidenceOutcome { content_hash: hash, evidence }).map_err(BackendError::operation)?);
                                 jobs.iter_mut().find(|job| job.hash == hash).unwrap().pipeline.finish_step();
                             }
                             Ok(None) => jobs.iter_mut().find(|job| job.hash == hash).unwrap().pipeline.finish_step(),
@@ -189,7 +170,7 @@ impl LibrarySession {
                     let hashes = jobs.iter().map(|j| j.hash).collect::<Vec<_>>();
                     let attempted = stage_providers.keys().copied().collect::<HashSet<_>>();
                     let refreshed = self.db.refresh_subject_enrichment(hashes, stage_providers.clone()).map_err(BackendError::operation)?;
-                    let mut writes: Vec<EnrichmentWrite> = Vec::new();
+                    let mut checkpoints: Vec<library_database::SubjectCheckpointOutcome> = Vec::new();
                     for refreshed in refreshed {
                         let hash = refreshed.content_hash;
                         let job = jobs.iter_mut().find(|j| j.hash == hash).unwrap();
@@ -212,12 +193,21 @@ impl LibrarySession {
                         let state = job.pipeline.clone();
                         let expected = job.book.clone();
                         let title = job.title.clone();
-                        writes.push(Box::new(move |conn| {
-                            prepared::save(conn, hash, &state, &expected, &title, complete, delay)?;
-                            Ok(0)
-                        }));
+                        let mut state_value = serde_json::to_value(&state).map_err(BackendError::operation)?;
+                        state_value["inspection_revision"] = INSPECTION_REVISION.into();
+                        checkpoints.push(library_database::SubjectCheckpointOutcome {
+                            content_hash: hash,
+                            state: state_value.to_string(),
+                            empty_metadata: expected == book_model::BookMetadata::default(),
+                            expected: sync_common::wire::encode(&expected).map_err(BackendError::operation)?,
+                            title,
+                            complete,
+                            retry_seconds: delay,
+                        });
                     }
-                    apply_enrichment_writes(self, writes).await?;
+                    for checkpoint in checkpoints {
+                        self.db.save_subject_checkpoint(checkpoint).map_err(BackendError::operation)?;
+                    }
                     crate::executor::sleep(std::time::Duration::from_millis(1)).await;
                 }
             }

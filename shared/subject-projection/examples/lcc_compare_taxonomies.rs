@@ -20,12 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let old = before.matching_concept_ids(LCC_SYSTEM_ID, &notation);
         let new = after.matching_concept_ids(LCC_SYSTEM_ID, &notation);
         if old != new {
-            output.write_record([
-                uses.to_string(),
-                notation,
-                old.iter().map(i64::to_string).collect::<Vec<_>>().join("|"),
-                new.iter().map(i64::to_string).collect::<Vec<_>>().join("|"),
-            ])?;
+            output.write_record([uses.to_string(), notation, old.iter().map(i64::to_string).collect::<Vec<_>>().join("|"), new.iter().map(i64::to_string).collect::<Vec<_>>().join("|")])?;
         }
     }
     output.flush()?;

@@ -1,1 +1,0 @@
-INSERT INTO book(content_hash,added_at,deleted_at,purged_at) VALUES(?1,1,1,1)

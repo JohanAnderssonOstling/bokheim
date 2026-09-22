@@ -125,28 +125,22 @@ pub struct OwnedEndpoint {
 }
 impl OwnedEndpoint {
     /// Own event conversion and browser errors while callers choose failure policy.
-    pub fn listen(
-        endpoint: WorkerEndpoint,
-        mut message: impl FnMut(JsValue) + 'static,
-        failed: impl Fn(String) + 'static,
-        stopped: &'static str,
-        malformed: &'static str,
-    ) -> Self {
+    pub fn listen(endpoint: WorkerEndpoint, mut message: impl FnMut(JsValue) + 'static, failed: impl Fn(String) + 'static, stopped: &'static str, malformed: &'static str) -> Self {
         let failed = Rc::new(failed);
         let invalid = failed.clone();
-        Self::new(endpoint, move |event| message(event.data()), move |event| {
-            event.prevent_default();
-            let error = super::field(event.as_ref(), "message").as_string().filter(|value| !value.is_empty()).unwrap_or_else(|| stopped.into());
-            failed(error);
-        }, move |_| invalid(malformed.into()))
+        Self::new(
+            endpoint,
+            move |event| message(event.data()),
+            move |event| {
+                event.prevent_default();
+                let error = super::field(event.as_ref(), "message").as_string().filter(|value| !value.is_empty()).unwrap_or_else(|| stopped.into());
+                failed(error);
+            },
+            move |_| invalid(malformed.into()),
+        )
     }
 
-    fn new(
-        endpoint: WorkerEndpoint,
-        message: impl FnMut(web_sys::MessageEvent) + 'static,
-        error: impl FnMut(web_sys::Event) + 'static,
-        malformed: impl FnMut(web_sys::MessageEvent) + 'static,
-    ) -> Self {
+    fn new(endpoint: WorkerEndpoint, message: impl FnMut(web_sys::MessageEvent) + 'static, error: impl FnMut(web_sys::Event) + 'static, malformed: impl FnMut(web_sys::MessageEvent) + 'static) -> Self {
         use wasm_bindgen::{closure::Closure, JsCast};
         let message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(message);
         let error = Closure::<dyn FnMut(web_sys::Event)>::new(error);
@@ -156,7 +150,9 @@ impl OwnedEndpoint {
         endpoint.set_onmessageerror(Some(malformed.as_ref().unchecked_ref()));
         Self { endpoint, _message: message, _error: error, _malformed: malformed }
     }
-    pub fn endpoint(&self) -> &WorkerEndpoint { &self.endpoint }
+    pub fn endpoint(&self) -> &WorkerEndpoint {
+        &self.endpoint
+    }
 }
 impl Drop for OwnedEndpoint {
     fn drop(&mut self) {

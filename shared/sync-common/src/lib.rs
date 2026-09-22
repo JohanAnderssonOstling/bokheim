@@ -34,7 +34,6 @@ pub mod mutation_kind {
     pub const ANNOTATION: &str = "annotation";
     pub const BOOK_LIFECYCLE: &str = "book_lifecycle";
     pub const BOOK_TOC: &str = "book_toc";
-    pub const CATALOG_BOOK: &str = "catalog_book";
     pub const DIRECTORY_LIFECYCLE: &str = "directory_lifecycle";
     pub const DIRECTORY_NAME: &str = "directory_name";
     pub const DIRECTORY_PARENT: &str = "directory_parent";

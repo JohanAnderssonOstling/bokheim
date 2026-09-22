@@ -1,1 +1,0 @@
-SELECT COUNT(*) FROM asset_file WHERE name=?1

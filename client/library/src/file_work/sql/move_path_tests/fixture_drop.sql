@@ -1,1 +1,0 @@
-DROP INDEX idx_local_file_projection_path

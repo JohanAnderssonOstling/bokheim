@@ -2,8 +2,8 @@
 
 use std::rc::Rc;
 
-use bokheim_backend::BoxedBookReader;
-use bokheim_backend::LibraryClient;
+use library_backend::BoxedBookReader;
+use library_backend::LibraryClient;
 use gpui::prelude::*;
 use gpui::{Context, Entity, Window};
 use gpui_component::input::{InputEvent, InputState};
@@ -19,13 +19,13 @@ use crate::settings::{ReaderSettings, library_interaction_style};
 use crate::shell::marks::MarkSession;
 use crate::shell::persistence::{ReadingPositionWriter, StoredPosition};
 use crate::shell::search::SearchBarTarget;
-use crate::shell::state_panel::{SidebarPanel, SidebarState};
+use crate::shell::state_panel::{SidebarState, SidebarTab};
 
 use super::PdfReaderView;
 
 impl PdfReaderView {
     pub(crate) fn new(
-        locator: BookLocator, title: String, library: Rc<LibraryClient>, reader: BoxedBookReader, metadata: Option<pdf_reader_core::PdfReaderMetadata>, page_source: Option<std::sync::Arc<dyn pdf_reader_core::PdfPageSource>>,
+        locator: BookLocator, title: String, _app: app::AppClient, library: Rc<LibraryClient>, reader: BoxedBookReader, metadata: Option<pdf_reader_core::PdfReaderMetadata>, page_source: Option<std::sync::Arc<dyn pdf_reader_core::PdfPageSource>>,
         initial_page: usize, initial_full_page_position: f32, close_reader: crate::CloseReader, window: &mut Window, cx: &mut Context<Self>,
     ) -> Self {
         let preferences = ReaderSettings::preferences(cx);
@@ -64,7 +64,7 @@ impl PdfReaderView {
         marks.merge_loaded(imported);
         let reader = Self {
             #[cfg(feature = "kobo")]
-            brightness: cx.new(|cx| crate::shell::brightness::BrightnessControls::new(library.app().clone(), window, cx)),
+            brightness: cx.new(|cx| crate::shell::brightness::BrightnessControls::new(_app.clone(), window, cx)),
             locator,
             title,
             library,
@@ -117,7 +117,7 @@ impl PdfReaderView {
                 }
             }
             PdfViewEvent::AnnotationActivated { id, position } => {
-                crate::shell::state_panel::select_panel(&mut self.sidebar, SidebarPanel::Annotations, cx);
+                crate::shell::state_panel::select_tab(&mut self.sidebar, SidebarTab::Annotations, cx);
                 self.annotation_popup_anchor = Some(*position);
                 self.select_annotation(id.clone(), window, cx);
             }

@@ -1,15 +1,21 @@
 //! PDF page and outline navigation.
 
+use book_model::BookTocEntry;
 use gpui::prelude::*;
 use gpui::{Context, Entity, ScrollStrategy, Window};
 use gpui_component::tree::TreeItem;
-use book_model::BookTocEntry;
 use ui_components as components;
 
 use super::PdfReaderView;
 use crate::pdf::toc::pdf_toc_tree_items;
 
 impl PdfReaderView {
+    /// Unconditionally claim both OS-window and document focus on pointer hover.
+    pub(super) fn reclaim_hover_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        window.activate_window();
+        self.focus_document(window, cx);
+    }
+
     pub(super) fn set_toc(&mut self, outline: Vec<BookTocEntry>, cx: &mut Context<Self>) {
         self.toc_tree.update(cx, |tree, cx| tree.set_items(pdf_toc_tree_items(&outline), cx));
         self.toc.replace_entries(outline);
@@ -45,11 +51,11 @@ impl PdfReaderView {
         self.toc.active_title()
     }
 
-    pub(super) fn render_toc(&self, entity: Entity<Self>, theme: components::BrowserTheme, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(super) fn render_toc_body(&self, entity: Entity<Self>, theme: components::BrowserTheme) -> gpui::AnyElement {
         let toc = crate::shell::state_panel::reader_toc_tree(&self.toc_tree, &entity, theme, |id, window, this: &mut Self, cx| {
             this.navigate_to_toc(id, cx);
             this.focus_document(window, cx);
         });
-        components::reader_toc(theme).child(self.render_sidebar_tabs(false, true, cx)).child(toc).into_any_element()
+        components::reader_toc(theme).child(toc).into_any_element()
     }
 }

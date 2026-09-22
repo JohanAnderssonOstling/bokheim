@@ -1,8 +1,8 @@
 //! Native library-handle wrappers for shared annotation persistence.
 
+use crate::library::LibrarySession;
 use crate::BackendError;
 use crate::ContentHash;
-use crate::library::LibrarySession;
 use book_model::ReaderAnnotation;
 
 impl LibrarySession {

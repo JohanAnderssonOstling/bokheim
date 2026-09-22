@@ -1,4 +1,4 @@
-use bokheim_backend::{AppClient, BatteryStatus};
+use app::{AppClient, BatteryStatus};
 use gpui::{Context, Entity, Render, Window, prelude::*, px};
 use gpui_component::{IconName, popover::Popover};
 use std::time::Duration;

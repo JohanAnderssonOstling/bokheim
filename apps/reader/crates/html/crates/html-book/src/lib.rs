@@ -5,4 +5,4 @@
 
 mod formats;
 
-pub use formats::{BookSourceFormat, BookLayout, BookSource};
+pub use formats::{BookLayout, BookSource, BookSourceFormat};

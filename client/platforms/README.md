@@ -1,14 +1,14 @@
 # Client platform crates
 
 Platform services live here; the backend composes them with library, account,
-and synchronization logic. None of these crates depends on `bokheim-backend`.
+and synchronization logic. None of these crates depends on `app`.
 
 | Crate | Responsibility |
 | --- | --- |
 | `android` | Private book locks and shared-storage book fallback. |
 | `web` | OPFS storage plus worker creation, owned ports, cancellation, Fetch transport, and tab lifetimes. |
 | `desktop` | Conventional application, Documents, and home directory locations. |
-| `kobo` | Mounted-device discovery and library transfers; optional on-device hardware services through the `device` feature. |
+| `kobo` | Mounted-device discovery, destination validation, and file copying; optional on-device hardware services through the `device` feature. |
 | `native` | Shared native file fingerprints, discovery OS helpers, and SQLite connection behavior and diagnostics. |
 | `runtime` | Target-selected async execution, cancellation, timers, and bounded storage scheduling. |
 
@@ -19,21 +19,25 @@ between platform implementations.
 
 Backend target dependencies select Android and web services. Its `kobo` feature
 forwards to `client-platform-kobo/device`; mounted-device transfer is available
-on native hosts without enabling hardware access. Desktop location resolution
+on native hosts through `app::host::kobo` without enabling hardware access.
+The app owns registry and manifest validation, transfer exclusions, and publishing
+the manifest after copying content. Desktop location resolution
 uses the portable `dirs` API, preserving the existing `SharedDesktop` behavior.
 
 Shared application policy has explicit homes:
 
-- `client/library` owns database mutations and durable library state.
-- `client/library-files` owns scanning and asset reconciliation policy.
-- `client/book-access` owns book-cache policy.
-- `client/backend/src/storage` coordinates connections, write notifications,
-  and adapters for those shared services.
-- `client/backend/src/library/events.rs` and `discovery.rs` connect domain events
-  and scan progress to the application.
-- `client/backend/src/contracts` contains opt-in browser integration contracts.
+- `client/app/crates/library-registry` owns registered libraries and app state.
 
-`client/backend/src/platform` only selects platform services. Native and browser
+- `client/library` owns database mutations and durable library state.
+- `client/library-backend/crates/library-files` owns scanning and asset reconciliation policy.
+- `client/library-backend/crates/book-access` owns book-cache policy.
+- `client/app/src/storage` coordinates connections, write notifications,
+  and adapters for those shared services.
+- `client/app/src/library/events.rs` and `discovery.rs` connect domain events
+  and scan progress to the application.
+- `client/app/src/contracts` contains opt-in browser integration contracts.
+
+`client/app/src/platform` only selects platform services. Native and browser
 SQLite modules supply connection-opening behavior, single-owner requirements,
 and diagnostics; transaction and notification policy stays in shared storage.
 Browser worker mechanisms live in `web/src/transport`. Its session owner handles
@@ -55,7 +59,7 @@ cargo test --release -p client-platform-android -p client-platform-web \
 ```
 
 Android filesystem fallback tests also run on a native host. Browser OPFS and
-timer contracts run through `client/backend/scripts/test-web-storage.mjs`.
+timer contracts run through `client/app/scripts/test-web-storage.mjs`.
 
 Shared-memory range transport lives in `web/src/transport/range.rs`, including
 source handles and synchronous/asynchronous callback ownership. Book

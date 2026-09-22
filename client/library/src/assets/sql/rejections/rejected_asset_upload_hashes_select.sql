@@ -1,1 +1,0 @@
-SELECT hash FROM rejected_asset_upload WHERE kind=?1 AND rejected_at>?2

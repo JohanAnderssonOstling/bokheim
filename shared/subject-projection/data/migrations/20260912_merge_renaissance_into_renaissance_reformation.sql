@@ -1,0 +1,10 @@
+PRAGMA foreign_keys=ON;
+BEGIN IMMEDIATE;
+INSERT INTO source_label VALUES(10233,'Renaissance',0);
+UPDATE lcc_range SET concept_id=10233 WHERE concept_id=3612;
+UPDATE bisac_selector SET concept_id=10233 WHERE concept_id=3612;
+UPDATE concept_parent SET parent_concept_id=10233 WHERE parent_concept_id=3612;
+INSERT INTO concept_parent VALUES(10233,3618,1);
+DELETE FROM concept_parent WHERE concept_id=3612;
+DELETE FROM concept WHERE concept_id=3612;
+COMMIT;

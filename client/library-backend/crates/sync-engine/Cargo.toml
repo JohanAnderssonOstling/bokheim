@@ -5,12 +5,12 @@ edition = "2021"
 publish = false
 
 [dependencies]
-library-replica = { path = "../../../library-replica" }
+library-replica = { path = "../library-replica" }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 reqwest = { version = "0.11", default-features = false }
 sync-common = { path = "../../../../shared/sync-common" }
-sync-transport = { path = "../../../sync/transport" }
+sync-transport = { path = "../sync-transport" }
 web-time = "1"
 
 [dev-dependencies]

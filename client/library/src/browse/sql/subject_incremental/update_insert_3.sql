@@ -1,1 +1,0 @@
-INSERT INTO subject_browse_member VALUES(?1,?2,?3)

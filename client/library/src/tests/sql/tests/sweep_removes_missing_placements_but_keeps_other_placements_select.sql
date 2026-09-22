@@ -1,1 +1,0 @@
-SELECT is_downloaded FROM book_dir WHERE dir_id=?1 AND book_row_id=(SELECT row_id FROM book WHERE content_hash=printf('%064x',2)) AND file_name='gone.epub'

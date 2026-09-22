@@ -1,0 +1,30 @@
+-- Nine approved literary theme selectors, 2026-09-07.
+-- Preserve broad literary theme selectors.
+PRAGMA foreign_keys=ON;
+BEGIN IMMEDIATE;
+INSERT INTO concept(concept_id,preferred_label) VALUES(52386,'Myth & Mythology in Literature');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal) VALUES(52386,8293,0);
+INSERT INTO lcc_selector(concept_id,selector) VALUES(52386,'PN56.M94');
+INSERT INTO lcc_selector(concept_id,selector) VALUES(52386,'PN56.M95');
+INSERT INTO concept(concept_id,preferred_label) VALUES(52387,'Postcolonialism in Literature');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal) VALUES(52387,8293,0);
+INSERT INTO lcc_selector(concept_id,selector) VALUES(52387,'PN56.P555');
+INSERT INTO concept(concept_id,preferred_label) VALUES(52388,'Literature & Psychology');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal) VALUES(52388,8293,0);
+INSERT INTO lcc_selector(concept_id,selector) VALUES(52388,'PN56.P93');
+INSERT INTO concept(concept_id,preferred_label) VALUES(52389,'Homosexuality in Literature');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal) VALUES(52389,8293,0);
+INSERT INTO lcc_selector(concept_id,selector) VALUES(52389,'PN56.H57');
+INSERT INTO concept(concept_id,preferred_label) VALUES(52390,'Cities in Literature');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal) VALUES(52390,8293,0);
+INSERT INTO lcc_selector(concept_id,selector) VALUES(52390,'PN56.C55');
+INSERT INTO concept(concept_id,preferred_label) VALUES(52391,'Literature & the Internet');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal) VALUES(52391,8293,0);
+INSERT INTO lcc_selector(concept_id,selector) VALUES(52391,'PN56.I64');
+INSERT INTO concept(concept_id,preferred_label) VALUES(52392,'Death in Literature');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal) VALUES(52392,8293,0);
+INSERT INTO lcc_selector(concept_id,selector) VALUES(52392,'PN56.D4');
+INSERT INTO concept(concept_id,preferred_label) VALUES(52393,'Animals in Literature');
+INSERT INTO concept_parent(concept_id,parent_concept_id,ordinal) VALUES(52393,8293,0);
+INSERT INTO lcc_selector(concept_id,selector) VALUES(52393,'PN56.A64');
+COMMIT;

@@ -1,1 +1,0 @@
-UPDATE book SET title='New metadata' WHERE content_hash=?1

@@ -1,1 +1,0 @@
-SELECT id FROM dir WHERE parent_id='00000000-0000-0000-0000-000000000000' AND name='Shared' AND deleted_at IS NULL

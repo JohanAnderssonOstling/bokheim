@@ -1,7 +1,7 @@
 //! Browser book capabilities and media URLs with their owning leases.
 use super::*;
-use crate::library::browser_book::BookLease;
 use crate::book::{BookSource, ResolvedBookData};
+use crate::library::browser_book::BookLease;
 pub(crate) type Opened = (ResolvedBookData, BookLease);
 
 pub(super) fn supports_streaming(format: BookFormat) -> bool {

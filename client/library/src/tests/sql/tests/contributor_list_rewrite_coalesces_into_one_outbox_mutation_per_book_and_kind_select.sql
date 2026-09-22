@@ -1,1 +1,0 @@
-SELECT state_kind, state_key FROM sync_outbox ORDER BY state_kind

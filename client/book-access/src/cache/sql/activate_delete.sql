@@ -1,1 +1,0 @@
-DELETE FROM source WHERE hash=?1 AND (checksum<>?2 OR size<>?3)

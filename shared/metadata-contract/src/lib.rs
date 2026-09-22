@@ -1,11 +1,11 @@
 pub mod wikidata;
 pub use wikidata::*;
-pub mod catalog_subjects;
-pub mod matching;
-pub mod identity_evidence;
-pub mod year_consensus;
-pub mod subject_consensus;
 pub mod audible;
+pub mod authority_subjects;
+pub mod identity_evidence;
+pub mod matching;
+pub mod subject_consensus;
+pub mod year_consensus;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,7 +40,7 @@ pub struct MetadataEnrichmentRequest {
 }
 
 /// Bibliographic evidence for missing ISBNs or classification recovery after
-/// an embedded ISBN returns no catalog match.
+/// an embedded ISBN returns no authority match.
 /// The opaque query id lets callers correlate batched results without sending
 /// a local book identifier to the metadata service.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -63,9 +63,9 @@ pub struct EditionIdentityResponse {
     pub results: Vec<EditionIdentityResult>,
 }
 
-/// A classification-only catalog match does not assert an ISBN or OL identity.
+/// A classification-only authority match does not assert an ISBN or OL identity.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct CatalogSubjectMatch {
+pub struct AuthoritySubjectMatch {
     #[serde(default)]
     pub main_title: String,
     pub provider_id: String,
@@ -88,7 +88,7 @@ pub struct EditionIdentityResult {
     #[serde(default)]
     pub candidates_truncated: bool,
     #[serde(default)]
-    pub catalog_subjects: Option<CatalogSubjectMatch>,
+    pub authority_subjects: Option<AuthoritySubjectMatch>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -116,7 +116,6 @@ pub struct EditionIdentityMatch {
     pub classifications: Vec<Classification>,
     #[serde(default)]
     pub subtitle: Option<String>,
-
 }
 
 impl EditionIdentityMatch {
@@ -144,15 +143,11 @@ pub struct MetadataEnrichmentResponse {
 
 /// Rich bibliographic enrichment. This is deliberately a separate wire value
 /// from [`MetadataEnrichmentResponse`], so deployed version-1 clients remain
-/// byte-compatible while clients adopt entity navigation independently.
+/// byte-compatible.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RichMetadataEnrichmentResponse {
     pub snapshot: SnapshotDescription,
     pub results: Vec<RichIsbnMetadataResult>,
-    /// Resolved entities are interned once per response. References in results
-    /// and parent links use the stable Wikidata identifier.
-    pub places: Vec<PlaceEntity>,
-    pub people: Vec<PersonEntity>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -171,9 +166,6 @@ pub struct RichWorkMetadataMatch {
     pub exact_edition_ids: Vec<String>,
     pub classifications: Vec<Classification>,
     pub authors: Vec<AuthorMetadata>,
-    pub places: Vec<EntityReference>,
-    pub people: Vec<EntityReference>,
-    pub popularity: Option<WorkPopularity>,
     /// Plain-text description from the matched Open Library work.
     #[serde(default)]
     pub description: Option<String>,
@@ -189,29 +181,8 @@ pub struct SubjectHeading {
     pub authority_uri: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct WorkPopularity {
-    pub want_to_read_count: u64,
-    pub currently_reading_count: u64,
-    pub already_read_count: u64,
-    pub rating_count: u64,
-    pub rating_sum: u64,
-}
-
-impl WorkPopularity {
-    pub fn reading_log_count(&self) -> u64 {
-        self.want_to_read_count.saturating_add(self.currently_reading_count).saturating_add(self.already_read_count)
-    }
-
-    /// Stable ordering used when several works contribute metadata for one
-    /// ISBN cluster. Reading activity leads, followed by rating evidence.
-    pub fn evidence_rank(&self) -> (u64, u64, u64) {
-        (self.reading_log_count(), self.rating_count, self.rating_sum)
-    }
-}
-
 /// Merges Open Library evidence for every exact ISBN attached to one book.
-/// Both the client library and catalogue enrichment use this policy so an
+/// Both the client library and authority enrichment use this policy so an
 /// ambiguous ISBN can contribute consensus evidence without being mistaken
 /// for a unique edition identity.
 pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWorkMetadataMatch>, similarity_keys: impl Fn(ClassificationScheme, &str) -> Vec<String>) -> RichWorkMetadataMatch {
@@ -219,9 +190,6 @@ pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWor
     let mut edition_ids = BTreeSet::new();
     let mut classifications = Vec::new();
     let mut authors = BTreeMap::<(u32, String), AuthorMetadata>::new();
-    let mut places = BTreeMap::<(Option<String>, String), EntitySource>::new();
-    let mut people = BTreeMap::<(Option<String>, String), EntitySource>::new();
-    let mut popularity = None;
     let mut descriptions = BTreeSet::new();
     let mut subjects = BTreeSet::new();
     for matched in matches {
@@ -235,9 +203,6 @@ pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWor
                     if existing.name.is_none() {
                         existing.name = author.name.clone();
                     }
-                    if existing.biography.is_none() {
-                        existing.biography = author.biography.clone();
-                    }
                     for identifier in &author.identifiers {
                         if !existing.identifiers.contains(identifier) {
                             existing.identifiers.push(identifier.clone());
@@ -248,15 +213,6 @@ pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWor
                 })
                 .or_insert_with(|| author.clone());
         }
-        for reference in &matched.places {
-            places.entry((reference.wikidata_id.clone(), reference.name.clone())).and_modify(|source| *source = (*source).min(reference.source)).or_insert(reference.source);
-        }
-        for reference in &matched.people {
-            people.entry((reference.wikidata_id.clone(), reference.name.clone())).and_modify(|source| *source = (*source).min(reference.source)).or_insert(reference.source);
-        }
-        if matched.popularity.as_ref().is_some_and(|candidate| popularity.as_ref().is_none_or(|current: &WorkPopularity| (candidate.reading_log_count(), candidate.rating_count) > (current.reading_log_count(), current.rating_count))) {
-            popularity = matched.popularity.clone();
-        }
         descriptions.extend(matched.description.iter().cloned());
         subjects.extend(matched.subjects.iter().cloned());
     }
@@ -266,53 +222,11 @@ pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWor
         exact_edition_ids: edition_ids.into_iter().collect(),
         classifications,
         authors: authors.into_values().collect(),
-        places: places.into_iter().map(|((wikidata_id, name), source)| EntityReference { wikidata_id, name, source }).collect(),
-        people: people.into_iter().map(|((wikidata_id, name), source)| EntityReference { wikidata_id, name, source }).collect(),
-        popularity,
         // Ambiguous ISBNs can point at unrelated works. Only expose a
         // description when all available Open Library evidence agrees.
         description: (descriptions.len() == 1).then(|| descriptions.into_iter().next().expect("one description exists")),
         subjects: subjects.into_iter().collect(),
     }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-pub struct EntityReference {
-    /// Absent when the dump evidence could not be resolved conservatively.
-    pub wikidata_id: Option<String>,
-    /// The original Open Library heading, preserved as bibliographic evidence.
-    pub name: String,
-    pub source: EntitySource,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EntitySource {
-    ExactEdition,
-    Work,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct PlaceEntity {
-    pub wikidata_id: String,
-    pub label: String,
-    pub aliases: Vec<String>,
-    /// Immediate administrative/containment parents. This is a graph rather
-    /// than a tree; the presentation layer may choose a preferred path.
-    pub parent_ids: Vec<String>,
-    pub country_ids: Vec<String>,
-    pub latitude_e7: Option<i32>,
-    pub longitude_e7: Option<i32>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct PersonEntity {
-    pub wikidata_id: String,
-    pub label: String,
-    pub aliases: Vec<String>,
-    pub birth_year: Option<i32>,
-    pub death_year: Option<i32>,
-    pub fictional: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -365,9 +279,6 @@ pub struct WorkMetadataMatch {
 pub struct AuthorMetadata {
     pub open_library_author_id: String,
     pub name: Option<String>,
-    /// Plain-text Open Library author biography, when available.
-    #[serde(default)]
-    pub biography: Option<String>,
     pub identifiers: Vec<AuthorIdentifier>,
     pub source: AuthorSource,
     pub position: u32,
@@ -382,8 +293,10 @@ pub struct AuthorIdentifier {
 impl AuthorMetadata {
     /// Wikidata-only authors have no Open Library identifier.
     pub fn identity_key(&self) -> String {
-        if !self.open_library_author_id.is_empty() { return format!("openlibrary:{}",self.open_library_author_id); }
-        self.identifiers.iter().find(|id| id.authority=="wikidata").map(|id| format!("wikidata:{}",id.value)).unwrap_or_default()
+        if !self.open_library_author_id.is_empty() {
+            return format!("openlibrary:{}", self.open_library_author_id);
+        }
+        self.identifiers.iter().find(|id| id.authority == "wikidata").map(|id| format!("wikidata:{}", id.value)).unwrap_or_default()
     }
 }
 
@@ -437,10 +350,9 @@ pub fn classification_consensus_notation(scheme: ClassificationScheme, notation:
         ClassificationScheme::DeweyDecimal => {
             let value = notation.trim().replace('/', "");
             let bytes = value.as_bytes();
-            let valid = bytes.len() >= 3 && bytes[..3].iter().all(u8::is_ascii_digit)
-                && (bytes.len() == 3 || (bytes[3] == b'.' && bytes.len() > 4 && bytes[4..].iter().all(u8::is_ascii_digit)));
+            let valid = bytes.len() >= 3 && bytes[..3].iter().all(u8::is_ascii_digit) && (bytes.len() == 3 || (bytes[3] == b'.' && bytes.len() > 4 && bytes[4..].iter().all(u8::is_ascii_digit)));
             valid.then_some(value)
-        },
+        }
         ClassificationScheme::LibraryOfCongress => {
             let value = notation.trim();
             let bytes = value.as_bytes();
@@ -515,11 +427,6 @@ impl EditionClassificationConsensus {
             for author in &mut matched.authors {
                 if author.source == AuthorSource::ExactEdition {
                     author.source = AuthorSource::Work;
-                }
-            }
-            for entity in matched.places.iter_mut().chain(&mut matched.people) {
-                if entity.source == EntitySource::ExactEdition {
-                    entity.source = EntitySource::Work;
                 }
             }
         }
@@ -674,8 +581,12 @@ fn protobuf_edition_identity_result(value: &EditionIdentityResult) -> protobuf_v
         },
         matched: value.matched.as_ref().map(protobuf_edition_identity_match),
         candidates: value.candidates.iter().map(protobuf_edition_identity_match).collect(),
-        catalog_subjects: value.catalog_subjects.as_ref().map(|m| protobuf_v2::CatalogSubjectMatch {
-            main_title: m.main_title.clone(), provider_id: m.provider_id.clone(), record_ids: m.record_ids.clone(), title: m.title.clone(), authors: m.authors.clone(),
+        authority_subjects: value.authority_subjects.as_ref().map(|m| protobuf_v2::AuthoritySubjectMatch {
+            main_title: m.main_title.clone(),
+            provider_id: m.provider_id.clone(),
+            record_ids: m.record_ids.clone(),
+            title: m.title.clone(),
+            authors: m.authors.clone(),
             classifications: m.classifications.iter().map(protobuf_classification).collect(),
         }),
         candidates_truncated: value.candidates_truncated,
@@ -705,7 +616,8 @@ fn protobuf_edition_identity_match(value: &EditionIdentityMatch) -> protobuf_v2:
 }
 
 fn protobuf_classification(value: &Classification) -> protobuf_v2::Classification {
-    protobuf_v2::Classification { evidence: value.evidence.iter().map(protobuf_evidence).collect(),
+    protobuf_v2::Classification {
+        evidence: value.evidence.iter().map(protobuf_evidence).collect(),
         scheme: match value.scheme {
             ClassificationScheme::LibraryOfCongress => 1,
             ClassificationScheme::DeweyDecimal => 2,
@@ -720,7 +632,8 @@ fn protobuf_classification(value: &Classification) -> protobuf_v2::Classificatio
 }
 
 fn domain_classification(value: protobuf_v2::Classification) -> Result<Classification, WireError> {
-    Ok(Classification { evidence: value.evidence.into_iter().map(domain_evidence).collect(),
+    Ok(Classification {
+        evidence: value.evidence.into_iter().map(domain_evidence).collect(),
         scheme: match value.scheme {
             1 => ClassificationScheme::LibraryOfCongress,
             2 => ClassificationScheme::DeweyDecimal,
@@ -748,10 +661,19 @@ fn domain_edition_identity_result(value: protobuf_v2::EditionIdentityResult) -> 
         },
         matched: value.matched.map(domain_edition_identity_match).transpose()?,
         candidates: value.candidates.into_iter().map(domain_edition_identity_match).collect::<Result<_, _>>()?,
-        catalog_subjects: value.catalog_subjects.map(|m| -> Result<CatalogSubjectMatch, WireError> { Ok(CatalogSubjectMatch {
-            main_title: m.main_title, provider_id: m.provider_id, record_ids: m.record_ids, title: m.title, authors: m.authors,
-            classifications: m.classifications.into_iter().map(domain_classification).collect::<Result<_, _>>()?,
-        }) }).transpose()?,
+        authority_subjects: value
+            .authority_subjects
+            .map(|m| -> Result<AuthoritySubjectMatch, WireError> {
+                Ok(AuthoritySubjectMatch {
+                    main_title: m.main_title,
+                    provider_id: m.provider_id,
+                    record_ids: m.record_ids,
+                    title: m.title,
+                    authors: m.authors,
+                    classifications: m.classifications.into_iter().map(domain_classification).collect::<Result<_, _>>()?,
+                })
+            })
+            .transpose()?,
         candidates_truncated: value.candidates_truncated,
     })
 }
@@ -803,17 +725,18 @@ pub fn is_binary_media_type_v2(value: &str) -> bool {
 
 impl From<&RichMetadataEnrichmentResponse> for protobuf_v2::EnrichmentResponse {
     fn from(value: &RichMetadataEnrichmentResponse) -> Self {
-        Self {
-            snapshot: Some(protobuf_v2::Snapshot { dump_date: value.snapshot.dump_date.clone(), imported_at_ms: value.snapshot.imported_at_ms }),
-            results: value.results.iter().map(protobuf_result).collect(),
-            places: value.places.iter().map(protobuf_place).collect(),
-            people: value.people.iter().map(protobuf_person).collect(),
-        }
+        Self { snapshot: Some(protobuf_v2::Snapshot { dump_date: value.snapshot.dump_date.clone(), imported_at_ms: value.snapshot.imported_at_ms }), results: value.results.iter().map(protobuf_result).collect() }
     }
 }
 
 fn protobuf_result(value: &RichIsbnMetadataResult) -> protobuf_v2::IsbnResult {
-    protobuf_v2::IsbnResult { wikidata_books: value.wikidata_books.clone(), requested_isbn: value.requested_isbn.clone(), canonical_isbn13: value.canonical_isbn13.clone(), status: lookup_status_number(value.status), matches: value.matches.iter().map(protobuf_match).collect() }
+    protobuf_v2::IsbnResult {
+        wikidata_books: value.wikidata_books.clone(),
+        requested_isbn: value.requested_isbn.clone(),
+        canonical_isbn13: value.canonical_isbn13.clone(),
+        status: lookup_status_number(value.status),
+        matches: value.matches.iter().map(protobuf_match).collect(),
+    }
 }
 
 fn protobuf_match(value: &RichWorkMetadataMatch) -> protobuf_v2::WorkMatch {
@@ -823,7 +746,8 @@ fn protobuf_match(value: &RichWorkMetadataMatch) -> protobuf_v2::WorkMatch {
         classifications: value
             .classifications
             .iter()
-            .map(|classification| protobuf_v2::Classification { evidence: classification.evidence.iter().map(protobuf_evidence).collect(),
+            .map(|classification| protobuf_v2::Classification {
+                evidence: classification.evidence.iter().map(protobuf_evidence).collect(),
                 scheme: match classification.scheme {
                     ClassificationScheme::LibraryOfCongress => 1,
                     ClassificationScheme::DeweyDecimal => 2,
@@ -842,7 +766,6 @@ fn protobuf_match(value: &RichWorkMetadataMatch) -> protobuf_v2::WorkMatch {
             .map(|author| protobuf_v2::Author {
                 open_library_author_id: author.open_library_author_id.clone(),
                 name: author.name.clone(),
-                biography: author.biography.clone(),
                 identifiers: author.identifiers.iter().map(|identifier| protobuf_v2::AuthorIdentifier { authority: identifier.authority.clone(), value: identifier.value.clone() }).collect(),
                 source: match author.source {
                     AuthorSource::ExactEdition => 1,
@@ -851,15 +774,6 @@ fn protobuf_match(value: &RichWorkMetadataMatch) -> protobuf_v2::WorkMatch {
                 position: author.position,
             })
             .collect(),
-        places: value.places.iter().map(protobuf_reference).collect(),
-        people: value.people.iter().map(protobuf_reference).collect(),
-        popularity: value.popularity.as_ref().map(|popularity| protobuf_v2::WorkPopularity {
-            want_to_read_count: popularity.want_to_read_count,
-            currently_reading_count: popularity.currently_reading_count,
-            already_read_count: popularity.already_read_count,
-            rating_count: popularity.rating_count,
-            rating_sum: popularity.rating_sum,
-        }),
         description: value.description.clone(),
         subjects: value
             .subjects
@@ -867,33 +781,6 @@ fn protobuf_match(value: &RichWorkMetadataMatch) -> protobuf_v2::WorkMatch {
             .map(|subject| protobuf_v2::SubjectHeading { source: subject.source.clone(), authority: subject.authority.clone(), components: subject.components.clone(), authority_uri: subject.authority_uri.clone() })
             .collect(),
     }
-}
-
-fn protobuf_reference(value: &EntityReference) -> protobuf_v2::EntityReference {
-    protobuf_v2::EntityReference {
-        wikidata_id: value.wikidata_id.clone(),
-        name: value.name.clone(),
-        source: match value.source {
-            EntitySource::ExactEdition => 1,
-            EntitySource::Work => 2,
-        },
-    }
-}
-
-fn protobuf_place(value: &PlaceEntity) -> protobuf_v2::PlaceEntity {
-    protobuf_v2::PlaceEntity {
-        wikidata_id: value.wikidata_id.clone(),
-        label: value.label.clone(),
-        aliases: value.aliases.clone(),
-        parent_ids: value.parent_ids.clone(),
-        country_ids: value.country_ids.clone(),
-        latitude_e7: value.latitude_e7,
-        longitude_e7: value.longitude_e7,
-    }
-}
-
-fn protobuf_person(value: &PersonEntity) -> protobuf_v2::PersonEntity {
-    protobuf_v2::PersonEntity { wikidata_id: value.wikidata_id.clone(), label: value.label.clone(), aliases: value.aliases.clone(), birth_year: value.birth_year, death_year: value.death_year, fictional: value.fictional }
 }
 
 fn lookup_status_number(value: LookupStatus) -> i32 {
@@ -910,33 +797,18 @@ impl TryFrom<protobuf_v2::EnrichmentResponse> for RichMetadataEnrichmentResponse
 
     fn try_from(value: protobuf_v2::EnrichmentResponse) -> Result<Self, Self::Error> {
         let snapshot = value.snapshot.ok_or_else(|| WireError::Decode("protobuf response omitted snapshot".to_owned()))?;
-        Ok(Self {
-            snapshot: SnapshotDescription { dump_date: snapshot.dump_date, imported_at_ms: snapshot.imported_at_ms },
-            results: value.results.into_iter().map(domain_result).collect::<Result<_, _>>()?,
-            places: value
-                .places
-                .into_iter()
-                .map(|place| PlaceEntity {
-                    wikidata_id: place.wikidata_id,
-                    label: place.label,
-                    aliases: place.aliases,
-                    parent_ids: place.parent_ids,
-                    country_ids: place.country_ids,
-                    latitude_e7: place.latitude_e7,
-                    longitude_e7: place.longitude_e7,
-                })
-                .collect(),
-            people: value
-                .people
-                .into_iter()
-                .map(|person| PersonEntity { wikidata_id: person.wikidata_id, label: person.label, aliases: person.aliases, birth_year: person.birth_year, death_year: person.death_year, fictional: person.fictional })
-                .collect(),
-        })
+        Ok(Self { snapshot: SnapshotDescription { dump_date: snapshot.dump_date, imported_at_ms: snapshot.imported_at_ms }, results: value.results.into_iter().map(domain_result).collect::<Result<_, _>>()? })
     }
 }
 
 fn domain_result(value: protobuf_v2::IsbnResult) -> Result<RichIsbnMetadataResult, WireError> {
-    Ok(RichIsbnMetadataResult { wikidata_books: value.wikidata_books, requested_isbn: value.requested_isbn, canonical_isbn13: value.canonical_isbn13, status: domain_lookup_status(value.status)?, matches: value.matches.into_iter().map(domain_match).collect::<Result<_, _>>()? })
+    Ok(RichIsbnMetadataResult {
+        wikidata_books: value.wikidata_books,
+        requested_isbn: value.requested_isbn,
+        canonical_isbn13: value.canonical_isbn13,
+        status: domain_lookup_status(value.status)?,
+        matches: value.matches.into_iter().map(domain_match).collect::<Result<_, _>>()?,
+    })
 }
 
 fn domain_match(value: protobuf_v2::WorkMatch) -> Result<RichWorkMetadataMatch, WireError> {
@@ -947,7 +819,8 @@ fn domain_match(value: protobuf_v2::WorkMatch) -> Result<RichWorkMetadataMatch, 
             .classifications
             .into_iter()
             .map(|classification| {
-                Ok(Classification { evidence: classification.evidence.into_iter().map(domain_evidence).collect(),
+                Ok(Classification {
+                    evidence: classification.evidence.into_iter().map(domain_evidence).collect(),
                     scheme: match classification.scheme {
                         1 => ClassificationScheme::LibraryOfCongress,
                         2 => ClassificationScheme::DeweyDecimal,
@@ -970,7 +843,6 @@ fn domain_match(value: protobuf_v2::WorkMatch) -> Result<RichWorkMetadataMatch, 
                 Ok(AuthorMetadata {
                     open_library_author_id: author.open_library_author_id,
                     name: author.name,
-                    biography: author.biography,
                     identifiers: author.identifiers.into_iter().map(|identifier| AuthorIdentifier { authority: identifier.authority, value: identifier.value }).collect(),
                     source: match author.source {
                         1 => AuthorSource::ExactEdition,
@@ -981,29 +853,8 @@ fn domain_match(value: protobuf_v2::WorkMatch) -> Result<RichWorkMetadataMatch, 
                 })
             })
             .collect::<Result<_, _>>()?,
-        places: value.places.into_iter().map(domain_reference).collect::<Result<_, _>>()?,
-        people: value.people.into_iter().map(domain_reference).collect::<Result<_, _>>()?,
-        popularity: value.popularity.map(|popularity| WorkPopularity {
-            want_to_read_count: popularity.want_to_read_count,
-            currently_reading_count: popularity.currently_reading_count,
-            already_read_count: popularity.already_read_count,
-            rating_count: popularity.rating_count,
-            rating_sum: popularity.rating_sum,
-        }),
         description: value.description,
         subjects: value.subjects.into_iter().map(|subject| SubjectHeading { source: subject.source, authority: subject.authority, components: subject.components, authority_uri: subject.authority_uri }).collect(),
-    })
-}
-
-fn domain_reference(value: protobuf_v2::EntityReference) -> Result<EntityReference, WireError> {
-    Ok(EntityReference {
-        wikidata_id: value.wikidata_id,
-        name: value.name,
-        source: match value.source {
-            1 => EntitySource::ExactEdition,
-            2 => EntitySource::Work,
-            source => return Err(invalid_enum("entity source", source)),
-        },
     })
 }
 
@@ -1028,10 +879,7 @@ mod tests {
     #[test]
     fn classifications_round_trip_through_binary_storage() {
         for scheme in [ClassificationScheme::LibraryOfCongress, ClassificationScheme::DeweyDecimal, ClassificationScheme::Bisac] {
-            for evidence in [Vec::new(), vec![ClassificationEvidence {
-                method: "exact".to_owned(), isbn13: "9780306406157".to_owned(),
-                open_library_work_id: "OL10W".to_owned(), open_library_edition_id: "OL1M".to_owned(),
-            }]] {
+            for evidence in [Vec::new(), vec![ClassificationEvidence { method: "exact".to_owned(), isbn13: "9780306406157".to_owned(), open_library_work_id: "OL10W".to_owned(), open_library_edition_id: "OL1M".to_owned() }]] {
                 let value = Classification { evidence, scheme, notation: "QA76.73".to_owned(), source: ClassificationSource::Work };
                 let bytes = wire::encode(&value).unwrap();
                 assert_eq!(wire::decode::<Classification>(&bytes, MAX_RESPONSE_BYTES).unwrap(), value);
@@ -1099,10 +947,7 @@ mod tests {
             open_library_work_id: Some(work.to_owned()),
             exact_edition_ids: vec![edition.to_owned()],
             classifications: vec![Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: notation.to_owned(), source: ClassificationSource::ExactEdition }],
-            authors: vec![AuthorMetadata { open_library_author_id: "OL1A".to_owned(), name: None, biography: None, identifiers: Vec::new(), source: AuthorSource::ExactEdition, position: 0 }],
-            places: vec![EntityReference { wikidata_id: None, name: "Paris".to_owned(), source: EntitySource::ExactEdition }],
-            people: Vec::new(),
-            popularity: None,
+            authors: vec![AuthorMetadata { open_library_author_id: "OL1A".to_owned(), name: None, identifiers: Vec::new(), source: AuthorSource::ExactEdition, position: 0 }],
             description: None,
             subjects: Vec::new(),
         };
@@ -1116,7 +961,6 @@ mod tests {
 
         assert!(first[0].classifications.is_empty());
         assert_eq!(first[0].authors[0].source, AuthorSource::Work);
-        assert_eq!(first[0].places[0].source, EntitySource::Work);
         assert_eq!(consensus.classifications(), vec![Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "PR4034".to_owned(), source: ClassificationSource::Work }]);
     }
 
@@ -1127,9 +971,6 @@ mod tests {
             exact_edition_ids: vec!["OL1M".to_owned()],
             classifications: vec![Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "GN496".to_owned(), source: ClassificationSource::ExactEdition }],
             authors: Vec::new(),
-            places: Vec::new(),
-            people: Vec::new(),
-            popularity: None,
             description: None,
             subjects: Vec::new(),
         };
@@ -1138,9 +979,6 @@ mod tests {
             exact_edition_ids: vec!["OL2M".to_owned()],
             classifications: vec![Classification { evidence: Vec::new(), scheme: ClassificationScheme::DeweyDecimal, notation: "306".to_owned(), source: ClassificationSource::Work }],
             authors: Vec::new(),
-            places: vec![EntityReference { wikidata_id: None, name: "Developing countries".to_owned(), source: EntitySource::Work }],
-            people: Vec::new(),
-            popularity: None,
             description: None,
             subjects: Vec::new(),
         };
@@ -1149,14 +987,14 @@ mod tests {
         assert_eq!(merged.exact_edition_ids, ["OL1M", "OL2M"]);
         assert_eq!(merged.classifications.len(), 2);
         assert!(merged.classifications.iter().any(|c| c.scheme == ClassificationScheme::DeweyDecimal));
-        assert_eq!(merged.places.len(), 1);
     }
 
     #[test]
-    fn protobuf_v2_round_trip_preserves_rich_entities() {
+    fn protobuf_v2_round_trip_preserves_rich_match() {
         let value = RichMetadataEnrichmentResponse {
             snapshot: SnapshotDescription { dump_date: "2026-08-01".to_owned(), imported_at_ms: 42 },
-            results: vec![RichIsbnMetadataResult { wikidata_books: Vec::new(),
+            results: vec![RichIsbnMetadataResult {
+                wikidata_books: Vec::new(),
                 requested_isbn: "9780306406157".to_owned(),
                 canonical_isbn13: Some("9780306406157".to_owned()),
                 status: LookupStatus::Matched,
@@ -1170,39 +1008,22 @@ mod tests {
                     authors: vec![AuthorMetadata {
                         open_library_author_id: "OL20A".to_owned(),
                         name: Some("Alex Smith".to_owned()),
-                        biography: Some("Author biography".to_owned()),
                         identifiers: vec![AuthorIdentifier { authority: "viaf".to_owned(), value: "123".to_owned() }],
                         source: AuthorSource::Work,
                         position: 0,
                     }],
-                    places: vec![EntityReference { wikidata_id: Some("Q90".to_owned()), name: "Paris".to_owned(), source: EntitySource::Work }],
-                    people: Vec::new(),
-                    popularity: Some(WorkPopularity { want_to_read_count: 12, currently_reading_count: 3, already_read_count: 8, rating_count: 4, rating_sum: 17 }),
                     description: Some("A description from Open Library.".to_owned()),
                     subjects: vec![SubjectHeading { source: "library_of_congress".to_owned(), authority: "lcsh".to_owned(), components: vec!["Books".to_owned(), "History".to_owned()], authority_uri: None }],
                 }],
             }],
-            places: vec![PlaceEntity {
-                wikidata_id: "Q90".to_owned(),
-                label: "Paris".to_owned(),
-                aliases: Vec::new(),
-                parent_ids: vec!["Q161741".to_owned()],
-                country_ids: vec!["Q142".to_owned()],
-                latitude_e7: Some(488_566_000),
-                longitude_e7: Some(23_522_000),
-            }],
-            people: Vec::new(),
         };
         let mut encoded = encode_v2_response(&value).unwrap();
         // A future scalar field 99 must be ignored by this version.
         encoded.extend_from_slice(&[0x98, 0x06, 0x01]);
         let decoded = decode_v2_response(&encoded, MAX_RESPONSE_BYTES).unwrap();
         assert_eq!(decoded.snapshot.dump_date, "2026-08-01");
-        assert_eq!(decoded.places, value.places);
         assert_eq!(decoded.results[0].matches[0].classifications, value.results[0].matches[0].classifications);
         assert_eq!(decoded.results[0].matches[0].authors, value.results[0].matches[0].authors);
-        assert_eq!(decoded.results[0].matches[0].places, value.results[0].matches[0].places);
-        assert_eq!(decoded.results[0].matches[0].popularity, value.results[0].matches[0].popularity);
         assert_eq!(decoded.results[0].matches[0].description, value.results[0].matches[0].description);
 
         let request = MetadataEnrichmentRequest { isbns: vec!["9780306406157".to_owned()] };
@@ -1211,7 +1032,8 @@ mod tests {
 
     #[test]
     fn protobuf_v2_round_trip_preserves_edition_review_candidates() {
-        let candidate = EditionIdentityMatch { subtitle: None,
+        let candidate = EditionIdentityMatch {
+            subtitle: None,
             canonical_isbn13: "9780306406157".to_owned(),
             open_library_edition_id: "OL1M".to_owned(),
             open_library_work_id: Some("OL10W".to_owned()),
@@ -1227,7 +1049,7 @@ mod tests {
         };
         let value = EditionIdentityResponse {
             snapshot: SnapshotDescription { dump_date: "2026-08-01".to_owned(), imported_at_ms: 42 },
-            results: vec![EditionIdentityResult { catalog_subjects: None, query_id: "book-1".to_owned(), status: EditionIdentityStatus::Ambiguous, matched: None, candidates: vec![candidate.clone()], candidates_truncated: true }],
+            results: vec![EditionIdentityResult { authority_subjects: None, query_id: "book-1".to_owned(), status: EditionIdentityStatus::Ambiguous, matched: None, candidates: vec![candidate.clone()], candidates_truncated: true }],
         };
         let decoded = decode_v2_edition_identity_response(&encode_v2_edition_identity_response(&value).unwrap(), MAX_RESPONSE_BYTES).unwrap();
         assert_eq!(decoded.results[0].status, EditionIdentityStatus::Ambiguous);
@@ -1236,8 +1058,7 @@ mod tests {
         assert_eq!(decoded.results[0].candidates[0].classifications, candidate.classifications);
         assert!(decoded.results[0].candidates_truncated);
 
-        let request =
-            EditionIdentityRequest { queries: vec![EditionIdentityQuery { query_id: "book-1".to_owned(), title: "Work title".to_owned(), authors: vec!["Alex Smith".to_owned()], publishers: Vec::new(), book_year: Some(2004) }] };
+        let request = EditionIdentityRequest { queries: vec![EditionIdentityQuery { query_id: "book-1".to_owned(), title: "Work title".to_owned(), authors: vec!["Alex Smith".to_owned()], publishers: Vec::new(), book_year: Some(2004) }] };
         let decoded = decode_v2_edition_identity_request(&encode_v2_edition_identity_request(&request).unwrap(), MAX_REQUEST_BYTES).unwrap();
         assert_eq!(decoded.queries[0].title, "Work title");
     }

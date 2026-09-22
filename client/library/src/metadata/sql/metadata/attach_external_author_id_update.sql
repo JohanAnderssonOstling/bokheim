@@ -1,1 +1,0 @@
-UPDATE author_identity SET is_provisional=0 WHERE id=?1

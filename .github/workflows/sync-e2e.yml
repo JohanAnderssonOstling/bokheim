@@ -7,14 +7,10 @@ on:
       - ".github/workflows/sync-e2e.yml"
       - "Cargo.toml"
       - "Cargo.lock"
-      - "client/backend/**"
-      - "client/library/**"
-      - "client/library-files/**"
-      - "client/sync/**"
+      - "client/app/**"
+      - "client/library-backend/**"
       - "client/test-support/**"
-      - "client/book-access/**"
       - "client/account-client/**"
-      - "shared/book-enrichment/**"
       - "shared/book-model/**"
       - "client/platforms/**"
       - "scripts/checks/library-sql.py"
@@ -32,14 +28,10 @@ on:
       - ".github/workflows/sync-e2e.yml"
       - "Cargo.toml"
       - "Cargo.lock"
-      - "client/backend/**"
-      - "client/library/**"
-      - "client/library-files/**"
-      - "client/sync/**"
+      - "client/app/**"
+      - "client/library-backend/**"
       - "client/test-support/**"
-      - "client/book-access/**"
       - "client/account-client/**"
-      - "shared/book-enrichment/**"
       - "shared/book-model/**"
       - "client/platforms/**"
       - "scripts/checks/library-sql.py"
@@ -97,4 +89,4 @@ jobs:
         run: cargo test --release -p account-client -p book-access -p book-enrichment -p book-model -p library-files -p asset-transfer -p client-platform-runtime -p sync-engine --all-features --lib
 
       - name: Run synchronization E2E suite
-        run: client/backend/tests/run_sync_e2e.sh
+        run: client/app/tests/run_sync_e2e.sh

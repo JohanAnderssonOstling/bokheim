@@ -2,7 +2,7 @@
 """Read-only storage/SQL diagnostics. Run as root; writes only a new report directory.
 
 Uses local PostgreSQL peer authentication, never reads application credentials.
-Pass the companion audiobooks-availability.csv exported from the desktop catalogue.
+Pass the companion audiobooks-availability.csv exported from the desktop library.
 No repairs, migrations, checksumming of large audio files, or service restarts.
 """
 import argparse
@@ -153,7 +153,7 @@ print(json.dumps(out))
                        assets_directory=str(root), service=status.splitlines(),
                        manifest_entries=len(rows), inventory_files=inventory_count, inventory_bytes=inventory_bytes,
                        inventory_errors=walk_errors, findings=dict(collections.Counter(row['findings'] for row in rows)),
-                       limitations=['Catalogue titles come from the supplied desktop manifest.',
+                       limitations=['Library titles come from the supplied desktop manifest.',
                                     'Probes run as the service user outside its systemd sandbox.',
                                     'No full-file checksum verification; database and disk can change during collection.',
                                     'No repairs or production database writes were performed.'])

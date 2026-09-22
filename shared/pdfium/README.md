@@ -46,9 +46,9 @@ Applications never use that build-machine directory at runtime (unit tests do).
 - Windows: the Inno Setup installer includes the adjacent `pdfium/` directory.
 - Flatpak: prepare first, build with `--features flatpak`, and install the native
   library at `/app/lib/libpdfium.so`. `PDFIUM_PACKAGED_PATH` customizes this prefix.
-- Catalogue server: the remote build prepares and stages PDFium; server installers
-  install and preserve it alongside the catalogue executable. The catalogue uses
-  a GNU/Linux target (`BOKHEIM_CATALOG_CARGO_TARGET`) because the prebuilt library
+- Metadata server: the remote build prepares and stages PDFium; server installers
+  install and preserve it alongside the metadata executable. PDFium uses
+  a GNU/Linux target because the prebuilt library
   requires glibc and dynamic loading. Other server targets remain independent.
 - Android: Gradle prepares before Rust compilation and stages the shared library
   in the APK's ABI directory. The Android linker resolves it from the app package.

@@ -1,1 +1,0 @@
-DELETE FROM sync_outbox WHERE mutation_id=?1

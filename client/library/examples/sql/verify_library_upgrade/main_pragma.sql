@@ -1,1 +1,0 @@
-PRAGMA quick_check

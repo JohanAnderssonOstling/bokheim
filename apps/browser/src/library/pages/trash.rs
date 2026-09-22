@@ -33,7 +33,7 @@ impl TrashPage {
         let load = async move { library.trash().await };
         let task = cx.spawn(async move |page, cx| {
             let result = load.await;
-            let _ = page.update(cx, |page, cx| {
+            cx.defer_update(page, move |page, cx| {
                 if !page.request.is_current(generation) {
                     return;
                 }
@@ -66,7 +66,7 @@ impl TrashPage {
         let operation = async move { library.restore_book(content_hash).await };
         cx.spawn(async move |page, cx| {
             let result = operation.await;
-            let _ = page.update(cx, |page, cx| page.finish(result, "restore book", cx));
+            cx.defer_update(page, |page, cx| page.finish(result, "restore book", cx));
         })
         .detach();
     }
@@ -77,7 +77,7 @@ impl TrashPage {
         let operation = async move { library.restore_directory(folder_id, None).await };
         cx.spawn(async move |page, cx| {
             let result = operation.await.map(|_| ());
-            let _ = page.update(cx, |page, cx| page.finish(result, "restore folder", cx));
+            cx.defer_update(page, |page, cx| page.finish(result, "restore folder", cx));
         })
         .detach();
     }
@@ -88,7 +88,7 @@ impl TrashPage {
         let operation = async move { library.purge_book(content_hash).await };
         cx.spawn(async move |page, cx| {
             let result = operation.await;
-            let _ = page.update(cx, |page, cx| page.finish(result, "delete book permanently", cx));
+            cx.defer_update(page, |page, cx| page.finish(result, "delete book permanently", cx));
         })
         .detach();
     }
@@ -99,7 +99,7 @@ impl TrashPage {
         let operation = async move { library.purge_directory(folder_id).await };
         cx.spawn(async move |page, cx| {
             let result = operation.await;
-            let _ = page.update(cx, |page, cx| page.finish(result, "delete folder permanently", cx));
+            cx.defer_update(page, |page, cx| page.finish(result, "delete folder permanently", cx));
         })
         .detach();
     }
@@ -109,7 +109,7 @@ impl TrashPage {
         let operation = async move { library.empty_trash().await };
         cx.spawn(async move |page, cx| {
             let result = operation.await;
-            let _ = page.update(cx, |page, cx| page.finish(result, "empty Trash", cx));
+            cx.defer_update(page, |page, cx| page.finish(result, "empty Trash", cx));
         })
         .detach();
     }
@@ -163,7 +163,8 @@ impl Render for TrashPage {
         let empty = self.contents.as_ref().is_some_and(|contents| contents.books.is_empty() && contents.folders.is_empty());
         let page = cx.entity();
         let heading = if components::uses_mobile_navigation(_window) {
-            components::mobile_navigation_heading("Trash", components::mobile_back_button(theme).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::DismissSettings), cx)))
+            let back = (!components::has_native_back_button()).then(|| components::mobile_back_button(theme).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::DismissSettings), cx)));
+            components::mobile_navigation_heading("Trash", back)
         } else {
             components::browser_topbar_left().child(div().text_xl().child("Trash"))
         };

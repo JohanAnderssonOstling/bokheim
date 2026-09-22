@@ -5,8 +5,7 @@ pub(super) fn initialize(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
 }
 
 pub(super) fn publish(conn: &rusqlite::Connection, name: &str, physical: &str, length: u64) -> rusqlite::Result<()> {
-    conn.execute(include_str!("sql/asset_index/publish_insert.sql"),
-        rusqlite::params![name, physical, length as i64])?;
+    conn.execute(include_str!("sql/asset_index/publish_insert.sql"), rusqlite::params![name, physical, length as i64])?;
     Ok(())
 }
 
@@ -30,6 +29,18 @@ pub(super) fn page(conn: &rusqlite::Connection, prefix: &str, after: &str) -> ru
 pub(super) fn total_bytes(conn: &rusqlite::Connection, prefix: &str) -> rusqlite::Result<u64> {
     let upper = format!("{}0", prefix.strip_suffix('/').ok_or(rusqlite::Error::InvalidQuery)?);
     conn.query_row(include_str!("sql/asset_index/total_bytes_select.sql"), rusqlite::params![prefix, upper], |row| row.get::<_, i64>(0)).map(|bytes| bytes as u64)
+}
+
+/// The physical directory is removed first. Clear its logical names and
+/// revision metadata in one transaction so a retry after interruption is safe.
+pub(super) fn purge_library(conn: &rusqlite::Connection, library: &str) -> rusqlite::Result<()> {
+    let logical = format!("assets/{library}/");
+    let logical_upper = format!("assets/{library}0");
+    let physical = format!("__libraries/{library}/");
+    let physical_upper = format!("__libraries/{library}0");
+    conn.execute("DELETE FROM asset_file WHERE name>=?1 AND name<?2", rusqlite::params![logical, logical_upper])?;
+    conn.execute("DELETE FROM asset_revision WHERE physical_name>=?1 AND physical_name<?2", rusqlite::params![physical, physical_upper])?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -65,12 +76,19 @@ mod tests {
     fn live_physical_files_are_scoped_to_the_exact_import_prefix() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(include_str!("sql/asset_index/live_physical_files_are_scoped_to_the_exact_import_prefix_create.sql")).unwrap();
-        for (name, physical) in [("first", Some("__import_objects/job/0")), ("alias", Some("__import_objects/job/0")), ("second", Some("__import_objects/job/1")), ("other", Some("__import_objects/job-other/0")), ("wildcard", Some("XXimport_objects/job/0")), ("deleted", None)] {
+        for (name, physical) in [
+            ("first", Some("__libraries/library/imports/job/0")),
+            ("alias", Some("__libraries/library/imports/job/0")),
+            ("second", Some("__libraries/library/imports/job/1")),
+            ("other", Some("__libraries/library/imports/job-other/0")),
+            ("wildcard", Some("XXlibraries/library/imports/job/0")),
+            ("deleted", None),
+        ] {
             conn.execute(include_str!("sql/asset_index/live_physical_files_are_scoped_to_the_exact_import_prefix_insert.sql"), rusqlite::params![name, physical]).unwrap();
         }
-        assert_eq!(live_physical_files(&conn, "__import_objects/job/").unwrap(), ["__import_objects/job/0".to_owned(), "__import_objects/job/1".to_owned()].into_iter().collect());
-        assert!(live_physical_files(&conn, "__import_objects/absent/").unwrap().is_empty());
-        assert!(live_physical_files(&conn, "__import_objects/job").is_err());
+        assert_eq!(live_physical_files(&conn, "__libraries/library/imports/job/").unwrap(), ["__libraries/library/imports/job/0".to_owned(), "__libraries/library/imports/job/1".to_owned()].into_iter().collect());
+        assert!(live_physical_files(&conn, "__libraries/library/imports/absent/").unwrap().is_empty());
+        assert!(live_physical_files(&conn, "__libraries/library/imports/job").is_err());
     }
 
     fn insert_asset(conn: &rusqlite::Connection, name: &str) -> rusqlite::Result<()> {
@@ -102,5 +120,24 @@ mod tests {
         assert_eq!(third.len(), 5);
         assert_eq!(third[4].0, "assets/library/book/069");
         assert!(page(&conn, "assets/library/book/", &third[4].0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn purging_one_library_preserves_other_library_assets() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        initialize(&conn).unwrap();
+        for (name, physical) in [
+            ("assets/a/book/first", "__libraries/a/book/one"),
+            ("assets/a/thumbnail/first", "__libraries/a/thumbnail/two"),
+            ("assets/ab/book/second", "__libraries/ab/book/three"),
+        ] {
+            publish(&conn, name, physical, 10).unwrap();
+            conn.execute("INSERT INTO asset_revision(physical_name,checksum) VALUES(?1,'checksum')", [physical]).unwrap();
+        }
+
+        purge_library(&conn, "a").unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM asset_file", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(conn.query_row("SELECT name FROM asset_file", [], |row| row.get::<_, String>(0)).unwrap(), "assets/ab/book/second");
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM asset_revision", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
     }
 }

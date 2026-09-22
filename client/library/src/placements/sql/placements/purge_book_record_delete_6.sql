@@ -1,1 +1,0 @@
-DELETE FROM remote_asset WHERE hash=?1

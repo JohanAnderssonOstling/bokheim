@@ -1,1 +1,0 @@
-INSERT INTO remote_asset(kind, hash) VALUES ('cover', ?1)

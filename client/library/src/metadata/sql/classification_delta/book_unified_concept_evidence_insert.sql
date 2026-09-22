@@ -1,1 +1,0 @@
-INSERT INTO book_unified_concept_evidence(book_row_id,concept_id,subject_position,source_system_id,source_code) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(book_row_id,concept_id,subject_position,source_system_id,source_code) DO NOTHING

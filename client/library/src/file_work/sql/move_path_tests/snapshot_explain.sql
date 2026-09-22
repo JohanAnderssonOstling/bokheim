@@ -1,1 +1,0 @@
-EXPLAIN QUERY PLAN UPDATE local_file_projection SET relative_path='new' WHERE relative_path>='/old/' COLLATE BINARY AND relative_path<'/old0' COLLATE BINARY

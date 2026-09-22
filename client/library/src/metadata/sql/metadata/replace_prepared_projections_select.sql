@@ -1,1 +1,0 @@
-SELECT row_id FROM book WHERE content_hash=?1

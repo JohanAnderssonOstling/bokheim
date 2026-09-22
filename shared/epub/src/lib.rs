@@ -208,7 +208,9 @@ impl EpubProvider {
                 let mut bytes = Vec::new();
                 reader.read_to_end(&mut bytes)?;
                 Ok(metadata_block_values(&String::from_utf8_lossy(&bytes), "head"))
-            }) { values.extend(extra); }
+            }) {
+                values.extend(extra);
+            }
         }
         values
     }
@@ -306,6 +308,13 @@ impl EpubProvider {
 
     pub fn read_string(&self, uri: &str) -> io::Result<String> {
         self.read_entry_string(uri)
+    }
+
+    /// Returns the package-declared media type for an archive resource.
+    /// EPUB content type comes from the manifest, not the resource filename.
+    pub fn resource_media_type(&self, uri: &str) -> Option<&str> {
+        let path = normalize_epub_path(uri.split(['?', '#']).next().unwrap_or(uri));
+        self.get_or_parse_manifest().items.iter().find(|item| normalize_epub_path(&resolve_href(&self.opf_dir, &item.href)) == path).and_then(|item| item.media_type.as_deref())
     }
 
     /// Inspect a bounded stream without allocating the complete document.
@@ -895,6 +904,83 @@ mod streaming_tests {
         }
     }
 
+    // Build a tiny EPUB and replace only central-directory extra fields.
+    // No user book or copyrighted contents are embedded in the fixture.
+    fn zip64_epub(sentinels: u8) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, text) in [
+            ("META-INF/container.xml", r#"<container><rootfiles><rootfile full-path="OPS/book.opf"/></rootfiles></container>"#),
+            ("OPS/book.opf", r#"<package><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#),
+            ("OPS/chapter.xhtml", "<html><body>ZIP64 regression chapter</body></html>"),
+        ] {
+            writer.start_file(name, stored).unwrap();
+            writer.write_all(text.as_bytes()).unwrap();
+        }
+        let bytes = writer.finish().unwrap().into_inner();
+        let end = bytes.len() - 22;
+        assert_eq!(&bytes[end..end + 4], b"PK\x05\x06");
+        let start = u32::from_le_bytes(bytes[end + 16..end + 20].try_into().unwrap()) as usize;
+        let mut output = bytes[..start].to_vec();
+        let mut cursor = start;
+        while cursor < end {
+            assert_eq!(&bytes[cursor..cursor + 4], b"PK\x01\x02");
+            let name_len = u16::from_le_bytes(bytes[cursor + 28..cursor + 30].try_into().unwrap()) as usize;
+            let extra_len = u16::from_le_bytes(bytes[cursor + 30..cursor + 32].try_into().unwrap()) as usize;
+            let comment_len = u16::from_le_bytes(bytes[cursor + 32..cursor + 34].try_into().unwrap()) as usize;
+            let mut header = bytes[cursor..cursor + 46].to_vec();
+            let mut payload = Vec::new();
+            for (mask, offset) in [(1, 24), (2, 20), (4, 42)] {
+                if sentinels & mask != 0 {
+                    let value = u32::from_le_bytes(header[offset..offset + 4].try_into().unwrap());
+                    payload.extend_from_slice(&(value as u64).to_le_bytes());
+                    header[offset..offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+                }
+            }
+            if sentinels == 0 {
+                // Broken redundant data must not replace valid sizes/offsets.
+                payload.resize(32, 0xff);
+            }
+            header[30..32].copy_from_slice(&((payload.len() + 4) as u16).to_le_bytes());
+            output.extend_from_slice(&header);
+            output.extend_from_slice(&bytes[cursor + 46..cursor + 46 + name_len]);
+            output.extend_from_slice(&1u16.to_le_bytes());
+            output.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+            output.extend_from_slice(&payload);
+            output.extend_from_slice(&bytes[cursor + 46 + name_len + extra_len..cursor + 46 + name_len + extra_len + comment_len]);
+            cursor += 46 + name_len + extra_len + comment_len;
+        }
+        let size = (output.len() - start) as u32;
+        let mut footer = bytes[end..].to_vec();
+        footer[12..16].copy_from_slice(&size.to_le_bytes());
+        output.extend_from_slice(&footer);
+        output
+    }
+
+    #[test]
+    fn zip64_redundant_fields_preserve_valid_offsets_and_sizes() {
+        let provider = EpubProvider::try_from_reader(Cursor::new(zip64_epub(0))).unwrap();
+        assert_eq!(provider.document_uris().unwrap(), vec!["OPS/chapter.xhtml"]);
+        assert!(provider.read_string("OPS/chapter.xhtml").unwrap().contains("ZIP64 regression chapter"));
+    }
+
+    #[test]
+    fn zip64_sentinel_fields_still_use_extended_values() {
+        for mask in 1..=7 {
+            let provider = EpubProvider::try_from_reader(Cursor::new(zip64_epub(mask))).unwrap();
+            assert!(provider.read_string("OPS/chapter.xhtml").unwrap().contains("ZIP64 regression chapter"), "sentinel mask {mask}");
+        }
+    }
+
+    #[test]
+    fn zip64_recovery_does_not_disable_crc_validation() {
+        let mut bytes = zip64_epub(0);
+        let position = bytes.windows(b"ZIP64 regression chapter".len()).position(|window| window == b"ZIP64 regression chapter").unwrap();
+        bytes[position] ^= 1;
+        let provider = EpubProvider::try_from_reader(Cursor::new(bytes)).unwrap();
+        assert!(provider.read_string("OPS/chapter.xhtml").is_err());
+    }
+
     #[test]
     fn spine_uses_declared_xhtml_type_for_xml_filenames() {
         let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
@@ -913,6 +999,23 @@ mod streaming_tests {
         let provider = EpubProvider::try_from_reader(archive.finish().unwrap()).unwrap();
         assert_eq!(provider.document_uris().unwrap(), vec!["OPS/chapter.xml"]);
         assert!(provider.read_string("OPS/chapter.xml").unwrap().contains("Chapter"));
+    }
+
+    #[test]
+    fn manifest_type_is_available_for_xhtml_with_html_filename() {
+        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, bytes) in [
+            ("META-INF/container.xml", "<container><rootfiles><rootfile full-path=\"OPS/book.opf\"/></rootfiles></container>"),
+            ("OPS/book.opf", r#"<package><manifest><item id="chapter" href="Text/chapter.html" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#),
+            ("OPS/Text/chapter.html", "<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><a id=\"page1\"/>Text</body></html>"),
+        ] {
+            archive.start_file(name, options).unwrap();
+            archive.write_all(bytes.as_bytes()).unwrap();
+        }
+        let provider = EpubProvider::try_from_reader(archive.finish().unwrap()).unwrap();
+        assert_eq!(provider.document_uris().unwrap(), vec!["OPS/Text/chapter.html"]);
+        assert_eq!(provider.resource_media_type("OPS/Text/chapter.html"), Some("application/xhtml+xml"));
     }
 
     #[test]
@@ -1291,7 +1394,9 @@ fn parse_opf_metadata(opf_xml: &str) -> EpubMetadata {
 fn add_metadata_isbns(metadata: &mut EpubMetadata, values: impl IntoIterator<Item = String>) {
     for value in values {
         let Some(isbn) = book_model::metadata_isbn(&value) else { continue };
-        if metadata.identifiers.iter().any(|id| matches!(id.scheme, IdentifierScheme::ISBN) && book_model::metadata_isbn(&id.value).as_ref() == Some(&isbn)) { continue; }
+        if metadata.identifiers.iter().any(|id| matches!(id.scheme, IdentifierScheme::ISBN) && book_model::metadata_isbn(&id.value).as_ref() == Some(&isbn)) {
+            continue;
+        }
         metadata.identifiers.push(EpubIdentifier { value: isbn, scheme: IdentifierScheme::ISBN, identifier_types: Vec::new() });
     }
 }
@@ -1774,28 +1879,44 @@ fn metadata_block_values(xml: &str, block: &str) -> Vec<String> {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
                 if !inside {
-                    if e.local_name().as_ref() == block.as_bytes() { inside = true; }
+                    if e.local_name().as_ref() == block.as_bytes() {
+                        inside = true;
+                    }
                     continue;
                 }
                 stack.push(String::new());
                 for attribute in e.attributes().flatten() {
-                    if let Ok(value) = attribute.unescape_value() { values.push(value.into_owned()); }
+                    if let Ok(value) = attribute.unescape_value() {
+                        values.push(value.into_owned());
+                    }
                 }
             }
             Ok(Event::Text(e)) if inside => {
-                if let Ok(text) = e.unescape() { for value in &mut stack { value.push_str(&text); } }
+                if let Ok(text) = e.unescape() {
+                    for value in &mut stack {
+                        value.push_str(&text);
+                    }
+                }
             }
             Ok(Event::CData(e)) if inside => {
-                for value in &mut stack { value.push_str(&String::from_utf8_lossy(&e)); }
+                for value in &mut stack {
+                    value.push_str(&String::from_utf8_lossy(&e));
+                }
             }
             Ok(Event::End(e)) if inside => {
-                if stack.is_empty() && e.local_name().as_ref() == block.as_bytes() { break; }
-                if let Some(value) = stack.pop() { values.push(value); }
+                if stack.is_empty() && e.local_name().as_ref() == block.as_bytes() {
+                    break;
+                }
+                if let Some(value) = stack.pop() {
+                    values.push(value);
+                }
             }
             Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
-        if values.len() >= 4096 || stack.len() > 64 { break; }
+        if values.len() >= 4096 || stack.len() > 64 {
+            break;
+        }
     }
     values
 }
@@ -1805,7 +1926,8 @@ mod bibliographic_property_tests {
     use super::metadata_block_values;
     #[test]
     fn scans_values_not_digit_fragments_and_stops_at_head_end() {
-        let values = metadata_block_values(r#"<ncx><head><meta name="dtb:uid" content="978-1-934356-55-5"/><meta name="other">prefix<![CDATA[9781934356555]]>suffix</meta></head><navMap><meta content="9780191507052"/></navMap></ncx>"#, "head");
+        let values =
+            metadata_block_values(r#"<ncx><head><meta name="dtb:uid" content="978-1-934356-55-5"/><meta name="other">prefix<![CDATA[9781934356555]]>suffix</meta></head><navMap><meta content="9780191507052"/></navMap></ncx>"#, "head");
         assert!(values.iter().any(|v| v == "978-1-934356-55-5"));
         assert!(values.iter().any(|v| v == "prefix9781934356555suffix"));
         assert!(!values.iter().any(|v| v == "9781934356555" || v == "9780191507052"));
@@ -1817,7 +1939,8 @@ mod mislabeled_isbn_tests {
     use super::*;
     #[test]
     fn whole_values_override_schemes_and_include_arbitrary_properties() {
-        let metadata = parse_opf_metadata(r#"<package><metadata>
+        let metadata = parse_opf_metadata(
+            r#"<package><metadata>
           <identifier scheme="ASIN">978-1-934356-55-5</identifier>
           <identifier scheme="ASIN">B005E835K0</identifier>
           <meta name="unknown" content="9780191507052"/>
@@ -1825,7 +1948,8 @@ mod mislabeled_isbn_tests {
           <meta name="uuid" content="7872d3e9-8394-4530-8a39-773505e19c9b"/>
           <meta name="cover" content="9780199588503.jpg"/>
           <identifier scheme="ISBN">0000000000</identifier>
-        </metadata></package>"#);
+        </metadata></package>"#,
+        );
         let isbns: Vec<_> = metadata.identifiers.iter().filter(|id| matches!(id.scheme, IdentifierScheme::ISBN)).map(|id| id.value.as_str()).collect();
         assert_eq!(isbns, ["9781934356555", "9780191507052", "9780191085048"]);
         assert!(metadata.identifiers.iter().any(|id| id.value == "B005E835K0" && matches!(id.scheme, IdentifierScheme::ASIN)));

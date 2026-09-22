@@ -1,1 +1,0 @@
-INSERT OR IGNORE INTO author_external_identifier(author_identity_id, authority, external_id, verified_at) VALUES(?1, ?2, ?3, ?4)

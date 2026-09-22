@@ -1,1 +1,0 @@
-INSERT INTO source_subject(system_id,source_version,code,official_label) VALUES(?1,?2,?3,NULL) ON CONFLICT DO NOTHING

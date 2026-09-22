@@ -1,0 +1,17 @@
+UPDATE concept SET preferred_label='U.S. Prose Serials & Societies' WHERE concept_id=13510 AND preferred_label='Periodicals, Societies & Serials';
+UPDATE concept SET preferred_label='Film Serials & Societies' WHERE concept_id=13564 AND preferred_label='Periodicals. Societies. Serials';
+UPDATE concept SET preferred_label='Psychotherapy Serials & Orgs.' WHERE concept_id=13590 AND preferred_label='Periodicals. Societies. Serials';
+UPDATE concept SET preferred_label='Public Health Study & Exams' WHERE concept_id=6169 AND preferred_label='Problems, Exercises & Examinations';
+UPDATE concept SET preferred_label='Greek Lit. Essays & Lectures' WHERE concept_id=8411 AND preferred_label='Collected essays. Lectures. Studies';
+UPDATE concept SET preferred_label='Roman Lit. Essays & Lectures' WHERE concept_id=6953 AND preferred_label='Collected essays. Studies. Lectures';
+UPDATE concept SET preferred_label='U.S. Memoir & Letter Anthologies' WHERE concept_id=7799 AND preferred_label='Collected memoirs, letters, etc.';
+UPDATE concept SET preferred_label='Cell Physics & Chemistry' WHERE concept_id=6852 AND preferred_label='Physical and chemical properties';
+UPDATE concept SET preferred_label='Chancellery Document Practices' WHERE concept_id=8003 AND preferred_label='Practice of special chancelleries';
+UPDATE concept SET preferred_label='World Biographies by Language' WHERE concept_id=8514 AND preferred_label='Universal in scope. By language';
+UPDATE concept SET preferred_label='Individual African Languages' WHERE concept_id=7927 AND preferred_label='Special languages (alphabetically)';
+UPDATE concept SET preferred_label='Spacecraft Topics' WHERE concept_id=9333 AND preferred_label='Specific aspects of space vehicles';
+UPDATE concept SET preferred_label='Specialized Internal Medicine' WHERE concept_id=2717 AND preferred_label='Special situations and conditions';
+UPDATE concept SET preferred_label='Catholic Bodies & Prelatures' WHERE concept_id=12957 AND preferred_label='Societies, Institutes & Prelatures';
+UPDATE concept SET preferred_label='Comparative Buddhist Traditions' WHERE concept_id=12859 AND preferred_label='General & Comparative Traditions';
+UPDATE concept SET preferred_label='Roman Literary History' WHERE concept_id=4457 AND preferred_label='Literary history';
+UPDATE concept SET preferred_label='Greek Literary History' WHERE concept_id=4256 AND preferred_label='Literary history';

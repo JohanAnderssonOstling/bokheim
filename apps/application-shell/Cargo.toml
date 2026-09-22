@@ -6,14 +6,14 @@ edition = "2024"
 [features]
 default = []
 audiobooks = ["reader-ui/audiobooks"]
-kobo = ["mobile", "audiobooks", "browser-ui/kobo", "reader-ui/kobo", "dep:gpui_kobo", "bokheim-backend/kobo", "dep:gpui-component", "dep:ui-components"]
+kobo = ["mobile", "audiobooks", "browser-ui/kobo", "reader-ui/kobo", "dep:gpui_kobo", "app/kobo", "dep:ui-components"]
 mobile = ["browser-ui/mobile", "reader-ui/mobile"]
 packaged-pdfium = ["reader-ui/packaged-pdfium"]
 
 [dependencies]
 book-model = { path = "../../shared/book-model" }
 async-channel = "2"
-bokheim-backend = { path = "../../client/backend", default-features = false }
+app = { path = "../../client/app", default-features = false }
 browser-ui = { path = "../browser", default-features = false }
 gpui.workspace = true
 gpui_kobo = { path = "../../../GPUI-Fork/crates/gpui_kobo", optional = true }
@@ -26,7 +26,7 @@ web-time = "1"
 reader-ui = { path = "../reader", default-features = false }
 sync-common = { path = "../../shared/sync-common" }
 
-gpui-component = { workspace = true, optional = true }
+gpui-component.workspace = true
 ui-components = { path = "../components", optional = true }
 
 [dev-dependencies]

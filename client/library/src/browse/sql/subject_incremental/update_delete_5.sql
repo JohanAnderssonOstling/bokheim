@@ -1,1 +1,0 @@
-DELETE FROM subject_browse_child WHERE location=?1

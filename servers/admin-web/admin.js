@@ -9,8 +9,8 @@ const pageDefinitions = {
   overview: ["Operations overview", "/admin/"],
   traffic: ["Traffic", "/admin/traffic"],
   accounts: ["Account activity", "/admin/accounts"],
-  catalogue: ["Catalogue operations", "/admin/catalogue"],
-  "catalogue-review": ["Catalogue manual review", "/admin/catalogue-review"],
+  authority: ["Authority operations", "/admin/authority"],
+  "authority-review": ["Authority manual review", "/admin/authority-review"],
   metadata: ["Metadata enrichment", "/admin/metadata"],
   security: ["Security and incident response", "/admin/security"],
 };
@@ -130,11 +130,13 @@ function card(label, value, detail) {
 }
 function processControl(process) {
   const labels = {
-    catalogue_crawling:["Catalogue crawling", "Fetches and activates OPDS catalogue generations"],
     cover_downloads:["Cover downloads", "Downloads saved cover URLs and records the result against each book"],
-    enrichment:["Enrichment pipeline", "Runs catalogue metadata, book-file extraction, title/author lookup, and OCR in pipeline order"],
+    enrichment:["Enrichment pipeline", "Runs authority metadata, book-file extraction, title/author lookup, and OCR in pipeline order"],
   };
-  const [label, description] = labels[process.process] ?? [process.process.replaceAll("_", " "), "Catalogue background process"];
+  if (!(process.process in labels)) {
+    return document.createDocumentFragment();
+  }
+  const [label, description] = labels[process.process];
   const state = process.blocked_by_configuration
     ? "Disabled by server configuration"
     : process.pause_pending
@@ -162,7 +164,7 @@ function serviceState(service) {
   return service.available ? ["Available", `${number(service.latency_ms)} ms response`] : ["Unavailable", "Check the service or dashboard target configuration"];
 }
 function render(overview, history, requestHistory, engagement, services, identityReviews, accounts) {
-  const catalogueState = serviceState(services.catalogue);
+  const authorityState = serviceState(services.authority);
   const metadataState = serviceState(services.metadata);
   elements.cards.replaceChildren(
     card("Requests · 1h", number(overview.requests_last_hour), `${number(overview.errors_last_hour)} errors`),
@@ -175,7 +177,7 @@ function render(overview, history, requestHistory, engagement, services, identit
     card("New accounts · 30d", number(overview.new_verified_accounts_30d), `${number(overview.first_time_accounts_30d)} first-time · ${number(overview.returning_accounts_30d)} returning`),
     card("Sync accounts · 30d", number(overview.sync_accounts_30d), `${number(overview.auth_only_accounts_30d)} authenticated without sync`),
     card("Registered accounts", number(overview.registered_users), `${number(overview.unique_accounts_ever)} used server since tracking began`),
-    card("Catalogue server", catalogueState[0], catalogueState[1]),
+    card("Authority server", authorityState[0], authorityState[1]),
     card("Metadata enrichment", metadataState[0], metadataState[1]),
     card("Storage used", bytes(overview.storage_used_bytes), `${bytes(overview.storage_reserved_bytes)} reserved`),
     card("Process uptime", duration(overview.uptime_seconds), overview.dropped_traffic_events ? `${number(overview.dropped_traffic_events)} metrics dropped` : "No dropped metrics"),
@@ -209,24 +211,24 @@ function render(overview, history, requestHistory, engagement, services, identit
   elements.engagement.replaceChildren(...engagementRows);
   renderAccounts(accounts);
 
-  const catalogue = services.catalogue.data;
-  elements["catalogue-unavailable"].hidden = Boolean(catalogue);
-  elements["catalogue-content"].hidden = !catalogue;
-  if (catalogue) {
-    const extractions = catalogue.epub_extractions;
-    const coverDownloads = catalogue.cover_downloads;
-    const metadataBackfill = catalogue.metadata_backfill;
-    const descriptionBackfill = catalogue.description_backfill;
-    const descriptionMetrics = catalogue.description_backfill_metrics;
-    const extractionMetrics = catalogue.extraction_metrics;
-    const descriptionBackfillAvailable = catalogue.description_backfill_available !== false;
+  const authority = services.authority.data;
+  elements["authority-unavailable"].hidden = Boolean(authority);
+  elements["authority-content"].hidden = !authority;
+  if (authority) {
+    const extractions = authority.epub_extractions;
+    const coverDownloads = authority.cover_downloads;
+    const metadataBackfill = authority.metadata_backfill;
+    const descriptionBackfill = authority.description_backfill;
+    const descriptionMetrics = authority.description_backfill_metrics;
+    const extractionMetrics = authority.extraction_metrics;
+    const descriptionBackfillAvailable = authority.description_backfill_available !== false;
     const descriptionWithoutOpenLibraryText = descriptionBackfill?.no_description ?? 0;
     const descriptionFinished = descriptionBackfill ? descriptionBackfill.succeeded + descriptionWithoutOpenLibraryText : 0;
     const descriptionTotal = descriptionBackfill ? descriptionFinished + descriptionBackfill.pending + descriptionBackfill.running : 0;
     const descriptionProgress = descriptionTotal ? descriptionFinished / descriptionTotal * 100 : 100;
     const descriptionsPerMinute = descriptionMetrics ? descriptionMetrics.jobs_per_second * 60 : null;
-    const currentCrawls = catalogue.sources.filter((source) => source.crawl_status === "running");
-    elements["catalogue-processes"].replaceChildren(...(catalogue.processes ?? []).map(processControl));
+    const currentCrawls = authority.sources.filter((source) => source.crawl_status === "running");
+    elements["authority-processes"].replaceChildren(...(authority.processes ?? []).map(processControl));
     const crawlRates = currentCrawls.map((source) => ({
       pages:perMinute(source.crawl_pages_fetched, source.crawl_elapsed_seconds),
       books:perMinute(source.crawl_books_seen, source.crawl_elapsed_seconds),
@@ -234,29 +236,29 @@ function render(overview, history, requestHistory, engagement, services, identit
     const measuredRates = crawlRates.filter((speed) => speed.pages !== null);
     const pagesPerMinute = measuredRates.reduce((sum, speed) => sum + speed.pages, 0);
     const booksPerMinute = measuredRates.reduce((sum, speed) => sum + speed.books, 0);
-    elements["catalogue-cards"].replaceChildren(
-      card("Books", number(catalogue.active_book_count), `${number(catalogue.active_page_count)} cached pages`),
-      card("Importable EPUBs", number(catalogue.active_epub_count), `${number(catalogue.sources.length)} configured sources`),
-      card("Catalogue latency", `${number(services.catalogue.latency_ms)} ms`, "Operations snapshot response"),
+    elements["authority-cards"].replaceChildren(
+      card("Books", number(authority.active_book_count), `${number(authority.active_page_count)} cached pages`),
+      card("Importable EPUBs", number(authority.active_epub_count), `${number(authority.sources.length)} configured sources`),
+      card("Authority latency", `${number(services.authority.latency_ms)} ms`, "Operations snapshot response"),
       card("EPUB extraction queue", number(extractions.pending + extractions.running), `${number(extractions.succeeded)} succeeded · ${number(extractions.failed)} failed`),
       ...(extractionMetrics?.jobs ? [card("EPUB CPU stages", `${extractionMetrics.average_worker_ms.toFixed(0)} ms/book`, `container ${extractionMetrics.average_container_ms.toFixed(0)} · evidence ${extractionMetrics.average_evidence_ms.toFixed(0)} · TOC ${extractionMetrics.average_toc_ms.toFixed(0)} · thumbnail ${extractionMetrics.average_thumbnail_ms.toFixed(0)} ms`)] : []),
       ...(coverDownloads ? [card("Cover download queue", number(coverDownloads.pending + coverDownloads.running), `${number(coverDownloads.succeeded)} cached · ${number(coverDownloads.failed)} failed`)] : []),
-      ...(metadataBackfill ? [card("Metadata backfill queue", number(metadataBackfill.pending + metadataBackfill.running), `${number(metadataBackfill.running)} running · ${number(metadataBackfill.succeeded)} succeeded · ${number(catalogue.identity_reviews?.failed ?? 0)} recorded failures`)] : []),
+      ...(metadataBackfill ? [card("Metadata backfill queue", number(metadataBackfill.pending + metadataBackfill.running), `${number(metadataBackfill.running)} running · ${number(metadataBackfill.succeeded)} succeeded · ${number(authority.identity_reviews?.failed ?? 0)} recorded failures`)] : []),
       ...(descriptionBackfill ? [card("Description backfill", descriptionBackfillAvailable ? `${descriptionProgress.toFixed(1)}%` : "Waiting", descriptionBackfillAvailable ? `${number(descriptionBackfill.pending + descriptionBackfill.running)} queued · ${rate(descriptionsPerMinute)} books/min · ${number(descriptionWithoutOpenLibraryText)} without an OL description` : "Metadata snapshot does not contain Open Library descriptions yet")] : []),
-      card("Registry revision", number(catalogue.registry_revision), catalogue.metadata_enrichment_configured ? "Metadata enrichment configured" : "Metadata enrichment disabled"),
+      card("Registry revision", number(authority.registry_revision), authority.metadata_enrichment_configured ? "Metadata enrichment configured" : "Metadata enrichment disabled"),
       card("Crawl speed", currentCrawls.length ? `${rate(measuredRates.length ? pagesPerMinute : null)} pages/min` : "Idle", currentCrawls.length ? `${rate(measuredRates.length ? booksPerMinute : null)} book entries/min across ${number(currentCrawls.length)} sources` : "No source is currently crawling"),
     );
-    elements["catalogue-metadata-backfill"].hidden = !metadataBackfill;
+    elements["authority-metadata-backfill"].hidden = !metadataBackfill;
     if (metadataBackfill) {
       const row = document.createElement("tr");
-      for (const value of [metadataBackfill.pending, metadataBackfill.running, metadataBackfill.succeeded, catalogue.identity_reviews?.failed ?? 0, metadataBackfill.last_error || "None"]) {
+      for (const value of [metadataBackfill.pending, metadataBackfill.running, metadataBackfill.succeeded, authority.identity_reviews?.failed ?? 0, metadataBackfill.last_error || "None"]) {
         const cell = document.createElement("td");
         cell.textContent = typeof value === "number" ? number(value) : value;
         row.append(cell);
       }
-      elements["catalogue-metadata-backfill-status"].replaceChildren(row);
+      elements["authority-metadata-backfill-status"].replaceChildren(row);
     }
-    elements["catalogue-description-backfill"].hidden = !descriptionBackfill;
+    elements["authority-description-backfill"].hidden = !descriptionBackfill;
     if (descriptionBackfill) {
       const row = document.createElement("tr");
       const speed = !descriptionBackfillAvailable
@@ -277,10 +279,10 @@ function render(overview, history, requestHistory, engagement, services, identit
         cell.textContent = typeof value === "number" ? number(value) : value;
         row.append(cell);
       }
-      elements["catalogue-description-backfill-status"].replaceChildren(row);
+      elements["authority-description-backfill-status"].replaceChildren(row);
     }
-    elements["catalogue-current-crawl-empty"].hidden = currentCrawls.length !== 0;
-    elements["catalogue-current-crawl-wrap"].hidden = currentCrawls.length === 0;
+    elements["authority-current-crawl-empty"].hidden = currentCrawls.length !== 0;
+    elements["authority-current-crawl-wrap"].hidden = currentCrawls.length === 0;
     const currentCrawlRows = currentCrawls.map((source, sourceIndex) => {
       const row = document.createElement("tr");
       const extraction = source.epub_extractions;
@@ -300,8 +302,8 @@ function render(overview, history, requestHistory, engagement, services, identit
       }
       return row;
     });
-    elements["catalogue-current-crawl"].replaceChildren(...currentCrawlRows);
-    const sourceRows = catalogue.sources.map((source) => {
+    elements["authority-current-crawl"].replaceChildren(...currentCrawlRows);
+    const sourceRows = authority.sources.map((source) => {
       const row = document.createElement("tr");
       const lastSuccess = source.last_crawl_succeeded_at ? timestamp(source.last_crawl_succeeded_at) : "Never";
       const extraction = source.epub_extractions;
@@ -317,10 +319,10 @@ function render(overview, history, requestHistory, engagement, services, identit
       }
       return row;
     });
-    elements["catalogue-sources"].replaceChildren(...sourceRows);
-    const failures = catalogue.extraction_failures ?? [];
-    elements["catalogue-failures-empty"].hidden = failures.length !== 0;
-    elements["catalogue-failures-wrap"].hidden = failures.length === 0;
+    elements["authority-sources"].replaceChildren(...sourceRows);
+    const failures = authority.extraction_failures ?? [];
+    elements["authority-failures-empty"].hidden = failures.length !== 0;
+    elements["authority-failures-wrap"].hidden = failures.length === 0;
     const failureRows = failures.map((failure) => {
       const row = document.createElement("tr");
       const retry = failure.retryable ? "Retryable with backoff" : "Permanent";
@@ -333,7 +335,7 @@ function render(overview, history, requestHistory, engagement, services, identit
       }
       return row;
     });
-    elements["catalogue-failures"].replaceChildren(...failureRows);
+    elements["authority-failures"].replaceChildren(...failureRows);
   }
 
   const metadata = services.metadata.data;
@@ -374,7 +376,7 @@ function render(overview, history, requestHistory, engagement, services, identit
   });
   elements["request-ips"].replaceChildren(...requestRows);
 
-  const sources = services.catalogue.data?.sources ?? [];
+  const sources = services.authority.data?.sources ?? [];
   const selectedSource = elements["review-source"].value;
   elements["review-source"].replaceChildren(new Option("All sources", ""), ...sources.map((source) => new Option(source.source_id, source.source_id)));
   elements["review-source"].value = selectedSource;
@@ -471,8 +473,8 @@ async function load() {
     const reviewQuery = new URLSearchParams({ limit:"100" });
     if (elements["review-source"].value) reviewQuery.set("source_id", elements["review-source"].value);
     if (elements["review-status"].value) reviewQuery.set("status", elements["review-status"].value);
-    const identityReviewRequest = activePage === "catalogue-review"
-      ? request(`/api/admin/catalog-identity-reviews?${reviewQuery}`)
+    const identityReviewRequest = activePage === "authority-review"
+      ? request(`/api/admin/authority-identity-reviews?${reviewQuery}`)
       : Promise.resolve({ ok:true, status:200, json:async () => null });
     // Email addresses are only fetched while the accounts page is open, so the
     // background poll on other pages does not keep reading account identities.
@@ -525,17 +527,17 @@ elements.ranges.addEventListener("click", (event) => {
 });
 elements["review-source"].addEventListener("change", load);
 elements["review-status"].addEventListener("change", load);
-elements["catalogue-processes"].addEventListener("click", async (event) => {
+elements["authority-processes"].addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-process-action]");
   if (!button) return;
   button.disabled = true;
   try {
-    const response = await post(`/api/admin/catalog-processes/${button.dataset.process}`, { action:button.dataset.processAction });
+    const response = await post(`/api/admin/authority-processes/${button.dataset.process}`, { action:button.dataset.processAction });
     if (!response.ok) throw new Error();
     await load();
   } catch {
     button.disabled = false;
-    window.alert("The catalogue process control could not be changed.");
+    window.alert("The authority process control could not be changed.");
   }
 });
 elements.reviews.addEventListener("click", async (event) => {
@@ -545,7 +547,7 @@ elements.reviews.addEventListener("click", async (event) => {
   const action = button.dataset.reviewAction;
   const body = action === "select_candidate" ? { action, edition_id:button.dataset.editionId, isbn13:button.dataset.isbn13 } : { action };
   button.disabled = true;
-  try { const response = await post(`/api/admin/catalog-identity-reviews/${review.dataset.reviewId}`, body); if (!response.ok) throw new Error(); await load(); }
+  try { const response = await post(`/api/admin/authority-identity-reviews/${review.dataset.reviewId}`, body); if (!response.ok) throw new Error(); await load(); }
   catch { button.disabled = false; window.alert("The review decision could not be saved."); }
 });
 elements.reviews.addEventListener("submit", async (event) => {
@@ -554,7 +556,7 @@ elements.reviews.addEventListener("submit", async (event) => {
   event.preventDefault();
   const review = form.closest("[data-review-id]");
   const submit = form.querySelector("button[type='submit']"); submit.disabled = true;
-  try { const response = await post(`/api/admin/catalog-identity-reviews/${review.dataset.reviewId}`, { action:"manual_isbn", isbn:new FormData(form).get("isbn") }); if (!response.ok) throw new Error(); await load(); }
+  try { const response = await post(`/api/admin/authority-identity-reviews/${review.dataset.reviewId}`, { action:"manual_isbn", isbn:new FormData(form).get("isbn") }); if (!response.ok) throw new Error(); await load(); }
   catch { submit.disabled = false; window.alert("The ISBN could not be applied."); }
 });
 elements["login-form"].addEventListener("submit", async (event) => {
@@ -582,6 +584,6 @@ elements["login-form"].addEventListener("submit", async (event) => {
 selectPage();
 load();
 window.setInterval(() => {
-  const editingReview = activePage === "catalogue-review" && document.activeElement?.closest("form[data-review-action='manual_isbn']");
+  const editingReview = activePage === "authority-review" && document.activeElement?.closest("form[data-review-action='manual_isbn']");
   if (!elements.dashboard.hidden && !editingReview) load();
 }, 15_000);

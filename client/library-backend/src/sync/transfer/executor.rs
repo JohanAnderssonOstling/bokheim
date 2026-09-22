@@ -5,13 +5,13 @@
 //! Network negotiation stays pure data; guards re-validate at commit time.
 use super::{TransferError, TransferOperation, TransferOrigin};
 use crate::sync::transfer::worker::TransferWorker;
-use asset_transfer::ClaimedTransferJob;
 use asset_transfer::runner::{DroppedUpload, PreparedUploads};
+use asset_transfer::ClaimedTransferJob;
 use library_database::{BookPlacement, BookUploadIntent, TransferOutcome, TransferSnapshot, TransferWrite};
 use library_model::DownloadState;
-use library_replica::TransferJobKind;
 #[cfg(target_arch = "wasm32")]
 use library_replica::BlobKind;
+use library_replica::TransferJobKind;
 use library_runtime::events::LibraryEvent;
 use sync_common::ContentHash;
 
@@ -41,18 +41,14 @@ impl TransferWorker {
         let planner = self.transfer_planner();
         let negotiation = planner.negotiate_book_uploads(intents).await?;
         planner.check_transfer_account(&credentials)?;
-        out.record(TransferWrite::SettleManifest {
-            intents: intents.to_vec(),
-            present_remotely: negotiation.present_remotely.clone(),
-            rejected: negotiation.rejected.clone(),
-        });
+        out.record(TransferWrite::SettleManifest { intents: intents.to_vec(), present_remotely: negotiation.present_remotely.clone(), rejected: negotiation.rejected.iter().map(|(hash, error)| (*hash, error.to_string())).collect() });
         let mut jobs = Vec::new();
         let mut dropped = Vec::new();
         for intent in intents {
             if negotiation.present_remotely.contains(&intent.content_hash) {
                 dropped.push(DroppedUpload::Completed { hash: intent.content_hash });
             } else if let Some((_, reason)) = negotiation.rejected.iter().find(|(hash, _)| *hash == intent.content_hash) {
-                dropped.push(DroppedUpload::Rejected { hash: intent.content_hash, reason: reason.clone() });
+                dropped.push(DroppedUpload::Rejected { hash: intent.content_hash, reason: reason.to_string() });
             } else {
                 jobs.push(super::TransferJob::upload_book_intent(intent.clone(), negotiation.upload_required.contains(&intent.content_hash), TransferOrigin::Background));
             }
@@ -91,19 +87,13 @@ impl TransferWorker {
         let negotiation = planner.negotiate_thumbnail_availability(hashes).await?;
         planner.check_transfer_account(&credentials)?;
         out.record(TransferWrite::SettleAvailability { available: negotiation.available.clone(), missing: negotiation.missing.clone() });
-        Ok(negotiation
-            .missing
-            .iter()
-            .filter(|hash| snapshot.thumbnail_allowed_for(hash))
-            .map(|hash| super::TransferJob::upload_thumbnail(*hash, TransferOrigin::Background))
-            .collect())
+        Ok(negotiation.missing.iter().filter(|hash| snapshot.asset_for(hash).is_some_and(|asset| asset.thumbnail_allowed)).map(|hash| super::TransferJob::upload_thumbnail(*hash, TransferOrigin::Background)).collect())
     }
 
     pub(super) fn resolve_rejected_job(&self, job: &super::TransferJob, reason: &str, out: &mut TransferOutcome) {
         match &job.operation {
             TransferOperation::DownloadBlob { content_hash, .. } => {
                 out.record(TransferWrite::CompleteDownload { hash: *content_hash });
-                self.send_download_status(*content_hash, DownloadState::NotDownloaded);
             }
             TransferOperation::UploadBlob { content_hash, intent, .. } => {
                 out.record(TransferWrite::SettleRejectedUpload { hash: *content_hash, intent: intent.clone(), reason: reason.to_owned() });
@@ -116,8 +106,14 @@ impl TransferWorker {
     }
 
     pub(super) async fn handle_claimed_batch(&self, snapshot: &TransferSnapshot, claimed: &[ClaimedTransferJob], out: &mut TransferOutcome) -> Result<(), TransferError> {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(item) = claimed.first().filter(|item| matches!(item.job.operation, TransferOperation::DownloadBlob { .. })) {
+            // Scheduler-owned downloads retain cross-tab ownership and guarded commits.
+            return self.handle_job(item.job.clone()).await;
+        }
         match claimed.first().map(|item| item.job.batch_kind()) {
             Some(Some(TransferJobKind::DownloadThumbnail)) => self.download_thumbnail_batch(snapshot, claimed, out).await,
+            Some(Some(TransferJobKind::UploadThumbnail)) => self.upload_thumbnail_batch(snapshot, claimed, out).await,
             Some(_) => self.execute_job(snapshot, claimed[0].job.clone(), out).await,
             None => Ok(()),
         }
@@ -165,6 +161,13 @@ impl TransferWorker {
         self.thumbnail_transfers().download_thumbnail_batch(snapshot, claimed, out).await
     }
 
+    async fn upload_thumbnail_batch(&self, snapshot: &TransferSnapshot, claimed: &[ClaimedTransferJob], out: &mut TransferOutcome) -> Result<(), TransferError> {
+        if !self.asset_storage_enabled() {
+            return Ok(());
+        }
+        self.thumbnail_transfers().upload_thumbnail_batch(snapshot, claimed, out).await
+    }
+
     fn transfer_planner(&self) -> asset_transfer::planning::TransferPlanner<impl Fn() -> Result<sync_transport::SyncCredentials, TransferError> + Sync + '_> {
         // Borrow only the credentials field: the closure must stay Sync, and
         // storage never crosses into it.
@@ -175,7 +178,7 @@ impl TransferWorker {
         &self,
     ) -> asset_transfer::thumbnails::ThumbnailTransfers<
         impl Fn() -> Result<sync_transport::SyncCredentials, TransferError> + Sync + '_,
-        impl Fn(Vec<u8>, u32) -> client_platform_runtime::executor::BoxedBackendFuture<'static, Result<Vec<u8>, String>> + Sync,
+        impl Fn(Vec<u8>, u32) -> client_platform_runtime::executor::BoxedBackendFuture<'static, Result<Vec<u8>, crate::BackendError>> + Sync,
         impl Fn(ContentHash) + Sync + '_,
     > {
         // Borrow only shareable fields: these closures must stay Sync, and
@@ -187,7 +190,7 @@ impl TransferWorker {
             http_client: self.http_client.clone(),
             library_id: self.library_id,
             credentials: move || credentials.credentials().ok_or(TransferError::AuthenticationRequired),
-            resize: |bytes, width| -> client_platform_runtime::executor::BoxedBackendFuture<'static, Result<Vec<u8>, String>> { Box::pin(crate::worker_cpu::resize(bytes, width)) },
+            resize: |bytes, width| -> client_platform_runtime::executor::BoxedBackendFuture<'static, Result<Vec<u8>, crate::BackendError>> { Box::pin(crate::worker_cpu::resize(bytes, width)) },
             ready: move |content_hash| {
                 if let Some(tx) = event_tx {
                     let _ = tx.try_send(LibraryEvent::ThumbnailGenerated { content_hash });
@@ -196,26 +199,32 @@ impl TransferWorker {
         }
     }
 
-    pub(super) fn book_transfers(
-        &self,
-    ) -> asset_transfer::books::BookTransfers<impl Fn() -> Result<sync_transport::SyncCredentials, TransferError> + Sync + '_, impl Fn(ContentHash, DownloadState) + Sync + '_> {
+    pub(super) fn book_transfers(&self) -> asset_transfer::books::BookTransfers<impl Fn() -> Result<sync_transport::SyncCredentials, TransferError> + Sync + '_, impl Fn(ContentHash, DownloadState) + Sync + '_> {
         // Borrow only shareable fields: these closures must stay Sync, and
         // storage never crosses into them.
         let credentials = &self.credentials;
         let availability_changed = &self.availability_changed;
         let event_tx = &self.event_tx;
+        #[cfg(target_arch = "wasm32")]
+        let progress_key = &self.progress_key;
         asset_transfer::books::BookTransfers {
             assets: self.assets.clone(),
             http_client: self.http_client.clone(),
             library_id: self.library_id,
             credentials: move || credentials.credentials().ok_or(TransferError::AuthenticationRequired),
-            status: move |hash, state| Self::report_download_status(availability_changed, event_tx, hash, state),
+            status: move |hash, state| {
+                #[cfg(target_arch = "wasm32")]
+                if let (Some(key), DownloadState::Downloading(progress)) = (progress_key.as_deref(), &state) {
+                    client_platform_web::transport::bridge::report_transfer_progress(key, progress.value() as f64);
+                }
+                Self::report_download_status(availability_changed, event_tx, hash, state);
+            },
             diagnostic: |_| {},
         }
     }
 
-    /// Single-book download outside the queue, committing its outcome before
-    /// returning. Test and explicit-request flows use this directly.
+    /// Test helper for transfer execution and guarded commits.
+    #[cfg(test)]
     pub(super) async fn download_blob(&self, content_hash: &ContentHash, placement: &BookPlacement) -> Result<(), TransferError> {
         self.execute_owned_job(super::TransferJob::download_blob(*content_hash, placement.clone(), super::TransferOrigin::Background)).await
     }
@@ -230,7 +239,7 @@ impl TransferWorker {
         let snapshot = database.transfer_snapshot(&[*content_hash])?;
         let mut outcome = TransferOutcome::default();
         let result = self.book_transfers().upload_blob(&snapshot, content_hash, &mut outcome).await;
-        let commit = database.commit_transfer_outcome(&outcome).map_err(TransferError::from);
+        let commit = database.commit_transfer_outcome(&outcome).map_err(TransferError::from).and_then(|current| if current { Ok(()) } else { Err(TransferError::retryable("local bytes changed before the upload could be confirmed")) });
         result.and(commit)
     }
 
@@ -242,7 +251,11 @@ impl TransferWorker {
     }
 
     async fn download_blob_to_placement(&self, snapshot: &TransferSnapshot, content_hash: &ContentHash, placement: &BookPlacement, out: &mut TransferOutcome) -> Result<(), TransferError> {
-        self.book_transfers().download_blob(snapshot, content_hash, placement, out).await
+        let result = self.book_transfers().download_blob(snapshot, content_hash, placement, out).await;
+        if result.is_err() {
+            self.send_download_status(*content_hash, DownloadState::Queued);
+        }
+        result
     }
 
     /// Reports one book's availability to whoever is showing that book.
@@ -251,18 +264,13 @@ impl TransferWorker {
     /// that is a property of the batch rather than of each book in it: a run
     /// that fetches four hundred books changes those counts once. The batch
     /// boundary announces it once after the queue drains.
-    fn send_download_status(&self, content_hash: ContentHash, state: DownloadState) {
+    pub(super) fn send_download_status(&self, content_hash: ContentHash, state: DownloadState) {
         Self::report_download_status(&self.availability_changed, &self.event_tx, content_hash, state);
     }
 
     /// Shareable reporting for transfer callbacks: touches only atomics and
     /// channels so the closure stays Sync without storage crossing into it.
-    fn report_download_status(
-        availability_changed: &std::sync::atomic::AtomicBool,
-        event_tx: &Option<library_runtime::events::LibraryEventSender>,
-        content_hash: ContentHash,
-        state: DownloadState,
-    ) {
+    fn report_download_status(availability_changed: &std::sync::atomic::AtomicBool, event_tx: &Option<library_runtime::events::LibraryEventSender>, content_hash: ContentHash, state: DownloadState) {
         if matches!(state, DownloadState::Downloaded | DownloadState::NotDownloaded) {
             availability_changed.store(true, std::sync::atomic::Ordering::Release);
         }

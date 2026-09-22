@@ -28,13 +28,21 @@ pub(crate) enum SurfaceAction {
 /// Owns toolbar visibility and applies its window/invalidation side effects.
 pub(crate) struct ChromeState {
     hidden: bool,
+    /// Closing the sidebar can leave the pointer over the newly-mounted left
+    /// reveal strip. Ignore that one synthetic/replayed move; otherwise the
+    /// close click immediately opens the sidebar again.
+    suppress_next_pointer_reveal: bool,
+    /// Android reports transient system-bar visibility as a change in the
+    /// bottom safe inset. While reader chrome is hidden, a return from zero
+    /// means the user performed the OS edge-bar reveal gesture.
+    hidden_safe_bottom: Option<f32>,
     system_bars_visible: std::cell::Cell<Option<bool>>,
     component: Component,
 }
 
 impl ChromeState {
     pub(crate) fn new(component: Component) -> Self {
-        Self { hidden: false, system_bars_visible: std::cell::Cell::new(None), component }
+        Self { hidden: false, suppress_next_pointer_reveal: false, hidden_safe_bottom: None, system_bars_visible: std::cell::Cell::new(None), component }
     }
 
     pub(crate) fn is_visible(&self) -> bool {
@@ -49,6 +57,7 @@ impl ChromeState {
     }
 
     pub(crate) fn hide<C: 'static>(&mut self, cx: &mut Context<C>) {
+        self.suppress_next_pointer_reveal = true;
         self.set_hidden(true, cx);
     }
 
@@ -56,8 +65,45 @@ impl ChromeState {
         self.set_hidden(false, cx);
     }
 
+    /// Reveals from the desktop left-edge hover strip. A close action replaces
+    /// the sidebar with that strip under the stationary pointer, so GPUI can
+    /// replay the just-finished pointer movement to it. That replay is not a
+    /// new hover intent.
+    pub(crate) fn show_from_pointer<C: 'static>(&mut self, cx: &mut Context<C>) -> bool {
+        if self.suppress_next_pointer_reveal {
+            self.suppress_next_pointer_reveal = false;
+            return false;
+        }
+        let was_hidden = self.hidden;
+        self.show(cx);
+        was_hidden
+    }
+
     pub(crate) fn toggle<C: 'static>(&mut self, cx: &mut Context<C>) {
         self.set_hidden(!self.hidden, cx);
+    }
+
+    /// Opens the reader sidebar from Android's own system-bars gesture. This
+    /// observes the platform state directly instead of trying to reinterpret a
+    /// touch gesture that belongs to book navigation.
+    /// Returns `true` only when it changed hidden reader chrome to visible.
+    /// The format owner uses that signal to select its sidebar tab in the
+    /// same render; chrome visibility alone does not imply a mobile sheet.
+    pub(crate) fn reveal_when_system_bars_return<C: 'static>(&mut self, window: &Window, cx: &mut Context<C>) -> bool {
+        if !cfg!(target_os = "android") {
+            return false;
+        }
+        let bottom = f32::from(window.insets().safe_area.bottom);
+        if !self.hidden {
+            self.hidden_safe_bottom = None;
+            return false;
+        }
+        if self.hidden_safe_bottom.is_some_and(|previous| bottom > previous + 0.5) {
+            self.show(cx);
+            return true;
+        }
+        self.hidden_safe_bottom = Some(bottom);
+        false
     }
 
     fn set_hidden<C: 'static>(&mut self, hidden: bool, cx: &mut Context<C>) {
@@ -65,24 +111,28 @@ impl ChromeState {
             return;
         }
         self.hidden = hidden;
+        self.hidden_safe_bottom = None;
         crate::invalidation::notify(cx, self.component, if hidden { "chrome_hidden" } else { "chrome_shown" });
     }
 }
 
 /// Builds the platform-specific interaction layer over a reading surface.
 ///
-/// Kobo uses left/right page zones and a central toolbar toggle. Other touch
-/// devices use the center to reveal hidden chrome, while pointer-driven
-/// readers reveal it from the top edge. Navigation itself remains owned by the
-/// format-specific reader through `on_action`.
+/// Kobo uses left/right page zones and a central sidebar toggle. Other touch
+/// devices use the center to reveal a hidden sidebar, while pointer-driven
+/// readers reveal it from the left edge. Navigation itself remains owned by
+/// the format-specific reader through `on_action`.
 pub(crate) fn surface_interactions<C: 'static>(
-    reader_id: &'static str, chrome_visible: bool, sidebar_visible: bool, toolbar_height: f32, touch_input: bool, cx: &mut Context<C>, on_action: impl Fn(&mut C, SurfaceAction, &mut Window, &mut Context<C>) + Clone + 'static,
+    reader_id: &'static str, chrome_visible: bool, sidebar_visible: bool, touch_input: bool, cx: &mut Context<C>, on_action: impl Fn(&mut C, SurfaceAction, &mut Window, &mut Context<C>) + Clone + 'static,
 ) -> Vec<AnyElement> {
     if cfg!(feature = "kobo") {
         if sidebar_visible {
             return Vec::new();
         }
-        let top = px(if chrome_visible { toolbar_height } else { 0.0 });
+        // No toolbar row sits above these zones any more — the sidebar
+        // overlays the whole surface when it is shown, which the check above
+        // already accounts for.
+        let top = px(0.0);
         let previous = on_action.clone();
         let next = on_action.clone();
         let toggle = on_action;
@@ -120,23 +170,19 @@ pub(crate) fn surface_interactions<C: 'static>(
         return Vec::new();
     }
     if touch_input {
-        return vec![
-            div()
-                .id(format!("touch-{reader_id}-show-toolbar-tap-zone"))
-                .absolute()
-                .left(gpui::relative(0.25))
-                .right(gpui::relative(0.25))
-                .top_0()
-                .bottom_0()
-                .on_click(cx.listener(move |reader, _, window, cx| on_action(reader, SurfaceAction::ShowChrome, window, cx)))
-                .into_any_element(),
-        ];
+        // Android's transient system-bars gesture emits the same ShowChrome
+        // action through the platform bridge. Do not put a competing touch
+        // gesture over the document: every one-finger direction is book
+        // navigation on mobile.
+        return Vec::new();
     }
+    // The sidebar is the reader's only chrome now and sits on the left, so a
+    // pointer-driven reader reaches for the left edge to bring it back rather
+    // than the top edge a toolbar used to occupy.
     let reveal_on_move = on_action.clone();
     vec![
-        ui_components::reader_chrome_reveal()
+        ui_components::reader_chrome_reveal_left()
             .on_mouse_move(cx.listener(move |reader, _, window, cx| reveal_on_move(reader, SurfaceAction::ShowChrome, window, cx)))
-            .on_click(cx.listener(move |reader, _, window, cx| on_action(reader, SurfaceAction::ShowChrome, window, cx)))
             .into_any_element(),
     ]
 }
@@ -152,16 +198,20 @@ pub(crate) fn surface_interactions<C: 'static>(
 /// `toc_width`. A partial overlay left a strip of text showing beside it that
 /// could not be read or paged, and the remembered width means nothing on a
 /// screen it was never dragged on. Contents is a place the reader goes to and
-/// comes back from, so it gets the screen while it is open — the toolbar stays
-/// above it, which is what closes it again.
-pub(crate) fn with_sidebar(sidebar: AnyElement, document: AnyElement, chrome_visible: bool, search_visible: bool, window: &Window, cx: &mut App) -> AnyElement {
+/// comes back from, so it gets the screen while it is open.
+///
+/// The sidebar itself now carries its own header (back, title, search), so
+/// there is no separate toolbar row above the overlay to leave room for. On a
+/// mobile-navigation window the bottom bar (`shell::page`'s mobile branch)
+/// stays visible beneath the overlay instead, so the sheet leaves room below
+/// it rather than above.
+pub(crate) fn with_sidebar(sidebar: AnyElement, document: AnyElement, window: &Window, cx: &mut App) -> AnyElement {
     if sidebar_overlays_document(window) {
-        let top = if ui_components::uses_mobile_navigation(window) && chrome_visible {
-            window.insets().safe_area.top + px(ui_components::READER_TOOLBAR_HEIGHT + if search_visible { super::search::bar_height(window) } else { 0.0 })
-        } else {
-            px(0.)
-        };
-        return div().relative().size_full().min_h_0().min_w_0().overflow_hidden().child(document).child(div().absolute().left_0().right_0().top(top).bottom_0().child(sidebar)).into_any_element();
+        let mobile = ui_components::uses_mobile_navigation(window);
+        let safe_area = window.insets().safe_area;
+        let top = if mobile { safe_area.top } else { px(0.) };
+        let bottom = if mobile { safe_area.bottom + px(ui_components::READER_BOTTOM_BAR_HEIGHT) } else { px(0.) };
+        return div().relative().size_full().min_h_0().min_w_0().overflow_hidden().child(document).child(div().absolute().left_0().right_0().top(top).bottom(bottom).child(sidebar)).into_any_element();
     }
     let width = ReaderSettings::preferences(cx).toc_width.min(f32::from(window.viewport_size().width));
     ui_components::reader_split(sidebar, document, width)
@@ -192,10 +242,10 @@ pub(crate) fn sidebar_width(visible: bool, window: &Window, cx: &App) -> f32 {
     if !visible || sidebar_overlays_document(window) {
         return 0.0;
     }
-    ReaderSettings::preferences(cx).toc_width
+    ui_components::clamp_reader_sidebar_width(ReaderSettings::preferences(cx).toc_width.min(f32::from(window.viewport_size().width)))
 }
 
-fn sidebar_overlays_document(window: &Window) -> bool {
+pub(crate) fn sidebar_overlays_document(window: &Window) -> bool {
     cfg!(feature = "kobo") || WindowWidthClass::for_window(window).is_compact()
 }
 

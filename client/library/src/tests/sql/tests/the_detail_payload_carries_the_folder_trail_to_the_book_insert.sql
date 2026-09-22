@@ -1,1 +1,0 @@
-INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash) VALUES(?1,(SELECT row_id FROM book WHERE content_hash=?2),'bowling.epub','')

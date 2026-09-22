@@ -48,8 +48,8 @@ use audio_engine::AudioEngine;
 #[cfg(target_arch = "wasm32")]
 mod web_audio;
 use audiobook_library::AudiobookChapter;
-use bokheim_backend::LibraryClient;
-use bokheim_backend::ResolvedBook;
+use library_backend::LibraryClient;
+use library_backend::ResolvedBook;
 use gpui_component::{ElementExt, Icon, IconName};
 use library_model::BookLocator;
 #[cfg(target_arch = "wasm32")]
@@ -108,6 +108,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("]", IncreaseSpeed, Some(KEY_CONTEXT)),
         KeyBinding::new("[", DecreaseSpeed, Some(KEY_CONTEXT)),
         KeyBinding::new("backspace", ReturnToLibrary, Some(KEY_CONTEXT)),
+        // The OS back button/gesture does the same on native mobile, where
+        // the on-screen back button is hidden.
+        #[cfg(target_os = "android")]
+        KeyBinding::new("back", ReturnToLibrary, Some(KEY_CONTEXT)),
         KeyBinding::new("escape", DismissMenus, Some(KEY_CONTEXT)),
     ]);
 }
@@ -160,8 +164,8 @@ impl<T: Read + Seek + Send + Sync> ReadSeek for T {}
 
 #[cfg(not(target_arch = "wasm32"))]
 struct AudiobookSource {
-    stream_control: Option<bokheim_backend::AudioStreamControl>,
-    cached_metadata: Option<bokheim_backend::PlaybackMetadata>,
+    stream_control: Option<app::AudioStreamControl>,
+    cached_metadata: Option<app::PlaybackMetadata>,
     display_path: PathBuf,
     #[cfg(target_os = "android")]
     playback_file: Option<std::fs::File>,
@@ -683,7 +687,8 @@ impl AudiobookReader {
         let library = cx.entity();
         if ui_components::uses_mobile_navigation(window) {
             let title = self.playback.read(cx).book.as_ref().map(|book| book.title.clone()).unwrap_or_else(|| "Audiobook".into());
-            let back = ui_components::mobile_back_button(theme).on_click(move |_, window, cx| library.update(cx, |this, cx| this.close(window, cx)));
+            // The OS back button/gesture already does this on native mobile.
+            let back = (!ui_components::has_native_back_button()).then(|| ui_components::mobile_back_button(theme).on_click(move |_, window, cx| library.update(cx, |this, cx| this.close(window, cx))));
             return ui_components::mobile_navigation_bar(title, back, theme).into_any_element();
         }
         let left = div().flex_1().min_w_0().flex().items_center().gap(px(ui_components::SPACE_SM)).child(ui_components::reader_control_button_icon("audiobook-library", "Return to library", IconName::ArrowLeft, theme).on_click(
@@ -703,6 +708,7 @@ impl Focusable for AudiobookReader {
 
 impl Render for AudiobookReader {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        ui_components::sync_reader_rem_size(window, cx);
         let theme = ui_components::browser_theme(cx);
         let toolbar = self.toolbar(window, cx);
         let body = self.render_expanded(window, cx);
@@ -728,28 +734,15 @@ impl Render for AudiobookReader {
             .on_action(cx.listener(Self::on_dismiss_menus))
             .child(toolbar)
             .child(div().flex_1().min_h_0().child(body))
-            .when(layout.compact && (self.sleep_menu_open || self.speed_menu_open), |page| {
+            // On a compact window `sleep_menu`/`playback_speed_menu` return a
+            // full-width bottom sheet with its own dismiss-on-tap scrim
+            // already attached (the same one the library browser's filter
+            // menu uses); on a wide window they return the small anchored
+            // popup they always have, which has no backdrop of its own.
+            .when(self.sleep_menu_open || self.speed_menu_open, |page| {
                 let target = cx.entity().downgrade();
                 let sheet = if self.sleep_menu_open { sleep_menu(target.clone(), self.sleep_label(cx), layout, theme) } else { playback_speed_menu(target.clone(), self.playback.read(cx).rate, layout, theme) };
-                page.child(
-                    gpui::deferred(
-                        div()
-                            .id("audiobook-menu-backdrop")
-                            .absolute()
-                            .inset_0()
-                            .bg(gpui::rgba(0x00000040))
-                            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                                cx.stop_propagation();
-                                let _ = target.update(cx, |reader, cx| {
-                                    reader.sleep_menu_open = false;
-                                    reader.speed_menu_open = false;
-                                    cx.notify();
-                                });
-                            })
-                            .child(sheet),
-                    )
-                    .with_priority(1),
-                )
+                page.child(gpui::deferred(sheet).with_priority(1))
             })
             // A drag that has left the 6px track still has to be followed, and
             // a hitbox under the pointer would otherwise swallow the moves, so
@@ -945,6 +938,10 @@ fn chapter_progress_row(
 /// The button that opens one of the transport's two menus. Lit while its menu
 /// is open, and — for the sleep timer — while it has something to report.
 fn menu_trigger(id: &'static str, label: impl IntoElement, active: bool, theme: ui_components::BrowserTheme) -> gpui::Stateful<gpui::Div> {
+    // Active is already the solid accent, so the ordinary translucent hover
+    // would just erase it; it darkens instead, the same distinction
+    // `accent_hover` exists for everywhere else in the interface.
+    let hovered = if active { theme.accent_hover } else { theme.hover };
     div()
         .id(id)
         .cursor_pointer()
@@ -956,12 +953,16 @@ fn menu_trigger(id: &'static str, label: impl IntoElement, active: bool, theme: 
         .justify_center()
         .bg(if active { theme.accent } else { gpui::Hsla::transparent_black() })
         .text_color(if active { theme.accent_text } else { theme.text_muted })
-        .hover(|style| style.bg(theme.accent_wash).text_color(theme.accent))
+        .hover(move |style| style.bg(hovered))
         .text_size(gpui::rems(ui_components::TEXT_MD))
         .font_weight(FontWeight::BOLD)
         .child(label)
 }
 
+/// The small popup anchored above the transport, for a wide window. A
+/// compact window uses a full-width bottom sheet instead — see the `layout.compact`
+/// branch in `sleep_menu`/`playback_speed_menu`, which build one directly from
+/// `ui_components::bottom_sheet_*` rather than through this function.
 fn menu_panel(theme: ui_components::BrowserTheme, layout: MenuLayout, title: &'static str) -> gpui::Stateful<gpui::Div> {
     div()
         .id(title)
@@ -972,7 +973,6 @@ fn menu_panel(theme: ui_components::BrowserTheme, layout: MenuLayout, title: &'s
         .max_h(px(layout.max_height))
         .overflow_y_scroll()
         .whitespace_normal()
-        .when(layout.compact, |panel| panel.w_full().bottom_0())
         .p(px(ui_components::SPACE_XS))
         .border_1()
         .border_color(theme.border)
@@ -997,6 +997,10 @@ fn menu_panel(theme: ui_components::BrowserTheme, layout: MenuLayout, title: &'s
 }
 
 fn menu_option(id: String, label: String, selected: bool, theme: ui_components::BrowserTheme) -> gpui::Stateful<gpui::Div> {
+    // Selected is already the solid accent, so the ordinary translucent
+    // hover would just erase it; it darkens instead, the same distinction
+    // `accent_hover` exists for everywhere else in the interface.
+    let hovered = if selected { theme.accent_hover } else { theme.hover };
     div()
         .id(gpui::SharedString::from(id))
         .flex_none()
@@ -1008,13 +1012,37 @@ fn menu_option(id: String, label: String, selected: bool, theme: ui_components::
         .px(px(ui_components::SPACE_SM))
         .py(px(ui_components::SPACE_SM))
         .text_size(gpui::rems(ui_components::TEXT_MD))
-        .hover(|style| style.bg(theme.accent_wash))
+        .hover(move |style| style.bg(hovered))
         .when(selected, |row| row.bg(theme.accent).text_color(theme.accent_text))
         .child(div().flex_1().min_w_0().whitespace_normal().child(label))
         .when(selected, |row| row.child(Icon::new(IconName::Check).size(px(15.0))))
 }
 
-fn playback_speed_menu<T: PlaybackTarget>(target: gpui::WeakEntity<T>, current_rate: f64, layout: MenuLayout, theme: ui_components::BrowserTheme) -> gpui::Stateful<gpui::Div> {
+fn playback_speed_menu<T: PlaybackTarget>(target: gpui::WeakEntity<T>, current_rate: f64, layout: MenuLayout, theme: ui_components::BrowserTheme) -> gpui::AnyElement {
+    if layout.compact {
+        let mut rows = div().id("playback-speed-rows").flex_1().min_h_0().overflow_y_scroll().flex().flex_col();
+        for rate in PLAYBACK_SPEEDS {
+            let option_target = target.clone();
+            rows = rows.child(menu_option(format!("speed-{rate}"), format_playback_rate(rate), same_rate(rate, current_rate), theme).on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                let _ = option_target.update(cx, |dock, cx| {
+                    dock.set_rate(rate, cx);
+                    cx.notify();
+                });
+            }));
+        }
+        let dismiss_target = target;
+        let sheet = ui_components::bottom_sheet_surface(theme).id("playback-speed-sheet").child(ui_components::bottom_sheet_header("Playback speed", theme)).child(rows);
+        return ui_components::bottom_sheet_overlay()
+            .child(ui_components::modal_scrim("playback-speed-scrim", theme).on_click(move |_, _, cx| {
+                let _ = dismiss_target.update(cx, |dock, cx| {
+                    dock.toggle_speed_menu();
+                    cx.notify();
+                });
+            }))
+            .child(sheet)
+            .into_any_element();
+    }
     let mut menu = menu_panel(theme, layout, "Playback speed").right_0();
     for rate in PLAYBACK_SPEEDS {
         let option_target = target.clone();
@@ -1026,11 +1054,57 @@ fn playback_speed_menu<T: PlaybackTarget>(target: gpui::WeakEntity<T>, current_r
             });
         }));
     }
-    menu
+    menu.into_any_element()
 }
 
-fn sleep_menu<T: PlaybackTarget>(target: gpui::WeakEntity<T>, remaining: Option<SharedString>, layout: MenuLayout, theme: ui_components::BrowserTheme) -> gpui::Stateful<gpui::Div> {
+fn sleep_menu<T: PlaybackTarget>(target: gpui::WeakEntity<T>, remaining: Option<SharedString>, layout: MenuLayout, theme: ui_components::BrowserTheme) -> gpui::AnyElement {
     let armed = remaining.is_some();
+    if layout.compact {
+        let mut rows = div().id("sleep-rows").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().when_some(remaining, |rows, remaining| {
+            let label = if remaining.as_ref() == "Chapter" { "Until end of chapter".to_owned() } else { format!("{remaining} remaining") };
+            rows.child(div().flex_none().min_w_0().px(px(ui_components::SPACE_SM)).py(px(ui_components::SPACE_SM)).text_size(gpui::rems(ui_components::TEXT_MD)).font_weight(FontWeight::SEMIBOLD).child(label))
+        });
+        for minutes in SLEEP_MINUTES {
+            let option_target = target.clone();
+            rows = rows.child(menu_option(format!("sleep-{minutes}"), format!("{minutes} minutes"), false, theme).on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                let _ = option_target.update(cx, |dock, cx| {
+                    dock.set_sleep(Some(SleepPlan::Until(Instant::now() + Duration::from_secs(minutes * 60))), cx);
+                    cx.notify();
+                });
+            }));
+        }
+        let chapter_target = target.clone();
+        rows = rows.child(menu_option("sleep-chapter".to_owned(), "End of chapter".to_owned(), false, theme).on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            let _ = chapter_target.update(cx, |dock, cx| {
+                let chapter = dock.active_chapter_index(cx);
+                dock.set_sleep(Some(SleepPlan::EndOfChapter(chapter)), cx);
+                cx.notify();
+            });
+        }));
+        if armed {
+            let off_target = target.clone();
+            rows = rows.child(menu_option("sleep-off".to_owned(), "Off".to_owned(), false, theme).on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                let _ = off_target.update(cx, |dock, cx| {
+                    dock.set_sleep(None, cx);
+                    cx.notify();
+                });
+            }));
+        }
+        let dismiss_target = target;
+        let sheet = ui_components::bottom_sheet_surface(theme).id("sleep-sheet").child(ui_components::bottom_sheet_header("Sleep timer", theme)).child(rows);
+        return ui_components::bottom_sheet_overlay()
+            .child(ui_components::modal_scrim("sleep-scrim", theme).on_click(move |_, _, cx| {
+                let _ = dismiss_target.update(cx, |dock, cx| {
+                    dock.toggle_sleep_menu();
+                    cx.notify();
+                });
+            }))
+            .child(sheet)
+            .into_any_element();
+    }
     let mut menu = menu_panel(theme, layout, "Sleep timer").left_0().when_some(remaining, |menu, remaining| {
         let label = if remaining.as_ref() == "Chapter" { "Until end of chapter".to_owned() } else { format!("{remaining} remaining") };
         menu.child(div().flex_none().min_w_0().px(px(ui_components::SPACE_SM)).py(px(ui_components::SPACE_SM)).text_size(gpui::rems(ui_components::TEXT_MD / 16.0)).font_weight(FontWeight::SEMIBOLD).child(label))
@@ -1063,7 +1137,7 @@ fn sleep_menu<T: PlaybackTarget>(target: gpui::WeakEntity<T>, remaining: Option<
             });
         }));
     }
-    menu
+    menu.into_any_element()
 }
 
 fn format_playback_rate(rate: f64) -> String {
@@ -1072,11 +1146,26 @@ fn format_playback_rate(rate: f64) -> String {
 }
 
 fn transport_control(id: impl Into<SharedString>, content: impl IntoElement, theme: ui_components::BrowserTheme) -> gpui::Stateful<gpui::Div> {
-    transport_control_base(id, content, theme).hover(|style| style.bg(theme.accent_wash).text_color(theme.text))
+    transport_control_base(id, content, theme).hover(|style| style.bg(theme.hover))
 }
 
 fn transport_control_base(id: impl Into<SharedString>, content: impl IntoElement, theme: ui_components::BrowserTheme) -> gpui::Stateful<gpui::Div> {
-    div().id(id.into()).flex_1().h(px(56.0)).min_w_0().cursor_pointer().flex().items_center().justify_center().bg(gpui::Hsla::transparent_black()).text_color(theme.text_muted).font_weight(FontWeight::BOLD).child(content)
+    let id = id.into();
+    let selector = id.clone();
+    div()
+        .id(id)
+        .debug_selector(move || selector.to_string())
+        .flex_1()
+        .h(px(56.0))
+        .min_w_0()
+        .cursor_pointer()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(gpui::Hsla::transparent_black())
+        .text_color(theme.text_muted)
+        .font_weight(FontWeight::BOLD)
+        .child(content)
 }
 
 fn chapter_icon(forward: bool, theme: ui_components::BrowserTheme) -> gpui::Div {

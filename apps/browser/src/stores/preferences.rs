@@ -5,11 +5,27 @@
 //! account. So this store lives at the root and is injected downward. Settings
 //! edits it, and appearance refreshes all windows.
 
-use app_preferences::{BrowsingPreferencePatch, BrowsingPreferences};
+use app_preferences::{BrowsingPreferencePatch, BrowsingPreferences, CoverText};
 use gpui::{App, Context, SharedString};
 use ui_components::theme::apply_appearance;
 
 use crate::services::AppServices;
+
+/// The live "cover text" setting, read by every book card and by the pages
+/// that size the row a card sits in.
+///
+/// A global rather than a value threaded down through the navigation stack
+/// like `detailed`: `detailed` only ever reaches browse pages, but this
+/// setting has to reach shelves too, and a card and the page around it can
+/// each pick it up on their own `cx.observe_global` instead of every layer
+/// between here and them needing a method just to pass it on.
+pub(crate) struct CoverTextSetting(pub(crate) CoverText);
+
+impl gpui::Global for CoverTextSetting {}
+
+pub(crate) fn current_cover_text(cx: &App) -> CoverText {
+    cx.try_global::<CoverTextSetting>().map(|setting| setting.0).unwrap_or_default()
+}
 
 pub(crate) struct Preferences {
     services: AppServices,
@@ -19,6 +35,7 @@ impl Preferences {
     pub(crate) fn new(services: AppServices, cx: &mut App) -> Self {
         let browsing = services.browsing_preferences.borrow().clone();
         apply_appearance(&browsing, cx);
+        cx.set_global(CoverTextSetting(browsing.cover_text()));
         Self { services }
     }
 
@@ -40,10 +57,13 @@ impl Preferences {
         let previous = self.browsing();
         let mut browsing = previous.clone();
         patch.clone().apply(&mut browsing).map_err(|error| error.to_string())?;
-        let appearance_changed = previous.theme() != browsing.theme() || previous.ui_font_size_px() != browsing.ui_font_size_px();
+        let appearance_changed = previous.theme() != browsing.theme() || previous.appearance_override() != browsing.appearance_override() || previous.ui_font_size_px() != browsing.ui_font_size_px();
         *self.services.browsing_preferences.borrow_mut() = browsing.clone();
         if appearance_changed {
             apply_appearance(&browsing, cx);
+        }
+        if previous.cover_text() != browsing.cover_text() {
+            cx.set_global(CoverTextSetting(browsing.cover_text()));
         }
         let backend = self.services.backend.clone();
         cx.spawn(async move |_preferences, _cx| {

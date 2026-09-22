@@ -1,1 +1,0 @@
-UPDATE subject_browse_state SET tree_revision=tree_revision+1,revision=revision+1

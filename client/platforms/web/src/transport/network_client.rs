@@ -2,10 +2,7 @@
 use super::{field, object, Port};
 use futures_channel::oneshot;
 use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
-use std::{
-    cell::RefCell,
-    rc::Rc,
-};
+use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{future_to_promise, JsFuture};
 use web_sys::{AbortSignal, DedicatedWorkerGlobalScope, MessageChannel, ReadableStreamDefaultController, Request};
@@ -64,7 +61,9 @@ impl Pending {
         match NetworkEvent::decode(&data).map_err(|error| js_sys::TypeError::new(&error))? {
             NetworkEvent::Error(error) => self.fail(js_sys::TypeError::new(&error).into()),
             NetworkEvent::Headers { has_body } => {
-                if self.response.borrow().is_none() { return Err(js_sys::TypeError::new("Duplicate network headers").into()); }
+                if self.response.borrow().is_none() {
+                    return Err(js_sys::TypeError::new("Duplicate network headers").into());
+                }
                 let body = if has_body { self.stream()? } else { JsValue::NULL };
                 let options = object(&[("status", field(&data, "status")), ("statusText", field(&data, "statusText")), ("headers", field(&data, "headers"))]);
                 let response = construct("Response", &Array::of2(&body, &options))?;
@@ -79,14 +78,18 @@ impl Pending {
                 }
             }
             NetworkEvent::Chunk(bytes) => {
-                if self.response.borrow().is_some() || self.controller.borrow().is_none() { return Err(js_sys::TypeError::new("Network chunk before headers").into()); }
+                if self.response.borrow().is_some() || self.controller.borrow().is_none() {
+                    return Err(js_sys::TypeError::new("Network chunk before headers").into());
+                }
                 if let Some(controller) = self.controller.borrow().as_ref() {
                     controller.enqueue_with_chunk(&bytes)?;
                 }
                 self.finish_pull();
             }
             NetworkEvent::Done => {
-                if self.response.borrow().is_some() { return Err(js_sys::TypeError::new("Network completion before headers").into()); }
+                if self.response.borrow().is_some() {
+                    return Err(js_sys::TypeError::new("Network completion before headers").into());
+                }
                 if let Some(controller) = self.controller.borrow().as_ref() {
                     controller.close()?;
                 }

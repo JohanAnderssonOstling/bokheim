@@ -1,1 +1,0 @@
-INSERT INTO book_unified_concept SELECT row_id,910002,1 FROM book WHERE title='Beta book'

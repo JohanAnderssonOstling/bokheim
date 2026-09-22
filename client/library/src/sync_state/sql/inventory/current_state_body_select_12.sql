@@ -1,2 +1,0 @@
-SELECT bokheim_mutation('annotation',annotation.id,book.content_hash,annotation.anchor_kind,annotation.anchor_cfi,annotation.anchor_page,annotation.anchor_rects,annotation.anchor_fallback_cfi,annotation.exact_text,annotation.style,annotation.color,annotation.note,annotation.created_at,annotation.modified_at,annotation.deleted_at IS NOT NULL),annotation.deleted_at IS NOT NULL
-                 FROM annotation JOIN book ON book.row_id=annotation.book_row_id WHERE annotation.id=?1

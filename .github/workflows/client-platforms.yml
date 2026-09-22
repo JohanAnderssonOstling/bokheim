@@ -86,7 +86,7 @@ jobs:
         run: cargo check --release --locked -p client-platform-web --target wasm32-unknown-unknown --features web-runtime-tests,storage-contract-tests
       - name: Worker entry-point type checks
         if: matrix.platform == 'web'
-        run: cargo check --release --locked -p bokheim-backend --no-default-features --features web-runtime-tests --example cpu_worker --example sync_coordinator --target wasm32-unknown-unknown
+        run: cargo check --release --locked -p app --no-default-features --features web-runtime-tests --example cpu_worker --example sync_coordinator --target wasm32-unknown-unknown
       - uses: actions/setup-node@v4
         if: matrix.platform == 'web'
         with:

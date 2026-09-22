@@ -21,7 +21,9 @@ const IMAGE_CACHE_BYTES: usize = 32 * 1024 * 1024;
 
 // Bound rasterization independently of authored layout size.
 fn raster_size(width: f64, height: f64) -> Option<(u32, u32)> {
-    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 { return None; }
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return None;
+    }
     let width = width.max(1.0);
     let height = height.max(1.0);
     let scale = (MAX_IMAGE_EDGE / width).min(MAX_IMAGE_EDGE / height).min(1.0);
@@ -48,10 +50,15 @@ impl ImageCache {
 
     fn insert(&mut self, key: Vec<u8>, image: Arc<RenderImage>) {
         let bytes = image.as_bytes(0).map_or(0, <[u8]>::len);
-        if bytes > IMAGE_CACHE_BYTES { return; }
+        if bytes > IMAGE_CACHE_BYTES {
+            return;
+        }
         while self.bytes + bytes > IMAGE_CACHE_BYTES || self.entries.len() >= 256 {
-            if let Some((_, _, evicted)) = self.entries.pop_front() { self.bytes -= evicted; }
-            else { break; }
+            if let Some((_, _, evicted)) = self.entries.pop_front() {
+                self.bytes -= evicted;
+            } else {
+                break;
+            }
         }
         self.bytes += bytes;
         self.entries.push_back((key, image, bytes));
@@ -540,7 +547,9 @@ mod tests {
         let mut first = None;
         for id in 0..8 {
             let image = Arc::new(RenderImage::new(SmallVec::from_vec(vec![Frame::new(RgbaImage::new(1024, 1024))])));
-            if id == 0 { first = Some(Arc::downgrade(&image)); }
+            if id == 0 {
+                first = Some(Arc::downgrade(&image));
+            }
             cache.insert(vec![id], image);
         }
         assert!(cache.get(&[1]).is_some());

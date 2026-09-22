@@ -261,7 +261,7 @@ async fn public_registration_verification_and_reset_are_end_to_end_safe() {
     let services = app.clone().oneshot(Request::get("/api/admin/services").header(header::COOKIE, &admin_cookies).header("sec-fetch-site", "same-origin").body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(services.status(), StatusCode::OK);
     let services: serde_json::Value = serde_json::from_slice(&to_bytes(services.into_body(), 64 * 1024).await.unwrap()).unwrap();
-    assert!(services["catalogue"]["available"].is_boolean());
+    assert!(services["authority"]["available"].is_boolean());
     assert!(services["metadata"]["available"].is_boolean());
     let request_history = app
         .clone()

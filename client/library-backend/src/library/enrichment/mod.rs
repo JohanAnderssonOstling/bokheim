@@ -11,7 +11,7 @@ const DESCRIPTION_PROVIDER: &str = "openlibrary_description_v1";
 const OPEN_LIBRARY_AUTHOR_PROVIDER: &str = "openlibrary_authors_v3";
 // v19 ignores legacy Dewey evidence; local print ISBN inspection remains enabled.
 const OPEN_LIBRARY_RICH_PROVIDER: &str = "openlibrary_rich_v19";
-const OPEN_LIBRARY_EDITION_IDENTITY_PROVIDER: &str = "openlibrary_edition_identity_v12";
+const OPEN_LIBRARY_EDITION_IDENTITY_PROVIDER: &str = "openlibrary_edition_identity_v17";
 const OPEN_LIBRARY_COVER_PROVIDER: &str = "openlibrary_covers_v2";
 
 // Edition matching can involve large candidate intersections in the dump.
@@ -28,4 +28,3 @@ mod authors;
 mod covers;
 mod editions;
 mod rich_metadata;
-mod status;

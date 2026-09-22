@@ -6,8 +6,8 @@ use gpui_component::spinner::Spinner;
 use gpui_component::{Icon, IconName, Selectable, Sizable};
 
 use crate::{
-    BOOK_CARD_AUTHOR_LINE_HEIGHT_EM, BOOK_CARD_AUTHOR_SIZE, BOOK_CARD_COVER_CONTENT_GAP, BOOK_CARD_TITLE_HEIGHT_REM, BOOK_CARD_TITLE_LINE_HEIGHT_EM, BOOK_CARD_TITLE_LINES, BOOK_CARD_TITLE_SIZE, BOOK_CARD_TITLE_WEIGHT,
-    BOOK_COVER_ASPECT_RATIO, BrowserTheme, CAROUSEL_CONTENT_GAP, CAROUSEL_CONTROL_GAP, CAROUSEL_TITLE_SIZE, CAROUSEL_TITLE_WEIGHT, RADIUS_MD, RADIUS_SM, SHELF_SUBJECT_SIZE, SPACE_SM, SPACE_XS, SPACE_XXS, TEXT_XS,
+    BOOK_CARD_COVER_CONTENT_GAP, BOOK_CARD_TITLE_LINE_HEIGHT_EM, BOOK_CARD_TITLE_LINES, BOOK_CARD_TITLE_SIZE, BOOK_CARD_TITLE_WEIGHT, BOOK_COVER_ASPECT_RATIO, BrowserTheme, CAROUSEL_CONTENT_GAP, CAROUSEL_CONTROL_GAP,
+    CAROUSEL_TITLE_SIZE, CAROUSEL_TITLE_WEIGHT, RADIUS_MD, RADIUS_SM, SHELF_SUBJECT_SIZE, SPACE_SM, SPACE_XS, SPACE_XXS, TEXT_MD, TEXT_SM, TEXT_XS,
 };
 
 /// Cover, then the text block. The two levels each have one gap: `SPACE_MD`
@@ -51,21 +51,59 @@ pub fn book_card(id: impl Into<ElementId>, focused: bool, marquee: bool, theme: 
         .when(!marquee, |card| card.hover(move |style| style.bg(hovered)))
 }
 
+/// The grid cell a card sits in, at the row's uniform reserved height.
+///
+/// Carries no background of its own — a card's cover is boxed at its own
+/// real proportions rather than the placeholder's, so `book_card` (which does
+/// carry the focus tint) comes out shorter or taller than the cell. This cell
+/// is plain space around it; `justify_end` is what pins every card to the
+/// cell's bottom edge regardless, so covers align along one line and the
+/// tint hugs only the card actually drawn, not the row's full reserved height.
+pub fn book_card_cell() -> Div {
+    div().relative().w_full().h_full().min_w_0().flex().flex_col().justify_end()
+}
+
 pub fn book_card_text() -> Div {
     div().w_full().min_w_0().flex_none().flex().flex_col().gap(px(crate::BOOK_CARD_TEXT_GAP))
 }
 
-pub fn book_cover(_theme: BrowserTheme) -> Div {
-    div().relative().w_full().min_w_0().aspect_ratio(BOOK_COVER_ASPECT_RATIO).flex().flex_col().items_center().justify_end()
+/// The text block under a card's cover — see `book_card_title_row`. Reserves
+/// the title budget the paginator's row height is computed from, so a title
+/// without a subtitle carries its slack below itself rather than shortening
+/// the card.
+pub fn book_card_text_title_only() -> Div {
+    div().w_full().min_w_0().flex_none().flex().flex_col().h(gpui::rems(crate::BOOK_CARD_TITLE_HEIGHT_REM))
 }
 
-pub fn book_cover_frame(theme: BrowserTheme) -> Div {
-    crate::clickable_surface(theme).relative().w_full().min_w_0().aspect_ratio(BOOK_COVER_ASPECT_RATIO)
+/// `aspect_ratio` is the cover's own width-over-height once its art is
+/// decoded, so the box takes the real cover's proportions instead of every
+/// book being forced into the same frame. Callers without a decoded image yet
+/// pass `BOOK_COVER_ASPECT_RATIO` as a placeholder.
+pub fn book_cover(_theme: BrowserTheme, aspect_ratio: f32) -> Div {
+    div().relative().w_full().min_w_0().aspect_ratio(aspect_ratio)
 }
 
-/// Cover art cropped to the standard 1:1.5 cover frame.
+pub fn book_cover_frame(theme: BrowserTheme, aspect_ratio: f32) -> Div {
+    crate::clickable_surface(theme).relative().w_full().min_w_0().aspect_ratio(aspect_ratio)
+}
+
+/// Cover art scaled to fit the standard 1:1.5 cover frame.
 ///
-/// The outline is invisible at rest, visible on hover, and accented for focus or selection.
+/// Scaled rather than cropped: a cover's own proportions are part of what it
+/// is, and a square audiobook cover cropped to a paperback's 2:3 would lose
+/// its edges rather than just sit in a taller frame than most books need.
+///
+/// The cover carries a light shadow at rest, so its edge lifts off the page
+/// the way a real cover would rather than lying flush with the background,
+/// and deepens on hover. The outline itself stays invisible except when
+/// focus or selection picks it out in the accent colour — a hover border
+/// read as a stray black line rather than a lift.
+/// A shaded strip down the leading edge suggests the page block a bound
+/// cover wraps around, so the art reads as an object rather than a poster.
+///
+/// Only the outer edge rounds. A jacket's spine side is a flat fold against
+/// the pages, not a curve, so rounding it along with the outer corners would
+/// contradict the spine shadow sitting right next to it.
 pub fn book_cover_image(id: impl Into<SharedString>, source: impl Into<ImageSource>, opacity: f32, focused: bool, theme: BrowserTheme) -> AnyElement {
     let id = id.into();
     div()
@@ -73,30 +111,58 @@ pub fn book_cover_image(id: impl Into<SharedString>, source: impl Into<ImageSour
         .relative()
         .size_full()
         .overflow_hidden()
-        .rounded(px(RADIUS_SM))
+        .rounded_r(px(crate::BOOK_COVER_RADIUS))
         .border_1()
         .border_color(if focused { theme.accent } else { gpui::transparent_black() })
-        .shadow(vec![gpui_component::box_shadow(px(0.0), px(4.0), px(12.0), px(0.0), theme.shadow)])
-        .hover(move |style| style.border_color(if focused { theme.accent } else { theme.border }).shadow(vec![gpui_component::box_shadow(px(0.0), px(6.0), px(16.0), px(0.0), theme.shadow)]))
+        .shadow(vec![gpui_component::box_shadow(px(0.0), px(2.0), px(6.0), px(0.0), theme.shadow)])
+        .hover(move |style| style.shadow(vec![gpui_component::box_shadow(px(0.0), px(6.0), px(16.0), px(0.0), theme.shadow)]))
         // Focus lifts the cover as a supporting cue to the selected card.
         .when(focused, |cover| cover.shadow(crate::overlay_shadow(theme)))
-        .child(img(source).size_full().object_fit(ObjectFit::Cover).opacity(opacity))
+        // `overflow_hidden` on the wrapping div clips with a rectangular
+        // mask regardless of its own corner radius — an image paints its
+        // corners from its own style, so the rounding has to be set here too.
+        .child(img(source).size_full().object_fit(ObjectFit::Contain).opacity(opacity).rounded_r(px(crate::BOOK_COVER_RADIUS)))
+        .child(book_cover_spine())
         .into_any_element()
 }
 
-/// The reader's place in the book, drawn along the cover's bottom edge.
+/// The gradient strip `book_cover_image` shades its leading edge with.
 ///
-/// The bar sits below the image within the existing cover-to-title gap.
-/// Length is the entire signal: nothing at zero, full at the end. There is no
-/// separate finished treatment — a finished book is one whose rule is full, and
-/// hiding those is the filter's business, not the card's. Because length rather
-/// than colour carries it, the mark survives greyscale.
+/// Painted as the image's last child so it lands above the art rather than
+/// under it — an opaque cover would otherwise hide anything drawn first.
+fn book_cover_spine() -> gpui::Div {
+    div().absolute().left_0().top_0().bottom_0().w(px(crate::BOOK_COVER_SPINE_WIDTH)).bg(gpui::linear_gradient(90.0, gpui::linear_color_stop(gpui::black().opacity(0.35), 0.0), gpui::linear_color_stop(gpui::transparent_black(), 1.0)))
+}
+
+/// The reader's place in the book, drawn on the cover's own bottom edge.
+///
+/// Laid over the artwork rather than in the gap below it, on a scrim dark
+/// enough to keep the mark legible against art of any colour — without it,
+/// an accent-coloured bar disappears into a cover already carrying warm or
+/// saturated tones there. Length is the entire signal: nothing at zero, full
+/// at the end. There is no separate finished treatment — a finished book is
+/// one whose rule is full, and hiding those is the filter's business, not the
+/// card's. Because length rather than colour carries it, the mark survives
+/// greyscale.
 pub fn book_cover_progress(progress: f32, theme: BrowserTheme) -> Option<AnyElement> {
     let fraction = (progress / 100.0).clamp(0.0, 1.0);
     if fraction <= 0.0 {
         return None;
     }
-    Some(div().absolute().left_0().right_0().top(gpui::relative(1.0)).mt(px(SPACE_XXS)).h(px(crate::BOOK_COVER_PROGRESS_HEIGHT)).flex().flex_row().child(div().w(gpui::relative(fraction)).h_full().bg(theme.accent)).into_any_element())
+    Some(
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .h(px(crate::BOOK_COVER_PROGRESS_SCRIM_HEIGHT))
+            .flex()
+            .flex_col()
+            .justify_end()
+            .child(div().absolute().inset_0().bg(gpui::linear_gradient(0.0, gpui::linear_color_stop(gpui::black().opacity(0.6), 0.0), gpui::linear_color_stop(gpui::transparent_black(), 1.0))))
+            .child(div().relative().h(px(crate::BOOK_COVER_PROGRESS_HEIGHT)).flex().flex_row().child(div().w(gpui::relative(fraction)).h_full().bg(theme.accent)))
+            .into_any_element(),
+    )
 }
 
 /// Stand-in for a book with no cover art.
@@ -105,13 +171,13 @@ pub fn book_cover_progress(progress: f32, theme: BrowserTheme) -> Option<AnyElem
 /// which read as loud as a real title. Muted and small: it is an absence, not
 /// a thing to look at.
 pub fn missing_book_cover(label: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    book_cover(theme)
+    book_cover(theme, BOOK_COVER_ASPECT_RATIO)
         .flex()
         .flex_col()
         .items_center()
         .justify_center()
         .overflow_hidden()
-        .rounded(px(RADIUS_SM))
+        .rounded_r(px(crate::BOOK_COVER_RADIUS))
         .border_1()
         .border_color(theme.rule)
         .bg(theme.page_bg)
@@ -120,47 +186,92 @@ pub fn missing_book_cover(label: impl Into<SharedString>, theme: BrowserTheme) -
         .child(div().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(label.into()))
 }
 
-/// No colour of its own: the title inherits from the card, which is what turns
-/// it to `accent_text` when the cell fills with the accent.
-pub fn book_card_title() -> Div {
-    div()
-        .w_full()
-        .min_w_0()
-        .h(gpui::rems(BOOK_CARD_TITLE_HEIGHT_REM))
-        .flex_none()
-        .text_size(gpui::rems(BOOK_CARD_TITLE_SIZE))
-        .line_height(gpui::relative(BOOK_CARD_TITLE_LINE_HEIGHT_EM))
-        .font_weight(BOOK_CARD_TITLE_WEIGHT)
+/// Fixed jacket colours a generated cover is drawn from — book cloth, not UI
+/// chrome, so these are their own palette rather than derived from `theme`:
+/// a cover's colour should not change when the reader switches themes.
+const GENERATED_COVER_VARIANTS: [(u32, u32); 5] = [
+    (0xb5502e, 0x3a2015), // terracotta
+    (0x163a4d, 0x061219), // deep blue
+    (0x5a4a2e, 0x2b2216), // ochre
+    (0x6b3f45, 0x2c1719), // wine
+    (0x4a4560, 0x201d2c), // slate violet
+];
+
+/// A cover for a book with no art of its own, used under the "cover text:
+/// cover only" setting in place of [`missing_book_cover`]: that placeholder
+/// says nothing without the title line the setting has just turned off, so a
+/// book with no jacket would otherwise be the one anonymous tile in the grid.
+///
+/// `variant` picks the jacket colour — pass something stable per book (its
+/// content hash, not a random draw) so the same book always generates the
+/// same cover. Built from a gradient and text, nothing rasterized, so it
+/// costs what any other card element costs.
+pub fn book_cover_generated(title: impl Into<SharedString>, subtitle: Option<&str>, variant: usize, theme: BrowserTheme) -> Div {
+    let (from, to) = GENERATED_COVER_VARIANTS[variant % GENERATED_COVER_VARIANTS.len()];
+    let ink: gpui::Hsla = gpui::rgb(0xf2efe8).into();
+    let subtitle = subtitle.map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned);
+    book_cover(theme, BOOK_COVER_ASPECT_RATIO)
+        .overflow_hidden()
+        .rounded_r(px(crate::BOOK_COVER_RADIUS))
+        .bg(gpui::linear_gradient(155.0, gpui::linear_color_stop(gpui::rgb(from), 0.0), gpui::linear_color_stop(gpui::rgb(to), 1.0)))
+        .flex()
+        .flex_col()
+        .justify_end()
+        .p(px(SPACE_SM * 2.0))
+        .gap(px(SPACE_XXS))
+        .text_color(ink)
+        .child(div().w(px(28.0)).h(px(2.0)).bg(ink).opacity(0.6))
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .mt(px(SPACE_XS))
+                .font_weight(BOOK_CARD_TITLE_WEIGHT)
+                .text_size(gpui::rems(BOOK_CARD_TITLE_SIZE))
+                .line_height(gpui::relative(BOOK_CARD_TITLE_LINE_HEIGHT_EM))
+                .text_ellipsis()
+                .line_clamp(BOOK_CARD_TITLE_LINES)
+                .child(title.into()),
+        )
+        .children(subtitle.map(|subtitle| div().w_full().min_w_0().opacity(0.85).text_size(gpui::rems(crate::BOOK_CARD_SUBTITLE_SIZE)).text_ellipsis().line_clamp(1).child(subtitle)))
 }
 
-/// Show one main-title line and up to two smaller subtitle lines.
-/// A book without a subtitle can wrap its main title over two lines.
+/// No colour of its own: the title inherits from the card, which is what turns
+/// it to `accent_text` when the cell fills with the accent.
+///
+/// Takes only the lines it needs rather than reserving the full
+/// title-and-subtitle height itself — see `book_card_text_title_only`, which
+/// reserves that budget as one box around the title.
+pub fn book_card_title() -> Div {
+    div().w_full().min_w_0().flex_none().text_size(gpui::rems(BOOK_CARD_TITLE_SIZE)).line_height(gpui::relative(BOOK_CARD_TITLE_LINE_HEIGHT_EM)).font_weight(BOOK_CARD_TITLE_WEIGHT)
+}
+
+/// Show the main title over up to two lines, with one smaller subtitle line
+/// under it. The title takes the space first — it's the line a reader scans
+/// for — so a long subtitle is what gives way to the ellipsis, never the title.
 pub fn book_title_lines(title: impl Into<SharedString>, subtitle: Option<&str>) -> Div {
     let title = title.into();
     let Some(subtitle) = subtitle.map(str::trim).filter(|value| !value.is_empty()) else {
         return div().w_full().min_w_0().text_ellipsis().line_clamp(BOOK_CARD_TITLE_LINES).child(title);
     };
-    div().w_full().min_w_0().flex().flex_col()
-        .child(div().w_full().min_w_0().text_ellipsis().line_clamp(1).child(title))
-        .child(div().w_full().min_w_0().text_size(gpui::rems(crate::BOOK_CARD_SUBTITLE_SIZE)).line_height(gpui::relative(BOOK_CARD_TITLE_LINE_HEIGHT_EM)).font_weight(gpui::FontWeight::NORMAL).text_ellipsis().line_clamp(crate::BOOK_CARD_SUBTITLE_LINES).child(subtitle.to_owned()))
+    div().w_full().min_w_0().flex().flex_col().child(div().w_full().min_w_0().text_ellipsis().line_clamp(BOOK_CARD_TITLE_LINES).child(title)).child(
+        div()
+            .w_full()
+            .min_w_0()
+            .text_size(gpui::rems(crate::BOOK_CARD_SUBTITLE_SIZE))
+            .line_height(gpui::relative(BOOK_CARD_TITLE_LINE_HEIGHT_EM))
+            .font_weight(gpui::FontWeight::NORMAL)
+            .text_ellipsis()
+            .line_clamp(crate::BOOK_CARD_SUBTITLE_LINES)
+            .child(subtitle.to_owned()),
+    )
 }
 
-/// The title of a card that states no author — every card on an author's own
-/// shelf is by the same person, so the line would repeat the heading above it.
-///
-/// The download control moves up beside the title rather than keeping a line of
-/// its own, which is how the card gets the metadata line back. The title is
-/// tall enough for both title parts, so the control has room beside it.
+/// A card's title row: title and subtitle, with the download control beside
+/// them. The card states no author — the title is tall enough for both title
+/// parts, so the control has room beside it without a metadata line of its own.
 pub fn book_card_title_row(title: impl Into<SharedString>, subtitle: Option<&str>, download: Option<AnyElement>) -> Div {
     div().w_full().min_w_0().flex_none().flex().flex_row().items_start().gap(px(SPACE_XS)).child(book_card_title().child(book_title_lines(title, subtitle))).children(download)
-}
-
-pub fn book_card_author(theme: BrowserTheme) -> Div {
-    div().flex_1().min_w_0().h_full().text_size(gpui::rems(BOOK_CARD_AUTHOR_SIZE)).line_height(gpui::relative(BOOK_CARD_AUTHOR_LINE_HEIGHT_EM)).text_color(theme.text_muted).text_ellipsis().line_clamp(1)
-}
-
-pub fn book_card_metadata(author: impl Into<SharedString>, download: Option<AnyElement>, theme: BrowserTheme) -> Div {
-    div().w_full().min_w_0().h(gpui::rems(crate::BOOK_CARD_METADATA_HEIGHT_REM)).flex_none().flex().flex_row().items_center().gap(px(SPACE_XS)).child(book_card_author(theme).child(author.into())).children(download)
 }
 
 /// A detailed card's two columns: the cover, then the words beside it.
@@ -172,7 +283,7 @@ pub fn book_card_detail_body() -> Div {
 }
 
 /// The left half of a detailed card, which is the ordinary card entire: cover,
-/// title, author.
+/// then title.
 ///
 /// The cover shrinks with narrow cards and stops at its preferred width.
 /// Extra card width belongs to the description.
@@ -192,21 +303,7 @@ pub fn book_card_detail_text() -> Div {
     div().flex_1().min_w_0().flex().flex_col()
 }
 
-/// The title of a detailed card, which takes only the lines it needs.
-///
-/// Compact cards reserve the full title-and-subtitle height for aligned rows.
-/// Detailed cards use the same line limits but only take the space they need.
-pub fn book_card_detail_title() -> Div {
-    div()
-        .w_full()
-        .min_w_0()
-        .flex_none()
-        .text_size(gpui::rems(BOOK_CARD_TITLE_SIZE))
-        .line_height(gpui::relative(BOOK_CARD_TITLE_LINE_HEIGHT_EM))
-        .font_weight(BOOK_CARD_TITLE_WEIGHT)
-}
-
-/// The blurb, filling whatever the title and author leave and clipped there.
+/// The blurb, filling whatever the title leaves and clipped there.
 ///
 /// Takes the description as stored — which is HTML — and sets what a card can
 /// use of it: paragraphs as line breaks, emphasis as emphasis, entities as the
@@ -228,7 +325,7 @@ pub fn book_card_description(id: impl Into<ElementId>, description: &str, theme:
             .min_h_0()
             .overflow_hidden()
             .cursor_pointer()
-            .text_size(gpui::rems(crate::BOOK_CARD_DESCRIPTION_SIZE))
+            .text_size(gpui::rems(crate::TEXT_SM))
             .line_height(gpui::relative(crate::BOOK_CARD_DESCRIPTION_LINE_HEIGHT_EM))
             .text_color(theme.text_muted)
             .child(crate::description::BlurbText::new(text, highlights)),
@@ -249,12 +346,7 @@ pub fn book_card_description(id: impl Into<ElementId>, description: &str, theme:
 /// auto-height column resolves to a zero-height box: the heading draws, the
 /// blurb does not, and nothing about the panel looks wrong.
 pub fn book_description_panel(theme: BrowserTheme) -> Div {
-    crate::modal_surface(theme)
-        .w(gpui::rems(crate::BOOK_DESCRIPTION_OVERLAY_WIDTH_REM))
-        .max_w_full()
-        .max_h(gpui::relative(crate::BOOK_DESCRIPTION_OVERLAY_HEIGHT_FRACTION))
-        .flex()
-        .flex_col()
+    crate::modal_surface(theme).w(gpui::rems(crate::BOOK_DESCRIPTION_OVERLAY_WIDTH_REM)).max_w_full().max_h(gpui::relative(crate::BOOK_DESCRIPTION_OVERLAY_HEIGHT_FRACTION)).flex().flex_col()
 }
 
 /// Holds the blurb between the heading and the bottom of the panel.
@@ -280,7 +372,7 @@ pub fn book_description_heading(title: impl Into<SharedString>, subtitle: Option
         .border_color(theme.rule)
         .child(div().text_size(gpui::rems(CAROUSEL_TITLE_SIZE)).font_weight(BOOK_CARD_TITLE_WEIGHT).child(title.into()))
         .children(subtitle.map(str::trim).filter(|value| !value.is_empty()).map(|subtitle| div().text_size(gpui::rems(BOOK_CARD_TITLE_SIZE)).font_weight(gpui::FontWeight::NORMAL).child(subtitle.to_owned())))
-        .children((!author.is_empty()).then(|| div().text_size(gpui::rems(BOOK_CARD_AUTHOR_SIZE)).text_color(theme.text_muted).child(author)))
+        .children((!author.is_empty()).then(|| div().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(author)))
 }
 
 /// The blurb in full: no clamp and no ellipsis, because whatever does not fit
@@ -290,7 +382,7 @@ pub fn book_description_body(description: &str, theme: BrowserTheme) -> Div {
     div()
         .w_full()
         .p(px(crate::SPACE_MD))
-        .text_size(gpui::rems(crate::BOOK_DESCRIPTION_OVERLAY_SIZE))
+        .text_size(gpui::rems(crate::TEXT_MD))
         .line_height(gpui::relative(crate::BOOK_DESCRIPTION_OVERLAY_LINE_HEIGHT_EM))
         .text_color(theme.text)
         .child(gpui::StyledText::new(text).with_highlights(highlights))
@@ -461,13 +553,6 @@ pub fn paginator_controls(previous: Option<AnyElement>, next: Option<AnyElement>
     div().flex_none().flex().flex_row().items_center().gap(px(CAROUSEL_CONTROL_GAP)).children(previous).children(next)
 }
 
-/// One step of a carousel. Square, quiet, and consistent across GPUI targets;
-/// a horizontal row of cards is otherwise reachable only by a pointer that can
-/// scroll sideways.
-pub fn carousel_arrow_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
-    crate::outlined_icon_button(id, label, icon, gpui::rems(crate::CAROUSEL_ARROW_SIZE / 16.0), RADIUS_SM, theme).text_color(theme.accent)
-}
-
 /// Breadcrumbs use the medium body token. Items own the vertical padding so
 /// the trail stays aligned with the action buttons in the topbar.
 ///
@@ -535,7 +620,10 @@ pub fn folder_breadcrumb_root_item(label: impl Into<SharedString>, current: bool
 /// Use the same text and icon layout as the rendered chip so font changes
 /// affect wrapping without estimating label widths from character counts.
 pub fn compact_hierarchy_item_width(icon: crate::NavigationIcon, label: SharedString, count: Option<usize>, show_download: bool, window: &mut gpui::Window, cx: &mut gpui::App) -> gpui::Pixels {
-    let mut content = div().flex().items_center().whitespace_nowrap()
+    let mut content = div()
+        .flex()
+        .items_center()
+        .whitespace_nowrap()
         .text_size(gpui::rems(crate::COMPACT_HIERARCHY_ITEM_TEXT_SIZE_REM))
         .gap(px(crate::COMPACT_HIERARCHY_ITEM_CONTENT_GAP))
         .child(crate::navigation_icon(icon))
@@ -551,7 +639,9 @@ pub fn compact_hierarchy_item_width(icon: crate::NavigationIcon, label: SharedSt
 ///
 /// This function owns presentation only. Feature code remains responsible for
 /// attaching click handlers and navigation behavior.
-pub fn compact_hierarchy_item(id: impl Into<ElementId>, icon: crate::NavigationIcon, label: impl Into<SharedString>, path: Option<SharedString>, count: Option<usize>, download: Option<AnyElement>, focused: bool, marquee: bool, theme: BrowserTheme) -> Button {
+pub fn compact_hierarchy_item(
+    id: impl Into<ElementId>, icon: crate::NavigationIcon, label: impl Into<SharedString>, path: Option<SharedString>, count: Option<usize>, download: Option<AnyElement>, focused: bool, marquee: bool, theme: BrowserTheme,
+) -> Button {
     let label = label.into();
     let text =
         div().relative().flex_1().min_w_0().h_full().child(div().size_full().min_w_0().flex().items_center().child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label))).children(path.map(|path| {

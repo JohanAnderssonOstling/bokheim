@@ -13,7 +13,8 @@ use gpui::{AnyElement, App, Context, Entity, Pixels, Point, SharedString, Window
 use gpui_component::input::{Input, InputState};
 use ui_components as components;
 
-use book_model::{AnnotationStyle, ReaderAnnotation};
+use book_model::{AnnotationStyle};
+use library_backend::{ReaderAnnotation};
 
 const WIDTH: f32 = 360.0;
 const MAX_HEIGHT: f32 = 420.0;
@@ -210,7 +211,7 @@ fn editor(geometry: Geometry, note: &Entity<InputState>, actions: EditorActions,
         components::reader_annotation_action_button(action.id, action.label, action.selected, theme).on_click(move |_, window, cx| on_click(window, cx))
     };
 
-    let mut styles = components::reader_state_actions();
+    let mut styles = components::action_row();
     for action in actions.styles {
         styles = styles.child(button(action));
     }

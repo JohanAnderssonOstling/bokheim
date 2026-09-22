@@ -15,15 +15,18 @@ pub fn execute(bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
 }
 
 fn execute_with_source(bytes: &[u8], source: JsValue) -> Result<Vec<u8>, JsValue> {
-    let request = rmp_serde::from_slice(bytes).map_err(|error| JsValue::from_str(&error.to_string()))?;
-    let response = match request {
-        bokheim_backend::host::cpu::CpuRequest::Book { task } => {
-            let reader = bokheim_backend::host::web::book_source::Reader::new(source).map_err(|e| JsValue::from_str(&e))?;
-            bokheim_backend::host::cpu::execute_book(task, Box::new(reader))
+    let response = (|| -> Result<_, app::BackendError> {
+        let request = rmp_serde::from_slice(bytes).map_err(app::BackendError::operation)?;
+        match request {
+            app::host::cpu::CpuRequest::Book { task } => {
+                let reader = app::host::web::book_source::Reader::new(source).map_err(app::BackendError::operation)?;
+                app::host::cpu::execute_book(task, Box::new(reader))
+            }
+            request => app::host::cpu::execute(request),
         }
-        request => bokheim_backend::host::cpu::execute(request),
-    }
-    .map_err(|error| JsValue::from_str(&error))?;
+    })();
+    // Application failures travel as typed results inside the byte payload.
+    // The outer transport failure is reserved for a broken worker/connection.
     rmp_serde::to_vec_named(&response).map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
@@ -45,15 +48,16 @@ pub fn start() -> Result<(), JsValue> {
             let CpuRequest { id, bytes, source } = request;
             let response = async {
                 if !source.is_undefined() {
-                    bokheim_backend::host::web::book_source::connect(&source).await?;
+                    app::host::web::book_source::connect(&source).await?;
                 }
-                if matches!(rmp_serde::from_slice::<bokheim_backend::host::cpu::CpuRequest>(&bytes),
-                    Ok(bokheim_backend::host::cpu::CpuRequest::Book {
-                        task: bokheim_backend::host::cpu::BookTask::Thumbnail { extension }
-                    }) if extension == "pdf") || matches!(rmp_serde::from_slice::<bokheim_backend::host::cpu::CpuRequest>(&bytes),
-                    Ok(bokheim_backend::host::cpu::CpuRequest::Book {
-                        task: bokheim_backend::host::cpu::BookTask::Inspect { format: book_model::BookFormat::Pdf, .. }
-                    }))
+                if matches!(rmp_serde::from_slice::<app::host::cpu::CpuRequest>(&bytes),
+                    Ok(app::host::cpu::CpuRequest::Book {
+                        task: app::host::cpu::BookTask::Thumbnail { extension }
+                    }) if extension == "pdf")
+                    || matches!(
+                        rmp_serde::from_slice::<app::host::cpu::CpuRequest>(&bytes),
+                        Ok(app::host::cpu::CpuRequest::Book { task: app::host::cpu::BookTask::Inspect { format: book_model::BookFormat::Pdf, .. } })
+                    )
                 {
                     initialize_pdfium().await?;
                 }
@@ -90,29 +94,29 @@ impl ImportHasher {
 #[cfg(feature = "web-runtime-tests")]
 #[wasm_bindgen]
 pub fn recover_import(manifest: &[u8], journal: &[u8]) -> Result<JsValue, JsValue> {
-    bokheim_backend::host::web::import_worker::recover(manifest, journal)
+    app::host::web::import_worker::recover(manifest, journal)
 }
 
 #[wasm_bindgen]
 pub fn start_import_worker(open: js_sys::Function, discover: js_sys::Function) -> Result<(), JsValue> {
-    bokheim_backend::host::web::import_worker::start(open, discover)
+    app::host::web::import_worker::start(open, discover)
 }
 
 #[cfg(feature = "web-runtime-tests")]
 #[wasm_bindgen]
 pub async fn import_worker_contract() -> Result<(), JsValue> {
-    bokheim_backend::host::web::import_worker::contract().await
+    app::host::web::import_worker::contract().await
 }
 
 #[cfg(feature = "web-runtime-tests")]
 #[wasm_bindgen]
-pub struct BookTestReader(bokheim_backend::host::web::book_source::Reader);
+pub struct BookTestReader(app::host::web::book_source::Reader);
 #[cfg(feature = "web-runtime-tests")]
 #[wasm_bindgen]
 impl BookTestReader {
     #[wasm_bindgen(constructor)]
     pub fn new(source: JsValue) -> Result<Self, JsValue> {
-        bokheim_backend::host::web::book_source::Reader::new(source).map(Self).map_err(|error| JsValue::from_str(&error))
+        app::host::web::book_source::Reader::new(source).map(Self).map_err(|error| JsValue::from_str(&error))
     }
     pub fn read(&mut self, offset: f64, length: u32) -> Result<Vec<u8>, JsValue> {
         use std::io::{Read, Seek, SeekFrom};
@@ -121,11 +125,13 @@ impl BookTestReader {
         (&mut self.0).take(length as u64).read_to_end(&mut bytes).map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(bytes)
     }
-    pub fn cache_bytes(&self) -> usize { self.0.cache_bytes() }
+    pub fn cache_bytes(&self) -> usize {
+        self.0.cache_bytes()
+    }
 }
 
 #[cfg(feature = "web-runtime-tests")]
 #[wasm_bindgen]
 pub async fn import_workflow_contract(job: JsValue, io: JsValue, respond: js_sys::Function, progress: js_sys::Function) -> Result<JsValue, JsValue> {
-    bokheim_backend::host::web::import_worker::workflow_contract(job, io, respond, progress).await
+    app::host::web::import_worker::workflow_contract(job, io, respond, progress).await
 }

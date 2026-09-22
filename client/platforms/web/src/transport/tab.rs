@@ -74,7 +74,10 @@ impl State {
         use super::control::TabEvent;
         let event = match TabEvent::decode(&data) {
             Ok(event) => event,
-            Err(_) => { self.shutdown(); return; }
+            Err(_) => {
+                self.shutdown();
+                return;
+            }
         };
         if matches!(event, TabEvent::Failed) {
             let init = web_sys::MessageEventInit::new();
@@ -91,7 +94,9 @@ impl State {
             }
             TabEvent::Create { id, role, port } if !self.closed.get() => {
                 let result = (|| {
-                    if self.workers.borrow().contains_key(&id) { return Err(js_sys::Error::new("Duplicate worker ID").into()); }
+                    if self.workers.borrow().contains_key(&id) {
+                        return Err(js_sys::Error::new("Duplicate worker ID").into());
+                    }
                     let spec = (self.resolve_worker)(&role, id)?;
                     let worker = super::endpoint::module_worker(&spec.url, &spec.name)?;
                     let control = self.control.clone();
@@ -136,15 +141,9 @@ impl Drop for TabConnection {
 }
 impl TabConnection {
     pub async fn connect(
-        broker_url: &str,
-        worker_name: &str,
-        lock_name: &str,
-        resolve_worker: impl Fn(&str, u32) -> Result<WorkerSpec, JsValue> + 'static,
-        application_message: impl Fn(JsValue) + 'static,
-        on_restore: impl Fn() + 'static,
+        broker_url: &str, worker_name: &str, lock_name: &str, resolve_worker: impl Fn(&str, u32) -> Result<WorkerSpec, JsValue> + 'static, application_message: impl Fn(JsValue) + 'static, on_restore: impl Fn() + 'static,
     ) -> Result<Self, String> {
-        let worker = super::endpoint::shared_module_worker(broker_url, worker_name)
-            .map_err(|error| format!("failed to create shared backend worker: {error:?}"))?;
+        let worker = super::endpoint::shared_module_worker(broker_url, worker_name).map_err(|error| format!("failed to create shared backend worker: {error:?}"))?;
         let control = worker.port();
         let lock = lock_name;
         let acquired = hold_tab_lock(&lock).map_err(|error| error_message(&error))?;
@@ -154,7 +153,15 @@ impl TabConnection {
         let ready: Promise = field(&acquired, "ready").dyn_into().map_err(|_| "Invalid tab lifetime promise".to_owned())?;
         JsFuture::from(ready).await.map_err(|error| error_message(&error))?;
         let channel = MessageChannel::new().map_err(|error| error_message(&error))?;
-        let state = Rc::new(State { client_port: channel.port1(), control: control.clone(), resolve_worker: Box::new(resolve_worker), workers: RefCell::new(HashMap::new()), release, closed: Cell::new(false), application_message: Box::new(application_message) });
+        let state = Rc::new(State {
+            client_port: channel.port1(),
+            control: control.clone(),
+            resolve_worker: Box::new(resolve_worker),
+            workers: RefCell::new(HashMap::new()),
+            release,
+            closed: Cell::new(false),
+            application_message: Box::new(application_message),
+        });
         let weak = Rc::downgrade(&state);
         let error = weak.clone();
         let callback = Port::new(
@@ -193,8 +200,12 @@ impl TabConnection {
         control.post_message_with_transferable(&object(&[("transport", "register_host".into()), ("lock", lock.into()), ("port", port.clone().into())]), &Array::of1(&port)).map_err(|error| error_message(&error))?;
         Ok(connection)
     }
-    pub fn worker(&self) -> &web_sys::SharedWorker { &self.worker }
-    pub fn control(&self) -> MessagePort { self.state.control.clone() }
+    pub fn worker(&self) -> &web_sys::SharedWorker {
+        &self.worker
+    }
+    pub fn control(&self) -> MessagePort {
+        self.state.control.clone()
+    }
     pub fn port(&self) -> MessagePort {
         self.state.client_port.clone()
     }
@@ -202,5 +213,7 @@ impl TabConnection {
 
 /// Available as an opt-in page-restore policy for hosts using immutable bundles.
 pub fn reload_page() {
-    if let Some(window) = web_sys::window() { let _ = window.location().reload(); }
+    if let Some(window) = web_sys::window() {
+        let _ = window.location().reload();
+    }
 }

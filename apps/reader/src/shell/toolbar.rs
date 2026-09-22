@@ -1,113 +1,139 @@
-//! Toolbar structure shared by every reader surface.
+//! Sidebar chrome shared by every reader surface.
+//!
+//! The sidebar is now the reader's only chrome: a header (back, title/progress
+//! or inline search, search toggle) fixed above whatever tab strip and body
+//! the caller has already built. There is no separate top toolbar and no
+//! "toggle sidebar" button — `shell::chrome::ChromeState` hides and reveals
+//! this whole element, and a mobile reader reaches it through the bottom bar
+//! in `shell::page` instead.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, FocusHandle, Window};
 use gpui_component::IconName;
 use ui_components as components;
 
-/// Operations provided by the entity that owns a reader toolbar.
-pub(crate) trait ToolbarTarget: Sized + 'static {
+use super::state_panel::SidebarTab;
+
+/// Operations provided by the entity that owns a reader sidebar.
+pub(crate) trait SidebarTarget: Sized + 'static {
     #[cfg(feature = "kobo")]
     fn brightness_controls(&self) -> Entity<super::brightness::BrightnessControls>;
     fn close_reader(&mut self, window: &mut Window, cx: &mut Context<Self>);
-    fn toggle_sidebar(&mut self, contents_available: bool, cx: &mut Context<Self>);
+    fn hide_sidebar(&mut self, cx: &mut Context<Self>);
     fn search_is_open(&self) -> bool;
     fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>);
-    /// Whether an annotation is open. The toolbar offers to discard it while it
-    /// is, which is the only place that offer is made now that the note panel
-    /// carries no buttons of its own.
-    fn has_selected_annotation(&self) -> bool {
-        false
-    }
-    fn delete_selected_annotation(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
 }
 
-/// The format-specific content placed into the common toolbar structure.
-pub(crate) struct ToolbarContent {
+/// The format-specific content placed into the common sidebar structure.
+pub(crate) struct SidebarContent {
     title: String,
     progress_label: String,
     progress_detail: String,
     document_focus: Option<FocusHandle>,
-    settings: AnyElement,
-    contents_available: bool,
-    left_extras: Vec<AnyElement>,
-    right_extras: Vec<AnyElement>,
+    /// The three-tab strip (`state_panel::reader_sidebar_tabs`).
+    tabs: AnyElement,
+    /// The active tab's body: a TOC tree, annotation rows, or the settings
+    /// panel — whichever `SidebarTab` is currently selected.
+    body: AnyElement,
 }
 
-impl ToolbarContent {
-    pub(crate) fn new(title: String, progress_label: String, progress_detail: String, document_focus: Option<FocusHandle>, settings: AnyElement) -> Self {
-        Self { title, progress_label, progress_detail, document_focus, settings, contents_available: true, left_extras: Vec::new(), right_extras: Vec::new() }
-    }
-
-    pub(crate) fn contents_available(mut self, available: bool) -> Self {
-        self.contents_available = available;
-        self
-    }
-
-    pub(crate) fn right(mut self, element: impl IntoElement) -> Self {
-        self.right_extras.push(element.into_any_element());
-        self
+impl SidebarContent {
+    pub(crate) fn new(title: String, progress_label: String, progress_detail: String, document_focus: Option<FocusHandle>, tabs: AnyElement, body: AnyElement) -> Self {
+        Self { title, progress_label, progress_detail, document_focus, tabs, body }
     }
 }
 
 /// `owner` is already leased by GPUI during rendering. Read state through it;
 /// the entity handle is only for callbacks that run after rendering completes.
-pub(crate) fn reader_toolbar<C: ToolbarTarget>(owner: &C, target: &Entity<C>, content: ToolbarContent, theme: components::BrowserTheme, window: &Window) -> AnyElement {
+pub(crate) fn reader_sidebar<C: SidebarTarget>(owner: &C, target: &Entity<C>, content: SidebarContent, search: Option<AnyElement>, theme: components::BrowserTheme, window: &Window) -> AnyElement {
     let library_target = target.clone();
     let sidebar_target = target.clone();
     let search_target = target.clone();
-    let delete_target = target.clone();
-    let annotation_open = owner.has_selected_annotation();
-    let contents_available = content.contents_available;
-    let left_extras = content.left_extras;
-    let right_extras = content.right_extras;
+    let document_focus = content.document_focus;
 
-    let heading = gpui::div().min_w_0().flex_1().flex().items_center().gap(gpui::px(components::SPACE_SM)).child(components::reader_toolbar_title(content.title)).child(components::reader_progress(
-        content.progress_label,
-        content.progress_detail,
-        theme,
-    ));
-
-    let left = gpui::div()
-        .flex_none()
+    let heading = gpui::div()
+        .min_w_0()
+        .flex_1()
         .flex()
         .items_center()
         .gap(gpui::px(components::SPACE_SM))
-        .when(!components::uses_mobile_navigation(window), |left| {
-            left.child(components::reader_control_button_icon("reader-library", "Return to library", IconName::ArrowLeft, theme).on_click(move |_, window, cx| {
+        .child(components::reader_toolbar_title(content.title))
+        .child(components::reader_progress(content.progress_label, content.progress_detail, theme));
+
+    let header = gpui::div()
+        .flex_none()
+        .w_full()
+        .min_w_0()
+        .h(gpui::rems(components::READER_TOOLBAR_SIZE_REM))
+        .flex()
+        .items_center()
+        .bg(theme.page_bg)
+        .when(!components::uses_mobile_navigation(window), |header| {
+            header.child(components::reader_control_button_icon("reader-library", "Return to library", IconName::ArrowLeft, theme).on_click(move |_, window, cx| {
                 library_target.update(cx, |this, cx| this.close_reader(window, cx));
             }))
         })
-        .child(components::reader_control_button_icon("reader-sidebar", "Toggle contents and annotations", IconName::PanelLeftOpen, theme).on_click(move |_, _, cx| {
-            sidebar_target.update(cx, |this, cx| this.toggle_sidebar(contents_available, cx));
-        }))
-        .children(left_extras);
-
-    let right = gpui::div()
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_end()
-        .gap(gpui::px(components::SPACE_SM))
-        .children(right_extras)
-        .children(annotation_open.then(|| {
-            components::reader_annotation_delete_button("reader-delete-annotation", gpui::px(components::READER_TOOLBAR_CONTROL_HEIGHT), theme).on_click(move |_, window, cx| {
-                delete_target.update(cx, |this, cx| this.delete_selected_annotation(window, cx));
-            })
-        }))
-        .map(|right| {
+        .child(heading)
+        .map(|header| {
             #[cfg(feature = "kobo")]
-            let right = right.child(super::brightness::popover(owner.brightness_controls(), content.document_focus.as_ref(), theme));
-            right
+            let header = header.child(super::brightness::popover(owner.brightness_controls(), document_focus.as_ref(), theme, window));
+            #[cfg(not(feature = "kobo"))]
+            let header = {
+                let _ = document_focus;
+                header
+            };
+            header
         })
         .child(components::selectable_button(components::reader_control_button_icon("reader-search", if owner.search_is_open() { "Hide search" } else { "Search" }, IconName::Search, theme), owner.search_is_open(), theme).on_click(
             move |_, window, cx| {
                 search_target.update(cx, |this, cx| this.toggle_search(window, cx));
             },
         ))
-        .child(components::reader_settings_popover(content.document_focus.as_ref(), theme).child(content.settings));
+        .child(components::reader_control_button_icon("reader-sidebar-close", "Close sidebar", IconName::Close, theme).on_click(move |_, _, cx| {
+            sidebar_target.update(cx, |this, cx| this.hide_sidebar(cx));
+        }));
 
-    components::reader_toolbar(theme).child(left).child(heading).child(right).into_any_element()
+    gpui::div()
+        .size_full()
+        .min_h_0()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .bg(theme.page_bg)
+        .child(header)
+        .children(search)
+        .child(content.tabs)
+        .child(gpui::div().flex_1().min_h_0().min_w_0().child(content.body))
+        .into_any_element()
+}
+
+/// The mobile reader's only permanent chrome: Back, Search, and the sidebar's
+/// three tabs, each self-toggling its own sheet. Contents is omitted when
+/// there is no outline, matching `state_panel::reader_sidebar_tabs`.
+pub(crate) fn reader_bottom_bar<C: SidebarTarget, F>(id: &'static str, owner: &C, target: &Entity<C>, active: Option<SidebarTab>, contents_available: bool, theme: components::BrowserTheme, on_select: F) -> AnyElement
+where
+    F: Fn(SidebarTab, &mut C, &mut Context<C>) + 'static,
+{
+    let on_select = std::rc::Rc::new(on_select);
+    let close_target = target.clone();
+    let search_target = target.clone();
+
+    let mut bar = components::bottom_navigation(theme).id(id).child(components::bottom_navigation_item("reader-bottom-back", IconName::ArrowLeft, "Back", false, theme).on_click(move |_, window, cx| {
+        close_target.update(cx, |this, cx| this.close_reader(window, cx));
+    }));
+    bar = bar.child(components::bottom_navigation_item("reader-bottom-search", IconName::Search, "Search", owner.search_is_open(), theme).on_click(move |_, window, cx| {
+        search_target.update(cx, |this, cx| this.toggle_search(window, cx));
+    }));
+    for (index, tab, label, icon) in [(0usize, SidebarTab::Contents, "Contents", IconName::Menu), (1, SidebarTab::Annotations, "Notes", IconName::Star), (2, SidebarTab::Settings, "Settings", IconName::Settings2)] {
+        if tab == SidebarTab::Contents && !contents_available {
+            continue;
+        }
+        let target = target.clone();
+        let on_select = on_select.clone();
+        let selected = active == Some(tab);
+        bar = bar.child(components::bottom_navigation_item(("reader-bottom-tab", index), icon, label, selected, theme).on_click(move |_, _, cx| target.update(cx, |this, cx| on_select(tab, this, cx))));
+    }
+    bar.into_any_element()
 }
 
 #[cfg(all(test, not(feature = "kobo")))]
@@ -119,9 +145,9 @@ mod tests {
         draws: usize,
     }
 
-    impl ToolbarTarget for TestReader {
+    impl SidebarTarget for TestReader {
         fn close_reader(&mut self, _: &mut Window, _: &mut Context<Self>) {}
-        fn toggle_sidebar(&mut self, _: bool, _: &mut Context<Self>) {}
+        fn hide_sidebar(&mut self, _: &mut Context<Self>) {}
         fn search_is_open(&self) -> bool {
             self.search_open
         }
@@ -133,13 +159,13 @@ mod tests {
     impl gpui::Render for TestReader {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             self.draws += 1;
-            let content = ToolbarContent::new("Book".into(), "1 / 2".into(), String::new(), None, gpui::div().into_any_element());
-            reader_toolbar(self, &cx.entity(), content, components::BrowserTheme::default(), window)
+            let content = SidebarContent::new("Book".into(), "1 / 2".into(), String::new(), None, gpui::div().into_any_element(), gpui::div().into_any_element());
+            reader_sidebar(self, &cx.entity(), content, None, components::BrowserTheme::default(), window)
         }
     }
 
     #[gpui::test]
-    fn toolbar_can_be_built_while_its_reader_is_leased(cx: &mut gpui::TestAppContext) {
+    fn sidebar_can_be_built_while_its_reader_is_leased(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
         let reader = cx.add_window(|_, _| TestReader { search_open: false, draws: 0 });
         cx.update_window(reader.into(), |_, window, cx| window.draw(cx).clear(cx)).unwrap();

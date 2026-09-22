@@ -1,23 +1,33 @@
 #[path = "src/selector_format.rs"]
 mod selector_format;
-struct UnifiedConceptSnapshotRow {
-    concept_id: i64,
-    preferred_label: String,
-    parent_ids: String,
-    bisac_codes: String,
-    ddc_codes: String,
-    lcc_codes: String,
-    source_labels: String,
+// Compile the same matcher builder used for downloaded overlays. The build
+// script never loads the artifact it is producing.
+#[allow(dead_code)]
+#[path = "src/lcc.rs"]
+mod lcc;
+#[allow(dead_code)]
+#[path = "src/runtime_index.rs"]
+mod runtime;
+fn compact_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
+#[path = "src/label_storage.rs"]
+mod label_storage;
+#[path = "src/range_storage.rs"]
+mod range_storage;
+#[path = "src/taxonomy_reader.rs"]
+mod taxonomy_reader;
 
 use rusqlite::Connection;
 use std::env;
-use std::fmt::Write as _;
 use std::path::PathBuf;
 
 const CLIENT_TAXONOMY_DEPTH: u8 = 2;
 
 fn main() {
+    for path in ["build.rs", "src", "data"] {
+        println!("cargo:rerun-if-changed={path}");
+    }
     println!("cargo:rerun-if-changed=data/unified-taxonomy-v2.sqlite3");
     println!("cargo:rerun-if-changed=data/master-taxonomy-v2.sqlite3");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_AUTHORITATIVE_TAXONOMY");
@@ -43,83 +53,15 @@ fn main() {
         build_client_database(&database_path, &client_database_path);
     }
     let client_connection = Connection::open(&client_database_path).unwrap_or_else(|error| panic!("failed to open {}: {error}", client_database_path.display()));
-    // Navigation is compiled once into the shipped artifact, never rebuilt in a library.
-    client_connection
-        .execute_batch(
-            "DROP TABLE IF EXISTS unified_concept_route;
-         CREATE TABLE unified_concept_route(path TEXT PRIMARY KEY, concept_id INTEGER NOT NULL, parent_path TEXT NOT NULL, label TEXT NOT NULL) WITHOUT ROWID;
-         INSERT INTO unified_concept_route
-         WITH RECURSIVE routes(path,concept_id,parent_path,label) AS (
-             SELECT c.preferred_label,c.concept_id,'Subject',c.preferred_label FROM concept c
-             WHERE NOT EXISTS(SELECT 1 FROM concept_parent p WHERE p.concept_id=c.concept_id)
-               AND (EXISTS(SELECT 1 FROM concept_parent p WHERE p.parent_concept_id=c.concept_id)
-                 OR EXISTS(SELECT 1 FROM lcc_selector s WHERE s.concept_id=c.concept_id)
-                 OR EXISTS(SELECT 1 FROM lcc_range s WHERE s.concept_id=c.concept_id)
-                 OR EXISTS(SELECT 1 FROM bisac_selector s WHERE s.concept_id=c.concept_id)
-                 OR EXISTS(SELECT 1 FROM ddc_selector s WHERE s.concept_id=c.concept_id))
-             UNION
-             SELECT r.path || ' / ' || c.preferred_label,c.concept_id,r.path,c.preferred_label
-             FROM routes r JOIN concept_parent p ON p.parent_concept_id=r.concept_id
-             JOIN concept c ON c.concept_id=p.concept_id
-         ) SELECT * FROM routes;
-         CREATE INDEX idx_unified_concept_route_parent ON unified_concept_route(parent_path,label,path);
-         CREATE INDEX idx_unified_concept_route_concept ON unified_concept_route(concept_id,path);",
-        )
-        .expect("compile curated navigation routes");
-    let concepts = read_concepts(&client_connection);
-    let revision_id = revision_id(&concepts);
-    let revision_path = output_dir.join("unified-taxonomy-revision-id.txt");
-    std::fs::write(&revision_path, revision_id).unwrap_or_else(|error| panic!("failed to write {}: {error}", revision_path.display()));
-}
-
-fn read_concepts(connection: &Connection) -> Vec<UnifiedConceptSnapshotRow> {
-    let mut statement = connection
-        .prepare(
-            "SELECT c.concept_id, c.preferred_label,
-                    COALESCE((SELECT group_concat(parent_concept_id, '|') FROM (SELECT parent_concept_id FROM concept_parent WHERE concept_id=c.concept_id ORDER BY ordinal)), ''),
-                    COALESCE((SELECT group_concat(selector, '|') FROM (SELECT selector FROM bisac_selector WHERE concept_id=c.concept_id ORDER BY selector)), ''),
-                    COALESCE((SELECT group_concat(selector, '|') FROM (SELECT selector FROM ddc_selector WHERE concept_id=c.concept_id ORDER BY selector)), ''),
-                    COALESCE((SELECT group_concat(selector, '|') FROM (
-                        SELECT selector FROM lcc_selector WHERE concept_id=c.concept_id
-                        UNION ALL
-                        SELECT start_code || '..' || end_code
-                        FROM lcc_range WHERE concept_id=c.concept_id
-                        ORDER BY selector
-                    )), ''),
-                    COALESCE((SELECT group_concat(label, '|') FROM (SELECT label FROM source_label WHERE concept_id=c.concept_id ORDER BY ordinal)), '')
-             FROM concept c ORDER BY c.rowid",
-        )
-        .expect("prepare taxonomy export");
-    let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?))).expect("query taxonomy concepts");
-    rows.map(|row| {
-        let row = row.expect("read taxonomy concept");
-        UnifiedConceptSnapshotRow {
-            concept_id: row.0,
-            preferred_label: row.1,
-            parent_ids: row.2,
-            bisac_codes: row.3,
-            ddc_codes: row.4,
-            lcc_codes: row.5.split('|').map(selector_format::canonical_lcc_selector).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>().join("|"),
-            source_labels: row.6,
-        }
-    })
-    .collect()
-}
-
-fn revision_id(concepts: &[UnifiedConceptSnapshotRow]) -> String {
-    let mut fingerprint = String::new();
-    for concept in concepts {
-        write!(&mut fingerprint, "{}\u{1f}{}\u{1f}{}", concept.concept_id, concept.preferred_label, concept.parent_ids).unwrap();
-        for (system, selectors) in [("bisac", &concept.bisac_codes), ("ddc", &concept.ddc_codes), ("lcc", &concept.lcc_codes)] {
-            if !selectors.is_empty() {
-                write!(&mut fingerprint, "\u{1f}{system}={selectors}").unwrap();
-            }
-        }
-        writeln!(&mut fingerprint, "\u{1f}{}", concept.source_labels).unwrap();
-    }
-    const NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([0xa7, 0xed, 0x9f, 0x7d, 0xa1, 0x2a, 0x59, 0xf5, 0xb5, 0x3d, 0x67, 0x4d, 0xe0, 0x80, 0x7c, 0x66]);
-    const UNIFIED_VERSION: &str = "9";
-    format!("{UNIFIED_VERSION}:{}", uuid::Uuid::new_v5(&NAMESPACE, fingerprint.as_bytes()))
+    // Route IDs identify occurrences, so a concept can retain several parents.
+    client_connection.execute_batch(include_str!("src/route_storage.sql")).expect("compile curated navigation routes");
+    range_storage::upgrade(&client_connection).expect("compile structured LCC ranges");
+    label_storage::upgrade(&client_connection).expect("compile preferred-name lookup keys");
+    let concepts = taxonomy_reader::read_unified_taxonomy_connection(&client_connection, "build-time taxonomy").expect("read bundled taxonomy");
+    let matcher = runtime::build_runtime(concepts, false).expect("compile bundled taxonomy matcher");
+    let encoded = bincode::serde::encode_to_vec(&matcher, bincode::config::standard()).expect("encode taxonomy matcher");
+    std::fs::write(output_dir.join("unified-taxonomy-matcher.bin"), encoded).expect("write taxonomy matcher");
+    std::fs::write(output_dir.join("unified-taxonomy-revision-id.txt"), &matcher.revision_id).expect("write taxonomy revision");
 }
 
 fn build_client_database(authority_path: &PathBuf, client_path: &PathBuf) {

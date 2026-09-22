@@ -1,1 +1,0 @@
-SELECT EXISTS(SELECT 1 FROM download_requests WHERE target_kind='book' AND target_key=?1 AND origin='user_initiated')

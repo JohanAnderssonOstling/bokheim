@@ -12,7 +12,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use bokheim_backend::LibraryClient;
+use library_backend::LibraryClient;
 use sync_common::{ContentHash, DirId};
 
 /// One reversal. Each names the operation that undoes a single change.

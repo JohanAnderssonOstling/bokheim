@@ -2,6 +2,23 @@ use super::compact_whitespace;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::OnceLock;
 
+// TEMP round-3 probe: per-branch hit counters inside the enumeration suffix
+// parser. Pure observation (Relaxed loads/stores); removed before finishing.
+macro_rules! enum_probes {
+    ($($name:ident),*) => {
+        $(static $name: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);)*
+        pub fn lcc_enumeration_branch_hits() -> Vec<(&'static str, u64)> {
+            vec![ $((stringify!($name), $name.load(std::sync::atomic::Ordering::Relaxed))),* ]
+        }
+    };
+}
+enum_probes!(
+    NUM_BD_GUARD, NUM_BRACKET, NUM_PLAIN, NUM_ALPHA, NUM_ROMAN, NUM_PAREN, NUM_PERIOD,
+    SUF_BRACKET, SUF_HU_NUMFIRST, SUF_ORDINAL, SUF_COMMENTARY, SUF_BARE, SUF_SUPPL_INDEX,
+    SUF_INDEX_YEAR, SUF_SUPPL_CAPTION, SUF_NEWSERIES, SUF_NUMBERED, SUF_COMMA_REP,
+    SUF_RANGE_SEP, SUF_HU_TRAIL, SUF_ETC, SUF_YEAR, SUF_CHRONO_SPLIT
+);
+
 #[derive(Default)]
 struct LccOutline {
     ranges_by_main: HashMap<char, Vec<LccRange>>,
@@ -44,367 +61,49 @@ fn outline() -> &'static LccOutline {
 }
 
 pub(super) fn outline_subclasses() -> BTreeSet<String> {
-    outline().ranges_by_main.values().flatten().flat_map(|r| [r.start_letters.clone(),r.end_letters.clone()]).collect()
-}
-
-// Imported preliminary calls may carry a schedule table reference. The
-// explicit preceding class/span is usable without constructing a finer call.
-fn registered_table_base(value: &str) -> Option<&str> {
-    let tail = value.strip_suffix('+').unwrap_or(value).strip_suffix(')')?;
-    let (base, table) = tail.rsplit_once(" (")?;
-    if base.contains(['(', ')']) || base.starts_with('K') { return None; }
-    static TABLES: OnceLock<BTreeSet<&'static str>> = OnceLock::new();
-    let tables = TABLES.get_or_init(|| include_str!("../data/lcc-table-identifiers.txt").lines().collect());
-    let mut family = None;
-    for reference in table.split([',', ';']).map(str::trim) {
-        if reference.as_bytes().first().is_some_and(u8::is_ascii_digit) {
-            let expanded = format!("{}{reference}", family?);
-            if !tables.contains(expanded.as_str()) { return None; }
-        } else {
-            if !tables.contains(reference) { return None; }
-            let number = reference.find(|c: char| c.is_ascii_digit())?;
-            family = Some(&reference[..number]);
-        }
-    }
-    Some(base)
-}
-
-pub(super) fn schedule_table_base(value: &str) -> Option<&str> {
-    let base = registered_table_base(value)?;
-    canonical_lcc_notation(base)?;
-    Some(base)
-}
-
-// Historical DS7/VII biography displays are not aliases of DS-DX7,
-// which is a different current table. Accept only an explicitly stated
-// G320 biography operation within a published first-Cutter biography scope.
-fn historical_biography_operation(endpoint: &LccEndpoint, table: &str, lower: &str, upper: &str) -> bool {
-    if !matches!(table, "DS7" | "DSVII" | "DS-DXVII" | "VII" | "TABLE VII")
-        || !matches!((lower, upper), ("A2", "A2") | ("A25", "A25") | ("A3", "A3") | ("A4", "A4") | ("A5", "A5") | ("A6", "Z"))
-        || endpoint.letters != "DS" { return false; }
-    let cutters = super::runtime::cutter_components(&endpoint.remainder);
-    if cutters.len() != 1 || cutters[0].0.len() != 1 { return false; }
-    static SCOPES: OnceLock<Vec<(LccEndpoint, LccEndpoint)>> = OnceLock::new();
-    SCOPES.get_or_init(|| include_str!("../data/lcc-ds-biography-scopes.tsv").lines().map(|line| {
-        let (a, b) = line.split_once('\t').expect("biography scope columns");
-        (lcc_endpoint(a, false).expect("biography start"), lcc_endpoint(b, true).expect("biography end"))
-    }).collect()).iter().any(|(a, b)| {
-        endpoint.number == a.number && endpoint.number == b.number
-            && !super::runtime::compare_cutter_endpoint(&cutters, &super::runtime::cutter_components(&a.remainder)).is_lt()
-            && !super::runtime::compare_cutter_endpoint(&cutters, &super::runtime::cutter_components(&b.remainder)).is_gt()
-    })
-}
-
-// A qualified table note can state the entire relative Cutter interval.
-// Apply only documented intervals to an already complete Cutter prefix;
-// .x represents that prefix, not an additional invented Cutter.
-fn qualified_table_parts(value: &str) -> Option<(LccEndpoint, &str, &str)> {
-    let tail = value.strip_suffix('+').unwrap_or(value).strip_suffix(')')?;
-    let (base, note) = tail.rsplit_once(" (")?;
-    // Imports may place the same relative interval before the table name:
-    // AUTHOR.xZ5-Z999 (P-PZ40). Both forms use the exact documented registry.
-    let (base, table, relative) = if let Some((table, relative)) = note.split_once(':') {
-        (base, table, relative)
-    } else {
-        let at = base.find(".X")?;
-        (base[..at].trim_end(), note, &base[at..])
-    };
-    if base.starts_with('K') || base.contains(['(', ')', '-', '[', ']']) { return None; }
-    let relative = relative.trim();
-    let (lower, upper) = relative.split_once('-').unwrap_or((relative, relative));
-    let lower = lower.trim().strip_prefix(".X")?;
-    let upper = upper.trim();
-    let upper = upper.strip_prefix(".X").unwrap_or_else(|| upper.strip_prefix('.').unwrap_or(upper));
-    static SPANS: OnceLock<BTreeSet<&'static str>> = OnceLock::new();
-    let spans = SPANS.get_or_init(|| include_str!("../data/lcc-relative-table-spans.tsv").lines()
-        .chain(include_str!("../data/lcc-numeric-relative-spans.tsv").lines()).collect());
-    let endpoint = lcc_endpoint(base, false)?;
-    if !spans.contains(format!("{}\t.X{lower}\t.X{upper}", table.trim()).as_str())
-        && !historical_biography_operation(&endpoint, table.trim(), lower, upper) { return None; }
-    Some((endpoint, lower, upper))
-}
-
-pub(super) fn qualified_table_span(value: &str) -> Option<String> {
-    let (endpoint, lower, upper) = qualified_table_parts(value)?;
-    let cutters = super::runtime::cutter_components(&endpoint.remainder);
-    if cutters.is_empty() || cutters.iter().any(|(letters, digits)| letters.len() != 1 || digits.is_empty()) { return None; }
-    // A numeric relative prefix continues the last complete Cutter's
-    // digits; an alphabetic relative prefix starts another Cutter. Keep
-    // the original digits, including trailing zeroes, during construction.
-    let separator = |suffix: &str| if suffix.as_bytes().first().is_some_and(u8::is_ascii_digit) { "" } else { "." };
-    canonical_printed_range(&format!("{}{}{lower}-{}{}{upper}", endpoint.code, separator(lower), endpoint.code, separator(upper)))
-}
-
-// A documented table operation cannot complete a missing author Cutter.
-// Retain only the stated filing family and require coverage of that whole
-// family; appending the table suffix to a lone initial would invent a call.
-pub(super) fn qualified_table_family(value: &str) -> Option<String> {
-    let (endpoint, _, _) = qualified_table_parts(value)?;
-    let mut cutters = super::runtime::cutter_components(&endpoint.remainder);
-    let (initial, digits) = cutters.pop()?;
-    if initial.len() != 1 || !digits.is_empty()
-        || cutters.iter().any(|(letters, digits)| letters.len() != 1 || digits.is_empty()) { return None; }
-    Some(endpoint.code)
-}
-
-fn reference_scopes() -> &'static HashMap<&'static str, Vec<&'static str>> {
-    static SCOPES: OnceLock<HashMap<&'static str, Vec<&'static str>>> = OnceLock::new();
-    SCOPES.get_or_init(|| {
-        let mut map: HashMap<&str, Vec<&str>> = HashMap::new();
-        for line in include_str!("../data/lcc-reference-scopes.tsv").lines() {
-            let (start, end) = line.split_once('\t').expect("reference scope TSV");
-            map.entry(start).or_default().push(end);
-        }
-        map
-    })
-}
-
-// Plus-marked preliminary numbers retain every documented scope beginning
-// at that number. A single-number entry must not hide a broader range.
-pub(super) fn reference_plus_span(value: &str) -> Option<(LccEndpoint, LccEndpoint)> {
-    let value = if let Some(rest) = value.strip_prefix("IN PROCESS ") {
-        rest.strip_prefix('[')?.strip_suffix(']')?
-    } else { value };
-    let base = value.strip_suffix('+')?.trim_end();
-    if base.starts_with('K') || base.contains(['+', '-', '(', ')', '[', ']']) { return None; }
-    let start = lcc_endpoint(base, false)?;
-    let scopes = reference_scopes();
-    let mut upper: Option<LccEndpoint> = None;
-    for code in scopes.get(start.code.as_str())? {
-        let end = lcc_endpoint(code, true)?;
-        let order = compare_lcc_key(&start.letters, start.number, &end.letters, end.number);
-        if order.is_gt() || (order.is_eq() && super::runtime::compare_cutter_endpoint(
-            &super::runtime::cutter_components(&start.remainder),
-            &super::runtime::cutter_components(&end.remainder)).is_gt()) { return None; }
-        if upper.as_ref().is_none_or(|upper| compare_lcc_key(&upper.letters, upper.number, &end.letters, end.number)
-            .then_with(|| super::runtime::compare_upper_cutters(
-                &super::runtime::cutter_components(&upper.remainder),
-                &super::runtime::cutter_components(&end.remainder))).is_lt()) { upper = Some(end); }
-    }
-    Some((start, upper?))
-}
-
-// In table-annotated Cutter ranges, a shortened upper Cutter retains the
-// lower endpoint's class and preceding Cutters: B33Z5-Z999 means B33.Z5
-// through B33.Z999. Repeated preceding Cutters and final alphabetic bounds
-// retain that same scope. Never treat Z999 as a separate bibliography class.
-pub(super) fn table_cutter_span(value: &str) -> Option<String> {
-    let base = registered_table_base(value)?;
-    let base = if let Some((stem, year)) = base.rsplit_once(' ') {
-        if year.len() == 4 && year.bytes().all(|b| b.is_ascii_digit()) { stem.trim_end() } else { base }
-    } else { base };
-    let (lower, upper) = base.split_once('-')?;
-    let endpoint = lcc_endpoint(lower, false)?;
-    let mut cutters = super::runtime::cutter_components(&endpoint.remainder);
-    let (last_letter, _) = cutters.pop()?;
-    if last_letter.len() != 1 || cutters.iter().any(|(letters, digits)| letters.len() != 1 || digits.is_empty()) { return None; }
-    let call = parse_lcc_call(lower)?;
-    let class = &lower[..lower.len() - call.remainder.len()];
-    let upper = upper.strip_prefix('.').unwrap_or(upper);
-    // Simple A6-Z already has a stable path through ordinary range parsing.
-    if cutters.is_empty() && upper.len() == 1 { return None; }
-    let upper_endpoint = lcc_endpoint(&format!("{class}.{upper}"), true)?;
-    let mut upper_cutters = super::runtime::cutter_components(&upper_endpoint.remainder);
-    let (upper_letter, upper_digits) = upper_cutters.pop()?;
-    if upper_letter.len() != 1 || (upper_letter != "Z" && upper_letter != last_letter) { return None; }
-    // An upper endpoint may repeat all preceding Cutters (S5A6-S5Z),
-    // or omit them (R36A6-Z). Partial or different prefixes are ambiguous.
-    if !upper_cutters.is_empty() && upper_cutters != cutters { return None; }
-    let prefix = cutters.iter().map(|(letters, digits)| format!(".{letters}{digits}")).collect::<String>();
-    canonical_printed_range(&format!("{}-{class}{prefix}.{upper_letter}{upper_digits}", endpoint.code))
-}
-
-// Numeric relative suffixes are validated here without appending their
-// digits to a class number. The caller retains the whole outer Cutter span.
-fn registered_nested_operation(table: &str, relative: &str) -> bool {
-    let (lower, upper) = relative.split_once('-').unwrap_or((relative, relative));
-    let upper = upper.strip_prefix(".X").unwrap_or_else(|| upper.strip_prefix('.').unwrap_or(upper));
-    static SPANS: OnceLock<BTreeSet<&'static str>> = OnceLock::new();
-    let spans = SPANS.get_or_init(|| include_str!("../data/lcc-relative-table-spans.tsv").lines()
-        .chain(include_str!("../data/lcc-numeric-relative-spans.tsv").lines()).collect());
-    if spans.contains(format!("{table}\t{lower}\t.X{upper}").as_str()) { return true; }
-    // A preliminary final initial still leaves the full documented inner
-    // A-Z range unresolved. It must not replace that range with a point.
-    let Some(at) = upper.rfind(|c: char| c.is_ascii_uppercase()) else { return false; };
-    let (bound, initial) = upper.split_at(at);
-    if !bound.ends_with('Z') || !initial.as_bytes()[1..].iter().all(u8::is_ascii_digit) { return false; }
-    let Some(lower) = lower.strip_prefix(".X") else { return false; };
-    let lower_initial = lower.bytes().find(u8::is_ascii_uppercase);
-    if lower_initial.is_none_or(|letter| initial.as_bytes()[0] < letter) { return false; }
-    spans.contains(format!("{table}\t.X{lower}\t.X{bound}").as_str())
-}
-
-// An explicit single-Cutter interval ending at Z already supplies its
-// complete upper family. Honor that exact documented interval even when
-// another, broader heading begins at the same lower endpoint.
-fn documented_closed_plus_span(value: &str) -> Option<String> {
-    let base = value.strip_suffix('+')?;
-    let (start, end) = lcc_span(base)?;
-    if start.letters.starts_with('K') || start.letters != end.letters
-        || start.number != end.number || end.remainder != ".Z"
-        || super::runtime::cutter_components(&start.remainder).len() != 1 { return None; }
-    if !reference_scopes().get(start.code.as_str())?.contains(&end.code.as_str()) { return None; }
-    canonical_printed_range(base)
-}
-
-// A preliminary initial retains the exact published outer
-// interval. Require the widest reference scope at its start, not a point
-// or an arbitrarily completed country/person Cutter.
-fn documented_preliminary_plus_span(value: &str) -> Option<String> {
-    let base = value.strip_suffix('+').unwrap_or(value);
-    if base.starts_with('K') || base.contains(['+', '(', ')', '[', ']']) { return None; }
-    let (lower, upper) = base.split_once('-')?;
-    let initial = upper.strip_prefix('.').unwrap_or(upper).strip_prefix('Z')?;
-    if initial.is_empty() && !value.ends_with('+') { return None; }
-    if !initial.is_empty() && (!initial.as_bytes()[0].is_ascii_uppercase()
-        || !initial.as_bytes()[1..].iter().all(u8::is_ascii_digit)) { return None; }
-    let start = lcc_endpoint(lower, false)?;
-    let cutters = super::runtime::cutter_components(&start.remainder);
-    if cutters.len() != 1 || cutters[0].0.len() != 1 || (!initial.is_empty() && initial.as_bytes()[0] < cutters[0].0.as_bytes()[0]) { return None; }
-    let (_, end) = reference_plus_span(&format!("{}+", start.code))?;
-    if end.code != format!("{}{}.Z", start.letters, start.number) { return None; }
-    canonical_printed_range(&format!("{}-{}", start.code, end.code))
-}
-
-// An unqualified .x position is usable only where the published outer
-// interval explicitly defines that position, inline or by a named table.
-fn documented_placeholder_span(value: &str) -> Option<String> {
-    if value.starts_with('K') { return None; }
-    let (stem, position) = value.strip_suffix('+').unwrap_or(value).rsplit_once(".X")?;
-    if !position.bytes().all(|b| b.is_ascii_digit()) { return None; }
-    let (lower, upper) = stem.trim_end().split_once('-')?;
-    let initial = upper.strip_prefix('.').unwrap_or(upper).strip_prefix('Z')?;
-    if !initial.is_empty() && (!initial.as_bytes()[0].is_ascii_uppercase()
-        || !initial.as_bytes()[1..].iter().all(u8::is_ascii_digit)) { return None; }
-    let start = lcc_endpoint(lower, false)?;
-    let cutters = super::runtime::cutter_components(&start.remainder);
-    if cutters.len() != 1 || cutters[0].0.len() != 1 || (!initial.is_empty() && initial.as_bytes()[0] < cutters[0].0.as_bytes()[0]) { return None; }
-    let end = format!("{}{}.Z", start.letters, start.number);
-    static POSITIONS: OnceLock<BTreeSet<String>> = OnceLock::new();
-    let positions = POSITIONS.get_or_init(|| include_str!("../data/lcc-placeholder-positions.tsv").lines().map(|line| {
-        let parts = line.split('\t').collect::<Vec<_>>();
-        let a = lcc_endpoint(parts[0], false).expect("placeholder scope start");
-        let b = lcc_endpoint(parts[1], true).expect("placeholder scope end");
-        format!("{}\t{}\t{}", a.code, b.code, parts[2])
-    }).collect());
-    if !positions.contains(&format!("{}\t{end}\t.X{position}", start.code)) { return None; }
-    canonical_printed_range(&format!("{}-{end}", start.code))
-}
-
-// These unmarked preliminary forms occur verbatim in linked MARC 050 fields.
-// Retain the complete explicit range; the trailing initial cannot supply a
-// finished language/author Cutter. Only source-reviewed spellings are accepted.
-fn reviewed_preliminary_span(value: &str) -> Option<String> {
-    static SPANS: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
-    let spans = SPANS.get_or_init(|| include_str!("../data/lcc-reviewed-preliminary-spans.tsv")
-        .lines().map(|line| line.split_once('\t').expect("reviewed preliminary span pair")).collect());
-    canonical_printed_range(spans.get(value)?)
-}
-
-// A preliminary construction states a Cutter span followed by an
-// initial (optionally numbered) and sometimes a variable .x position. Keep
-// the full stated span; do not invent a completed geographic/author Cutter.
-pub(super) fn variable_cutter_span(value: &str) -> Option<String> {
-    if let Some(span) = reviewed_preliminary_span(value) { return Some(span); }
-    let Some(base) = registered_table_base(value) else {
-        return documented_placeholder_span(value).or_else(|| documented_closed_plus_span(value))
-            .or_else(|| documented_preliminary_plus_span(value));
-    };
-    // Table arrangements may end with a publication year. The year does
-    // not narrow the stated subject span; validate it before detaching it.
-    let base = if let Some((stem, year)) = base.rsplit_once(' ') {
-        if year.len() == 4 && year.bytes().all(|b| b.is_ascii_digit()) {
-            stem.trim_end()
-        } else { base }
-    } else { base };
-    let mut nested_operation = false;
-    let stem = if let Some((stem, position)) = base.rsplit_once(".X") {
-        if position.bytes().all(|b| b.is_ascii_digit()) { stem } else {
-            // A documented relative operation on an unresolved outer Cutter
-            // cannot complete it. Keep the whole outer interval, after
-            // validating every character of the nested operation.
-            let table = value.strip_suffix('+').unwrap_or(value).strip_suffix(')')?.rsplit_once(" (")?.1;
-            nested_operation = true;
-            base.match_indices(".X").find_map(|(at, _)| {
-                registered_nested_operation(table, &base[at..]).then_some(base[..at].trim_end())
-            })?
-        }
-    } else { base };
-    if nested_operation {
-        if let Some((a, b)) = lcc_span(stem) {
-            if a.letters == b.letters && a.number == b.number && !a.remainder.is_empty() && !b.remainder.is_empty() {
-                return canonical_printed_range(stem);
-            }
-        }
-    }
-    let (lower, upper) = stem.split_once('-')?;
-    let upper = upper.strip_prefix('.').unwrap_or(upper);
-    let initial_at = upper.rfind(|c: char| c.is_ascii_uppercase())?;
-    let initial_cutter = &upper[initial_at..];
-    let bound = &upper[..initial_at];
-    let z_at = bound.rfind('Z')?;
-    let upper_digits = &bound[z_at + 1..];
-    if !upper_digits.bytes().all(|b| b.is_ascii_digit()) { return None; }
-    let repeated_prefix = bound[..z_at].trim_end_matches('.');
-    let initial = *initial_cutter.as_bytes().first()?;
-    if !initial_cutter.as_bytes()[1..].iter().all(u8::is_ascii_digit) { return None; }
-    let endpoint = lcc_endpoint(lower, false)?;
-    let mut cutters = super::runtime::cutter_components(&endpoint.remainder);
-    let (letter, lower_digits) = cutters.pop()?;
-    if letter.len() != 1 || initial < letter.as_bytes()[0]
-        || cutters.iter().any(|(letters, digits)| letters.len() != 1 || digits.is_empty()) { return None; }
-    // A numbered upper bound is usable only when the explicitly named
-    // table defines this exact relative interval. Keep Z458 as Z458;
-    // a following preliminary initial cannot turn it into the whole Z family.
-    if !upper_digits.is_empty() {
-        let table = value.strip_suffix('+').unwrap_or(value).strip_suffix(')')?.rsplit_once(" (")?.1;
-        if !registered_nested_operation(table, &format!(".X{letter}{lower_digits}-.XZ{upper_digits}")) { return None; }
-    }
-    // Inherit every completed preceding Cutter when expanding the upper
-    // endpoint. B432A-ZE states B432.A through B432.Z, not class Z.
-    let call = parse_lcc_call(lower)?;
-    let class = &lower[..lower.len() - call.remainder.len()];
-    let prefix = cutters.iter().map(|(letters, digits)| format!(".{letters}{digits}")).collect::<String>();
-    if !repeated_prefix.is_empty() {
-        let repeated = lcc_endpoint(&format!("{class}.{repeated_prefix}"), false)?;
-        if super::runtime::cutter_components(&repeated.remainder) != cutters { return None; }
-    }
-    canonical_printed_range(&format!("{}-{class}{prefix}.Z{upper_digits}", endpoint.code))
+    outline().ranges_by_main.values().flatten().flat_map(|r| [r.start_letters.clone(), r.end_letters.clone()]).collect()
 }
 
 // Imported fields concatenate complete calls and documented outline spans.
 // Consume the entire input and require explicit numeric/Cutter boundaries;
 // ordinary adjacent Cutters must not turn a single book into several subjects.
 fn joined_lcc_codes(value: &str) -> Option<Vec<String>> {
-    if value.len() > 512 || !value.is_ascii() { return None; }
+    if value.len() > 512 || !value.is_ascii() {
+        return None;
+    }
     // A second multi-letter class prefix distinguishes joined calls from
     // ordinary single-letter item Cutters. Avoid work on ordinary shelfmarks.
     if !value.contains('-') {
         let bytes = value.as_bytes();
-        let multi_letter = bytes.windows(3).skip(1)
-            .any(|w| w[0].is_ascii_alphabetic() && w[1].is_ascii_alphabetic() && w[2].is_ascii_digit());
+        let multi_letter = bytes.windows(3).skip(1).any(|w| w[0].is_ascii_alphabetic() && w[1].is_ascii_alphabetic() && w[2].is_ascii_digit());
         // A single-letter class with its own numeric decimal is also
         // unambiguous here (RC466.8R726.7). A dotted item Cutter is not.
         let single_letter_decimal = bytes.iter().enumerate().skip(1).any(|(at, b)| {
-            if !b.is_ascii_alphabetic() || !bytes[at - 1].is_ascii_digit() { return false; }
+            if !b.is_ascii_alphabetic() || !bytes[at - 1].is_ascii_digit() {
+                return false;
+            }
             let digits = bytes[at + 1..].iter().take_while(|b| b.is_ascii_digit()).count();
             let end = at + 1 + digits;
-            digits > 0 && bytes.get(end) == Some(&b'.')
-                && bytes.get(end + 1).is_some_and(u8::is_ascii_digit)
+            digits > 0 && bytes.get(end) == Some(&b'.') && bytes.get(end + 1).is_some_and(u8::is_ascii_digit)
         });
-        if !multi_letter && (!single_letter_decimal || period_year_call_base(value).is_some()) { return None; }
+        if !multi_letter && (!single_letter_decimal || period_year_call_base(value).is_some()) {
+            return None;
+        }
     }
     let value = value.trim().to_ascii_uppercase();
-    if value.bytes().any(|b| !(b.is_ascii_alphanumeric() || b == b'.' || b == b'-')) { return None; }
+    if value.bytes().any(|b| !(b.is_ascii_alphanumeric() || b == b'.' || b == b'-')) {
+        return None;
+    }
     static SPANS: OnceLock<BTreeSet<String>> = OnceLock::new();
     static CLASSES: OnceLock<BTreeSet<String>> = OnceLock::new();
     let spans = SPANS.get_or_init(|| {
         // Detailed LCC reference: HF4999.2-HF6182 is Business; the
         // abbreviated outline starts at HF5001 and omits this lower bound.
-        let mut spans = BTreeSet::from(["R-RZ".to_owned(), "D1-DX301".to_owned(),
-            "HF4999.2-HF6182".to_owned(), "HF4999.2-6182".to_owned()]);
+        let mut spans = BTreeSet::from(["R-RZ".to_owned(), "D1-DX301".to_owned(), "HF4999.2-HF6182".to_owned(), "HF4999.2-6182".to_owned()]);
         for range in outline().ranges_by_main.values().flatten() {
-            if range.start_letters == range.end_letters && range.start_number == range.end_number { continue; }
+            if range.start_letters == range.end_letters && range.start_number == range.end_number {
+                continue;
+            }
             spans.insert(format!("{}{}-{}{}", range.start_letters, range.start_number, range.end_letters, range.end_number));
             if range.start_letters == range.end_letters {
                 spans.insert(format!("{}{}-{}", range.start_letters, range.start_number, range.end_number));
@@ -427,15 +126,16 @@ fn joined_lcc_codes(value: &str) -> Option<Vec<String>> {
     let mut range_keys = BTreeSet::new();
     let mut repeated_range = false;
     while !rest.is_empty() {
-        if parts.len() == 32 { return None; }
+        if parts.len() == 32 {
+            return None;
+        }
         // Probe input boundaries instead of scanning every outline span.
-        let mut anchors = (1..=rest.len()).filter(|&end|
-            rest.as_bytes().get(end).is_none_or(u8::is_ascii_alphabetic)
-                && (spans.contains(&rest[..end]) || canonical_printed_range(&rest[..end])
-                    .is_some_and(|key| spans.contains(&key))));
+        let mut anchors = (1..=rest.len()).filter(|&end| rest.as_bytes().get(end).is_none_or(u8::is_ascii_alphabetic) && (spans.contains(&rest[..end]) || canonical_printed_range(&rest[..end]).is_some_and(|key| spans.contains(&key))));
         if let Some(end) = anchors.next() {
             let span = &rest[..end];
-            if anchors.next().is_some() { return None; }
+            if anchors.next().is_some() {
+                return None;
+            }
             let key = canonical_printed_range(span)?;
             repeated_range |= !range_keys.insert(key);
             parts.push(span.to_owned());
@@ -444,49 +144,86 @@ fn joined_lcc_codes(value: &str) -> Option<Vec<String>> {
             continue;
         }
         let letters = rest.bytes().take_while(u8::is_ascii_alphabetic).count();
-        if !classes.contains(&rest[..letters]) { return None; }
+        if !classes.contains(&rest[..letters]) {
+            return None;
+        }
         // An undotted single-letter suffix can be an item Cutter. Do not
         // reinterpret it as a second classification without a separator.
         let mut end = letters;
-        while rest.as_bytes().get(end).is_some_and(u8::is_ascii_digit) { end += 1; }
-        if end == letters { return None; }
+        while rest.as_bytes().get(end).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        }
+        if end == letters {
+            return None;
+        }
         let decimal_class = rest.as_bytes().get(end) == Some(&b'.') && rest.as_bytes().get(end + 1).is_some_and(u8::is_ascii_digit);
         if decimal_class {
             end += 1;
-            while rest.as_bytes().get(end).is_some_and(u8::is_ascii_digit) { end += 1; }
+            while rest.as_bytes().get(end).is_some_and(u8::is_ascii_digit) {
+                end += 1;
+            }
         }
-        if letters == 1 && !parts.is_empty() && !decimal_class { return None; }
+        if letters == 1 && !parts.is_empty() && !decimal_class {
+            return None;
+        }
         // Only explicitly dotted, single-letter numeric Cutters are safe here.
         while rest.as_bytes().get(end) == Some(&b'.') && rest.as_bytes().get(end + 1).is_some_and(u8::is_ascii_alphabetic) {
             end += 2;
             let digits = end;
-            while rest.as_bytes().get(end).is_some_and(u8::is_ascii_digit) { end += 1; }
-            if end == digits { return None; }
+            while rest.as_bytes().get(end).is_some_and(u8::is_ascii_digit) {
+                end += 1;
+            }
+            if end == digits {
+                return None;
+            }
         }
         parts.push(rest[..end].to_owned());
         rest = &rest[end..];
     }
     // Exact repetition already has its own interpretation. A repeated range
     // plus an extra fragment may be a cut-off copy, not a new classification.
-    if parts.len() < 2 { return None; }
+    if parts.len() < 2 {
+        return None;
+    }
     // Original editions retain complete separate components proving these
     // fields end inside a classification. See the source-record evidence in
     // data/reports/20260907-confirmed-clipped-joined-components.json.
     // Length alone cannot establish truncation for other imported fields.
-    if matches!(value.as_str(), "T385TA1637-1638TK788" | "QB1-991QB460-466QB98"
-        | "QA315-316QA402.3QA40" | "TJ1075-1081TA467TA41" | "QC173.45-173.458TA40"
-        | "SB123-123.5S494.5.B5" | "Q334-342TA329-348TA6" | "QC138-168.86QA930QC1"
-        | "QA639.5-640.7QA640.7" | "QC173.45-173.458TA41" | "QA76.9.C66QA76.76.A6") { return None; }
-    let classes: BTreeSet<_> = parts.iter().map(|part| {
-        let n = part.bytes().take_while(u8::is_ascii_alphabetic).count();
-        &part[..n]
-    }).collect();
-    if repeated_range && classes.len() == 1 { return None; }
+    if matches!(
+        value.as_str(),
+        "T385TA1637-1638TK788"
+            | "QB1-991QB460-466QB98"
+            | "QA315-316QA402.3QA40"
+            | "TJ1075-1081TA467TA41"
+            | "QC173.45-173.458TA40"
+            | "SB123-123.5S494.5.B5"
+            | "Q334-342TA329-348TA6"
+            | "QC138-168.86QA930QC1"
+            | "QA639.5-640.7QA640.7"
+            | "QC173.45-173.458TA41"
+            | "QA76.9.C66QA76.76.A6"
+    ) {
+        return None;
+    }
+    let classes: BTreeSet<_> = parts
+        .iter()
+        .map(|part| {
+            let n = part.bytes().take_while(u8::is_ascii_alphabetic).count();
+            &part[..n]
+        })
+        .collect();
+    if repeated_range && classes.len() == 1 {
+        return None;
+    }
     if !anchored {
         // Require a decimal class or a dotted numeric Cutter in every suffix
         // call, rather than treating possible undotted item marks as classes.
-        if parts.iter().skip(1).any(|part| !part.contains('.')) { return None; }
-        if parts.iter().all(|part| part == &parts[0]) { return None; }
+        if parts.iter().skip(1).any(|part| !part.contains('.')) {
+            return None;
+        }
+        if parts.iter().all(|part| part == &parts[0]) {
+            return None;
+        }
     }
     Some(parts)
 }
@@ -494,26 +231,26 @@ fn joined_lcc_codes(value: &str) -> Option<Vec<String>> {
 // Explicit semicolons separate complete classifications. Every component
 // must validate; punctuation inside table notes must not become a code list.
 pub(super) fn lcc_code_list(value: &str) -> Option<Vec<String>> {
-    if !value.contains(';') { return joined_lcc_codes(value); }
+    if !value.contains(';') {
+        return joined_lcc_codes(value);
+    }
     let value = value.trim();
-    let value = value.strip_prefix('[').and_then(|v| v.strip_suffix(']'))
-        .filter(|v| !v.contains(['[', ']'])).unwrap_or(value);
+    let value = value.strip_prefix('[').and_then(|v| v.strip_suffix(']')).filter(|v| !v.contains(['[', ']'])).unwrap_or(value);
     static SUBCLASSES: OnceLock<BTreeSet<String>> = OnceLock::new();
     let mut codes = Vec::new();
     for part in value.split(';') {
         let canonical = canonical_lcc_notation(part.trim())?;
-        let unwrapped = display_bracket_base(&canonical).unwrap_or(&canonical);
-        let marc = marc_subfield_call_base(unwrapped);
-        let call = parse_lcc_call(marc.as_deref().unwrap_or(unwrapped))?;
-        if call.letters.starts_with('K') || !SUBCLASSES.get_or_init(outline_subclasses).contains(&call.letters) { return None; }
+        let call = parse_lcc_call(&canonical)?;
+        if call.letters.starts_with('K') || !SUBCLASSES.get_or_init(outline_subclasses).contains(&call.letters) {
+            return None;
+        }
         // An unmarked single-letter integer such as B43 can be an item
         // Cutter, not a second class (BF175; B43). Require evidence that
         // distinguishes it: a class decimal, $a marker, or alternate brackets.
-        let base = marc.as_deref().unwrap_or(unwrapped);
-        let number_prefix = &base[..base.len() - call.remainder.len()];
-        if !codes.is_empty() && call.letters.len() == 1 && !number_prefix.contains('.')
-            && !["$A", "ǂA", "‡A"].iter().any(|marker| canonical.starts_with(marker))
-            && !canonical.starts_with('[') { return None; }
+        let number_prefix = &canonical[..canonical.len() - call.remainder.len()];
+        if !codes.is_empty() && call.letters.len() == 1 && !number_prefix.contains('.') && !["$A", "ǂA", "‡A"].iter().any(|marker| canonical.starts_with(marker)) && !canonical.starts_with('[') {
+            return None;
+        }
         codes.push(canonical);
     }
     (codes.len() > 1).then_some(codes)
@@ -528,50 +265,33 @@ pub fn lcc_subject_paths(value: &str) -> Vec<String> {
     lcc_subject_path(value).into_iter().collect()
 }
 
-// MARC 050 $a supplies the class and $b the item portion. Imported display
-// markers must not hide either portion or concatenate alternative $a fields.
-pub(super) fn marc_subfield_call_base(value: &str) -> Option<String> {
-    if !value.contains(['$', 'ǂ', '‡']) { return None; }
-    // OCLC documents these as equivalent displays of the MARC delimiter.
-    // Keep the original notation outside this temporary match base.
-    let normalized = value.replace(['ǂ', '‡'], "$");
-    let value = normalized.as_str();
-    let (value, explicit_class) = if let Some(base) = value.strip_prefix("$A") {
-        (base.trim_start(), true)
-    } else { (value, false) };
-    let (class, item) = if let Some((class, item)) = value.split_once("$B") {
-        (class.trim_end(), Some(item.trim()))
-    } else if explicit_class { (value, None) } else { return None; };
-    if class.contains(['$', '-']) { return None; }
-    let call = parse_lcc_call(class)?;
-    if !valid_lcc_remainder(call.remainder) && !valid_literature_work_mark(&call) { return None; }
-    let base = if let Some(item) = item {
-        if item.is_empty() || item.contains('$') { return None; }
-        format!("{class} {item}")
-    } else { class.to_owned() };
-    canonical_lcc_notation(&base)?;
-    Some(base)
-}
-
 // Repeating a numeric interval with and without its upper subclass letters
 // adds no information either. Every copy must be complete and equivalent.
 fn repeated_numeric_range_base(value: &str) -> Option<&str> {
     static SUBCLASSES: OnceLock<BTreeSet<String>> = OnceLock::new();
     let call = parse_lcc_call(value)?;
-    if call.letters.starts_with('K') { return None; }
+    if call.letters.starts_with('K') {
+        return None;
+    }
     for (length, _) in value.match_indices(&call.letters).skip(1) {
         let base = &value[..length];
-        let Some((start, end)) = lcc_span(base) else { continue; };
-        if start.letters != end.letters || !start.remainder.is_empty() || !end.remainder.is_empty()
-            || !SUBCLASSES.get_or_init(outline_subclasses).contains(&start.letters) { continue; }
+        let Some((start, end)) = lcc_span(base) else {
+            continue;
+        };
+        if start.letters != end.letters || !start.remainder.is_empty() || !end.remainder.is_empty() || !SUBCLASSES.get_or_init(outline_subclasses).contains(&start.letters) {
+            continue;
+        }
         let full = format!("{}-{}", start.code, end.code);
         let short = format!("{}-{}", start.code, end.code.strip_prefix(&end.letters)?);
         let mut rest = value;
         let mut copies = 0;
         while let Some(tail) = rest.strip_prefix(&full).or_else(|| rest.strip_prefix(&short)) {
-            rest = tail;copies += 1;
+            rest = tail;
+            copies += 1;
         }
-        if rest.is_empty() && copies > 1 { return Some(base); }
+        if rest.is_empty() && copies > 1 {
+            return Some(base);
+        }
     }
     None
 }
@@ -580,23 +300,33 @@ fn repeated_numeric_range_base(value: &str) -> Option<&str> {
 // copies of an independently valid class/Cutter or span with known subclasses;
 // concatenated different codes and truncated copies are not repetitions.
 pub(super) fn repeated_lcc_base(value: &str) -> Option<&str> {
-    if let Some(base) = repeated_numeric_range_base(value) { return Some(base); }
+    if let Some(base) = repeated_numeric_range_base(value) {
+        return Some(base);
+    }
     let call = parse_lcc_call(value)?;
-    if call.letters.starts_with('K') { return None; }
+    if call.letters.starts_with('K') {
+        return None;
+    }
     static SUBCLASSES: OnceLock<BTreeSet<String>> = OnceLock::new();
     for (length, _) in value.match_indices(&call.letters).skip(1) {
-        if length > value.len() / 2 { break; }
-        if value.len() % length != 0 || !value.as_bytes().chunks(length).all(|part| part == &value.as_bytes()[..length]) { continue; }
+        if length > value.len() / 2 {
+            break;
+        }
+        if value.len() % length != 0 || !value.as_bytes().chunks(length).all(|part| part == &value.as_bytes()[..length]) {
+            continue;
+        }
         let base = &value[..length];
         let known = SUBCLASSES.get_or_init(outline_subclasses);
         let valid = |endpoint: &LccEndpoint, allow_initial: bool| {
-            known.contains(&endpoint.letters)
-                && super::runtime::cutter_components(&endpoint.remainder).iter()
-                    .all(|(letters, digits)| letters.len() == 1 && (allow_initial || !digits.is_empty()))
+            known.contains(&endpoint.letters) && super::runtime::cutter_components(&endpoint.remainder).iter().all(|(letters, digits)| letters.len() == 1 && (allow_initial || !digits.is_empty()))
         };
         if base.contains('-') {
-            if lcc_span(base).is_some_and(|(start, end)| valid(&start, true) && valid(&end, true)) { return Some(base); }
-        } else if lcc_endpoint(base, false).is_some_and(|endpoint| valid(&endpoint, false)) { return Some(base); }
+            if lcc_span(base).is_some_and(|(start, end)| valid(&start, true) && valid(&end, true)) {
+                return Some(base);
+            }
+        } else if lcc_endpoint(base, false).is_some_and(|endpoint| valid(&endpoint, false)) {
+            return Some(base);
+        }
     }
     None
 }
@@ -606,151 +336,78 @@ pub(super) fn repeated_lcc_base(value: &str) -> Option<&str> {
 // completed shelf number or permission to discard an arbitrary remainder.
 pub(super) fn terminal_slash_base(value: &str) -> Option<&str> {
     let base = value.strip_suffix('/')?.trim_end();
-    if base.starts_with('K') || base.contains(['/', '-', '(', ')', '[', ']']) { return None; }
+    if base.starts_with('K') || base.contains(['/', '-', '(', ')', '[', ']']) {
+        return None;
+    }
     let call = parse_lcc_call(base)?;
     let mut rest = call.remainder;
     while !rest.is_empty() {
         rest = rest.trim_start();
-        if let Some(after) = rest.strip_prefix('.') { rest = after.trim_start(); }
+        if let Some(after) = rest.strip_prefix('.') {
+            rest = after.trim_start();
+        }
         let initial = *rest.as_bytes().first()?;
-        if !initial.is_ascii_uppercase() { return None; }
+        if !initial.is_ascii_uppercase() {
+            return None;
+        }
         rest = &rest[1..];
         let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-        if digits == 0 && !rest.is_empty() { return None; }
+        if digits == 0 && !rest.is_empty() {
+            return None;
+        }
         rest = &rest[digits..];
     }
     Some(base)
 }
 
-// The LC H outline names the whole Sociology subclass HM(1)-1281; the
-// parentheses flag obsolete numbers. This is a documented heading alias,
-// not a general permission to erase parentheses or fill retired intervals.
-pub(super) fn documented_outline_heading(value: &str) -> Option<&'static str> {
-    match value { "HM(1)-1281" => Some("HM"), _ => None }
-}
-
-// Unicode hyphens and their numeric character references still delimit a
-// whole range. The ampersand-less #8209; form occurs in imported data.
-// Decode only these separators, then validate both complete endpoints.
-fn encoded_hyphen_range(value: &str) -> Option<String> {
-    if !value.contains(['‐', '‑', '#']) { return None; }
-    let value = compact_whitespace(value).to_ascii_uppercase();
-    let decoded = value.replace(['‐', '‑'], "-")
-        .replace("&#8208;", "-").replace("&#X2010;", "-")
-        .replace("&#8209;", "-").replace("&#X2011;", "-")
-        .replace("#8209;", "-");
-    if decoded == value { return None; }
-    let (start, end) = lcc_span(&decoded)?;
-    if start.letters.starts_with('K') || end.letters.starts_with('K') { return None; }
-    canonical_printed_range(&decoded)
-}
-
-// The pinned BX p.277 arranges BX870 by papal accession date; DC p.181
-// arranges DC240 by event date within 1815. Dates are classification detail,
-// not disposable publication years. Book suffixes use the ordinary parser.
-pub(super) fn documented_date_call(value: &str) -> Option<(&'static str, String, String)> {
-    fn month(value: &str) -> Option<(u32, &'static str)> {
-        Some(match value.trim_end_matches('.') {
-            "JAN" | "JANUARY" => (1, "JAN."), "FEB" | "FEBRUARY" => (2, "FEB."),
-            "MAR" | "MARCH" => (3, "MARCH"), "APR" | "APRIL" => (4, "APRIL"),
-            "MAY" => (5, "MAY"), "JUN" | "JUNE" => (6, "JUNE"),
-            "JUL" | "JULY" => (7, "JULY"), "AUG" | "AUGUST" => (8, "AUG."),
-            "SEP" | "SEPT" | "SEPTEMBER" => (9, "SEPT."), "OCT" | "OCTOBER" => (10, "OCT."),
-            "NOV" | "NOVEMBER" => (11, "NOV."), "DEC" | "DECEMBER" => (12, "DEC."), _ => return None,
-        })
-    }
-    let (class, rest) = if let Some(rest) = value.strip_prefix("BX870 ") { ("BX870", rest) }
-        else { ("DC240", value.strip_prefix("DC240 ")?) };
-    let mut parts = rest.split_whitespace().peekable();
-    let year = if class == "BX870" {
-        let y = parts.next()?;
-        if y.len() != 4 || !y.bytes().all(|b| b.is_ascii_digit()) { return None; }
-        let y = y.parse::<u32>().ok()?; if y == 0 { return None; } y
-    } else { 1815 };
-    let raw_month = parts.next()?;
-    if raw_month.ends_with("..") { return None; }
-    let (m, label) = month(raw_month)?;
-    let mut heading = if class == "BX870" { format!("{class} {year:04} {label}") } else { format!("{class} {label}") };
-    if class == "DC240" || parts.peek().is_some_and(|x| x.len() <= 2 && x.bytes().all(|b| b.is_ascii_digit())) {
-        let raw_day = parts.next()?;
-        if raw_day.len() > 2 || !raw_day.bytes().all(|b| b.is_ascii_digit()) { return None; }
-        let day = raw_day.parse::<u32>().ok()?;
-        let max = match m { 4 | 6 | 9 | 11 => 30, 2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29, 2 => 28, _ => 31 };
-        if day == 0 || day > max { return None; }
-        heading.push_str(&format!(" {day}"));
-    }
-    let suffix = parts.collect::<Vec<_>>().join(" ");
-    if suffix.is_empty() { return Some((class, heading, String::new())); }
-    // Require an ordinary complete item Cutter/year, not another class,
-    // range, arbitrary text or a second chronological qualification.
-    if suffix.contains(['-', '+', ';']) || suffix.split_whitespace().any(|x| month(x).is_some()) { return None; }
-    if super::runtime::cutter_components(&suffix).iter().any(|(letters, digits)| letters.len() != 1 || digits.is_empty()) { return None; }
-    let item = canonical_lcc_notation(&format!("{class} {suffix}"))?;
-    let tail = item.strip_prefix(class)?.trim_start().to_owned();
-    Some((class, heading, tail))
-}
-
-// Literal DATE is an unfilled item-date position only at documented
-// reference templates or unmodified BS2 text positions. Never invent a year.
-pub(super) fn documented_literal_date_base(value: &str) -> Option<String> {
-    let base = value.strip_suffix(" DATE")?;
-    let endpoint = lcc_endpoint(base, false)?;
-    static SCOPES: OnceLock<BTreeSet<&'static str>> = OnceLock::new();
-    let scopes = SCOPES.get_or_init(|| include_str!("../data/lcc-literal-date-scopes.tsv").lines().collect());
-    scopes.contains(endpoint.code.as_str()).then_some(endpoint.code)
-}
-
-// Exact source-reviewed corrections retain the original string as evidence.
-// The exporter verifies the preserved Open Library edition and linked MARC
-// record. No publication year or neighboring call number is inferred.
-pub(super) fn reviewed_call_base(value: &str) -> Option<&'static str> {
-    static BASES: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
-    BASES.get_or_init(|| include_str!("../data/lcc-reviewed-call-bases.tsv").lines().map(|line| {
-        line.split_once('\t').expect("reviewed call base row")
-    }).collect()).get(value).copied()
-}
-
 pub fn lcc_subject_path(notation: &str) -> Option<String> {
-    if let Some(range) = encoded_hyphen_range(notation) { return lcc_subject_path(&range); }
-    if lcc_code_list(notation).is_some() { return None; }
-    if notation.contains(';') && canonical_lcc_notation(notation).is_none() { return None; }
+    if lcc_code_list(notation).is_some() {
+        return None;
+    }
+    if notation.contains(';') && canonical_lcc_notation(notation).is_none() {
+        return None;
+    }
     let normalized = compact_whitespace(notation).to_ascii_uppercase().replace(['–', '—'], "-");
     // Reviewed whole-class spans also occur inside joined imported fields.
-    if normalized == "R-RZ" { return letters_only_path("R"); }
-    if normalized == "D1-DX301" { return letters_only_path("D"); }
-    if let Some(base) = reference_collection_base(&normalized) { return lcc_subject_path(base); }
-    if let Some(base) = local_cutter_x_base(&normalized) { return lcc_subject_path(&base); }
-    if let Some(base) = reviewed_call_base(&normalized) { return lcc_subject_path(base); }
-    if let Some(base) = documented_literal_date_base(&normalized) { return lcc_subject_path(&base); }
-    if let Some((base, _, _)) = documented_date_call(&normalized) { return lcc_subject_path(base); }
-    if let Some(base) = range_item_base(&normalized) { return lcc_subject_path(base); }
-    if let Some(base) = marc_subfield_call_base(&normalized) { return lcc_subject_path(&base); }
-    if let Some((start, end)) = reference_plus_span(&normalized) { return lcc_subject_path(&format!("{}-{}", start.code, end.code)); }
-    if let Some(base) = repeated_lcc_base(&normalized) { return lcc_subject_path(base); }
-    if let Some(base) = terminal_slash_base(&normalized) { return lcc_subject_path(base); }
-    if let Some(base) = qualified_table_family(&normalized) { return lcc_subject_path(&base); }
-    if let Some(base) = qualified_table_span(&normalized) { return lcc_subject_path(&base); }
-    if let Some(base) = table_cutter_span(&normalized) { return lcc_subject_path(&base); }
-    if let Some(base) = variable_cutter_span(&normalized) { return lcc_subject_path(&base); }
-    if let Some(class) = minimal_subclass_assignment(&normalized) { return lcc_subject_path(class); }
-    if let Some(base) = schedule_table_base(&normalized) { return lcc_subject_path(base); }
-    if let Some(base) = documented_outline_heading(&normalized) { return lcc_subject_path(base); }
-    if let Some(base) = display_bracket_base(&normalized) { return lcc_subject_path(base); }
+    if normalized == "R-RZ" {
+        return letters_only_path("R");
+    }
+    if normalized == "D1-DX301" {
+        return letters_only_path("D");
+    }
+    if let Some(base) = reference_collection_base(&normalized) {
+        return lcc_subject_path(base);
+    }
+    if let Some(base) = local_cutter_x_base(&normalized) {
+        return lcc_subject_path(&base);
+    }
+    if let Some(base) = repeated_lcc_base(&normalized) {
+        return lcc_subject_path(base);
+    }
+    if let Some(base) = terminal_slash_base(&normalized) {
+        return lcc_subject_path(base);
+    }
+    if let Some(class) = minimal_subclass_assignment(&normalized) {
+        return lcc_subject_path(class);
+    }
     if let Some(assignment) = minimal_class_assignment(&normalized) {
-        let main = outline().ranges_by_main.get(&assignment.chars().next()?)?
-            .first()?.path.split(" / ").next()?;
+        let main = outline().ranges_by_main.get(&assignment.chars().next()?)?.first()?.path.split(" / ").next()?;
         return Some(build_subject_path(main, &normalized));
     }
-    if is_catalog_or_storage_marker(&normalized) { return None; }
+    if is_holdings_or_storage_marker(&normalized) {
+        return None;
+    }
     if let Some((start, end)) = lcc_span(&normalized) {
         let ranges = outline().ranges_by_main.get(&start.letters.chars().next()?)?;
-        let best = ranges.iter().filter(|r|
-            compare_lcc_key(&r.start_letters,r.start_number,&start.letters,start.number).is_le()
-            && compare_lcc_key(&end.letters,end.number,&r.end_letters,r.end_number).is_le())
+        let best = ranges
+            .iter()
+            .filter(|r| compare_lcc_key(&r.start_letters, r.start_number, &start.letters, start.number).is_le() && compare_lcc_key(&end.letters, end.number, &r.end_letters, r.end_number).is_le())
             .max_by_key(|r| r.path.matches(" / ").count())?;
         return Some(build_subject_path(&best.path, &normalized));
     }
-    if normalized.contains('-') { return None; }
+    if normalized.contains('-') {
+        return None;
+    }
     if let Some(path) = letters_only_path(notation) {
         return Some(path);
     }
@@ -766,7 +423,6 @@ pub fn lcc_subject_path(notation: &str) -> Option<String> {
 /// This keeps collection of external identifiers independent from local
 /// taxonomy coverage so finer server-side schedules can be requested later.
 pub fn canonical_lcc_notation(notation: &str) -> Option<String> {
-    if let Some(range) = encoded_hyphen_range(notation) { return Some(range); }
     let notation = compact_whitespace(notation).to_ascii_uppercase().replace(['–', '—'], "-");
     // The published LC outline prints K(520)-5582 for comparative law.
     // Imports also lose the separator after the parenthesized lower bound.
@@ -774,47 +430,44 @@ pub fn canonical_lcc_notation(notation: &str) -> Option<String> {
     if matches!(notation.as_str(), "K(520) 5582" | "K(520)-5582" | "K(520) - 5582") {
         return Some("K520-5582".to_owned());
     }
-    if lcc_code_list(&notation).is_some() { return Some(notation); }
-    if reference_collection_base(&notation).is_some() { return Some(notation); }
-    if local_cutter_x_base(&notation).is_some() { return Some(notation); }
-    if reviewed_call_base(&notation).is_some() { return Some(notation); }
-    if documented_literal_date_base(&notation).is_some() { return Some(notation); }
-    if let Some((_, heading, suffix)) = documented_date_call(&notation) {
-        return Some(if suffix.is_empty() { heading } else { format!("{heading} {suffix}") });
+    if lcc_code_list(&notation).is_some() {
+        return Some(notation);
     }
-    if range_item_base(&notation).is_some() { return Some(notation); }
-    if marc_subfield_call_base(&notation).is_some() { return Some(notation); }
-    if reference_plus_span(&notation).is_some() { return Some(notation); }
-    if repeated_lcc_base(&notation).is_some() { return Some(notation); }
-    if terminal_slash_base(&notation).is_some() { return Some(notation); }
-    if qualified_table_family(&notation).is_some() { return Some(notation); }
-    if qualified_table_span(&notation).is_some() { return Some(notation); }
-    if table_cutter_span(&notation).is_some() { return Some(notation); }
-    if variable_cutter_span(&notation).is_some() { return Some(notation); }
-    if minimal_subclass_assignment(&notation).is_some() { return Some(notation); }
-    if schedule_table_base(&notation).is_some() { return Some(notation); }
-    if documented_outline_heading(&notation).is_some() { return Some(notation); }
-    if display_bracket_base(&notation).is_some() { return Some(notation); }
-    if minimal_class_assignment(&notation).is_some() { return Some(notation); }
-    if is_catalog_or_storage_marker(&notation) {
+    if reference_collection_base(&notation).is_some() {
+        return Some(notation);
+    }
+    if local_cutter_x_base(&notation).is_some() {
+        return Some(notation);
+    }
+    if repeated_lcc_base(&notation).is_some() {
+        return Some(notation);
+    }
+    if terminal_slash_base(&notation).is_some() {
+        return Some(notation);
+    }
+    if minimal_subclass_assignment(&notation).is_some() {
+        return Some(notation);
+    }
+    if minimal_class_assignment(&notation).is_some() {
+        return Some(notation);
+    }
+    if is_holdings_or_storage_marker(&notation) {
         return None;
     }
-    if let Some(range) = canonical_printed_range(&notation) { return Some(range); }
-    if letters_only_syntax(&notation) || bracketed_year_call_base(&notation).is_some() || doubled_cutter_period_base(&notation).is_some() || period_year_call_base(&notation).is_some() || apostrophe_call_base(&notation).is_some() || lcc_item_base(&notation).is_some()
-        || parse_lcc_call(&notation).is_some_and(|call| valid_lcc_remainder(call.remainder) || valid_literature_work_mark(&call)) {
+    if let Some(range) = canonical_printed_range(&notation) {
+        return Some(range);
+    }
+    if letters_only_syntax(&notation)
+        || doubled_cutter_period_base(&notation).is_some()
+        || period_year_call_base(&notation).is_some()
+        || apostrophe_call_base(&notation).is_some()
+        || lcc_item_base(&notation).is_some()
+        || parse_lcc_call(&notation).is_some_and(|call| valid_lcc_remainder(call.remainder) || valid_literature_work_mark(&call))
+    {
         Some(notation)
     } else {
         None
     }
-}
-
-// MARC 050 display brackets surround alternate calls or calls for items not
-// held by LC. Accept one complete wrapper, retaining the original evidence.
-pub(super) fn display_bracket_base(value: &str) -> Option<&str> {
-    let inner = value.strip_prefix('[')?.strip_suffix(']')?.trim();
-    if inner.contains(['[', ']']) { return None; }
-    canonical_lcc_notation(inner)?;
-    Some(inner)
 }
 
 // Printed spans stay distinct from individual call numbers and can also be
@@ -839,7 +492,9 @@ pub(super) fn lcc_endpoint(value: &str, upper: bool) -> Option<LccEndpoint> {
         rest = rest.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '.');
         let letters = rest.bytes().take_while(u8::is_ascii_alphabetic).count();
         let digits = rest[letters..].bytes().take_while(u8::is_ascii_digit).count();
-        if letters == 0 || (digits == 0 && (letters != 1 || letters != rest.len())) { return None; }
+        if letters == 0 || (digits == 0 && (letters != 1 || letters != rest.len())) {
+            return None;
+        }
         remainder.push('.');
         remainder.push_str(&rest[..letters + digits]);
         rest = &rest[letters + digits..];
@@ -857,108 +512,86 @@ pub(super) fn lcc_span(value: &str) -> Option<(LccEndpoint, LccEndpoint)> {
     } else if end.strip_prefix('.').is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit())) {
         // A decimal-only end inherits the whole-number part, not the start's
         // existing fraction. Cutter-only ends below inherit the entire number.
-        if !start.number.is_finite() || start.code == start.letters { return None; }
+        if !start.number.is_finite() || start.code == start.letters {
+            return None;
+        }
         format!("{}{:.0}{end}", start.letters, start.number.trunc())
     } else if start.remainder.len() >= 2
         && start.remainder.starts_with('.')
         && start.remainder.as_bytes()[1].is_ascii_alphabetic()
         && start.remainder.as_bytes()[2..].iter().all(u8::is_ascii_digit)
-        && end.len() == 1 && end.as_bytes()[0].is_ascii_alphabetic() {
+        && end.len() == 1
+        && end.as_bytes()[0].is_ascii_alphabetic()
+    {
         // Printed alphabetic Cutter intervals (B829.5.A-Z) share a class
         // number. The lower Cutter may include digits (A3-Z); a numbered
         // upper class endpoint remains explicit.
         format!("{}{}.{end}", start.letters, start.number)
-    } else if start.letters.starts_with('P') && start.remainder.ends_with(".Z5")
-        && matches!(end, "Z999" | ".Z999")
-        && super::runtime::cutter_components(&start.remainder).len() >= 2 {
+    } else if start.letters.starts_with('P') && start.remainder.ends_with(".Z5") && matches!(end, "Z999" | ".Z999") && super::runtime::cutter_components(&start.remainder).len() >= 2 {
         // LC literature tables use an author's second Cutter Z5-Z999 for
         // general biography and criticism. Inherit the completed author
         // prefix, rather than interpreting Z999 as a different class.
         // https://loc.gov/catworkshop/lcc/PDFs%20of%20slides/12-5%20handout.pdf
-        format!("{}{}{}.Z999", start.letters, start.number,
-            start.remainder.strip_suffix(".Z5")?)
+        format!("{}{}{}.Z999", start.letters, start.number, start.remainder.strip_suffix(".Z5")?)
     } else if end.starts_with('.') {
         format!("{}{}{end}", start.letters, start.number)
-    } else { end.to_owned() };
+    } else {
+        end.to_owned()
+    };
     let end = lcc_endpoint(&expanded, true)?;
     let order = compare_lcc_key(&start.letters, start.number, &end.letters, end.number);
-    if order.is_gt() { return None; }
+    if order.is_gt() {
+        return None;
+    }
     if order.is_eq() && !end.remainder.is_empty() {
         let a = super::runtime::cutter_components(&start.remainder);
         let b = super::runtime::cutter_components(&end.remainder);
-        if super::runtime::compare_cutter_endpoint(&a, &b).is_gt() { return None; }
+        if super::runtime::compare_cutter_endpoint(&a, &b).is_gt() {
+            return None;
+        }
     }
     Some((start, end))
 }
 
-// A whitespace-separated item Cutter and publication year after a complete
-// numeric span describe the book, not a narrower upper classification bound.
-// Require a final year and validate every suffix token; never discard prose.
-pub(super) fn range_item_base(value: &str) -> Option<&str> {
-    if !value.contains('-') || value.len() > 512 { return None; }
-    for (at, _) in value.match_indices(char::is_whitespace) {
-        let base = &value[..at];
-        let Some((start, end)) = lcc_span(base) else { continue; };
-        let suffix: Vec<_> = value[at..].split_whitespace().collect();
-        let Some(year) = suffix.last() else { return None; };
-        let bytes = year.as_bytes();
-        if !(bytes.len() == 4 || (bytes.len() == 5 && bytes[4].is_ascii_alphabetic()))
-            || !bytes[..4].iter().all(u8::is_ascii_digit) { return None; }
-        if !suffix[..suffix.len() - 1].iter().all(|part| {
-            let part = part.strip_prefix('.').unwrap_or(part).as_bytes();
-            part.len() > 1 && part[0].is_ascii_alphabetic()
-                && part[1..].iter().all(u8::is_ascii_digit)
-        }) { return None; }
-        if start.code != start.letters && end.code != end.letters { return Some(base); }
-    }
-    None
-}
-
 fn canonical_printed_range(value: &str) -> Option<String> {
     let (start, end) = lcc_span(value)?;
-    let end_code = if start.letters == end.letters && start.number.is_finite() && end.number.is_finite() {
-        end.code.strip_prefix(&end.letters)?.to_owned()
-    } else { end.code };
+    let end_code = if start.letters == end.letters && start.number.is_finite() && end.number.is_finite() { end.code.strip_prefix(&end.letters)?.to_owned() } else { end.code };
     Some(format!("{}-{end_code}", start.code))
-}
-
-// G140 uses the numeric publication year without its display brackets.
-// Retain imported brackets as evidence, but match the complete dated call.
-pub(super) fn bracketed_year_call_base(value: &str) -> Option<String> {
-    let (prefix, year) = value.strip_suffix(']')?.rsplit_once(" [")?;
-    if prefix.contains(['[', ']']) { return None; }
-    let bytes = year.as_bytes();
-    if !(bytes.len() == 4 || (bytes.len() == 5 && bytes[4].is_ascii_alphabetic()))
-        || !bytes[..4].iter().all(u8::is_ascii_digit) { return None; }
-    parse_lcc_call(prefix)?;
-    let base = format!("{prefix} {year}");
-    canonical_lcc_notation(&base)?;
-    Some(base)
 }
 
 // Imported MARC records can duplicate the period before a numeric Cutter.
 // Collapse exactly two separators only at a digit-to-Cutter boundary, then
 // validate the entire resulting call. Preserve the original as evidence.
 pub(super) fn doubled_cutter_period_base(value: &str) -> Option<String> {
-    if value.contains('-') { return None; }
+    if value.contains('-') {
+        return None;
+    }
     let mut base = String::new();
     let mut copied = 0;
     for (at, _) in value.match_indices('.') {
-        if at < copied || !value[..at].trim_end().as_bytes().last().is_some_and(u8::is_ascii_digit) { continue; }
+        if at < copied || !value[..at].trim_end().as_bytes().last().is_some_and(u8::is_ascii_digit) {
+            continue;
+        }
         let tail = value[at + 1..].trim_start();
-        let Some(tail) = tail.strip_prefix('.') else { continue; };
+        let Some(tail) = tail.strip_prefix('.') else {
+            continue;
+        };
         let tail = tail.trim_start();
-        if !tail.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-            || !tail.as_bytes().get(1).is_some_and(u8::is_ascii_digit) { continue; }
+        if !tail.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) || !tail.as_bytes().get(1).is_some_and(u8::is_ascii_digit) {
+            continue;
+        }
         base.push_str(&value[copied..at]);
         base.push('.');
         copied = value.len() - tail.len();
     }
-    if copied == 0 { return None; }
+    if copied == 0 {
+        return None;
+    }
     base.push_str(&value[copied..]);
     let call = parse_lcc_call(&base)?;
-    if !valid_lcc_remainder(call.remainder) && !valid_literature_work_mark(&call)
-        && lcc_item_base(&base).is_none() { return None; }
+    if !valid_lcc_remainder(call.remainder) && !valid_literature_work_mark(&call) && lcc_item_base(&base).is_none() {
+        return None;
+    }
     Some(base)
 }
 
@@ -970,16 +603,18 @@ pub(super) fn reference_collection_base(value: &str) -> Option<&str> {
     let candidate = value.strip_prefix("REF ").or_else(|| value.strip_suffix(" REF"))?;
     let candidate = candidate.trim();
     let base = lcc_enumeration_base(candidate).unwrap_or(candidate);
-    if base.contains('-') { return None; }
+    if base.contains('-') {
+        return None;
+    }
     let call = parse_lcc_call(base)?;
-    if !outline().ranges_by_main.get(&call.letters.chars().next()?)?.iter()
-        .any(|range| range.start_letters == call.letters) { return None; }
+    if !outline().ranges_by_main.get(&call.letters.chars().next()?)?.iter().any(|range| range.start_letters == call.letters) {
+        return None;
+    }
     let complete_parts = call.remainder.split_whitespace().all(|part| {
         let part = part.trim_start_matches('.');
         let bytes = part.as_bytes();
         if bytes.first().is_some_and(u8::is_ascii_digit) {
-            return (bytes.len() == 4 || (bytes.len() == 5 && bytes[4].is_ascii_alphabetic()))
-                && bytes[..4].iter().all(u8::is_ascii_digit);
+            return (bytes.len() == 4 || (bytes.len() == 5 && bytes[4].is_ascii_alphabetic())) && bytes[..4].iter().all(u8::is_ascii_digit);
         }
         let cutters = super::runtime::cutter_components(part);
         !cutters.is_empty() && cutters.iter().all(|(letters, digits)| letters.len() == 1 && !digits.is_empty())
@@ -995,17 +630,25 @@ pub(super) fn local_cutter_x_base(value: &str) -> Option<String> {
     let at = value.rfind('X')?;
     let prefix = value[..at].trim_end();
     let tail = &value[at + 1..];
-    if !tail.is_empty() && !tail.starts_with(|c: char| c.is_ascii_whitespace() || c == ',') { return None; }
+    if !tail.is_empty() && !tail.starts_with(|c: char| c.is_ascii_whitespace() || c == ',') {
+        return None;
+    }
     let year = tail.trim_start().strip_prefix(',').unwrap_or(tail.trim_start()).trim_start();
     if !year.is_empty() {
         let bytes = year.as_bytes();
-        if !(bytes.len() == 4 || (bytes.len() == 5 && bytes[4].is_ascii_alphabetic()))
-            || !bytes[..4].iter().all(u8::is_ascii_digit) { return None; }
-    } else if tail.contains(',') { return None; }
-    if prefix.contains('-') { return None; }
+        if !(bytes.len() == 4 || (bytes.len() == 5 && bytes[4].is_ascii_alphabetic())) || !bytes[..4].iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+    } else if tail.contains(',') {
+        return None;
+    }
+    if prefix.contains('-') {
+        return None;
+    }
     let call = parse_lcc_call(prefix)?;
-    if !outline().ranges_by_main.get(&call.letters.chars().next()?)?.iter()
-        .any(|range| range.start_letters == call.letters) { return None; }
+    if !outline().ranges_by_main.get(&call.letters.chars().next()?)?.iter().any(|range| range.start_letters == call.letters) {
+        return None;
+    }
     let mut rest = call.remainder;
     let mut cutters = 0;
     let mut ends_with_cutter = false;
@@ -1015,20 +658,30 @@ pub(super) fn local_cutter_x_base(value: &str) -> Option<String> {
         let bytes = rest.as_bytes();
         if bytes.first().is_some_and(u8::is_ascii_digit) {
             let digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
-            if digits != 4 { return None; }
+            if digits != 4 {
+                return None;
+            }
             rest = &rest[digits..];
             ends_with_cutter = false;
             continue;
         }
-        if !bytes.first().is_some_and(u8::is_ascii_alphabetic) { return None; }
+        if !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
+            return None;
+        }
         let digits = bytes[1..].iter().take_while(|b| b.is_ascii_digit()).count();
-        if digits == 0 { return None; }
+        if digits == 0 {
+            return None;
+        }
         cutters += 1;
         rest = &rest[1 + digits..];
         ends_with_cutter = true;
     }
-    if cutters == 0 || !ends_with_cutter { return None; }
-    if cutters == 1 && matches!(call.letters.as_str(), "PR" | "PS" | "PZ") && value[..at].ends_with(' ') { return None; }
+    if cutters == 0 || !ends_with_cutter {
+        return None;
+    }
+    if cutters == 1 && matches!(call.letters.as_str(), "PR" | "PS" | "PZ") && value[..at].ends_with(' ') {
+        return None;
+    }
     Some(if year.is_empty() { prefix.to_owned() } else { format!("{prefix} {year}") })
 }
 
@@ -1037,8 +690,9 @@ pub(super) fn local_cutter_x_base(value: &str) -> Option<String> {
 pub(super) fn period_year_call_base(value: &str) -> Option<String> {
     let (prefix, year) = value.rsplit_once('.')?;
     let bytes = year.as_bytes();
-    if !(bytes.len() == 4 || (bytes.len() == 5 && bytes[4].is_ascii_alphabetic()))
-        || !bytes[..4].iter().all(u8::is_ascii_digit) { return None; }
+    if !(bytes.len() == 4 || (bytes.len() == 5 && bytes[4].is_ascii_alphabetic())) || !bytes[..4].iter().all(u8::is_ascii_digit) {
+        return None;
+    }
     let call = parse_lcc_call(prefix)?;
     let mut rest = call.remainder;
     let mut cutters = 0;
@@ -1046,14 +700,22 @@ pub(super) fn period_year_call_base(value: &str) -> Option<String> {
         rest = rest.trim_start();
         rest = rest.strip_prefix('.').unwrap_or(rest).trim_start();
         let bytes = rest.as_bytes();
-        if !bytes.first().is_some_and(u8::is_ascii_alphabetic) { return None; }
+        if !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
+            return None;
+        }
         let digits = bytes[1..].iter().take_while(|b| b.is_ascii_digit()).count();
-        if digits == 0 { return None; }
+        if digits == 0 {
+            return None;
+        }
         cutters += 1;
         rest = &rest[1 + digits..];
-        if !rest.is_empty() && !rest.starts_with(|c: char| c.is_ascii_whitespace() || c == '.') { return None; }
+        if !rest.is_empty() && !rest.starts_with(|c: char| c.is_ascii_whitespace() || c == '.') {
+            return None;
+        }
     }
-    if cutters == 0 { return None; }
+    if cutters == 0 {
+        return None;
+    }
     Some(format!("{prefix} {year}"))
 }
 
@@ -1061,10 +723,13 @@ pub(super) fn period_year_call_base(value: &str) -> Option<String> {
 // components. Keep the original notation, and interpret only unambiguous
 // class + Cutter components with an optional final publication year.
 pub(super) fn apostrophe_call_base(value: &str) -> Option<String> {
-    if !value.contains('\'') { return None; }
+    if !value.contains('\'') {
+        return None;
+    }
     for (at, _) in value.match_indices('\'') {
-        if at == 0 || !value.as_bytes()[at - 1].is_ascii_alphanumeric()
-            || !value.as_bytes().get(at + 1).is_some_and(u8::is_ascii_alphanumeric) { return None; }
+        if at == 0 || !value.as_bytes()[at - 1].is_ascii_alphanumeric() || !value.as_bytes().get(at + 1).is_some_and(u8::is_ascii_alphanumeric) {
+            return None;
+        }
     }
     let base = value.replace('\'', " ");
     // Compose two already supported display forms: apostrophe separators
@@ -1075,19 +740,18 @@ pub(super) fn apostrophe_call_base(value: &str) -> Option<String> {
     while let Some(part) = parts.next() {
         let part = part.strip_prefix('.').unwrap_or(part);
         let bytes = part.as_bytes();
-        if bytes.first().is_some_and(u8::is_ascii_alphabetic)
-            && bytes.len() > 1 && bytes[1..].iter().all(u8::is_ascii_digit) {
+        if bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.len() > 1 && bytes[1..].iter().all(u8::is_ascii_digit) {
             cutters += 1;
-        } else if cutters > 0 && parts.peek().is_none()
-            && (bytes.len() == 4 || (bytes.len() == 5 && bytes[4].is_ascii_alphabetic()))
-            && bytes[..4].iter().all(u8::is_ascii_digit) {
+        } else if cutters > 0 && parts.peek().is_none() && (bytes.len() == 4 || (bytes.len() == 5 && bytes[4].is_ascii_alphabetic())) && bytes[..4].iter().all(u8::is_ascii_digit) {
             break;
-        } else { return None; }
+        } else {
+            return None;
+        }
     }
     Some(base)
 }
 
-fn is_catalog_or_storage_marker(value: &str) -> bool {
+fn is_holdings_or_storage_marker(value: &str) -> bool {
     value.starts_with("CPB") || value.starts_with("MLC") || value.starts_with("LAW") || matches!(value, "LCC" | "COMIC" | "MICROFICHE" | "MICROFILM" | "UNCLASSIFIED" | "ACQUIRED" | "ACQUISITION" | "NONE" | "N/A")
 }
 
@@ -1095,13 +759,18 @@ fn is_catalog_or_storage_marker(value: &str) -> bool {
 // MLCF 2013/40001 (PQ). Validate the completed shelf number with the same
 // rules as main-class assignments, and accept only known non-law subclasses.
 fn minimal_subclass_assignment(value: &str) -> Option<&str> {
-    if !value.starts_with("MLC") { return None; }
+    if !value.starts_with("MLC") {
+        return None;
+    }
     let at = value.rfind('(')?;
     let class = value[at..].strip_prefix('(')?.strip_suffix(')')?.trim();
-    if !(2..=3).contains(&class.len()) || class.starts_with('K')
-        || !value[..at].contains('/') { return None; }
+    if !(2..=3).contains(&class.len()) || class.starts_with('K') || !value[..at].contains('/') {
+        return None;
+    }
     static SUBCLASSES: OnceLock<BTreeSet<String>> = OnceLock::new();
-    if !SUBCLASSES.get_or_init(outline_subclasses).contains(class) { return None; }
+    if !SUBCLASSES.get_or_init(outline_subclasses).contains(class) {
+        return None;
+    }
     let main = format!("{}({})", &value[..at], &class[..1]);
     minimal_class_assignment(&main)?;
     Some(class)
@@ -1115,36 +784,50 @@ fn minimal_class_assignment(value: &str) -> Option<&str> {
     let at = value.rfind('(')?;
     let assignment = &value[at..];
     let class = assignment.strip_prefix('(')?.strip_suffix(')')?.trim();
-    if class.len() != 1 || !b"ABCDEFGHJKLMNPQRSTUVZ".contains(&class.as_bytes()[0]) { return None; }
+    if class.len() != 1 || !b"ABCDEFGHJKLMNPQRSTUVZ".contains(&class.as_bytes()[0]) {
+        return None;
+    }
     let placeholder = |s: &str| (3..=5).contains(&s.len()) && s.bytes().all(|b| b == b'X');
     // LC preliminary records can use MLCxxx (P) before a shelf sequence is
     // assigned. Only the explicit parenthesized class supplies a subject.
     let shelving_prefix = |s: &str| {
-        let Some(suffix) = s.strip_prefix("MLC") else { return false; };
+        let Some(suffix) = s.strip_prefix("MLC") else {
+            return false;
+        };
         let suffix = suffix.as_bytes();
-        matches!(suffix.len(), 1 | 2) && b"SMLF".contains(&suffix[0])
-            && (suffix.len() == 1 || b"ACEHJKMNRT".contains(&suffix[1]))
+        matches!(suffix.len(), 1 | 2) && b"SMLF".contains(&suffix[0]) && (suffix.len() == 1 || b"ACEHJKMNRT".contains(&suffix[1]))
     };
     let shelf = value[..at].trim();
     if let Some(x) = shelf.find('X') {
         let prefix = shelf[..x].trim();
-        if (prefix == "MLC" || shelving_prefix(prefix)) && placeholder(&shelf[x..]) { return Some(class); }
+        if (prefix == "MLC" || shelving_prefix(prefix)) && placeholder(&shelf[x..]) {
+            return Some(class);
+        }
     }
     let mut parts = value[..at].split_whitespace().peekable();
     let prefix = parts.next()?;
     if matches!(prefix, "MICROFILM" | "MICROFICHE" | "MICROOPAQUE") {
-        if parts.peek().is_some_and(|part| matches!(*part, "(O)" | "(W)")) { parts.next(); }
+        if parts.peek().is_some_and(|part| matches!(*part, "(O)" | "(W)")) {
+            parts.next();
+        }
     } else if prefix == "MLC" {
-        if parts.next()? != "R" { return None; }
-    } else if !shelving_prefix(prefix) { return None; }
+        if parts.next()? != "R" {
+            return None;
+        }
+    } else if !shelving_prefix(prefix) {
+        return None;
+    }
     // Whitespace around the delimiter is harmless; whitespace within either
     // digit component remains invalid. Do not concatenate split digits.
     let number = parts.collect::<Vec<_>>().join(" ");
-    if prefix.starts_with("MLC") && placeholder(&number) { return Some(class); }
+    if prefix.starts_with("MLC") && placeholder(&number) {
+        return Some(class);
+    }
     let (year, sequence) = number.split_once('/')?;
     let (year, sequence) = (year.trim(), sequence.trim());
-    if !matches!(year.len(), 2 | 4) || !year.bytes().all(|b| b.is_ascii_digit())
-        || sequence.is_empty() || sequence.len() > 5 || !sequence.bytes().all(|b| b.is_ascii_digit()) { return None; }
+    if !matches!(year.len(), 2 | 4) || !year.bytes().all(|b| b.is_ascii_digit()) || sequence.is_empty() || sequence.len() > 5 || !sequence.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
     Some(class)
 }
 
@@ -1158,37 +841,54 @@ fn complete_item_year_suffix(value: &str) -> bool {
     // LC MARC 050/490/830 for OL1648155M records A13 1990/1.
     // Slash chronology identifies a numbered series issue, not a class range.
     if let Some((year, issue)) = value.split_once('/') {
-        if year.len() != 4 || !year.bytes().all(|b| b.is_ascii_digit())
-            || !(1000..=2999).contains(&year.parse::<u32>().unwrap()) { return false; }
+        if year.len() != 4 || !year.bytes().all(|b| b.is_ascii_digit()) || !(1000..=2999).contains(&year.parse::<u32>().unwrap()) {
+            return false;
+        }
         // LC 050 for OL4232369M: S37 1978/1979:5. The coverage
         // chronology and issue number jointly describe the series item.
         let issue = if let Some((end, number)) = issue.split_once(':') {
-            if !matches!(end.len(), 2 | 4) || !end.bytes().all(|b| b.is_ascii_digit())
-                || (end.len() == 4 && !(year.parse::<u32>().unwrap()..=2999)
-                    .contains(&end.parse::<u32>().unwrap())) { return false; }
+            if !matches!(end.len(), 2 | 4) || !end.bytes().all(|b| b.is_ascii_digit()) || (end.len() == 4 && !(year.parse::<u32>().unwrap()..=2999).contains(&end.parse::<u32>().unwrap())) {
+                return false;
+            }
             number
-        } else { issue };
+        } else {
+            issue
+        };
         return !issue.is_empty() && issue.len() <= 5 && issue.bytes().all(|b| b.is_ascii_digit());
     }
-    let Some((start, end)) = value.split_once('-') else { return false; };
-    if start.len() != 4 || !start.bytes().all(|b| b.is_ascii_digit())
-        || !matches!(end.len(), 2 | 4) || !end.bytes().all(|b| b.is_ascii_digit()) { return false; }
+    let Some((start, end)) = value.split_once('-') else {
+        return false;
+    };
+    if start.len() != 4 || !start.bytes().all(|b| b.is_ascii_digit()) || !matches!(end.len(), 2 | 4) || !end.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
     let start = start.parse::<u32>().unwrap();
-    if !(1000..=2999).contains(&start) { return false; }
-    if end.len() == 2 { return true; }
+    if !(1000..=2999).contains(&start) {
+        return false;
+    }
+    if end.len() == 2 {
+        return true;
+    }
     (start..=2999).contains(&end.parse::<u32>().unwrap())
 }
 
 pub(super) fn lcc_enumeration_base(value: &str) -> Option<&str> {
     fn number(rest: &str) -> Option<&str> {
         // A following Bd caption is not series B, Roman volume D.
-        if rest.starts_with("BD ") { return None; }
-        // Holdings enclose cataloger-supplied enumeration in square brackets.
+        if rest.starts_with("BD ") {
+            NUM_BD_GUARD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return None;
+        }
+        // Holdings enclose staff-supplied enumeration in square brackets.
         // Accept only a complete numeric item value, never a missing value or
         // arbitrary bracketed text (and never a replacement class number).
         if let Some(rest) = rest.strip_prefix('[') {
             let (digits, tail) = rest.split_once(']')?;
-            return (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())).then_some(tail);
+            let ok = !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit());
+            if ok {
+                NUM_BRACKET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            return ok.then_some(tail);
         }
         let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
         if digits == 0 {
@@ -1197,8 +897,12 @@ pub(super) fn lcc_enumeration_base(value: &str) -> Option<&str> {
             // recognized item caption; it never creates a class or Cutter.
             if rest.as_bytes().first().is_some_and(u8::is_ascii_alphabetic) {
                 let count = rest.as_bytes()[1..].iter().take_while(|b| b.is_ascii_digit()).count();
-                if count > 0 { return Some(&rest[1 + count..]); }
+                if count > 0 {
+                    NUM_ALPHA.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return Some(&rest[1 + count..]);
+                }
                 if rest.len() == 1 || rest[1..].starts_with(|c: char| c.is_ascii_whitespace() || matches!(c, '-' | '/' | ':' | ',' | '=')) {
+                    NUM_ALPHA.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     return Some(&rest[1..]);
                 }
             }
@@ -1207,18 +911,32 @@ pub(super) fn lcc_enumeration_base(value: &str) -> Option<&str> {
             // with the same grammar as an ordinary Roman volume.
             let roman_rest = rest.strip_prefix(['A', 'B']).unwrap_or(rest);
             let count = roman_rest.bytes().take_while(|b| b"IVXLCDM".contains(b)).count();
-            if count == 0 { return None; }
+            if count == 0 {
+                return None;
+            }
             let mut roman = &roman_rest[..count];
-            for _ in 0..3 { if let Some(tail) = roman.strip_prefix('M') { roman = tail; } }
+            for _ in 0..3 {
+                if let Some(tail) = roman.strip_prefix('M') {
+                    roman = tail;
+                }
+            }
             for (nine, four, five, one) in [("CM", "CD", 'D', 'C'), ("XC", "XL", 'L', 'X'), ("IX", "IV", 'V', 'I')] {
-                if let Some(tail) = roman.strip_prefix(nine).or_else(|| roman.strip_prefix(four)) { roman = tail; }
-                else {
+                if let Some(tail) = roman.strip_prefix(nine).or_else(|| roman.strip_prefix(four)) {
+                    roman = tail;
+                } else {
                     roman = roman.strip_prefix(five).unwrap_or(roman);
-                    for _ in 0..3 { if let Some(tail) = roman.strip_prefix(one) { roman = tail; } }
+                    for _ in 0..3 {
+                        if let Some(tail) = roman.strip_prefix(one) {
+                            roman = tail;
+                        }
+                    }
                 }
             }
             let tail = &roman_rest[count..];
-            if !roman.is_empty() || (!tail.is_empty() && !tail.starts_with(|c: char| c.is_ascii_whitespace() || matches!(c, '-' | '/' | ':' | ',' | '='))) { return None; }
+            if !roman.is_empty() || (!tail.is_empty() && !tail.starts_with(|c: char| c.is_ascii_whitespace() || matches!(c, '-' | '/' | ':' | ',' | '='))) {
+                return None;
+            }
+            NUM_ROMAN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Some(tail);
         }
         let end = digits + usize::from(rest.as_bytes().get(digits).is_some_and(u8::is_ascii_alphabetic));
@@ -1226,44 +944,85 @@ pub(super) fn lcc_enumeration_base(value: &str) -> Option<&str> {
         // Columbia 050/490/830 for OL27425628M records Fasz.5a(1).
         if let Some(part) = tail.strip_prefix('(') {
             let (part, after) = part.split_once(')')?;
-            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) { return None; }
+            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            NUM_PAREN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tail = after;
         }
         // MARC 050 for OL4202742M records Bd. 2. fasz. 3b. A single
         // separating/full-stop period is distinct from a decimal subdivision.
         if let Some(after) = tail.strip_prefix('.') {
-            if after.is_empty() || after.starts_with(char::is_whitespace) { tail = after; }
+            if after.is_empty() || after.starts_with(char::is_whitespace) {
+                NUM_PERIOD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tail = after;
+            }
         }
+        NUM_PLAIN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Some(tail)
     }
     fn new_series_tail(rest: &str) -> Option<&str> {
-        ["NEW SER.", "NEW SERIES", "N. S.", "N. S", "N.S.", "N.S",
-            "N. F.", "N. F", "N.F.", "N.F", "NEUE FOLGE",
-            "N. R.", "N. R", "N.R.", "N.R", "NEUE REIHE", "NY SER.",
-            "NOUV. SER.", "NOUV. SéR.", "NOUV. SÉR.", "NOUV. SE\u{301}R.",
-            "NOUV. PéRIODE", "NOUV. PÉRIODE", "NOUV. PE\u{301}RIODE"]
-            .iter().find_map(|caption| rest.strip_prefix(caption))
+        [
+            "NEW SER.",
+            "NEW SERIES",
+            "N. S.",
+            "N. S",
+            "N.S.",
+            "N.S",
+            "N. F.",
+            "N. F",
+            "N.F.",
+            "N.F",
+            "NEUE FOLGE",
+            "N. R.",
+            "N. R",
+            "N.R.",
+            "N.R",
+            "NEUE REIHE",
+            "NY SER.",
+            "NOUV. SER.",
+            "NOUV. SéR.",
+            "NOUV. SÉR.",
+            "NOUV. SE\u{301}R.",
+            "NOUV. PéRIODE",
+            "NOUV. PÉRIODE",
+            "NOUV. PE\u{301}RIODE",
+        ]
+        .iter()
+        .find_map(|caption| rest.strip_prefix(caption))
     }
     fn complete_year(value: &str) -> bool {
         let year = value.strip_prefix('(').and_then(|s| s.strip_suffix(')')).unwrap_or(value).as_bytes();
-        (year.len() == 4 || (year.len() == 5 && year[4].is_ascii_alphabetic()))
-            && year[..4].iter().all(u8::is_ascii_digit)
+        (year.len() == 4 || (year.len() == 5 && year[4].is_ascii_alphabetic())) && year[..4].iter().all(u8::is_ascii_digit)
     }
     fn ordinal_caption_tail(rest: &str) -> Option<&str> {
         fn ordinal(rest: &str) -> Option<&str> {
             let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
             if digits == 0 {
                 let (roman, tail) = rest.split_once('.')?;
-                if roman.is_empty() || !roman.bytes().all(|b| b"IVXLCDM".contains(&b))
-                    || number(roman) != Some("") { return None; }
+                if roman.is_empty() || !roman.bytes().all(|b| b"IVXLCDM".contains(&b)) || number(roman) != Some("") {
+                    return None;
+                }
                 return Some(tail.trim_start());
             }
             let n = rest[..digits].parse::<u32>().ok()?;
-            if n == 0 { return None; }
+            if n == 0 {
+                return None;
+            }
             let tail = &rest[digits..];
-            let tail = if let Some(tail) = tail.strip_prefix('.') { tail } else {
-                let ending = if (11..=13).contains(&(n % 100)) { "TH" }
-                    else { match n % 10 { 1 => "ST", 2 => "ND", 3 => "RD", _ => "TH" } };
+            let tail = if let Some(tail) = tail.strip_prefix('.') {
+                tail
+            } else {
+                let ending = if (11..=13).contains(&(n % 100)) {
+                    "TH"
+                } else {
+                    match n % 10 {
+                        1 => "ST",
+                        2 => "ND",
+                        3 => "RD",
+                        _ => "TH",
+                    }
+                };
                 let tail = tail.strip_prefix(ending).or_else(|| matches!(n, 2 | 3).then(|| tail.strip_prefix('D')).flatten())?;
                 tail.strip_prefix('.').unwrap_or(tail)
             };
@@ -1272,19 +1031,17 @@ pub(super) fn lcc_enumeration_base(value: &str) -> Option<&str> {
         let mut tail = ordinal(rest)?;
         // A combined numbered part can use ordinal punctuation on both
         // numbers, e.g. 21./22. Hft. Never supply a missing endpoint.
-        while let Some(next) = tail.strip_prefix(['/','-']) { tail = ordinal(next.trim_start())?; }
-        ["SERIES", "SER.", "JAHRG.", "EDITION", "ED.", "AUFL.",
-            "REIHE", "BD.", "HFT.", "HEFT", "ABT.", "T.", "SESS."]
-            .iter().find_map(|caption| tail.strip_prefix(caption))
+        while let Some(next) = tail.strip_prefix(['/', '-']) {
+            tail = ordinal(next.trim_start())?;
+        }
+        ["SERIES", "SER.", "JAHRG.", "EDITION", "ED.", "AUFL.", "REIHE", "BD.", "HFT.", "HEFT", "ABT.", "T.", "SESS."].iter().find_map(|caption| tail.strip_prefix(caption))
     }
     fn hungarian_volume_tail(rest: &str) -> Option<&str> {
         // LC-PCC Hungarian abbreviations: kötet -> köt. Preserve both
         // composed and decomposed accents in imported evidence.
-        let tail = ["KöT", "KÖT", "KO\u{308}T"].iter()
-            .find_map(|caption| rest.strip_prefix(caption))?;
+        let tail = ["KöT", "KÖT", "KO\u{308}T"].iter().find_map(|caption| rest.strip_prefix(caption))?;
         let tail = tail.strip_prefix('.').unwrap_or(tail);
-        (tail.is_empty() || tail.starts_with(|c: char| c.is_ascii_whitespace()
-            || c.is_ascii_digit() || matches!(c, ',' | ':'))).then_some(tail)
+        (tail.is_empty() || tail.starts_with(|c: char| c.is_ascii_whitespace() || c.is_ascii_digit() || matches!(c, ',' | ':'))).then_some(tail)
     }
     fn numbered_caption_tail(rest: &str) -> Option<&str> {
         // MARC 050 source records confirm Fasz. (OL4683326M), Fas.
@@ -1293,29 +1050,126 @@ pub(super) fn lcc_enumeration_base(value: &str) -> Option<&str> {
             let tail = tail.trim_start();
             return Some(tail.strip_prefix(',').unwrap_or(tail).trim_start());
         }
-        new_series_tail(rest).map(|tail| {
-            let tail = tail.trim_start();
-            tail.strip_prefix([',', ':']).unwrap_or(tail).trim_start()
-        }).or_else(|| ["SER.", "SERIES ", "VOLUME ", "VOLS.", "VOL .", "VOL ", "VOL.", "V .", "V.",
-                "PART ", "PTS.", "PT ", "PT.", "NUMBER ", "NOS.", "NO .", "NO ", "NO.", "N:O", "ISSUE ", "ISS.", "SECT.", "SESS.", "SUPPL.", "SUPPL ", "SUPP.", "SUPL.",
-                "BD.", "BD ", "BDE.", "BDCHN.", "NR.", "T.", "FASC.", "FASZ.", "FAS.", "ABT.", "LFG.", "LIVR.",
-                "BK.", "JAHRG.", "JAARG.", "KN.", "KNJ.", "CZ.", "D.", "SV.", "ZESZ.", "VYP.",
-                "HEFT.", "HEFT ", "H.", "HFT.", "HBD.", "HALBBD.", "DEEL", "DL.", "SZ.", "NIDE ", "OSA ",
-                "ABH.", "ABH ", "BEIHEFT ", "BEIH.", "FOLGE ", "AR.", "ZV.", "REIHE ", "BOOK ", "UNIT ", "COPY ", "COP.", "BAND ", "TEIL ", "TEILBD.", "CH.", "SEC.", "CAHIER ",
-                "RéSZ ", "RÉSZ ", "RE\u{301}SZ ", "FüZET ", "FÜZET ", "FU\u{308}ZET ",
-                "SéR.", "SÉR.", "SE\u{301}R.", "AFL.", "PTIES ", "PTIE ",
-                "ROč.", "ROČ.", "ROC\u{30c}.", "SEš.", "SEŠ.", "SES\u{30c}.", "LVL.", "LVL ", "LEVEL "]
-                .iter().find_map(|label| rest.strip_prefix(label)))
+        new_series_tail(rest)
+            .map(|tail| {
+                let tail = tail.trim_start();
+                tail.strip_prefix([',', ':']).unwrap_or(tail).trim_start()
+            })
+            .or_else(|| {
+                [
+                    "SER.",
+                    "SERIES ",
+                    "VOLUME ",
+                    "VOLS.",
+                    "VOL .",
+                    "VOL ",
+                    "VOL.",
+                    "V .",
+                    "V.",
+                    "PART ",
+                    "PTS.",
+                    "PT ",
+                    "PT.",
+                    "NUMBER ",
+                    "NOS.",
+                    "NO .",
+                    "NO ",
+                    "NO.",
+                    "N:O",
+                    "ISSUE ",
+                    "ISS.",
+                    "SECT.",
+                    "SESS.",
+                    "SUPPL.",
+                    "SUPPL ",
+                    "SUPP.",
+                    "SUPL.",
+                    "BD.",
+                    "BD ",
+                    "BDE.",
+                    "BDCHN.",
+                    "NR.",
+                    "T.",
+                    "FASC.",
+                    "FASZ.",
+                    "FAS.",
+                    "ABT.",
+                    "LFG.",
+                    "LIVR.",
+                    "BK.",
+                    "JAHRG.",
+                    "JAARG.",
+                    "KN.",
+                    "KNJ.",
+                    "CZ.",
+                    "D.",
+                    "SV.",
+                    "ZESZ.",
+                    "VYP.",
+                    "HEFT.",
+                    "HEFT ",
+                    "H.",
+                    "HFT.",
+                    "HBD.",
+                    "HALBBD.",
+                    "DEEL",
+                    "DL.",
+                    "SZ.",
+                    "NIDE ",
+                    "OSA ",
+                    "ABH.",
+                    "ABH ",
+                    "BEIHEFT ",
+                    "BEIH.",
+                    "FOLGE ",
+                    "AR.",
+                    "ZV.",
+                    "REIHE ",
+                    "BOOK ",
+                    "UNIT ",
+                    "COPY ",
+                    "COP.",
+                    "BAND ",
+                    "TEIL ",
+                    "TEILBD.",
+                    "CH.",
+                    "SEC.",
+                    "CAHIER ",
+                    "RéSZ ",
+                    "RÉSZ ",
+                    "RE\u{301}SZ ",
+                    "FüZET ",
+                    "FÜZET ",
+                    "FU\u{308}ZET ",
+                    "SéR.",
+                    "SÉR.",
+                    "SE\u{301}R.",
+                    "AFL.",
+                    "PTIES ",
+                    "PTIE ",
+                    "ROč.",
+                    "ROČ.",
+                    "ROC\u{30c}.",
+                    "SEš.",
+                    "SEŠ.",
+                    "SES\u{30c}.",
+                    "LVL.",
+                    "LVL ",
+                    "LEVEL ",
+                ]
+                .iter()
+                .find_map(|label| rest.strip_prefix(label))
+            })
     }
     fn suffix(mut rest: &str, allow_unfinished: bool) -> bool {
         // Supplied volume enumeration may enclose both caption and number,
         // e.g. [v.2]. Require a complete numbered caption inside one pair;
         // this does not unwrap arbitrary shelving notes or nested brackets.
         if let Some(inner) = rest.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-            if inner.contains(['[', ']'])
-                || numbered_caption_tail(inner).and_then(|s| number(s.trim_start())).is_none() {
+            if inner.contains(['[', ']']) || numbered_caption_tail(inner).and_then(|s| number(s.trim_start())).is_none() {
                 return false;
             }
+            SUF_BRACKET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return suffix(inner, false);
         }
         let mut numbered_level = false;
@@ -1325,29 +1179,46 @@ pub(super) fn lcc_enumeration_base(value: &str) -> Option<&str> {
             if digits > 0 && rest[digits..].starts_with(char::is_whitespace) {
                 if let Some(tail) = hungarian_volume_tail(rest[digits..].trim_start()) {
                     rest = tail.trim_start();
-                    if rest.is_empty() { return true; }
+                    if rest.is_empty() {
+                        return true;
+                    }
                     rest = rest.strip_prefix([',', ':']).unwrap_or(rest).trim_start();
-                    if rest.is_empty() { return false; }
+                    if rest.is_empty() {
+                        return false;
+                    }
+                    SUF_HU_NUMFIRST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     continue;
                 }
             }
             // Ordinal numbering may precede its caption (3rd ser., 38.Jahrg.).
             if let Some(tail) = ordinal_caption_tail(rest) {
+                SUF_ORDINAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 numbered_level = true;
                 rest = tail.trim_start();
-                if rest.is_empty() || complete_year(rest) { return true; }
+                if rest.is_empty() || complete_year(rest) {
+                    return true;
+                }
                 rest = rest.strip_prefix([',', ':']).unwrap_or(rest).trim_start();
-                if rest.is_empty() { return false; }
+                if rest.is_empty() {
+                    return false;
+                }
                 continue;
             }
             // LC 050 for OL439736M records vol. 90, commentary.
             // Only recognize this designation after a numbered item level.
             if numbered_level {
                 if let Some(tail) = rest.strip_prefix("COMMENTARY") {
-                    if tail.is_empty() { return true; }
-                    if !tail.starts_with(|c: char| c.is_ascii_whitespace() || c == ',') { return false; }
+                    SUF_COMMENTARY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if tail.is_empty() {
+                        return true;
+                    }
+                    if !tail.starts_with(|c: char| c.is_ascii_whitespace() || c == ',') {
+                        return false;
+                    }
                     rest = tail.trim_start().strip_prefix(',').unwrap_or(tail.trim_start()).trim_start();
-                    if rest.is_empty() { return false; }
+                    if rest.is_empty() {
+                        return false;
+                    }
                     numbered_level = false;
                     continue;
                 }
@@ -1357,40 +1228,57 @@ pub(super) fn lcc_enumeration_base(value: &str) -> Option<&str> {
             // volume/part number is reconstructed or used as classification.
             // Bare V is ambiguous with an unfinished Cutter unless it
             // follows an already numbered enumeration level.
-            if allow_unfinished && (matches!(rest, "VOL." | "VOL" | "V." | "PT." | "PT" | "NO." | "NO")
-                || (rest == "V" && numbered_level)) { return true; }
+            if allow_unfinished && (matches!(rest, "VOL." | "VOL" | "V." | "PT." | "PT" | "NO." | "NO") || (rest == "V" && numbered_level)) {
+                SUF_BARE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return true;
+            }
             // G155 uses Suppl. for the first supplement, with numbers for
             // subsequent supplements. Retain the common unpunctuated form.
             // G140/G230 also append Index to the original call number.
-            if matches!(rest, "SUPPL." | "SUPPL" | "SUPP." | "SUPL." | "INDEX") { return true; }
+            if matches!(rest, "SUPPL." | "SUPPL" | "SUPP." | "SUPL." | "INDEX") {
+                SUF_SUPPL_INDEX.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return true;
+            }
             // Although G140 prescribes no date after Index, LC-source
             // imports do contain this form (OL3543081M, MARC 050 00).
             // Keep the original call's date; the following year identifies
             // the index item and never supplies a missing classification.
             if let Some(year) = rest.strip_prefix("INDEX ") {
+                SUF_INDEX_YEAR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return year.len() == 4 && year.bytes().all(|b| b.is_ascii_digit());
             }
             // An unnumbered supplement may itself have numbered volumes:
             // Suppl. v.61, Suppl., v.62, or the joined German Suppl.Bd.14.
             // Require a recognized next caption, whose number is validated
             // on the next iteration; unknown prose is never discarded.
-            if let Some(tail) = ["SUPPL.", "SUPP.", "SUPL.", "SUPPL "]
-                .iter().find_map(|caption| rest.strip_prefix(caption)) {
+            if let Some(tail) = ["SUPPL.", "SUPP.", "SUPL.", "SUPPL "].iter().find_map(|caption| rest.strip_prefix(caption)) {
                 let tail = tail.trim_start();
                 let tail = tail.strip_prefix([',', ':']).unwrap_or(tail).trim_start();
-                if numbered_caption_tail(tail).and_then(|n| number(n.trim_start())).is_some() { rest = tail; continue; }
+                if numbered_caption_tail(tail).and_then(|n| number(n.trim_start())).is_some() {
+                    SUF_SUPPL_CAPTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    rest = tail;
+                    continue;
+                }
             }
             // MARC 853-855 allows a numbered series or an unnumbered
             // "new ser." caption preceding the ordinary volume levels.
             // Legacy holdings also use n.s. (Harvard Library item-description
             // guidance and OCLC's caption abbreviation list).
             if let Some(tail) = new_series_tail(rest) {
-                if tail.is_empty() { return true; }
+                SUF_NEWSERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if tail.is_empty() {
+                    return true;
+                }
                 if tail.starts_with(|c: char| c.is_ascii_whitespace() || matches!(c, ':' | ',')) {
                     let tail = tail.trim_start();
                     let tail = tail.strip_prefix([':', ',']).unwrap_or(tail).trim_start();
-                    if tail.is_empty() { return false; }
-                    if number(tail).is_none() { rest = tail; continue; }
+                    if tail.is_empty() {
+                        return false;
+                    }
+                    if number(tail).is_none() {
+                        rest = tail;
+                        continue;
+                    }
                 }
             }
             // G615 retains established vernacular designations. The PCC
@@ -1398,8 +1286,13 @@ pub(super) fn lcc_enumeration_base(value: &str) -> Option<&str> {
             // Annual-volume captions can be followed by chronology. Do not
             // reinterpret a shortened year there as another volume number.
             let comma_numbers = !["JAHRG.", "JAARG.", "AR.", "ROč.", "ROČ.", "ROC\u{30c}."].iter().any(|caption| rest.starts_with(caption));
-            let Some(tail) = numbered_caption_tail(rest) else { return false; };
-            let Some(tail) = number(tail.trim_start()) else { return false; };
+            let Some(tail) = numbered_caption_tail(rest) else {
+                return false;
+            };
+            let Some(tail) = number(tail.trim_start()) else {
+                return false;
+            };
+            SUF_NUMBERED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             numbered_level = true;
             rest = tail;
             loop {
@@ -1411,48 +1304,88 @@ pub(super) fn lcc_enumeration_base(value: &str) -> Option<&str> {
                         let next = next.trim_start();
                         // Preserve an ordinal caption such as 2nd ed.; its
                         // leading digits are not another volume number.
-                        if ordinal_caption_tail(next).is_some() { break; }
-                        if let Some(tail) = number(next) { rest = tail; continue; }
+                        if ordinal_caption_tail(next).is_some() {
+                            break;
+                        }
+                        if let Some(tail) = number(next) {
+                            SUF_COMMA_REP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            rest = tail;
+                            continue;
+                        }
                     }
                 }
-                if !rest.starts_with(['-', ':', '/']) { break; }
+                if !rest.starts_with(['-', ':', '/']) {
+                    break;
+                }
                 // A colon can introduce the next captioned level (v.1:no.2)
                 // as well as the existing numeric shorthand (v.1:2).
-                if rest.starts_with(':') && number(&rest[1..]).is_none() { break; }
-                let Some(tail) = number(&rest[1..]) else { return false; };
+                if rest.starts_with(':') && number(&rest[1..]).is_none() {
+                    break;
+                }
+                let Some(tail) = number(&rest[1..]) else {
+                    return false;
+                };
+                SUF_RANGE_SEP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 rest = tail;
             }
-            if rest.is_empty() { return true; }
-            if !rest.starts_with(|c: char| c.is_ascii_whitespace() || matches!(c, ',' | ':' | '=')) { return false; }
+            if rest.is_empty() {
+                return true;
+            }
+            if !rest.starts_with(|c: char| c.is_ascii_whitespace() || matches!(c, ',' | ':' | '=')) {
+                return false;
+            }
             rest = rest.trim_start();
-            if hungarian_volume_tail(rest) == Some("") { return true; }
-            if rest.starts_with([',', ':', '=']) { rest = rest[1..].trim_start(); }
-            if rest.is_empty() { return false; }
+            if hungarian_volume_tail(rest) == Some("") {
+                SUF_HU_TRAIL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return true;
+            }
+            if rest.starts_with([',', ':', '=']) {
+                rest = rest[1..].trim_start();
+            }
+            if rest.is_empty() {
+                return false;
+            }
             // "v. 82, etc." records further item volumes, without changing
             // the classification. Require the complete numbered level above.
             if let Some(tail) = rest.strip_prefix("ETC.") {
-                if tail.is_empty() { return true; }
-                if !tail.starts_with(char::is_whitespace) { return false; }
+                SUF_ETC.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if tail.is_empty() {
+                    return true;
+                }
+                if !tail.starts_with(char::is_whitespace) {
+                    return false;
+                }
                 rest = tail.trim_start();
             }
             // Serial/item call numbers may end with chronology after their
             // enumeration (e.g. v.1 (1999)). Only a complete year is detached.
-            if complete_year(rest) || complete_item_year_suffix(rest) { return true; }
+            if complete_year(rest) || complete_item_year_suffix(rest) {
+                SUF_YEAR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return true;
+            }
             if let Some(year) = rest.strip_prefix("OF ") {
+                SUF_YEAR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return year.len() == 4 && year.bytes().all(|b| b.is_ascii_digit());
             }
             // Chronology may separate two numbered levels, e.g.
             // Jahrg. 44, 1976, Heft 1. The following caption must still parse.
             if let Some((year, tail)) = rest.split_once(',') {
-                if complete_year(year.trim()) { rest = tail.trim_start(); }
+                if complete_year(year.trim()) {
+                    SUF_CHRONO_SPLIT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    rest = tail.trim_start();
+                }
             }
         }
     }
     for (at, _) in value.match_indices(' ') {
-        if !suffix(value[at..].trim_start(), !value.starts_with('K')) { continue; }
+        if !suffix(value[at..].trim_start(), !value.starts_with('K')) {
+            continue;
+        }
         let base = value[..at].trim_end().strip_suffix(',').unwrap_or(value[..at].trim_end()).trim_end();
         // A storage phrase must not become a PZ title mark plus issue number.
-        if base.ends_with(" BOX") && value[at..].trim_start().starts_with("NO") { continue; }
+        if base.ends_with(" BOX") && value[at..].trim_start().starts_with("NO") {
+            continue;
+        }
         let call = parse_lcc_call(base)?;
         if !base.contains('-') && (valid_lcc_remainder(call.remainder) || valid_literature_work_mark(&call)) {
             return Some(base);
@@ -1472,29 +1405,40 @@ pub(super) fn lcc_item_base(value: &str) -> Option<&str> {
     for (at, _) in value.match_indices(' ').rev() {
         let prefix = &value[..at];
         let (years, tail) = value[at + 1..].split_once(' ').unwrap_or((&value[at + 1..], ""));
-        if !complete_item_year_suffix(years) { continue; }
+        if !complete_item_year_suffix(years) {
+            continue;
+        }
         // LC 050/490/830 for OL4156375M: .H4 1979/80 abh. 5.
         // Validate a following numbered caption independently of chronology.
-        let complete_tail = tail.is_empty() || (tail.bytes().any(|b| b.is_ascii_digit())
-            && lcc_enumeration_base(&format!("{prefix} {tail}")) == Some(prefix));
-        if complete_tail && !prefix.contains('-')
+        let complete_tail = tail.is_empty() || (tail.bytes().any(|b| b.is_ascii_digit()) && lcc_enumeration_base(&format!("{prefix} {tail}")) == Some(prefix));
+        if complete_tail
+            && !prefix.contains('-')
             && parse_lcc_call(prefix).is_some_and(|call| {
-                if call.letters.starts_with('K') { return false; }
+                if call.letters.starts_with('K') {
+                    return false;
+                }
                 let mut rest = call.remainder;
                 let mut count = 0;
                 while !rest.is_empty() {
                     rest = rest.trim_start();
                     rest = rest.strip_prefix('.').unwrap_or(rest).trim_start();
                     let bytes = rest.as_bytes();
-                    if !bytes.first().is_some_and(u8::is_ascii_alphabetic) { return false; }
+                    if !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
+                        return false;
+                    }
                     let digits = bytes[1..].iter().take_while(|b| b.is_ascii_digit()).count();
-                    if digits == 0 { return false; }
+                    if digits == 0 {
+                        return false;
+                    }
                     count += 1;
                     rest = &rest[1 + digits..];
                 }
-                count > 0 && outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges|
-                    ranges.iter().any(|range| range.start_letters == call.letters))
-            }) { base = prefix; break; }
+                count > 0 && outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges| ranges.iter().any(|range| range.start_letters == call.letters))
+            })
+        {
+            base = prefix;
+            break;
+        }
     }
     // Columbia CPM-605 records F, FF and FFF in MARC 852 $m as
     // oversize suffixes on LC calls, also after volume enumeration.
@@ -1505,25 +1449,26 @@ pub(super) fn lcc_item_base(value: &str) -> Option<&str> {
         let enumerated = lcc_enumeration_base(prefix);
         let candidate = enumerated.unwrap_or(prefix);
         let year = candidate.split_whitespace().last().unwrap_or_default().as_bytes();
-        let dated = (year.len() == 4 || (year.len() == 5 && year[4].is_ascii_alphabetic()))
-            && year[..4].iter().all(u8::is_ascii_digit);
+        let dated = (year.len() == 4 || (year.len() == 5 && year[4].is_ascii_alphabetic())) && year[..4].iter().all(u8::is_ascii_digit);
         let numbered = enumerated.is_some() && prefix[candidate.len()..].bytes().any(|b| b.is_ascii_digit());
-        if (dated || numbered) && !candidate.contains('-')
+        if (dated || numbered)
+            && !candidate.contains('-')
             && parse_lcc_call(candidate).is_some_and(|call| {
                 let complete_parts = call.remainder.split_whitespace().all(|part| {
                     let part = part.trim_start_matches('.');
                     let bytes = part.as_bytes();
                     if bytes.first().is_some_and(u8::is_ascii_digit) {
-                        return (bytes.len() == 4 || (bytes.len() == 5 && bytes[4].is_ascii_alphabetic()))
-                            && bytes[..4].iter().all(u8::is_ascii_digit);
+                        return (bytes.len() == 4 || (bytes.len() == 5 && bytes[4].is_ascii_alphabetic())) && bytes[..4].iter().all(u8::is_ascii_digit);
                     }
                     let cutters = super::runtime::cutter_components(part);
                     !cutters.is_empty() && cutters.iter().all(|(letters, digits)| letters.len() == 1 && !digits.is_empty())
                 });
                 ((valid_lcc_remainder(call.remainder) && complete_parts) || valid_literature_work_mark(&call))
-                    && outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges|
-                        ranges.iter().any(|range| range.start_letters == call.letters))
-            }) { base = candidate; }
+                    && outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges| ranges.iter().any(|range| range.start_letters == call.letters))
+            })
+        {
+            base = candidate;
+        }
     }
     // A single terminal period after a complete publication year is export
     // punctuation, not a decimal or an unfinished Cutter. Keep the dated
@@ -1532,25 +1477,38 @@ pub(super) fn lcc_item_base(value: &str) -> Option<&str> {
         if let Some((undated, year)) = prefix.rsplit_once(' ') {
             let year = year.as_bytes();
             if (year.len() == 4 || (year.len() == 5 && year[4].is_ascii_alphabetic()))
-                && year[..4].iter().all(u8::is_ascii_digit) && !prefix.contains('-')
+                && year[..4].iter().all(u8::is_ascii_digit)
+                && !prefix.contains('-')
                 && parse_lcc_call(undated).is_some_and(|call| {
-                    let known_class = outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges|
-                        ranges.iter().any(|range| range.start_letters == call.letters));
-                    if !known_class { return false; }
-                    if valid_literature_work_mark(&call) { return true; }
+                    let known_class = outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges| ranges.iter().any(|range| range.start_letters == call.letters));
+                    if !known_class {
+                        return false;
+                    }
+                    if valid_literature_work_mark(&call) {
+                        return true;
+                    }
                     let mut rest = call.remainder;
                     while !rest.is_empty() {
                         rest = rest.trim_start();
                         rest = rest.strip_prefix('.').unwrap_or(rest).trim_start();
                         let bytes = rest.as_bytes();
-                        if !bytes.first().is_some_and(u8::is_ascii_alphabetic) { return false; }
+                        if !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
+                            return false;
+                        }
                         let digits = bytes[1..].iter().take_while(|b| b.is_ascii_digit()).count();
-                        if digits == 0 { return false; }
+                        if digits == 0 {
+                            return false;
+                        }
                         rest = &rest[1 + digits..];
-                        if !rest.is_empty() && !rest.starts_with(|c: char| c.is_ascii_whitespace() || c == '.') { return false; }
+                        if !rest.is_empty() && !rest.starts_with(|c: char| c.is_ascii_whitespace() || c == '.') {
+                            return false;
+                        }
                     }
                     true
-                }) { base = prefix; }
+                })
+            {
+                base = prefix;
+            }
         }
     }
     // Libraries append eb (often directly to the date) or ebook to identify
@@ -1562,40 +1520,48 @@ pub(super) fn lcc_item_base(value: &str) -> Option<&str> {
         // both to the call and to its volume. Only collapse repeated markers
         // after a digit; a literary title mark ending in EB stays intact.
         let mut repeated_base = candidate;
-        while let Some(rest) = repeated_base.strip_suffix("EB") { repeated_base = rest.trim_end(); }
-        if repeated_base.as_bytes().last().is_some_and(u8::is_ascii_digit) { candidate = repeated_base; }
-        if !candidate.contains('-') && parse_lcc_call(candidate).is_some_and(|call| {
-            let complete_parts = call.remainder.split_whitespace().all(|part| {
-                let part = part.trim_start_matches('.');
-                if part.is_empty() { return true; }
-                if part.as_bytes()[0].is_ascii_digit() {
-                    let (year, cutter) = part.split_once('.').map_or((part, None), |(year, cutter)| (year, Some(cutter)));
-                    let year = year.as_bytes();
-                    return (year.len() == 4 || (year.len() == 5 && year[4].is_ascii_alphabetic()))
-                        && year[..4].iter().all(u8::is_ascii_digit)
-                        && cutter.is_none_or(|part| {
-                            let cutters = super::runtime::cutter_components(part);
-                            !cutters.is_empty() && cutters.iter().all(|(letters, digits)| letters.len() == 1 && !digits.is_empty())
-                        });
-                }
-                let cutters = super::runtime::cutter_components(part);
-                !cutters.is_empty() && cutters.iter().all(|(letters, digits)| letters.len() == 1 && !digits.is_empty())
-            });
-            // LC's MARC 050 for LCCN 75313994 records TX553.A3 W67a.
-            // This verified legacy work mark is not a general license to
-            // accept arbitrary trailing letters on numeric Cutters.
-            // https://openlibrary.org/show-records/marc_loc_2016/BooksAll.2016.part09.utf8:65764277:1235
-            // Columbia's MARC 050 4 for OL12773809M independently records
-            // QP905 .H236s v.175, corroborating this second legacy base.
-            // https://openlibrary.org/show-records/marc_columbia/Columbia-extract-20221130-012.mrc:204912902:1888
-            // LC's MARC 050 10 for OL4886228M records PZ3.M8346 Lo5.
-            // https://openlibrary.org/show-records/marc_loc_2016/BooksAll.2016.part09.utf8:176896691:989
-            let reviewed_legacy_work_mark = matches!(candidate, "TX553.A3 W67A" | "QP905 .H236S" | "PZ3.M8346 LO5");
-            ((valid_lcc_remainder(call.remainder) && complete_parts) || valid_literature_work_mark(&call)
-                || reviewed_legacy_work_mark)
-                && outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges|
-                    ranges.iter().any(|range| range.start_letters == call.letters))
-        }) { base = candidate; }
+        while let Some(rest) = repeated_base.strip_suffix("EB") {
+            repeated_base = rest.trim_end();
+        }
+        if repeated_base.as_bytes().last().is_some_and(u8::is_ascii_digit) {
+            candidate = repeated_base;
+        }
+        if !candidate.contains('-')
+            && parse_lcc_call(candidate).is_some_and(|call| {
+                let complete_parts = call.remainder.split_whitespace().all(|part| {
+                    let part = part.trim_start_matches('.');
+                    if part.is_empty() {
+                        return true;
+                    }
+                    if part.as_bytes()[0].is_ascii_digit() {
+                        let (year, cutter) = part.split_once('.').map_or((part, None), |(year, cutter)| (year, Some(cutter)));
+                        let year = year.as_bytes();
+                        return (year.len() == 4 || (year.len() == 5 && year[4].is_ascii_alphabetic()))
+                            && year[..4].iter().all(u8::is_ascii_digit)
+                            && cutter.is_none_or(|part| {
+                                let cutters = super::runtime::cutter_components(part);
+                                !cutters.is_empty() && cutters.iter().all(|(letters, digits)| letters.len() == 1 && !digits.is_empty())
+                            });
+                    }
+                    let cutters = super::runtime::cutter_components(part);
+                    !cutters.is_empty() && cutters.iter().all(|(letters, digits)| letters.len() == 1 && !digits.is_empty())
+                });
+                // LC's MARC 050 for LCCN 75313994 records TX553.A3 W67a.
+                // This verified legacy work mark is not a general license to
+                // accept arbitrary trailing letters on numeric Cutters.
+                // https://openlibrary.org/show-records/marc_loc_2016/BooksAll.2016.part09.utf8:65764277:1235
+                // Columbia's MARC 050 4 for OL12773809M independently records
+                // QP905 .H236s v.175, corroborating this second legacy base.
+                // https://openlibrary.org/show-records/marc_columbia/Columbia-extract-20221130-012.mrc:204912902:1888
+                // LC's MARC 050 10 for OL4886228M records PZ3.M8346 Lo5.
+                // https://openlibrary.org/show-records/marc_loc_2016/BooksAll.2016.part09.utf8:176896691:989
+                let reviewed_legacy_work_mark = matches!(candidate, "TX553.A3 W67A" | "QP905 .H236S" | "PZ3.M8346 LO5");
+                ((valid_lcc_remainder(call.remainder) && complete_parts) || valid_literature_work_mark(&call) || reviewed_legacy_work_mark)
+                    && outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges| ranges.iter().any(|range| range.start_letters == call.letters))
+            })
+        {
+            base = candidate;
+        }
     }
     // Textbook call numbers can append a K–12 grade designation (Tarleton
     // Library). Interpret it only after a complete dated call, so GR as an
@@ -1603,81 +1569,115 @@ pub(super) fn lcc_item_base(value: &str) -> Option<&str> {
     if let Some((prefix, grade)) = value.rsplit_once(" GR.").or_else(|| value.rsplit_once(" GRADE ")) {
         let grade = grade.trim_start();
         let grade_number = |part: &str| -> Option<u8> {
-            if part == "K" { return Some(0); }
-            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) { return None; }
+            if part == "K" {
+                return Some(0);
+            }
+            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
             part.parse::<u8>().ok().filter(|n| (1..=12).contains(n))
         };
-        let valid_grade = if let Some((start, end)) = grade.split_once('-') {
-            grade_number(start).zip(grade_number(end)).is_some_and(|(a, b)| a <= b)
-        } else { grade_number(grade).is_some() };
+        let valid_grade = if let Some((start, end)) = grade.split_once('-') { grade_number(start).zip(grade_number(end)).is_some_and(|(a, b)| a <= b) } else { grade_number(grade).is_some() };
         let year = prefix.split_whitespace().last().unwrap_or_default().as_bytes();
-        if valid_grade && (year.len() == 4 || (year.len() == 5 && year[4].is_ascii_alphabetic()))
-            && year[..4].iter().all(u8::is_ascii_digit) && !prefix.contains('-')
+        if valid_grade
+            && (year.len() == 4 || (year.len() == 5 && year[4].is_ascii_alphabetic()))
+            && year[..4].iter().all(u8::is_ascii_digit)
+            && !prefix.contains('-')
             && parse_lcc_call(prefix).is_some_and(|call| {
                 let cutters = super::runtime::cutter_components(call.remainder);
-                valid_lcc_remainder(call.remainder) && !cutters.is_empty()
+                valid_lcc_remainder(call.remainder)
+                    && !cutters.is_empty()
                     && cutters.iter().all(|(letters, digits)| letters.len() == 1 && !digits.is_empty())
-                    && outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges|
-                        ranges.iter().any(|range| range.start_letters == call.letters))
-            }) { base = prefix; }
+                    && outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges| ranges.iter().any(|range| range.start_letters == call.letters))
+            })
+        {
+            base = prefix;
+        }
     }
     // Serial enumeration can use year:issue. Keep the complete dated call
     // as the match base; never turn a bare number or truncated issue into LCC.
     if let Some((prefix, issue)) = value.rsplit_once(':') {
         let year = prefix.split_whitespace().last().unwrap_or_default();
-        if year.len() == 4 && year.bytes().all(|b| b.is_ascii_digit())
-            && !issue.is_empty() && issue.bytes().all(|b| b.is_ascii_digit())
+        if year.len() == 4
+            && year.bytes().all(|b| b.is_ascii_digit())
+            && !issue.is_empty()
+            && issue.bytes().all(|b| b.is_ascii_digit())
             && !prefix.contains(['-', ':'])
             && parse_lcc_call(prefix).is_some_and(|call| {
                 let cutters = super::runtime::cutter_components(call.remainder);
-                !call.letters.starts_with('K') && valid_lcc_remainder(call.remainder)
+                !call.letters.starts_with('K')
+                    && valid_lcc_remainder(call.remainder)
                     && !cutters.is_empty()
                     && cutters.iter().all(|(letters, digits)| letters.len() == 1 && !digits.is_empty())
-                    && outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges|
-                        ranges.iter().any(|range| range.start_letters == call.letters))
-            }) { base = prefix; }
+                    && outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges| ranges.iter().any(|range| range.start_letters == call.letters))
+            })
+        {
+            base = prefix;
+        }
     }
     // UBC's standard print suffix list includes workbook. A year is not
     // required when the preceding classification and Cutter are complete.
-    let workbook_prefix = [" STUDENT WORKBOOK", " WORKBOOK"].iter()
-        .find_map(|suffix| value.strip_suffix(suffix)).or_else(|| {
-            let (prefix, tail) = value.rsplit_once(" WORKBOOK ")?;
-            let year = tail.as_bytes();
-            let complete_year = (year.len() == 4 || (year.len() == 5 && year[4].is_ascii_alphabetic()))
-                && year[..4].iter().all(u8::is_ascii_digit);
-            let numbered_part = tail.starts_with("PART ")
-                && lcc_enumeration_base(&format!("{prefix} {tail}")) == Some(prefix);
-            (complete_year || tail == "TEACHER'S EDITION" || numbered_part).then_some(prefix)
-        });
+    let workbook_prefix = [" STUDENT WORKBOOK", " WORKBOOK"].iter().find_map(|suffix| value.strip_suffix(suffix)).or_else(|| {
+        let (prefix, tail) = value.rsplit_once(" WORKBOOK ")?;
+        let year = tail.as_bytes();
+        let complete_year = (year.len() == 4 || (year.len() == 5 && year[4].is_ascii_alphabetic())) && year[..4].iter().all(u8::is_ascii_digit);
+        let numbered_part = tail.starts_with("PART ") && lcc_enumeration_base(&format!("{prefix} {tail}")) == Some(prefix);
+        (complete_year || tail == "TEACHER'S EDITION" || numbered_part).then_some(prefix)
+    });
     if let Some(prefix) = workbook_prefix {
         let prefix = prefix.trim_end().strip_suffix(',').unwrap_or(prefix.trim_end()).trim_end();
         let candidate = lcc_enumeration_base(prefix).unwrap_or(prefix);
         if parse_lcc_call(candidate).is_some_and(|call| {
             let cutters = super::runtime::cutter_components(call.remainder);
-            !candidate.contains('-') && valid_lcc_remainder(call.remainder)
+            !candidate.contains('-')
+                && valid_lcc_remainder(call.remainder)
                 && !cutters.is_empty()
                 && cutters.iter().all(|(letters, digits)| letters.len() == 1 && !digits.is_empty())
-                && outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges|
-                    ranges.iter().any(|range| range.start_letters == call.letters))
-        }) { base = candidate; }
+                && outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges| ranges.iter().any(|range| range.start_letters == call.letters))
+        }) {
+            base = candidate;
+        }
     }
     // Accompanying print material and explicit folio-size labels keep the
     // original dated call (Yale Accompanying Material and folio guidance).
     // LC 050 for OL3795881M records <fol>. Imported edition records also
     // display fol and <fol.>; recognize only these exact folio spellings.
     // Recognize only these documented descriptors, not arbitrary prose.
-    if let Some(prefix) = [" INSTRUCTOR'S RESOURCE MANUAL", " INSTRUCTOR'S MANUAL", " INSTRUCTOR MANUAL",
-        " INSTRUCTOR'S GUIDE", " TEACHER'S MANUAL", " TEACHERS GUIDE", " TEACHER GUIDE", " TEACHER'S GUIDE",
-        " STUDY GUIDE", " STUDENT GUIDE", " STUDENT MANUAL", " SOLUTIONS MANUAL", " SOLUTION MANUAL", " LAB MANUAL",
-        " USER GUIDE", " GUIDE", " MANUAL", " WORKBOOK", " FOLIO", " FOL.", " FOL", " <FOL>", " <FOL.>"]
-        .iter().find_map(|suffix| value.strip_suffix(suffix)) {
+    if let Some(prefix) = [
+        " INSTRUCTOR'S RESOURCE MANUAL",
+        " INSTRUCTOR'S MANUAL",
+        " INSTRUCTOR MANUAL",
+        " INSTRUCTOR'S GUIDE",
+        " TEACHER'S MANUAL",
+        " TEACHERS GUIDE",
+        " TEACHER GUIDE",
+        " TEACHER'S GUIDE",
+        " STUDY GUIDE",
+        " STUDENT GUIDE",
+        " STUDENT MANUAL",
+        " SOLUTIONS MANUAL",
+        " SOLUTION MANUAL",
+        " LAB MANUAL",
+        " USER GUIDE",
+        " GUIDE",
+        " MANUAL",
+        " WORKBOOK",
+        " FOLIO",
+        " FOL.",
+        " FOL",
+        " <FOL>",
+        " <FOL.>",
+    ]
+    .iter()
+    .find_map(|suffix| value.strip_suffix(suffix))
+    {
         let prefix = prefix.trim_end().strip_suffix(',').unwrap_or(prefix.trim_end()).trim_end();
         let year = prefix.split_whitespace().last().unwrap_or_default().as_bytes();
         if (year.len() == 4 || (year.len() == 5 && year[4].is_ascii_alphabetic()))
             && year[..4].iter().all(u8::is_ascii_digit)
-            && parse_lcc_call(prefix).is_some_and(|call| valid_lcc_remainder(call.remainder)
-                && outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges|
-                    ranges.iter().any(|range| range.start_letters == call.letters))) {
+            && parse_lcc_call(prefix)
+                .is_some_and(|call| valid_lcc_remainder(call.remainder) && outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges| ranges.iter().any(|range| range.start_letters == call.letters)))
+        {
             base = prefix;
         }
     }
@@ -1685,25 +1685,25 @@ pub(super) fn lcc_item_base(value: &str) -> Option<&str> {
     // enumeration. Angle brackets supply their own token boundary. Retain
     // literary work letters only when a date or numbered caption disambiguates
     // the size label from an undated title mark.
-    if let Some(prefix) = ["<FOL.>", "<FOL>", " FOLIO", " FOL.", " FOL"]
-        .iter().find_map(|suffix| value.strip_suffix(suffix)) {
+    if let Some(prefix) = ["<FOL.>", "<FOL>", " FOLIO", " FOL.", " FOL"].iter().find_map(|suffix| value.strip_suffix(suffix)) {
         let prefix = prefix.trim_end().strip_suffix(',').unwrap_or(prefix.trim_end()).trim_end();
         let enumerated = lcc_enumeration_base(prefix);
         let candidate = enumerated.unwrap_or(prefix);
         let year = candidate.split_whitespace().last().unwrap_or_default().as_bytes();
-        let dated = (year.len() == 4 || (year.len() == 5 && year[4].is_ascii_alphabetic()))
-            && year[..4].iter().all(u8::is_ascii_digit);
+        let dated = (year.len() == 4 || (year.len() == 5 && year[4].is_ascii_alphabetic())) && year[..4].iter().all(u8::is_ascii_digit);
         let numbered = enumerated.is_some() && prefix[candidate.len()..].bytes().any(|b| b.is_ascii_digit());
-        if !candidate.contains('-') && parse_lcc_call(candidate).is_some_and(|call| {
-            let literary = matches!(call.letters.as_str(), "PR" | "PS" | "PZ");
-            let cutters = super::runtime::cutter_components(call.remainder);
-            let numeric_cutters = !cutters.is_empty()
-                && cutters.iter().all(|(letters, digits)| letters.len() == 1 && !digits.is_empty());
-            (dated || numbered || (!literary && numeric_cutters))
-                && (valid_lcc_remainder(call.remainder) || valid_literature_work_mark(&call))
-                && outline().ranges_by_main.get(&call.letters.chars().next().unwrap())
-                    .is_some_and(|ranges| ranges.iter().any(|range| range.start_letters == call.letters))
-        }) { base = candidate; }
+        if !candidate.contains('-')
+            && parse_lcc_call(candidate).is_some_and(|call| {
+                let literary = matches!(call.letters.as_str(), "PR" | "PS" | "PZ");
+                let cutters = super::runtime::cutter_components(call.remainder);
+                let numeric_cutters = !cutters.is_empty() && cutters.iter().all(|(letters, digits)| letters.len() == 1 && !digits.is_empty());
+                (dated || numbered || (!literary && numeric_cutters))
+                    && (valid_lcc_remainder(call.remainder) || valid_literature_work_mark(&call))
+                    && outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges| ranges.iter().any(|range| range.start_letters == call.letters))
+            })
+        {
+            base = candidate;
+        }
     }
     // Some imported calls separate the publication year with a semicolon.
     // Only a complete four-digit year can be detached; a second call or an
@@ -1711,19 +1711,18 @@ pub(super) fn lcc_item_base(value: &str) -> Option<&str> {
     if let Some((prefix, year)) = value.split_once(';') {
         let year = year.trim();
         let prefix = prefix.trim_end();
-        if year.len() == 4 && year.bytes().all(|b| b.is_ascii_digit())
+        if year.len() == 4
+            && year.bytes().all(|b| b.is_ascii_digit())
             && !prefix.contains('-')
-            && parse_lcc_call(prefix).is_some_and(|call|
+            && parse_lcc_call(prefix).is_some_and(|call| {
                 valid_lcc_remainder(call.remainder)
-                    && call.remainder.split(|c: char| c.is_ascii_whitespace() || c == '.')
-                        .filter(|part| !part.is_empty()).all(|part| {
-                            let bytes = part.as_bytes();
-                            bytes.len() >= 2 && bytes[0].is_ascii_alphabetic()
-                                && bytes[1..].iter().all(u8::is_ascii_digit)
-                        })
-                    && outline().ranges_by_main
-                    .get(&call.letters.chars().next().unwrap()).is_some_and(|ranges|
-                        ranges.iter().any(|range| range.start_letters == call.letters))) {
+                    && call.remainder.split(|c: char| c.is_ascii_whitespace() || c == '.').filter(|part| !part.is_empty()).all(|part| {
+                        let bytes = part.as_bytes();
+                        bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1..].iter().all(u8::is_ascii_digit)
+                    })
+                    && outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges| ranges.iter().any(|range| range.start_letters == call.letters))
+            })
+        {
             base = prefix;
         }
     }
@@ -1731,9 +1730,7 @@ pub(super) fn lcc_item_base(value: &str) -> Option<&str> {
     // its classification. Do not interpret other parenthesized text here.
     if let Some(prefix) = value.strip_suffix("(SET)") {
         let prefix = prefix.trim_end();
-        if parse_lcc_call(prefix).is_some_and(|call| outline().ranges_by_main
-            .get(&call.letters.chars().next().unwrap()).is_some_and(|ranges|
-                ranges.iter().any(|range| range.start_letters == call.letters))) {
+        if parse_lcc_call(prefix).is_some_and(|call| outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges| ranges.iter().any(|range| range.start_letters == call.letters))) {
             base = prefix;
         }
     }
@@ -1746,7 +1743,11 @@ pub(super) fn lcc_item_base(value: &str) -> Option<&str> {
             base = prefix;
         }
     }
-    let opener = match value.as_bytes().last() { Some(b'>') => '<', Some(b')') => '(', _ => '\0' };
+    let opener = match value.as_bytes().last() {
+        Some(b'>') => '<',
+        Some(b')') => '(',
+        _ => '\0',
+    };
     if opener != '\0' {
         if let Some((prefix, note)) = value[..value.len() - 1].rsplit_once(opener) {
             let parts = note.split_whitespace().collect::<Vec<_>>();
@@ -1757,7 +1758,9 @@ pub(super) fn lcc_item_base(value: &str) -> Option<&str> {
                 ["ORIEN" | "ASIAN" | "AMED", lang, "CAGE"] => language(lang),
                 _ => false,
             };
-            if recognized && prefix.ends_with(char::is_whitespace) { base = prefix.trim_end(); }
+            if recognized && prefix.ends_with(char::is_whitespace) {
+                base = prefix.trim_end();
+            }
         }
     }
     // Yale appends (LC) to call numbers in designated shelving runs.
@@ -1765,10 +1768,10 @@ pub(super) fn lcc_item_base(value: &str) -> Option<&str> {
     // with a known LCC class; the marker alone never creates a match.
     if let Some(prefix) = base.strip_suffix(" (LC)") {
         let call_base = lcc_enumeration_base(prefix).unwrap_or(prefix);
-        if parse_lcc_call(call_base).is_some_and(|call|
+        if parse_lcc_call(call_base).is_some_and(|call| {
             (valid_lcc_remainder(call.remainder) || valid_literature_work_mark(&call))
-                && outline().ranges_by_main.get(&call.letters.chars().next().unwrap())
-                    .is_some_and(|ranges| ranges.iter().any(|range| range.start_letters == call.letters))) {
+                && outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges| ranges.iter().any(|range| range.start_letters == call.letters))
+        }) {
             base = prefix;
         }
     }
@@ -1779,22 +1782,25 @@ pub(super) fn lcc_item_base(value: &str) -> Option<&str> {
         if let Some((call_base, year)) = prefix.rsplit_once(' ') {
             let year = year.as_bytes();
             if (year.len() == 4 || (year.len() == 5 && year[4].is_ascii_alphabetic()))
-                && year[..4].iter().all(u8::is_ascii_digit) && !call_base.contains('-')
+                && year[..4].iter().all(u8::is_ascii_digit)
+                && !call_base.contains('-')
                 && parse_lcc_call(call_base).is_some_and(|call| {
                     let cutters = super::runtime::cutter_components(call.remainder);
-                    valid_lcc_remainder(call.remainder) && !cutters.is_empty()
+                    valid_lcc_remainder(call.remainder)
+                        && !cutters.is_empty()
                         && cutters.iter().all(|(letters, digits)| letters.len() == 1 && !digits.is_empty())
-                        && outline().ranges_by_main.get(&call.letters.chars().next().unwrap())
-                            .is_some_and(|ranges| ranges.iter().any(|range| range.start_letters == call.letters))
-                }) {
+                        && outline().ranges_by_main.get(&call.letters.chars().next().unwrap()).is_some_and(|ranges| ranges.iter().any(|range| range.start_letters == call.letters))
+                })
+            {
                 base = prefix;
             }
         }
     }
     base = lcc_enumeration_base(base).unwrap_or(base);
-    if base == value { return None; }
-    let valid = canonical_printed_range(base).is_some()
-        || parse_lcc_call(base).is_some_and(|call| valid_lcc_remainder(call.remainder) || valid_literature_work_mark(&call));
+    if base == value {
+        return None;
+    }
+    let valid = canonical_printed_range(base).is_some() || parse_lcc_call(base).is_some_and(|call| valid_lcc_remainder(call.remainder) || valid_literature_work_mark(&call));
     valid.then_some(base)
 }
 
@@ -1802,31 +1808,41 @@ pub(super) fn lcc_item_base(value: &str) -> Option<&str> {
 // the PZ item subfield to alternate PR/PS classifications (e.g. LC 35014886).
 // Recognize that imported shape without treating it as standard PR/PS shelving.
 fn valid_literature_work_mark(call: &LccCall<'_>) -> bool {
-    if !matches!(call.letters.as_str(), "PZ" | "PR" | "PS") { return false; }
+    if !matches!(call.letters.as_str(), "PZ" | "PR" | "PS") {
+        return false;
+    }
     let remainder = call.remainder.trim_start();
     let remainder = remainder.strip_prefix('.').unwrap_or(remainder).trim_start();
     let mut parts = remainder.split_whitespace();
-    let Some(first) = parts.next() else { return false; };
+    let Some(first) = parts.next() else {
+        return false;
+    };
     let author = first.as_bytes();
-    let has_cutter = author.len() >= 2 && author[0].is_ascii_alphabetic()
-        && author[1..].iter().all(u8::is_ascii_digit);
+    let has_cutter = author.len() >= 2 && author[0].is_ascii_alphabetic() && author[1..].iter().all(u8::is_ascii_digit);
     let title = if has_cutter {
-        let Some(title) = parts.next() else { return false; };
+        let Some(title) = parts.next() else {
+            return false;
+        };
         title
     } else if matches!(call.letters.as_str(), "PR" | "PS") {
         // Alternate PR/PS numbers may have no Cutter at all (LC 78316959:
         // $a PZ3.D55 $b Su 1978 $a PR4552). The imported item mark adds
         // no author precision to the explicit alternate class.
         first
-    } else { return false; };
+    } else {
+        return false;
+    };
     // G350 section 8 preserves the historical single-letter PZ practice
     // (PZ7.S268 E). Alternate PR/PS imports retain their existing rule.
     let minimum_title_letters = if call.letters == "PZ" { 1 } else { 2 };
-    if title.len() < minimum_title_letters || !title.bytes().all(|b| b.is_ascii_alphabetic()) { return false; }
+    if title.len() < minimum_title_letters || !title.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return false;
+    }
     if let Some(date) = parts.next() {
         let date = date.as_bytes();
-        if !(date.len() == 4 || (date.len() == 5 && date[4].is_ascii_alphabetic()))
-            || !date[..4].iter().all(u8::is_ascii_digit) { return false; }
+        if !(date.len() == 4 || (date.len() == 5 && date[4].is_ascii_alphabetic())) || !date[..4].iter().all(u8::is_ascii_digit) {
+            return false;
+        }
     }
     parts.next().is_none()
 }
@@ -1844,7 +1860,9 @@ fn valid_lcc_remainder(mut remainder: &str) -> bool {
                 cursor = 1;
                 // Spacing after the Cutter separator does not change its
                 // letter/number components. Do not consume a second period.
-                while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) { cursor += 1; }
+                while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+                    cursor += 1;
+                }
                 if !bytes.get(cursor).is_some_and(u8::is_ascii_alphabetic) {
                     return false;
                 }
@@ -1965,40 +1983,8 @@ pub(super) fn parse_lcc_call(value: &str) -> Option<LccCall<'_>> {
 /// Component boundaries, not textual prefixes: C6 and C65 are distinct.
 pub(super) fn lcc_match_keys(value: &str) -> Option<Vec<String>> {
     let canonical = canonical_lcc_notation(value)?;
-    if let Some(base) = reviewed_call_base(&canonical) {
-        let mut keys = lcc_match_keys(base)?; keys.push(canonical); return Some(keys);
-    }
-    if let Some(base) = documented_literal_date_base(&canonical) {
-        let mut keys = lcc_match_keys(&base)?; keys.push(canonical); return Some(keys);
-    }
-    if let Some((base, heading, suffix)) = documented_date_call(&canonical) {
-        let mut keys = lcc_match_keys(base)?;
-        if base == "BX870" { keys.push(heading.split_whitespace().take(2).collect::<Vec<_>>().join(" ")); }
-        keys.push(heading.clone());
-        if !suffix.is_empty() {
-            for key in lcc_match_keys(&format!("{base} {suffix}"))? {
-                if let Some(tail) = key.strip_prefix(base).filter(|tail| !tail.is_empty()) {
-                    keys.push(format!("{heading} {}", tail.trim_start()));
-                }
-            }
-        }
-        if keys.last() != Some(&canonical) { keys.push(canonical); }
-        return Some(keys);
-    }
-    if let Some(base) = range_item_base(&canonical) {
-        let mut keys = lcc_match_keys(base)?;
-        keys.push(canonical);
-        return Some(keys);
-    }
-    if lcc_code_list(&canonical).is_some() { return Some(vec![canonical]); }
-    if let Some(base) = marc_subfield_call_base(&canonical) {
-        let mut keys = lcc_match_keys(&base)?;keys.push(canonical);
-        return Some(keys);
-    }
-    if let Some((start, end)) = reference_plus_span(&canonical) {
-        let mut keys = if start.code == end.code { lcc_match_keys(&start.code)? }
-            else { lcc_match_keys(&format!("{}-{}", start.code, end.code))? };
-        keys.push(canonical);return Some(keys);
+    if lcc_code_list(&canonical).is_some() {
+        return Some(vec![canonical]);
     }
     if let Some(base) = repeated_lcc_base(&canonical) {
         let mut keys = lcc_match_keys(base)?;
@@ -2010,35 +1996,15 @@ pub(super) fn lcc_match_keys(value: &str) -> Option<Vec<String>> {
         keys.push(canonical);
         return Some(keys);
     }
-    if let Some(base) = qualified_table_family(&canonical) {
-        let mut keys = lcc_match_keys(&base)?;keys.push(canonical);
-        return Some(keys);
+    if let Some(class) = minimal_subclass_assignment(&canonical) {
+        return Some(vec![class.to_owned(), canonical]);
     }
-    if let Some(base) = qualified_table_span(&canonical) {
-        let mut keys = lcc_match_keys(&base)?;keys.push(canonical);
-        return Some(keys);
-    }
-    if let Some(base) = table_cutter_span(&canonical) {
-        let mut keys = lcc_match_keys(&base)?;
-        keys.push(canonical);
-        return Some(keys);
-    }
-    if let Some(base) = variable_cutter_span(&canonical) {
-        let mut keys = lcc_match_keys(&base)?;
-        keys.push(canonical);
-        return Some(keys);
-    }
-    if let Some(class) = minimal_subclass_assignment(&canonical) { return Some(vec![class.to_owned(), canonical]); }
-    if let Some(base) = documented_outline_heading(&canonical) { return Some(vec![base.to_owned(), canonical]); }
-    if let Some(base) = schedule_table_base(&canonical).or_else(|| display_bracket_base(&canonical)) {
+    if let Some(base) = reference_collection_base(&canonical) {
         let mut keys = lcc_match_keys(base)?;
         keys.push(canonical);
         return Some(keys);
     }
-    if let Some(base) = reference_collection_base(&canonical) {
-        let mut keys = lcc_match_keys(base)?;keys.push(canonical);return Some(keys);
-    }
-    if let Some(base) = local_cutter_x_base(&canonical).or_else(|| bracketed_year_call_base(&canonical)).or_else(|| doubled_cutter_period_base(&canonical)).or_else(|| period_year_call_base(&canonical)).or_else(|| apostrophe_call_base(&canonical)) {
+    if let Some(base) = local_cutter_x_base(&canonical).or_else(|| doubled_cutter_period_base(&canonical)).or_else(|| period_year_call_base(&canonical)).or_else(|| apostrophe_call_base(&canonical)) {
         let mut keys = lcc_match_keys(&base)?;
         keys.push(canonical);
         return Some(keys);
@@ -2061,17 +2027,19 @@ pub(super) fn lcc_match_keys(value: &str) -> Option<Vec<String>> {
     let mut rest = call.remainder;
     while !rest.is_empty() {
         rest = rest.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '.');
-        if rest.is_empty() { break; }
+        if rest.is_empty() {
+            break;
+        }
         let letters = rest.bytes().take_while(u8::is_ascii_alphabetic).count();
         let digits = rest[letters..].bytes().take_while(u8::is_ascii_digit).count();
         if digits == 0 {
             // Preserve earlier topic keys for a single-letter year suffix
             // (1999a), without broadening matching of arbitrary Cutter suffixes.
-            let year_suffix = rest.len() == 1 && rest.as_bytes()[0].is_ascii_alphabetic()
-                && keys.last().and_then(|key| key.rsplit_once(' '))
-                    .is_some_and(|(_, year)| year.len() == 4 && year.bytes().all(|byte| byte.is_ascii_digit()));
+            let year_suffix = rest.len() == 1 && rest.as_bytes()[0].is_ascii_alphabetic() && keys.last().and_then(|key| key.rsplit_once(' ')).is_some_and(|(_, year)| year.len() == 4 && year.bytes().all(|byte| byte.is_ascii_digit()));
             if year_suffix || valid_literature_work_mark(&call) {
-                if keys.last() != Some(&canonical) { keys.push(canonical); }
+                if keys.last() != Some(&canonical) {
+                    keys.push(canonical);
+                }
                 return Some(keys);
             }
             return Some(vec![canonical]);
@@ -2167,8 +2135,7 @@ mod tests {
 
     #[test]
     fn minimal_class_assignment_parentheses_delimit_the_final_letter() {
-        for (code, assignment) in [("MLCL 2006/00304(B)", "(B)"),
-            ("MLCM 2006/00248(R)", "(R)"), ("MICROFILM (O) 85/4003(P)", "(P)")] {
+        for (code, assignment) in [("MLCL 2006/00304(B)", "(B)"), ("MLCM 2006/00248(R)", "(R)"), ("MICROFILM (O) 85/4003(P)", "(P)")] {
             assert_eq!(canonical_lcc_notation(code).as_deref(), Some(code));
             assert_eq!(super::lcc_match_keys(code).unwrap(), vec![assignment.to_owned(), code.to_owned()]);
             let spaced = code.replace(assignment, &format!(" {assignment}"));
@@ -2183,8 +2150,7 @@ mod tests {
 
     #[test]
     fn cutter_separator_spacing_keeps_the_same_components() {
-        for (code, base) in [("TJ217.2. C48 2000", "TJ217.2.C48 2000"),
-            ("QA76 . A1 . B2 1999", "QA76.A1.B2 1999"), ("AC106 . A24 2013", "AC106.A24 2013")] {
+        for (code, base) in [("TJ217.2. C48 2000", "TJ217.2.C48 2000"), ("QA76 . A1 . B2 1999", "QA76.A1.B2 1999"), ("AC106 . A24 2013", "AC106.A24 2013")] {
             assert_eq!(canonical_lcc_notation(code).as_deref(), Some(code));
             assert_eq!(super::lcc_match_keys(code), super::lcc_match_keys(base));
         }
@@ -2198,22 +2164,8 @@ mod tests {
     }
 
     #[test]
-    fn plus_markers_keep_the_widest_documented_scope() {
-        let (start, end) = super::reference_plus_span("PK2916+").unwrap();
-        assert_eq!(start.code, "PK2916");assert_eq!(end.code, "PK2947");
-        let (start, end) = super::reference_plus_span("IN PROCESS [F123+]").unwrap();
-        assert_eq!(start.code, "F123");assert_eq!(end.code, "F123");
-        assert_eq!(super::lcc_match_keys("PK2916+").unwrap(), vec![canonical_lcc_notation("PK2916-PK2947").unwrap(), "PK2916+".to_owned()]);
-        assert!(canonical_lcc_notation("[F123+]").is_some());
-        for code in ["PK2916++", "PK2916+ EXTRA", "IN PROCESS F123+", "IN PROCESS [UNKNOWN+]", "BG1068+", "QA99999999+", "LAW+", "MLCS+"] {
-            assert!(super::reference_plus_span(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
     fn historical_pz_single_title_letters_keep_author_evidence() {
-        for (code, class, cutter) in [("PZ7.S268 E", "PZ7", "PZ7.S268"),
-            ("PZ7.C54 A", "PZ7", "PZ7.C54"), ("PZ10.831.G586 E 1998", "PZ10.831", "PZ10.831.G586")] {
+        for (code, class, cutter) in [("PZ7.S268 E", "PZ7", "PZ7.S268"), ("PZ7.C54 A", "PZ7", "PZ7.C54"), ("PZ10.831.G586 E 1998", "PZ10.831", "PZ10.831.G586")] {
             assert_eq!(canonical_lcc_notation(code).as_deref(), Some(code));
             assert_eq!(super::lcc_match_keys(code).unwrap(), vec![class.to_owned(), cutter.to_owned(), code.to_owned()]);
         }
@@ -2228,7 +2180,8 @@ mod tests {
         for suffix in ["SER. 2, VOL. 130", "SER.2 VOL.130", "SERIES 2:V.130", "SER. II, VOL. 3", "NEW SER. 2, VOL. 4", "NEW SERIES 2 VOL. 4", "NEW SER.:V.1", "NEW SERIES, VOL. 1", "NEW SER."] {
             let code = format!("{base} {suffix}");
             assert_eq!(super::lcc_item_base(&code), Some(base), "{code}");
-            let mut keys = super::lcc_match_keys(base).unwrap();keys.push(code.clone());
+            let mut keys = super::lcc_match_keys(base).unwrap();
+            keys.push(code.clone());
             assert_eq!(super::lcc_match_keys(&code), Some(keys));
         }
         for suffix in ["SER.", "SER. 2,", "SERIES UNKNOWN", "SER. 2 EXTRA", "NEW SER. UNKNOWN", "NEW SERIES,", "SER. 2 QA76", "SER. IIV", "SERIAL 2"] {
@@ -2238,225 +2191,14 @@ mod tests {
     }
 
     #[test]
-    fn qualified_table_spans_require_documented_ranges_and_complete_cutters() {
-        let expected = canonical_lcc_notation("PR9499.3.S53.Z5-PR9499.3.S53.Z999");
-        for note in ["P-PZ40:.XZ5-.XZ999", "P-PZ40: .XZ5-Z999", "P-PZ40:.XZ5-.Z999"] {
-            let code = format!("PR9499.3.S53 ({note})+");
-            assert_eq!(super::qualified_table_span(&code), expected);
-            assert_eq!(canonical_lcc_notation(&code).as_deref(), Some(code.as_str()));
-        }
-        for code in ["PR9499.3.S (P-PZ40:.XZ5-.XZ999)+", "PR9499.3 (P-PZ40:.XZ5-.XZ999)+", "PR9499.3.S53 (UNKNOWN:.XZ5-.XZ999)+", "PR9499.3.S53 (P-PZ40:.XZ999-.XZ5)+", "PR9499.3.S53 (P-PZ40:.XZ5-.XZ998)+", "PR9499.3.S53 (P-PZ40:.XZ5-.XZ999 EXTRA)+", "PR9499.3.S53 (P-PZ40:.X)+"] {
-            assert!(super::qualified_table_span(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
-    fn used_reference_endpoints_retain_full_documented_scopes() {
-        for (code, expected_end) in [("BP65.A1+", "BP65.Z"), ("GV1131+", "GV1132"), ("PN1991.77.A1+", "PN1991.77.Z")] {
-            let (_, end) = super::reference_plus_span(code).unwrap();
-            assert_eq!(end.code, expected_end);
-        }
-    }
-
-    #[test]
-    fn mineralogy_reference_scopes_retain_qe_subclass() {
-        for (code, expected_end) in [("QE372+", "QE387"), ("QE373+", "QE385.6"), ("QE377.7.A1+", "QE377.7.Z"), ("QE385.6.A1+", "QE385.6.Z")] {
-            let (_, end) = super::reference_plus_span(code).unwrap();
-            assert_eq!(end.code, expected_end);
-        }
-    }
-
-    #[test]
-    fn reviewed_printed_endpoints_retain_class_decimals_and_cutters() {
-        for (code, expected_end) in [("B4165.M49+", "B4165.M494"), ("BM520.88.A3+", "BM520.88.A39"), ("B605.P5+", "B605.P54"), ("NX284.4.A+", "NX284.4.Z")] {
-            let (_, end) = super::reference_plus_span(code).unwrap();
-            assert_eq!(end.code, expected_end);
-        }
-    }
-
-    #[test]
-    fn reviewed_hydrology_scopes_do_not_cross_into_recreation() {
-        for (code, expected_end) in [("GB1016+", "GB1016.6"), ("GB1219+", "GB1223"), ("GB2819+", "GB2823")] {
-            let (start, end) = super::reference_plus_span(code).unwrap();
-            assert_eq!(start.letters, "GB");
-            assert_eq!(end.code, expected_end);
-        }
-    }
-
-    #[test]
-    fn table_initials_retain_family_without_inventing_author_digits() {
-        for code in ["PR9499.3.S (P-PZ40:.XZ5-.XZ999)+", "PR9499.3.S.XZ5-Z999 (P-PZ40)+"] {
-            assert_eq!(super::qualified_table_family(code).as_deref(), Some("PR9499.3.S"));
-            assert_eq!(canonical_lcc_notation(code).as_deref(), Some(code));
-            assert!(super::qualified_table_span(code).is_none());
-        }
-        for code in ["PR9499.3.S (UNKNOWN:.XZ5-.XZ999)+", "PR9499.3.S (P-PZ40:.XZ5-.XZ998)+", "PR9499.3.S (P-PZ40:.XZ999-.XZ5)+", "PR9499.3.S.A (P-PZ40:.XZ5-.XZ999)+", "PR9499.3 (P-PZ40:.XZ5-.XZ999)+"] {
-            assert!(super::qualified_table_family(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
-    fn table_ranges_allow_repeated_prefixes_and_terminal_initials() {
-        for (code, span) in [
-            ("B133.S5A6-S5Z (B-BJ5)+", "B133.S5.A6-B133.S5.Z"),
-            ("BL1280.292.R36A6-Z (BL4)+", "BL1280.292.R36.A6-BL1280.292.R36.Z"),
-            ("BL1142.6.M3642A-Z 2004 (BL3)+", "BL1142.6.M3642.A-BL1142.6.M3642.Z"),
-        ] {
-            assert_eq!(super::table_cutter_span(code), canonical_lcc_notation(span), "{code}");
-        }
-        for code in ["B133.S5A6-S6Z (B-BJ5)+", "B133.S5A6-S5Z (UNKNOWN)+",
-            "B133.S5A6-S5Z 200 (B-BJ5)+", "B133.S5A6-S5Z 2004 EXTRA (B-BJ5)+",
-            "B133.S5A6-S5A2 (B-BJ5)+", "B133.S.A6-Z (B-BJ5)+",
-            "B133.S5A6-D1 (B-BJ5)+", "K1.A1-Z (B-BJ5)+"] {
-            assert!(super::table_cutter_span(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
-    fn preliminary_plus_initials_require_complete_reference_scopes() {
-        for code in ["HV6433.A-Z+", "HV6433.A-ZI+", "HV6433.A-.ZI+", "HV6433.A-ZI4+", "HV6433.A-ZI"] {
-            assert_eq!(super::documented_preliminary_plus_span(code), canonical_lcc_notation("HV6433.A-HV6433.Z"));
-        }
-        for code in ["HV6433.A-ZI++", "HV6433.A-ZI+ EXTRA",
-            "HV6433.A2-ZI+", "HV6433.J-ZI+", "QA999999.A-ZI+",
-            "HV6433.A-ZI.X+", "HV6433.A-ZI1A+", "K1.A-ZI+"] {
-            assert!(super::documented_preliminary_plus_span(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
-    fn unqualified_placeholders_require_published_scope_and_position() {
-        for code in ["HV6433.A-Z.X+", "HV6433.A-ZI.X+", "HV6433.A-ZI.X", "HD1289.A-ZI.X+"] {
-            let class = if code.starts_with("HV") { "HV6433" } else { "HD1289" };
-            assert_eq!(super::documented_placeholder_span(code), canonical_lcc_notation(&format!("{class}.A-{class}.Z")));
-        }
-        for code in ["HV6433.A-ZI.X99+", "HV6433.A2-ZI.X+", "HV6433.A-ZI.X+ EXTRA",
-            "HV6433.A-ZI.XX+", "HV6433.A-ZI.X++", "QA999999.A-ZI.X+",
-            "HV6433.A-ZI.X2A+", "HV6433.A-ZI.X (UNKNOWN)+", "K1.A-ZI.X+"] {
-            assert!(super::documented_placeholder_span(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
-    fn numeric_qualified_operations_extend_complete_cutter_digits() {
-        for (code, span) in [
-            ("PN5499.A4 (PN4:.X2A6-.X2Z)+", "PN5499.A42.A6-PN5499.A42.Z"),
-            ("PN5499.A40 (PN4:.X2A6-.X2Z)+", "PN5499.A402.A6-PN5499.A402.Z"),
-            ("PN5499.T8.X4A-.X4Z (PN4)+", "PN5499.T84.A-PN5499.T84.Z"),
-        ] { assert_eq!(super::qualified_table_span(code), canonical_lcc_notation(span), "{code}"); }
-        assert_eq!(super::qualified_table_family("B5134.K (B-BJ5:.X4A6-.X4Z)+").as_deref(), Some("B5134.K"));
-        assert!(super::qualified_table_span("B5134.K (B-BJ5:.X4A6-.X4Z)+").is_none());
-        for code in ["PN5499 (PN4:.X2A6-.X2Z)+", "PN5499.A4 (PN4:.X2A6-.X3Z)+", "PN5499.A4 (UNKNOWN:.X2A6-.X2Z)+"] {
-            assert!(super::qualified_table_span(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
-    fn numeric_nested_operations_keep_outer_scope() {
-        for code in ["HT169.A-ZI.X2A-.X2ZD (H73)+", "HT169.A-ZI.X2A-.X2Z (H73)+",
-            "HT169.A-ZI.X2A-2ZD (H73)+"] {
-            assert_eq!(super::variable_cutter_span(code), canonical_lcc_notation("HT169.A-HT169.Z"));
-        }
-        for code in ["HT169.A-ZI.X2A-.X3ZD (H73)+", "HT169.A-ZI.X2A-.X2ZD (H15)+",
-            "HT169.A-ZI.X2A-.X2ZD EXTRA (H73)+", "HT169.A-ZI.X2A-.X2ZD.X9 (H73)+",
-            "HT169.A-ZI.X2A-.X2MD (H73)+"] {
-            assert!(super::variable_cutter_span(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
-    fn nested_relative_operations_preserve_unresolved_outer_interval() {
-        for code in ["BL1175.A-Z.XA6-.XZ (BL4)+", "BL1175.A-ZG .XA6-.XZ (BL4)+",
-            "BL1175.A-ZG.XA6-.XZ (BL4)+", "BL1175.A-ZG.XA6-Z (BL4)+",
-            "BL1175.A-ZG.XA6-.Z (BL4)+", "BL2017.85.A-ZG.XA27-.XA279 (BL4)+"] {
-            let class = if code.starts_with("BL1175") { "BL1175" } else { "BL2017.85" };
-            assert_eq!(super::variable_cutter_span(code), canonical_lcc_notation(&format!("{class}.A-{class}.Z")), "{code}");
-        }
-        for code in ["BL1175.A-ZG.XA6-.X7 (BL4)+", "BL1175.A-ZG.XA6-.XZ EXTRA (BL4)+",
-            "BL1175.A-ZG.XA6-.XZ (UNKNOWN)+", "BL1175.A-ZG.XA6-.XZ.X2 (BL4)+",
-            "BL1175.A-ZG.XA6-.XZ (DS7)+"] {
-            assert!(super::variable_cutter_span(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
-    fn historical_biography_tables_require_applicable_scope_and_explicit_operation() {
-        for table in ["DS7", "DSVII", "DS-DXVII", "VII", "TABLE VII"] {
-            let code = format!("DS481.G3 ({table}:.XA6-Z)+");
-            assert_eq!(super::qualified_table_span(&code), canonical_lcc_notation("DS481.G3.A6-DS481.G3.Z"));
-        }
-        assert_eq!(super::qualified_table_span("DS481.G3.XA4 (DS7)+"), canonical_lcc_notation("DS481.G3.A4-DS481.G3.A4"));
-        assert_eq!(super::qualified_table_family("DS481.G (DS7:.XA6-.XZ)+").as_deref(), Some("DS481.G"));
-        for code in ["DS481.G3 (DS-DX7:.XA6-.XZ)+", "DS481.G3 (UNKNOWN:.XA6-.XZ)+",
-            "DS582.G3 (DS7:.XA6-.XZ)+", "DS481.A1 (DS7:.XA6-.XZ)+",
-            "DS481.A (DS7:.XA6-.XZ)+", "DS481.G3.A2 (DS7:.XA6-.XZ)+",
-            "DS481.G3 (DS7:.XA6-.X7)+", "DS481.G3 (DS7)+"] {
-            assert!(super::qualified_table_span(code).is_none(), "{code}");
-            assert!(super::qualified_table_family(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
-    fn preliminary_ranges_require_identical_repeated_prefixes() {
-        for (code, span) in [
-            ("BL1140.4.B435A-.B435ZC 2008 (BL3)+", "BL1140.4.B435.A-BL1140.4.B435.Z"),
-            ("HD8039.T182A-.T182ZI (H50)+", "HD8039.T182.A-HD8039.T182.Z"),
-            ("BQ1300.M363A-.M363ZS (BQ3)+", "BQ1300.M363.A-BQ1300.M363.Z"),
-        ] { assert_eq!(super::variable_cutter_span(code), canonical_lcc_notation(span), "{code}"); }
-        for code in ["HD8039.T182A-.T183ZI (H50)+", "HD8039.T182A-.T18ZI (H50)+",
-            "HD8039.T182A-.T182ZI EXTRA (H50)+", "HD8039.T182A-.T182ZI (UNKNOWN)+",
-            "HD8039.T182A-.T182ZI 200 (H50)+", "HD8039.T182A-.T182Z (H50)+"] {
-            assert!(super::variable_cutter_span(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
-    fn preliminary_spans_keep_nested_cutters_and_allow_complete_years() {
-        for code in ["BL1140.4.B432A-ZE (BL3)+", "BL1140.4.B432.A-ZE 2009 (BL3)+", "BL1140.4.B432A-.ZE 2009 (BL3)+"] {
-            assert_eq!(super::variable_cutter_span(code), canonical_lcc_notation("BL1140.4.B432.A-BL1140.4.B432.Z"));
-        }
-        assert_eq!(super::variable_cutter_span("BL1112.24.A-ZU 2009 (BL1)+"), canonical_lcc_notation("BL1112.24.A-Z"));
-        for code in ["BL1140.4.B.A-ZE 2009 (BL3)+", "BL1140.4.B432A-ZE 200 (BL3)+", "BL1140.4.B432A-ZE 2009 EXTRA (BL3)+", "BL1140.4.B432A-ZE 2009 (UNKNOWN)+", "BL1140.4.B432A-ZE 20X9 (BL3)+"] {
-            assert!(super::variable_cutter_span(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
-    fn inline_table_spans_use_the_same_documented_interval() {
-        let expected = canonical_lcc_notation("PL4718.9.G678.Z5-PL4718.9.G678.Z999");
-        for relative in [".XZ5-Z999", ".XZ5-.XZ999", ".XZ5-.Z999"] {
-            let code = format!("PL4718.9.G678{relative} (P-PZ40)+");
-            assert_eq!(super::qualified_table_span(&code), expected);
-            assert_eq!(canonical_lcc_notation(&code).as_deref(), Some(code.as_str()));
-        }
-        for code in ["PL4718.9.G.XZ5-Z999 (P-PZ40)+", "PL4718.9.G678.XZ5-Z998 (P-PZ40)+", "PL4718.9.G678.XZ5-Z999 (UNKNOWN)+", "PL4718.9.G678.XZ999-Z5 (P-PZ40)+", "PL4718.9.G678.XZ5-Z999 EXTRA (P-PZ40)+", "PL4718.9.G678.XZ5-Z999 (P-PZ50)+"] {
-            assert!(super::qualified_table_span(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
     fn explicit_lists_require_complete_known_components() {
         assert_eq!(super::lcc_code_list("[qa76; QC1]").unwrap(), vec!["QA76", "QC1"]);
         assert_eq!(super::lcc_subject_paths("QA76; QC1").len(), 2);
-        assert!(super::lcc_code_list("QA76; $AB43").is_some());
-        assert!(super::lcc_code_list("QA76; [B43]").is_some());
         assert!(super::lcc_code_list("QA76; E78.2").is_some());
         assert!(super::lcc_subject_path("QA76; QC1").is_none());
         assert!(super::lcc_subject_paths("QA76; prose").is_empty());
         for code in ["QA76;", "QA76; prose", "QA76; QX1", "QA76; QC", "QA76; QC1 truncated", "BF175; B43", "B126; F8", "QA76; K1", "PL4758.85.A-ZS.x (P-PZ25; P-PZ40)+"] {
             assert!(super::lcc_code_list(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
-    fn marc_markers_keep_class_and_item_and_reject_alternatives() {
-        for (code, base) in [("$AQA76.9$B.A25 2008", "QA76.9 .A25 2008"), ("E99.S45$BC76 1996", "E99.S45 C76 1996"), ("$A RC951", "RC951"), ("CS71.C323$B1977", "CS71.C323 1977")] {
-            assert_eq!(super::marc_subfield_call_base(code).as_deref(), Some(base));
-            assert_eq!(canonical_lcc_notation(code).as_deref(), Some(code));
-            assert_eq!(super::lcc_match_keys(code).unwrap().last().unwrap(), code);
-        }
-        for code in ["QA76$B", "$B.A25", "$AQA76$B.A25$AQC1", "QA76$B.A25$B.A26", "QA76$C.A25", "$AQA76$0ID", "QA76$BUNKNOWN WORDS", "$AK1$0ID", "QA1-10$B.A25"] {
-            assert!(super::marc_subfield_call_base(code).is_none(), "{code}");
         }
     }
 
@@ -2478,7 +2220,8 @@ mod tests {
                 let code = base.repeat(count);
                 assert_eq!(super::repeated_lcc_base(&code), Some(base));
                 assert_eq!(canonical_lcc_notation(&code).as_deref(), Some(code.as_str()));
-                let mut keys = super::lcc_match_keys(base).unwrap();keys.push(code.clone());
+                let mut keys = super::lcc_match_keys(base).unwrap();
+                keys.push(code.clone());
                 assert_eq!(super::lcc_match_keys(&code), Some(keys));
             }
         }
@@ -2504,20 +2247,6 @@ mod tests {
     }
 
     #[test]
-    fn table_cutter_ranges_retain_all_preceding_components() {
-        for (code, span) in [("PL4718.9.B33Z5-Z999 (P-PZ40)+", "PL4718.9.B33.Z5-PL4718.9.B33.Z999"),
-            ("PL4718.9.B33.Z5-.Z999 (P-PZ40)+", "PL4718.9.B33.Z5-PL4718.9.B33.Z999"),
-            ("HC425.A5-Z6 (H17)+", "HC425.A5-HC425.Z6")] {
-            assert_eq!(super::table_cutter_span(code), canonical_lcc_notation(span));
-            let mut keys = super::lcc_match_keys(span).unwrap();keys.push(code.to_owned());
-            assert_eq!(super::lcc_match_keys(code), Some(keys));
-        }
-        for code in ["PL4718.9.B33Z999-Z5 (P-PZ40)+", "PL4718.9.B33Z5-Z999 (UNKNOWN)+", "PL4718.9.B33Z5-QA999 (P-PZ40)+", "PL4718.9.B33Z5-Z999 EXTRA (P-PZ40)+", "PL4718.9.B33Z5-Z999"] {
-            assert!(super::table_cutter_span(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
     fn terminal_slashes_keep_only_valid_class_and_cutter_prefixes() {
         for code in ["PR6023.A93Z/", "DA690.S/", "AM101.B85/", "QA76/", "QA76 . A1/"] {
             assert_eq!(canonical_lcc_notation(code).as_deref(), Some(code));
@@ -2526,90 +2255,6 @@ mod tests {
         }
         for code in ["QA76//", "QA76/A1/", "QA76.UNKNOWN/", "QA76.A1 1999/", "QA76.A1 VOL. 2/", "QA76./", "QA76.A1 EXTRA/", "QA76-QA80/", "CPB/"] {
             assert!(super::terminal_slash_base(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
-    fn reviewed_unmarked_preliminaries_preserve_both_endpoints_and_evidence() {
-        for row in include_str!("../data/lcc-reviewed-preliminary-spans.tsv").lines() {
-            let (raw, span) = row.split_once('\t').unwrap();
-            assert_eq!(super::reviewed_preliminary_span(raw), canonical_lcc_notation(span));
-            assert_eq!(canonical_lcc_notation(raw).as_deref(), Some(raw));
-            assert!(super::lcc_match_keys(raw).unwrap().contains(&raw.to_owned()));
-        }
-        for raw in ["PK1716.5.A-ZF", "PK1716.5.A-ZE EXTRA", "PK1717.5.A-ZE", "PK2598.A3-Z5.Q", "K1716.5.A-ZE"] {
-            assert!(super::reviewed_preliminary_span(raw).is_none(), "{raw}");
-        }
-    }
-
-    #[test]
-    fn reviewed_call_bases_preserve_original_evidence_and_exact_boundaries() {
-        let raw = "PA85.G 646A3 date";
-        assert_eq!(canonical_lcc_notation(raw).as_deref(), Some("PA85.G 646A3 DATE"));
-        let mut keys = super::lcc_match_keys("PA85.G646.A3").unwrap(); keys.push(raw.to_ascii_uppercase());
-        assert_eq!(super::lcc_match_keys(raw), Some(keys));
-        for value in ["PA85.G 647A3 DATE", "PA85.G 646A4 DATE", "PA85.G 646A3 DATE EXTRA", "PA85.G 646A3 2007"] {
-            assert!(super::reviewed_call_base(value).is_none(), "{value}");
-        }
-    }
-
-    #[test]
-    fn literal_dates_require_a_documented_complete_base() {
-        for (value, base) in [("BS195 .E64 DATE", "BS195.E64"), ("PE1119.A1N5 DATE", "PE1119.A1.N5"),
-            ("PA3862.A3 DATE", "PA3862.A3")] {
-            assert_eq!(super::documented_literal_date_base(value).as_deref(), Some(base));
-            assert_eq!(canonical_lcc_notation(value).as_deref(), Some(value));
-            let keys = super::lcc_match_keys(value).unwrap();
-            assert!(keys.contains(&base.to_owned())); assert_eq!(keys.last().map(String::as_str), Some(value));
-        }
-        for value in ["BS195.E642 DATE", "BS195.E6 DATE", "PA85.G 646A3 DATE", "QA76 DATE", "KZ179.5.H2 DATE",
-            "BS195.E64 2005 DATE", "BS195.E64 DATE EXTRA", "BS195.E64 DATE DATE"] {
-            assert!(super::documented_literal_date_base(value).is_none(), "{value}");
-        }
-    }
-
-    #[test]
-    fn chronological_calls_validate_dates_and_preserve_complete_items() {
-        for (input, expected) in [("BX870 1978 October .S65 2012", "BX870 1978 OCT. .S65 2012"),
-            ("DC240 jun. 22 B47 2011", "DC240 JUNE 22 B47 2011"),
-            ("BX870 2000 Feb. 29", "BX870 2000 FEB. 29")] {
-            assert_eq!(canonical_lcc_notation(input).as_deref(), Some(expected));
-            assert!(super::lcc_subject_path(input).is_some());
-        }
-        for input in ["BX870 1900 FEB. 29", "BX870 1978A OCT.", "DC240 APRIL 31", "DC240 JUNE 0",
-            "DC240 JUNE", "BX870 1978 OCT..", "BX871 1978 OCT.", "K870 1978 OCT.",
-            "DC240 JUNE 22 .B", "DC240 JUNE 22 .B47 UNKNOWN"] {
-            assert!(super::documented_date_call(input).is_none(), "{input}");
-        }
-    }
-
-    #[test]
-    fn preliminary_initials_preserve_the_whole_declared_cutter_span() {
-        for (code, span) in [("HC437.A-ZM (H15)+", "HC437.A-Z"),
-            ("HC440.A-ZE5 (H15)+", "HC440.A-Z"), ("HC437.A-.ZM (H15)+", "HC437.A-Z")] {
-            assert_eq!(super::variable_cutter_span(code), canonical_lcc_notation(span));
-            let mut keys = super::lcc_match_keys(span).unwrap();
-            keys.push(code.to_owned());
-            assert_eq!(super::lcc_match_keys(code), Some(keys));
-        }
-        for code in ["HC437.N-ZM (H15)+", "HC437.A-ZMAN (H15)+", "HC437.A-ZM33X (H15)+", "HC437.A-ZM", "HC437.A-ZM (UNKNOWN)+", "HC437.A-ZM EXTRA (H15)+"] {
-            assert!(super::variable_cutter_span(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
-    fn variable_cutter_templates_preserve_the_full_declared_span() {
-        assert_eq!(super::variable_cutter_span("HD2346.A-ZI.X"), canonical_lcc_notation("HD2346.A-HD2346.Z"));
-        assert_eq!(super::schedule_table_base("HD2346.A-ZI.X (H73)+"), Some("HD2346.A-ZI.X"));
-        for (code, span) in [("HD2346.A-ZI.X (H73)+", "HD2346.A-Z"),
-            ("HD9502.A4-ZI.X2 (H20)+", "HD9502.A4-Z")] {
-            assert_eq!(canonical_lcc_notation(code).as_deref(), Some(code));
-            let mut keys = super::lcc_match_keys(span).unwrap();
-            keys.push(code.to_owned());
-            assert_eq!(super::lcc_match_keys(code), Some(keys));
-        }
-        for code in ["HD2346.J-ZI.X (H73)+", "HD2346.A-ZI.X EXTRA (H73)+", "HD2346.A-ZI.X (UNKNOWN)+", "HD2346.A-ZI.X2A (H73)+", "HD2346.A-ZI.X99"] {
-            assert!(super::variable_cutter_span(code).is_none(), "{code}");
         }
     }
 
@@ -2677,9 +2322,7 @@ mod tests {
 
     #[test]
     fn duplicated_cutter_periods_preserve_component_boundaries() {
-        for (code, normal) in [("TK5103.59. .I55 1998", "TK5103.59.I55 1998"),
-            ("PK2200..H355", "PK2200.H355"), ("QA76.A1. .B2 1999", "QA76.A1.B2 1999"),
-            ("PZ7 . .R79835 HAM", "PZ7 .R79835 HAM")] {
+        for (code, normal) in [("TK5103.59. .I55 1998", "TK5103.59.I55 1998"), ("PK2200..H355", "PK2200.H355"), ("QA76.A1. .B2 1999", "QA76.A1.B2 1999"), ("PZ7 . .R79835 HAM", "PZ7 .R79835 HAM")] {
             assert_eq!(canonical_lcc_notation(code).as_deref(), Some(code));
             let mut keys = super::lcc_match_keys(normal).unwrap();
             keys.push(code.to_owned());
@@ -2691,20 +2334,8 @@ mod tests {
     }
 
     #[test]
-    fn documented_obsolete_sociology_heading_retains_original_evidence() {
-        let code = "HM(1)-1281";
-        assert_eq!(canonical_lcc_notation(code).as_deref(), Some(code));
-        assert_eq!(super::lcc_match_keys(code).unwrap(), vec!["HM", code]);
-        assert_eq!(super::lcc_subject_path(code), super::lcc_subject_path("HM"));
-        for code in ["HM(2)-1281", "HM(1)-1282", "HM(1)-1281 Sociology", "HM(1)-1281QA76", "QA(1)-1281"] {
-            assert!(canonical_lcc_notation(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
     fn final_period_year_preserves_complete_class_and_cutter_keys() {
-        for (code, base) in [("LB1140.5.P4 G373.2003", "LB1140.5.P4 G373 2003"),
-            ("QD388P65.2004", "QD388P65 2004"), ("QA76 . A1.1999B", "QA76 . A1 1999B")] {
+        for (code, base) in [("LB1140.5.P4 G373.2003", "LB1140.5.P4 G373 2003"), ("QD388P65.2004", "QD388P65 2004"), ("QA76 . A1.1999B", "QA76 . A1 1999B")] {
             assert_eq!(canonical_lcc_notation(code).as_deref(), Some(code));
             let mut keys = super::lcc_match_keys(base).unwrap();
             keys.push(code.to_owned());
@@ -2712,21 +2343,6 @@ mod tests {
         }
         for code in ["QA76.2004", "QA76.A.2004", "QA76.A1..2004", "QA76.A1.200", "QA76.A1.2004 EXTRA", "QA76.A1.2004.2005", "QA76.A1 3.2004", "QA76.A1-B2.2004"] {
             assert!(super::period_year_call_base(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
-    fn display_brackets_preserve_valid_inner_classification_and_evidence() {
-        for base in ["B53", "HG4515.15 .S53 2002", "QA76.1-QA76.9", "QA76.A1-QA76.A9", "QA3 .L28 VOL. 2"] {
-            let code = format!("[{base}]");
-            assert_eq!(canonical_lcc_notation(&code), Some(code.clone()));
-            let mut keys = super::lcc_match_keys(base).unwrap();
-            keys.push(code.clone());
-            assert_eq!(super::lcc_match_keys(&code), Some(keys));
-            assert_eq!(super::lcc_subject_path(&code), super::lcc_subject_path(base));
-        }
-        for code in ["[]", "[[B53]]", "[B53", "B53]", "[B53] EXTRA", "[QA76 .]", "[QA76][QB2]", "[IN PROCESS]", "[QA76 .A1 [1999]]"] {
-            assert!(canonical_lcc_notation(code).is_none(), "{code}");
         }
     }
 
@@ -2739,49 +2355,6 @@ mod tests {
         }
         for suffix in ["VOL. 1 99", "VOL. 1 (1999", "VOL. 1 1999)", "VOL. 1 (1999) EXTRA", "VOL. 1 1999 QB2", "VOL. 1 1999 2000"] {
             assert!(canonical_lcc_notation(&format!("QA3 .L28 {suffix}")).is_none(), "{suffix}");
-        }
-    }
-
-    #[test]
-    fn bracketed_book_years_preserve_the_complete_dated_call() {
-        for (code, base) in [("AC8 .S6588 [1981]", "AC8 .S6588 1981"),
-            ("QA76 .A1 [1999B]", "QA76 .A1 1999B"), ("QA76 [1999]", "QA76 1999")] {
-            assert_eq!(canonical_lcc_notation(code).as_deref(), Some(code));
-            let mut keys = super::lcc_match_keys(base).unwrap();
-            keys.push(code.to_owned());
-            assert_eq!(super::lcc_match_keys(code), Some(keys));
-        }
-        for code in ["QA76 .A1 [99]", "QA76 .A1 [1999?]", "QA76 .A1 [1999 OR 2000]", "QA76 .A1 [1999] EXTRA", "QA76 .A1 [1999", "QA76 .A1 [[1999]]", "QA76 UNKNOWN [1999]"] {
-            assert!(canonical_lcc_notation(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
-    fn registered_table_notes_preserve_complete_base_and_evidence() {
-        for (code, base) in [("HC435.3 (H15)+", "HC435.3"), ("PK2166 (P-PZ22)+", "PK2166"),
-            ("PL4758.A6-Z (P-PZ25)+", "PL4758.A6-Z"), ("HN683.5 (H8)", "HN683.5")] {
-            assert_eq!(canonical_lcc_notation(code).as_deref(), Some(code));
-            let mut keys = super::lcc_match_keys(base).unwrap();
-            keys.push(code.to_owned());
-            assert_eq!(super::lcc_match_keys(code), Some(keys));
-            assert_eq!(super::lcc_subject_path(code), super::lcc_subject_path(base));
-        }
-        for code in ["HC435.3 (UNKNOWN)+", "HC435.3 (H99999)+", "HC435.3 (H15)+ EXTRA", "HC435.3 (H15)++", "HC435.3 (H15", "HC435.3 (H15) (H15)+", "HC4353.. (H15)+"] {
-            assert!(super::schedule_table_base(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
-    fn table_lists_validate_every_reference_and_inherit_only_known_families() {
-        for note in ["P-PZ25, 26", "P-PZ25; P-PZ40", "P-PZ25,26", "P-PZ25; P-PZ26, 40"] {
-            let code = format!("PL4758.85.A-ZS.X ({note})+");
-            assert_eq!(super::variable_cutter_span(&code).as_deref(), canonical_lcc_notation("PL4758.85.A-Z").as_deref());
-            assert_eq!(canonical_lcc_notation(&code).as_deref(), Some(code.as_str()));
-            assert_eq!(super::lcc_subject_path(&code), super::lcc_subject_path(&canonical_lcc_notation("PL4758.85.A-Z").unwrap()));
-        }
-        for note in ["26", "P-PZ25,", ", P-PZ25", "P-PZ25,,26", "P-PZ25; UNKNOWN", "P-PZ25, 99999", "P-PZ25, Smith", "P-PZ25 26"] {
-            let code = format!("PL4758.85 ({note})+");
-            assert!(canonical_lcc_notation(&code).is_none(), "{code}");
         }
     }
 
@@ -2799,8 +2372,7 @@ mod tests {
 
     #[test]
     fn imported_alternate_literature_classes_retain_class_and_cutter_keys() {
-        for (code, class, cutter) in [("PR6045.R35 Dc", "PR6045", "PR6045.R35"),
-            ("PS648.S3 Be", "PS648", "PS648.S3"), ("PS3566.I4 Hi 1978", "PS3566", "PS3566.I4")] {
+        for (code, class, cutter) in [("PR6045.R35 Dc", "PR6045", "PR6045.R35"), ("PS648.S3 Be", "PS648", "PS648.S3"), ("PS3566.I4 Hi 1978", "PS3566", "PS3566.I4")] {
             let canonical = code.to_ascii_uppercase();
             assert_eq!(canonical_lcc_notation(code), Some(canonical.clone()));
             assert_eq!(super::lcc_match_keys(code).unwrap(), vec![class.to_owned(), cutter.to_owned(), canonical]);
@@ -2829,39 +2401,82 @@ mod tests {
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["ML113 .I6 VOL. BIIII", "ML113 .I6 VOL. AI UNKNOWN",
-            "BT21.2 .H35 FASZ.5A()", "BT21.2 .H35 FASZ.5A(1", "BT21.2 .H35 FASZ.5A(UNKNOWN)",
-            "BT21.2 .H35 BD. 2..", "BT21.2 .H35 BD. 2.3", "BT21.2 .H35 BD. 2. UNKNOWN",
-            "NE90 .I45 1978 COMMENTARY", "NE90 .I45 1978 VOL. 90, COMMENTARYUNKNOWN",
-            "NE90 .I45 1978 VOL. 90, COMMENTARY, UNKNOWN", "NE90 .I45 1978 VOL. 90, COMMENTARY,"] {
+        for code in [
+            "ML113 .I6 VOL. BIIII",
+            "ML113 .I6 VOL. AI UNKNOWN",
+            "BT21.2 .H35 FASZ.5A()",
+            "BT21.2 .H35 FASZ.5A(1",
+            "BT21.2 .H35 FASZ.5A(UNKNOWN)",
+            "BT21.2 .H35 BD. 2..",
+            "BT21.2 .H35 BD. 2.3",
+            "BT21.2 .H35 BD. 2. UNKNOWN",
+            "NE90 .I45 1978 COMMENTARY",
+            "NE90 .I45 1978 VOL. 90, COMMENTARYUNKNOWN",
+            "NE90 .I45 1978 VOL. 90, COMMENTARY, UNKNOWN",
+            "NE90 .I45 1978 VOL. 90, COMMENTARY,",
+        ] {
             assert!(super::lcc_enumeration_base(code).is_none(), "{code}");
         }
     }
 
     #[test]
     fn established_vernacular_volume_labels_preserve_call_number_keys() {
-        for suffix in ["BD. 12", "BDE. 1-3", "BDCHN. 2", "NR. 45", "T. 6", "FASC. 129",
-            "ABT. 12, T. 5", "LFG. 2", "LIVR. 3", "BK. 1", "JAHRG. 1978, NR. 3",
-            "JAARG. 4", "KN. 2", "KNJ. 3", "CZ. 2", "D. 5", "SV. 2", "ZESZ. 8", "VYP. 15",
-            "HEFT 1", "H. 2", "HFT. 3", "HBD. 1", "HALBBD. 2",
-            "BD. 10, FASZ. 2", "BD. 13, FAS. 1 1975", "BD. 293, ABH 1", "BD 24"] {
+        for suffix in [
+            "BD. 12",
+            "BDE. 1-3",
+            "BDCHN. 2",
+            "NR. 45",
+            "T. 6",
+            "FASC. 129",
+            "ABT. 12, T. 5",
+            "LFG. 2",
+            "LIVR. 3",
+            "BK. 1",
+            "JAHRG. 1978, NR. 3",
+            "JAARG. 4",
+            "KN. 2",
+            "KNJ. 3",
+            "CZ. 2",
+            "D. 5",
+            "SV. 2",
+            "ZESZ. 8",
+            "VYP. 15",
+            "HEFT 1",
+            "H. 2",
+            "HFT. 3",
+            "HBD. 1",
+            "HALBBD. 2",
+            "BD. 10, FASZ. 2",
+            "BD. 13, FAS. 1 1975",
+            "BD. 293, ABH 1",
+            "BD 24",
+        ] {
             let code = format!("QA3 .L28 {suffix}");
             assert_eq!(canonical_lcc_notation(&code), Some(code.clone()));
             assert_eq!(super::lcc_match_keys(&code).unwrap(), vec!["QA3".to_owned(), "QA3.L28".to_owned(), code]);
         }
-        for code in ["QA3 .L28 BD.", "QA3 .L28 BD. UNKNOWN", "QA3 .L28 NR. 2 EXTRA",
-            "QA3 .L28 FASZ. UNKNOWN", "QA3 .L28 FAS. 1 UNKNOWN",
-            "QA3 .L28 ABH EXTRA", "QA3 .L28 BD 24 UNKNOWN", "QA3 .L28 BDX 24",
-            "QA3 .L28 T. 1-QB2", "BAD TEXT BD. 1", "QA3 .L28 FASC. 2,", "QA3 .L28 NR. 2 99", "QA3 .L28 HEFT EXTRA"] {
+        for code in [
+            "QA3 .L28 BD.",
+            "QA3 .L28 BD. UNKNOWN",
+            "QA3 .L28 NR. 2 EXTRA",
+            "QA3 .L28 FASZ. UNKNOWN",
+            "QA3 .L28 FAS. 1 UNKNOWN",
+            "QA3 .L28 ABH EXTRA",
+            "QA3 .L28 BD 24 UNKNOWN",
+            "QA3 .L28 BDX 24",
+            "QA3 .L28 T. 1-QB2",
+            "BAD TEXT BD. 1",
+            "QA3 .L28 FASC. 2,",
+            "QA3 .L28 NR. 2 99",
+            "QA3 .L28 HEFT EXTRA",
+        ] {
             assert!(canonical_lcc_notation(code).is_none(), "{code}");
         }
     }
 
     #[test]
     fn apostrophes_separate_complete_components_without_erasing_evidence() {
-        for (code, base) in [("TN'291'C35'1977", "TN291.C35 1977"),
-            ("HF5415.12'G7'D37'1976", "HF5415.12.G7.D37 1976"),
-            ("BR'60'A64", "BR60.A64")] {
+        for (code, base) in [("TN'291'C35'1977", "TN291.C35 1977"), ("HF5415.12'G7'D37'1976", "HF5415.12.G7.D37 1976"), ("BR'60'A64", "BR60.A64")] {
             assert_eq!(canonical_lcc_notation(code).as_deref(), Some(code));
             let mut expected = super::lcc_match_keys(base).unwrap();
             expected.push(code.to_owned());
@@ -2888,14 +2503,31 @@ mod tests {
 
     #[test]
     fn mlc_shelf_numbers_require_an_explicit_class_assignment() {
-        for (code, key) in [("MLCM 98/02114 (P)", "(P)"), ("MLCMJ 2003/00135 (S)", "(S)"),
-            ("MLC R 85/7 (D)", "(D)"), ("MLCS 2005/04905 (Z)", "(Z)"), ("MICROFILM 85/4003 (P)", "(P)"),
-            ("MICROFICHE (O) 84/61398 (B)", "(B)"), ("MICROOPAQUE (W) 85/42 (D)", "(D)")] {
+        for (code, key) in [
+            ("MLCM 98/02114 (P)", "(P)"),
+            ("MLCMJ 2003/00135 (S)", "(S)"),
+            ("MLC R 85/7 (D)", "(D)"),
+            ("MLCS 2005/04905 (Z)", "(Z)"),
+            ("MICROFILM 85/4003 (P)", "(P)"),
+            ("MICROFICHE (O) 84/61398 (B)", "(B)"),
+            ("MICROOPAQUE (W) 85/42 (D)", "(D)"),
+        ] {
             assert_eq!(canonical_lcc_notation(code).as_deref(), Some(code));
             assert_eq!(super::lcc_match_keys(code).unwrap(), vec![key.to_owned(), code.to_owned()]);
         }
-        for code in ["MLCS", "MLCMJ 2003/00135", "MLCS 2010/40000 (I)", "MLCS 2010/40000 (ZZ)",
-            "MLCX 2010/40000 (P)", "MLCS 201/40000 (P)", "MLCS 2010/40000X (P)", "MLCS 2010/40000 (P) NOTE", "MICROFILM 85/4003", "MICROFICHE (X) 84/61398 (B)", "MICROFILM 85/4003 (PQ)"] {
+        for code in [
+            "MLCS",
+            "MLCMJ 2003/00135",
+            "MLCS 2010/40000 (I)",
+            "MLCS 2010/40000 (ZZ)",
+            "MLCX 2010/40000 (P)",
+            "MLCS 201/40000 (P)",
+            "MLCS 2010/40000X (P)",
+            "MLCS 2010/40000 (P) NOTE",
+            "MICROFILM 85/4003",
+            "MICROFICHE (X) 84/61398 (B)",
+            "MICROFILM 85/4003 (PQ)",
+        ] {
             assert!(canonical_lcc_notation(code).is_none(), "{code}");
         }
     }
@@ -2917,23 +2549,16 @@ mod tests {
     }
     #[test]
     fn complete_range_endpoints_are_canonicalized() {
-        for (input, expected) in [
-            (" d 1 – dx 301 ", "D1-DX301"), ("R-RZ", "R-RZ"),
-            ("QA273.A1-274.9", "QA273.A1-274.9"),
-            ("QA76.A1-.C5", "QA76.A1-76.C5"),
-            ("PN1-PN6790.A3", "PN1-6790.A3"),
-        ] { assert_eq!(canonical_lcc_notation(input).as_deref(), Some(expected)); }
+        for (input, expected) in [(" d 1 – dx 301 ", "D1-DX301"), ("R-RZ", "R-RZ"), ("QA273.A1-274.9", "QA273.A1-274.9"), ("QA76.A1-.C5", "QA76.A1-76.C5"), ("PN1-PN6790.A3", "PN1-6790.A3")] {
+            assert_eq!(canonical_lcc_notation(input).as_deref(), Some(expected));
+        }
     }
 
     #[test]
     fn decimal_only_range_ends_inherit_the_integer_part() {
-        for (input, expected) in [
-            ("T57.6-.97", "T57.6-57.97"),
-            ("TA418.5–.84", "TA418.5-418.84"),
-            ("QA76-.95", "QA76-76.95"),
-            ("TA418.5-.84.A1", "TA418.5-418.84.A1"),
-            ("QB1.A2-.C4", "QB1.A2-1.C4"),
-        ] { assert_eq!(canonical_lcc_notation(input).as_deref(), Some(expected)); }
+        for (input, expected) in [("T57.6-.97", "T57.6-57.97"), ("TA418.5–.84", "TA418.5-418.84"), ("QA76-.95", "QA76-76.95"), ("TA418.5-.84.A1", "TA418.5-418.84.A1"), ("QB1.A2-.C4", "QB1.A2-1.C4")] {
+            assert_eq!(canonical_lcc_notation(input).as_deref(), Some(expected));
+        }
         for invalid in ["T57.6-.5", "T57.6-.", "T-.97", "T57.6-.97.2"] {
             assert!(super::lcc_span(invalid).is_none(), "{invalid}");
         }
@@ -2941,29 +2566,10 @@ mod tests {
 
     #[test]
     fn bare_letter_cutter_intervals_inherit_the_class_number() {
-        for (input, expected) in [
-            ("B829.5.A-Z", "B829.5.A-829.5.Z"),
-            ("QA76.B-D", "QA76.B-76.D"),
-            ("B829.5.A-Z1", "B829.5.A-Z1"),
-            ("B829.5.A3-Z", "B829.5.A3-829.5.Z"),
-            ("B-Z", "B-Z"),
-        ] { assert_eq!(canonical_lcc_notation(input).as_deref(), Some(expected)); }
+        for (input, expected) in [("B829.5.A-Z", "B829.5.A-829.5.Z"), ("QA76.B-D", "QA76.B-76.D"), ("B829.5.A-Z1", "B829.5.A-Z1"), ("B829.5.A3-Z", "B829.5.A3-829.5.Z"), ("B-Z", "B-Z")] {
+            assert_eq!(canonical_lcc_notation(input).as_deref(), Some(expected));
+        }
         assert!(super::lcc_span("B829.5.Z-A").is_none());
-    }
-
-    #[test]
-    fn encoded_hyphens_require_a_complete_ordered_range() {
-        for code in ["G1100#8209;3102", "G1100&#8209;3102", "g1100&#x2011;3102",
-            "G1100‑3102", "G1100‐3102", "G1100&#8208;3102", "G1100&#x2010;3102"] {
-            assert_eq!(canonical_lcc_notation(code).as_deref(), Some("G1100-3102"), "{code}");
-            assert_eq!(super::lcc_subject_path(code), super::lcc_subject_path("G1100-3102"), "{code}");
-        }
-        for code in ["G3102#8209;1100", "G1100#8209;", "G1100#8209;3102 trailing",
-            "#780;ML3470", "G1100#8209;3102#8209;4000", "G1100&#8209;3102;QA76",
-            "K1#8209;100", "G1100#8209;K100", "G1100#8210;3102"] {
-            assert!(super::encoded_hyphen_range(code).is_none(), "{code}");
-            assert!(canonical_lcc_notation(code).is_none(), "{code}");
-        }
     }
 
     #[test]
@@ -2978,38 +2584,11 @@ mod tests {
             assert!(keys.contains(&"DS436.N47".to_owned()));
         }
         assert_eq!(super::lcc_enumeration_base("QA3 .L28 VOL."), Some("QA3 .L28"));
-        for code in ["DS436 BAD TEXT PT.", "DS436 .N47 1987 PT. UNKNOWN", "DS436 .N47 1987 PT. 1/",
-            "DS436 .N47 1987 VOL. 1,", "DS436-500 VOL.", "D810.M8 V", "PZ7 BOX NO", "CPB VOL.", "K1 .A1 VOL."] {
+        for code in ["DS436 BAD TEXT PT.", "DS436 .N47 1987 PT. UNKNOWN", "DS436 .N47 1987 PT. 1/", "DS436 .N47 1987 VOL. 1,", "DS436-500 VOL.", "D810.M8 V", "PZ7 BOX NO", "CPB VOL.", "K1 .A1 VOL."] {
             assert!(super::lcc_enumeration_base(code).is_none(), "{code}");
             assert!(canonical_lcc_notation(code).is_none(), "{code}");
         }
     }
-
-    #[test]
-    fn explicit_closed_plus_ranges_keep_their_documented_upper_boundary() {
-        for code in ["DS785.A5-Z+", "DS785.A5-.Z+", "DS785.A5-DS785.Z+"] {
-            assert_eq!(super::documented_closed_plus_span(code), canonical_lcc_notation("DS785.A5-DS785.Z"));
-            assert!(canonical_lcc_notation(code).is_some());
-        }
-        let (_, open_end) = super::reference_plus_span("DS785.A5+").unwrap();
-        assert_eq!(open_end.code, "DS786");
-        assert!(super::documented_preliminary_plus_span("DS785.A5-ZI+").is_none());
-        for code in ["DS785.A4-Z+", "DS785.A5-Y+", "DS785.A5-ZI+", "DS785.A5-Z++", "DS785.A5-Z+ NOTE", "K1.A-Z+"] {
-            assert!(super::documented_closed_plus_span(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
-    fn numbered_table_scopes_preserve_points_and_complete_intervals() {
-        let (a, z) = super::reference_plus_span("PK8375+").unwrap();
-        assert_eq!((a.code.as_str(), z.code.as_str()), ("PK8375", "PK8375"));
-        let (a, z) = super::reference_plus_span("PK6729+").unwrap();
-        assert_eq!((a.code.as_str(), z.code.as_str()), ("PK6729", "PK6732.9"));
-        assert!(super::reference_plus_span("PK2166+").is_none());
-        let generated = include_str!("../data/lcc-numbered-table-scopes.tsv");
-        assert!(!generated.lines().any(|line| line.starts_with('K') || line.starts_with("PR4741\t")));
-    }
-
 }
 
 #[cfg(test)]
@@ -3032,7 +2611,27 @@ mod joined_classification_tests {
             assert_eq!(super::joined_lcc_codes(input).unwrap(), expected, "{input}");
             assert_eq!(super::joined_lcc_codes(&input.to_ascii_lowercase()).unwrap(), expected);
         }
-        for input in ["QA76.A1B2", "QH506R", "B67D1-DX301QH", "QH506R-RZUNKNOWN", "QH506R-RZ.", "B67D1-DX", "D1-DX301", "R-RZ", "QH506R-RZ 2000", "D1-DX301B53", "B67B53D1-DX301", "HD28-70HF4999.2-618", "HD28-70HF4999.2-6182HF", "HD28-70HF4999.2-6182.5", "HD28-70HF4999.2-6182UNKNOWN", "QA76.A1QA2", "QA76.76.M52QA76.", "QA76.758QA76.758", "QA76.9.D3QA76.9.D3Q"] {
+        for input in [
+            "QA76.A1B2",
+            "QH506R",
+            "B67D1-DX301QH",
+            "QH506R-RZUNKNOWN",
+            "QH506R-RZ.",
+            "B67D1-DX",
+            "D1-DX301",
+            "R-RZ",
+            "QH506R-RZ 2000",
+            "D1-DX301B53",
+            "B67B53D1-DX301",
+            "HD28-70HF4999.2-618",
+            "HD28-70HF4999.2-6182HF",
+            "HD28-70HF4999.2-6182.5",
+            "HD28-70HF4999.2-6182UNKNOWN",
+            "QA76.A1QA2",
+            "QA76.76.M52QA76.",
+            "QA76.758QA76.758",
+            "QA76.9.D3QA76.9.D3Q",
+        ] {
             assert!(super::joined_lcc_codes(input).is_none(), "{input}");
         }
     }
@@ -3043,12 +2642,14 @@ mod joined_classification_tests {
         for (input, parts) in [("QH506R-RZ", vec!["QH506", "R-RZ"]), ("B67D1-DX301", vec!["B67", "D1-DX301"]), ("HD28-70HF4999.2-6182", vec!["HD28-70", "HF4999.2-6182"])] {
             // Fixed selectors prove that joined input preserves every component.
             // Curated umbrella ranges can legitimately be removed during curation.
-            let fixture = crate::UnifiedTaxonomy::from_concepts(parts.iter().enumerate().map(|(index, part)| {
-                crate::UnifiedConceptDefinition::new(
-                    index as i64 + 1, format!("Component {index}"), vec![],
-                    std::collections::BTreeMap::from([("lcc".into(), vec![(*part).into()])]), vec![],
-                )
-            }).collect()).unwrap();
+            let fixture = crate::UnifiedTaxonomy::from_concepts(
+                parts
+                    .iter()
+                    .enumerate()
+                    .map(|(index, part)| crate::UnifiedConceptDefinition::new(index as i64 + 1, format!("Component {index}"), vec![], std::collections::BTreeMap::from([("lcc".into(), vec![(*part).into()])]), vec![]))
+                    .collect(),
+            )
+            .unwrap();
             let fixture_ids: std::collections::BTreeSet<_> = (1..=parts.len() as i64).collect();
             for (index, part) in parts.iter().enumerate() {
                 assert_eq!(fixture.matching_concept_ids("lcc", part), vec![index as i64 + 1], "{part}");
@@ -3066,24 +2667,19 @@ mod joined_classification_tests {
 mod range_item_tests {
     #[test]
     fn complete_ranges_keep_book_metadata_as_evidence() {
-        for (code, base) in [
-            ("P121-143.3 .S66 2021", "P121-143.3"),
-            ("NA9000-9284 S337 2018", "NA9000-9284"),
-            ("ML3757-3757.9 .T87 2017", "ML3757-3757.9"),
-            ("P121-143.3 2021", "P121-143.3"),
-            ("P121.A1-P143.3.Z9 .S66 A2 2021B", "P121.A1-P143.3.Z9"),
-            ("QA75-QB76 .S66 2021", "QA75-QB76"),
-        ] {
-            assert_eq!(super::range_item_base(code), Some(base));
+        // Range-plus-item codes stay syntactically valid but no longer resolve
+        // to their base range: that shape never occurs in practice (0 in
+        // 101k sampled edition rows), and the range-item splitter was removed
+        // with the other zero-hit helpers. They project to nothing.
+        for code in ["P121-143.3 .S66 2021", "NA9000-9284 S337 2018", "ML3757-3757.9 .T87 2017", "P121-143.3 2021"] {
             assert_eq!(super::canonical_lcc_notation(code).as_deref(), Some(code));
-            let keys = super::lcc_match_keys(code).unwrap();
-            assert_eq!(keys.first(), super::canonical_lcc_notation(base).as_ref());
-            assert_eq!(keys.last().unwrap(), code);
-            assert_eq!(super::lcc_subject_path(code), super::lcc_subject_path(base));
+            assert_eq!(super::lcc_match_keys(code).unwrap(), vec![code.to_owned()]);
+            assert_eq!(super::lcc_subject_path(code), None);
         }
+        assert!(super::lcc_subject_path("P121-143.3 .S66").is_some());
         assert_eq!(super::canonical_lcc_notation("p121–143.3 .s66 2021").as_deref(), Some("P121-143.3 .S66 2021"));
-        for code in ["P143.3-121 .S66 2021", "P121-143.3 .S 2021", "P121-143.3 .S66 21", "P121-143.3 .S66 2021 NOTES", "P121-143.3 .S66 2021 2022", "P121-143.3 .S66", "P121-143.3.Z9", "P121-??? .S66 2021"] {
-            assert!(super::range_item_base(code).is_none(), "{code}");
+        for code in ["P143.3-121 .S66 2021", "P121-143.3 .S 2021", "P121-143.3 .S66 21", "P121-143.3 .S66 2021 NOTES", "P121-143.3 .S66 2021 2022", "P121-??? .S66 2021", "P121.A1-P143.3.Z9 .S66 A2 2021B", "QA75-QB76 .S66 2021"] {
+            assert_eq!(super::lcc_subject_path(code), None, "{code}");
         }
     }
 }
@@ -3111,11 +2707,14 @@ mod physical_set_tests {
 mod composed_item_metadata_tests {
     #[test]
     fn ordinal_and_plural_item_captions_preserve_classification() {
-        for (code, base) in [("AC9 .A6 2D SER., PT. 3", "AC9 .A6"),
+        for (code, base) in [
+            ("AC9 .A6 2D SER., PT. 3", "AC9 .A6"),
             ("AM101 .M9743 38.JAHRG., HEFT 3", "AM101 .M9743"),
             ("AE5 .E5 15TH ED. 1986", "AE5 .E5"),
             ("B1602 .A2 1963 VOLS. 18-19", "B1602 .A2 1963"),
-            ("DF10 .A825 AR.197", "DF10 .A825"), ("CD6151.S57 S37 ZV. 31", "CD6151.S57 S37")] {
+            ("DF10 .A825 AR.197", "DF10 .A825"),
+            ("CD6151.S57 S37 ZV. 31", "CD6151.S57 S37"),
+        ] {
             assert_eq!(super::lcc_enumeration_base(code), Some(base));
             assert!(super::lcc_match_keys(code).is_some());
         }
@@ -3125,63 +2724,53 @@ mod composed_item_metadata_tests {
     }
 
     #[test]
-    fn marc_display_delimiters_preserve_call_structure_and_evidence() {
-        for (code, base) in [("QA76.9 ǂB .A25 2008", "QA76.9 .A25 2008"),
-            ("‡AQA76.9 ‡B.A25 2008", "QA76.9 .A25 2008"),
-            ("K1188.A8 $B A3 2007", "K1188.A8 A3 2007"),
-            ("KD358.M3 ǂB R8612 2008", "KD358.M3 R8612 2008")] {
-            assert_eq!(super::marc_subfield_call_base(code).as_deref(), Some(base));
-            let keys = super::lcc_match_keys(code).unwrap();
-            assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
-            assert_eq!(keys.last().unwrap(), code);
-        }
-        for code in ["QA76 ǂB", "QA76 ‡C.A25", "QA76 ǂB.A25 ‡AQC1", "K1188.A8 ǂBUNKNOWN WORDS"] {
-            assert!(super::marc_subfield_call_base(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
     fn compound_serial_captions_keep_complete_chronology() {
-        for (code, base) in [("AM101 .M9743 N.F, BD. 12", "AM101 .M9743"),
+        for (code, base) in [
+            ("AM101 .M9743 N.F, BD. 12", "AM101 .M9743"),
             ("AM101 .V5344 N. F., NR. 296", "AM101 .V5344"),
             ("AS182 .H4 1971 ABH. 3", "AS182 .H4 1971"),
             ("B2900 .H432 BEIHEFT 44 2001", "B2900 .H432"),
             ("AS182 .G811 FOLGE 3, NR. 31", "AS182 .G811"),
-            ("AM101 .M9743 JAHRG. 44, 1976, HEFT 1", "AM101 .M9743")] {
+            ("AM101 .M9743 JAHRG. 44, 1976, HEFT 1", "AM101 .M9743"),
+        ] {
             assert_eq!(super::lcc_enumeration_base(code), Some(base));
             assert!(super::lcc_match_keys(code).is_some());
         }
-        for code in ["AM101 .M9743 N.F.UNKNOWN", "AM101 .M9743 JAHRG. 44, 1976, UNKNOWN",
-            "AM101 .M9743 JAHRG. 44, 1976,", "AM101 .M9743 JAHRG. 44, 76, HEFT 1"] {
+        for code in ["AM101 .M9743 N.F.UNKNOWN", "AM101 .M9743 JAHRG. 44, 1976, UNKNOWN", "AM101 .M9743 JAHRG. 44, 1976,", "AM101 .M9743 JAHRG. 44, 76, HEFT 1"] {
             assert!(super::lcc_enumeration_base(code).is_none(), "{code}");
         }
     }
 
     #[test]
     fn accompanying_print_descriptors_follow_complete_dated_calls() {
-        for (code, base) in [("QD33 .Z843 1998 GUIDE", "QD33 .Z843 1998"),
+        for (code, base) in [
+            ("QD33 .Z843 1998 GUIDE", "QD33 .Z843 1998"),
             ("BC71 .C49 1990 MANUAL", "BC71 .C49 1990"),
             ("BF121 .B47 1991, GUIDE", "BF121 .B47 1991"),
             ("BF121 .C522 2010 STUDY GUIDE", "BF121 .C522 2010"),
             ("BF637 C45 G35 2005 INSTRUCTOR'S RESOURCE MANUAL", "BF637 C45 G35 2005"),
-            ("QA303 .A1 2010 SOLUTIONS MANUAL", "QA303 .A1 2010")] {
+            ("QA303 .A1 2010 SOLUTIONS MANUAL", "QA303 .A1 2010"),
+        ] {
             assert_eq!(super::lcc_item_base(code), Some(base));
             let keys = super::lcc_match_keys(code).unwrap();
             assert_eq!(keys.last().unwrap(), code);
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
         }
-        for code in ["GUIDE RECORD", "QD33 UNKNOWN 1998 GUIDE", "QD33 .Z843 1998 GUIDE EXTRA",
-            "QD33 .Z843 98 GUIDE", "QD33 .Z843 1998 UNKNOWN", "WB18.2 .A1 1998 GUIDE"] {
+        for code in ["GUIDE RECORD", "QD33 UNKNOWN 1998 GUIDE", "QD33 .Z843 1998 GUIDE EXTRA", "QD33 .Z843 98 GUIDE", "QD33 .Z843 1998 UNKNOWN", "WB18.2 .A1 1998 GUIDE"] {
             assert!(super::lcc_item_base(code).is_none(), "{code}");
         }
     }
 
     #[test]
     fn documented_vernacular_captions_keep_the_complete_call() {
-        for (code, base) in [("AM101 .M9743 N.F., BD. 12", "AM101 .M9743"),
+        for (code, base) in [
+            ("AM101 .M9743 N.F., BD. 12", "AM101 .M9743"),
             ("AS244 .A512 DEEL 12, NO. 1, 1949", "AS244 .A512"),
-            ("AM101 .P295845 SZ. 18", "AM101 .P295845"), ("AM49 F67 HEFT. 16", "AM49 F67"),
-            ("B56 .H53 NIDE 360", "B56 .H53"), ("AS262.T84 A3 OSA 139", "AS262.T84 A3")] {
+            ("AM101 .P295845 SZ. 18", "AM101 .P295845"),
+            ("AM49 F67 HEFT. 16", "AM49 F67"),
+            ("B56 .H53 NIDE 360", "B56 .H53"),
+            ("AS262.T84 A3 OSA 139", "AS262.T84 A3"),
+        ] {
             assert_eq!(super::lcc_enumeration_base(code), Some(base));
             assert!(super::lcc_match_keys(code).is_some());
         }
@@ -3192,11 +2781,17 @@ mod composed_item_metadata_tests {
 
     #[test]
     fn alphanumeric_item_numbers_follow_recognized_captions() {
-        for (code, base) in [("HD4456 .A49 NO. M5", "HD4456 .A49"),
-            ("TD491 .A49 NO. M5", "TD491 .A49"), ("QA1 .A1 VOL. A12", "QA1 .A1"),
-            ("TD193 .Y46 1999 VOL. B", "TD193 .Y46 1999"), ("TA1245 .C56 1984 VOL. 2, PT. E", "TA1245 .C56 1984"),
-            ("PJ2463 .M66 VOL. 7, ISSUE 1", "PJ2463 .M66"), ("QA1 .A1 VOLUME 2, PART A", "QA1 .A1"),
-            ("QA1 .A1 NO 12", "QA1 .A1"), ("QA1 .A1 VOL 2", "QA1 .A1")] {
+        for (code, base) in [
+            ("HD4456 .A49 NO. M5", "HD4456 .A49"),
+            ("TD491 .A49 NO. M5", "TD491 .A49"),
+            ("QA1 .A1 VOL. A12", "QA1 .A1"),
+            ("TD193 .Y46 1999 VOL. B", "TD193 .Y46 1999"),
+            ("TA1245 .C56 1984 VOL. 2, PT. E", "TA1245 .C56 1984"),
+            ("PJ2463 .M66 VOL. 7, ISSUE 1", "PJ2463 .M66"),
+            ("QA1 .A1 VOLUME 2, PART A", "QA1 .A1"),
+            ("QA1 .A1 NO 12", "QA1 .A1"),
+            ("QA1 .A1 VOL 2", "QA1 .A1"),
+        ] {
             assert_eq!(super::lcc_enumeration_base(code), Some(base));
             let keys = super::lcc_match_keys(code).unwrap();
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
@@ -3207,37 +2802,14 @@ mod composed_item_metadata_tests {
     }
 
     #[test]
-    fn preliminary_initials_preserve_registered_numbered_table_bounds() {
-        for (code, span) in [
-            ("PK2598.B487A61-Z458S (P-PZ40)+", "PK2598.B487.A61-PK2598.B487.Z458"),
-            ("PL4758.9.K27A61-Z458R (P-PZ40)+", "PL4758.9.K27.A61-PL4758.9.K27.Z458"),
-        ] {
-            let expected = super::canonical_printed_range(span).unwrap();
-            assert_eq!(super::variable_cutter_span(code), Some(expected.clone()));
-            let keys = super::lcc_match_keys(code).unwrap();
-            assert_eq!(keys.last().unwrap(), code);
-            assert!(keys.contains(&expected));
-        }
-        for code in ["PK2598.B487A61-Z459S (P-PZ40)+", "PK2598.B487A62-Z458S (P-PZ40)+",
-            "PK2598.B487A61-Z458S", "PK2598.B487A61-Z458S (UNKNOWN)+",
-            "PK2598.B487A61-Z458S (P-PZ40)+ EXTRA"] {
-            assert!(super::variable_cutter_span(code).is_none(), "{code}");
-        }
-    }
-
-    #[test]
     fn index_designation_keeps_original_call_number() {
-        for (code, base) in [("ML1.M2 INDEX", "ML1.M2"), ("KF101 .A313 INDEX", "KF101 .A313"),
-            ("M2127 .U55 1989 INDEX", "M2127 .U55 1989"),
-            ("Z1215 .S5 INDEX 2000", "Z1215 .S5"),
-            ("AC149.S73 H792 1996 INDEX 1999", "AC149.S73 H792 1996")] {
+        for (code, base) in [("ML1.M2 INDEX", "ML1.M2"), ("KF101 .A313 INDEX", "KF101 .A313"), ("M2127 .U55 1989 INDEX", "M2127 .U55 1989"), ("Z1215 .S5 INDEX 2000", "Z1215 .S5"), ("AC149.S73 H792 1996 INDEX 1999", "AC149.S73 H792 1996")] {
             assert_eq!(super::lcc_enumeration_base(code), Some(base));
             let keys = super::lcc_match_keys(code).unwrap();
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["INDEX", "ML1.M2 INDEX UNKNOWN", "ML1.M2 INDEX 200",
-            "ML1.M2 INDEX 2000 UNKNOWN", "ML1.M2 INDEX 2000-", "ML1.M2 INDEX 2000/01"] {
+        for code in ["INDEX", "ML1.M2 INDEX UNKNOWN", "ML1.M2 INDEX 200", "ML1.M2 INDEX 2000 UNKNOWN", "ML1.M2 INDEX 2000-", "ML1.M2 INDEX 2000/01"] {
             assert!(super::lcc_enumeration_base(code).is_none(), "{code}");
         }
     }
@@ -3253,22 +2825,28 @@ mod composed_item_metadata_tests {
 
     #[test]
     fn source_confirmed_clipped_joined_field_is_not_split() {
-        for code in ["T385TA1637-1638TK788", "QB1-991QB460-466QB98", "QA315-316QA402.3QA40",
-            "TJ1075-1081TA467TA41", "QC173.45-173.458TA40", "SB123-123.5S494.5.B5", "Q334-342TA329-348TA6",
-            "QC138-168.86QA930QC1", "QA639.5-640.7QA640.7", "QC173.45-173.458TA41", "QA76.9.C66QA76.76.A6"] {
+        for code in [
+            "T385TA1637-1638TK788",
+            "QB1-991QB460-466QB98",
+            "QA315-316QA402.3QA40",
+            "TJ1075-1081TA467TA41",
+            "QC173.45-173.458TA40",
+            "SB123-123.5S494.5.B5",
+            "Q334-342TA329-348TA6",
+            "QC138-168.86QA930QC1",
+            "QA639.5-640.7QA640.7",
+            "QC173.45-173.458TA41",
+            "QA76.9.C66QA76.76.A6",
+        ] {
             assert!(super::joined_lcc_codes(code).is_none(), "{code}");
         }
-        assert_eq!(super::joined_lcc_codes("T385TA1637-1638TK7882.P3").unwrap(),
-            vec!["T385", "TA1637-1638", "TK7882.P3"]);
-        assert_eq!(super::joined_lcc_codes("HD28-70HD28-HD70HF54").unwrap(),
-            vec!["HD28-70", "HD28-HD70", "HF54"]);
+        assert_eq!(super::joined_lcc_codes("T385TA1637-1638TK7882.P3").unwrap(), vec!["T385", "TA1637-1638", "TK7882.P3"]);
+        assert_eq!(super::joined_lcc_codes("HD28-70HD28-HD70HF54").unwrap(), vec!["HD28-70", "HD28-HD70", "HF54"]);
     }
 
     #[test]
     fn numbered_volume_continuations_do_not_change_subjects() {
-        for (code, base) in [("CS434 .B7 VOL. 82, ETC.", "CS434 .B7"),
-            ("KF8742.A45 H55 VOL. 6, ETC. 2010", "KF8742.A45 H55"),
-            ("E78.I3 A58 1983, VOL. 10", "E78.I3 A58 1983")] {
+        for (code, base) in [("CS434 .B7 VOL. 82, ETC.", "CS434 .B7"), ("KF8742.A45 H55 VOL. 6, ETC. 2010", "KF8742.A45 H55"), ("E78.I3 A58 1983, VOL. 10", "E78.I3 A58 1983")] {
             assert_eq!(super::lcc_enumeration_base(code), Some(base));
             assert!(super::lcc_match_keys(code).is_some());
         }
@@ -3293,10 +2871,9 @@ mod composed_item_metadata_tests {
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["AS244 .A51 N.R.UNKNOWN", "AS244 .A51 N.R.,",
-            "AS244 .A51 N.R. DL.UNKNOWN", "AS244 .A51 N.R. DEEL-100",
-            "AS244 .A51 N.R. DEELUNKNOWN", "AS244 .A51 N.R. DL.70 UNKNOWN",
-            "H31 .W5 NEUE REIHE UNKNOWN", "H31 .W5 NEUE REIHE, BD."] {
+        for code in
+            ["AS244 .A51 N.R.UNKNOWN", "AS244 .A51 N.R.,", "AS244 .A51 N.R. DL.UNKNOWN", "AS244 .A51 N.R. DEEL-100", "AS244 .A51 N.R. DEELUNKNOWN", "AS244 .A51 N.R. DL.70 UNKNOWN", "H31 .W5 NEUE REIHE UNKNOWN", "H31 .W5 NEUE REIHE, BD."]
+        {
             assert!(super::lcc_enumeration_base(code).is_none(), "{code}");
         }
     }
@@ -3317,11 +2894,22 @@ mod composed_item_metadata_tests {
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["QA3 .L28 V.[]", "QA3 .L28 V.[ ]", "QA3 .L28 V.[1",
-            "QA3 .L28 V.[UNKNOWN]", "QA3 .L28 V.[[1]]", "QA3 .L28 V.[1] UNKNOWN",
-            "QA3 .L28 V.[1]-[]", "QA3 .L28 V.[1?]",
-            "QA3 .L28 [V.]", "QA3 .L28 [V.1-]", "QA3 .L28 [V.1] UNKNOWN",
-            "QA3 .L28 [[V.1]]", "QA3 .L28 [UNKNOWN]", "QA3 .L28 [V.1 UNKNOWN]"] {
+        for code in [
+            "QA3 .L28 V.[]",
+            "QA3 .L28 V.[ ]",
+            "QA3 .L28 V.[1",
+            "QA3 .L28 V.[UNKNOWN]",
+            "QA3 .L28 V.[[1]]",
+            "QA3 .L28 V.[1] UNKNOWN",
+            "QA3 .L28 V.[1]-[]",
+            "QA3 .L28 V.[1?]",
+            "QA3 .L28 [V.]",
+            "QA3 .L28 [V.1-]",
+            "QA3 .L28 [V.1] UNKNOWN",
+            "QA3 .L28 [[V.1]]",
+            "QA3 .L28 [UNKNOWN]",
+            "QA3 .L28 [V.1 UNKNOWN]",
+        ] {
             assert!(super::lcc_enumeration_base(code).is_none(), "{code}");
         }
     }
@@ -3350,38 +2938,49 @@ mod composed_item_metadata_tests {
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["QA76 .A1 2001-2000", "QA76 .A1 2001-", "QA76 .A1 2001-2",
-            "QA76 .A1 2001-2002 UNKNOWN", "QA76 .A1 5000-5001", "QA76 1999-2000",
-            "QA76 .A 1999-2000", "QA75-76 1999-2000", "KF1 .A1 1999-2000",
-            "WB18.2 .A1 1999-2000", "QA3 .L28 V.1 1999-2000-2001",
-            "QA76 .A1 1985-02 UNKNOWN", "AS613.S8 A13 1990/",
-            "AS613.S8 A13 1990/1 UNKNOWN", "AS613.S8 A13 1990/1/2",
-            "AS613.S8 A13 90/1", "AS613.S8 A13 1990/A", "AS613.S8 A13 1990/123456",
-            "KF1 .A1 1990/1", "WB18.2 .A1 1990/1",
-            "AS284.A1 S37 1978/1979:", "AS284.A1 S37 1978/1977:5",
-            "AS284.A1 S37 1978/1979:5 UNKNOWN", "AS284.A1 S37 1978/1979:5:6",
-            "AS182 .H4 1979/80 ABH.", "AS182 .H4 1979/80 ABH. 5 UNKNOWN",
-            "AS182 .H4 1979/80 UNKNOWN 5", "KF1 .H4 1979/80 ABH. 5"] {
+        for code in [
+            "QA76 .A1 2001-2000",
+            "QA76 .A1 2001-",
+            "QA76 .A1 2001-2",
+            "QA76 .A1 2001-2002 UNKNOWN",
+            "QA76 .A1 5000-5001",
+            "QA76 1999-2000",
+            "QA76 .A 1999-2000",
+            "QA75-76 1999-2000",
+            "KF1 .A1 1999-2000",
+            "WB18.2 .A1 1999-2000",
+            "QA3 .L28 V.1 1999-2000-2001",
+            "QA76 .A1 1985-02 UNKNOWN",
+            "AS613.S8 A13 1990/",
+            "AS613.S8 A13 1990/1 UNKNOWN",
+            "AS613.S8 A13 1990/1/2",
+            "AS613.S8 A13 90/1",
+            "AS613.S8 A13 1990/A",
+            "AS613.S8 A13 1990/123456",
+            "KF1 .A1 1990/1",
+            "WB18.2 .A1 1990/1",
+            "AS284.A1 S37 1978/1979:",
+            "AS284.A1 S37 1978/1977:5",
+            "AS284.A1 S37 1978/1979:5 UNKNOWN",
+            "AS284.A1 S37 1978/1979:5:6",
+            "AS182 .H4 1979/80 ABH.",
+            "AS182 .H4 1979/80 ABH. 5 UNKNOWN",
+            "AS182 .H4 1979/80 UNKNOWN 5",
+            "KF1 .H4 1979/80 ABH. 5",
+        ] {
             assert!(super::lcc_item_base(code).is_none(), "{code}");
         }
     }
 
     #[test]
     fn reference_collection_labels_preserve_calls_and_evidence() {
-        for (code, base) in [
-            ("REF BF31 .C65 2006", "BF31 .C65 2006"),
-            ("REF BL31 .F33", "BL31 .F33"),
-            ("AY 414 C2 1995 REF", "AY 414 C2 1995"),
-            ("DA190 D5 VOL.2 1976 REF", "DA190 D5"),
-        ] {
+        for (code, base) in [("REF BF31 .C65 2006", "BF31 .C65 2006"), ("REF BL31 .F33", "BL31 .F33"), ("AY 414 C2 1995 REF", "AY 414 C2 1995"), ("DA190 D5 VOL.2 1976 REF", "DA190 D5")] {
             assert_eq!(super::reference_collection_base(code), Some(base), "{code}");
             let keys = super::lcc_match_keys(code).unwrap();
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["REF", "REF UNKNOWN", "REF WB18.2 .A1", "QA76 .A REF",
-            "REF REF QA76 .A1", "REF QA75-76", "QA76 .A1 201 REF",
-            "QA76 .A1 2001 CHINA REF", "REF QA76 .A1 UNKNOWN", "REFERENCE QA76 .A1"] {
+        for code in ["REF", "REF UNKNOWN", "REF WB18.2 .A1", "QA76 .A REF", "REF REF QA76 .A1", "REF QA75-76", "QA76 .A1 201 REF", "QA76 .A1 2001 CHINA REF", "REF QA76 .A1 UNKNOWN", "REFERENCE QA76 .A1"] {
             assert!(super::reference_collection_base(code).is_none(), "{code}");
         }
     }
@@ -3401,10 +3000,7 @@ mod composed_item_metadata_tests {
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["F", "FF", "FFF", "QA76 .A1 F", "PZ7.A1 F", "QA76 .A1 201 F",
-            "QA76 .A1 2001 FFFF", "QA76 .A1 2001 F UNKNOWN", "QA76 .A 2001 F",
-            "QA76 UNKNOWN 2001 F", "WB18.2 .A1 2001 F", "QA75-76 2001 F",
-            "QA76 .A1 V.2- F"] {
+        for code in ["F", "FF", "FFF", "QA76 .A1 F", "PZ7.A1 F", "QA76 .A1 201 F", "QA76 .A1 2001 FFFF", "QA76 .A1 2001 F UNKNOWN", "QA76 .A 2001 F", "QA76 UNKNOWN 2001 F", "WB18.2 .A1 2001 F", "QA75-76 2001 F", "QA76 .A1 V.2- F"] {
             assert!(super::lcc_item_base(code).is_none(), "{code}");
         }
         // Existing lettered enumeration interprets this as volume F.
@@ -3428,11 +3024,26 @@ mod composed_item_metadata_tests {
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["QA76 X", "QA76 .AX", "QA76 .A1 X,", "QA76 .A1X2001",
-            "QA76 .A1X 201", "QA76 .A1X UNKNOWN", "QA76 .A1XX", "QA76 .A1X,2001 UNKNOWN",
-            "QA76 .A1 2001 X", "QA76 .X123", "QA75-76.A1X", "WB18.2 .A1X",
-            "WEB .A1X", "PZ7.A1 X", "PZ7.A1 X 2001", "PR123.A1 X 2001",
-            "GV722 197 .M32 X", "GV722 19765 .M32 X"] {
+        for code in [
+            "QA76 X",
+            "QA76 .AX",
+            "QA76 .A1 X,",
+            "QA76 .A1X2001",
+            "QA76 .A1X 201",
+            "QA76 .A1X UNKNOWN",
+            "QA76 .A1XX",
+            "QA76 .A1X,2001 UNKNOWN",
+            "QA76 .A1 2001 X",
+            "QA76 .X123",
+            "QA75-76.A1X",
+            "WB18.2 .A1X",
+            "WEB .A1X",
+            "PZ7.A1 X",
+            "PZ7.A1 X 2001",
+            "PR123.A1 X 2001",
+            "GV722 197 .M32 X",
+            "GV722 19765 .M32 X",
+        ] {
             assert!(super::local_cutter_x_base(code).is_none(), "{code}");
         }
     }
@@ -3452,9 +3063,7 @@ mod composed_item_metadata_tests {
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["QA76.", "QA76 .A1.", "QA76 .A1 200.", "QA76 .A1 2001..",
-            "QA76 .A1 2001.UNKNOWN.", "QA76 .A1 UNKNOWN 2001.", "QA76 .A 2001.",
-            "QA76 .A1 2 001.", "QA75-76 2001.", "WB18.2 .A1 2001.", "WEB 2001."] {
+        for code in ["QA76.", "QA76 .A1.", "QA76 .A1 200.", "QA76 .A1 2001..", "QA76 .A1 2001.UNKNOWN.", "QA76 .A1 UNKNOWN 2001.", "QA76 .A 2001.", "QA76 .A1 2 001.", "QA75-76 2001.", "WB18.2 .A1 2001.", "WEB 2001."] {
             assert!(super::lcc_item_base(code).is_none(), "{code}");
         }
     }
@@ -3481,71 +3090,68 @@ mod composed_item_metadata_tests {
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["EB", "WEB", "WB18.2 .A1 2001EB", "QA76 UNKNOWN EBOOK",
-            "QA76 .A1 2001EB UNKNOWN", "QA76 .A1 VOL.2-EB", "QA76 . EBOOK",
-            "QA76 .UNKNOWN EBOOK", "QA76 .A EBOOK", "QA76 .A1 2001UNKNOWN EBOOK",
-            "QA76 .A1 2001 .UNKNOWN EBOOK", "QA76.5 197.M5217EB", "QA76.5 1977.UNKNOWN EBOOK",
-            "TX553.A3 W67B NO.60EB", "TX553.A3 W67A UNKNOWN EBOOK",
-            "QP905 .H236T V.175EB", "QP905 .H236S UNKNOWN EBOOK",
-            "PZ3.M8346 LO6EB", "PZ3.M8346 LO5 UNKNOWN EBOOK",
-            "DT159.944 S69 201 EB", "QA76.76.C672 044 2000EB"] {
+        for code in [
+            "EB",
+            "WEB",
+            "WB18.2 .A1 2001EB",
+            "QA76 UNKNOWN EBOOK",
+            "QA76 .A1 2001EB UNKNOWN",
+            "QA76 .A1 VOL.2-EB",
+            "QA76 . EBOOK",
+            "QA76 .UNKNOWN EBOOK",
+            "QA76 .A EBOOK",
+            "QA76 .A1 2001UNKNOWN EBOOK",
+            "QA76 .A1 2001 .UNKNOWN EBOOK",
+            "QA76.5 197.M5217EB",
+            "QA76.5 1977.UNKNOWN EBOOK",
+            "TX553.A3 W67B NO.60EB",
+            "TX553.A3 W67A UNKNOWN EBOOK",
+            "QP905 .H236T V.175EB",
+            "QP905 .H236S UNKNOWN EBOOK",
+            "PZ3.M8346 LO6EB",
+            "PZ3.M8346 LO5 UNKNOWN EBOOK",
+            "DT159.944 S69 201 EB",
+            "QA76.76.C672 044 2000EB",
+        ] {
             assert!(super::lcc_item_base(code).is_none(), "{code}");
         }
     }
 
     #[test]
     fn textbook_grade_suffix_preserves_subject_and_evidence() {
-        for (code, base) in [
-            ("BF723.A4 S27 2005 GR.3-6", "BF723.A4 S27 2005"),
-            ("E175.8 .H37 2007 GR.5", "E175.8 .H37 2007"),
-            ("QA107 .A1 2005 GRADE 3", "QA107 .A1 2005"),
-            ("QA107 .A1 2005 GR.K-2", "QA107 .A1 2005"),
-        ] {
+        for (code, base) in [("BF723.A4 S27 2005 GR.3-6", "BF723.A4 S27 2005"), ("E175.8 .H37 2007 GR.5", "E175.8 .H37 2007"), ("QA107 .A1 2005 GRADE 3", "QA107 .A1 2005"), ("QA107 .A1 2005 GR.K-2", "QA107 .A1 2005")] {
             assert_eq!(super::lcc_item_base(code), Some(base));
             let keys = super::lcc_match_keys(code).unwrap();
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["QA107 .A1 2005 GR.3-", "QA107 .A1 2005 GR.6-3",
-            "QA107 .A1 2005 GR.97", "QA107 .A1 2005 GR.3 UNKNOWN",
-            "QA107 .A1 GR.3", "WB18.2 .A1 2005 GR.3", "GR.3"] {
+        for code in ["QA107 .A1 2005 GR.3-", "QA107 .A1 2005 GR.6-3", "QA107 .A1 2005 GR.97", "QA107 .A1 2005 GR.3 UNKNOWN", "QA107 .A1 GR.3", "WB18.2 .A1 2005 GR.3", "GR.3"] {
             assert!(super::lcc_item_base(code).is_none(), "{code}");
         }
     }
 
     #[test]
     fn spaced_caption_period_preserves_evidence() {
-        for (code, base) in [
-            ("AM101 .I374 NO .56", "AM101 .I374"),
-            ("DA670.S97 S97 VOL .76", "DA670.S97 S97"),
-            ("PG3199 .G526 V .25", "PG3199 .G526"),
-        ] {
+        for (code, base) in [("AM101 .I374 NO .56", "AM101 .I374"), ("DA670.S97 S97 VOL .76", "DA670.S97 S97"), ("PG3199 .G526 V .25", "PG3199 .G526")] {
             assert_eq!(super::lcc_enumeration_base(code), Some(base));
             let keys = super::lcc_match_keys(code).unwrap();
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["AM101 .I374 NO .", "DA670.S97 S97 VOL .76-",
-            "PG3199 .G526 V .25 UNKNOWN", "PG3199 .G526 V ..25"] {
+        for code in ["AM101 .I374 NO .", "DA670.S97 S97 VOL .76-", "PG3199 .G526 V .25 UNKNOWN", "PG3199 .G526 V ..25"] {
             assert!(super::lcc_enumeration_base(code).is_none(), "{code}");
         }
     }
 
     #[test]
     fn serial_year_issue_preserves_dated_call_and_evidence() {
-        for (code, base) in [
-            ("AM64 .R15 1974:43", "AM64 .R15 1974"),
-            ("AS281 .A34 1978:51", "AS281 .A34 1978"),
-            ("BF38 .H45 1975:4", "BF38 .H45 1975"),
-        ] {
+        for (code, base) in [("AM64 .R15 1974:43", "AM64 .R15 1974"), ("AS281 .A34 1978:51", "AS281 .A34 1978"), ("BF38 .H45 1975:4", "BF38 .H45 1975")] {
             assert_eq!(super::lcc_item_base(code), Some(base));
             let keys = super::lcc_match_keys(code).unwrap();
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["AM64 .R15 74:43", "AM64 .R15 1974:", "AM64 .R15 1974:43-",
-            "AM64 .R15 1974:43 UNKNOWN", "AM64 .R15 1974:4:3", "AM64 1974:43",
-            "WB18.2 .C1 1974:43", "KF1 .A1 1974:43"] {
+        for code in ["AM64 .R15 74:43", "AM64 .R15 1974:", "AM64 .R15 1974:43-", "AM64 .R15 1974:43 UNKNOWN", "AM64 .R15 1974:4:3", "AM64 1974:43", "WB18.2 .C1 1974:43", "KF1 .A1 1974:43"] {
             assert!(super::lcc_item_base(code).is_none(), "{code}");
         }
     }
@@ -3566,10 +3172,16 @@ mod composed_item_metadata_tests {
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["AS161 .B39 SéR. UNKNOWN", "AS613.S8 A14 AFL.1-",
-            "DC611.R437 .P48 1985 PTIE", "AS142 .C445 ROč.101, SEš.2 UNKNOWN",
-            "AS142 .C445 ROč.101, 76, SEš.2", "PE1119.A2 B4 1989 LVL.",
-            "PE1119.A2 B4 1989 LVL.4-", "PE1119.A2 B4 1989 LVL.4 UNKNOWN"] {
+        for code in [
+            "AS161 .B39 SéR. UNKNOWN",
+            "AS613.S8 A14 AFL.1-",
+            "DC611.R437 .P48 1985 PTIE",
+            "AS142 .C445 ROč.101, SEš.2 UNKNOWN",
+            "AS142 .C445 ROč.101, 76, SEš.2",
+            "PE1119.A2 B4 1989 LVL.",
+            "PE1119.A2 B4 1989 LVL.4-",
+            "PE1119.A2 B4 1989 LVL.4 UNKNOWN",
+        ] {
             assert!(super::lcc_enumeration_base(code).is_none(), "{code}");
         }
     }
@@ -3610,13 +3222,23 @@ mod composed_item_metadata_tests {
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["BC25 VOL. 16 OF 04", "BC25 VOL. 16 OF 2004 UNKNOWN",
-            "BC25 VOL. OF 2004", "BC25 VOL. 16- OF 2004",
-            "N6841 .A9 NOUV. PéRIODEUNKNOWN", "N6841 .A9 NOUV. PéRIODE, T. 31-",
-            "QD251.3 .B78 2004 WORKBOOK UNKNOWN", "WB18.2 .C1 2004 WORKBOOK",
-            "BX1751.3 WORKBOOK", "BX1751.3 .I WORKBOOK", "LC149.7 .A65 V.9- WORKBOOK",
-            "GN31 .B7 WORKBOOK 76", "GN31 .B7 WORKBOOK 1976 UNKNOWN",
-            "PC2129.E5 S546 2007 WORKBOOK PART 2-", "E178.1 .T67 1982 WORKBOOK TEACHER'S EDITION UNKNOWN"] {
+        for code in [
+            "BC25 VOL. 16 OF 04",
+            "BC25 VOL. 16 OF 2004 UNKNOWN",
+            "BC25 VOL. OF 2004",
+            "BC25 VOL. 16- OF 2004",
+            "N6841 .A9 NOUV. PéRIODEUNKNOWN",
+            "N6841 .A9 NOUV. PéRIODE, T. 31-",
+            "QD251.3 .B78 2004 WORKBOOK UNKNOWN",
+            "WB18.2 .C1 2004 WORKBOOK",
+            "BX1751.3 WORKBOOK",
+            "BX1751.3 .I WORKBOOK",
+            "LC149.7 .A65 V.9- WORKBOOK",
+            "GN31 .B7 WORKBOOK 76",
+            "GN31 .B7 WORKBOOK 1976 UNKNOWN",
+            "PC2129.E5 S546 2007 WORKBOOK PART 2-",
+            "E178.1 .T67 1982 WORKBOOK TEACHER'S EDITION UNKNOWN",
+        ] {
             assert!(super::lcc_item_base(code).is_none(), "{code}");
         }
     }
@@ -3639,30 +3261,31 @@ mod composed_item_metadata_tests {
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["LB1105 .P7 KöT.", "LB1105 .P7 KöT.,",
-            "LB1105 .P7 KöT. 25-", "LB1105 .P7 KöT.UNKNOWN",
-            "PH3194 .M3 3 KöT UNKNOWN", "AS142 .M323 NEW SER., 80 KöT.UNKNOWN",
-            "QE1 .H94 KöT. 63, FüZET", "QE1 .H94 KöT. 63, FüZET 4-",
-            "B809.8 .S985 1984 RéSZ UNKNOWN", "LA832 .P35 FüZET 22 UNKNOWN"] {
+        for code in [
+            "LB1105 .P7 KöT.",
+            "LB1105 .P7 KöT.,",
+            "LB1105 .P7 KöT. 25-",
+            "LB1105 .P7 KöT.UNKNOWN",
+            "PH3194 .M3 3 KöT UNKNOWN",
+            "AS142 .M323 NEW SER., 80 KöT.UNKNOWN",
+            "QE1 .H94 KöT. 63, FüZET",
+            "QE1 .H94 KöT. 63, FüZET 4-",
+            "B809.8 .S985 1984 RéSZ UNKNOWN",
+            "LA832 .P35 FüZET 22 UNKNOWN",
+        ] {
             assert!(super::lcc_enumeration_base(code).is_none(), "{code}");
         }
     }
 
     #[test]
     fn ordinal_session_enumeration_preserves_evidence() {
-        for (code, base) in [
-            ("HD4813 .R37 67TH SESS., NO. 4", "HD4813 .R37"),
-            ("HD1521 .G46 7TH SESS., NO. 2", "HD1521 .G46"),
-            ("HD5718.M615 R46 10TH SESS., NO. 2", "HD5718.M615 R46"),
-        ] {
+        for (code, base) in [("HD4813 .R37 67TH SESS., NO. 4", "HD4813 .R37"), ("HD1521 .G46 7TH SESS., NO. 2", "HD1521 .G46"), ("HD5718.M615 R46 10TH SESS., NO. 2", "HD5718.M615 R46")] {
             assert_eq!(super::lcc_enumeration_base(code), Some(base), "{code}");
             let keys = super::lcc_match_keys(code).unwrap();
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["HD4813 .R37 71TH SESS., NO. 6", "HD4813 .R37 0TH SESS.",
-            "HD4813 .R37 67TH SESS.UNKNOWN", "HD4813 .R37 67TH SESS., NO. 4-",
-            "HD4813 .R37 67TH SESS., UNKNOWN"] {
+        for code in ["HD4813 .R37 71TH SESS., NO. 6", "HD4813 .R37 0TH SESS.", "HD4813 .R37 67TH SESS.UNKNOWN", "HD4813 .R37 67TH SESS., NO. 4-", "HD4813 .R37 67TH SESS., UNKNOWN"] {
             assert!(super::lcc_enumeration_base(code).is_none(), "{code}");
         }
     }
@@ -3687,46 +3310,45 @@ mod composed_item_metadata_tests {
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["B74 P4414 2004 FFFF", "PZ7.V266 FOLIO", "B74 P4414 2004 FOL.UNKNOWN",
-            "B74 P4414 2004 FOLIO UNKNOWN", "FOLIO", "WB18.2 .C1 2004 FOLIO",
-            "F452 <FOL>", "F452 .A72 1982 <FOL", "F452 .A72 1982 <FOL> UNKNOWN",
-            "F452 .A72 1982 <UNKNOWN>", "WB18.2 .C1 2004 <FOL>"] {
+        for code in [
+            "B74 P4414 2004 FFFF",
+            "PZ7.V266 FOLIO",
+            "B74 P4414 2004 FOL.UNKNOWN",
+            "B74 P4414 2004 FOLIO UNKNOWN",
+            "FOLIO",
+            "WB18.2 .C1 2004 FOLIO",
+            "F452 <FOL>",
+            "F452 .A72 1982 <FOL",
+            "F452 .A72 1982 <FOL> UNKNOWN",
+            "F452 .A72 1982 <UNKNOWN>",
+            "WB18.2 .C1 2004 <FOL>",
+        ] {
             assert!(super::lcc_item_base(code).is_none(), "{code}");
         }
     }
 
     #[test]
     fn oversize_plus_after_a_complete_dated_call_preserves_evidence() {
-        for (code, base) in [
-            ("AP95.P3 T393 2016+", "AP95.P3 T393 2016"),
-            ("B753.F34 S245 2017+", "B753.F34 S245 2017"),
-            ("M452 .B415 1989++", "M452 .B415 1989"),
-        ] {
+        for (code, base) in [("AP95.P3 T393 2016+", "AP95.P3 T393 2016"), ("B753.F34 S245 2017+", "B753.F34 S245 2017"), ("M452 .B415 1989++", "M452 .B415 1989")] {
             assert_eq!(super::lcc_item_base(code), Some(base), "{code}");
             let keys = super::lcc_match_keys(code).unwrap();
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["QA76+", "QA76.C1 20+", "QA76.C1 2017+++", "QA76 2017+",
-            "QA76.C1 2017+ UNKNOWN", "LAW+", "WB18.2 .C1 2017+", "QA76.C1-QA77.C1 2017+"] {
+        for code in ["QA76+", "QA76.C1 20+", "QA76.C1 2017+++", "QA76 2017+", "QA76.C1 2017+ UNKNOWN", "LAW+", "WB18.2 .C1 2017+", "QA76.C1-QA77.C1 2017+"] {
             assert!(super::lcc_item_base(code).is_none(), "{code}");
         }
     }
 
     #[test]
     fn shelving_lc_suffix_requires_a_complete_known_call() {
-        for (code, base) in [
-            ("AC149 .H758 1989 (LC)", "AC149 .H758 1989"),
-            ("B2799.A4 K63 2001 (LC)", "B2799.A4 K63 2001"),
-            ("QA3 .L28 VOL. 1-3 (LC)", "QA3 .L28"),
-        ] {
+        for (code, base) in [("AC149 .H758 1989 (LC)", "AC149 .H758 1989"), ("B2799.A4 K63 2001 (LC)", "B2799.A4 K63 2001"), ("QA3 .L28 VOL. 1-3 (LC)", "QA3 .L28")] {
             assert_eq!(super::lcc_item_base(code), Some(base), "{code}");
             let keys = super::lcc_match_keys(code).unwrap();
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["(LC)", "CPB (LC)", "LAW (LC)", "WB18.2 (LC)",
-            "QA3 UNKNOWN (LC)", "QA3 .L28 VOL. 1- (LC)", "QA3 (LC) EXTRA"] {
+        for code in ["(LC)", "CPB (LC)", "LAW (LC)", "WB18.2 (LC)", "QA3 UNKNOWN (LC)", "QA3 .L28 VOL. 1- (LC)", "QA3 (LC) EXTRA"] {
             assert!(super::lcc_item_base(code).is_none(), "{code}");
         }
     }
@@ -3746,28 +3368,20 @@ mod composed_item_metadata_tests {
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["GA862 .A33 NOUV. SER.,", "GA862 .A33 NOUV. SéR.UNKNOWN",
-            "GA862 .A33 NOUV. SER., 2 UNKNOWN", "AS283 .O54 NY SER., NO.?",
-            "QA3 .L28 N.S.,, 2"] {
+        for code in ["GA862 .A33 NOUV. SER.,", "GA862 .A33 NOUV. SéR.UNKNOWN", "GA862 .A33 NOUV. SER., 2 UNKNOWN", "AS283 .O54 NY SER., NO.?", "QA3 .L28 N.S.,, 2"] {
             assert!(super::lcc_enumeration_base(code).is_none(), "{code}");
         }
     }
 
     #[test]
     fn ordinal_volume_and_series_captions_keep_complete_endpoints() {
-        for (code, base) in [
-            ("AS142 .V32 294. BD.", "AS142 .V32"),
-            ("BL25 .R4 II. REIHE, 15. HFT.", "BL25 .R4"),
-            ("BT25 R4 II. REIHE, 21./22. HFT.", "BT25 R4"),
-            ("BR45 .T4 3. REIHE, 7. BD., HFT. 2", "BR45 .T4"),
-        ] {
+        for (code, base) in [("AS142 .V32 294. BD.", "AS142 .V32"), ("BL25 .R4 II. REIHE, 15. HFT.", "BL25 .R4"), ("BT25 R4 II. REIHE, 21./22. HFT.", "BT25 R4"), ("BR45 .T4 3. REIHE, 7. BD., HFT. 2", "BR45 .T4")] {
             assert_eq!(super::lcc_enumeration_base(code), Some(base), "{code}");
             let keys = super::lcc_match_keys(code).unwrap();
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["BT25 R4 IVX. REIHE", "BT25 R4 II. UNKNOWN", "BT25 R4 21./ HFT.",
-            "BT25 R4 21./22 HFT.", "BT25 R4 0. BD.", "BT25 R4 21.. HFT."] {
+        for code in ["BT25 R4 IVX. REIHE", "BT25 R4 II. UNKNOWN", "BT25 R4 21./ HFT.", "BT25 R4 21./22 HFT.", "BT25 R4 0. BD.", "BT25 R4 21.. HFT."] {
             assert!(super::lcc_enumeration_base(code).is_none(), "{code}");
         }
     }
@@ -3789,29 +3403,20 @@ mod composed_item_metadata_tests {
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["BS1154 .A6 TEILBD., 5", "BS1154 .A6 TEILBD. 22/",
-            "BS1154 .A6 TEIL UNKNOWN", "BS1154 .A6 BAND", "BS1154 .A6 CH.UNKNOWN",
-            "BS1154 .A6 SEC. 1ERCYCLE", "BS1154 .A6 CAHIER 44 UNKNOWN"] {
+        for code in ["BS1154 .A6 TEILBD., 5", "BS1154 .A6 TEILBD. 22/", "BS1154 .A6 TEIL UNKNOWN", "BS1154 .A6 BAND", "BS1154 .A6 CH.UNKNOWN", "BS1154 .A6 SEC. 1ERCYCLE", "BS1154 .A6 CAHIER 44 UNKNOWN"] {
             assert!(super::lcc_enumeration_base(code).is_none(), "{code}");
         }
     }
 
     #[test]
     fn explicit_copy_labels_preserve_classification_and_evidence() {
-        for (code, base) in [
-            ("BS2585.3 .M37 COPY 2", "BS2585.3 .M37"),
-            ("DD286.4 .M57 2007 COPY 1", "DD286.4 .M57 2007"),
-            ("BS2545.P68 M377 COP. 3", "BS2545.P68 M377"),
-            ("BV4211.2 .E382 1982 COP. 2, COP. 3", "BV4211.2 .E382 1982"),
-        ] {
+        for (code, base) in [("BS2585.3 .M37 COPY 2", "BS2585.3 .M37"), ("DD286.4 .M57 2007 COPY 1", "DD286.4 .M57 2007"), ("BS2545.P68 M377 COP. 3", "BS2545.P68 M377"), ("BV4211.2 .E382 1982 COP. 2, COP. 3", "BV4211.2 .E382 1982")] {
             assert_eq!(super::lcc_enumeration_base(code), Some(base), "{code}");
             let keys = super::lcc_match_keys(code).unwrap();
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["BS2585.3 .M37 COPY", "BS2585.3 .M37 COPY UNKNOWN",
-            "BS2585.3 .M37 COPY 2 UNKNOWN", "BS2585.3 .M37 COP. 2,",
-            "BS2585.3 .M37 COP. 2-", "BS2585.3 .M37 COPIED 2"] {
+        for code in ["BS2585.3 .M37 COPY", "BS2585.3 .M37 COPY UNKNOWN", "BS2585.3 .M37 COPY 2 UNKNOWN", "BS2585.3 .M37 COP. 2,", "BS2585.3 .M37 COP. 2-", "BS2585.3 .M37 COPIED 2"] {
             assert!(super::lcc_enumeration_base(code).is_none(), "{code}");
         }
     }
@@ -3834,29 +3439,20 @@ mod composed_item_metadata_tests {
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["BF1301 .N65 VOL.5,", "BF1301 .N65 VOL.5,,6",
-            "BF1301 .N65 VOL.5,6-", "BF1301 .N65 VOL.5,6UNKNOWN",
-            "BF1301 .N65 VOL.5,QA76", "BF1301 .N65 5,6,7"] {
+        for code in ["BF1301 .N65 VOL.5,", "BF1301 .N65 VOL.5,,6", "BF1301 .N65 VOL.5,6-", "BF1301 .N65 VOL.5,6UNKNOWN", "BF1301 .N65 VOL.5,QA76", "BF1301 .N65 5,6,7"] {
             assert!(super::lcc_enumeration_base(code).is_none(), "{code}");
         }
     }
 
     #[test]
     fn supplementary_volumes_require_complete_numbered_captions() {
-        for (code, base) in [
-            ("ML5.A63 SUPPL.BD.14", "ML5.A63"),
-            ("ML1700 .A63 SUPPL. BD. 20", "ML1700 .A63"),
-            ("B11 .A7 SUPPL., V.62, 1988", "B11 .A7"),
-            ("B11 .A7 SUPP. V.61", "B11 .A7"),
-        ] {
+        for (code, base) in [("ML5.A63 SUPPL.BD.14", "ML5.A63"), ("ML1700 .A63 SUPPL. BD. 20", "ML1700 .A63"), ("B11 .A7 SUPPL., V.62, 1988", "B11 .A7"), ("B11 .A7 SUPP. V.61", "B11 .A7")] {
             assert_eq!(super::lcc_enumeration_base(code), Some(base), "{code}");
             let keys = super::lcc_match_keys(code).unwrap();
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["ML5.A63 SUPPL.BD.", "ML5.A63 SUPPL.BD.UNKNOWN",
-            "ML5.A63 SUPPL.BD.14UNKNOWN", "ML5.A63 SUPPL., UNKNOWN 2",
-            "ML5.A63 SUPPL.,", "ML5.A63 SUPPL..BD.14", "ML5.A63 SUPPL. V."] {
+        for code in ["ML5.A63 SUPPL.BD.", "ML5.A63 SUPPL.BD.UNKNOWN", "ML5.A63 SUPPL.BD.14UNKNOWN", "ML5.A63 SUPPL., UNKNOWN 2", "ML5.A63 SUPPL.,", "ML5.A63 SUPPL..BD.14", "ML5.A63 SUPPL. V."] {
             assert!(super::lcc_enumeration_base(code).is_none(), "{code}");
         }
     }
@@ -3881,9 +3477,7 @@ mod composed_item_metadata_tests {
             assert_eq!(&keys[..keys.len() - 1], super::lcc_match_keys(base).unwrap());
             assert_eq!(keys.last().unwrap(), code);
         }
-        for code in ["QA3 .L28 SUPP.UNKNOWN", "QA3 .L28 SUPL.?", "QA3 .L28 REIHE UNKNOWN",
-            "QA3 .L28 BOOK NOT YET IN LC", "QA3 .L28 UNIT", "QA3 .L28 UNIT 1 UNKNOWN",
-            "BOOK NOT YET IN LC", "IN PROCESS UNIT 1"] {
+        for code in ["QA3 .L28 SUPP.UNKNOWN", "QA3 .L28 SUPL.?", "QA3 .L28 REIHE UNKNOWN", "QA3 .L28 BOOK NOT YET IN LC", "QA3 .L28 UNIT", "QA3 .L28 UNIT 1 UNKNOWN", "BOOK NOT YET IN LC", "IN PROCESS UNIT 1"] {
             assert!(super::lcc_enumeration_base(code).is_none(), "{code}");
         }
     }
@@ -3903,8 +3497,7 @@ mod composed_item_metadata_tests {
 
     #[test]
     fn semicolon_years_keep_the_complete_call_and_original_evidence() {
-        for (code, base) in [("GR203.135 .K33;1998", "GR203.135 .K33"),
-            ("Z1073 .P63;1999", "Z1073 .P63"), ("BF633 .D87; 1994", "BF633 .D87")] {
+        for (code, base) in [("GR203.135 .K33;1998", "GR203.135 .K33"), ("Z1073 .P63;1999", "Z1073 .P63"), ("BF633 .D87; 1994", "BF633 .D87")] {
             assert_eq!(super::lcc_item_base(code), Some(base));
             let keys = super::lcc_match_keys(code).unwrap();
             assert_eq!(keys.last().unwrap(), code);

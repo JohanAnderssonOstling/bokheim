@@ -1,4 +1,4 @@
-use bokheim_backend::AppClient;
+use app::AppClient;
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, FocusHandle, IntoElement, Pixels, Render, Window};
 use gpui_component::{
@@ -48,7 +48,7 @@ impl BrightnessControls {
 }
 impl Render for BrightnessControls {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        components::reader_settings_dropdown(window.viewport_size().height, components::browser_theme(cx)).child(self.brightness.clone()).child(self.natural.clone())
+        components::reader_settings_dropdown(window, components::browser_theme(cx)).child(self.brightness.clone()).child(self.natural.clone())
     }
 }
 
@@ -143,21 +143,21 @@ impl Render for LightControl {
         if let Some(error) = self.error.clone() {
             panel = panel
                 .child(gpui::div().text_color(theme.text_muted).child(error))
-                .child(components::reader_control_button("brightness-retry", "Retry", theme).disabled(self.busy).on_click(cx.listener(|panel, _, window, cx| panel.request(None, window, cx))));
+                .child(components::topbar_action_button("brightness-retry", "Retry", IconName::Redo2, theme).disabled(self.busy).on_click(cx.listener(|panel, _, window, cx| panel.request(None, window, cx))));
         }
         panel
     }
 }
 
-pub fn popover(panel: Entity<BrightnessControls>, document_focus: Option<&FocusHandle>, theme: components::BrowserTheme) -> Popover {
-    popover_with_height(panel, document_focus, theme, None)
+pub fn popover(panel: Entity<BrightnessControls>, document_focus: Option<&FocusHandle>, theme: components::BrowserTheme, window: &Window) -> Popover {
+    popover_with_height(panel, document_focus, theme, None, window)
 }
 
-pub fn popover_with_height(panel: Entity<BrightnessControls>, document_focus: Option<&FocusHandle>, theme: components::BrowserTheme, height: Option<Pixels>) -> Popover {
+pub fn popover_with_height(panel: Entity<BrightnessControls>, document_focus: Option<&FocusHandle>, theme: components::BrowserTheme, height: Option<Pixels>, window: &Window) -> Popover {
     let refresh = panel.clone();
     let mut popover = Popover::new("reader-brightness")
         .anchor(gpui::Anchor::TopRight)
-        .top(gpui::px((components::READER_TOOLBAR_HEIGHT + components::READER_TOOLBAR_CONTROL_HEIGHT) / 2.0 + 4.0))
+        .top(gpui::px(components::reader_toolbar_size_px(window) + 4.0))
         .p_0()
         .when_some(document_focus, |popover, focus| popover.track_focus(focus))
         .trigger(components::reader_control_button_icon("reader-brightness-button", "Brightness", IconName::Sun, theme))

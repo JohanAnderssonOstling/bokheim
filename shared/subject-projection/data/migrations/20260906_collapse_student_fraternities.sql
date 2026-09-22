@@ -1,0 +1,18 @@
+DELETE FROM source_selector WHERE concept_id IN (2297,6393,7221,7650,9903,10029);
+INSERT INTO source_selector VALUES(2297,'lcc','LJ1..LJ165');
+DELETE FROM source_label WHERE concept_id=6393;
+DELETE FROM concept_parent WHERE concept_id=6393;
+DELETE FROM concept WHERE concept_id=6393;
+DELETE FROM source_label WHERE concept_id=7221;
+DELETE FROM concept_parent WHERE concept_id=7221;
+DELETE FROM concept WHERE concept_id=7221;
+DELETE FROM source_label WHERE concept_id=7650;
+DELETE FROM concept_parent WHERE concept_id=7650;
+DELETE FROM concept WHERE concept_id=7650;
+DELETE FROM source_label WHERE concept_id=9903;
+DELETE FROM concept_parent WHERE concept_id=9903;
+DELETE FROM concept WHERE concept_id=9903;
+DELETE FROM source_label WHERE concept_id=10029;
+DELETE FROM concept_parent WHERE concept_id=10029;
+DELETE FROM concept WHERE concept_id=10029;
+INSERT INTO source_selector VALUES(2297,'lcc','LJ');

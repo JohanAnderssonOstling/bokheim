@@ -1,1 +1,0 @@
-SELECT author_identity_id FROM author_external_identifier WHERE authority=?1 AND external_id=?2

@@ -1,1 +1,0 @@
-SELECT SUM(length(body)) FROM sync_outbox

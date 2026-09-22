@@ -1,7 +1,7 @@
 //! Shared-memory range transport between dedicated browser workers.
+use super::{error_message, field};
 use js_sys::{Function, Uint8Array};
 use wasm_bindgen::prelude::*;
-use super::{field, error_message};
 
 #[wasm_bindgen(inline_js = r#"
 export function serveBook(read, length) {
@@ -102,31 +102,35 @@ pub struct Server {
 }
 impl Server {
     pub fn sync(length: u64, mut fetch: impl FnMut(u64, usize) -> Result<Vec<u8>, String> + 'static) -> Result<Self, String> {
-        let read = Closure::<dyn FnMut(f64, u32) -> Result<Uint8Array, JsValue>>::new(move |offset, length| {
-            fetch(offset as u64, length as usize).map(|bytes| Uint8Array::from(bytes.as_slice())).map_err(|e| JsValue::from_str(&e))
-        });
+        let read = Closure::<dyn FnMut(f64, u32) -> Result<Uint8Array, JsValue>>::new(move |offset, length| fetch(offset as u64, length as usize).map(|bytes| Uint8Array::from(bytes.as_slice())).map_err(|e| JsValue::from_str(&e)));
         Self::attach(length, read)
     }
     pub fn asynchronous<F, Fut>(length: u64, mut fetch: F) -> Result<Self, String>
-    where F: FnMut(u64, usize) -> Fut + 'static,
-          Fut: std::future::Future<Output = Result<Vec<u8>, String>> + 'static {
+    where
+        F: FnMut(u64, usize) -> Fut + 'static,
+        Fut: std::future::Future<Output = Result<Vec<u8>, String>> + 'static,
+    {
         let read = Closure::<dyn FnMut(f64, u32) -> js_sys::Promise>::new(move |offset, length| {
             let future = fetch(offset as u64, length as usize);
-            wasm_bindgen_futures::future_to_promise(async move {
-                future.await.map(|bytes| Uint8Array::from(bytes.as_slice()).into()).map_err(|e| JsValue::from_str(&e))
-            })
+            wasm_bindgen_futures::future_to_promise(async move { future.await.map(|bytes| Uint8Array::from(bytes.as_slice()).into()).map_err(|e| JsValue::from_str(&e)) })
         });
         Self::attach(length, read)
     }
     fn attach<T: ?Sized + wasm_bindgen::closure::WasmClosure + 'static>(length: u64, read: Closure<T>) -> Result<Self, String> {
-        if length > 9_007_199_254_740_991 { return Err("book exceeds browser offset precision".into()); }
+        if length > 9_007_199_254_740_991 {
+            return Err("book exceeds browser offset precision".into());
+        }
         let server = serve(read.as_ref().unchecked_ref(), length as f64).map_err(|e| error_message(&e))?;
         Ok(Self { server, _read: Box::new(read) })
     }
-    pub fn source(&self) -> JsValue { field(&self.server, "source") }
+    pub fn source(&self) -> JsValue {
+        field(&self.server, "source")
+    }
 }
 impl Drop for Server {
-    fn drop(&mut self) { close(&self.server); }
+    fn drop(&mut self) {
+        close(&self.server);
+    }
 }
 
 // Only numeric IDs cross the parser's Send + Sync boundary. JS handles remain
@@ -135,15 +139,24 @@ thread_local! {
     static SOURCES: std::cell::RefCell<std::collections::HashMap<u32, JsValue>> = Default::default();
     static NEXT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
-pub struct Source { id: u32, length: u64 }
+pub struct Source {
+    id: u32,
+    length: u64,
+}
 impl Source {
     pub fn new(source: JsValue) -> Result<Self, String> {
         let length = field(&source, "length").as_f64().filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0 && *n <= 9_007_199_254_740_991.0).ok_or("invalid book length")? as u64;
-        let id = NEXT.with(|next| { let id = next.get().wrapping_add(1); next.set(id); id });
+        let id = NEXT.with(|next| {
+            let id = next.get().wrapping_add(1);
+            next.set(id);
+            id
+        });
         SOURCES.with(|sources| sources.borrow_mut().insert(id, source));
         Ok(Self { id, length })
     }
-    pub fn length(&self) -> u64 { self.length }
+    pub fn length(&self) -> u64 {
+        self.length
+    }
     fn with<T>(&self, operation: impl FnOnce(&JsValue) -> Result<T, JsValue>) -> std::io::Result<T> {
         SOURCES.with(|sources| {
             let sources = sources.borrow();
@@ -151,7 +164,9 @@ impl Source {
             operation(source).map_err(|e| std::io::Error::other(error_message(&e)))
         })
     }
-    pub fn check(&self) -> std::io::Result<()> { self.with(check_source) }
+    pub fn check(&self) -> std::io::Result<()> {
+        self.with(check_source)
+    }
     pub fn read(&self, offset: u64, length: u32) -> std::io::Result<Vec<u8>> {
         self.with(|source| read_range(source, offset as f64, length).map(|bytes| bytes.to_vec()))
     }

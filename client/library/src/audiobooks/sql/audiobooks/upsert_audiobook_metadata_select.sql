@@ -1,1 +1,0 @@
-SELECT request_json FROM audible_enrichment_jobs WHERE content_hash=?1 AND status='applied'

@@ -4,26 +4,31 @@ use crate::theme::BrowserTheme;
 
 /// The interaction ladder, defined once.
 ///
-/// A call site says what a thing *is* — selected or not — and never names a
+/// A call site says what a thing *is* — current or not — and never names a
 /// colour. That is the point: the treatment was previously spelled out at each
-/// site, so selection drifted into meaning `accent_wash` in some places and a
-/// solid accent in others, and pages picked palette values directly.
+/// site, so the same state drifted into meaning `accent_wash` in some places
+/// and a solid accent in others, and pages picked palette values directly.
 ///
 ///   rest      untouched
-///   hover     `accent_wash`
-///   selected  `accent` with `accent_text` on it
+///   hover     `theme.hover` — translucent, correct over any surface
+///   current   `accent` with `accent_text` on it — persistent "you are here"
+///             state, not a transient pick; outranks hover
+///
+/// A transient pick (a row a reader clicked to look at, not a place the app
+/// considers itself "in") is a third tier, `accent_wash`, that this trait does
+/// not cover — see `contents_row`, which lays out all three together.
 ///
 /// Do not call this on an element that already sets its own `hover`: gpui
 /// asserts a hover style is only set once. A `gpui_component` `Button` is such
 /// an element — use [`selectable_button`] for those.
 pub trait Interactive: Styled + gpui::InteractiveElement + Sized {
-    fn selectable(self, selected: bool, theme: BrowserTheme) -> Self {
-        // A selected surface is already the accent, so a wash laid over it
+    fn selectable(self, current: bool, theme: BrowserTheme) -> Self {
+        // A current surface is already the accent, so a wash laid over it
         // would be invisible. It darkens instead — the same distinction
         // `accent_hover` exists for.
-        let hovered = if selected { theme.accent_hover } else { theme.accent_wash };
+        let hovered = if current { theme.accent_hover } else { theme.hover };
         let element = self.hover(move |style| style.bg(hovered));
-        if selected { element.bg(theme.accent).text_color(theme.accent_text) } else { element }
+        if current { element.bg(theme.accent).text_color(theme.accent_text) } else { element }
     }
 }
 
@@ -151,7 +156,6 @@ pub fn small_caps() -> gpui::FontFeatures {
 }
 
 pub const BOOK_COVER_WIDTH: f32 = 200.0;
-pub const BOOK_COVER_HEIGHT: f32 = 320.0;
 pub const BOOK_COVER_ASPECT_RATIO: f32 = 1.0 / 1.5;
 /// However narrow the window, the book grid keeps at least this many columns.
 /// One cover stretched across a phone screen is not a grid, and the covers are
@@ -159,11 +163,10 @@ pub const BOOK_COVER_ASPECT_RATIO: f32 = 1.0 / 1.5;
 pub const BOOK_GRID_MINIMUM_COLUMNS: usize = 2;
 pub const BOOK_CARD_MINIMUM_WIDTH_REM: f32 = 10.0;
 /// Cover width in logical pixels, independent of the UI font size.
-pub const BOOK_CARD_CONTENT_WIDTH: f32 = 200.0;
+pub const BOOK_CARD_CONTENT_WIDTH: f32 = 300.0;
 pub const BOOK_CARD_WIDTH: f32 = BOOK_CARD_CONTENT_WIDTH + BOOK_CARD_PADDING * 2.0;
 /// Regular cards grow by up to 25% before spare row width expands gaps.
 pub const BOOK_CARD_MAXIMUM_WIDTH: f32 = BOOK_CARD_WIDTH * 1.25;
-pub const BOOK_GRID_GAP: f32 = SPACE_XS;
 /// Air between one card's plate and the next, on both axes.
 ///
 /// This was `SPACE_MD` and unused: the grid ran at a zero gap, because a
@@ -189,51 +192,59 @@ pub const BOOK_CARD_PADDING: f32 = CONTENT_INSET;
 /// them reads as a misalignment. Each carries it as its own padding rather than
 /// a container supplying it, so a selected card can still fill its whole cell.
 pub const CONTENT_INSET: f32 = SPACE_SM;
-pub const BOOK_GRID_MAX_GAP: f32 = SPACE_MD + SPACE_SM;
-/// Book-card text reserves a main title, two subtitle lines and an author line. Keep those
-/// blocks in rems: the interface font can have different glyph widths, and the
-/// user's UI font size must enlarge the card instead of being clipped by the
-/// 16px-reference geometry in the application contract.
+/// Book-card text reserves two title lines and one subtitle line — the title
+/// gets first claim on the space, so a long subtitle is what clips. Keep
+/// those blocks in rems: the interface font can have different glyph widths,
+/// and the user's UI font size must enlarge the card instead of being
+/// clipped by the 16px-reference geometry in the application contract.
 /// On the scale rather than beside it: this was 16.0, a value that appeared
 /// nowhere else and sat between two steps.
 pub const BOOK_CARD_TITLE_SIZE: f32 = TEXT_MD;
-/// Main titles carry more weight than subtitles and author credits.
+/// Main titles carry more weight than subtitles.
 pub const BOOK_CARD_TITLE_WEIGHT: FontWeight = FontWeight::SEMIBOLD;
 pub const BOOK_CARD_TITLE_LINE_HEIGHT_EM: f32 = 1.25;
 pub const BOOK_CARD_TITLE_LINES: usize = 2;
 pub const BOOK_CARD_SUBTITLE_SIZE: f32 = TEXT_SM;
-pub const BOOK_CARD_SUBTITLE_LINES: usize = 2;
-pub const BOOK_CARD_AUTHOR_SIZE: f32 = TEXT_XS;
+pub const BOOK_CARD_SUBTITLE_LINES: usize = 1;
+/// Author lines run at `TEXT_XS`.
 pub const BOOK_CARD_AUTHOR_LINE_HEIGHT_EM: f32 = 1.0;
 /// Compact card spacing for the GPUI browser surface.
 pub const BOOK_CARD_COVER_CONTENT_GAP: f32 = SPACE_SM;
 pub const BOOK_CARD_TEXT_GAP: f32 = SPACE_XS;
 pub const BOOK_CARD_TITLE_HEIGHT_REM: f32 = {
+    // The title always claims its full two lines, subtitle or not, so the
+    // reserved box is that plus the subtitle's one line when there is one —
+    // never a max() between two shapes, since the title no longer shrinks.
     let title_only = BOOK_CARD_TITLE_SIZE * BOOK_CARD_TITLE_LINE_HEIGHT_EM * BOOK_CARD_TITLE_LINES as f32;
-    let with_subtitle = (BOOK_CARD_TITLE_SIZE + BOOK_CARD_SUBTITLE_SIZE * BOOK_CARD_SUBTITLE_LINES as f32) * BOOK_CARD_TITLE_LINE_HEIGHT_EM;
+    let with_subtitle = title_only + BOOK_CARD_SUBTITLE_SIZE * BOOK_CARD_TITLE_LINE_HEIGHT_EM * BOOK_CARD_SUBTITLE_LINES as f32;
     if title_only > with_subtitle { title_only } else { with_subtitle }
 };
-pub const BOOK_CARD_AUTHOR_HEIGHT_REM: f32 = BOOK_CARD_AUTHOR_SIZE * BOOK_CARD_AUTHOR_LINE_HEIGHT_EM;
 /// The download action on a card.
 ///
-/// It was a 13px glyph the size of the author line beside it — a real action
+/// It was a 13px glyph the size of the title beside it — a real action
 /// carrying a click handler and a tooltip, drawn as though it were a status
 /// icon. Square and bordered like every other icon action in the interface, at
 /// a size that can actually be hit.
-/// The reader's place in the book, drawn directly below the cover.
+/// The reader's place in the book, drawn on the cover's own bottom edge.
 pub const BOOK_COVER_PROGRESS_HEIGHT: f32 = 3.0;
+/// How tall a stripe of the cover the progress mark's scrim darkens, so the
+/// bar reads against art of any colour underneath it.
+pub const BOOK_COVER_PROGRESS_SCRIM_HEIGHT: f32 = 28.0;
+/// Width of the shadow suggesting a bound page block along the cover's
+/// leading edge — a hint of thickness, not a rendered spine.
+pub const BOOK_COVER_SPINE_WIDTH: f32 = 14.0;
+/// A cover's own corner radius, apart from `RADIUS_SM`: every other square
+/// corner in the interface stays sharp, so rounding this alone is a
+/// deliberate departure rather than a change to the shared radius scale.
+/// Applied to the outer (right) edge only — see `book_cover_image`.
+pub const BOOK_COVER_RADIUS: f32 = 4.0;
 pub const BOOK_CARD_ACTION_SIZE: f32 = 26.0;
 pub const BOOK_CARD_ACTION_ICON_SIZE: f32 = 14.0;
-/// The metadata row is governed by the action, not the author line: the button
-/// is the taller of the two. The paginator's row arithmetic reads this, so the
-/// card grows with the control instead of clipping it.
-pub const BOOK_CARD_METADATA_HEIGHT_REM: f32 = BOOK_CARD_ACTION_SIZE / 16.0;
-pub const BOOK_CARD_FIXED_HEIGHT: f32 = BOOK_CARD_COVER_CONTENT_GAP + BOOK_CARD_TEXT_GAP;
-/// The same card without its author line — see `book_card_title_row`. The
-/// metadata row and the gap above it are gone, so the text block is the title
-/// alone and the only pixel term left is the gap under the cover.
-pub const BOOK_CARD_TITLE_ONLY_HEIGHT_REM: f32 = BOOK_CARD_TITLE_HEIGHT_REM;
-pub const BOOK_CARD_TITLE_ONLY_FIXED_HEIGHT: f32 = BOOK_CARD_COVER_CONTENT_GAP;
+/// A card under the "cover text: cover only" setting: nothing below the
+/// cover at all, not even the gap — there is no second child to hold one
+/// open against.
+pub const BOOK_CARD_NO_TEXT_HEIGHT_REM: f32 = 0.0;
+pub const BOOK_CARD_NO_TEXT_FIXED_HEIGHT: f32 = 0.0;
 
 /// Detailed cards combine a fixed cover and padding with a scalable text column.
 pub const BOOK_CARD_DETAIL_TEXT_WIDTH_REM: f32 = 24.0;
@@ -253,9 +264,9 @@ pub const BOOK_CARD_DETAIL_GAP: f32 = SPACE_MD;
 /// cover ratio, widened by the fraction the cover is drawn at, is what makes the
 /// card exactly as tall as its cover.
 pub const BOOK_CARD_DETAIL_ASPECT_RATIO: f32 = BOOK_COVER_ASPECT_RATIO / BOOK_CARD_DETAIL_COVER_FRACTION;
-/// The blurb on a detailed card. A step above the author line: it is read
-/// rather than scanned, and it is the reason the card is twice as wide.
-pub const BOOK_CARD_DESCRIPTION_SIZE: f32 = TEXT_SM;
+/// The blurb on a detailed card, at `TEXT_SM`. A step above the author line:
+/// it is read rather than scanned, and it is the reason the card is twice
+/// as wide.
 pub const BOOK_CARD_DESCRIPTION_LINE_HEIGHT_EM: f32 = 1.4;
 
 /// The full blurb, opened from the card.
@@ -268,9 +279,8 @@ pub const BOOK_DESCRIPTION_OVERLAY_WIDTH_REM: f32 = 34.0;
 /// Short of the whole, so the page it opened over stays visible around it and
 /// the overlay reads as a layer rather than a new screen.
 pub const BOOK_DESCRIPTION_OVERLAY_HEIGHT_FRACTION: f32 = 0.75;
-/// Set larger than the card's blurb: on the card it is a sample squeezed beside
-/// the cover, here it is the thing being read.
-pub const BOOK_DESCRIPTION_OVERLAY_SIZE: f32 = TEXT_MD;
+/// Set at `TEXT_MD`, larger than the card's blurb: on the card it is a sample
+/// squeezed beside the cover, here it is the thing being read.
 pub const BOOK_DESCRIPTION_OVERLAY_LINE_HEIGHT_EM: f32 = 1.5;
 
 /// One measure for the whole detail page.
@@ -281,13 +291,16 @@ pub const BOOK_DESCRIPTION_OVERLAY_LINE_HEIGHT_EM: f32 = 1.5;
 /// block starting on a different line. Around eighty characters at the body
 /// size, which is where a column of prose stops being comfortable.
 pub const BOOK_DETAIL_PAGE_WIDTH_REM: f32 = 38.5;
+/// At expanded window widths the detail page places the cover/contents and the
+/// description beside one another. Each side keeps a readable measure instead
+/// of stretching the description across the whole window.
+pub const BOOK_DETAIL_WIDE_PAGE_WIDTH_REM: f32 = BOOK_DETAIL_PAGE_WIDTH_REM * 2.0 + 2.0;
 /// The cover takes at most half the hero, so a narrow window never leaves the
 /// title in a column one word wide.
 pub const BOOK_DETAIL_COVER_FRACTION: f32 = 0.5;
 pub const BOOK_DETAIL_SECTION_GAP: f32 = SPACE_XL;
 pub const BOOK_DETAIL_HERO_GAP: f32 = SPACE_LG;
-pub const BOOK_DETAIL_TITLE_SIZE: f32 = TITLE_MD;
-pub const BOOK_DETAIL_SUBTITLE_SIZE: f32 = TEXT_MD;
+/// Detail titles run at `TITLE_MD`, subtitles at `TEXT_MD`.
 pub const BOOK_DETAIL_DESCRIPTION_SIZE: f32 = TEXT_SM;
 pub const BOOK_DETAIL_DESCRIPTION_LINE_HEIGHT_EM: f32 = 1.5;
 
@@ -296,7 +309,6 @@ pub const CAROUSEL_TITLE_SIZE: f32 = TEXT_LG;
 pub const CAROUSEL_TITLE_WEIGHT: FontWeight = FontWeight::NORMAL;
 pub const CAROUSEL_CONTENT_GAP: f32 = SPACE_MD;
 pub const CAROUSEL_CONTROL_GAP: f32 = SPACE_XS;
-pub const CAROUSEL_ARROW_SIZE: f32 = 34.0;
 
 /// The line box of the title over a shelf. Stated rather than left to the font,
 /// because the row's height is computed from it.
@@ -364,24 +376,14 @@ pub const SHELF_ROW_WIDTH_REM: f32 = 1000.0;
 /// that small caps are wider than the lowercase this was once sized against —
 /// 4rem would leave under a SPACE_SM margin and is no longer enough.
 pub const NAV_RAIL_SIZE_REM: f32 = 5.0;
-/// Rail destinations are square, so their height *is* the rail's width — a
-/// rule, not a coincidence, and the reason this is an alias rather than a
-/// value. Changing the rail's width deliberately changes their height with it.
+/// Rail destinations are square: their height is the rail's width. Changing
+/// the rail's width deliberately changes their height with it.
 ///
 /// The square is still generous for what it holds: a 1.5rem icon, a SPACE_XXS
 /// gap and one `NAV_RAIL_LABEL_SIZE` line come to 38px of the 80px box. That
 /// slack is the point — it is what makes the item read as a tile rather than a
 /// row.
-pub const NAV_RAIL_ITEM_HEIGHT_REM: f32 = NAV_RAIL_SIZE_REM;
-/// The library switcher at the head of the rail.
 ///
-/// It spans the topbar's height, not the rail's width, so that the rail's edge
-/// begins exactly on the topbar's baseline and the two form a single L against
-/// the content. Break the alias and the corner develops a visible jog.
-///
-/// This is the one rail cell that is not square: the switcher is an identity,
-/// not a destination, and the control inside it is sized on its own.
-pub const NAV_RAIL_HEADER_HEIGHT_REM: f32 = TOPBAR_HEIGHT_REM;
 /// Rail labels sit below their icon in a fixed-width column, so they run
 /// smaller than ordinary caption text: the icon is the primary cue and the word
 /// confirms it. Smaller here also buys margin against longer names before the
@@ -394,7 +396,8 @@ pub const NAV_RAIL_ICON_SIZE_REM: f32 = 1.5;
 pub const BOTTOM_NAV_HEIGHT_REM: f32 = 4.0;
 pub const TOPBAR_HEIGHT: f32 = TOPBAR_ACTION_HEIGHT + 2.0 * CONTENT_INSET;
 pub const TOPBAR_HEIGHT_REM: f32 = TOPBAR_HEIGHT / 16.0;
-pub const TOPBAR_ACTION_HEIGHT: f32 = 40.0;
+pub const TOPBAR_ACTION_HEIGHT_REM: f32 = 2.0;
+pub const TOPBAR_ACTION_HEIGHT: f32 = TOPBAR_ACTION_HEIGHT_REM * 16.0;
 pub const TOPBAR_ACTION_LABEL_WEIGHT: FontWeight = FontWeight::NORMAL;
 pub const TOPBAR_ACTION_GAP: f32 = SPACE_SM;
 pub const TOPBAR_ACTION_HORIZONTAL_PADDING: f32 = SPACE_SM;
@@ -402,7 +405,8 @@ pub const TOPBAR_ACTION_HORIZONTAL_PADDING: f32 = SPACE_SM;
 /// The switcher and the compact "More" sheet are one row height throughout —
 /// library rows, their delete buttons, the add button and the header all sit on
 /// it. It was repeated as a bare `40.0` in five places.
-pub const NAVIGATION_MODAL_ROW_HEIGHT: f32 = 40.0;
+pub const NAVIGATION_MODAL_ROW_HEIGHT_REM: f32 = 2.0;
+pub const NAVIGATION_MODAL_ROW_HEIGHT: f32 = NAVIGATION_MODAL_ROW_HEIGHT_REM * 16.0;
 /// Row pitch: the row plus the gap the panel puts between rows.
 pub const NAVIGATION_MODAL_ROW_PITCH: f32 = NAVIGATION_MODAL_ROW_HEIGHT + SPACE_XS;
 /// Everything above and below the rows — the header and its gap, plus the
@@ -422,7 +426,6 @@ pub const NAVIGATION_MODAL_WIDTH: f32 = 328.0;
 pub const COMPACT_HIERARCHY_ITEM_HEIGHT_REM: f32 = 3.0;
 pub const COMPACT_HIERARCHY_ITEM_TEXT_SIZE_REM: f32 = TEXT_LG;
 pub const COMPACT_HIERARCHY_ITEM_ROW_GAP: f32 = SPACE_SM;
-pub const COMPACT_HIERARCHY_ITEM_HEIGHT_OFFSET: f32 = 0.0;
 pub const COMPACT_HIERARCHY_ITEM_HORIZONTAL_PADDING: f32 = CONTENT_INSET;
 pub const COMPACT_HIERARCHY_ITEM_CONTENT_GAP: f32 = SPACE_SM;
 
@@ -451,23 +454,12 @@ pub const CONTENTS_AMOUNT_WIDTH_REM: f32 = 5.125;
 /// it. Thicker than `rule`'s hairline on purpose: it is a state, not a divider.
 pub const TAB_UNDERLINE_HEIGHT: f32 = 2.0;
 
-/// The bar the tabs and their actions sit on. Set from the action height rather
-/// than from the labels: the controls beside the tabs are the tall things on the
-/// row, and a bar shorter than them would be one they overhang.
-pub const TAB_BAR_HEIGHT: f32 = TOPBAR_ACTION_HEIGHT;
-
-/// Shared geometry for segmented settings controls and steppers. Keeping
-/// these dimensions here prevents individual settings surfaces from drifting.
-pub const SETTINGS_CONTROL_HEIGHT: f32 = 36.0;
-pub const SETTINGS_CHOICE_SEGMENT_WIDTH: f32 = 116.0;
-pub const SETTINGS_STEPPER_VALUE_WIDTH: f32 = 72.0;
+/// Shared geometry for settings controls.
+pub const SETTINGS_CONTROL_SIZE_REM: f32 = 2.0;
+pub const SETTINGS_STEPPER_BUTTON_SIZE: f32 = 28.0;
+pub const SETTINGS_STEPPER_VALUE_WIDTH_REM: f32 = 4.5;
+pub const SETTINGS_STEPPER_VALUE_MAX_WIDTH: f32 = 80.0;
 pub const SETTINGS_CONTROL_GAP: f32 = 1.0;
-/// The outer width of a stepper: two square buttons, the value between them,
-/// the hairline gaps that separate the three, and the group's own border.
-///
-/// Choice groups are set to match, so every control in a settings column ends
-/// on the same right edge instead of a 240px group overhanging a 148px stepper.
-pub const SETTINGS_GROUP_WIDTH: f32 = SETTINGS_CONTROL_HEIGHT * 2.0 + SETTINGS_STEPPER_VALUE_WIDTH + SETTINGS_CONTROL_GAP * 2.0 + 2.0;
 
 #[cfg(test)]
 mod tests {

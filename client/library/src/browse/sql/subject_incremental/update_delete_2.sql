@@ -1,1 +1,0 @@
-DELETE FROM subject_book_ownership WHERE book_row_id=?1

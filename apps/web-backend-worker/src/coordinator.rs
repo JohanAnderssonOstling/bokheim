@@ -4,12 +4,12 @@ use std::rc::Rc;
 
 use js_sys::Array;
 use wasm_bindgen::prelude::*;
-use web_sys::{MessageEvent, MessagePort};
 #[cfg(feature = "web-runtime-tests")]
 use web_sys::Worker;
+use web_sys::{MessageEvent, MessagePort};
 
-use super::{byte_reply, error_message, failure, field, object, BackgroundService, ClientRelay, CpuService, SyncService, TransferService};
-use bokheim_backend::host::coordinator_lifecycle::{Action, CoordinatorLifecycle};
+use super::{BackgroundService, ClientRelay, CpuService, SyncService, TransferService, byte_reply, error_message, failure, field, object};
+use app::host::coordinator_lifecycle::{Action, CoordinatorLifecycle};
 use client_platform_web::transport::endpoint::WorkerEndpoint;
 
 type WorkerFactory = Rc<dyn Fn(&str, &str) -> Result<WorkerEndpoint, JsValue>>;
@@ -66,7 +66,9 @@ impl State {
         }
     }
     fn fail(&self, error: String) {
-        if !self.lifecycle.borrow().accepting_work() { return; }
+        if !self.lifecycle.borrow().accepting_work() {
+            return;
+        }
         self.startup_cancel.borrow_mut().take();
         if let Some(handler) = self.failure_handler.borrow().clone() {
             handler(error, !self.lifecycle.borrow().starting());
@@ -76,7 +78,9 @@ impl State {
         self.execute(actions);
     }
     fn route_network(self: &Rc<Self>, message: JsValue) {
-        let Ok(port) = field(&message, "port").dyn_into::<MessagePort>() else { return; };
+        let Ok(port) = field(&message, "port").dyn_into::<MessagePort>() else {
+            return;
+        };
         let result = (|| {
             if !self.lifecycle.borrow().accepting_work() {
                 return Err(js_sys::Error::new("Coordinator stopped").into());
@@ -120,7 +124,9 @@ impl State {
             Some("network_request") => self.route_network(message),
             Some("transfer_request" | "sync_request" | "cpu_request") => {
                 use client_platform_web::transport::protocol::WorkerRequest;
-                let Ok(port) = field(&message, "port").dyn_into::<MessagePort>() else { return; };
+                let Ok(port) = field(&message, "port").dyn_into::<MessagePort>() else {
+                    return;
+                };
                 match WorkerRequest::decode(&message) {
                     Ok(WorkerRequest::Transfer { key }) => self.transfers.request(key, port),
                     Ok(WorkerRequest::Sync { key, bytes }) => self.sync.request_bytes(key, bytes, port),
@@ -138,7 +144,9 @@ impl State {
             Some("backend_ready") => {
                 self.startup_cancel.borrow_mut().take();
                 self.clients.resume();
-                if let Some(handler) = self.ready_handler.borrow().clone() { handler(); }
+                if let Some(handler) = self.ready_handler.borrow().clone() {
+                    handler();
+                }
                 let actions = self.lifecycle.borrow_mut().ready();
                 self.execute(actions);
             }
@@ -249,9 +257,13 @@ impl Coordinator {
         let (cancel, cancelled) = futures_channel::oneshot::channel();
         *state.startup_cancel.borrow_mut() = Some(cancel);
         wasm_bindgen_futures::spawn_local(async move {
-            if client_platform_runtime::pending::until_cancelled(client_platform_runtime::executor::sleep(options.database_startup), cancelled).await.is_none() { return; }
+            if client_platform_runtime::pending::until_cancelled(client_platform_runtime::executor::sleep(options.database_startup), cancelled).await.is_none() {
+                return;
+            }
             if let Some(state) = weak.upgrade() {
-                if state.lifecycle.borrow().starting() { state.fail("Database worker startup timed out".into()); }
+                if state.lifecycle.borrow().starting() {
+                    state.fail("Database worker startup timed out".into());
+                }
             }
         });
         Ok(Self(state))

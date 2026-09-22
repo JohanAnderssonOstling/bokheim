@@ -1,7 +1,7 @@
 //! Framework-independent PDF crop, coordinate, and text-selection geometry.
 
 mod metadata;
-pub use metadata::{PdfReaderMetadata, PdfStoredPage, PdfStoredAnnotation, PdfStoredAnnotationKind, PdfByteRange, PdfDependencyIndex, PdfPageSource};
+pub use metadata::{PdfByteRange, PdfDependencyIndex, PdfPageSource, PdfReaderMetadata, PdfStoredAnnotation, PdfStoredAnnotationKind, PdfStoredPage};
 
 const DEFAULT_CONTENT_DIFFERENCE_THRESHOLD: u8 = 24;
 const DEFAULT_PADDING_PIXELS: u32 = 12;
@@ -232,6 +232,175 @@ pub struct FitWidthViewport {
     column_height: f32,
 }
 
+/// A stable source position used to begin a bounded fit-width viewport.
+///
+/// Unlike a display-column index, this survives a change in column count or
+/// viewport height: it always identifies a point in the original PDF page.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FitWidthAnchor {
+    page_index: usize,
+    page_y: f32,
+}
+
+/// A locally planned reading viewport. `start` and `end` are source anchors,
+/// so a caller can discard its display columns and later reconstruct the same
+/// reading position at a different viewport size.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FitWidthViewportWindow {
+    start: FitWidthAnchor,
+    end: Option<FitWidthAnchor>,
+    plan: FitWidthPlan,
+}
+
+impl FitWidthViewportWindow {
+    pub const fn start(&self) -> FitWidthAnchor {
+        self.start
+    }
+
+    /// The position immediately after this viewport's final column, if the
+    /// document has more renderable content.
+    pub const fn end(&self) -> Option<FitWidthAnchor> {
+        self.end
+    }
+
+    pub fn plan(&self) -> &FitWidthPlan {
+        &self.plan
+    }
+}
+
+/// Stateful, source-anchored viewport pagination for fit-width PDFs.
+///
+/// It keeps only stable source anchors between windows. Display columns are
+/// rebuilt from those anchors, so a change in viewport size cannot make a
+/// previous display-column index point to unrelated content.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FitWidthAnchorPager {
+    pages: Vec<(FitWidthPage, Vec<(f32, f32)>)>,
+    viewport: FitWidthViewport,
+    column_count: usize,
+    window: FitWidthViewportWindow,
+}
+
+impl FitWidthAnchorPager {
+    pub fn new(pages: impl IntoIterator<Item = (FitWidthPage, Vec<(f32, f32)>)>, viewport: FitWidthViewport, column_count: usize, start: FitWidthAnchor) -> Result<Self, FitWidthPlanError> {
+        let pages = pages.into_iter().collect::<Vec<_>>();
+        let window = Self::build_window(&pages, viewport, column_count, start)?;
+        Ok(Self { pages, viewport, column_count: column_count.max(1), window })
+    }
+
+    pub fn window(&self) -> &FitWidthViewportWindow {
+        &self.window
+    }
+
+    pub fn can_forward(&self) -> bool {
+        self.window.end.is_some()
+    }
+
+    pub fn can_backward(&self) -> bool {
+        self.previous_window_start().is_some()
+    }
+
+    /// Promotes this viewport's end source anchor to the next viewport start.
+    pub fn forward(&mut self) -> Result<bool, FitWidthPlanError> {
+        let Some(next_start) = self.window.end else {
+            return Ok(false);
+        };
+        self.window = Self::build_window(&self.pages, self.viewport, self.column_count, next_start)?;
+        Ok(true)
+    }
+
+    /// Derives the prior viewport by packing backward from the current source
+    /// start. It never depends on navigation history or a document-wide layout.
+    pub fn backward(&mut self) -> Result<bool, FitWidthPlanError> {
+        let Some(previous_start) = self.previous_window_start() else {
+            return Ok(false);
+        };
+        self.window = Self::build_window(&self.pages, self.viewport, self.column_count, previous_start)?;
+        Ok(true)
+    }
+
+    /// Reflows from an arbitrary source position reached during continuous
+    /// scrolling, a page jump, a search hit, or a TOC target.
+    pub fn seek(&mut self, start: FitWidthAnchor, _remember_previous: bool) -> Result<(), FitWidthPlanError> {
+        if start == self.window.start {
+            return Ok(());
+        }
+        self.window = Self::build_window(&self.pages, self.viewport, self.column_count, start)?;
+        Ok(())
+    }
+
+    /// Builds the locally visible layout at an offset from this viewport's
+    /// stable start anchor. The pager itself is not advanced; wheel scrolling
+    /// may therefore move backward by reducing the offset and running this
+    /// same forward pass again.
+    pub fn reflow_at(&self, display_offset: f32) -> Result<FitWidthPlan, FitWidthPlanError> {
+        let anchor = self.anchor_at_offset(display_offset).unwrap_or(self.window.start);
+        Ok(Self::build_window(&self.pages, self.viewport, self.column_count, anchor)?.plan)
+    }
+
+    fn previous_window_start(&self) -> Option<FitWidthAnchor> {
+        let mut page_position = self.pages.iter().position(|(page, _)| page.page_index() == self.window.start.page_index())?;
+        let mut page_y = self.window.start.page_y();
+        let had_preceding_content = page_position > 0 || page_y > f32::EPSILON;
+        for _ in 0..self.column_count {
+            let mut remaining_height = self.viewport.column_height();
+            loop {
+                let (page, bands) = self.pages.get(page_position)?;
+                let scaled_height = page.height() / page.width() * self.viewport.column_width();
+                let ideal_top = (page_y - remaining_height / scaled_height.max(f32::EPSILON)).max(0.0);
+                let top = safe_slice_start(ideal_top, page_y, bands);
+                remaining_height -= (page_y - top) * scaled_height;
+                page_y = top;
+                if remaining_height <= 0.5 {
+                    break;
+                }
+                if page_position == 0 {
+                    return had_preceding_content.then(|| FitWidthAnchor::new(page.page_index(), 0.0));
+                }
+                page_position -= 1;
+                page_y = 1.0;
+            }
+        }
+        Some(FitWidthAnchor::new(self.pages.get(page_position)?.0.page_index(), page_y))
+    }
+
+    fn anchor_at_offset(&self, display_offset: f32) -> Option<FitWidthAnchor> {
+        let column_height = self.viewport.column_height().max(f32::EPSILON);
+        let display_column = (display_offset.max(0.0) / column_height).floor() as usize;
+        let mut y = display_offset.max(0.0) - display_column as f32 * column_height;
+        let columns = self.window.plan.columns.iter().filter(|column| column.display_column_index == display_column);
+        let mut last = None;
+        for column in columns {
+            y -= column.leading_page_gap;
+            if y <= column.display_height {
+                let fraction = (y / column.display_height.max(f32::EPSILON)).clamp(0.0, 1.0);
+                return Some(FitWidthAnchor::new(column.page_index, column.page_rect.top() + fraction * column.page_rect.height()));
+            }
+            y -= column.display_height;
+            last = Some(*column);
+        }
+        last.map(|column| FitWidthAnchor::new(column.page_index, column.page_rect.bottom()))
+    }
+
+    fn build_window(pages: &[(FitWidthPage, Vec<(f32, f32)>)], viewport: FitWidthViewport, column_count: usize, start: FitWidthAnchor) -> Result<FitWidthViewportWindow, FitWidthPlanError> {
+        FitWidthPlan::viewport_window_from_anchor_avoiding_breaks(pages.iter().map(|(page, bands)| (*page, bands.as_slice())), viewport, start, column_count)
+    }
+}
+
+impl FitWidthAnchor {
+    pub fn new(page_index: usize, page_y: f32) -> Self {
+        Self { page_index, page_y: page_y.clamp(0.0, 1.0) }
+    }
+
+    pub const fn page_index(self) -> usize {
+        self.page_index
+    }
+
+    pub const fn page_y(self) -> f32 {
+        self.page_y
+    }
+}
+
 impl FitWidthViewport {
     pub fn new(column_width: f32, column_height: f32) -> Option<Self> {
         valid_layout_extent(column_width, column_height).then_some(Self { column_width, column_height })
@@ -357,8 +526,44 @@ impl FitWidthPlan {
         Self::new_avoiding_breaks_with_page_gap(pages, viewport, 0.0)
     }
 
+    /// Plans from a source anchor instead of from the document beginning.
+    ///
+    /// The returned plan retains ordinary `FitWidthColumn` geometry, but its
+    /// display column zero begins at `anchor`. Callers can therefore fill one
+    /// viewport at a time and retain the source position after that viewport as
+    /// the next stable anchor.
+    pub fn from_anchor_avoiding_breaks<'a>(pages: impl IntoIterator<Item = (FitWidthPage, &'a [(f32, f32)])>, viewport: FitWidthViewport, anchor: FitWidthAnchor) -> Result<Self, FitWidthPlanError> {
+        let mut columns = Vec::new();
+        let mut display_column_index = 0;
+        let mut used_display_height = 0.0;
+        let mut found_anchor = false;
+        for (page, protected_bands) in pages {
+            if !found_anchor {
+                if page.page_index() != anchor.page_index() {
+                    continue;
+                }
+                found_anchor = true;
+                append_fit_width_columns_from(&mut columns, page, viewport, protected_bands, 0.0, anchor.page_y(), &mut display_column_index, &mut used_display_height)?;
+            } else {
+                append_fit_width_columns_from(&mut columns, page, viewport, protected_bands, 0.0, 0.0, &mut display_column_index, &mut used_display_height)?;
+            }
+        }
+        Ok(Self { columns })
+    }
+
+    /// Plans exactly one visible reading viewport from `anchor`.
+    ///
+    /// The plan may retain later columns for cheap look-ahead, but `end` is
+    /// always the source position at the first column outside `column_count`.
+    pub fn viewport_window_from_anchor_avoiding_breaks<'a>(pages: impl IntoIterator<Item = (FitWidthPage, &'a [(f32, f32)])>, viewport: FitWidthViewport, anchor: FitWidthAnchor, column_count: usize) -> Result<FitWidthViewportWindow, FitWidthPlanError> {
+        let plan = Self::from_anchor_avoiding_breaks(pages, viewport, anchor)?;
+        let end = plan.anchor_for_display_column(column_count.max(1));
+        Ok(FitWidthViewportWindow { start: anchor, end, plan })
+    }
+
     /// Builds a fit-width plan with vertical spacing at real PDF page
-    /// boundaries. The gap is never inserted between slices of one page.
+    /// boundaries. A column may contain several complete pages; only a page
+    /// that cannot fit is split into its following display column.
     pub fn new_avoiding_breaks_with_page_gap<'a>(pages: impl IntoIterator<Item = (FitWidthPage, &'a [(f32, f32)])>, viewport: FitWidthViewport, page_gap: f32) -> Result<Self, FitWidthPlanError> {
         let mut columns = Vec::new();
         let mut display_column_index = 0;
@@ -370,7 +575,7 @@ impl FitWidthPlan {
                 used_display_height = 0.0;
             }
             used_display_height += leading_page_gap;
-            append_fit_width_columns(&mut columns, page, viewport, protected_bands, leading_page_gap, &mut display_column_index, &mut used_display_height)?;
+        append_fit_width_columns_from(&mut columns, page, viewport, protected_bands, leading_page_gap, 0.0, &mut display_column_index, &mut used_display_height)?;
         }
         Ok(Self { columns })
     }
@@ -407,10 +612,22 @@ impl FitWidthPlan {
     pub fn len(&self) -> usize {
         self.columns.len()
     }
+
+    /// The source position at which this display column begins.
+    ///
+    /// This is the end anchor for a viewport that owns all preceding display
+    /// columns. Empty tails are intentionally skipped: an anchor always lands
+    /// on renderable PDF content.
+    pub fn anchor_for_display_column(&self, display_column_index: usize) -> Option<FitWidthAnchor> {
+        self.columns
+            .iter()
+            .find(|column| column.display_column_index == display_column_index)
+            .map(|column| FitWidthAnchor::new(column.page_index, column.page_rect.top()))
+    }
 }
 
-fn append_fit_width_columns(
-    columns: &mut Vec<FitWidthColumn>, page: FitWidthPage, viewport: FitWidthViewport, protected_bands: &[(f32, f32)], leading_page_gap: f32, display_column_index: &mut usize, used_display_height: &mut f32,
+fn append_fit_width_columns_from(
+    columns: &mut Vec<FitWidthColumn>, page: FitWidthPage, viewport: FitWidthViewport, protected_bands: &[(f32, f32)], leading_page_gap: f32, initial_top: f32, display_column_index: &mut usize, used_display_height: &mut f32,
 ) -> Result<(), FitWidthPlanError> {
     let mut leading_page_gap = leading_page_gap;
     let scaled_page_height = (page.height as f64 / page.width as f64 * viewport.column_width as f64) as f32;
@@ -420,7 +637,7 @@ fn append_fit_width_columns(
     }
 
     let mut segments = Vec::new();
-    let mut top = 0.0;
+    let mut top = initial_top.clamp(0.0, 1.0);
     while top < 1.0 {
         let available_height = (viewport.column_height - *used_display_height).max(0.0);
         if available_height <= f32::EPSILON {
@@ -482,14 +699,28 @@ fn safe_slice_boundary(top: f32, ideal_bottom: f32, protected_bands: &[(f32, f32
     else {
         return ideal_bottom;
     };
-    // Never move the boundary below `ideal_bottom`. The column has only
-    // `ideal_bottom - top` of room left, and a taller slice is clipped by the
-    // reader and then stepped over, taking its overflow with it. Moving the
-    // boundary up carries the whole band into the next column; when there is
-    // too little above it to be worth a column, the band is split instead.
+    // Keep a text line or ordinary image whole by ending the column before
+    // the protected band, even when that leaves a short tail. The tail belongs
+    // to this display column; a following page or slice must not fill it.
+    // A band that starts at the column top is larger than the column only in
+    // exceptional cases (for example a scanned full-page image), where a
+    // split is the only way to make progress.
     let before = protected_top - top;
-    let ideal_height = ideal_bottom - top;
-    if before >= ideal_height * 0.5 { protected_top } else { ideal_bottom }
+    if before > f32::EPSILON { protected_top } else { ideal_bottom }
+}
+
+/// Reverse counterpart to [`safe_slice_boundary`].
+fn safe_slice_start(ideal_top: f32, bottom: f32, protected_bands: &[(f32, f32)]) -> f32 {
+    let ideal_top = ideal_top.clamp(0.0, bottom);
+    let Some((_, protected_bottom)) = protected_bands
+        .iter()
+        .copied()
+        .map(|(top, bottom)| (top.clamp(0.0, 1.0), bottom.clamp(0.0, 1.0)))
+        .find(|(protected_top, protected_bottom)| *protected_top < ideal_top && ideal_top < *protected_bottom)
+    else {
+        return ideal_top;
+    };
+    if protected_bottom < bottom - f32::EPSILON { protected_bottom } else { ideal_top }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1018,6 +1249,71 @@ mod tests {
         assert!(first.page_point_to_column((0.25, 0.5)).is_none(), "a shared boundary belongs to the following column");
         assert_eq!(second.page_point_to_column((0.25, 0.5)), Some((0.25, 0.0)));
         assert_eq!(second.column_point_to_page((0.25, 1.0)), (0.25, 1.0));
+    }
+
+    #[test]
+    fn anchored_plan_starts_at_the_source_position_not_a_previous_display_column() {
+        let pages = [FitWidthPage::new(0, 600.0, 1_200.0).expect("first page"), FitWidthPage::new(1, 600.0, 600.0).expect("second page")];
+        let viewport = FitWidthViewport::new(300.0, 300.0).expect("viewport");
+        let plan = FitWidthPlan::from_anchor_avoiding_breaks(pages.into_iter().map(|page| (page, &[][..])), viewport, FitWidthAnchor::new(0, 0.25)).expect("anchored plan");
+        assert_eq!(plan.columns()[0].display_column_index(), 0);
+        assert_eq!(plan.columns()[0].page_rect(), NormalizedRect::new(0.0, 0.25, 1.0, 0.5));
+        assert_eq!(plan.columns()[1].page_rect(), NormalizedRect::new(0.0, 0.75, 1.0, 0.25));
+        assert_eq!(plan.columns()[2].page_index(), 1);
+    }
+
+    #[test]
+    fn anchored_viewport_window_exposes_the_next_viewports_source_anchor() {
+        let pages = [FitWidthPage::new(0, 600.0, 1_200.0).expect("first page"), FitWidthPage::new(1, 600.0, 600.0).expect("second page")];
+        let viewport = FitWidthViewport::new(300.0, 300.0).expect("viewport");
+        let window = FitWidthPlan::viewport_window_from_anchor_avoiding_breaks(pages.into_iter().map(|page| (page, &[][..])), viewport, FitWidthAnchor::new(0, 0.0), 1).expect("viewport window");
+        assert_eq!(window.start(), FitWidthAnchor::new(0, 0.0));
+        assert_eq!(window.end(), Some(FitWidthAnchor::new(0, 0.5)));
+        assert_eq!(window.plan().columns()[0].page_rect(), NormalizedRect::new(0.0, 0.0, 1.0, 0.5));
+    }
+
+    #[test]
+    fn anchor_pager_promotes_the_end_anchor_and_restores_the_previous_window() {
+        let pages = [
+            (FitWidthPage::new(0, 600.0, 1_200.0).expect("first page"), Vec::new()),
+            (FitWidthPage::new(1, 600.0, 600.0).expect("second page"), Vec::new()),
+        ];
+        let viewport = FitWidthViewport::new(300.0, 300.0).expect("viewport");
+        let mut pager = FitWidthAnchorPager::new(pages, viewport, 1, FitWidthAnchor::new(0, 0.0)).expect("pager");
+        assert_eq!(pager.window().start(), FitWidthAnchor::new(0, 0.0));
+        assert_eq!(pager.window().end(), Some(FitWidthAnchor::new(0, 0.5)));
+        assert!(pager.forward().expect("forward"));
+        assert_eq!(pager.window().start(), FitWidthAnchor::new(0, 0.5));
+        assert_eq!(pager.window().end(), Some(FitWidthAnchor::new(1, 0.0)));
+        assert!(pager.backward().expect("backward"));
+        assert_eq!(pager.window().start(), FitWidthAnchor::new(0, 0.0));
+    }
+
+    #[test]
+    fn anchor_pager_crosses_omitted_source_pages() {
+        let pages = [
+            (FitWidthPage::new(0, 600.0, 600.0).expect("first page"), Vec::new()),
+            (FitWidthPage::new(2, 600.0, 600.0).expect("third page"), Vec::new()),
+        ];
+        let viewport = FitWidthViewport::new(300.0, 300.0).expect("viewport");
+        let mut pager = FitWidthAnchorPager::new(pages, viewport, 1, FitWidthAnchor::new(0, 0.0)).expect("pager");
+        assert_eq!(pager.window().end(), Some(FitWidthAnchor::new(2, 0.0)));
+        assert!(pager.forward().expect("forward"));
+        assert_eq!(pager.window().start(), FitWidthAnchor::new(2, 0.0));
+        assert!(pager.backward().expect("backward"));
+        assert_eq!(pager.window().start(), FitWidthAnchor::new(0, 0.0));
+    }
+
+    #[test]
+    fn anchor_pager_reflows_from_a_continuous_scroll_anchor() {
+        let pages = [(FitWidthPage::new(0, 600.0, 1_200.0).expect("page"), Vec::new())];
+        let viewport = FitWidthViewport::new(300.0, 300.0).expect("viewport");
+        let mut pager = FitWidthAnchorPager::new(pages, viewport, 1, FitWidthAnchor::new(0, 0.0)).expect("pager");
+        pager.seek(FitWidthAnchor::new(0, 0.2), true).expect("reflow");
+        assert_eq!(pager.window().start(), FitWidthAnchor::new(0, 0.2));
+        assert_eq!(pager.window().plan().columns()[0].page_rect(), NormalizedRect::new(0.0, 0.2, 1.0, 0.5));
+        assert!(pager.backward().expect("backward"));
+        assert_eq!(pager.window().start(), FitWidthAnchor::new(0, 0.0));
     }
 
     #[test]

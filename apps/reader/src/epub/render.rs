@@ -8,7 +8,8 @@ use crate::epub::{LoadState, ReaderView};
 use crate::invalidation::Component;
 use crate::shell::chrome;
 use crate::shell::input::{self as shell_input, CommandTarget};
-use crate::shell::state_panel::SidebarPanel;
+use crate::shell::state_panel;
+use crate::shell::toolbar::{self as sidebar_chrome, SidebarContent};
 use crate::{DecreaseColumnWidth, DecreaseFont, IncreaseColumnWidth, IncreaseFont, NextPage, NextSection, PreviousPage, PreviousSection, ToggleFullscreen};
 use gpui::prelude::*;
 use gpui::{App, Context, FocusHandle, Focusable, IntoElement, KeyBinding, Render, Window};
@@ -30,19 +31,57 @@ impl Focusable for ReaderView {
 
 impl Render for ReaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        components::sync_reader_rem_size(window, cx);
         crate::invalidation::record_render(Component::ReaderShell);
         let theme = components::browser_theme(cx);
-        let entity = cx.entity();
-        let touch_input = cx.supports_touch_input();
-        let sidebar_visible = self.sidebar.is_visible();
-        let split_sidebar_width = chrome::sidebar_width(sidebar_visible, window, cx);
-        let available_width = (f32::from(window.viewport_size().width) - split_sidebar_width).max(1.0);
         if let LoadState::Ready(renderer) = &self.load_state {
-            renderer.update(cx, |renderer, cx| renderer.set_available_width(f64::from(available_width), cx));
+            let selected = cx.try_global::<components::theme::SelectedPalette>().copied();
+            if self.applied_palette != selected {
+                self.applied_palette = selected;
+                let appearance = crate::settings::library_theme_adaptation(cx);
+                let overrides = crate::settings::ReaderSettings::preferences(cx).style_overrides(Some(appearance));
+                let paint = crate::settings::library_paint_palette(cx);
+                renderer.update(cx, |renderer, cx| {
+                    renderer.apply(html_view_core::RendererCommand::SetReaderStyleOverrides(overrides), cx);
+                    renderer.apply(html_view_core::RendererCommand::SetReaderPaintPalette(paint), cx);
+                });
+            }
         }
-        let document = self.render_document(entity.clone(), cx);
+        let entity = cx.entity();
+        if self.chrome.reveal_when_system_bars_return(window, cx) {
+            state_panel::select_tab(&mut self.sidebar, crate::shell::state_panel::SidebarTab::Contents, cx);
+            crate::invalidation::notify(cx, Component::ReaderShell, "system_bar_sidebar_shown");
+        }
+        let touch_input = cx.supports_touch_input();
+        let search_visible = self.search.query.is_some();
+        let chrome_visible = self.chrome.is_visible() || search_visible;
+        let mobile = components::uses_mobile_navigation(window);
+        // A persistent desktop split always shows a tab — there is no closed
+        // state once the toolbar's toggle button is gone. The mobile/compact
+        // overlay keeps the open-or-closed sheet behaviour instead.
+        let active_tab = self.active_sidebar_tab(window);
+        let sidebar_visible = chrome_visible && active_tab.is_some();
+        let preferences = crate::settings::ReaderSettings::preferences(cx);
+        let (split_sidebar_width, horizontal_margin, available_width) = Self::horizontal_layout(window, cx, sidebar_visible);
+        let vertical_margin = preferences.vertical_margin_px.min(((f32::from(window.viewport_size().height) - 100.0) / 2.0).max(0.0));
+        let max_columns = self.max_columns_for_gap(f64::from(available_width), cx);
+        let fitted_column_width = self.fitted_column_width(f64::from(available_width), cx);
+        let column_gap = f64::from(preferences.min_column_gap_px) / preferences.scale.max(0.1);
+        if let LoadState::Ready(renderer) = &self.load_state {
+            renderer.update(cx, |renderer, cx| {
+                renderer.apply(html_view_core::RendererCommand::SetColumnViewportPlan {
+                    available_width: f64::from(available_width),
+                    column_width: fitted_column_width,
+                    column_count: max_columns,
+                    column_gap,
+                }, cx);
+            });
+        }
+        let document = self.render_document(entity.clone(), horizontal_margin, vertical_margin, cx);
 
-        let mut document_body = components::reader_document_body().child(document);
+        let mut document_body = components::reader_document_body()
+            .id("epub-reader-document-surface")
+            .child(document);
         if let Some(annotation) = self.render_annotation_popup(&entity, sidebar_visible, window, cx) {
             document_body = document_body.child(annotation);
         }
@@ -54,12 +93,13 @@ impl Render for ReaderView {
         }
 
         let content = if sidebar_visible {
-            let sidebar = match self.sidebar.active() {
-                Some(SidebarPanel::Annotations) => self.render_reader_state(cx),
-                Some(SidebarPanel::Contents) => self.render_toc(entity.clone(), theme, cx),
-                None => unreachable!("a visible sidebar has an active panel"),
-            };
-            chrome::with_sidebar(sidebar, document_body.into_any_element(), self.chrome.is_visible() || self.search.query.is_some(), self.search.query.is_some(), window, cx)
+            let active = active_tab.expect("sidebar_visible implies an active tab");
+            let (tabs, body) = self.render_sidebar(active, entity.clone(), theme, window, cx);
+            let progress = self.progress.summary();
+            let search_element = self.render_search(window, theme, cx);
+            let sidebar_content = SidebarContent::new(self.spine_title(), progress.label(), progress.tooltip(), self.document_focus(cx), tabs, body);
+            let sidebar = sidebar_chrome::reader_sidebar(self, &entity, sidebar_content, search_element, theme, window);
+            chrome::with_sidebar(sidebar, document_body.into_any_element(), window, cx)
         } else {
             document_body.into_any_element()
         };
@@ -67,19 +107,19 @@ impl Render for ReaderView {
         // The page container is only focusable while the book is
         // loading, when it is the one thing that can hold the keyboard. A
         // focusable container steals focus from the document on any click that
-        // reaches it — a margin, the toolbar's background, the sidebar — and
-        // navigation is bound in the document's key context, so the paging keys
-        // would go dead until the text was clicked again. Dropping the handle
-        // once the document exists leaves clicks on the chrome harmless; the
-        // container still sits on the dispatch path, so `Reader` bindings keep
-        // firing.
+        // reaches it — a margin, the sidebar's background — and navigation is
+        // bound in the document's key context, so the paging keys would go
+        // dead until the text was clicked again. Dropping the handle once the
+        // document exists leaves clicks on the chrome harmless; the container
+        // still sits on the dispatch path, so `Reader` bindings keep firing.
         let document_ready = self.document_focus(cx).is_some();
-        let search = self.render_search(window, theme, cx);
-        let chrome_visible = self.chrome.is_visible() || search.is_some();
         self.chrome.sync_system_bars(chrome_visible, cx);
-        let chrome_height = components::READER_TOOLBAR_HEIGHT + if search.is_some() { crate::shell::search::bar_height(window) } else { 0.0 };
-        let toolbar = chrome_visible.then(|| self.render_toolbar(window, cx));
-        let page = crate::shell::page::reader_page(window, cx, theme, document_ready, &self.focus, toolbar, search, content)
+        let page = crate::shell::page::reader_page(window, cx, theme, document_ready, &self.focus, chrome_visible, None, content)
+            // Reading is pointer-first: merely returning to this window should
+            // make its page keys available again. Activate at the platform
+            // level as well as restoring the document's GPUI focus, so this
+            // also takes keyboard input back from another application.
+            .on_mouse_move(cx.listener(|reader: &mut Self, _, window, cx| reader.reclaim_hover_focus(window, cx)))
             .on_scroll_wheel(cx.listener(Self::handle_mouse_wheel))
             .on_action(cx.listener(shell_input::dispatch::<Self, PreviousSection>))
             .on_action(cx.listener(shell_input::dispatch::<Self, NextSection>))
@@ -88,7 +128,7 @@ impl Render for ReaderView {
             .on_action(cx.listener(shell_input::dispatch::<Self, IncreaseColumnWidth>))
             .on_action(cx.listener(shell_input::dispatch::<Self, DecreaseColumnWidth>))
             .on_action(cx.listener(shell_input::dispatch::<Self, ToggleFullscreen>));
-        let interactions = chrome::surface_interactions("epub", chrome_visible, sidebar_visible, chrome_height, touch_input, cx, |reader: &mut Self, action, window, cx| match action {
+        let interactions = chrome::surface_interactions("epub", chrome_visible, sidebar_visible, touch_input, cx, |reader: &mut Self, action, window, cx| match action {
             chrome::SurfaceAction::PreviousPage => {
                 reader.execute(&PreviousPage, window, cx);
             }
@@ -96,7 +136,13 @@ impl Render for ReaderView {
                 reader.execute(&NextPage, window, cx);
             }
             chrome::SurfaceAction::ToggleChrome => reader.chrome.toggle(cx),
-            chrome::SurfaceAction::ShowChrome => reader.chrome.show(cx),
+            chrome::SurfaceAction::ShowChrome => {
+                if !reader.chrome.show_from_pointer(cx) {
+                    return;
+                }
+                state_panel::select_tab(&mut reader.sidebar, crate::shell::state_panel::SidebarTab::Contents, cx);
+                crate::invalidation::notify(cx, Component::ReaderShell, "sidebar_shown");
+            }
         });
         page.children(interactions)
     }
@@ -107,6 +153,12 @@ impl Render for ReaderView {
 const WHEEL_SCROLL_END_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
 
 impl ReaderView {
+    /// Unconditionally claim both OS-window and document focus on pointer hover.
+    fn reclaim_hover_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        window.activate_window();
+        self.focus_document(window, cx);
+    }
+
     /// Turns the page on a wheel gesture rather than scrolling the document.
     ///
     /// The whole burst is treated as one gesture: each event postpones the turn,

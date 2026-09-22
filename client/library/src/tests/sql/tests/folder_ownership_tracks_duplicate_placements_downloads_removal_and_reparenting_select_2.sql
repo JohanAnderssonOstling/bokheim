@@ -1,1 +1,0 @@
-SELECT placement_count,downloaded_placement_count FROM folder_book_ownership WHERE folder_id=?1 AND book_row_id=?2

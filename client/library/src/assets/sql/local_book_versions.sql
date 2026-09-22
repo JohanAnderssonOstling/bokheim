@@ -1,1 +1,0 @@
-SELECT dir_id, file_name, local_hash FROM book_dir JOIN book ON book.row_id=book_dir.book_row_id WHERE book.content_hash=?1 AND book_dir.deleted_at IS NULL ORDER BY dir_id,file_name

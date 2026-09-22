@@ -1,9 +1,0 @@
-CREATE TEMP TRIGGER audit_book_subject_code_INSERT AFTER INSERT ON main.book_subject_code BEGIN INSERT INTO write_audit VALUES('book_subject_code','INSERT'); END;
-CREATE TEMP TRIGGER audit_book_subject_code_UPDATE AFTER UPDATE ON main.book_subject_code BEGIN INSERT INTO write_audit VALUES('book_subject_code','UPDATE'); END;
-CREATE TEMP TRIGGER audit_book_subject_code_DELETE AFTER DELETE ON main.book_subject_code BEGIN INSERT INTO write_audit VALUES('book_subject_code','DELETE'); END;
-CREATE TEMP TRIGGER audit_book_subject_assignment_evidence_INSERT AFTER INSERT ON main.book_subject_assignment_evidence BEGIN INSERT INTO write_audit VALUES('book_subject_assignment_evidence','INSERT'); END;
-CREATE TEMP TRIGGER audit_book_subject_assignment_evidence_UPDATE AFTER UPDATE ON main.book_subject_assignment_evidence BEGIN INSERT INTO write_audit VALUES('book_subject_assignment_evidence','UPDATE'); END;
-CREATE TEMP TRIGGER audit_book_subject_assignment_evidence_DELETE AFTER DELETE ON main.book_subject_assignment_evidence BEGIN INSERT INTO write_audit VALUES('book_subject_assignment_evidence','DELETE'); END;
-CREATE TEMP TRIGGER audit_book_unified_concept_evidence_INSERT AFTER INSERT ON main.book_unified_concept_evidence BEGIN INSERT INTO write_audit VALUES('book_unified_concept_evidence','INSERT'); END;
-CREATE TEMP TRIGGER audit_book_unified_concept_evidence_UPDATE AFTER UPDATE ON main.book_unified_concept_evidence BEGIN INSERT INTO write_audit VALUES('book_unified_concept_evidence','UPDATE'); END;
-CREATE TEMP TRIGGER audit_book_unified_concept_evidence_DELETE AFTER DELETE ON main.book_unified_concept_evidence BEGIN INSERT INTO write_audit VALUES('book_unified_concept_evidence','DELETE'); END;

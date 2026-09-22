@@ -1,5 +1,5 @@
 //! Browser connection and failure events after the WASM runtime has loaded.
-use wasm_bindgen::{closure::Closure, JsCast, JsValue};
+use wasm_bindgen::{JsCast, JsValue, closure::Closure};
 use web_sys::{ErrorEvent, MessageEvent, PromiseRejectionEvent};
 
 fn detail(error: JsValue) -> String {
@@ -16,17 +16,15 @@ fn detail(error: JsValue) -> String {
 pub fn install() -> Result<(), JsValue> {
     let scope = super::worker_scope();
     let error = Closure::<dyn FnMut(ErrorEvent)>::new(|event: ErrorEvent| {
-        let error = if event.error().is_null() || event.error().is_undefined() {
-            event.message()
-        } else {
-            detail(event.error())
-        };
+        let error = if event.error().is_null() || event.error().is_undefined() { event.message() } else { detail(event.error()) };
         super::post_control("backend_failed", Some(&format!("Database worker failed: {error}")));
-    }).into_js_value();
+    })
+    .into_js_value();
     scope.add_event_listener_with_callback("error", error.unchecked_ref())?;
     let rejection = Closure::<dyn FnMut(PromiseRejectionEvent)>::new(|event: PromiseRejectionEvent| {
         super::post_control("backend_failed", Some(&format!("Database worker failed: {}", detail(event.reason()))));
-    }).into_js_value();
+    })
+    .into_js_value();
     scope.add_event_listener_with_callback("unhandledrejection", rejection.unchecked_ref())?;
     let message = Closure::<dyn FnMut(MessageEvent)>::new(|event: MessageEvent| {
         let data = event.data();
@@ -36,7 +34,8 @@ pub fn install() -> Result<(), JsValue> {
                 super::connect(port);
             }
         }
-    }).into_js_value();
+    })
+    .into_js_value();
     scope.set_onmessage(Some(message.unchecked_ref()));
     Ok(())
 }

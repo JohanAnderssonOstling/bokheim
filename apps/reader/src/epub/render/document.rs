@@ -12,7 +12,7 @@ use crate::epub::{LoadState, ReaderView};
 const KOBO_READER_EDGE_INSET: f32 = 2.0;
 
 impl ReaderView {
-    pub(super) fn render_document(&self, entity: Entity<Self>, _cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_document(&self, entity: Entity<Self>, horizontal_margin: f32, vertical_margin: f32, _cx: &mut Context<Self>) -> AnyElement {
         if let LoadState::Error(error) = &self.load_state {
             return components::reader_content().child(gpui::div().size_full().flex().flex_col().items_center().justify_center().gap(px(16.0)).p(px(24.0)).child("Could not display this book").child(error.clone())).into_any_element();
         }
@@ -28,7 +28,8 @@ impl ReaderView {
         let image_renderer = renderer.clone();
         components::reader_content()
             .id("epub-reader-document")
-            .when(cfg!(feature = "kobo"), |document| document.px(px(KOBO_READER_EDGE_INSET)))
+            .px(px(horizontal_margin + if cfg!(feature = "kobo") { KOBO_READER_EDGE_INSET } else { 0.0 }))
+            .py(px(vertical_margin))
             .child(renderer.clone())
             .context_menu(move |menu, window, cx| {
                 let position = window.mouse_position();

@@ -1,1 +1,0 @@
-INSERT OR REPLACE INTO local_book_work(content_hash) VALUES(?1)

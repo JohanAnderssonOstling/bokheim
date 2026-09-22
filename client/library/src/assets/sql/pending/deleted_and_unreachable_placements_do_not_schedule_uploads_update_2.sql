@@ -1,1 +1,0 @@
-UPDATE dir SET deleted_at=1 WHERE id='shelf'

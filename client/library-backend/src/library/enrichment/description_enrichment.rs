@@ -1,7 +1,7 @@
-use super::DESCRIPTION_PROVIDER;
 use super::application::record_enrichment_failures;
+use super::DESCRIPTION_PROVIDER;
 
-use crate::{BackendError, ContentHash, library::LibrarySession};
+use crate::{library::LibrarySession, BackendError, ContentHash};
 use library_database::DescriptionEnrichmentResult;
 use metadata_contract::MetadataEnrichmentRequest;
 use std::collections::{BTreeSet, HashMap};
@@ -33,13 +33,7 @@ impl LibrarySession {
                 } else {
                     ("no_match", None)
                 };
-                DescriptionEnrichmentResult {
-                    content_hash: hash,
-                    provider: DESCRIPTION_PROVIDER.to_owned(),
-                    identifier: isbns.join(","),
-                    description,
-                    status: status.to_owned(),
-                }
+                DescriptionEnrichmentResult { content_hash: hash, provider: DESCRIPTION_PROVIDER.to_owned(), identifier: isbns.join(","), description, status: status.to_owned() }
             })
             .collect::<Vec<_>>();
         let mut updated = 0;

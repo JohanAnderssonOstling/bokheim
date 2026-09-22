@@ -1,1 +1,0 @@
-UPDATE subject_system SET matcher_version=MAX(matcher_version,?2) WHERE id=?1

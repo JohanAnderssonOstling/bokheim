@@ -1,1 +1,0 @@
-SELECT COUNT(*) FROM source_concept_mapping WHERE source_system_id='bisac' AND source_code='HIS000000' AND mapping_type='exact'

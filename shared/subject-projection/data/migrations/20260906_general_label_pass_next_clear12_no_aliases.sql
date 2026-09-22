@@ -1,0 +1,12 @@
+UPDATE concept SET preferred_label='Electrical & Electronic Engineering' WHERE concept_id=5566 AND preferred_label='Electrical, Electronics & Communications';
+UPDATE concept SET preferred_label='Classical & Quantum Electrodynamics' WHERE concept_id=6078 AND preferred_label='Electrodynamics, Waves & Quantum Effects';
+UPDATE concept SET preferred_label='Christian Life & Relationships' WHERE concept_id=5909 AND preferred_label='Family, Relationships & Life Transitions';
+UPDATE concept SET preferred_label='Medical History & Expeditions' WHERE concept_id=2728 AND preferred_label='History of medicine. Medical expeditions';
+UPDATE concept SET preferred_label='Latin American & Caribbean Housing' WHERE concept_id=11860 AND preferred_label='Housing in Latin America & the Caribbean';
+UPDATE concept SET preferred_label='Christian Work & Leadership' WHERE concept_id=5910 AND preferred_label='Leadership, Vocation & Professional Life';
+UPDATE concept SET preferred_label='Spiritual Practices & Growth' WHERE concept_id=5736 AND preferred_label='Meditation, Mysticism & Spiritual Growth';
+UPDATE concept SET preferred_label='Operations & Supply Chain Management' WHERE concept_id=11590 AND preferred_label='Operations, Productivity & Supply Chains';
+UPDATE concept SET preferred_label='Administrative & Local Government Law' WHERE concept_id=5645 AND preferred_label='Public Administration & Local Government';
+UPDATE concept SET preferred_label='Kids’ Fiction in Scandinavian Languages' WHERE concept_id=7726 AND preferred_label='Scandinavian-Language Children’s Fiction';
+UPDATE concept SET preferred_label='Religious Studies' WHERE concept_id=5857 AND preferred_label='Study, Philosophy & Comparative Religion';
+UPDATE concept SET preferred_label='Music Institutions & Professional Life' WHERE concept_id=5946 AND preferred_label='Institutions, Events & Professional Life';

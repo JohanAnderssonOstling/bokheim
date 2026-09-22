@@ -16,6 +16,10 @@ pub struct OpenBookRequested {
     pub initial_target: Option<String>,
 }
 
+/// The cached book detail page just closed — e.g. an audiobook dock expanded
+/// to show it can collapse back down.
+pub struct BookDetailDismissed;
+
 /// Owns window policy and composes the browser shell.
 pub struct BrowserRoot {
     #[cfg(target_arch = "wasm32")]
@@ -28,6 +32,10 @@ pub struct BrowserRoot {
 }
 
 impl BrowserRoot {
+    #[cfg(target_arch = "wasm32")]
+    pub fn apply_sync_event(&mut self, event: crate::SyncEvent, cx: &mut Context<Self>) {
+        self.shell.update(cx, |shell, cx| shell.apply_sync_event(event, cx));
+    }
     pub fn set_content_footer(&mut self, footer: Option<gpui::AnyView>, cx: &mut Context<Self>) {
         self.shell.update(cx, |shell, cx| shell.set_content_footer(footer, cx));
     }
@@ -43,18 +51,35 @@ impl BrowserRoot {
         self.shell.update(cx, |shell, cx| shell.open_folder(library_id, directory_id, title, window, cx));
     }
 
+    pub fn open_subject(&mut self, library_id: sync_common::LibraryId, location: String, label: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.shell.update(cx, |shell, cx| shell.open_subject(library_id, location, label, window, cx));
+    }
+
     /// Builds the window root and its browser shell.
-    pub fn new(services: AppServices, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        cx.set_system_bars_visible(false);
+    pub fn new(services: AppServices, sync_state: Entity<crate::SyncState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        cx.set_system_bars_visible(true);
         #[cfg(target_arch = "wasm32")]
-        let import_notifications = crate::services::import_progress::watch_browser_imports(services.backend.clone(), window, cx);
+        let import_notifications = crate::services::import_progress::watch_browser_imports(
+            services.backend.clone(),
+            services.sync_events.clone().expect("web sync event inbox"),
+            window,
+            cx,
+        );
         let preferences = cx.new(|cx| Preferences::new(services.clone(), cx));
+        let theme_preferences = preferences.clone();
+        cx.set_global(ui_components::theme::PaletteSelectionHandler(std::rc::Rc::new(move |theme, appearance, cx| {
+            theme_preferences.update(cx, |preferences, cx| {
+                if let Err(error) = preferences.update_browsing(app_preferences::BrowsingPreferencePatch::Palette(theme, appearance), cx) {
+                    log::error!("failed to select application palette: {error}");
+                }
+            });
+        })));
         let appearance_preferences = preferences.clone();
         window
             .observe_window_appearance(move |_, cx| {
                 let browsing = appearance_preferences.read(cx).browsing();
-                // `apply_appearance` repaints; the system only ever changes what
-                // `System` resolves to, so re-resolving is the whole update.
+                // Re-resolve when following the system; an explicit palette
+                // stays fixed and `apply_appearance` refreshes the windows.
                 ui_components::theme::apply_appearance(&browsing, cx);
             })
             .detach();
@@ -63,15 +88,11 @@ impl BrowserRoot {
         let open_book: crate::library::OpenBook = std::rc::Rc::new(move |locator, title, initial_target, _, cx| {
             let _ = browser.update(cx, |_, cx| cx.emit(OpenBookRequested { locator, title, initial_target }));
         });
-        let shell = cx.new(|cx| {
-            BrowserShell::new(
-                services.clone(),
-                open_book,
-                preferences.clone(),
-                window,
-                cx,
-            )
+        let browser = cx.entity().downgrade();
+        let book_detail_closed: crate::library::BookDetailClosed = std::rc::Rc::new(move |cx| {
+            let _ = browser.update(cx, |_, cx| cx.emit(BookDetailDismissed));
         });
+        let shell = cx.new(|cx| BrowserShell::new(services.clone(), sync_state, open_book, book_detail_closed, preferences.clone(), window, cx));
         let shell_subscription = cx.observe(&shell, |_, _, cx| cx.notify());
         let shell_for_preferences = shell.clone();
         let preferences_subscription = cx.observe(&preferences, move |_, preferences, cx| {
@@ -83,7 +104,15 @@ impl BrowserRoot {
 
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        Self { #[cfg(target_arch = "wasm32")] _import_notifications: import_notifications, preferences, shell, focus, _shell_subscription: shell_subscription, _preferences_subscription: preferences_subscription }
+        Self {
+            #[cfg(target_arch = "wasm32")]
+            _import_notifications: import_notifications,
+            preferences,
+            shell,
+            focus,
+            _shell_subscription: shell_subscription,
+            _preferences_subscription: preferences_subscription,
+        }
     }
 
     pub fn contains_library(&self, library_id: &sync_common::LibraryId, cx: &App) -> bool {
@@ -129,6 +158,7 @@ impl BrowserRoot {
 }
 
 impl EventEmitter<OpenBookRequested> for BrowserRoot {}
+impl EventEmitter<BookDetailDismissed> for BrowserRoot {}
 
 impl Focusable for BrowserRoot {
     fn focus_handle(&self, _: &App) -> FocusHandle {

@@ -1,1 +1,0 @@
-INSERT INTO subject_browse_raw_child VALUES(?1,?2)

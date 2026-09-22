@@ -1,1 +1,0 @@
-CREATE TRIGGER fail_audible_job BEFORE INSERT ON audible_enrichment_jobs BEGIN SELECT RAISE(ABORT,'fixture failure'); END;

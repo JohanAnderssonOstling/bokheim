@@ -27,7 +27,5 @@ fn library_path() -> Result<PathBuf, String> {
 
 pub(crate) fn initialize() -> Result<Pdfium, String> {
     let path = library_path()?;
-    Pdfium::bind_to_library(&path)
-        .map(Pdfium::new)
-        .map_err(|error| format!("loading PDFium from {}: {error}", path.display()))
+    Pdfium::bind_to_library(&path).map(Pdfium::new).map_err(|error| format!("loading PDFium from {}: {error}", path.display()))
 }

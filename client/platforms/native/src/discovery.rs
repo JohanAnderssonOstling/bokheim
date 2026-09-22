@@ -18,4 +18,3 @@ pub fn lower_priority() {
         libc::syscall(libc::SYS_ioprio_set, 1, 0, 3 << 13); // IOPRIO_CLASS_IDLE
     }
 }
-

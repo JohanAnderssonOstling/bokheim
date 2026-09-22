@@ -25,7 +25,7 @@ pub fn write_annotated_pdf(path: &Path) {
         "Annots" => vec![existing_annotation.into()],
     });
     document.objects.insert(pages_id, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1 }));
-    let catalog_id = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
-    document.trailer.set("Root", catalog_id);
+    let root_id = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    document.trailer.set("Root", root_id);
     document.save(path).unwrap();
 }

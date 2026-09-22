@@ -1,1 +1,0 @@
-SELECT changed_at FROM sync_outbox WHERE state_kind='directory_name' AND state_key=?1

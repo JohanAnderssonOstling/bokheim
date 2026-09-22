@@ -5,6 +5,7 @@ use futures_channel::oneshot;
 #[cfg(feature = "web-runtime-tests")]
 use js_sys::Promise;
 use js_sys::{Array, Uint8Array};
+use std::collections::HashMap;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
@@ -18,6 +19,7 @@ struct Bridge {
     pending: super::pending::Pending<Cancel>,
 }
 thread_local! {static BRIDGE:RefCell<Option<Rc<Bridge>>>=const{RefCell::new(None)};}
+thread_local! {static ACTIVE_TRANSFERS:RefCell<HashMap<String, std::rc::Weak<Request>>>=RefCell::new(HashMap::new());}
 fn bridge() -> Result<Rc<Bridge>, JsValue> {
     BRIDGE.with(|slot| {
         if let Some(bridge) = slot.borrow().as_ref() {
@@ -49,13 +51,24 @@ enum Runner {
 struct Request {
     bridge: Rc<Bridge>,
     id: u64,
+    key: String,
     port: RefCell<Option<Port>>,
     reply: RefCell<Option<Reply>>,
     cancelled: async_channel::Receiver<()>,
     runner: Runner,
+    progress: Option<Box<dyn Fn(f64)>>,
 }
 impl Request {
+    fn forget_progress(&self) {
+        ACTIVE_TRANSFERS.with(|active| {
+            let mut active = active.borrow_mut();
+            if active.get(&self.key).is_some_and(|owner| std::ptr::eq(owner.as_ptr(), self)) {
+                active.remove(&self.key);
+            }
+        });
+    }
     fn finish(&self, result: Result<Vec<u8>, String>) {
+        self.forget_progress();
         self.cancelled.close();
         self.port.borrow_mut().take();
         self.bridge.pending.take(self.id);
@@ -68,12 +81,19 @@ impl Request {
             Ok(BridgeEvent::Complete(result)) => self.finish(result),
             Ok(BridgeEvent::Storage { id, bytes }) if matches!(self.runner, Runner::Storage { .. }) => self.execute(Some((id, bytes))),
             Ok(BridgeEvent::Run) if matches!(self.runner, Runner::Transfer(_)) => self.execute(None),
+            Ok(BridgeEvent::Progress(fraction)) if matches!(self.runner, Runner::Transfer(_)) => {
+                if let Some(progress) = &self.progress {
+                    progress(fraction);
+                }
+            }
             Ok(_) => self.finish(Err("Worker requested an unavailable capability".into())),
             Err(error) => self.finish(Err(error)),
         }
     }
     fn execute(self: &Rc<Self>, storage: Option<(u32, Vec<u8>)>) {
-        if self.cancelled.is_closed() { return; }
+        if self.cancelled.is_closed() {
+            return;
+        }
         let (id, run) = match (&self.runner, storage) {
             (Runner::Storage { run, .. }, Some((id, bytes))) => (Some(id), run(bytes)),
             (Runner::Transfer(run), None) => {
@@ -81,9 +101,15 @@ impl Request {
                     self.finish(Err("Transfer capability already consumed".into()));
                     return;
                 };
+                ACTIVE_TRANSFERS.with(|active| {
+                    active.borrow_mut().insert(self.key.clone(), Rc::downgrade(self));
+                });
                 (None, run())
             }
-            _ => { self.finish(Err("Worker requested an unavailable capability".into())); return; }
+            _ => {
+                self.finish(Err("Worker requested an unavailable capability".into()));
+                return;
+            }
         };
         let state = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
@@ -103,6 +129,7 @@ impl Request {
 }
 impl Drop for Request {
     fn drop(&mut self) {
+        self.forget_progress();
         if matches!(self.runner, Runner::Storage { .. }) {
             if let Some(port) = self.port.get_mut().as_ref() {
                 let _ = port.raw.post_message(&object(&[("kind", "cancel".into())]));
@@ -111,7 +138,7 @@ impl Drop for Request {
         self.bridge.pending.take(self.id);
     }
 }
-fn request(key: String, mut runner: Runner) -> Result<BytesFuture, JsValue> {
+fn request(key: String, mut runner: Runner, progress: Option<Box<dyn Fn(f64)>>) -> Result<BytesFuture, JsValue> {
     let bridge = bridge()?;
     let id = bridge.pending.next_id();
     let channel = MessageChannel::new()?;
@@ -123,7 +150,7 @@ fn request(key: String, mut runner: Runner) -> Result<BytesFuture, JsValue> {
         Runner::Storage { .. } => "sync_request",
         Runner::Transfer(_) => "transfer_request",
     };
-    let message = object(&[("transport", transport.into()), ("key", key.into()), ("port", channel.port2().into())]);
+    let message = object(&[("transport", transport.into()), ("key", key.clone().into()), ("port", channel.port2().into())]);
     let transfer = Array::of1(&channel.port2());
     if let Runner::Storage { bytes, .. } = &mut runner {
         // The queued runner retains no input buffer after dispatch.
@@ -137,6 +164,7 @@ fn request(key: String, mut runner: Runner) -> Result<BytesFuture, JsValue> {
         Request {
             bridge: bridge.clone(),
             id,
+            key: key.clone(),
             port: RefCell::new(Some(Port::new(
                 channel.port1(),
                 move |event| {
@@ -153,6 +181,7 @@ fn request(key: String, mut runner: Runner) -> Result<BytesFuture, JsValue> {
             reply: RefCell::new(Some(reply)),
             cancelled,
             runner,
+            progress,
         }
     });
     let weak = Rc::downgrade(&state);
@@ -175,10 +204,26 @@ fn request(key: String, mut runner: Runner) -> Result<BytesFuture, JsValue> {
     }))
 }
 pub fn sync_request(key: String, bytes: Vec<u8>, storage: BytesOperation) -> Result<BytesFuture, JsValue> {
-    request(key, Runner::Storage { bytes, run: storage })
+    request(key, Runner::Storage { bytes, run: storage }, None)
 }
 pub fn transfer_request(key: String, run: impl FnOnce() -> BytesFuture + 'static) -> Result<BytesFuture, JsValue> {
-    request(key, Runner::Transfer(RefCell::new(Some(Box::new(run)))))
+    request(key, Runner::Transfer(RefCell::new(Some(Box::new(run)))), None)
+}
+pub fn transfer_request_with_progress(key: String, run: impl FnOnce() -> BytesFuture + 'static, progress: impl Fn(f64) + 'static) -> Result<BytesFuture, JsValue> {
+    request(key, Runner::Transfer(RefCell::new(Some(Box::new(run)))), Some(Box::new(progress)))
+}
+pub fn report_transfer_progress(key: &str, fraction: f64) {
+    if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+        return;
+    }
+    ACTIVE_TRANSFERS.with(|active| {
+        let owner = active.borrow().get(key).and_then(std::rc::Weak::upgrade);
+        if let Some(owner) = owner {
+            if let Some(port) = owner.port.borrow().as_ref() {
+                let _ = port.raw.post_message(&object(&[("kind", "progress".into()), ("fraction", fraction.into())]));
+            }
+        }
+    });
 }
 
 struct Background {
@@ -226,7 +271,9 @@ impl BackgroundHost {
                         Ok(BackgroundReply::Stopped) | Err(_) => state.stop(),
                         Ok(BackgroundReply::Cycle { id, refresh }) => {
                             state.active.set(id);
-                            if send.try_send(refresh).is_err() { state.stop(); }
+                            if send.try_send(refresh).is_err() {
+                                state.stop();
+                            }
                         }
                     }
                 },
@@ -312,24 +359,43 @@ pub async fn cancellation_contract() -> bool {
         let (cancel, cancelled) = async_channel::unbounded();
         let mut cancel = Some(cancel);
         let state = Rc::new(Request {
-            id: bridge.pending.next_id(), bridge, port: RefCell::new(None),
-            reply: RefCell::new(Some(reply)), cancelled,
+            id: bridge.pending.next_id(),
+            bridge,
+            key: "test-transfer".into(),
+            port: RefCell::new(None),
+            reply: RefCell::new(Some(reply)),
+            cancelled,
+            progress: None,
             runner: Runner::Transfer(RefCell::new(Some(Box::new(move || {
                 created_work.set(true);
-                Box::pin(async move { drop(captured); ran_work.set(true); Ok(Vec::new()) })
+                Box::pin(async move {
+                    drop(captured);
+                    ran_work.set(true);
+                    Ok(Vec::new())
+                })
             })))),
         });
         if cancelled_before_dispatch {
-            if coordinator_reply { state.finish(Err("cancelled".into())); } else { cancel.take(); }
+            if coordinator_reply {
+                state.finish(Err("cancelled".into()));
+            } else {
+                cancel.take();
+            }
         }
         state.execute(None);
         if !cancelled_before_dispatch {
-            if coordinator_reply { state.finish(Err("cancelled".into())); } else { cancel.take(); }
+            if coordinator_reply {
+                state.finish(Err("cancelled".into()));
+            } else {
+                cancel.take();
+            }
         }
         drop(state);
         client_platform_runtime::executor::sleep(std::time::Duration::ZERO).await;
         let expected_creation = !cancelled_before_dispatch;
-        if ran.get() || created.get() != expected_creation || Rc::strong_count(&resource) != 1 { return false; }
+        if ran.get() || created.get() != expected_creation || Rc::strong_count(&resource) != 1 {
+            return false;
+        }
     }
     true
 }

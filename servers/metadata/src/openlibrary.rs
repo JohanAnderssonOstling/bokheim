@@ -1,4 +1,4 @@
-use super::{fmt, Connection, Deserialize, KeyReference, MetadataError, OpenFlags, Path, PathBuf, Pool, SqliteConnectionManager, MAX_AUTHOR_BIOGRAPHY_BYTES, MAX_DESCRIPTION_BYTES, QUERY_CONCURRENCY, READ_CACHE_KIB, READ_MMAP_BYTES};
+use super::{fmt, Connection, Deserialize, KeyReference, MetadataError, OpenFlags, Path, PathBuf, Pool, SqliteConnectionManager, MAX_DESCRIPTION_BYTES, QUERY_CONCURRENCY, READ_CACHE_KIB, READ_MMAP_BYTES};
 
 pub(crate) fn open_read_pool(path: &Path) -> Result<Pool<SqliteConnectionManager>, MetadataError> {
     let manager = SqliteConnectionManager::file(path).with_flags(OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).with_init(configure_read_only);
@@ -59,10 +59,6 @@ pub(crate) fn deserialize_optional_description<'de, D: serde::Deserializer<'de>>
 
 pub(crate) fn valid_open_library_description(value: &str) -> Option<String> {
     valid_open_library_text(value, MAX_DESCRIPTION_BYTES)
-}
-
-pub(crate) fn valid_open_library_author_biography(value: &str) -> Option<String> {
-    valid_open_library_text(value, MAX_AUTHOR_BIOGRAPHY_BYTES)
 }
 
 pub(crate) fn valid_open_library_text(value: &str, maximum_bytes: usize) -> Option<String> {
@@ -139,12 +135,15 @@ pub(crate) fn error(error: impl fmt::Display) -> MetadataError {
     MetadataError(error.to_string())
 }
 
-/// Internal catalog keys reserve negatives for Wikidata QIDs; Open Library
+/// Internal authority keys reserve negatives for Wikidata QIDs; Open Library
 /// identifiers remain positive and are never fabricated for other sources.
-pub(crate) fn catalog_edition_id(value: &str) -> Option<i64> {
-    value.strip_prefix("wikidata:Q").and_then(|q|q.parse::<i64>().ok()).filter(|q|*q>0).map(|q|-q)
-        .or_else(||open_library_id(value,'M'))
+pub(crate) fn authority_edition_id(value: &str) -> Option<i64> {
+    value.strip_prefix("wikidata:Q").and_then(|q| q.parse::<i64>().ok()).filter(|q| *q > 0).map(|q| -q).or_else(|| open_library_id(value, 'M'))
 }
-pub(crate) fn catalog_edition_key(id: i64) -> String {
-    if id<0 {format!("wikidata:Q{}",-id)} else {format!("OL{id}M")}
+pub(crate) fn authority_edition_key(id: i64) -> String {
+    if id < 0 {
+        format!("wikidata:Q{}", -id)
+    } else {
+        format!("OL{id}M")
+    }
 }

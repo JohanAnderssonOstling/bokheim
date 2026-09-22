@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use bokheim_backend::LibraryClient;
+use library_backend::LibraryClient;
 use gpui::{Entity, FocusHandle, Pixels, Point, Subscription};
 use gpui_component::input::InputState;
 use gpui_component::tree::TreeState;
@@ -73,6 +73,7 @@ pub(crate) struct ReaderView {
     book_title: String,
     title: String,
     load_state: LoadState,
+    applied_palette: Option<ui_components::theme::SelectedPalette>,
     desired_column_count: u8,
     toc: TocState,
     toc_tree: Entity<TreeState>,

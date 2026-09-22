@@ -1,1 +1,0 @@
-DELETE FROM external_place_edge WHERE child_id=?1

@@ -1,1 +1,0 @@
-SELECT file_name FROM book_dir WHERE dir_id='dest' AND deleted_at IS NULL

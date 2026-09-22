@@ -1,1 +1,0 @@
-SELECT DISTINCT route.path FROM book_unified_concept assignment JOIN curated.unified_concept_route route ON route.concept_id=assignment.concept_id

@@ -1,1 +1,0 @@
-SELECT EXISTS(SELECT 1 FROM sync_outbox WHERE state_kind='description' AND state_key=?1)

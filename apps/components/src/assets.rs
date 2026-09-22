@@ -10,15 +10,22 @@ const WIFI_ICON: &[u8] = include_bytes!("../../ui/design-tokens/assets/icon/wifi
 
 const APP_ICON_PATH: &str = "icons/bokheim.svg";
 const APP_ICON: &[u8] = include_bytes!("../../ui/design-tokens/assets/icon/bokheim.svg");
-const PHOSPHOR_LIGHT_ICONS: [(&str, &[u8]); 49] = [
+const PHOSPHOR_LIGHT_ICONS: [(&str, &[u8]); 63] = [
     ("icons/alarm.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/alarm.svg")),
+    ("icons/arrow-down.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/arrow-down.svg")),
     ("icons/arrow-left.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/arrow-left.svg")),
     ("icons/arrow-right.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/arrow-right.svg")),
     ("icons/book-open.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/book-open.svg")),
+    ("icons/battery-charging.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/battery-charging.svg")),
+    ("icons/battery-full.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/battery-full.svg")),
+    ("icons/battery-low.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/battery-low.svg")),
+    ("icons/battery-medium.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/battery-medium.svg")),
+    ("icons/battery-warning.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/battery-warning.svg")),
     ("icons/bluetooth.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/bluetooth.svg")),
     ("icons/bluetooth-off.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/bluetooth-off.svg")),
     ("icons/check.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/check.svg")),
     ("icons/cloud-download.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/cloud-download.svg")),
+    ("icons/copy.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/copy.svg")),
     ("icons/chevron-down.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/caret-down.svg")),
     ("icons/chevron-left.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/caret-left.svg")),
     ("icons/chevron-right.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/caret-right.svg")),
@@ -27,15 +34,20 @@ const PHOSPHOR_LIGHT_ICONS: [(&str, &[u8]); 49] = [
     ("icons/close.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/x.svg")),
     ("icons/delete.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/trash.svg")),
     ("icons/ellipsis.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/dots-three.svg")),
-    ("icons/eye.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/web-eye.svg")),
-    ("icons/eye-off.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/web-eye-off.svg")),
+    ("icons/ellipsis-vertical.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/dots-three-vertical.svg")),
+    ("icons/eye.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/eye.svg")),
+    ("icons/eye-off.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/eye-slash.svg")),
     ("icons/external-link.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/arrow-square-out.svg")),
     ("icons/folder.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/folder.svg")),
     ("icons/folder-open.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/folder-open.svg")),
     ("icons/globe.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/globe.svg")),
-    ("icons/loader-circle.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/web-loader-circle.svg")),
+    ("icons/hard-drive.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/hard-drive.svg")),
+    ("icons/headphones.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/headphones.svg")),
+    ("icons/loader-circle.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/circle-notch.svg")),
     ("icons/lock.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/lock.svg")),
     ("icons/lock-open.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/lock-open.svg")),
+    ("icons/menu.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/list.svg")),
+    ("icons/panel-left.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/sidebar-simple.svg")),
     ("icons/panel-left-open.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/sidebar-simple.svg")),
     ("icons/panel-right-open.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/sidebar-simple-right.svg")),
     ("icons/power.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/power.svg")),
@@ -43,10 +55,12 @@ const PHOSPHOR_LIGHT_ICONS: [(&str, &[u8]); 49] = [
     ("icons/play.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/play.svg")),
     ("icons/plus.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/plus.svg")),
     ("icons/redo-2.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/arrow-clockwise.svg")),
+    ("icons/replace.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/pencil.svg")),
     ("icons/search.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/magnifying-glass.svg")),
     ("icons/settings.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/gear.svg")),
     ("icons/settings-2.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/sliders-horizontal.svg")),
     ("icons/star.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/star.svg")),
+    ("icons/sun.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/sun.svg")),
     ("icons/undo-2.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/arrow-counter-clockwise.svg")),
     ("icons/user.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/user.svg")),
     ("icons/window-close.svg", include_bytes!("../../ui/design-tokens/assets/phosphor-light/x.svg")),
@@ -105,6 +119,18 @@ mod standard_assets {
 
     pub(super) fn list(assets: &Assets, path: &str) -> Result<Vec<SharedString>> {
         assets.standard.list(path)
+    }
+}
+
+/// Headphones glyph for audiobook actions, in phosphor light like the rest of
+/// the set. There is no such icon in the vendored bundle, so it rides the
+/// override table under its own path instead of an `IconName` variant.
+#[derive(Clone, Copy)]
+pub struct Headphones;
+
+impl gpui_component::IconNamed for Headphones {
+    fn path(self) -> gpui::SharedString {
+        "icons/headphones.svg".into()
     }
 }
 

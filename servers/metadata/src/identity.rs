@@ -2,12 +2,11 @@ use super::{
     classification_similarity_keys, error, sql_placeholders, BTreeMap, BTreeSet, Classification, ClassificationScheme, ClassificationSource, Connection, EditionIdentityMatch, EditionIdentityQuery, EditionIdentityResult,
     EditionIdentityStatus, EditionTitleMatch, HashMap, MetadataError, BULK_EVIDENCE_IDS_PER_QUERY, LCC_SCHEME, MAX_EDITION_IDENTITY_REVIEW_CANDIDATES, MAX_RAW_TITLE_CANDIDATES, MAX_REVERSE_TITLE_CANDIDATES,
 };
-use crate::import::core::{author_match_keys, author_match_tokens, bibliographic_match_key, title_substring_keys};
+use crate::import::core::{author_match_keys, bibliographic_match_key};
 
 struct PreparedEditionQuery {
     query: EditionIdentityQuery,
     author_keys: BTreeSet<String>,
-    author_tokens: BTreeSet<String>,
     publisher_keys: BTreeSet<String>,
 }
 
@@ -33,7 +32,6 @@ pub(crate) fn resolve_edition_batch(connection: &Connection, queries: Vec<Editio
         }
         let title_keys = identity_title_keys(&query.title);
         let author_keys = query.authors.iter().flat_map(|author| author_match_keys(author)).collect::<BTreeSet<_>>();
-        let author_tokens = query.authors.iter().flat_map(|author| author_match_tokens(author)).collect::<BTreeSet<_>>();
         let publisher_keys = query.publishers.iter().map(|publisher| bibliographic_match_key(publisher)).filter(|key| !key.is_empty()).collect::<BTreeSet<_>>();
         if title_keys.is_empty() {
             completed.push(Some(identity_result(&query.query_id, EditionIdentityStatus::InsufficientMetadata, None, Vec::new(), false)));
@@ -43,7 +41,7 @@ pub(crate) fn resolve_edition_batch(connection: &Connection, queries: Vec<Editio
         }
         query_title_keys.push(title_keys);
         completed.push(None);
-        prepared.push(Some(PreparedEditionQuery { query, author_keys, author_tokens, publisher_keys }));
+        prepared.push(Some(PreparedEditionQuery { query, author_keys, publisher_keys }));
     }
 
     let mut title_keys = query_title_keys.into_iter().map(Vec::into_iter).collect::<Vec<_>>();
@@ -64,7 +62,7 @@ pub(crate) fn resolve_edition_batch(connection: &Connection, queries: Vec<Editio
             let mut matched = load_edition_candidates(connection, &[(query_index, title, specificity)])?;
             if let Some(mut values) = matched.remove(&query_index) {
                 let qualifiers = title_qualifiers(&prepared_query.query.title);
-                values.retain(|candidate| candidate.edition_title.as_deref().or(candidate.work_title.as_deref()).is_some_and(|title| title_qualifiers(title)==qualifiers));
+                values.retain(|candidate| candidate.edition_title.as_deref().or(candidate.work_title.as_deref()).is_some_and(|title| title_qualifiers(title) == qualifiers));
                 if values.len() > MAX_REVERSE_TITLE_CANDIDATES {
                     // An incomplete candidate set cannot safely justify fallback.
                     completed[query_index] = Some(identity_result(&prepared_query.query.query_id, EditionIdentityStatus::Ambiguous, None, Vec::new(), true));
@@ -88,7 +86,19 @@ pub(crate) fn resolve_edition_batch(connection: &Connection, queries: Vec<Editio
 
         for (query_index, query_candidates) in candidates {
             let prepared_query = prepared[query_index].as_ref().expect("unfinished query is prepared");
-            let result = resolve_prepared_edition_query(connection, has_title_author_classification, prepared_query, query_candidates, &edition_authors, &work_authors, &publishers, &isbns, &edition_classifications, &work_classifications, &sibling_classifications)?;
+            let result = resolve_prepared_edition_query(
+                connection,
+                has_title_author_classification,
+                prepared_query,
+                query_candidates,
+                &edition_authors,
+                &work_authors,
+                &publishers,
+                &isbns,
+                &edition_classifications,
+                &work_classifications,
+                &sibling_classifications,
+            )?;
             // Only rejected/unusable candidates permit a broader search. A
             // credible ambiguity must not be replaced by a weaker title hit.
             if result.status != EditionIdentityStatus::NoMatch {
@@ -99,7 +109,7 @@ pub(crate) fn resolve_edition_batch(connection: &Connection, queries: Vec<Editio
     Ok(completed.into_iter().map(|result| result.expect("every edition query is completed")).collect())
 }
 
-pub(crate) fn edition_candidate_query(title_rows: usize) -> String {
+pub(crate) fn edition_candidate_query(title_rows: usize, year_column: &'static str) -> String {
     let values = (0..title_rows).map(|_| "(?,?,?)").collect::<Vec<_>>().join(",");
     format!(
         "WITH request_title(query_index,normalized_title,specificity) AS (VALUES {values}),
@@ -166,7 +176,7 @@ pub(crate) fn edition_candidate_query(title_rows: usize) -> String {
              FROM eligible_candidate candidate
              JOIN query_best_specificity best ON best.query_index=candidate.query_index AND best.specificity=candidate.specificity
          )
-         SELECT ranked.query_index,edition.edition_id,edition.work_id,bibliography.title,work_bibliography.title,bibliography.book_year,ranked.specificity,ranked.edition_match,ranked.work_match
+         SELECT ranked.query_index,edition.edition_id,edition.work_id,bibliography.title,work_bibliography.title,bibliography.{year_column},ranked.specificity,ranked.edition_match,ranked.work_match
          FROM ranked
          JOIN edition ON edition.edition_id=ranked.edition_id
          LEFT JOIN edition_bibliography bibliography ON bibliography.edition_id=edition.edition_id
@@ -175,22 +185,36 @@ pub(crate) fn edition_candidate_query(title_rows: usize) -> String {
     )
 }
 
+// The read-only production snapshot may predate the column rename. Resolve
+// only these two known identifiers; no request text is interpolated into SQL.
+fn bibliography_year_column(connection: &Connection, table: &str) -> Result<&'static str, MetadataError> {
+    let column: String = connection.query_row("SELECT name FROM pragma_table_info(?1) WHERE name IN ('book_year','publication_year') ORDER BY name='book_year' DESC LIMIT 1", [table], |row| row.get(0)).map_err(error)?;
+    match column.as_str() {
+        "book_year" => Ok("book_year"),
+        "publication_year" => Ok("publication_year"),
+        _ => unreachable!("query restricts the column names"),
+    }
+}
+
 fn load_edition_candidates(connection: &Connection, title_rows: &[(usize, String, usize)]) -> Result<BTreeMap<usize, Vec<EditionCandidate>>, MetadataError> {
     if title_rows.is_empty() {
         return Ok(BTreeMap::new());
     }
     let has_subtitles: bool = connection.query_row("SELECT count(*)=2 FROM sqlite_master WHERE type='table' AND name IN ('edition_subtitle','work_subtitle')", [], |row| row.get(0)).map_err(error)?;
-    let mut sql = edition_candidate_query(title_rows.len());
+    let year_column = bibliography_year_column(connection, "edition_bibliography")?;
+    let mut sql = edition_candidate_query(title_rows.len(), year_column);
     if has_subtitles {
         // Add indexed full-title sources alongside the existing main-title
         // sources. Preserve the bounded request order and old snapshot support.
         let edition_start = sql.find("edition_candidate_source(query_index").unwrap();
         let work_start = sql.find("work_candidate_source(query_index").unwrap();
         let combined_start = work_start + 20 + sql[work_start + 20..].find("candidate_source(query_index").unwrap();
-        let edition = sql[edition_start..work_start].replace("edition_candidate_source", "edition_subtitle_candidate_source")
+        let edition = sql[edition_start..work_start]
+            .replace("edition_candidate_source", "edition_subtitle_candidate_source")
             .replace("edition_bibliography AS bibliography INDEXED BY edition_bibliography_by_title", "edition_subtitle AS bibliography INDEXED BY edition_subtitle_by_title")
             .replace("LIMIT ?", &format!("LIMIT {MAX_RAW_TITLE_CANDIDATES}"));
-        let work = sql[work_start..combined_start].replace("work_candidate_source", "work_subtitle_candidate_source")
+        let work = sql[work_start..combined_start]
+            .replace("work_candidate_source", "work_subtitle_candidate_source")
             .replace("work_bibliography AS work_bibliography INDEXED BY work_bibliography_by_title", "work_subtitle AS work_bibliography INDEXED BY work_subtitle_by_title")
             .replace("LIMIT ?", &format!("LIMIT {MAX_RAW_TITLE_CANDIDATES}"));
         sql.insert_str(combined_start, &format!("{edition}{work}"));
@@ -307,14 +331,15 @@ pub(crate) fn load_classifications_by_ids(connection: &Connection, table: &str, 
 }
 
 fn resolve_prepared_edition_query(
-    connection: &Connection, has_title_author_classification: bool, prepared: &PreparedEditionQuery, candidates: Vec<EditionCandidate>, edition_authors: &HashMap<i64, Vec<String>>, work_authors: &HashMap<i64, Vec<String>>, publishers: &HashMap<i64, Vec<(String, String)>>, isbns: &HashMap<i64, i64>,
-    edition_classifications: &HashMap<i64, Vec<(ClassificationScheme, String)>>, work_classifications: &HashMap<i64, Vec<(ClassificationScheme, String)>>, sibling_classifications: &HashMap<i64, Vec<(ClassificationScheme, String)>>,
+    connection: &Connection, has_title_author_classification: bool, prepared: &PreparedEditionQuery, candidates: Vec<EditionCandidate>, edition_authors: &HashMap<i64, Vec<String>>, work_authors: &HashMap<i64, Vec<String>>,
+    publishers: &HashMap<i64, Vec<(String, String)>>, isbns: &HashMap<i64, i64>, edition_classifications: &HashMap<i64, Vec<(ClassificationScheme, String)>>, work_classifications: &HashMap<i64, Vec<(ClassificationScheme, String)>>,
+    sibling_classifications: &HashMap<i64, Vec<(ClassificationScheme, String)>>,
 ) -> Result<EditionIdentityResult, MetadataError> {
-    let mut editions = Vec::<(usize, bool, usize, EditionIdentityMatch)>::new();
+    let mut editions = Vec::<(usize, usize, usize, EditionIdentityMatch)>::new();
     for candidate in candidates {
         let authors = edition_authors.get(&candidate.edition_id).filter(|authors| !authors.is_empty()).or_else(|| candidate.work_id.and_then(|work_id| work_authors.get(&work_id))).cloned().unwrap_or_default();
-        let matched_author = !prepared.author_tokens.is_empty() && authors.iter().any(|author| author_match_tokens(author).iter().any(|token| prepared.author_tokens.contains(token)));
-        if !prepared.author_tokens.is_empty() && !matched_author {
+        let matched_author = metadata_contract::matching::matching_author_count(&prepared.query.authors, &authors);
+        if !prepared.author_keys.is_empty() && matched_author == 0 {
             continue;
         }
         let publisher_rows = publishers.get(&candidate.edition_id).cloned().unwrap_or_default();
@@ -351,7 +376,8 @@ fn resolve_prepared_edition_query(
                 classifications.insert((scheme, notation), ClassificationSource::ExactEdition);
             }
         }
-        let classifications = metadata_contract::filter_classification_outliers(classifications.into_iter().map(|((scheme, notation), source)| Classification { evidence: Vec::new(), scheme, notation, source }), classification_similarity_keys);
+        let classifications =
+            metadata_contract::filter_classification_outliers(classifications.into_iter().map(|((scheme, notation), source)| Classification { evidence: Vec::new(), scheme, notation, source }), classification_similarity_keys);
         // Candidate generation requires a usable LCC code. DDC-only records
         // cannot supply subjects through the ISBN-to-LCC enrichment path.
         if !classifications.iter().any(|c| c.scheme == ClassificationScheme::LibraryOfCongress && metadata_contract::classification_consensus_notation(c.scheme, &c.notation).is_some()) {
@@ -361,9 +387,10 @@ fn resolve_prepared_edition_query(
             candidate.title_specificity,
             matched_author,
             usize::from(matched_publisher) + usize::from(matched_book_year),
-            EditionIdentityMatch { subtitle: candidate.subtitle,
+            EditionIdentityMatch {
+                subtitle: candidate.subtitle,
                 canonical_isbn13: format!("{isbn:013}"),
-                open_library_edition_id: if candidate.edition_id>0 {format!("OL{}M",candidate.edition_id)}else{String::new()},
+                open_library_edition_id: if candidate.edition_id > 0 { format!("OL{}M", candidate.edition_id) } else { String::new() },
                 open_library_work_id: candidate.work_id.map(|work_id| format!("OL{work_id}W")),
                 title: candidate.edition_title.clone().unwrap_or_else(|| candidate.work_title.clone().unwrap_or_default()),
                 work_title: candidate.work_title,
@@ -381,8 +408,9 @@ fn resolve_prepared_edition_query(
         let best_specificity = editions.iter().map(|(specificity, _, _, _)| *specificity).max().unwrap_or(0);
         editions.retain(|(specificity, _, _, _)| *specificity == best_specificity);
     }
-    if editions.len() > 1 && !prepared.author_keys.is_empty() && editions.iter().any(|(_, matched_author, _, _)| *matched_author) {
-        editions.retain(|(_, matched_author, _, _)| *matched_author);
+    if editions.len() > 1 {
+        let best_authors = editions.iter().map(|(_, count, _, _)| *count).max().unwrap_or(0);
+        editions.retain(|(_, count, _, _)| *count == best_authors);
     }
     if editions.len() > 1 && !prepared.author_keys.is_empty() {
         let best_score = editions.iter().map(|(_, _, score, _)| *score).max().unwrap_or(0);
@@ -397,12 +425,14 @@ fn resolve_prepared_edition_query(
     // Duplicate records sharing one ISBN and identical codes can collapse.
     // Different ISBNs remain unresolved even when their classifications agree;
     // callers can recover work subjects without inventing an edition identity.
-    if editions.len() > 1 && editions.iter().all(|(_, matched_author, _, _)| *matched_author) {
+    if editions.len() > 1 && editions.iter().all(|(_, matched_author, _, _)| *matched_author > 0) {
         let classification_codes = |matched: &EditionIdentityMatch| {
             matched.classifications.iter().map(|classification| (classification.scheme, classification.notation.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_uppercase).collect::<String>())).collect::<BTreeSet<_>>()
         };
         let first_codes = classification_codes(&editions[0].3);
-        if !first_codes.is_empty() && editions.iter().skip(1).all(|(_, _, _, matched)| matched.canonical_isbn13 == editions[0].3.canonical_isbn13 && matched.book_year == editions[0].3.book_year && classification_codes(matched) == first_codes) {
+        if !first_codes.is_empty()
+            && editions.iter().skip(1).all(|(_, _, _, matched)| matched.canonical_isbn13 == editions[0].3.canonical_isbn13 && matched.book_year == editions[0].3.book_year && classification_codes(matched) == first_codes)
+        {
             editions.truncate(1);
         }
     }
@@ -411,7 +441,7 @@ fn resolve_prepared_edition_query(
     // Works" routinely collide across unrelated authors. Publisher and year
     // may rank editions of the same work, while at least one author must agree
     // before the remaining candidate is safe to accept without review.
-    let automatic_match = editions.len() == 1 && editions[0].1;
+    let automatic_match = editions.len() == 1 && editions[0].1 > 0;
     let mut strong = editions.into_iter().map(|(_, _, _, matched)| matched).collect::<Vec<_>>();
     Ok(match strong.len() {
         0 => identity_result(&prepared.query.query_id, EditionIdentityStatus::NoMatch, None, Vec::new(), false),
@@ -428,63 +458,43 @@ fn load_title_author_classifications(connection: &Connection, prepared: &Prepare
     if prepared.author_keys.is_empty() {
         return Ok(Vec::new());
     }
-    let author_placeholders = sql_placeholders(prepared.author_keys.len());
-    let sql = format!(
-        "SELECT normalized_author,book_year,normalized_publisher,scheme,notation FROM title_author_classification WHERE normalized_title=?1 AND normalized_subtitle=?2 AND normalized_author IN ({author_placeholders}) ORDER BY scheme,notation"
-    );
+    let year_column = bibliography_year_column(connection, "title_author_classification")?;
+    let sql = format!("SELECT normalized_author,{year_column},normalized_publisher,scheme,notation FROM title_author_classification WHERE normalized_title=?1 AND normalized_subtitle=?2 ORDER BY scheme,notation LIMIT 129");
     let mut values = Vec::<rusqlite::types::Value>::with_capacity(prepared.author_keys.len() + 2);
     values.push(metadata_contract::matching::bibliographic_title_match_key(candidate.edition_title.as_deref().or(candidate.work_title.as_deref()).unwrap_or_default()).into());
     values.push(candidate.subtitle.as_deref().map(|value| value.trim().to_lowercase()).unwrap_or_default().into());
-    values.extend(prepared.author_keys.iter().cloned().map(Into::into));
     let mut statement = connection.prepare(&sql).map_err(error)?;
-    let rows = statement.query_map(rusqlite::params_from_iter(values), |row| Ok((row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, String>(4)?))).map_err(error)?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(values), |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, String>(4)?)))
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    if rows.len() > 128 {
+        return Ok(Vec::new());
+    }
     let mut best = BTreeMap::<(ClassificationScheme, String), usize>::new();
     for row in rows {
-        let (year, publisher, scheme, notation) = row.map_err(error)?;
-        let scheme = match scheme { 1 => ClassificationScheme::DeweyDecimal, LCC_SCHEME => ClassificationScheme::LibraryOfCongress, _ => continue };
-        let score = usize::from(prepared.query.book_year.is_some_and(|value| value == i32::try_from(year).unwrap_or_default() && year != 0))
-            + usize::from(!publisher.is_empty() && prepared.publisher_keys.contains(&publisher));
+        let (author, year, publisher, scheme, notation) = row;
+        if !prepared.query.authors.iter().any(|local| metadata_contract::matching::author_names_compatible(local, &author)) {
+            continue;
+        }
+        let scheme = match scheme {
+            1 => ClassificationScheme::DeweyDecimal,
+            LCC_SCHEME => ClassificationScheme::LibraryOfCongress,
+            _ => continue,
+        };
+        let score = usize::from(prepared.query.book_year.is_some_and(|value| value == i32::try_from(year).unwrap_or_default() && year != 0)) + usize::from(!publisher.is_empty() && prepared.publisher_keys.contains(&publisher));
         best.entry((scheme, notation)).and_modify(|current| *current = (*current).max(score)).or_insert(score);
     }
     Ok(best.into_keys().collect())
 }
 
 pub(crate) fn identity_result(query_id: &str, status: EditionIdentityStatus, matched: Option<EditionIdentityMatch>, candidates: Vec<EditionIdentityMatch>, candidates_truncated: bool) -> EditionIdentityResult {
-    EditionIdentityResult { catalog_subjects: None, query_id: query_id.to_owned(), status, matched, candidates, candidates_truncated }
+    EditionIdentityResult { authority_subjects: None, query_id: query_id.to_owned(), status, matched, candidates, candidates_truncated }
 }
 
-pub(crate) fn title_without_parenthetical_segments(title: &str) -> String {
-    let mut depth = 0_u32;
-    title
-        .chars()
-        .filter(|character| match character {
-            '(' => {
-                depth = depth.saturating_add(1);
-                false
-            }
-            ')' if depth > 0 => {
-                depth -= 1;
-                false
-            }
-            _ => depth == 0,
-        })
-        .collect()
-}
-
-/// Preserve an exact full-title hit; try the main title before spending the
-/// bounded substring budget on a long subtitle or series label.
 fn identity_title_keys(title: &str) -> Vec<(String, usize)> {
-    let cleaned = title_without_parenthetical_segments(title);
-    let mut keys = Vec::new();
-    for text in [cleaned.as_str(), cleaned.split(':').next().unwrap_or(&cleaned)] {
-        for key in [metadata_contract::matching::bibliographic_title_match_key(text)] {
-            if !key.is_empty() && !keys.iter().any(|(k,_)| k==&key) { keys.push((key.clone(),key.chars().count())); }
-        }
-    }
-    for item in title_substring_keys(&cleaned) {
-        if !keys.iter().any(|(key,_)| key==&item.0) { keys.push(item); }
-    }
-    keys
+    metadata_contract::matching::NormalizedTitle::new(title).candidate_keys(super::MAX_TITLE_SUBSTRINGS_PER_QUERY)
 }
 
 fn title_qualifiers(title: &str) -> BTreeSet<String> {

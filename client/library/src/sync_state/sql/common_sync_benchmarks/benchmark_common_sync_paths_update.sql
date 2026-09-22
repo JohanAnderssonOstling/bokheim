@@ -1,1 +1,0 @@
-UPDATE book SET read_pos=?1,read_progress=?2 WHERE row_id=1

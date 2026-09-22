@@ -1,1 +1,0 @@
-INSERT INTO book_dir VALUES(1,?1,NULL)

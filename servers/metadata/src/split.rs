@@ -1,28 +1,11 @@
 use super::{error, Connection, MetadataError, Path};
 
 const SUBJECT_TABLES: &[&str] = &["snapshot", "metadata_metric", "edition", "edition_isbn", "edition_classification", "isbn_classification", "edition_work_classification", "work_classification", "isbn_lcc", "lcc_import"];
-const RICH_TABLES: &[&str] = &[
-    "edition_description",
-    "wikidata_ingestion",
-    "snapshot",
-    "metadata_metric",
-    "edition_author",
-    "work_author",
-    "author",
-    "author_identifier",
-    "edition_entity_evidence",
-    "work_entity_evidence",
-    "entity",
-    "entity_alias",
-    "place_parent",
-    "place_country",
-    "work_popularity",
-    "work_description",
-    "lc_record",
-    "lc_record_isbn",
-];
+const RICH_TABLES: &[&str] = &["edition_description", "wikidata_ingestion", "snapshot", "metadata_metric", "edition_author", "work_author", "author", "author_identifier", "work_description", "lc_record", "lc_record_isbn"];
 const IDENTITY_TABLES: &[&str] = &[
-    "lc_record", "lc_record_lcc", "lc_title",
+    "lc_record",
+    "lc_record_lcc",
+    "lc_title",
     "isbn_lcc",
     "snapshot",
     "metadata_metric",
@@ -37,7 +20,9 @@ const IDENTITY_TABLES: &[&str] = &[
     "work_author",
     "author",
     "author_identifier",
-    "edition_classification", "isbn_classification", "title_author_classification",
+    "edition_classification",
+    "isbn_classification",
+    "title_author_classification",
     "edition_work_classification",
     "work_classification",
 ];

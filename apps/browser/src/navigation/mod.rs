@@ -1,7 +1,7 @@
 //! Browser navigation, library switching, and route ownership.
 
-mod global_pages;
 mod folder_creation;
+mod global_pages;
 mod libraries;
 mod library_session;
 mod route;

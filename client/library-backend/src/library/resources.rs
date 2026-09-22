@@ -3,20 +3,20 @@
 //! The application registry decides *which* location and account policy to
 //! use.  Everything opened from that location belongs to the library session.
 
-use crate::BackendError;
+use crate::asset_store::AssetStore;
 use crate::library::discovery::LibraryScanner;
 use crate::library::events::library_event_channel;
 use crate::notification_interest::NotificationInterest;
-use crate::asset_store::AssetStore;
 use crate::sync::{LibrarySync, LibrarySyncConfig};
+use crate::BackendError;
 use library_database::Database;
 use std::sync::Arc;
 
 use super::LibrarySession;
 
 pub struct LibraryRuntimeSpec {
-    pub config: library_runtime::open::LibraryOpenConfig,
-    pub account: library_runtime::account::LibraryAccount,
+    pub config: super::open::LibraryOpenConfig,
+    pub account: crate::integration::LibraryAccount,
     pub notification_interest: NotificationInterest,
     pub remote_changes: crate::notification_interest::RemoteChanges,
 }
@@ -53,9 +53,10 @@ impl LibrarySession {
         sync.set_asset_storage_enabled(spec.config.asset_storage_enabled);
         let metadata = metadata_client::MetadataClient::new(&metadata_server_url).map_err(BackendError::operation)?;
         let library = Self::from_parts(spec.config.id, database, assets, metadata, event_tx, event_rx, scanner).with_sync(sync).with_remote_changes(spec.remote_changes);
-        if library.db.needs_scan()? {
-            library.start_scanner();
-        }
+        // The initial scan (if needed) is triggered by the caller after the
+        // actor spawns: the scanner now does async inspection work, and this
+        // constructor runs synchronously on the library's blocking-open path,
+        // before that actor (and its async command channel) exists.
         Ok(library)
     }
 }
@@ -67,7 +68,7 @@ fn open_assets(root: &str, database_locator: &str) -> Result<AssetStore, Backend
 
 #[cfg(target_arch = "wasm32")]
 fn open_assets(root: &str, _database_locator: &str) -> Result<AssetStore, BackendError> {
-    Ok(crate::asset_store::open(root)?)
+    Ok(crate::asset_store::open(root).map_err(BackendError::operation)?)
 }
 
 #[cfg(not(target_arch = "wasm32"))]

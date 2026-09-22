@@ -17,7 +17,7 @@ impl LibraryScanner {
         cfg!(all(feature = "scanner", not(target_arch = "wasm32")))
     }
 
-    pub(crate) fn discover(&self, snapshot: &library_database::ScanCatalogSnapshot) -> library_database::FilesystemScan {
+    pub(crate) fn discover(&self, snapshot: &library_database::ScanSnapshot) -> library_database::FilesystemScan {
         #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
         {
             crate::scanner::filesystem_scan::discover(&self.root, snapshot)
@@ -29,14 +29,14 @@ impl LibraryScanner {
         }
     }
 
-    pub(crate) fn inspect(&self, scan: &library_database::FilesystemScan) -> library_database::InspectedFilesystemScan {
+    pub(crate) async fn inspect(&self, scan: &library_database::FilesystemScan, snapshot: &library_database::ScanSnapshot) -> library_database::InspectedFilesystemScan {
         #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
         {
-            crate::scanner::filesystem_scan::inspect(&self.root, scan)
+            crate::scanner::filesystem_scan::inspect(&self.root, scan, snapshot).await
         }
         #[cfg(not(all(feature = "scanner", not(target_arch = "wasm32"))))]
         {
-            let _ = scan;
+            let _ = (scan, snapshot);
             library_database::InspectedFilesystemScan { readable: false, ..library_database::InspectedFilesystemScan::default() }
         }
     }

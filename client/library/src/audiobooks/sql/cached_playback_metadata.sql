@@ -1,1 +1,0 @@
-SELECT COALESCE(b.title,'Untitled'),COALESCE(b.author,''),a.duration_ms,toc.toc_json FROM audiobook_metadata a JOIN book_cards b ON b.content_hash=a.content_hash JOIN book_toc toc ON toc.content_hash=a.content_hash WHERE a.content_hash=?1 AND a.duration_ms>0

@@ -1,1 +1,0 @@
-SELECT name FROM book_contributor ORDER BY book_row_id, position

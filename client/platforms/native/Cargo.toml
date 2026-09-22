@@ -6,6 +6,11 @@ edition = "2021"
 [features]
 websocket = ["dep:tokio-tungstenite", "dep:rustls", "dep:tokio", "dep:futures-util"]
 
+[dependencies]
+cpu-host = { path = "../../library-backend/crates/cpu-host" }
+client-platform-runtime = { path = "../runtime" }
+thumbnail = { path = "../../library-backend/crates/thumbnail" }
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }

@@ -22,9 +22,13 @@ impl std::io::Read for SparsePdf {
         let end_start = SIZE - self.bytes.len() as u64;
         for (i, byte) in out[..n].iter_mut().enumerate() {
             let at = self.position + i as u64;
-            *byte = if at < self.bytes.len() as u64 { self.bytes[at as usize] }
-                else if at >= end_start { self.bytes[(at - end_start) as usize] }
-                else { b' ' };
+            *byte = if at < self.bytes.len() as u64 {
+                self.bytes[at as usize]
+            } else if at >= end_start {
+                self.bytes[(at - end_start) as usize]
+            } else {
+                b' '
+            };
         }
         self.position += n as u64;
         Ok(n)

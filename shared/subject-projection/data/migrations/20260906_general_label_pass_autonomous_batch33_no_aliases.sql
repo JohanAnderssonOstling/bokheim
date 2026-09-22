@@ -1,0 +1,17 @@
+UPDATE concept SET preferred_label='Andrew Johnson, 1865–1869' WHERE concept_id=51145 AND preferred_label='Andrew Johnson Administration, 1865–1869';
+UPDATE concept SET preferred_label='Ulysses S. Grant, 1869–1877' WHERE concept_id=51146 AND preferred_label='Grant Administrations, 1869–1877';
+UPDATE concept SET preferred_label='Rutherford B. Hayes, 1877–1881' WHERE concept_id=51147 AND preferred_label='Hayes Administration, 1877–1881';
+UPDATE concept SET preferred_label='Chester A. Arthur, 1881–1885' WHERE concept_id=51149 AND preferred_label='Arthur Administration, 1881–1885';
+UPDATE concept SET preferred_label='Grover Cleveland, 1885–1889' WHERE concept_id=51150 AND preferred_label='Cleveland Administration, 1885–1889';
+UPDATE concept SET preferred_label='Benjamin Harrison, 1889–1893' WHERE concept_id=51151 AND preferred_label='Benjamin Harrison Administration, 1889–1893';
+UPDATE concept SET preferred_label='Grover Cleveland, 1893–1897' WHERE concept_id=51152 AND preferred_label='Cleveland Administration, 1893–1897';
+UPDATE concept SET preferred_label='William McKinley, 1897–1901' WHERE concept_id=51153 AND preferred_label='McKinley Administration, 1897–1901';
+UPDATE concept SET preferred_label='U.S. Culture & Intellectual Life' WHERE concept_id=51143 AND preferred_label='U.S. Civilization & Intellectual Life';
+UPDATE concept SET preferred_label='U.S. Mennonite & Amish History' WHERE concept_id=51164 AND preferred_label='Mennonite & Amish American History';
+UPDATE concept SET preferred_label='Afro-American Hist., 1863–1877' WHERE concept_id=51167 AND preferred_label='African American History, 1863–1877';
+UPDATE concept SET preferred_label='Afro-American Hist., 1877–1964' WHERE concept_id=51168 AND preferred_label='African American History, 1877–1964';
+UPDATE concept SET preferred_label='Afro-American Hist. Since 1964' WHERE concept_id=51169 AND preferred_label='African American History Since 1964';
+UPDATE concept SET preferred_label='Afro-American Race Relations' WHERE concept_id=51170 AND preferred_label='African American Interracial Relations';
+UPDATE concept SET preferred_label='Afro-American Military History' WHERE concept_id=51172 AND preferred_label='African American Military History';
+UPDATE concept SET preferred_label='Afro-American Econ. Conditions' WHERE concept_id=51174 AND preferred_label='African American Economic Conditions';
+UPDATE concept SET preferred_label='Afro-American Social Life' WHERE concept_id=51175 AND preferred_label='African American Social Life & Customs';

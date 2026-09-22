@@ -36,19 +36,19 @@ output. Before deployment it verifies all 43 parts, the OL corpus identity,
 importer version, a shadow-server ISBN lookup and a real no-ISBN title/author
 lookup. It stops if the active snapshot or staged binary has changed meanwhile.
 Activation uses the existing privileged deployment helper, retaining the current
-catalog-server binary and provider definitions. Failed post-deployment checks
+metadata-server binary and provider definitions. Failed post-deployment checks
 restore the previous snapshot and binaries. The installed service uses SQLite;
 no subject mmap index is configured.
 
 The desktop application has not been replaced by this deployment. A release
-rebuild/relaunch is needed to consume the new optional `catalog_subjects`
+rebuild/relaunch is needed to consume the new optional `authority_subjects`
 response; old clients safely ignore that protobuf field. Existing clients can
 already use the newly active ISBN/LCC supplement. No ISBN or Open Library
-identity is synthesized from a catalog-only classification result.
+identity is synthesized from an authority-only classification result.
 
 Validation: Python importer tests cover ISBN validation, no-ISBN records,
 replacement/deletion cleanup, resume and source preservation. Release Rust tests
-cover catalog agreement/conflicts, title/author checks, candidate overflow,
+cover authority agreement/conflicts, title/author checks, candidate overflow,
 protobuf round trips, old snapshots, split stores, and enrichment without
 assigning an ISBN. The staged release executable also passed a read-only lookup
 smoke check on the server.

@@ -94,6 +94,7 @@ async fn inventory_repair_resumes_its_checkpoint_after_a_failed_page() {
     }
     assert!(manager.repair_inventory().await.is_err());
     assert!(manager.database.sync_inventory_checkpoint().unwrap().is_some());
+    assert!(manager.database.query_row("SELECT operation_sync_unfinished FROM sync_metadata WHERE singleton=1", [], |row| row.get::<_, bool>(0)).unwrap());
     // A fresh handle has no in-memory progress, but reads the durable checkpoint.
     let url = manager.server_url.clone();
     drop(manager);
@@ -105,6 +106,8 @@ async fn inventory_repair_resumes_its_checkpoint_after_a_failed_page() {
     assert_eq!(calls[0].len(), 256);
     assert_eq!(calls[1], calls[2], "retry resumes the failed page, not the completed first page");
     assert!(manager.database.sync_inventory_checkpoint().unwrap().is_none());
+    assert!(!manager.database.query_row("SELECT operation_sync_unfinished FROM sync_metadata WHERE singleton=1", [], |row| row.get::<_, bool>(0)).unwrap());
+    assert!(manager.database.query_row("SELECT last_successful_sync_at IS NULL FROM sync_metadata WHERE singleton=1", [], |row| row.get::<_, bool>(0)).unwrap(), "repair is not a full-sync checkpoint");
     server.abort();
 }
 

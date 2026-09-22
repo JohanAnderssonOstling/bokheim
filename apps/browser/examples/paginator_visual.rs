@@ -67,56 +67,11 @@ fn visual_group(policy: PaginatorGroupPolicy, group_index: usize, intrinsic_heig
 
 fn visual_groups() -> Vec<PaginatorGroup> {
     vec![
-        visual_group(
-            PaginatorGroupPolicy::new(
-                PaginatorWidthPolicy::new(rems(10.0)),
-                PaginatorSizing::aspect_ratio(1.8),
-                px(8.0),
-            ),
-            0,
-            [56.0, 72.0, 84.0],
-            0..5,
-        ),
-        visual_group(
-            PaginatorGroupPolicy::new(
-                PaginatorWidthPolicy::new(rems(7.0)),
-                PaginatorSizing::aspect_ratio(0.7),
-                px(12.0),
-            ),
-            1,
-            [96.0, 128.0, 152.0],
-            5..12,
-        ),
-        visual_group(
-            PaginatorGroupPolicy::new(
-                PaginatorWidthPolicy::new(rems(8.0)),
-                PaginatorSizing::aspect_ratio(1.0),
-                px(6.0),
-            ),
-            2,
-            [64.0, 92.0, 120.0],
-            12..19,
-        ),
-        visual_group(
-            PaginatorGroupPolicy::new(
-                PaginatorWidthPolicy::new(rems(9.0)),
-                PaginatorSizing::rems(rems(7.0)),
-                px(10.0),
-            ),
-            3,
-            [48.0, 76.0, 104.0],
-            19..28,
-        ),
-        visual_group(
-            PaginatorGroupPolicy::new(
-                PaginatorWidthPolicy::new(rems(6.0)),
-                PaginatorSizing::pixels(px(112.0)),
-                px(12.0),
-            ),
-            4,
-            [60.0, 84.0, 108.0],
-            28..40,
-        ),
+        visual_group(PaginatorGroupPolicy::new(PaginatorWidthPolicy::new(rems(10.0)), PaginatorSizing::aspect_ratio(1.8), px(8.0)), 0, [56.0, 72.0, 84.0], 0..5),
+        visual_group(PaginatorGroupPolicy::new(PaginatorWidthPolicy::new(rems(7.0)), PaginatorSizing::aspect_ratio(0.7), px(12.0)), 1, [96.0, 128.0, 152.0], 5..12),
+        visual_group(PaginatorGroupPolicy::new(PaginatorWidthPolicy::new(rems(8.0)), PaginatorSizing::aspect_ratio(1.0), px(6.0)), 2, [64.0, 92.0, 120.0], 12..19),
+        visual_group(PaginatorGroupPolicy::new(PaginatorWidthPolicy::new(rems(9.0)), PaginatorSizing::rems(rems(7.0)), px(10.0)), 3, [48.0, 76.0, 104.0], 19..28),
+        visual_group(PaginatorGroupPolicy::new(PaginatorWidthPolicy::new(rems(6.0)), PaginatorSizing::pixels(px(112.0)), px(12.0)), 4, [60.0, 84.0, 108.0], 28..40),
     ]
 }
 

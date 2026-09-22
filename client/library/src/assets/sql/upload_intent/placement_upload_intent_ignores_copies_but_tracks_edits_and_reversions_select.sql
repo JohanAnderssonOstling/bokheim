@@ -1,1 +1,0 @@
-SELECT origin FROM local_book_current ORDER BY origin

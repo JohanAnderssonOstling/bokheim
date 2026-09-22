@@ -1,1 +1,0 @@
-INSERT OR REPLACE INTO local_directory_work(dir_id) VALUES(?1)

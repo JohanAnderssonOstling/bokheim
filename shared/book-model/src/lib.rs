@@ -1,37 +1,39 @@
-//! Bibliographic values shared by catalogue and local-library metadata.
+//! Bibliographic values shared by local-library metadata.
 
+mod annotations;
+mod author_name;
+mod book_format;
 mod canonical;
 mod credits;
-mod titles;
 mod marc;
 mod names;
-mod toc_target;
-mod annotations;
-mod book_format;
 mod reader_annotation;
 mod reading;
+mod search_text;
+mod titles;
+mod toc_target;
 
+pub use annotations::{annotation_progress, AnnotationAnchor, AnnotationState, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, StoredAnnotationDetail};
+pub use author_name::{AuthorName, AuthorNameError, AuthorNameMatchKey};
+pub use book_format::BookFormat;
 pub use canonical::{canonical_doi, canonical_isbn, canonical_uuid};
-pub use credits::{
-    agent_id_from_migration_seed, AgentId, AuthorId, BookRecord, Contributor, ContributorId, BookMetadata, BookMetadataError, BookTocEntry, PublisherCredit, PublisherId, PublisherMatchKey, PublisherName,
-};
+pub use content_address::ContentHash;
+pub use credits::{agent_id_from_migration_seed, AgentId, AuthorId, BookMetadata, BookMetadataError, BookRecord, BookTocDocument, BookTocEntry, Contributor, ContributorId, PublisherCredit, PublisherId, PublisherMatchKey, PublisherName};
 pub use marc::{marc_relator_code_from_metadata_role, MarcRelatorCode, AUTHOR_MARC_RELATOR_CODE, CONTRIBUTOR_MARC_RELATOR_CODE, NARRATOR_MARC_RELATOR_CODE, TRANSLATOR_MARC_RELATOR_CODE};
 pub use names::{comparison_key, given_name_first, looks_like_organization, recognized_suffix};
-pub use annotations::{AnnotationAnchor, AnnotationState, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect};
-pub use book_format::BookFormat;
 pub use reader_annotation::{ReaderAnnotation, EXTERNAL_PDF_ANNOTATION_ID_PREFIX};
 pub use reading::{
     audiobook_position_millis, audiobook_reading_position, pdf_page_from_reading_position, pdf_page_position_from_reading_position, pdf_page_position_reading_position, pdf_page_reading_position, valid_epub_cfi, valid_reading_position,
     EpubCfi, InvalidEpubCfi, InvalidReadProgress, InvalidReadingPosition, ReadProgress, ReadingEpubCfi, ReadingPosition,
 };
-pub use content_address::ContentHash;
+pub use search_text::{normalize_search_text, normalized_substring_match};
 
 /// A non-negative Unix timestamp measured in milliseconds.
 pub type UnixMillis = u64;
 
-pub use toc_target::{audiobook_toc_position, audiobook_toc_target, pdf_toc_page, pdf_toc_target, AUDIOBOOK_TOC_TARGET_PREFIX, PDF_TOC_TARGET_PREFIX};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+pub use toc_target::{audiobook_chapter_display_title, audiobook_toc_position, audiobook_toc_target, pdf_toc_page, pdf_toc_target, AUDIOBOOK_TOC_TARGET_PREFIX, PDF_TOC_TARGET_PREFIX};
 
 const MAX_VALUE_BYTES: usize = 4096;
 /// Returns a year only when the supplied date evidence contains exactly one
@@ -118,14 +120,15 @@ pub enum Scope {
     Work,
 }
 
-/// One bibliographic identifier. Catalogue-entry keys are deliberately not
-/// represented here; they belong to the catalogue listing identity.
+/// One bibliographic identifier. Source-entry keys are deliberately not
+/// represented here; they belong to the source listing identity.
+/// Identity carries no provenance: a checksum-valid identifier is the same
+/// identifier wherever it was observed.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Identifier {
     pub value: String,
     pub scheme: Scheme,
     pub scope: Scope,
-    pub source: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -134,7 +137,7 @@ pub struct LocalizedText {
     pub value: String,
 }
 
-/// A validated, canonical BCP-47 language tag shared by catalogue and local
+/// A validated, canonical BCP-47 language tag shared by authority and local
 /// library metadata. Underscores are repaired at ingestion because they are a
 /// common POSIX-style provider error; serialized values always use BCP-47
 /// hyphens and canonical subtag casing.
@@ -447,7 +450,7 @@ pub struct PopularityRank {
     pub source: String,
 }
 
-/// Exact subject evidence supplied by a book or catalogue. Taxonomy
+/// Exact subject evidence supplied by a book or authority. Taxonomy
 /// projection never rewrites this value; it produces separate assignments.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct BookSubject {
@@ -567,7 +570,6 @@ impl CollectionKind {
 }
 
 /// Membership of a book in a bibliographic series or collection.
-/// Catalogue navigation groups are deliberately represented elsewhere.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct Collection {
     pub name: String,
@@ -650,8 +652,8 @@ impl fmt::Display for CollectionError {
 impl std::error::Error for CollectionError {}
 
 impl Identifier {
-    pub fn new(value: impl AsRef<str>, scheme: Scheme, scope: Scope, source: impl AsRef<str>) -> Result<Self, IdentifierError> {
-        Ok(Self { value: bounded(value.as_ref())?, scheme, scope, source: bounded(source.as_ref())? })
+    pub fn new(value: impl AsRef<str>, scheme: Scheme, scope: Scope) -> Result<Self, IdentifierError> {
+        Ok(Self { value: bounded(value.as_ref())?, scheme, scope })
     }
 
     pub fn value(&self) -> &str {
@@ -664,10 +666,6 @@ impl Identifier {
 
     pub const fn scope(&self) -> Scope {
         self.scope
-    }
-
-    pub fn source(&self) -> &str {
-        &self.source
     }
 
     pub fn canonical_value(&self) -> Option<String> {
@@ -689,27 +687,24 @@ struct EncodedIdentifier<'a> {
     value: &'a str,
     scheme: &'a Scheme,
     scope: Scope,
-    source: &'a str,
 }
 
 impl Serialize for Identifier {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        EncodedIdentifier { value: &self.value, scheme: &self.scheme, scope: self.scope, source: &self.source }.serialize(serializer)
+        EncodedIdentifier { value: &self.value, scheme: &self.scheme, scope: self.scope }.serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for Identifier {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
         struct Encoded {
             value: String,
             scheme: Scheme,
             scope: Scope,
-            source: String,
         }
         let encoded = Encoded::deserialize(deserializer)?;
-        Self::new(encoded.value, encoded.scheme, encoded.scope, encoded.source).map_err(serde::de::Error::custom)
+        Self::new(encoded.value, encoded.scheme, encoded.scope).map_err(serde::de::Error::custom)
     }
 }
 
@@ -738,7 +733,7 @@ mod tests {
 
     #[test]
     fn canonicalizes_shared_identifiers() {
-        let identifier = Identifier::new("urn:isbn:978-1-23456-789-7", Scheme::Isbn, Scope::Edition, "epub:package:identifier").unwrap();
+        let identifier = Identifier::new("urn:isbn:978-1-23456-789-7", Scheme::Isbn, Scope::Edition).unwrap();
         assert_eq!(identifier.canonical_value().as_deref(), Some("9781234567897"));
     }
 
@@ -756,7 +751,7 @@ mod tests {
     #[test]
     fn identifiers_require_current_fields_and_round_trip_in_both_encodings() {
         assert!(serde_json::from_str::<Identifier>(r#"{"value":"OL1M","scheme":"isbn","identifier_types":[]}"#).is_err());
-        let identifier = Identifier::new("OL1M", Scheme::Other("openlibrary".to_owned()), Scope::Edition, "openlibrary:identity-match").unwrap();
+        let identifier = Identifier::new("OL1M", Scheme::Other("openlibrary".to_owned()), Scope::Edition).unwrap();
         let json = serde_json::to_string(&identifier).unwrap();
         assert_eq!(serde_json::from_str::<Identifier>(&json).unwrap(), identifier);
         let encoded = bincode::serde::encode_to_vec(&identifier, bincode::config::standard()).unwrap();
@@ -775,7 +770,7 @@ mod tests {
             vec!["urn:series:earthsea".to_owned()],
             Some(CollectionKind::Series),
             Some("2".to_owned()),
-            "opds2:metadata.belongsTo.series",
+            "test:metadata.belongsTo.series",
         )
         .unwrap();
         let encoded = serde_json::to_string(&collection).unwrap();
@@ -786,7 +781,7 @@ mod tests {
 
     #[test]
     fn date_retains_event_and_source_in_json_and_binary_storage() {
-        let date = BookDate::new(Some("pub-date".to_owned()), "2026-08-22", Some("book".to_owned()), "opds2:metadata.published").unwrap();
+        let date = BookDate::new(Some("pub-date".to_owned()), "2026-08-22", Some("book".to_owned()), "test:metadata.published").unwrap();
 
         let json = serde_json::to_string(&date).unwrap();
         assert_eq!(serde_json::from_str::<BookDate>(&json).unwrap(), date);
@@ -817,7 +812,7 @@ mod tests {
             vec![LocalizedText::new("en", "Historical fiction").unwrap()],
             Some("Romaner, historiska".to_owned()),
             Vec::new(),
-            "opds2:subject",
+            "test:subject",
             Some("saogf".to_owned()),
             Some("Historiska romaner".to_owned()),
         )
@@ -838,12 +833,18 @@ mod tests {
 pub fn metadata_isbn(value: &str) -> Option<String> {
     fn whole(value: &str) -> Option<String> {
         let compact: String = value.chars().filter(|c| !c.is_whitespace() && !matches!(c, '-' | '\u{00ad}' | '\u{2010}'..='\u{2015}')).collect();
-        if !(compact.len() == 10 || (compact.len() == 13 && (compact.starts_with("978") || compact.starts_with("979")))) || compact.chars().all(|c| c == '0') { return None; }
-        if !compact.chars().enumerate().all(|(i,c)| c.is_ascii_digit() || (compact.len() == 10 && i == 9 && matches!(c,'X'|'x'))) { return None; }
+        if !(compact.len() == 10 || (compact.len() == 13 && (compact.starts_with("978") || compact.starts_with("979")))) || compact.chars().all(|c| c == '0') {
+            return None;
+        }
+        if !compact.chars().enumerate().all(|(i, c)| c.is_ascii_digit() || (compact.len() == 10 && i == 9 && matches!(c, 'X' | 'x'))) {
+            return None;
+        }
         canonical_isbn(&compact)
     }
     let value = value.trim();
-    if let Some(isbn) = whole(value) { return Some(isbn); }
+    if let Some(isbn) = whole(value) {
+        return Some(isbn);
+    }
     let mut tail = value;
     // Preserve the previously supported malformed urn:uuid:isbn wrapper, but
     // require an explicit ISBN label; plain UUIDs are never normalized.
@@ -854,9 +855,13 @@ pub fn metadata_isbn(value: &str) -> Option<String> {
             tail = rest.trim_start();
         }
     }
-    if !tail.get(..4).is_some_and(|head| head.eq_ignore_ascii_case("isbn")) { return None; }
+    if !tail.get(..4).is_some_and(|head| head.eq_ignore_ascii_case("isbn")) {
+        return None;
+    }
     let rest = &tail[4..];
-    if !rest.starts_with(|c: char| c == ':' || c == '|' || c.is_whitespace()) { return None; }
+    if !rest.starts_with(|c: char| c == ':' || c == '|' || c.is_whitespace()) {
+        return None;
+    }
     whole(rest.trim_start_matches(|c: char| c == ':' || c == '|' || c.is_whitespace()))
 }
 

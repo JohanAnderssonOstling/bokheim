@@ -35,8 +35,8 @@ fn fixture_pdf() -> Vec<u8> {
         "Contents" => contents_id,
     });
     document.objects.insert(pages_id, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![page_id.into()], "Count" => 1 }));
-    let catalog_id = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
-    document.trailer.set("Root", catalog_id);
+    let root_id = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+    document.trailer.set("Root", root_id);
     let mut bytes = Vec::new();
     document.save_to(&mut bytes).expect("serialize PDF fixture");
     bytes

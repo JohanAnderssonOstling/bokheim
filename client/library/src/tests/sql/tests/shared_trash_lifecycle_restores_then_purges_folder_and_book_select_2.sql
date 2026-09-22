@@ -1,1 +1,0 @@
-SELECT title IS NULL AND purged_at IS NOT NULL FROM book WHERE content_hash=?1

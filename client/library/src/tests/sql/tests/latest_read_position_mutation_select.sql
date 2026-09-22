@@ -1,1 +1,0 @@
-SELECT replica_seq, changed_at, 0 FROM sync_outbox WHERE state_kind='reading_position' AND state_key=printf('%064x',1)

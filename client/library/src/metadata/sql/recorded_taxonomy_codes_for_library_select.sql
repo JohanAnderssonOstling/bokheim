@@ -1,1 +1,0 @@
-SELECT DISTINCT system_id,code FROM book_subject_code ORDER BY system_id,code

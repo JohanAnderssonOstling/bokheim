@@ -1,6 +1,6 @@
 use super::*;
-use crate::sync::LibrarySync;
 use crate::sync::library_sync::LibrarySyncConfig;
+use crate::sync::LibrarySync;
 use std::sync::{Arc, RwLock};
 use sync_engine::SyncStore;
 
@@ -11,7 +11,10 @@ fn page(count: usize, revision: u64) -> PullStateResponse {
             .map(|id| {
                 let change = library_replica::StateMutation {
                     mutation_id: MutationId::new(),
-                    body: library_replica::MutationBody::Metadata { content_hash: sync_common::ContentHash::new(&format!("{id:064x}")), value: library_replica::SyncBookMetadata { title: format!("Remote {revision}"), ..Default::default() } },
+                    body: library_replica::MutationBody::Metadata {
+                        content_hash: sync_common::ContentHash::new(&format!("{id:064x}")),
+                        value: library_replica::SyncBookMetadata { title: format!("Remote {revision}"), ..Default::default() },
+                    },
                     changed_at: now,
                     replica_seq: sync_common::ReplicaSeq::new(revision + id as u64).unwrap(),
                 };
@@ -28,11 +31,7 @@ fn addition(hash: sync_common::ContentHash, changed_at: u64) -> sync_common::Ser
         mutation_id: MutationId::new(),
         body: library_replica::MutationBody::BookLifecycle {
             content_hash: hash,
-            value: library_replica::BookLifecycleState::Present {
-                metadata: library_replica::SyncBookMetadata { title: format!("Batch {}", hash.as_str()), ..Default::default() },
-                added_at: changed_at,
-                format: book_model::BookFormat::Epub,
-            },
+            value: library_replica::BookLifecycleState::Present { metadata: library_replica::SyncBookMetadata { title: format!("Batch {}", hash.as_str()), ..Default::default() }, added_at: changed_at, format: book_model::BookFormat::Epub },
         },
         changed_at,
         replica_seq: sync_common::ReplicaSeq::new(changed_at).unwrap(),
@@ -42,8 +41,13 @@ fn addition(hash: sync_common::ContentHash, changed_at: u64) -> sync_common::Ser
 
 /// Raw second connection for fixtures and assertions only. Production paths
 /// below only touch the owner.
-fn raw(db_path: &std::path::Path) -> rusqlite::Connection {
-    rusqlite::Connection::open(db_path).unwrap()
+fn raw(db_path: &std::path::Path) -> library_database::Database {
+    // A second connection to the same file: distinct from the owner's, but
+    // triggers on tables like `book` still call `bokheim_mutation`, so this
+    // connection needs the custom function registered too.
+    let database = library_database::Database::open(db_path).unwrap();
+    database.initialize_library().unwrap();
+    database
 }
 
 /// Test handle pairing the session-owned database with its sync worker.
@@ -81,13 +85,7 @@ fn test_sync(root: &std::path::Path) -> TestSync {
 }
 
 fn outbox_ids(db_path: &std::path::Path) -> Vec<String> {
-    raw(db_path)
-        .prepare("SELECT mutation_id FROM sync_outbox ORDER BY replica_seq")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<Vec<String>, _>>()
-        .unwrap()
+    raw(db_path).prepare("SELECT mutation_id FROM sync_outbox ORDER BY replica_seq").unwrap().query_map([], |row| row.get(0)).unwrap().collect::<Result<Vec<String>, _>>().unwrap()
 }
 
 #[tokio::test]
@@ -99,13 +97,15 @@ async fn combined_response_failure_retains_ack_but_rolls_back_pull_and_cursor() 
     {
         let conn = raw(&db_path);
         conn.execute("INSERT INTO sync_outbox(mutation_id, state_kind, state_key, state_subkey, body, changed_at) VALUES ('00000000-0000-0000-0000-000000000001', 'metadata', ?1, '', X'00', 50)", [hash.as_str()]).unwrap();
-        conn.execute("INSERT INTO book(content_hash, title) VALUES (?1, 'Local')", [hash.as_str()]).unwrap();
+        conn.execute("INSERT INTO book(content_hash, title, format) VALUES (?1, 'Local', 'epub')", [hash.as_str()]).unwrap();
         // Whatever the page would record first is gone, so the whole commit
         // fails and rolls back the acknowledgement with it.
         conn.execute_batch("DROP TABLE sync_state_version").unwrap();
     }
     let ids: Vec<MutationId> = outbox_ids(&db_path).into_iter().map(|id| MutationId::parse(&id).unwrap()).collect();
-    assert_eq!(ids.len(), 1);
+    // The manually seeded metadata mutation, plus the book_lifecycle mutation
+    // the insert trigger projects into the outbox automatically.
+    assert_eq!(ids.len(), 2);
     let store = AccountStore { sync: &sync.sync };
     assert!(store.apply_exchange_response(&ids, &page(1, 1)).await.is_err());
     assert!(outbox_ids(&db_path).is_empty(), "the acknowledgement is retried under a fresh transaction");

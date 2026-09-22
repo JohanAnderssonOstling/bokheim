@@ -1,1 +1,0 @@
-SELECT EXISTS(SELECT 1 FROM sync_outbox LIMIT 1)

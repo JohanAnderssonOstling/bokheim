@@ -1,1 +1,0 @@
-SELECT COUNT(*) FROM book_dir WHERE is_downloaded=1 AND deleted_at IS NULL

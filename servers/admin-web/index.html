@@ -19,8 +19,8 @@
         <a href="/admin/" data-nav-page="overview">Overview</a>
         <a href="/admin/traffic" data-nav-page="traffic">Traffic</a>
         <a href="/admin/accounts" data-nav-page="accounts">Accounts</a>
-        <a href="/admin/catalogue" data-nav-page="catalogue">Catalogue</a>
-        <a href="/admin/catalogue-review" data-nav-page="catalogue-review">Manual review</a>
+        <a href="/admin/authority" data-nav-page="authority">Authority</a>
+        <a href="/admin/authority-review" data-nav-page="authority-review">Manual review</a>
         <a href="/admin/metadata" data-nav-page="metadata">Metadata</a>
         <a href="/admin/security" data-nav-page="security">Security</a>
       </nav>
@@ -58,10 +58,10 @@
           </div>
         </section>
 
-        <section class="panel" data-page="catalogue-review">
+        <section class="panel" data-page="authority-review">
           <div class="panel-heading">
-            <div><p class="eyebrow">Catalogue enrichment</p><h2>Edition identity review</h2></div>
-            <span>Candidate evidence and decisions are retained in the private catalogue cache</span>
+            <div><p class="eyebrow">Authority enrichment</p><h2>Edition identity review</h2></div>
+            <span>Candidate evidence and decisions are retained in the private authority cache</span>
           </div>
           <div class="review-filters">
             <label>Source<select id="review-source"><option value="">All sources</option></select></label>
@@ -93,29 +93,29 @@
           <div class="table-wrap"><table><thead><tr><th>Email</th><th>Registered</th><th>Status</th><th>Last seen</th><th>Requests</th><th>Libraries</th></tr></thead><tbody id="accounts"></tbody></table></div>
         </section>
 
-        <section class="panel" data-page="catalogue">
-          <div class="panel-heading"><div><p class="eyebrow">Catalogue</p><h2>Catalogue inventory &amp; workers</h2></div><span>Local service status through the authenticated admin API</span></div>
-          <p id="catalogue-unavailable" class="empty" hidden>The catalogue server is unavailable.</p>
-          <div id="catalogue-content">
+        <section class="panel" data-page="authority">
+          <div class="panel-heading"><div><p class="eyebrow">Authority</p><h2>Authority inventory &amp; workers</h2></div><span>Local service status through the authenticated admin API</span></div>
+          <p id="authority-unavailable" class="empty" hidden>The authority server is unavailable.</p>
+          <div id="authority-content">
             <div class="panel-heading subsection process-heading"><div><p class="eyebrow">Processes</p><h2>Worker controls</h2></div><span>All workers start paused after a server restart; pausing takes effect after the current source, cover, book, or enrichment batch</span></div>
-            <div id="catalogue-processes" class="process-controls" aria-label="Catalogue process controls"></div>
-            <div id="catalogue-cards" class="cards"></div>
-            <div id="catalogue-metadata-backfill" hidden>
+            <div id="authority-processes" class="process-controls" aria-label="Authority process controls"></div>
+            <div id="authority-cards" class="cards"></div>
+            <div id="authority-metadata-backfill" hidden>
               <div class="panel-heading subsection"><div><p class="eyebrow">Enrichment</p><h2>Metadata backfill</h2></div><span>Local metadata enrichment from previously extracted book data</span></div>
-              <div class="table-wrap"><table><thead><tr><th>Pending</th><th>Running</th><th>Succeeded</th><th>Recorded failures</th><th>Last error</th></tr></thead><tbody id="catalogue-metadata-backfill-status"></tbody></table></div>
+              <div class="table-wrap"><table><thead><tr><th>Pending</th><th>Running</th><th>Succeeded</th><th>Recorded failures</th><th>Last error</th></tr></thead><tbody id="authority-metadata-backfill-status"></tbody></table></div>
             </div>
-            <div id="catalogue-description-backfill" hidden>
+            <div id="authority-description-backfill" hidden>
               <div class="panel-heading subsection"><div><p class="eyebrow">Enrichment</p><h2>Description backfill</h2></div><span>Open Library descriptions processed separately from regular metadata enrichment</span></div>
-              <div class="table-wrap"><table><thead><tr><th>Pending</th><th>Running</th><th>Succeeded</th><th>No OL description</th><th>Progress</th><th>Speed</th><th>Last error</th></tr></thead><tbody id="catalogue-description-backfill-status"></tbody></table></div>
+              <div class="table-wrap"><table><thead><tr><th>Pending</th><th>Running</th><th>Succeeded</th><th>No OL description</th><th>Progress</th><th>Speed</th><th>Last error</th></tr></thead><tbody id="authority-description-backfill-status"></tbody></table></div>
             </div>
             <div class="panel-heading subsection"><div><p class="eyebrow">Live</p><h2>Current crawl</h2></div><span>Sources actively being fetched right now</span></div>
-            <p id="catalogue-current-crawl-empty" class="empty">No source is crawling right now.</p>
-            <div id="catalogue-current-crawl-wrap" class="table-wrap" hidden><table><thead><tr><th>Source</th><th>Started</th><th>Speed</th><th>Pages waiting</th><th>Cached pages</th><th>Books found</th><th>Enrichment queue</th></tr></thead><tbody id="catalogue-current-crawl"></tbody></table></div>
-            <div class="panel-heading subsection"><div><p class="eyebrow">Sources</p><h2>Crawl queue and inventory</h2></div><span>Pages waiting are discovered catalogue pages not fetched yet; the count can grow during a crawl</span></div>
-            <div class="table-wrap"><table><thead><tr><th>Source</th><th>Crawl status</th><th>Origin throttle</th><th>Pages waiting</th><th>Last success</th><th>Books</th><th>EPUBs</th><th>Queued / failed extractions</th></tr></thead><tbody id="catalogue-sources"></tbody></table></div>
+            <p id="authority-current-crawl-empty" class="empty">No source is crawling right now.</p>
+            <div id="authority-current-crawl-wrap" class="table-wrap" hidden><table><thead><tr><th>Source</th><th>Started</th><th>Speed</th><th>Pages waiting</th><th>Cached pages</th><th>Books found</th><th>Enrichment queue</th></tr></thead><tbody id="authority-current-crawl"></tbody></table></div>
+            <div class="panel-heading subsection"><div><p class="eyebrow">Sources</p><h2>Crawl queue and inventory</h2></div><span>Pages waiting are discovered authority pages not fetched yet; the count can grow during a crawl</span></div>
+            <div class="table-wrap"><table><thead><tr><th>Source</th><th>Crawl status</th><th>Origin throttle</th><th>Pages waiting</th><th>Last success</th><th>Books</th><th>EPUBs</th><th>Queued / failed extractions</th></tr></thead><tbody id="authority-sources"></tbody></table></div>
             <div class="panel-heading subsection"><div><p class="eyebrow">Diagnostics</p><h2>Book extraction failures</h2></div><span>Normalized categories and redacted examples · raw errors remain private</span></div>
-            <p id="catalogue-failures-empty" class="empty">No classified extraction failures.</p>
-            <div id="catalogue-failures-wrap" class="table-wrap" hidden><table><thead><tr><th>Category</th><th>Retry policy</th><th>Count</th><th>First / last seen</th><th>Next retry</th><th>Examples</th></tr></thead><tbody id="catalogue-failures"></tbody></table></div>
+            <p id="authority-failures-empty" class="empty">No classified extraction failures.</p>
+            <div id="authority-failures-wrap" class="table-wrap" hidden><table><thead><tr><th>Category</th><th>Retry policy</th><th>Count</th><th>First / last seen</th><th>Next retry</th><th>Examples</th></tr></thead><tbody id="authority-failures"></tbody></table></div>
           </div>
         </section>
 

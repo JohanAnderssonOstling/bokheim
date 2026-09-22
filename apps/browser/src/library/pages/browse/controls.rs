@@ -2,10 +2,10 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{Anchor, App, Context, Entity, Focusable, IntoElement, Subscription, Window};
-use gpui_component::IconName;
+use gpui::{Anchor, AnyElement, App, Context, Entity, Focusable, FontWeight, IntoElement, SharedString, Subscription, Window, div, px};
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::menu::DropdownMenu as _;
+use gpui_component::{Icon, IconName};
 use ui_components as components;
 
 use library_model::{BrowseBookSort, BrowseChipSort, LibraryFileTypeFilter, LibraryFormatCount, LibraryLanguageCount};
@@ -173,11 +173,16 @@ impl SearchField {
     }
 }
 
-/// Sort and filter choices use the same popup-menu surface as the Add action.
-pub(crate) fn browse_options_control<P, SelectOption>(page: Entity<P>, controls: BrowseControls, selection: BrowseOptionsSelection, select_option: SelectOption, theme: components::BrowserTheme) -> impl IntoElement
+/// Sort and filter choices use the same popup-menu surface as the Add action
+/// on wide windows. On a compact window the popup menu widget has no bottom
+/// sheet mode, so the trigger instead toggles `browse_options_sheet` below.
+pub(crate) fn browse_options_control<P, SelectOption, OnToggleSheet>(
+    page: Entity<P>, controls: BrowseControls, selection: BrowseOptionsSelection, select_option: SelectOption, compact: bool, on_toggle_sheet: OnToggleSheet, theme: components::BrowserTheme,
+) -> AnyElement
 where
     P: 'static,
     SelectOption: Fn(&mut P, BrowseOptionsEvent, &mut Context<P>) + Clone + 'static,
+    OnToggleSheet: Fn(&mut P, &mut Context<P>) + 'static,
 {
     let active = selection.chip_sort != controls.collection_sorts.first().copied()
         || selection.book_sort != controls.book_sorts.first().copied()
@@ -185,100 +190,228 @@ where
         || !selection.languages.is_empty()
         || selection.hide_finished
         || selection.include_direct_child_books;
-    let trigger = components::topbar_icon_action_button("browse-options", "Sort & filter", IconName::Settings2, theme) // Deliberately not the selected treatment. This is a dropdown trigger, and
+    let trigger = components::outlined_icon_button("browse-options", "Sort & filter", IconName::Settings2, theme) // Deliberately not the selected treatment. This is a dropdown trigger, and
         // `active` means filters are applied — a status on the control, not a state
         // the control is in. An accent edge marks it without claiming to be the
         // chosen thing in the toolbar.
         .when(active, |button| button.border_color(theme.accent).text_color(theme.accent));
-    trigger.dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-        let mut menu = menu.scrollable(true);
 
-        if !controls.book_sorts.is_empty() {
-            menu = menu.item(components::menu_section("Sort books"));
-            for sort in controls.book_sorts.iter().copied() {
-                let page = page.clone();
-                let select = select_option.clone();
-                menu = menu.item(
-                    components::menu_item(sort.label(), move |_, _, cx| {
-                        page.update(cx, |page, cx| select(page, BrowseOptionsEvent::SelectBookSort(sort), cx));
-                    })
-                    .checked(Some(sort) == selection.book_sort),
-                );
-            }
-        }
-        if !controls.collection_sorts.is_empty() {
-            menu = menu.separator().item(components::menu_section("Sort collections"));
-            for sort in controls.collection_sorts.iter().copied() {
-                let page = page.clone();
-                let select = select_option.clone();
-                menu = menu.item(
-                    components::menu_item(sort.label(), move |_, _, cx| {
-                        page.update(cx, |page, cx| select(page, BrowseOptionsEvent::SelectChipSort(sort), cx));
-                    })
-                    .checked(Some(sort) == selection.chip_sort),
-                );
-            }
-        }
-        if !controls.formats.is_empty() || !selection.formats.is_empty() {
-            menu = menu.separator().item(components::menu_section("Format"));
-            let formats = if controls.formats.is_empty() { vec![BrowseFormatFilter::Any] } else { controls.formats.clone() };
-            for format in formats {
-                let checked = if format == BrowseFormatFilter::Any { selection.formats.is_empty() } else { selection.formats.contains(&format) };
-                let page = page.clone();
-                let select = select_option.clone();
-                menu = menu.item(
-                    components::menu_item(controls.format_label(format), move |_, _, cx| {
-                        page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleFormat(format), cx));
-                    })
-                    .checked(checked),
-                );
-            }
-        }
-        if !controls.languages.is_empty() || !selection.languages.is_empty() {
-            menu = menu.separator().item(components::menu_section("Language"));
-            let page_for_any = page.clone();
-            let select_any = select_option.clone();
-            menu = menu.item(
-                components::menu_item("Any", move |_, _, cx| {
-                    page_for_any.update(cx, |page, cx| select_any(page, BrowseOptionsEvent::ToggleLanguage(None), cx));
-                })
-                .checked(selection.languages.is_empty()),
-            );
-            for (language, label) in LIBRARY_LANGUAGE_OPTIONS.into_iter().filter(|(language, _)| controls.languages.contains(language)) {
-                let checked = selection.languages.contains(&language);
-                let page = page.clone();
-                let select = select_option.clone();
-                menu = menu.item(
-                    components::menu_item(controls.language_label(language, label), move |_, _, cx| {
-                        page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleLanguage(Some(language)), cx));
-                    })
-                    .checked(checked),
-                );
-            }
-        }
+    if compact {
+        return trigger.on_click(move |_, _, cx| page.update(cx, |page, cx| on_toggle_sheet(page, cx))).into_any_element();
+    }
 
-        if controls.supports_reading_progress {
+    trigger
+        .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+            let mut menu = menu.scrollable(true);
+
+            if !controls.book_sorts.is_empty() {
+                menu = menu.item(components::menu_section("Sort books"));
+                for sort in controls.book_sorts.iter().copied() {
+                    let page = page.clone();
+                    let select = select_option.clone();
+                    menu = menu.item(
+                        components::menu_item(sort.label(), move |_, _, cx| {
+                            page.update(cx, |page, cx| select(page, BrowseOptionsEvent::SelectBookSort(sort), cx));
+                        })
+                        .checked(Some(sort) == selection.book_sort),
+                    );
+                }
+            }
+            if !controls.collection_sorts.is_empty() {
+                menu = menu.separator().item(components::menu_section("Sort collections"));
+                for sort in controls.collection_sorts.iter().copied() {
+                    let page = page.clone();
+                    let select = select_option.clone();
+                    menu = menu.item(
+                        components::menu_item(sort.label(), move |_, _, cx| {
+                            page.update(cx, |page, cx| select(page, BrowseOptionsEvent::SelectChipSort(sort), cx));
+                        })
+                        .checked(Some(sort) == selection.chip_sort),
+                    );
+                }
+            }
+            if !controls.formats.is_empty() || !selection.formats.is_empty() {
+                menu = menu.separator().item(components::menu_section("Format"));
+                let formats = if controls.formats.is_empty() { vec![BrowseFormatFilter::Any] } else { controls.formats.clone() };
+                for format in formats {
+                    let checked = if format == BrowseFormatFilter::Any { selection.formats.is_empty() } else { selection.formats.contains(&format) };
+                    let page = page.clone();
+                    let select = select_option.clone();
+                    menu = menu.item(
+                        components::menu_item(controls.format_label(format), move |_, _, cx| {
+                            page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleFormat(format), cx));
+                        })
+                        .checked(checked),
+                    );
+                }
+            }
+            if !controls.languages.is_empty() || !selection.languages.is_empty() {
+                menu = menu.separator().item(components::menu_section("Language"));
+                let page_for_any = page.clone();
+                let select_any = select_option.clone();
+                menu = menu.item(
+                    components::menu_item("Any", move |_, _, cx| {
+                        page_for_any.update(cx, |page, cx| select_any(page, BrowseOptionsEvent::ToggleLanguage(None), cx));
+                    })
+                    .checked(selection.languages.is_empty()),
+                );
+                for (language, label) in LIBRARY_LANGUAGE_OPTIONS.into_iter().filter(|(language, _)| controls.languages.contains(language)) {
+                    let checked = selection.languages.contains(&language);
+                    let page = page.clone();
+                    let select = select_option.clone();
+                    menu = menu.item(
+                        components::menu_item(controls.language_label(language, label), move |_, _, cx| {
+                            page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleLanguage(Some(language)), cx));
+                        })
+                        .checked(checked),
+                    );
+                }
+            }
+
+            if controls.supports_reading_progress {
+                let page = page.clone();
+                let select = select_option.clone();
+                menu = menu.separator().item(
+                    components::menu_item("Hide finished", move |_, _, cx| {
+                        page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleHideFinished, cx));
+                    })
+                    .checked(selection.hide_finished),
+                );
+            }
+
+            if controls.supports_direct_child_books {
+                let page = page.clone();
+                let select = select_option.clone();
+                menu = menu.separator().item(
+                    components::menu_item("Include books from direct children", move |_, _, cx| {
+                        page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleDirectChildBooks, cx));
+                    })
+                    .checked(selection.include_direct_child_books),
+                );
+            }
+
+            menu
+        })
+        .into_any_element()
+}
+
+fn sheet_section(label: &'static str, theme: components::BrowserTheme) -> gpui::Div {
+    div().flex_none().min_w_0().px(px(components::SPACE_SM)).pt(px(components::SPACE_SM)).pb(px(components::SPACE_XXS)).text_size(gpui::rems(components::TEXT_XS)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text_muted).child(label)
+}
+
+fn sheet_divider(theme: components::BrowserTheme) -> gpui::Div {
+    div().flex_none().h(px(1.0)).my(px(components::SPACE_XXS)).bg(theme.rule)
+}
+
+fn sheet_row(id: String, label: String, checked: bool, theme: components::BrowserTheme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(id))
+        .flex_none()
+        .min_w_0()
+        .cursor_pointer()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(components::SPACE_SM))
+        .px(px(components::SPACE_SM))
+        .py(px(components::SPACE_SM))
+        .text_size(gpui::rems(components::TEXT_MD))
+        .hover(move |style| style.bg(theme.hover))
+        .when(checked, |row| row.bg(theme.accent).text_color(theme.accent_text))
+        .child(div().flex_1().min_w_0().whitespace_normal().child(label))
+        .when(checked, |row| row.child(Icon::new(IconName::Check).size(px(15.0))))
+}
+
+/// The compact counterpart to `browse_options_control`'s dropdown: the same
+/// sections, events, and read of `controls`/`selection`, laid out as full-width
+/// rows in a bottom sheet instead of a small anchored popup, since the popup
+/// menu widget used above has no bottom-sheet mode of its own.
+pub(crate) fn browse_options_sheet<P, SelectOption, OnDismiss>(page: Entity<P>, controls: BrowseControls, selection: BrowseOptionsSelection, select_option: SelectOption, on_dismiss: OnDismiss, theme: components::BrowserTheme) -> AnyElement
+where
+    P: 'static,
+    SelectOption: Fn(&mut P, BrowseOptionsEvent, &mut Context<P>) + Clone + 'static,
+    OnDismiss: Fn(&mut P, &mut Context<P>) + Clone + 'static,
+{
+    let mut rows = div().flex().flex_col();
+
+    if !controls.book_sorts.is_empty() {
+        rows = rows.child(sheet_section("Sort books", theme));
+        for sort in controls.book_sorts.iter().copied() {
             let page = page.clone();
             let select = select_option.clone();
-            menu = menu.separator().item(
-                components::menu_item("Hide finished", move |_, _, cx| {
-                    page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleHideFinished, cx));
-                })
-                .checked(selection.hide_finished),
-            );
+            rows = rows.child(sheet_row(format!("sheet-book-sort-{}", sort.label()), sort.label().to_owned(), Some(sort) == selection.book_sort, theme).on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                page.update(cx, |page, cx| select(page, BrowseOptionsEvent::SelectBookSort(sort), cx));
+            }));
         }
-
-        if controls.supports_direct_child_books {
+    }
+    if !controls.collection_sorts.is_empty() {
+        rows = rows.child(sheet_divider(theme)).child(sheet_section("Sort collections", theme));
+        for sort in controls.collection_sorts.iter().copied() {
             let page = page.clone();
             let select = select_option.clone();
-            menu = menu.separator().item(
-                components::menu_item("Include books from direct children", move |_, _, cx| {
-                    page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleDirectChildBooks, cx));
-                })
-                .checked(selection.include_direct_child_books),
-            );
+            rows = rows.child(sheet_row(format!("sheet-chip-sort-{}", sort.label()), sort.label().to_owned(), Some(sort) == selection.chip_sort, theme).on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                page.update(cx, |page, cx| select(page, BrowseOptionsEvent::SelectChipSort(sort), cx));
+            }));
         }
+    }
+    if !controls.formats.is_empty() || !selection.formats.is_empty() {
+        rows = rows.child(sheet_divider(theme)).child(sheet_section("Format", theme));
+        let formats = if controls.formats.is_empty() { vec![BrowseFormatFilter::Any] } else { controls.formats.clone() };
+        for format in formats {
+            let checked = if format == BrowseFormatFilter::Any { selection.formats.is_empty() } else { selection.formats.contains(&format) };
+            let page = page.clone();
+            let select = select_option.clone();
+            rows = rows.child(sheet_row(format!("sheet-format-{}", format.label()), controls.format_label(format), checked, theme).on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleFormat(format), cx));
+            }));
+        }
+    }
+    if !controls.languages.is_empty() || !selection.languages.is_empty() {
+        rows = rows.child(sheet_divider(theme)).child(sheet_section("Language", theme));
+        let page_for_any = page.clone();
+        let select_any = select_option.clone();
+        rows = rows.child(sheet_row("sheet-language-any".to_owned(), "Any".to_owned(), selection.languages.is_empty(), theme).on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            page_for_any.update(cx, |page, cx| select_any(page, BrowseOptionsEvent::ToggleLanguage(None), cx));
+        }));
+        for (language, label) in LIBRARY_LANGUAGE_OPTIONS.into_iter().filter(|(language, _)| controls.languages.contains(language)) {
+            let checked = selection.languages.contains(&language);
+            let page = page.clone();
+            let select = select_option.clone();
+            rows = rows.child(sheet_row(format!("sheet-language-{language}"), controls.language_label(language, label), checked, theme).on_click(move |_, _, cx| {
+                cx.stop_propagation();
+                page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleLanguage(Some(language)), cx));
+            }));
+        }
+    }
+    if controls.supports_reading_progress {
+        let page = page.clone();
+        let select = select_option.clone();
+        rows = rows.child(sheet_divider(theme)).child(sheet_row("sheet-hide-finished".to_owned(), "Hide finished".to_owned(), selection.hide_finished, theme).on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleHideFinished, cx));
+        }));
+    }
+    if controls.supports_direct_child_books {
+        let page = page.clone();
+        let select = select_option.clone();
+        rows = rows.child(sheet_divider(theme)).child(sheet_row("sheet-direct-child-books".to_owned(), "Include books from direct children".to_owned(), selection.include_direct_child_books, theme).on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleDirectChildBooks, cx));
+        }));
+    }
 
-        menu
-    })
+    let header_dismiss_target = page.clone();
+    let header_dismiss = on_dismiss.clone();
+    let header = components::bottom_sheet_header("Sort & filter", theme).child(
+        div().id("browse-options-sheet-close").cursor_pointer().text_color(theme.text_muted).child(Icon::new(IconName::Close).size(px(16.0))).on_click(move |_, _, cx| header_dismiss_target.update(cx, |page, cx| header_dismiss(page, cx))),
+    );
+
+    let sheet = components::bottom_sheet_surface(theme).id("browse-options-sheet").child(header).child(div().id("browse-options-sheet-rows").flex_1().min_h_0().overflow_y_scroll().child(rows));
+
+    let scrim_dismiss = on_dismiss;
+    components::bottom_sheet_overlay().child(components::modal_scrim("browse-options-sheet-scrim", theme).on_click(move |_, _, cx| page.update(cx, |page, cx| scrim_dismiss(page, cx)))).child(sheet).into_any_element()
 }

@@ -1,1 +1,0 @@
-SELECT deleted_at IS NULL FROM book WHERE content_hash=?1

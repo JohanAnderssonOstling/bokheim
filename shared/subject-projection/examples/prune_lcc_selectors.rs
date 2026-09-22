@@ -8,7 +8,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("{} exact LCC selectors are redundant with existing ranges or broader exact codes", removed.len());
     let mut output = csv::Writer::from_writer(std::io::stdout());
     output.write_record(["concept_id", "selector"])?;
-    for (id, selector) in removed { output.write_record([id.to_string(), selector])?; }
+    for (id, selector) in removed {
+        output.write_record([id.to_string(), selector])?;
+    }
     output.flush()?;
     Ok(())
 }

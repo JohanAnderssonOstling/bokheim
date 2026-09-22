@@ -1,1 +1,0 @@
-UPDATE book SET row_id=row_id WHERE 0

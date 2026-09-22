@@ -1,1 +1,0 @@
-SELECT wikidata_id FROM book_external_entity WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND (wikidata_id LIKE 'OLP-%' OR wikidata_id LIKE 'OLR-%')

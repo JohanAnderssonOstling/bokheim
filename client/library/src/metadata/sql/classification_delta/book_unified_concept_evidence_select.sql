@@ -1,1 +1,0 @@
-SELECT concept_id,subject_position,source_system_id,source_code FROM book_unified_concept_evidence WHERE book_row_id=?1

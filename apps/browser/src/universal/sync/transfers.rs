@@ -10,13 +10,18 @@
 //! several times a second, and the settings controls around the library list
 //! must not be rebuilt at that rate.
 
-use std::{rc::Rc, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Duration};
+use web_time::Instant;
+#[cfg(not(target_arch = "wasm32"))]
+use std::rc::Rc;
 
 #[path = "activity_display.rs"]
 mod display;
 use display::{ActivityDisplay, ActivityKind};
 
-use bokheim_backend::{AppClient, LibraryTransfers, TransferJobKind, TransferState};
+use app::{LibraryTransfers, TransferJobKind, TransferState};
+#[cfg(not(target_arch = "wasm32"))]
+use app::AppClient;
 use gpui::{Context, Task};
 use sync_common::LibraryId;
 
@@ -61,25 +66,45 @@ fn counted(completed: impl Into<u64>, total: impl Into<u64>) -> (Option<String>,
     (Some(format!("{completed} / {total}")), Some((completed as f32 / total as f32).clamp(0.0, 1.0)))
 }
 
+/// The transfer API is snapshot-based, so refresh while a library has work
+/// that can change without another UI action. Idle libraries do not poll.
+fn has_live_activity(group: &LibraryTransfers) -> bool {
+    group.operation.as_ref().is_some_and(|operation| operation.state != library_backend::LibraryOperationState::Completed)
+        || group.file_work_pending
+        || group.scanner_running
+        || group.thumbnail_work_running
+        || group.metadata_sync_running
+        || group.preparing_transfers
+        || group.transfers.iter().any(|transfer| transfer.state != TransferState::Completed)
+}
+
 pub(super) struct LibraryActivity {
+    #[cfg(not(target_arch = "wasm32"))]
     backend: Rc<AppClient>,
+    #[cfg(target_arch = "wasm32")]
+    events: async_channel::Sender<super::SyncEvent>,
     groups: Arc<Vec<LibraryTransfers>>,
     display: ActivityDisplay,
     display_timer: Option<Task<()>>,
     refresh_scheduled: bool,
     refresh_active: bool,
     refresh_pending: bool,
-    _updates: Task<()>,
 }
 
 impl LibraryActivity {
-    pub(super) fn new(backend: Rc<AppClient>, cx: &mut Context<Self>) -> Self {
-        let updates = cx.spawn(async move |activity, cx| {
-            // Transfer presentation is a snapshot owned by each library. There
-            // is no app-global transfer event stream after the ownership split.
-            let _ = activity.update(cx, |activity, cx| activity.refresh(cx));
-        });
-        Self { backend, groups: Arc::new(Vec::new()), display: ActivityDisplay::default(), display_timer: None, refresh_scheduled: false, refresh_active: false, refresh_pending: false, _updates: updates }
+    pub(super) fn new(#[cfg(not(target_arch = "wasm32"))] backend: Rc<AppClient>, #[cfg(target_arch = "wasm32")] events: Option<async_channel::Sender<super::SyncEvent>>, _: &mut Context<Self>) -> Self {
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            backend,
+            #[cfg(target_arch = "wasm32")]
+            events: events.expect("web sync event inbox"),
+            groups: Arc::new(Vec::new()),
+            display: ActivityDisplay::default(),
+            display_timer: None,
+            refresh_scheduled: false,
+            refresh_active: false,
+            refresh_pending: false,
+        }
     }
 
     /// Every current local activity; idle libraries have no activity lines.
@@ -88,14 +113,28 @@ impl LibraryActivity {
     }
 
     pub(super) fn set_groups(&mut self, groups: Vec<LibraryTransfers>, cx: &mut Context<Self>) {
-        self.groups = Arc::new(groups);
+        self.set_shared_groups(Arc::new(groups), cx);
+    }
+
+    fn set_shared_groups(&mut self, groups: Arc<Vec<LibraryTransfers>>, cx: &mut Context<Self>) {
+        self.groups = groups;
         let rows = self.groups.iter().flat_map(|group| summarize(group).into_iter().chain(transfer_summaries(group)).map(|row| (group.library_id, row))).collect();
         self.display.update(rows, Instant::now());
         self.advance_display(cx);
+        if self.groups.iter().any(has_live_activity) {
+            self.schedule_refresh_after(Duration::from_secs(1), cx);
+        }
     }
 
     pub(super) fn server_summaries(&self, library_id: &LibraryId) -> Vec<LibraryActivitySummary> {
         self.display.rows(*library_id, true)
+    }
+
+    /// A library was created or changed outside the transfer snapshot's normal
+    /// active-work polling loop. Fetch it now; if it contains work,
+    /// `set_groups` starts the bounded polling loop again.
+    pub(super) fn refresh_now(&mut self, cx: &mut Context<Self>) {
+        self.refresh(cx);
     }
 
     fn advance_display(&mut self, cx: &mut Context<Self>) {
@@ -103,9 +142,20 @@ impl LibraryActivity {
         let changed = self.display.advance(now);
         self.display_timer = self.display.next_deadline().map(|deadline| {
             let timer = cx.background_executor().timer(deadline.saturating_duration_since(now));
+            #[cfg(target_arch = "wasm32")]
+            let events = self.events.clone();
             cx.spawn(async move |activity, cx| {
                 timer.await;
-                let _ = activity.update(cx, |activity, cx| activity.advance_display(cx));
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = events.try_send(super::SyncEvent::TransferDisplayTick);
+                    let _ = (activity, cx);
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    super::after_browser_callback(cx).await;
+                    let _ = activity.update(cx, |activity, cx| activity.advance_display(cx));
+                }
             })
         });
         if changed {
@@ -114,17 +164,32 @@ impl LibraryActivity {
     }
 
     fn schedule_refresh(&mut self, cx: &mut Context<Self>) {
+        self.schedule_refresh_after(Duration::from_millis(200), cx);
+    }
+
+    fn schedule_refresh_after(&mut self, delay: Duration, cx: &mut Context<Self>) {
         if self.refresh_scheduled {
             return;
         }
         self.refresh_scheduled = true;
-        let timer = cx.background_executor().timer(std::time::Duration::from_millis(200));
+        let timer = cx.background_executor().timer(delay);
+        #[cfg(target_arch = "wasm32")]
+        let events = self.events.clone();
         cx.spawn(async move |activity, cx| {
             timer.await;
-            let _ = activity.update(cx, |activity, cx| {
-                activity.refresh_scheduled = false;
-                activity.refresh(cx);
-            });
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = events.try_send(super::SyncEvent::TransferRefreshDue);
+                let _ = (activity, cx);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                super::after_browser_callback(cx).await;
+                let _ = activity.update(cx, |activity, cx| {
+                    activity.refresh_scheduled = false;
+                    activity.refresh(cx);
+                });
+            }
         })
         .detach();
     }
@@ -135,27 +200,61 @@ impl LibraryActivity {
             return;
         }
         self.refresh_active = true;
-        let backend = self.backend.clone();
-        let operation = async move { backend.transfers().await };
-        cx.spawn(async move |activity, cx| {
-            let result = operation.await;
-            let _ = activity.update(cx, |activity, cx| {
-                activity.refresh_active = false;
-                match result {
-                    Ok(groups) => {
-                        activity.set_groups(groups, cx);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = self.events.try_send(super::SyncEvent::TransferRefreshRequested);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let backend = self.backend.clone();
+            let operation = async move { backend.transfers().await };
+            cx.spawn(async move |activity, cx| {
+                let result = operation.await;
+                super::after_browser_callback(cx).await;
+                let _ = activity.update(cx, |activity, cx| {
+                    activity.refresh_active = false;
+                    match result {
+                        Ok(groups) => {
+                            activity.set_groups(groups, cx);
+                        }
+                        Err(error) => {
+                            log::error!("failed to refresh library activity: {error}");
+                            activity.set_groups(Vec::new(), cx);
+                        }
                     }
-                    Err(error) => {
-                        log::error!("failed to refresh library activity: {error}");
-                        activity.set_groups(Vec::new(), cx);
+                    if std::mem::take(&mut activity.refresh_pending) {
+                        activity.schedule_refresh(cx);
                     }
-                }
-                if std::mem::take(&mut activity.refresh_pending) {
-                    activity.schedule_refresh(cx);
-                }
-            });
-        })
-        .detach();
+                });
+            })
+            .detach();
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn refresh_due(&mut self, cx: &mut Context<Self>) {
+        self.refresh_scheduled = false;
+        self.refresh(cx);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn display_tick(&mut self, cx: &mut Context<Self>) {
+        self.advance_display(cx);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn apply_result(&mut self, result: Result<(), String>, groups: Arc<Vec<LibraryTransfers>>, cx: &mut Context<Self>) {
+        self.refresh_active = false;
+        match result {
+            Ok(()) => self.set_shared_groups(groups, cx),
+            Err(error) => {
+                log::error!("failed to refresh library activity: {error}");
+                self.set_groups(Vec::new(), cx);
+            }
+        }
+        if std::mem::take(&mut self.refresh_pending) {
+            self.schedule_refresh(cx);
+        }
     }
 }
 
@@ -182,50 +281,86 @@ fn summarize(group: &LibraryTransfers) -> Vec<LibraryActivitySummary> {
             kind: ActivityKind::Files,
             urgent: group.file_work_error.is_some(),
             state: ActivityState::Waiting,
-            text: group.file_work_error.as_ref().map(|error| format!("Updating library files · {error}")).unwrap_or_else(|| "Updating library files".to_owned()),
+            text: if group.file_work_error.is_some() { "Library files will be retried automatically".to_owned() } else { "Updating library files".to_owned() },
             count: None,
             progress: None,
         });
     }
     if let Some(operation) = &group.operation {
-        use bokheim_backend::{LibraryOperationKind as Kind, LibraryOperationState as State};
+        use library_backend::{LibraryOperationKind as Kind, LibraryOperationState as State};
         if operation.state != State::Completed {
-            let name = match operation.kind {
-                Kind::Import => "Importing library",
-                Kind::Sync => "Syncing library",
-            };
-            let mut text = name.to_owned();
-            if operation.scanning {
-                text.push_str(" · discovering files");
+            if operation.kind == Kind::Import {
+                let mut text = "Importing library".to_owned();
+                if operation.scanning {
+                    text.push_str(" · discovering files");
+                }
+                let failures = operation.failures.saturating_sub(operation.scan_failures.len() as u64);
+                if failures > 0 {
+                    text.push_str(&format!(" · {failures} failed"));
+                }
+                if let Some(reason) = &operation.waiting_reason {
+                    if reason != "Waiting for background work" && group.file_work_error.as_deref() != Some(reason.as_str()) {
+                        text.push_str(&format!(" · {reason}"));
+                    }
+                }
+                // Upload progress is meaningful only for workflows that include
+                // account sync. Local imports must not appear stalled at 0 / N.
+                let (count, progress) = if operation.requires_sync { counted(operation.uploaded_books, operation.books) } else { (Some(format!("{} books", operation.books)), None) };
+                summaries.push(LibraryActivitySummary {
+                    kind: ActivityKind::Operation,
+                    urgent: operation.needs_attention,
+                    state: if operation.state == State::Waiting { ActivityState::Waiting } else { ActivityState::Running },
+                    text,
+                    count,
+                    progress,
+                });
             }
+            let waiting = operation.state == State::Waiting;
             if operation.pending_thumbnails > 0 {
-                text.push_str(&format!(" · {} thumbnails pending", operation.pending_thumbnails));
+                let batch = group.thumbnail_progress.filter(|progress| progress.total > 0);
+                let (count, progress) = batch.map(|batch| counted(batch.succeeded + batch.failed, batch.total)).unwrap_or((Some(format!("{} pending", operation.pending_thumbnails)), None));
+                summaries.push(LibraryActivitySummary {
+                    kind: ActivityKind::OperationThumbnails,
+                    urgent: false,
+                    state: if waiting { ActivityState::Waiting } else { ActivityState::Running },
+                    text: "Generating thumbnails".to_owned(),
+                    count,
+                    progress,
+                });
             }
-            if operation.pending_uploads > 0 {
-                text.push_str(&format!(" · {} uploads pending", operation.pending_uploads));
+            if operation.requires_sync && operation.pending_uploads > 0 {
+                let (count, progress) = counted(operation.uploaded_books, operation.books);
+                summaries.push(LibraryActivitySummary {
+                    kind: ActivityKind::OperationBookUploads,
+                    urgent: operation.needs_attention,
+                    state: if waiting { ActivityState::Waiting } else { ActivityState::Running },
+                    text: "Uploading books".to_owned(),
+                    count: count.or_else(|| Some(format!("{} pending", operation.pending_uploads))),
+                    progress,
+                });
             }
-            if operation.pending_changes > 0 {
-                text.push_str(&format!(" · {} changes pending", operation.pending_changes));
+            if operation.requires_sync && operation.pending_covers > 0 {
+                let batch = group.transfers.iter().find(|transfer| transfer.kind == TransferJobKind::UploadThumbnail && transfer.origin == app::TransferOrigin::Background && transfer.total_items > 0);
+                let (count, progress) = batch.map(|batch| counted(batch.completed_items, batch.total_items)).unwrap_or((Some(format!("{} pending", operation.pending_covers)), None));
+                summaries.push(LibraryActivitySummary {
+                    kind: ActivityKind::OperationCoverUploads,
+                    urgent: operation.needs_attention,
+                    state: if waiting { ActivityState::Waiting } else { ActivityState::Running },
+                    text: "Uploading thumbnails".to_owned(),
+                    count,
+                    progress: if batch.is_some_and(|batch| batch.state == TransferState::Failed) { None } else { progress },
+                });
             }
-            if operation.failures > 0 {
-                text.push_str(&format!(" · {} failed", operation.failures));
+            if operation.requires_sync && operation.pending_changes > 0 {
+                summaries.push(LibraryActivitySummary {
+                    kind: ActivityKind::OperationSyncChanges,
+                    urgent: operation.needs_attention,
+                    state: if waiting { ActivityState::Waiting } else { ActivityState::Running },
+                    text: "Syncing library changes".to_owned(),
+                    count: Some(format!("{} pending", operation.pending_changes)),
+                    progress: None,
+                });
             }
-            if let Some(reason) = &operation.waiting_reason {
-                text.push_str(&format!(" · {reason}"));
-            }
-            // What the operation counts is books uploaded of books found. It is
-            // not the whole of the work — thumbnails and changes finish after
-            // it — so those stay in the sentence, where they read as what is
-            // left rather than as a second, disagreeing fraction.
-            let (count, progress) = counted(operation.uploaded_books, operation.books);
-            summaries.push(LibraryActivitySummary {
-                kind: ActivityKind::Operation,
-                urgent: operation.needs_attention,
-                state: if operation.state == State::Waiting { ActivityState::Waiting } else { ActivityState::Running },
-                text,
-                count,
-                progress,
-            });
         }
         return summaries;
     }
@@ -249,43 +384,23 @@ fn summarize(group: &LibraryTransfers) -> Vec<LibraryActivitySummary> {
         if group.thumbnail_waiting {
             text.push_str(if group.scanner_running && batch.is_none_or(|progress| progress.succeeded >= progress.total) { " · waiting for scan" } else { " · waiting to retry" });
         }
-        let (count, progress) = batch.map(|batch| counted(batch.succeeded, batch.total)).unwrap_or((None, None));
+        let (count, progress) = batch.map(|batch| counted(batch.succeeded + batch.failed, batch.total)).unwrap_or((None, None));
         summaries.push(LibraryActivitySummary { kind: ActivityKind::Thumbnails, urgent: false, state: if group.thumbnail_waiting { ActivityState::Waiting } else { ActivityState::Running }, text, count, progress });
     }
     summaries
 }
 
-/// Scans produce many short batches; keep their server row stable between jobs.
-/// Once scanning settles, show individual transfer progress again.
+/// Show specific metadata, preparation, and transfer work without an
+/// uncounted umbrella row between batches.
 pub(super) fn transfer_summaries(group: &LibraryTransfers) -> Vec<LibraryActivitySummary> {
-    let operation = group.operation.is_some();
-    if !operation && (group.scanner_running || group.scan_progress.is_some()) {
-        let retrying = group.transfers.iter().any(|transfer| transfer.state == TransferState::Retrying);
-        let failed = group.transfers.iter().any(|transfer| transfer.state == TransferState::Failed);
-        return vec![LibraryActivitySummary {
-            kind: ActivityKind::ScanSync,
-            urgent: retrying || failed,
-            state: if retrying || failed { ActivityState::Waiting } else { ActivityState::Running },
-            text: if failed {
-                "Syncing scanned books and thumbnails · transfer failed"
-            } else if retrying {
-                "Syncing scanned books and thumbnails · waiting to retry"
-            } else {
-                "Syncing scanned books and thumbnails"
-            }
-            .to_owned(),
-            // Each small batch has its own denominator, not overall scan progress.
-            count: None,
-            progress: None,
-        }];
-    }
+    let operation = group.operation.as_ref().filter(|operation| operation.state != library_backend::LibraryOperationState::Completed);
     let mut summaries = Vec::new();
     for (kind, running, label) in [(ActivityKind::Metadata, group.metadata_sync_running, "Syncing library changes"), (ActivityKind::Preparation, group.preparing_transfers, "Preparing file transfers")] {
-        if !operation && running {
+        if running && (kind != ActivityKind::Metadata || operation.is_none_or(|operation| operation.pending_changes == 0)) {
             summaries.push(LibraryActivitySummary { kind, urgent: false, state: ActivityState::Running, text: label.to_owned(), count: None, progress: None });
         }
     }
-    summaries.extend(group.transfers.iter().filter(|transfer| !operation || transfer.origin == bokheim_backend::TransferOrigin::UserInitiated).filter_map(|transfer| {
+    summaries.extend(group.transfers.iter().filter(|transfer| operation.is_none() || transfer.origin == app::TransferOrigin::UserInitiated).filter_map(|transfer| {
         // A queued or retrying batch knows exactly as much about itself as a
         // running one. It used to report none of it, so a transfer that stalled
         // lost the progress it had already made — the moment the number matters
@@ -311,7 +426,7 @@ pub(super) fn transfer_summaries(group: &LibraryTransfers) -> Vec<LibraryActivit
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bokheim_backend::{ContentHash, TransferJobKind, TransferOrigin, TransferStatus};
+    use app::{ContentHash, TransferJobKind, TransferOrigin, TransferStatus};
 
     #[test]
     fn storage_warning_preserves_other_work_and_clears_with_quota_status() {
@@ -328,17 +443,70 @@ mod tests {
     }
 
     #[test]
+    fn local_import_reports_books_without_upload_progress() {
+        let mut library = group(true, vec![], vec![]);
+        library.operation = Some(library_backend::LibraryOperation {
+            id: "local-import".into(),
+            kind: library_backend::LibraryOperationKind::Import,
+            state: library_backend::LibraryOperationState::Running,
+            scanning: true,
+            requires_sync: false,
+            scan_failures: vec![],
+            books: 87,
+            uploaded_books: 0,
+            pending_uploads: 87,
+            pending_covers: 0,
+            pending_changes: 2,
+            pending_thumbnails: 12,
+            failures: 0,
+            needs_attention: false,
+            waiting_reason: None,
+        });
+        library.thumbnail_work_running = true;
+        library.thumbnail_progress = Some(app::ScanProgress { total: 12, succeeded: 3, failed: 1 });
+        let rows = summarize(&library);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].text, "Importing library · discovering files");
+        assert_eq!(rows[0].count.as_deref(), Some("87 books"));
+        assert_eq!(rows[0].progress, None);
+        assert_eq!(rows[1].text, "Generating thumbnails");
+        assert_eq!(rows[1].count.as_deref(), Some("4 / 12"));
+        assert_eq!(rows[1].progress, Some(4. / 12.));
+        let operation = library.operation.as_mut().unwrap();
+        operation.state = library_backend::LibraryOperationState::Completed;
+        operation.scanning = false;
+        operation.pending_thumbnails = 0;
+        operation.scan_failures = vec![("Broken.epub".into(), "Invalid ZIP header".into())];
+        let rows = summarize(&library);
+        assert!(rows.is_empty(), "completed scan diagnostics belong in logs");
+        library.file_work_pending = true;
+        library.file_work_error = Some("No such file or directory (os error 2)".into());
+        let operation = library.operation.as_mut().unwrap();
+        operation.state = library_backend::LibraryOperationState::Waiting;
+        operation.waiting_reason = library.file_work_error.clone();
+        operation.failures = 1;
+        let rows = summarize(&library);
+        assert!(rows.iter().all(|row| !row.text.contains("os error") && !row.text.contains("Broken.epub") && !row.text.contains("failed")));
+        assert_eq!(rows[0].text, "Library files will be retried automatically");
+    }
+
+    #[test]
     fn library_operation_survives_scan_completion_and_keeps_explicit_download_separate() {
-        use bokheim_backend::{LibraryOperation, LibraryOperationKind, LibraryOperationState};
-        let mut library = group(true, vec![transfer(TransferJobKind::UploadBook, TransferState::Running, 0, 1, "1")], vec![]);
+        use library_backend::{LibraryOperation, LibraryOperationKind, LibraryOperationState};
+        let mut library = group(true, vec![transfer(TransferJobKind::UploadBook, TransferState::Running, 0, 1, "1"), transfer(TransferJobKind::UploadThumbnail, TransferState::Running, 3, 8, "1")], vec![]);
+        library.thumbnail_work_running = true;
+        library.thumbnail_progress = Some(app::ScanProgress { total: 60, succeeded: 10, failed: 2 });
         library.operation = Some(LibraryOperation {
             id: "import-1".into(),
             kind: LibraryOperationKind::Import,
             state: LibraryOperationState::Running,
             scanning: true,
+            requires_sync: true,
+            scan_failures: vec![],
             books: 240,
             uploaded_books: 120,
             pending_uploads: 120,
+            pending_covers: 3,
             pending_changes: 5,
             pending_thumbnails: 60,
             failures: 0,
@@ -346,11 +514,21 @@ mod tests {
             waiting_reason: None,
         });
         let first = summarize(&library);
-        assert_eq!(first.len(), 1);
+        assert_eq!(first.len(), 5);
         assert_eq!(first[0].kind, ActivityKind::Operation);
-        assert_eq!(first[0].text, "Importing library · discovering files · 60 thumbnails pending · 120 uploads pending · 5 changes pending");
+        assert_eq!(first[0].text, "Importing library · discovering files");
         assert_eq!(first[0].count.as_deref(), Some("120 / 240"));
         assert_eq!(first[0].progress, Some(0.5));
+        assert_eq!(first[1].text, "Generating thumbnails");
+        assert_eq!(first[1].count.as_deref(), Some("12 / 60"));
+        assert_eq!(first[2].text, "Uploading books");
+        assert_eq!(first[3].text, "Uploading thumbnails");
+        assert_eq!(first[3].count.as_deref(), Some("3 / 8"));
+        assert_eq!(first[3].progress, Some(3. / 8.));
+        library.transfers[1].state = TransferState::Failed;
+        assert_eq!(summarize(&library)[3].progress, None);
+        library.transfers[1].state = TransferState::Running;
+        assert_eq!(first[4].text, "Syncing library changes");
         assert!(transfer_summaries(&library).is_empty());
         library.scanner_running = false;
         let operation = library.operation.as_mut().unwrap();
@@ -361,9 +539,11 @@ mod tests {
         operation.needs_attention = true;
         library.transfers.clear();
         let waiting = summarize(&library);
-        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting.len(), 5);
         assert_eq!(waiting[0].kind, first[0].kind);
         assert!(waiting[0].urgent);
+        assert_eq!(waiting[3].count.as_deref(), Some("3 pending"));
+        assert_eq!(waiting[3].progress, None);
         let mut download = transfer(TransferJobKind::DownloadBook, TransferState::Running, 0, 1, "2");
         download.origin = TransferOrigin::UserInitiated;
         library.transfers.push(download);
@@ -375,11 +555,16 @@ mod tests {
 
     #[test]
     fn uploads_remain_visible_during_scanning() {
-        let mut scanning = group(true, vec![transfer(TransferJobKind::UploadBook, TransferState::Running, 2, 5, "1")], vec![]);
-        scanning.scan_progress = Some(bokheim_backend::ScanProgress { total: 10, succeeded: 3, failed: 0 });
-        let summary = transfer_summaries(&scanning).remove(0);
-        assert_eq!(summary.text, "Syncing scanned books and thumbnails");
-        assert_eq!(summary.progress, None);
+        let mut scanning = group(true, vec![transfer(TransferJobKind::UploadBook, TransferState::Running, 2, 5, "1"), transfer(TransferJobKind::UploadThumbnail, TransferState::Running, 3, 8, "1")], vec![]);
+        scanning.scan_progress = Some(app::ScanProgress { total: 10, succeeded: 3, failed: 0 });
+        let uploads = transfer_summaries(&scanning);
+        assert_eq!(uploads.len(), 2);
+        assert_eq!(uploads[0].text, "Uploading books");
+        assert_eq!(uploads[0].count.as_deref(), Some("2 / 5"));
+        assert_eq!(uploads[0].progress, Some(0.4));
+        assert_eq!(uploads[1].text, "Uploading thumbnails");
+        assert_eq!(uploads[1].count.as_deref(), Some("3 / 8"));
+        assert_eq!(uploads[1].progress, Some(3. / 8.));
         assert!(summarize(&scanning).remove(0).text.starts_with("Scanning library"));
         scanning.scanner_running = false;
         scanning.scan_progress = None;
@@ -388,13 +573,17 @@ mod tests {
     }
 
     #[test]
-    fn scanning_server_summary_survives_small_batches_and_idle_gaps() {
+    fn scanning_shows_only_specific_server_work() {
         let mut library = group(true, vec![], vec![]);
         let stable = transfer_summaries(&library);
+        assert!(stable.is_empty());
         library.metadata_sync_running = true;
         library.preparing_transfers = true;
         library.transfers = vec![transfer(TransferJobKind::UploadBook, TransferState::Running, 0, 1, "1")];
-        assert_eq!(transfer_summaries(&library), stable);
+        let uploading = transfer_summaries(&library);
+        assert_eq!(uploading.len(), 3);
+        assert_eq!(uploading[2].text, "Uploading books");
+        assert_eq!(uploading[2].count.as_deref(), Some("0 / 1"));
         library.transfers.clear();
         library.metadata_sync_running = false;
         library.preparing_transfers = false;
@@ -403,9 +592,10 @@ mod tests {
         let retry = transfer_summaries(&library);
         assert_eq!(retry.len(), 1);
         assert_eq!(retry[0].state, ActivityState::Waiting);
-        assert!(retry[0].text.contains("waiting to retry"));
+        assert!(retry[0].text.contains("retrying"));
+        assert_eq!(retry[0].count.as_deref(), Some("0 / 1"));
         library.transfers[0].state = TransferState::Failed;
-        assert!(transfer_summaries(&library)[0].text.contains("transfer failed"));
+        assert!(transfer_summaries(&library)[0].text.contains("failed"));
         library.scanner_running = false;
         library.transfers[0].state = TransferState::Running;
         let running = transfer_summaries(&library).remove(0);
@@ -457,6 +647,73 @@ mod tests {
     }
 
     #[test]
+    fn active_snapshots_keep_refreshing_but_idle_ones_do_not() {
+        let idle = group(false, vec![], vec![]);
+        assert!(!has_live_activity(&idle));
+
+        let mut waiting = group(false, vec![], vec![]);
+        waiting.operation = Some(library_backend::LibraryOperation {
+            id: "waiting".into(),
+            kind: library_backend::LibraryOperationKind::Sync,
+            state: library_backend::LibraryOperationState::Waiting,
+            scanning: false,
+            requires_sync: true,
+            scan_failures: vec![],
+            books: 1,
+            uploaded_books: 0,
+            pending_uploads: 1,
+            pending_covers: 0,
+            pending_changes: 1,
+            pending_thumbnails: 0,
+            failures: 0,
+            needs_attention: false,
+            waiting_reason: None,
+        });
+        assert!(has_live_activity(&waiting));
+
+        waiting.operation.as_mut().unwrap().state = library_backend::LibraryOperationState::Completed;
+        assert!(!has_live_activity(&waiting));
+    }
+
+    #[test]
+    fn sync_operation_shows_only_specific_work() {
+        use library_backend::{LibraryOperation, LibraryOperationKind, LibraryOperationState};
+        let mut library = group(false, vec![], vec![]);
+        library.operation = Some(LibraryOperation {
+            id: "sync-1".into(),
+            kind: LibraryOperationKind::Sync,
+            state: LibraryOperationState::Running,
+            scanning: false,
+            requires_sync: true,
+            scan_failures: vec![],
+            books: 10,
+            uploaded_books: 3,
+            pending_uploads: 7,
+            pending_covers: 2,
+            pending_changes: 1,
+            pending_thumbnails: 4,
+            failures: 0,
+            needs_attention: false,
+            waiting_reason: None,
+        });
+        let rows = summarize(&library);
+        assert_eq!(rows.iter().map(|row| row.text.as_str()).collect::<Vec<_>>(), ["Generating thumbnails", "Uploading books", "Uploading thumbnails", "Syncing library changes"]);
+        assert_eq!(rows[1].count.as_deref(), Some("3 / 10"));
+
+        library.metadata_sync_running = true;
+        library.preparing_transfers = true;
+        assert_eq!(transfer_summaries(&library).iter().map(|row| row.text.as_str()).collect::<Vec<_>>(), ["Preparing file transfers"]);
+
+        let operation = library.operation.as_mut().unwrap();
+        operation.pending_uploads = 0;
+        operation.pending_covers = 0;
+        operation.pending_changes = 0;
+        operation.pending_thumbnails = 0;
+        assert!(summarize(&library).is_empty());
+        assert_eq!(transfer_summaries(&library).iter().map(|row| row.text.as_str()).collect::<Vec<_>>(), ["Syncing library changes", "Preparing file transfers"]);
+    }
+
+    #[test]
     fn pending_file_work_is_visible_without_idle_errors() {
         let mut files = group(false, vec![], vec![]);
         files.file_work_pending = true;
@@ -466,7 +723,7 @@ mod tests {
         files.file_work_error = Some("folder is unavailable".into());
         let status = summarize(&files).remove(0);
         assert_eq!(status.state, ActivityState::Waiting);
-        assert_eq!(status.text, "Updating library files · folder is unavailable");
+        assert_eq!(status.text, "Library files will be retried automatically");
         assert!(status.urgent);
         files.file_work_pending = false;
         assert!(summarize(&files).is_empty());
@@ -477,7 +734,7 @@ mod tests {
         let mut library = group(true, vec![], vec![]);
         library.file_work_pending = true;
         library.thumbnail_work_running = true;
-        library.scan_progress = Some(bokheim_backend::ScanProgress { total: 500, succeeded: 120, failed: 0 });
+        library.scan_progress = Some(app::ScanProgress { total: 500, succeeded: 120, failed: 0 });
         let summaries = summarize(&library);
         assert_eq!(summaries.len(), 3);
         assert_eq!(summaries[0].text, "Updating library files");
@@ -498,7 +755,7 @@ mod tests {
     fn thumbnail_batch_keeps_progress_visible_while_waiting() {
         let mut library = group(false, vec![], vec![]);
         library.thumbnail_work_running = true;
-        library.thumbnail_progress = Some(bokheim_backend::ScanProgress { total: 10, succeeded: 4, failed: 0 });
+        library.thumbnail_progress = Some(app::ScanProgress { total: 10, succeeded: 3, failed: 1 });
         let generating = summarize(&library).remove(0);
         assert_eq!(generating.text, "Generating thumbnails");
         assert_eq!(generating.count.as_deref(), Some("4 / 10"));
@@ -565,12 +822,12 @@ mod tests {
     #[test]
     fn folder_progress_counts_failures_and_supported_books() {
         let mut library = group(true, vec![], vec![]);
-        library.scan_progress = Some(bokheim_backend::ScanProgress { total: 20, succeeded: 7, failed: 3 });
+        library.scan_progress = Some(app::ScanProgress { total: 20, succeeded: 7, failed: 3 });
         let summary = summarize(&library).remove(0);
         assert_eq!(summary.text, "Scanning library · 7 added · 3 failed");
         assert_eq!(summary.count.as_deref(), Some("10 / 20"));
         assert_eq!(summary.progress, Some(0.5));
-        library.scan_progress = Some(bokheim_backend::ScanProgress::default());
+        library.scan_progress = Some(app::ScanProgress::default());
         assert_eq!(summarize(&library).remove(0).progress, None);
     }
 

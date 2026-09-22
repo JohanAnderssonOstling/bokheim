@@ -1,1 +1,0 @@
-SELECT DISTINCT table_name FROM write_audit

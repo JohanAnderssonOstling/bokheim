@@ -4,11 +4,7 @@ pub(super) fn canonical_ddc_notation(value: &str) -> Option<String> {
         return Some(compact);
     }
     let (whole, decimal) = compact.split_once('.')?;
-    (whole.len() == 3
-        && whole.bytes().all(|byte| byte.is_ascii_digit())
-        && !decimal.is_empty()
-        && decimal.bytes().all(|byte| byte.is_ascii_digit()))
-        .then(|| format!("{whole}.{decimal}"))
+    (whole.len() == 3 && whole.bytes().all(|byte| byte.is_ascii_digit()) && !decimal.is_empty() && decimal.bytes().all(|byte| byte.is_ascii_digit())).then(|| format!("{whole}.{decimal}"))
 }
 
 pub(super) fn specificity(notation: &str) -> usize {

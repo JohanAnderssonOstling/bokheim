@@ -1,1 +1,0 @@
-SELECT name,authority,code FROM book_subject

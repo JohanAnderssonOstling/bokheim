@@ -1,1 +1,0 @@
-INSERT INTO pdf_reader_metadata VALUES(?1,?2,?3) ON CONFLICT(content_hash,checksum) DO UPDATE SET metadata=excluded.metadata WHERE metadata IS NOT excluded.metadata

@@ -10,6 +10,7 @@
 //! reader match names between two lists to find that out.
 
 use super::*;
+use crate::services::format_storage_bytes;
 use gpui_component::Disableable;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::menu::DropdownMenu as _;
@@ -35,6 +36,9 @@ impl AccountIdentityView {
     }
 
     pub(super) fn set_account_status(&mut self, account_status: AccountStatus, cx: &mut Context<Self>) {
+        if self.account_status.signed_in() == account_status.signed_in() && self.account_status.email() == account_status.email() {
+            return;
+        }
         self.account_status = account_status;
         cx.notify();
     }
@@ -95,23 +99,6 @@ impl Render for LibrariesView {
     }
 }
 
-fn format_storage_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1_000.0 && unit < UNITS.len() - 1 {
-        value /= 1_000.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else if value < 10.0 {
-        format!("{value:.2} {}", UNITS[unit])
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
-}
-
 /// One library as the page shows it: the sync status joined to the two
 /// quantities the page reports for it.
 ///
@@ -121,6 +108,7 @@ fn format_storage_bytes(bytes: u64) -> String {
 struct LibraryRow {
     #[cfg(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     local_path: Option<String>,
+    name: String,
     status: LibrarySyncStatus,
     server_bytes: Option<u64>,
     local_bytes: Option<u64>,
@@ -149,37 +137,29 @@ impl SyncPage {
     /// have, so the verdict above the list is computed from exactly the rows the
     /// list renders rather than from a different set.
     fn library_rows(&self, cx: &gpui::App) -> Vec<LibraryRow> {
+        let state = self.state.read(cx);
         // Signed out there is no verdict to wait for, so a library the backend
         // has no status for is what it plainly is — local — rather than a row
         // that says it is checking something that will never be checked.
-        let unknown_state = if self.account_status.signed_in() { LibrarySyncState::Checking } else { LibrarySyncState::LocalOnly };
+        let unknown_state = if state.account_status.signed_in() { LibrarySyncState::Checking } else { LibrarySyncState::LocalOnly };
         let mut rows: Vec<LibraryRow> = self
             .active_library
             .read(cx)
             .entries()
             .iter()
             .map(|library| {
-                let mut status = self.sync_statuses.iter().find(|status| status.library_id == *library.library_id()).cloned().unwrap_or_else(|| LibrarySyncStatus {
-                    asset_storage_enabled: true,
-                    library_id: *library.library_id(),
-                    library_name: library.library_name().to_owned(),
-                    state: unknown_state,
-                    server_url: None,
-                    account_id: None,
-                    has_unsynced_changes: false,
-                    last_synced_at: None,
-                });
-                status.library_name = library.library_name().to_owned();
-                let local_bytes = self.local_storage_usage.iter().find(|usage| usage.library_id == *library.library_id()).map(|usage| usage.used_bytes);
+                let status = state.sync_statuses.iter().find(|status| status.library_id == *library.library_id()).cloned().unwrap_or_else(|| LibrarySyncStatus::placeholder(*library.library_id(), unknown_state));
+                let local_bytes = state.local_storage_usage.iter().find(|usage| usage.library_id == *library.library_id()).map(|usage| usage.used_bytes);
                 // A supported server that lists no share for a library is
                 // reporting zero; an unsupported server reports nothing at all.
-                let server_bytes = self.server_storage_usage.as_ref().map(|usage| usage.iter().find(|entry| entry.library_id == *library.library_id()).map(|entry| entry.used_bytes).unwrap_or_default());
+                let server_bytes = state.server_storage_usage.as_ref().map(|usage| usage.iter().find(|entry| entry.library_id == *library.library_id()).map(|entry| entry.used_bytes).unwrap_or_default());
                 let activity_jobs = self.activity_jobs.read(cx);
                 // Both halves of the work a library is doing report on the
                 // library itself. The uploads used to be listed under the quota
                 // instead, which is where the bytes are, not where the job is.
                 let activities = activity_jobs.summaries(library.library_id()).into_iter().chain(activity_jobs.server_summaries(library.library_id())).collect();
                 LibraryRow {
+                    name: library.library_name().to_owned(),
                     status,
                     server_bytes,
                     local_bytes,
@@ -191,7 +171,7 @@ impl SyncPage {
             .collect();
         // Sorted by the quantity the page leads with, falling back to the local
         // sizes while no server breakdown is available.
-        rows.sort_by(|left, right| right.sort_bytes().cmp(&left.sort_bytes()).then_with(|| left.status.library_name.cmp(&right.status.library_name)));
+        rows.sort_by(|left, right| right.sort_bytes().cmp(&left.sort_bytes()).then_with(|| left.name.cmp(&right.name)));
         rows
     }
 
@@ -342,10 +322,10 @@ impl SyncPage {
     /// never uploaded — so library shares are taken from the used bytes in
     /// descending order and stop once those are accounted for. The remainder of
     /// the track is free space.
-    fn storage_segments(&self, usage: AccountStorageUsage, theme: components::BrowserTheme) -> Vec<(SharedString, u64, gpui::Hsla)> {
+    fn storage_segments(&self, usage: AccountStorageUsage, theme: components::BrowserTheme, state: &SyncState) -> Vec<(SharedString, u64, gpui::Hsla)> {
         let mut segments: Vec<(SharedString, u64, gpui::Hsla)> = Vec::new();
         let mut other_bytes = 0_u64;
-        for (index, (name, bytes)) in self.server_storage_usage.as_ref().map(|usage| usage.iter()).into_iter().flatten().filter(|library| library.used_bytes > 0).map(|library| (library.library_name.clone(), library.used_bytes)).enumerate()
+        for (index, (name, bytes)) in state.server_storage_usage.as_ref().map(|usage| usage.iter()).into_iter().flatten().filter(|library| library.used_bytes > 0).map(|library| (library.library_name.clone(), library.used_bytes)).enumerate()
         {
             if index < LEGEND_LIBRARY_LIMIT {
                 segments.push((name.into(), bytes, components::usage_segment_color(index, theme)));
@@ -383,11 +363,11 @@ impl SyncPage {
             (None, None) => None,
         };
 
-        let signed_in = self.account_status.signed_in();
+        let signed_in = self.state.read(cx).account_status.signed_in();
         let mut account = components::browser_settings_fieldset_with_actions("Account", self.account_header_actions(&entity, signed_in, theme), theme);
 
         if signed_in {
-            account = account.child(self.storage_body(theme).px(px(components::SPACE_MD)).py(px(components::SPACE_SM)));
+            account = account.child(self.storage_body(theme, cx).px(px(components::SPACE_MD)).py(px(components::SPACE_SM)));
         }
 
         // The form is not the group's resting state on any platform any more:
@@ -409,8 +389,9 @@ impl SyncPage {
     }
 
     /// The quota as a figure and a shape.
-    fn storage_body(&self, theme: components::BrowserTheme) -> Div {
-        let Some(usage) = self.storage_usage else {
+    fn storage_body(&self, theme: components::BrowserTheme, cx: &Context<Self>) -> Div {
+        let state = self.state.read(cx);
+        let Some(usage) = state.storage_usage else {
             return components::storage_block().child("Loading cloud storage…");
         };
         let mut storage = components::storage_block().child(components::storage_figures(
@@ -420,7 +401,7 @@ impl SyncPage {
             theme,
         ));
         if usage.quota_bytes > 0 {
-            let segments = self.storage_segments(usage, theme).into_iter().map(|(label, bytes, color)| (bytes as f32 / usage.quota_bytes as f32, color, SharedString::from(format!("{label} {}", format_storage_bytes(bytes)))));
+            let segments = self.storage_segments(usage, theme, &state).into_iter().map(|(label, bytes, color)| (bytes as f32 / usage.quota_bytes as f32, color, SharedString::from(format!("{label} {}", format_storage_bytes(bytes)))));
             storage = storage.child(components::storage_meter(segments, theme));
         }
         storage
@@ -505,11 +486,11 @@ impl SyncPage {
 
         // The list is ruled off from the setting above it. Without that the
         // first library reads as the setting's own second line.
-        #[cfg(feature = "filesystem-libraries")]
+        #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
         let ruled = self.default_library_location.is_some();
-        #[cfg(not(feature = "filesystem-libraries"))]
+        #[cfg(not(all(feature = "filesystem-libraries", not(target_arch = "wasm32"))))]
         let ruled = false;
-        #[cfg(feature = "filesystem-libraries")]
+        #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
         if let Some(path) = self.default_library_location.clone() {
             let page = page.clone();
             let choose = components::browser_settings_path_button("default-library-location", components::library_path_label(std::path::Path::new(&path)), theme)
@@ -531,8 +512,17 @@ impl SyncPage {
                 components::library_activity_note(color, activity.text.clone(), activity.count.clone().map(SharedString::from), activity.progress, theme)
             });
             let mut facts: Vec<(SharedString, gpui::AnyElement)> = Vec::new();
-            facts.push(("On this device".into(), SharedString::from(row.local_bytes.map(format_storage_bytes).unwrap_or_else(|| "Calculating…".to_owned())).into_any_element()));
-            facts.push(("Status".into(), Self::library_state(row, theme)));
+            let local_bytes = row.local_bytes.map(format_storage_bytes).unwrap_or_else(|| {
+                if row.status.state == LibrarySyncState::Unavailable {
+                    "Unavailable".to_owned()
+                } else {
+                    "Calculating…".to_owned()
+                }
+            });
+            facts.push(("On this device".into(), SharedString::from(local_bytes).into_any_element()));
+            if let Some(state) = Self::library_state(row, theme) {
+                facts.push(("Status".into(), state));
+            }
 
             #[cfg(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
             if let Some(path) = row.local_path.as_ref() {
@@ -563,13 +553,13 @@ impl SyncPage {
                     .into_any_element(),
             ));
 
-            usage_rows.push(components::library_usage_row(row.status.library_name.clone(), facts, activity, compact, theme));
+            usage_rows.push(components::library_usage_row(row.name.clone(), facts, activity, compact, theme));
         }
         libraries.child(components::library_usage_list(usage_rows, theme).when(ruled, |list| list.border_t_1().border_color(theme.rule)))
     }
 
     /// Chooses the folder new libraries are created in.
-    #[cfg(feature = "filesystem-libraries")]
+    #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
     fn choose_library_location(&mut self, cx: &mut Context<Self>) {
         let selection = cx.prompt_for_paths(gpui::PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Choose default library location".into()) });
         let backend = self.services.backend.clone();
@@ -598,18 +588,19 @@ impl SyncPage {
     /// [`LibrarySyncState`] by priority — so this is one value, never a set of
     /// badges. A settled library says so in plain text: a tag is what marks the
     /// rows worth stopping at, and one on every row marks nothing.
-    fn library_state(row: &LibraryRow, theme: components::BrowserTheme) -> gpui::AnyElement {
+    /// Local-only libraries have no server-status fact; their activity is shown separately.
+    fn library_state(row: &LibraryRow, theme: components::BrowserTheme) -> Option<gpui::AnyElement> {
         let (label, tag) = match row.status.state {
             LibrarySyncState::Checking => ("Loading status…", Tag::secondary()),
+            LibrarySyncState::Unavailable => ("Unavailable on this device", Tag::warning()),
             LibrarySyncState::Receiving => ("Receiving library…", Tag::secondary()),
-            LibrarySyncState::Synced => return div().text_color(theme.text_muted).child("Up to date").into_any_element(),
+            LibrarySyncState::Synced => return Some(div().text_color(theme.text_muted).child("Up to date").into_any_element()),
             LibrarySyncState::SyncPending if row.status.last_synced_at.is_none() => ("Sync pending", Tag::secondary()),
             LibrarySyncState::SyncPending => ("Changes pending", Tag::warning()),
-            LibrarySyncState::SignInRequired => ("Sign in required", Tag::warning()),
             LibrarySyncState::RemoteMissing => ("Not on server", Tag::warning()),
-            LibrarySyncState::LocalOnly => ("Local", Tag::secondary()),
+            LibrarySyncState::LocalOnly => return None,
         };
-        tag.rounded(px(components::RADIUS_SM)).with_size(Size::Small).child(label.to_owned()).into_any_element()
+        Some(tag.rounded(px(components::RADIUS_SM)).with_size(Size::Small).child(label.to_owned()).into_any_element())
     }
 }
 

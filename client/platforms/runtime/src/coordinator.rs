@@ -62,6 +62,7 @@ pub struct Transfer<T> {
     pub owner: (u32, T),
     pub owner_subscribed: bool,
     pub subscribers: HashMap<u32, T>,
+    pub latest_progress: Option<f64>,
 }
 pub struct TransferJobs<T> {
     jobs: HashMap<String, Transfer<T>>,
@@ -85,7 +86,7 @@ impl<T> TransferJobs<T> {
             job.subscribers.insert(id, payload);
             Ok(false)
         } else {
-            self.jobs.insert(key, Transfer { owner: (id, payload), owner_subscribed: true, subscribers: HashMap::new() });
+            self.jobs.insert(key, Transfer { owner: (id, payload), owner_subscribed: true, subscribers: HashMap::new(), latest_progress: None });
             Ok(true)
         }
     }
@@ -113,6 +114,23 @@ impl<T> TransferJobs<T> {
         let job = self.jobs.remove(key).unwrap();
         self.count -= job.subscribers.len() + usize::from(job.owner_subscribed);
         Some(job)
+    }
+    pub fn latest_progress(&self, key: &str) -> Option<f64> {
+        self.jobs.get(key).and_then(|job| job.latest_progress)
+    }
+    pub fn report_progress(&mut self, key: &str, id: u32, progress: f64, mut send: impl FnMut(&T)) -> bool {
+        let Some(job) = self.jobs.get_mut(key) else { return false };
+        if job.owner.0 != id || !progress.is_finite() || !(0.0..=1.0).contains(&progress) {
+            return false;
+        }
+        job.latest_progress = Some(progress);
+        if job.owner_subscribed {
+            send(&job.owner.1);
+        }
+        for subscriber in job.subscribers.values() {
+            send(subscriber);
+        }
+        true
     }
     pub fn drain(&mut self, error: String) -> Vec<Transfer<T>> {
         self.failure = Some(error);
@@ -222,6 +240,23 @@ mod tests {
         assert_eq!(jobs.count(), 1);
         assert!(jobs.take_finished("a", 2, true).is_none());
         assert!(jobs.take_finished("a", 1, false).is_some());
+    }
+    #[test]
+    fn transfer_progress_is_shared_with_followers_and_late_joiners() {
+        let mut jobs = TransferJobs::new(3);
+        jobs.request("book".into(), 1, "owner").unwrap();
+        jobs.request("book".into(), 2, "follower").unwrap();
+        let mut delivered = Vec::new();
+        assert!(!jobs.report_progress("book", 2, 0.5, |port| delivered.push(*port)));
+        assert!(delivered.is_empty());
+        assert!(jobs.report_progress("book", 1, 0.5, |port| delivered.push(*port)));
+        delivered.sort_unstable();
+        assert_eq!(delivered, ["follower", "owner"]);
+        assert_eq!(jobs.latest_progress("book"), Some(0.5));
+        jobs.request("book".into(), 3, "late").unwrap();
+        assert_eq!(jobs.latest_progress("book"), Some(0.5));
+        jobs.take_finished("book", 1, false).unwrap();
+        assert_eq!(jobs.latest_progress("book"), None);
     }
     #[test]
     fn cancelled_executors_still_count_toward_the_job_limit() {

@@ -4,14 +4,14 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use app_preferences::LibraryView;
-use bokheim_backend::AppClient;
+use app::AppClient;
 use gpui::prelude::*;
 use gpui::{AnyView, App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, Render, Subscription, Window, div, px};
 use sync_common::{LibraryId, ROOT_DIR_ID};
 
 use super::LibraryRoute;
 use crate::library::BrowseCrumb;
-use crate::library::{AuthorsPage, BrowsePlaneKind, BrowseSplitPlane, HomePage, LibraryContext, LibraryUpdateBridge, OpenBook, TrashPage, folder_browse_page, subject_browse_page};
+use crate::library::{AuthorsPage, BookDetailClosed, BrowsePlaneKind, BrowseSplitPlane, HomePage, LibraryContext, LibraryUpdateBridge, OpenBook, TrashPage, folder_browse_page, subject_browse_page};
 
 struct CachedPage {
     view: AnyView,
@@ -33,10 +33,10 @@ fn create_page<V: Focusable + Render>(build: impl FnOnce(&mut Context<V>) -> V, 
 }
 
 impl LibrarySession {
-    pub(super) fn new(app_backend: Rc<AppClient>, open_book: OpenBook, library_id: LibraryId, cx: &mut Context<Self>) -> Self {
+    pub(super) fn new(app_backend: Rc<AppClient>, open_book: OpenBook, book_detail_closed: BookDetailClosed, library_id: LibraryId, cx: &mut Context<Self>) -> Self {
         let library_backend = Rc::new(app_backend.library(library_id));
         let updates = LibraryUpdateBridge::create(app_backend, library_id, cx);
-        let library = LibraryContext::new(library_backend, open_book, updates);
+        let library = LibraryContext::new(library_backend, open_book, book_detail_closed, updates);
         let library_updates = library.updates();
         let library_updates_subscription = cx.observe(&library_updates, |_, _, cx| cx.notify());
         let mut session = Self { library, route: LibraryRoute::Home, pages: HashMap::new(), browse_planes: HashMap::new(), _library_updates_subscription: library_updates_subscription };
@@ -100,13 +100,18 @@ impl LibrarySession {
         self.browse_plane(LibraryRoute::Folders, cx).update(cx, |plane, cx| plane.open_folder(directory_id, title, cx));
     }
 
+    pub(super) fn open_subject(&mut self, location: String, label: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate(LibraryRoute::Subjects, window, cx);
+        self.browse_plane(LibraryRoute::Subjects, cx).update(cx, |plane, cx| plane.open_subject(location, label, cx));
+    }
+
     pub(super) fn open_book_detail(&mut self, content_hash: sync_common::ContentHash, window: &mut Window, cx: &mut Context<Self>) {
         self.navigate(LibraryRoute::Folders, window, cx);
         let backend = self.library.backend().clone();
         let plane = self.browse_plane(LibraryRoute::Folders, cx);
         cx.spawn(async move |session, cx| {
             let result = backend.book_detail(content_hash).await;
-            let _ = session.update(cx, |session, cx| {
+            cx.defer_update(session, move |session, cx| {
                 if let Ok(detail) = result {
                     let path = detail.path.into_iter().map(|segment| BrowseCrumb { location: segment.id, label: segment.name }).collect();
                     plane.update(cx, |plane, cx| plane.open_book_detail(detail.book, path, cx));
@@ -173,7 +178,7 @@ impl Render for LibrarySession {
             })
             .flatten()
             .map(|title| {
-                let back = ui_components::mobile_back_button(theme).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::DismissSettings), cx));
+                let back = (!ui_components::has_native_back_button()).then(|| ui_components::mobile_back_button(theme).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::DismissSettings), cx)));
                 ui_components::mobile_navigation_bar(title, back, theme)
             });
         ui_components::library_section_content()

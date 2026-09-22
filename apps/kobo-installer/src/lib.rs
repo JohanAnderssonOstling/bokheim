@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const KOBO_MARKER_DIRECTORY: &str = ".kobo";
 const REQUIRED_INSTALLED_FILES: &[&str] = &[".adds/bokheim/desktop-gpui-kobo", ".adds/bokheim/fbink", ".adds/bokheim/run.sh", ".adds/bokheim/run-monitored.sh", ".adds/nm/desktop-gpui-kobo"];
-const PROTECTED_APP_DATA_DIRECTORIES: &[&str] = &[".adds/bokheim/data", ".adds/bokheim/libraries", ".adds/bokheim/opds-downloads", ".adds/bokheim/remote-book-cache", ".adds/bokheim/taxonomy"];
+const PROTECTED_APP_DATA_DIRECTORIES: &[&str] = &[".adds/bokheim/data", ".adds/bokheim/libraries", ".adds/bokheim/remote-book-cache", ".adds/bokheim/taxonomy"];
 const PROTECTED_APP_DATA_FILES: &[&str] =
     &[".adds/bokheim/browsing_preferences.json", ".adds/bokheim/detached-libraries.json", ".adds/bokheim/libraries.csv", ".adds/bokheim/reader_preferences.json", ".adds/bokheim/session.json", ".adds/bokheim/transfer_preferences.json"];
 const MAX_UNPACKED_PACKAGE_BYTES: u64 = 512 * 1024 * 1024;

@@ -1,1 +1,0 @@
-SELECT bokheim_mutation('description',content_hash,COALESCE((SELECT description FROM book_description WHERE book_row_id=book.row_id),'')),0 FROM book WHERE content_hash=?1

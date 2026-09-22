@@ -5,7 +5,7 @@ P=pathlib.Path
 # Snapshot activation preserves the installed server release and its configured providers.
 BINARY=P('/usr/local/bin/metadata-server')
 CURRENT=P('/home/johan/data/openlibrary/current.sqlite')
-INCOMING=P('/var/lib/bokheim-deploy/metadata-catalog-incoming')
+INCOMING=P('/var/lib/bokheim-deploy/metadata-incoming')
 ROOT=P('/home/johan/data/loc-books-2016')
 def request(port, endpoint, data=None):
     req=urllib.request.Request(f'http://127.0.0.1:{port}/{endpoint}',data=json.dumps(data).encode() if data is not None else None,headers={'Content-Type':'application/json'})
@@ -22,21 +22,19 @@ def check_http(port, full, samples):
             if not m.get('title') or not m.get('authors'): continue
             result=request(port,'v2/edition-identities',{'queries':[{'query_id':'lc-check','title':m['title'],'authors':m['authors'],'publishers':[],'book_year':None}]})
             r=result['results'][0]
-            if r.get('catalog_subjects'):
-                hit=r['catalog_subjects']
+            if r.get('authority_subjects'):
+                hit=r['authority_subjects']
                 assert hit['provider_id']=='library_of_congress' and hit['classifications']
                 assert record_id in hit['record_ids'],(record_id,hit)
                 assert r.get('matched') is None
                 checked=True
-                print('catalog_lookup_verified',record_id,m['title'],flush=True)
+                print('authority_lookup_verified',record_id,m['title'],flush=True)
                 break
-        assert checked,'No no-ISBN catalog fallback verified'
-def stage(binary,catalog,providers):
+        assert checked,'No no-ISBN authority fallback verified'
+def stage(binary):
     INCOMING.mkdir()
     shutil.copy2(binary,INCOMING/'metadata-server')
-    shutil.copy2(catalog,INCOMING/'catalog-server')
-    shutil.copy2(providers,INCOMING/'opds.json')
-    (INCOMING/'metadata-server').chmod(0o755);(INCOMING/'catalog-server').chmod(0o755)
+    (INCOMING/'metadata-server').chmod(0o755)
 def link(target):
     pending=CURRENT.with_name('current.sqlite.lc-all-records-pending')
     assert not pending.is_symlink() and not pending.exists()
@@ -46,7 +44,7 @@ def deploy(candidate,full=False):
     assert BINARY.is_file() and os.access(BINARY,os.X_OK)
     assert not INCOMING.exists(),'Another deployment has staged artifacts'
     old=CURRENT.resolve(strict=True)
-    for name in ['bokheim-metadata.service','bokheim-catalogs.service']:
+    for name in ['bokheim-metadata.service']:
         assert (P('/etc/systemd/system')/name).read_bytes()==(P('/usr/local/share/bokheim-deploy')/name).read_bytes(),'Service template differs from installed unit'
     c=sqlite3.connect(candidate.as_uri()+'?mode=ro',uri=True)
     assert c.execute('select count(*),sum(records_read) from lcc_import').fetchone()==(43,10543015)
@@ -76,19 +74,19 @@ def deploy(candidate,full=False):
             except subprocess.TimeoutExpired:p.kill();p.wait()
     assert CURRENT.resolve()==old,'Active snapshot changed during validation'
     backup=ROOT/('activation-all-records-'+str(time.time_ns()));backup.mkdir()
-    for path in ['/usr/local/bin/metadata-server','/usr/local/bin/catalog-server','/usr/local/share/catalog-providers/opds.json']:
+    for path in ['/usr/local/bin/metadata-server']:
         shutil.copy2(path,backup/P(path).name)
     (backup/'previous-snapshot').write_text(str(old))
-    stage(BINARY,backup/'catalog-server',backup/'opds.json')
+    stage(BINARY)
     try:
         link(candidate)
-        subprocess.run(['sudo','-n','/usr/local/sbin/bokheim-deploy-metadata-catalog'],check=True)
+        subprocess.run(['sudo','-n','/usr/local/sbin/bokheim-deploy-metadata'],check=True)
         check_http(8091,full,samples)
     except BaseException:
         link(old)
         if INCOMING.exists():shutil.rmtree(INCOMING)
-        stage(backup/'metadata-server',backup/'catalog-server',backup/'opds.json')
-        subprocess.run(['sudo','-n','/usr/local/sbin/bokheim-deploy-metadata-catalog'],check=True)
+        stage(backup/'metadata-server')
+        subprocess.run(['sudo','-n','/usr/local/sbin/bokheim-deploy-metadata'],check=True)
         raise
     result=dict(status='deployed',snapshot=str(candidate),full=full,backup=str(backup),completed_at_unix=time.time())
     (ROOT/'deployment-all-records-status.json').write_text(json.dumps(result,indent=2))

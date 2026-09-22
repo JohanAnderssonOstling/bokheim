@@ -1,6 +1,6 @@
 use super::*;
-use library_replica::{BookLifecycleState, ReadingPositionState};
 use book_model::{AnnotationAnchor, AnnotationState, AnnotationStyle, BookFormat};
+use library_replica::{BookLifecycleState, ReadingPositionState};
 use library_replica::{MutationBody, StateMutation};
 use std::io::Write;
 use std::path::Path;
@@ -9,16 +9,16 @@ use test_support::{fixture_content_hash, fixture_dir_id, fixture_library_id, fix
 
 const TEST_CONTENT_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const TEST_AUTH_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-use crate::BlobKind;
 use crate::sync::transfer::TransferJob;
+use crate::BlobKind;
 use asset_transfer::should_download_thumbnail;
 use library_database::CURSOR_RECOVERY_PENDING_KEY;
 use library_replica::coalesce_mutations_for_push;
 use library_replica::prepare_push;
-use sync_common::SyncExchangeResponse;
 use sync_common::api::assets::BlobManifestEntry;
+use sync_common::SyncExchangeResponse;
 use sync_common::{PullStateResponse, PushMutationsResponse};
-use sync_transport::{PushResponseError, validate_pull_batch, validate_push_response};
+use sync_transport::{validate_pull_batch, validate_push_response, PushResponseError};
 
 mod accounts;
 mod assets;
@@ -95,7 +95,11 @@ fn deleted(content_hash: u64) -> MutationBody {
 fn added(content_hash: u64, title: &str, added_at: u64) -> MutationBody {
     MutationBody::BookLifecycle {
         content_hash: fixture_content_hash(content_hash),
-        value: BookLifecycleState::Present { metadata: library_replica::SyncBookMetadata { title: title.to_owned(), contributors: Vec::new(), book: Default::default() }, added_at: millis(added_at), format: BookFormat::Epub },
+        value: BookLifecycleState::Present {
+            metadata: library_replica::SyncBookMetadata { title: title.to_owned(), subtitle: None, contributors: Vec::new(), book: Default::default() },
+            added_at: millis(added_at),
+            format: BookFormat::Epub,
+        },
     }
 }
 
@@ -170,6 +174,8 @@ fn annotation_change(sequence: u64, text: String) -> StateMutation {
                 created_at: millis(1),
                 modified_at: millis(1),
                 deleted: false,
+                toc_ordinal: None,
+                progress: None,
             },
         },
         changed_at: millis(sequence),
@@ -190,11 +196,11 @@ impl TestManager {
         self.sync.transfer_worker()
     }
 
-    fn request_download(&self, content_hash: ContentHash) -> Result<(), Box<dyn std::error::Error>> {
+    fn request_download(&self, content_hash: ContentHash) -> crate::sync::error::SyncResult<()> {
         self.sync.request_download(content_hash)
     }
 
-    fn request_downloads(&self, content_hashes: &[ContentHash]) -> Result<(), Box<dyn std::error::Error>> {
+    fn request_downloads(&self, content_hashes: &[ContentHash]) -> crate::sync::error::SyncResult<()> {
         self.sync.request_downloads(content_hashes)
     }
 

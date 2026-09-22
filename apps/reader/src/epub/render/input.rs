@@ -1,21 +1,24 @@
 //! EPUB implementations of shared navigation commands.
 
 use gpui::{Context, Focusable, Window};
+use ui_components as components;
 
 use crate::epub::ReaderView;
 use crate::invalidation::Component;
 use crate::shell::input::CommandTarget;
 use crate::shell::search::SearchBarTarget;
-use crate::shell::state_panel::{self, SidebarPanel};
-use crate::shell::toolbar::ToolbarTarget;
+use crate::shell::state_panel::{self, SidebarTab};
+use crate::shell::toolbar::SidebarTarget;
 use crate::{
     CloseSearch, DecreaseColumnWidth, DecreaseFont, DecreaseScale, FocusReaderSearch, IncreaseColumnWidth, IncreaseFont, IncreaseScale, NextLine, NextPage, NextSection, PreviousLine, PreviousPage, PreviousSection, ReturnToLibrary,
     ToggleFullscreen, ToggleSearch, ToggleToc,
 };
 
 impl CommandTarget<PreviousPage> for ReaderView {
-    fn execute(&mut self, _: &PreviousPage, _: &mut Window, cx: &mut Context<Self>) {
-        self.chrome.hide(cx);
+    fn execute(&mut self, _: &PreviousPage, window: &mut Window, cx: &mut Context<Self>) {
+        if components::uses_mobile_navigation(window) {
+            self.chrome.hide(cx);
+        }
         // Renderer position is authoritative. Progress is an asynchronous
         // projection and may still contain its initial value on the first key.
         self.with_renderer(cx, |renderer, cx| {
@@ -25,8 +28,10 @@ impl CommandTarget<PreviousPage> for ReaderView {
 }
 
 impl CommandTarget<NextPage> for ReaderView {
-    fn execute(&mut self, _: &NextPage, _: &mut Window, cx: &mut Context<Self>) {
-        self.chrome.hide(cx);
+    fn execute(&mut self, _: &NextPage, window: &mut Window, cx: &mut Context<Self>) {
+        if components::uses_mobile_navigation(window) {
+            self.chrome.hide(cx);
+        }
         self.with_renderer(cx, |renderer, cx| {
             renderer.next_page(cx);
         });
@@ -34,29 +39,37 @@ impl CommandTarget<NextPage> for ReaderView {
 }
 
 impl CommandTarget<PreviousLine> for ReaderView {
-    fn execute(&mut self, _: &PreviousLine, _: &mut Window, cx: &mut Context<Self>) {
-        self.chrome.hide(cx);
+    fn execute(&mut self, _: &PreviousLine, window: &mut Window, cx: &mut Context<Self>) {
+        if components::uses_mobile_navigation(window) {
+            self.chrome.hide(cx);
+        }
         self.with_renderer(cx, |renderer, cx| renderer.previous_line(cx));
     }
 }
 
 impl CommandTarget<NextLine> for ReaderView {
-    fn execute(&mut self, _: &NextLine, _: &mut Window, cx: &mut Context<Self>) {
-        self.chrome.hide(cx);
+    fn execute(&mut self, _: &NextLine, window: &mut Window, cx: &mut Context<Self>) {
+        if components::uses_mobile_navigation(window) {
+            self.chrome.hide(cx);
+        }
         self.with_renderer(cx, |renderer, cx| renderer.next_line(cx));
     }
 }
 
 impl CommandTarget<PreviousSection> for ReaderView {
-    fn execute(&mut self, _: &PreviousSection, _: &mut Window, cx: &mut Context<Self>) {
-        self.chrome.hide(cx);
+    fn execute(&mut self, _: &PreviousSection, window: &mut Window, cx: &mut Context<Self>) {
+        if components::uses_mobile_navigation(window) {
+            self.chrome.hide(cx);
+        }
         self.with_renderer(cx, |renderer, cx| renderer.previous_section(cx));
     }
 }
 
 impl CommandTarget<NextSection> for ReaderView {
-    fn execute(&mut self, _: &NextSection, _: &mut Window, cx: &mut Context<Self>) {
-        self.chrome.hide(cx);
+    fn execute(&mut self, _: &NextSection, window: &mut Window, cx: &mut Context<Self>) {
+        if components::uses_mobile_navigation(window) {
+            self.chrome.hide(cx);
+        }
         self.with_renderer(cx, |renderer, cx| renderer.next_section(cx));
     }
 }
@@ -64,8 +77,7 @@ impl CommandTarget<NextSection> for ReaderView {
 impl CommandTarget<ToggleToc> for ReaderView {
     fn execute(&mut self, _: &ToggleToc, _: &mut Window, cx: &mut Context<Self>) {
         self.chrome.show(cx);
-        let visible = !self.sidebar.shows(SidebarPanel::Contents);
-        state_panel::set_contents_visible(&mut self.sidebar, visible, cx);
+        state_panel::select_tab(&mut self.sidebar, SidebarTab::Contents, cx);
         crate::invalidation::notify(cx, Component::ReaderShell, "toc_visibility_changed");
     }
 }
@@ -110,27 +122,25 @@ impl CommandTarget<DecreaseFont> for ReaderView {
     }
 }
 
+// EPUB has no zoom control: font size covers reflowable text, and
+// CommonReaderCommands still requires these two be implemented.
 impl CommandTarget<IncreaseScale> for ReaderView {
-    fn execute(&mut self, _: &IncreaseScale, _: &mut Window, cx: &mut Context<Self>) {
-        self.adjust_scale(0.1, cx);
-    }
+    fn execute(&mut self, _: &IncreaseScale, _: &mut Window, _: &mut Context<Self>) {}
 }
 
 impl CommandTarget<DecreaseScale> for ReaderView {
-    fn execute(&mut self, _: &DecreaseScale, _: &mut Window, cx: &mut Context<Self>) {
-        self.adjust_scale(-0.1, cx);
-    }
+    fn execute(&mut self, _: &DecreaseScale, _: &mut Window, _: &mut Context<Self>) {}
 }
 
 impl CommandTarget<IncreaseColumnWidth> for ReaderView {
-    fn execute(&mut self, _: &IncreaseColumnWidth, _: &mut Window, cx: &mut Context<Self>) {
-        self.adjust_column_width(40.0, cx);
+    fn execute(&mut self, _: &IncreaseColumnWidth, window: &mut Window, cx: &mut Context<Self>) {
+        self.adjust_column_width(40.0, window, cx);
     }
 }
 
 impl CommandTarget<DecreaseColumnWidth> for ReaderView {
-    fn execute(&mut self, _: &DecreaseColumnWidth, _: &mut Window, cx: &mut Context<Self>) {
-        self.adjust_column_width(-40.0, cx);
+    fn execute(&mut self, _: &DecreaseColumnWidth, window: &mut Window, cx: &mut Context<Self>) {
+        self.adjust_column_width(-40.0, window, cx);
     }
 }
 

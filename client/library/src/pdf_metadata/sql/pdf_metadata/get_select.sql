@@ -1,1 +1,0 @@
-SELECT metadata FROM pdf_reader_metadata WHERE content_hash=?1 AND checksum=?2

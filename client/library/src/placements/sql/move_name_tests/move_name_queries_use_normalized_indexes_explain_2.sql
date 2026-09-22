@@ -1,1 +1,0 @@
-EXPLAIN QUERY PLAN SELECT 1 FROM dir WHERE parent_id='dest' AND name_key='free' AND deleted_at IS NULL AND id!='00000000-0000-0000-0000-000000000000' AND id!='self'

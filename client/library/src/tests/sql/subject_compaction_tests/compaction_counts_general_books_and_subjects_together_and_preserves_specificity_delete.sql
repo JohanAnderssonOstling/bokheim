@@ -1,1 +1,0 @@
-DELETE FROM book_unified_concept WHERE concept_id=910006

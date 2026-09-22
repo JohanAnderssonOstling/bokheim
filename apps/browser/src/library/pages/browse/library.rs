@@ -10,16 +10,15 @@ use sync_common::ROOT_DIR_ID;
 
 use super::adapter::{BrowseAdapter, BrowseCrumb, BrowseQuery, BrowseRequest};
 use super::controls::{BrowseBookOrder, BrowseControls, BrowseFormatFilter};
-use super::detail::BookDetailPage;
+use super::detail::{BookDetailPage, CloseBookDetail};
 use super::folder_actions::{FolderActions, FolderTargets};
 use super::page::{BrowsePage, BrowsePageConfig};
 use crate::library::services::LibraryContext;
 use crate::library::widgets::{BookCardView, BookPlacement, OpenBookDetail, PlaceBook, RemoveBook};
 
-/// One book, as a place. A detail page is not a folder, but it *is* somewhere
-/// the reader has gone: giving it a location means the breadcrumb ends on the
-/// title, Escape leaves it the way it leaves a folder, and Back is the same
-/// `open_path` that goes up the tree. None of that had to be written.
+/// One book, as a transient location. A detail page is not a folder, so its
+/// title must not become a breadcrumb segment; the browse page keeps the
+/// folder trail separately while this location is open.
 const BOOK_LOCATION_PREFIX: &str = "book:";
 
 pub(super) fn book_location(content_hash: sync_common::ContentHash) -> String {
@@ -44,6 +43,7 @@ pub(crate) struct LibraryBrowseAdapter {
     chip_groups: Vec<library_model::BrowseChipGroup>,
     books: Rc<Vec<Entity<BookCardView>>>,
     open_detail: OpenBookDetail,
+    close_detail: CloseBookDetail,
     place_book: Option<PlaceBook>,
     remove_book: Option<RemoveBook>,
     /// What the card handed over on its way out, waiting for the navigation it
@@ -61,14 +61,26 @@ pub(crate) struct LibraryBrowseAdapter {
 
 pub(crate) enum LibraryBrowseResponse {
     Book(sync_common::ContentHash),
-    Contents { contents: BrowseContents, chip_groups: Vec<library_model::BrowseChipGroup>, path: Vec<BrowseCrumb>, language_counts: Vec<library_model::LibraryLanguageCount>, format_counts: Vec<library_model::LibraryFormatCount> },
+    Contents {
+        contents: BrowseContents,
+        chip_groups: Vec<library_model::BrowseChipGroup>,
+        path: Vec<BrowseCrumb>,
+        language_counts: Vec<library_model::LibraryLanguageCount>,
+        format_counts: Vec<library_model::LibraryFormatCount>,
+    },
+    /// Global search hits. Chips, facets, and the breadcrumb trail describe a
+    /// location, so a search carries none: installing it keeps the trail the
+    /// reader searched from, which is where going back returns to.
+    Search {
+        books: Vec<library_model::BookCardRow>,
+    },
 }
 
 impl LibraryBrowseAdapter {
-    fn new(ui: LibraryContext, kind: LibraryBrowseKind, open_detail: OpenBookDetail, place_book: Option<PlaceBook>, remove_book: Option<RemoveBook>) -> Self {
+    fn new(ui: LibraryContext, kind: LibraryBrowseKind, open_detail: OpenBookDetail, close_detail: CloseBookDetail, place_book: Option<PlaceBook>, remove_book: Option<RemoveBook>) -> Self {
         let mut controls = BrowseControls::library();
         controls.supports_direct_child_books = matches!(kind, LibraryBrowseKind::Subject);
-        Self { ui, kind, controls, children: Rc::new(Vec::new()), chip_groups: Vec::new(), books: Rc::new(Vec::new()), open_detail, place_book, remove_book, pending_detail: None, detail: None, detail_visible: false }
+        Self { ui, kind, controls, children: Rc::new(Vec::new()), chip_groups: Vec::new(), books: Rc::new(Vec::new()), open_detail, close_detail, place_book, remove_book, pending_detail: None, detail: None, detail_visible: false }
     }
 
     pub(super) fn prepare_detail(&mut self, book: library_model::BookCardRow, cover: Option<crate::library::widgets::LoadedCover>) {
@@ -151,6 +163,20 @@ impl BrowseAdapter for LibraryBrowseAdapter {
         if let Some(content_hash) = book_at_location(&query.location) {
             return BrowseRequest::Ready(LibraryBrowseResponse::Book(content_hash));
         }
+        // A search filter runs across the whole library instead of the
+        // current location: title matches first, then distinct author-only
+        // matches. Chips, facets, and the breadcrumb trail describe a
+        // location, so a search response carries none of them.
+        if !query.search.is_empty() {
+            let library = self.ui.backend().clone();
+            let search = query.search.clone();
+            return BrowseRequest::Async(Box::pin(async move {
+                let result: library_model::LibrarySearchResult = library.library_search(search).await?;
+                let mut books = result.title_matches;
+                books.extend(result.author_matches);
+                Ok(LibraryBrowseResponse::Search { books })
+            }));
+        }
         // These maintenance lanes run additional full-library and enrichment
         // work. In a browser they execute on the same single-threaded worker as
         // navigation, so awaiting them here can prevent every browse request
@@ -164,7 +190,7 @@ impl BrowseAdapter for LibraryBrowseAdapter {
             }
         };
         BrowseRequest::Async(Box::pin(async move {
-            let response: bokheim_backend::LibraryBrowseData = request.await?;
+            let response: app::LibraryBrowseData = request.await?;
             let contents = response.contents;
             let chip_groups = response.chip_groups;
             let language_counts = response.language_counts;
@@ -175,13 +201,17 @@ impl BrowseAdapter for LibraryBrowseAdapter {
     }
 
     fn install(&mut self, response: Self::Response, cx: &mut App) -> Option<Vec<BrowseCrumb>> {
-        let (contents, chip_groups, path, language_counts, format_counts) = match response {
-            LibraryBrowseResponse::Contents { contents, chip_groups, path, language_counts, format_counts } => (contents, chip_groups, path, language_counts, format_counts),
+        // A search response is books only: no children, and no trail update.
+        // The reader's breadcrumb stays where the search was typed, which is
+        // where going back returns to.
+        let (children, books, chip_groups, path, language_counts, format_counts) = match response {
+            LibraryBrowseResponse::Contents { contents, chip_groups, path, language_counts, format_counts } => (contents.children, contents.books, chip_groups, Some(path), language_counts, format_counts),
+            LibraryBrowseResponse::Search { books } => (Vec::new(), books, Vec::new(), None, Vec::new(), Vec::new()),
             LibraryBrowseResponse::Book(content_hash) => {
                 // Deliberately leaves `children` and `books` alone: the grid is
                 // where the reader came from and where they are going back to.
                 match self.pending_detail.take().filter(|(book, _)| book.content_hash == content_hash) {
-                    Some((book, cover)) => self.detail = Some(BookDetailPage::create(book, cover, self.ui.clone(), cx)),
+                    Some((book, cover)) => self.detail = Some(BookDetailPage::create(book, cover, self.ui.clone(), self.close_detail.clone(), cx)),
                     // A reload of this same location — a scan committed while
                     // the page was open — arrives with nothing handed over. The
                     // page already on screen is for this book, so it stays.
@@ -198,12 +228,11 @@ impl BrowseAdapter for LibraryBrowseAdapter {
         self.detail_visible = false;
         self.controls = BrowseControls::library_with_facets(&language_counts, &format_counts);
         self.controls.supports_direct_child_books = matches!(self.kind, LibraryBrowseKind::Subject);
-        self.children = Rc::new(contents.children);
+        self.children = Rc::new(children);
         self.chip_groups = chip_groups;
         let mut existing = self.books.iter().map(|book| (book.read(cx).content_hash(), book.clone())).collect::<HashMap<_, _>>();
         self.books = Rc::new(
-            contents
-                .books
+            books
                 .into_iter()
                 .map(|book| {
                     let source_directory = book.source_directory;
@@ -216,7 +245,10 @@ impl BrowseAdapter for LibraryBrowseAdapter {
                 })
                 .collect(),
         );
-        matches!(self.kind, LibraryBrowseKind::Folder).then_some(path)
+        match self.kind {
+            LibraryBrowseKind::Folder => path,
+            LibraryBrowseKind::Subject => None,
+        }
     }
 
     fn chip_groups(&self) -> &[library_model::BrowseChipGroup] {
@@ -316,8 +348,9 @@ impl BrowseAdapter for LibraryBrowseAdapter {
         self.detail_visible = true;
     }
 
-    fn hide_cached_book_detail(&mut self) {
+    fn hide_cached_book_detail(&mut self, cx: &mut App) {
         self.detail_visible = false;
+        self.ui.notify_book_detail_closed(cx);
     }
 }
 
@@ -336,6 +369,15 @@ fn open_detail(cx: &mut Context<BrowsePage<LibraryBrowseAdapter>>) -> OpenBookDe
     })
 }
 
+/// Leaving a discarded book's page returns to the folder it was opened from —
+/// the detail has its own location but deliberately no breadcrumb of its own.
+fn close_detail(cx: &mut Context<BrowsePage<LibraryBrowseAdapter>>) -> CloseBookDetail {
+    let page = cx.entity();
+    Rc::new(move |cx| {
+        page.update(cx, |page, cx| page.close_book_detail(cx));
+    })
+}
+
 pub(crate) fn folder(ui: LibraryContext, cx: &mut Context<BrowsePage<LibraryBrowseAdapter>>) -> BrowsePage<LibraryBrowseAdapter> {
     let changes = ui.updates();
     let folder_actions = cx.new(|_| FolderActions::new(ui.clone(), ROOT_DIR_ID, None));
@@ -350,16 +392,16 @@ pub(crate) fn folder(ui: LibraryContext, cx: &mut Context<BrowsePage<LibraryBrow
     let remove_actions = folder_actions.clone();
     let remove_book: RemoveBook = Rc::new(move |book, source, description, window, cx| {
         let targets = FolderTargets { folders: Vec::new(), folder_parents: Default::default(), books: vec![book], source };
-        remove_actions.update(cx, |actions, cx| actions.trash_targets(targets, description, window, cx));
+        remove_actions.update(cx, |actions, cx| actions.remove_books_from_folder(targets, description, window, cx));
     });
-    let adapter = LibraryBrowseAdapter::new(ui, LibraryBrowseKind::Folder, open_detail(cx), Some(place_book), Some(remove_book));
+    let adapter = LibraryBrowseAdapter::new(ui, LibraryBrowseKind::Folder, open_detail(cx), close_detail(cx), Some(place_book), Some(remove_book));
     let config = BrowsePageConfig::new(ROOT_DIR_ID.to_string(), "Folders", "folder").with_changes(changes).with_folder_actions(folder_actions).with_split();
     BrowsePage::new(adapter, config, cx)
 }
 
 pub(crate) fn subject(ui: LibraryContext, cx: &mut Context<BrowsePage<LibraryBrowseAdapter>>) -> BrowsePage<LibraryBrowseAdapter> {
     let changes = ui.updates();
-    let adapter = LibraryBrowseAdapter::new(ui, LibraryBrowseKind::Subject, open_detail(cx), None, None);
+    let adapter = LibraryBrowseAdapter::new(ui, LibraryBrowseKind::Subject, open_detail(cx), close_detail(cx), None, None);
     let config = BrowsePageConfig::new(ROOT_SUBJECT_PATH, "Subjects", "subject").with_changes(changes).with_split();
     BrowsePage::new(adapter, config, cx)
 }

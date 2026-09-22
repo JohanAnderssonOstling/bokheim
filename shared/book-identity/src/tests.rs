@@ -98,7 +98,7 @@ fn malformed_books_are_left_untouched() {
     for (name, bytes) in [("broken.pdf", b"%PDF-1.7\nbroken".as_slice()), ("broken.m4b", b"\0\0\0\x18ftypM4B broken".as_slice())] {
         let path = dir.path().join(name);
         fs::write(&path, bytes).unwrap();
-        // Neither an unreadable PDF catalog nor unfingerprintable audio can be
+        // Neither an unreadable PDF document nor unfingerprintable audio can be
         // given a derived identity, so both fall back to the byte hash and
         // neither file is rewritten.
         assert_eq!(ensure(&path).unwrap(), hash(&path));
@@ -141,19 +141,19 @@ fn embedded_pdf_identity_skips_large_page_streams() {
 
 #[test]
 fn changed_audio_is_a_different_book_not_a_revision() {
-    let dir=tempfile::tempdir().unwrap();
-    let path=dir.path().join("book.m4b");
-    fs::write(&path,include_bytes!("../../../client/backend/tests/fixtures/embedded-cover.m4b")).unwrap();
-    let id=ensure(&path).unwrap();
-    let before=audio_fingerprint(&mut fs::File::open(&path).unwrap()).unwrap();
-    assert_eq!(id,ContentHash::new(before.to_hex().as_str()),"identity is the audio fingerprint");
-    let mut bytes=fs::read(&path).unwrap();
-    let at=bytes.windows(4).position(|b|b==b"mdat").unwrap()+4;
-    bytes[at]^=1;
-    fs::write(&path,bytes).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("book.m4b");
+    fs::write(&path, include_bytes!("../../../client/app/tests/fixtures/embedded-cover.m4b")).unwrap();
+    let id = ensure(&path).unwrap();
+    let before = audio_fingerprint(&mut fs::File::open(&path).unwrap()).unwrap();
+    assert_eq!(id, ContentHash::new(before.to_hex().as_str()), "identity is the audio fingerprint");
+    let mut bytes = fs::read(&path).unwrap();
+    let at = bytes.windows(4).position(|b| b == b"mdat").unwrap() + 4;
+    bytes[at] ^= 1;
+    fs::write(&path, bytes).unwrap();
     // Metadata edits keep the identity; touching a sample does not.
-    assert_ne!(audio_fingerprint(&mut fs::File::open(&path).unwrap()).unwrap(),before);
-    assert_ne!(identify(&mut fs::File::open(&path).unwrap()).unwrap(),id);
+    assert_ne!(audio_fingerprint(&mut fs::File::open(&path).unwrap()).unwrap(), before);
+    assert_ne!(identify(&mut fs::File::open(&path).unwrap()).unwrap(), id);
 }
 
 fn encrypted_pdf(path: &Path, encryption: u8, password: &str) {
@@ -161,22 +161,29 @@ fn encrypted_pdf(path: &Path, encryption: u8, password: &str) {
     pdf(path);
     let mut doc = Document::load(path).unwrap();
     doc.trailer.set("ID", Object::Array(vec![Object::string_literal("0123456789abcdef"); 2]));
-    // A direct catalog string catches double encryption and plaintext writes.
+    // A direct root string catches double encryption and plaintext writes.
     doc.catalog_mut().unwrap().set("Lang", Object::string_literal("en-US"));
     let version = if encryption == 4 {
         EncryptionVersion::V4 {
-            document: &doc, encrypt_metadata: true,
+            document: &doc,
+            encrypt_metadata: true,
             crypt_filters: std::collections::BTreeMap::from([(b"StdCF".to_vec(), std::sync::Arc::new(lopdf::encryption::crypt_filters::Aes128CryptFilter) as std::sync::Arc<dyn lopdf::encryption::crypt_filters::CryptFilter>)]),
-            stream_filter: b"StdCF".to_vec(), string_filter: b"StdCF".to_vec(),
-            owner_password: "owner", user_password: password, permissions: Permissions::PRINTABLE,
+            stream_filter: b"StdCF".to_vec(),
+            string_filter: b"StdCF".to_vec(),
+            owner_password: "owner",
+            user_password: password,
+            permissions: Permissions::PRINTABLE,
         }
     } else if encryption == 5 {
         EncryptionVersion::V5 {
             encrypt_metadata: false,
             crypt_filters: std::collections::BTreeMap::from([(b"StdCF".to_vec(), std::sync::Arc::new(lopdf::encryption::crypt_filters::Aes256CryptFilter) as std::sync::Arc<dyn lopdf::encryption::crypt_filters::CryptFilter>)]),
             file_encryption_key: &[42; 32],
-            stream_filter: b"StdCF".to_vec(), string_filter: b"StdCF".to_vec(),
-            owner_password: "owner", user_password: password, permissions: Permissions::PRINTABLE,
+            stream_filter: b"StdCF".to_vec(),
+            string_filter: b"StdCF".to_vec(),
+            owner_password: "owner",
+            user_password: password,
+            permissions: Permissions::PRINTABLE,
         }
     } else if encryption == 1 {
         EncryptionVersion::V1 { document: &doc, owner_password: "owner", user_password: password, permissions: Permissions::PRINTABLE }
@@ -204,10 +211,9 @@ fn empty_password_pdf_identity_preserves_encryption_and_content() {
         let metadata = pdf_range_reader::metadata(fs::File::open(&path).unwrap()).unwrap();
         let info = metadata.get_object(metadata.trailer.get(b"Info").unwrap().as_reference().unwrap()).unwrap().as_dict().unwrap();
         assert_eq!(info.get(b"Title").unwrap().as_str().unwrap(), b"Original title");
-        let ranged = pdf_range_reader::catalog(fs::File::open(&path).unwrap()).unwrap();
+        let ranged = pdf_range_reader::document_root(fs::File::open(&path).unwrap()).unwrap();
         assert!(ranged.is_encrypted());
-        assert_eq!(ranged.get_encrypted().unwrap().get(b"P").unwrap().as_i64().unwrap(),
-            pdf_range_reader::catalog(Cursor::new(original)).unwrap().get_encrypted().unwrap().get(b"P").unwrap().as_i64().unwrap());
+        assert_eq!(ranged.get_encrypted().unwrap().get(b"P").unwrap().as_i64().unwrap(), pdf_range_reader::document_root(Cursor::new(original)).unwrap().get_encrypted().unwrap().get(b"P").unwrap().as_i64().unwrap());
         let doc = Document::load(&path).unwrap();
         assert_eq!(doc.catalog().unwrap().get(PDF_KEY).unwrap().as_str().unwrap(), identity.as_str().as_bytes());
         assert_eq!(doc.catalog().unwrap().get(b"Lang").unwrap().as_str().unwrap(), b"en-US");

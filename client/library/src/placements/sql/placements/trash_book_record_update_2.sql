@@ -1,1 +1,0 @@
-UPDATE book_dir SET deleted_at=?2,is_downloaded=0 WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND deleted_at IS NULL

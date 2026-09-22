@@ -27,12 +27,16 @@ pub(super) fn lock() {}
 pub(super) struct Document(Option<pdfium_render::prelude::PdfDocument<'static>>);
 
 impl From<pdfium_render::prelude::PdfDocument<'static>> for Document {
-    fn from(document: pdfium_render::prelude::PdfDocument<'static>) -> Self { Self(Some(document)) }
+    fn from(document: pdfium_render::prelude::PdfDocument<'static>) -> Self {
+        Self(Some(document))
+    }
 }
 
 impl std::ops::Deref for Document {
     type Target = pdfium_render::prelude::PdfDocument<'static>;
-    fn deref(&self) -> &Self::Target { self.0.as_ref().unwrap() }
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().unwrap()
+    }
 }
 
 impl Drop for Document {

@@ -1,28 +1,14 @@
 //! Classification recovery for bibliographically equivalent editions with year differences.
 use crate::{
-    matching::{author_match_keys, author_names_compatible, bibliographic_match_key},
-    Classification, ClassificationEvidence, ClassificationScheme, ClassificationSource, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus,
+    matching::{bibliographic_match_key, matching_author_count, NormalizedTitle},
+    Classification, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus,
 };
 use std::collections::BTreeSet;
 
-pub const METHOD: &str = "verified_year_only_edition_consensus";
+pub const METHOD: &str = "verified_year_variant_classifications";
 
 fn credits_match(local: &[String], remote: &[String]) -> bool {
-    if local.is_empty() || local.len() != remote.len() {
-        return false;
-    }
-    let mut remaining = remote.to_vec();
-    for name in local {
-        let keys = author_match_keys(name);
-        if keys.iter().all(|k| k.split_whitespace().count() < 2) {
-            return false;
-        }
-        let Some(i) = remaining.iter().position(|n| author_names_compatible(name, n)) else {
-            return false;
-        };
-        remaining.remove(i);
-    }
-    remaining.is_empty()
+    matching_author_count(local, remote) > 0
 }
 fn publishers(values: &[String]) -> BTreeSet<String> {
     values.iter().map(|p| bibliographic_match_key(p)).filter(|p| !p.is_empty()).collect()
@@ -32,53 +18,35 @@ pub fn classifications(query: &EditionIdentityQuery, result: &EditionIdentityRes
     if result.status != EditionIdentityStatus::Ambiguous || result.query_id != query.query_id || result.candidates_truncated || result.candidates.len() < 2 {
         return Vec::new();
     }
-    let title = bibliographic_match_key(&query.title);
+    let title = NormalizedTitle::new(&query.title);
     let first = &result.candidates[0];
     let publisher = publishers(&first.publishers);
-    if title.len() < 5 || publisher.is_empty() {
+    if title.full.len() < 5 || publisher.is_empty() {
         return Vec::new();
     }
-    let mut common = None;
-    let mut evidence = Vec::new();
     for (index, candidate) in result.candidates.iter().enumerate() {
         if candidate.work_title.as_deref().map(bibliographic_match_key) != first.work_title.as_deref().map(bibliographic_match_key)
-            || bibliographic_match_key(&candidate.title) != title
+            || !title.matches(&NormalizedTitle::new(&candidate.full_title()))
             || !credits_match(&query.authors, &candidate.authors)
             || result.candidates[..index].iter().any(|previous| !credits_match(&previous.authors, &candidate.authors))
             || publishers(&candidate.publishers) != publisher
         {
             return Vec::new();
         }
-        // Require edition-level evidence; repeated work-wide unions cannot vote.
-        let codes = candidate
-            .classifications
-            .iter()
-            .filter(|c| c.scheme == ClassificationScheme::LibraryOfCongress)
-            .filter_map(|c| crate::classification_consensus_notation(c.scheme, &c.notation))
-            .collect::<BTreeSet<_>>();
-        if codes.is_empty() || common.as_ref().is_some_and(|previous| previous != &codes) {
-            return Vec::new();
-        }
-        common = Some(codes);
-        evidence.push(ClassificationEvidence {
-            method: METHOD.into(),
-            isbn13: candidate.canonical_isbn13.clone(),
-            open_library_work_id: candidate.open_library_work_id.clone().unwrap_or_default(),
-            open_library_edition_id: candidate.open_library_edition_id.clone(),
-        });
     }
-    common.unwrap_or_default().into_iter().map(|notation| Classification { notation, scheme: ClassificationScheme::LibraryOfCongress, source: ClassificationSource::Work, evidence: evidence.clone() }).collect()
+    crate::subject_consensus::candidate_classifications(result.candidates.iter(), METHOD)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EditionIdentityMatch, EditionTitleMatch};
+    use crate::{ClassificationScheme, ClassificationSource, EditionIdentityMatch, EditionTitleMatch};
     fn fixture() -> (EditionIdentityQuery, EditionIdentityResult) {
         let query = EditionIdentityQuery { query_id: "1".into(), title: "Example History: Volume 2".into(), authors: vec!["Ada Author".into()], publishers: vec![], book_year: None };
         let candidates = [1999, 2013]
             .into_iter()
-            .map(|year| EditionIdentityMatch { subtitle: None,
+            .map(|year| EditionIdentityMatch {
+                subtitle: None,
                 canonical_isbn13: if year == 1999 { "9780821338278" } else { "9780393243277" }.into(),
                 open_library_edition_id: format!("OL{year}M"),
                 open_library_work_id: Some(format!("OL{year}W")),
@@ -93,7 +61,7 @@ mod tests {
                 classifications: vec![Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: format!("E806 .S89 {year}"), source: ClassificationSource::ExactEdition, evidence: vec![] }],
             })
             .collect();
-        (query, EditionIdentityResult { catalog_subjects: None, query_id: "1".into(), status: EditionIdentityStatus::Ambiguous, matched: None, candidates, candidates_truncated: false })
+        (query, EditionIdentityResult { authority_subjects: None, query_id: "1".into(), status: EditionIdentityStatus::Ambiguous, matched: None, candidates, candidates_truncated: false })
     }
     #[test]
     fn work_classifications_participate_in_agreement() {
@@ -118,7 +86,7 @@ mod tests {
         assert!(r.matched.is_none());
     }
     #[test]
-    fn rejects_identity_and_classification_differences() {
+    fn rejects_identity_differences_but_collects_valid_classifications() {
         for change in 0..9 {
             let (mut q, mut r) = fixture();
             match change {
@@ -132,7 +100,13 @@ mod tests {
                 7 => q.authors.clear(),
                 _ => r.candidates[1].classifications.clear(),
             }
-            assert!(classifications(&q, &r).is_empty(), "change {change}");
+            if matches!(change, 4 | 5 | 8) {
+                let codes = classifications(&q, &r);
+                assert_eq!(codes.len(), if change == 4 { 2 } else { 1 });
+                assert!(codes.iter().all(|c| c.evidence.len() == 1));
+            } else {
+                assert!(classifications(&q, &r).is_empty(), "change {change}");
+            }
         }
     }
 

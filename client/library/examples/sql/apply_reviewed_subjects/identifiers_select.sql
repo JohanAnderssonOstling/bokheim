@@ -1,1 +1,0 @@
-SELECT scheme,value,COALESCE(canonical_value,''),source,scope FROM book_identifier WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) ORDER BY position

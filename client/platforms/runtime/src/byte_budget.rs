@@ -1,27 +1,46 @@
 //! Admission accounting follows owned requests through dispatch and cancellation.
 use std::{cell::Cell, rc::Rc};
 #[derive(Clone)]
-pub struct ByteBudget { used: Rc<Cell<usize>>, limit: usize }
-pub struct Reservation { used: Rc<Cell<usize>>, bytes: usize }
+pub struct ByteBudget {
+    used: Rc<Cell<usize>>,
+    limit: usize,
+}
+pub struct Reservation {
+    used: Rc<Cell<usize>>,
+    bytes: usize,
+}
 impl ByteBudget {
-    pub fn new(limit: usize) -> Self { Self { used: Rc::new(Cell::new(0)), limit } }
+    pub fn new(limit: usize) -> Self {
+        Self { used: Rc::new(Cell::new(0)), limit }
+    }
     pub fn reserve(&self, bytes: usize) -> Option<Reservation> {
         let next = self.used.get().checked_add(bytes)?;
-        if next > self.limit { return None; }
+        if next > self.limit {
+            return None;
+        }
         self.used.set(next);
         Some(Reservation { used: self.used.clone(), bytes })
     }
-    pub fn limit(&self) -> usize { self.limit }
-    pub fn used(&self) -> usize { self.used.get() }
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+    pub fn used(&self) -> usize {
+        self.used.get()
+    }
 }
 impl Drop for Reservation {
-    fn drop(&mut self) { self.used.set(self.used.get() - self.bytes); }
+    fn drop(&mut self) {
+        self.used.set(self.used.get() - self.bytes);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{coordinator::{CpuJobs, SyncJobs, TransferJobs}, worker_lifecycle::Connection};
+    use crate::{
+        coordinator::{CpuJobs, SyncJobs, TransferJobs},
+        worker_lifecycle::Connection,
+    };
     #[test]
     fn budget_rejects_oversize_and_overflow_without_changing_usage() {
         let budget = ByteBudget::new(10);
@@ -110,7 +129,9 @@ mod tests {
     fn transfer_failure_releases_owner_and_subscriber_once() {
         let resources = Rc::new(());
         let mut jobs = TransferJobs::new(3);
-        for id in 1..=3 { jobs.request("book".into(), id, resources.clone()).unwrap(); }
+        for id in 1..=3 {
+            jobs.request("book".into(), id, resources.clone()).unwrap();
+        }
         jobs.cancel("book", 1);
         drop(jobs.cancel("book", 2));
         assert_eq!(Rc::strong_count(&resources), 3);

@@ -9,8 +9,7 @@ CREATE TABLE snapshot(
              ) STRICT;
              CREATE TABLE import_setting(
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-                record_limit INTEGER,
-                rich INTEGER NOT NULL CHECK(rich IN (0,1))
+                record_limit INTEGER
              ) STRICT;
              CREATE TABLE import_input(
                 name TEXT PRIMARY KEY,
@@ -97,30 +96,6 @@ CREATE TABLE snapshot(
                 notation TEXT NOT NULL,
                 PRIMARY KEY(work_id,scheme,notation)
              ) WITHOUT ROWID;
-             CREATE TABLE work_popularity(
-                work_id INTEGER PRIMARY KEY,
-                want_to_read_count INTEGER NOT NULL DEFAULT 0,
-                currently_reading_count INTEGER NOT NULL DEFAULT 0,
-                already_read_count INTEGER NOT NULL DEFAULT 0,
-                rating_count INTEGER NOT NULL DEFAULT 0,
-                rating_sum INTEGER NOT NULL DEFAULT 0
-             ) STRICT;
-             CREATE TABLE edition_entity_evidence(
-                edition_id INTEGER NOT NULL,
-                kind INTEGER NOT NULL CHECK(kind IN (1,2)),
-                name TEXT NOT NULL,
-                normalized_name TEXT NOT NULL,
-                wikidata_id INTEGER,
-                PRIMARY KEY(edition_id,kind,name)
-             ) WITHOUT ROWID;
-             CREATE TABLE work_entity_evidence(
-                work_id INTEGER NOT NULL,
-                kind INTEGER NOT NULL CHECK(kind IN (1,2)),
-                name TEXT NOT NULL,
-                normalized_name TEXT NOT NULL,
-                wikidata_id INTEGER,
-                PRIMARY KEY(work_id,kind,name)
-             ) WITHOUT ROWID;
              CREATE TABLE edition_author(
                 edition_id INTEGER NOT NULL,
                 position INTEGER NOT NULL,
@@ -143,53 +118,6 @@ CREATE TABLE snapshot(
                 external_id TEXT NOT NULL,
                 PRIMARY KEY(author_id,authority,external_id)
              ) WITHOUT ROWID;
-             CREATE TABLE entity(
-                wikidata_id INTEGER PRIMARY KEY,
-                kind INTEGER NOT NULL CHECK(kind IN (1,2)),
-                label TEXT NOT NULL,
-                birth_year INTEGER,
-                death_year INTEGER,
-                fictional INTEGER NOT NULL DEFAULT 0 CHECK(fictional IN (0,1)),
-                latitude_e7 INTEGER,
-                longitude_e7 INTEGER
-             ) STRICT;
-             CREATE TABLE entity_alias(
-                wikidata_id INTEGER NOT NULL,
-                alias TEXT NOT NULL,
-                PRIMARY KEY(wikidata_id,alias)
-             ) WITHOUT ROWID;
-             CREATE TABLE place_parent(
-                place_id INTEGER NOT NULL,
-                parent_id INTEGER NOT NULL,
-                PRIMARY KEY(place_id,parent_id)
-             ) WITHOUT ROWID;
-             CREATE TABLE place_country(
-                place_id INTEGER NOT NULL,
-                country_id INTEGER NOT NULL,
-                PRIMARY KEY(place_id,country_id)
-             ) WITHOUT ROWID;
-             CREATE TABLE wikidata_candidate(
-                kind INTEGER NOT NULL,
-                normalized_name TEXT NOT NULL,
-                wikidata_id INTEGER NOT NULL,
-                PRIMARY KEY(kind,normalized_name,wikidata_id)
-             ) WITHOUT ROWID;
-             CREATE TABLE wikidata_place_candidate(
-                normalized_name TEXT NOT NULL,
-                wikidata_id INTEGER NOT NULL,
-                PRIMARY KEY(normalized_name,wikidata_id)
-             ) WITHOUT ROWID;
-             CREATE TABLE wikidata_instance(
-                wikidata_id INTEGER NOT NULL,
-                class_id INTEGER NOT NULL,
-                PRIMARY KEY(wikidata_id,class_id)
-             ) WITHOUT ROWID;
-             CREATE TABLE wikidata_subclass(
-                child_id INTEGER NOT NULL,
-                parent_id INTEGER NOT NULL,
-                PRIMARY KEY(child_id,parent_id)
-             ) WITHOUT ROWID;
-
              -- Import staging tables intentionally have no indexes. Dump rows
              -- are appended cheaply and then sorted/deduplicated into the
              -- query schema once per phase.
@@ -200,22 +128,12 @@ CREATE TABLE snapshot(
              CREATE TABLE edition_classification_stage(edition_id INTEGER NOT NULL, scheme INTEGER NOT NULL, notation TEXT NOT NULL);
              CREATE TABLE edition_work_classification_stage(work_id INTEGER NOT NULL, scheme INTEGER NOT NULL, notation TEXT NOT NULL);
              CREATE TABLE edition_author_stage(edition_id INTEGER NOT NULL, position INTEGER NOT NULL, author_id INTEGER NOT NULL);
-             CREATE TABLE edition_entity_evidence_stage(edition_id INTEGER NOT NULL, kind INTEGER NOT NULL, name TEXT NOT NULL, normalized_name TEXT NOT NULL);
              CREATE TABLE work_classification_stage(work_id INTEGER NOT NULL, scheme INTEGER NOT NULL, notation TEXT NOT NULL);
              CREATE TABLE work_bibliography_stage(work_id INTEGER NOT NULL, title TEXT NOT NULL, normalized_title TEXT NOT NULL);
              CREATE TABLE work_description_stage(work_id INTEGER NOT NULL, description TEXT NOT NULL);
              CREATE TABLE work_author_stage(work_id INTEGER NOT NULL, position INTEGER NOT NULL, author_id INTEGER NOT NULL);
-             CREATE TABLE work_entity_evidence_stage(work_id INTEGER NOT NULL, kind INTEGER NOT NULL, name TEXT NOT NULL, normalized_name TEXT NOT NULL);
              CREATE TABLE author_stage(author_id INTEGER NOT NULL, name TEXT);
              CREATE TABLE author_identifier_stage(author_id INTEGER NOT NULL, authority TEXT NOT NULL, external_id TEXT NOT NULL);
-             CREATE TABLE entity_stage(wikidata_id INTEGER NOT NULL, kind INTEGER NOT NULL, label TEXT NOT NULL, birth_year INTEGER, death_year INTEGER, fictional INTEGER NOT NULL, latitude_e7 INTEGER, longitude_e7 INTEGER);
-             CREATE TABLE entity_alias_stage(wikidata_id INTEGER NOT NULL, alias TEXT NOT NULL);
-             CREATE TABLE place_parent_stage(place_id INTEGER NOT NULL, parent_id INTEGER NOT NULL);
-             CREATE TABLE place_country_stage(place_id INTEGER NOT NULL, country_id INTEGER NOT NULL);
-             CREATE TABLE wikidata_candidate_stage(kind INTEGER NOT NULL, normalized_name TEXT NOT NULL, wikidata_id INTEGER NOT NULL);
-             CREATE TABLE wikidata_place_candidate_stage(normalized_name TEXT NOT NULL, wikidata_id INTEGER NOT NULL);
-             CREATE TABLE wikidata_instance_stage(wikidata_id INTEGER NOT NULL, class_id INTEGER NOT NULL);
-             CREATE TABLE wikidata_subclass_stage(child_id INTEGER NOT NULL, parent_id INTEGER NOT NULL);
              INSERT INTO metadata_metric(name,value) VALUES('builder_schema_version',9);
 
 -- Optional subtitle indexes preserve compatibility with older query snapshots.

@@ -4,6 +4,7 @@
 //! spare horizontal space is used. All grid groups expand either their children
 //! or their gaps across the available width, regardless of their child count.
 
+use app_preferences::CoverText;
 use gpui::{Pixels, Rems, px};
 
 /// The one horizontal gap, used between children and at either edge of a
@@ -202,17 +203,12 @@ impl PaginatorGroupPolicy {
 /// two places, so they resolve their geometry here rather than each restating
 /// it. The cards are the ordinary book cards at their ordinary width: a shelf
 /// that sized its covers differently would be a second visual language for the
-/// same object. Where the shelf is already one person's, the cards state no
-/// author and lose the metadata line with it — see `book_card_title_row`.
+/// same object.
 ///
 /// Rows start flush with their heading. Cards grow up to 25%, then spare
 /// width expands the gaps.
-pub(crate) fn shelf_card_policy(cards_state_author: bool) -> PaginatorGroupPolicy {
-    let (extra_height, fixed_height) = if cards_state_author {
-        (ui_components::BOOK_CARD_TITLE_HEIGHT_REM + ui_components::BOOK_CARD_METADATA_HEIGHT_REM, ui_components::BOOK_CARD_FIXED_HEIGHT)
-    } else {
-        (ui_components::BOOK_CARD_TITLE_ONLY_HEIGHT_REM, ui_components::BOOK_CARD_TITLE_ONLY_FIXED_HEIGHT)
-    };
+pub(crate) fn shelf_card_policy(cover_text: CoverText) -> PaginatorGroupPolicy {
+    let (extra_height, fixed_height) = text_block_height(cover_text);
     let gap = px(ui_components::BOOK_GRID_BOOK_GAP);
     PaginatorGroupPolicy::new(
         PaginatorWidthPolicy::pixels(px(ui_components::BOOK_CARD_WIDTH)),
@@ -225,18 +221,31 @@ pub(crate) fn shelf_card_policy(cards_state_author: bool) -> PaginatorGroupPolic
     .flush_edges()
 }
 
+/// The text block's contribution to a card's reserved height, under either
+/// value of the "cover text" setting.
+fn text_block_height(cover_text: CoverText) -> (f32, f32) {
+    match cover_text {
+        CoverText::Always => (ui_components::BOOK_CARD_TITLE_HEIGHT_REM, ui_components::BOOK_CARD_COVER_CONTENT_GAP),
+        CoverText::CoverOnly => (ui_components::BOOK_CARD_NO_TEXT_HEIGHT_REM, ui_components::BOOK_CARD_NO_TEXT_FIXED_HEIGHT),
+    }
+}
+
 /// The book grid on a browse page, in either of the card's two modes.
 ///
 /// A detailed card is the ordinary card with a blurb opened out beside it: the
-/// cover, title and author keep their stack, at the ordinary card's width, and
-/// the doubled cell gives the gained half to the words. So both modes are the
-/// same arithmetic — cover, then title, subtitle and author — and
-/// the only thing the detailed card changes is the width the cover is a
-/// fraction of, which is what its ratio carries.
+/// cover and title keep their stack, at the ordinary card's width, and the
+/// doubled cell gives the gained half to the words. So both modes are the
+/// same arithmetic — cover, then title and subtitle — and the only thing the
+/// detailed card changes is the width the cover is a fraction of, which is
+/// what its ratio carries.
 ///
 /// Detailed cards widen their description up to a cap, then expand gaps.
 /// Cover-only cards grow up to 25% before expanding gaps.
-pub(crate) fn book_card_policy(detailed: bool) -> PaginatorGroupPolicy {
+///
+/// A detailed card always states its title — the blurb needs a heading, and
+/// there is no separate cover-scale grid to compare it against — so
+/// `cover_text` is read only in the compact case.
+pub(crate) fn book_card_policy(detailed: bool, cover_text: CoverText) -> PaginatorGroupPolicy {
     let (width, maximum_width, cover_ratio, minimum_columns) = if detailed {
         (
             PaginatorWidthPolicy::new(Rems(ui_components::BOOK_CARD_DETAIL_TEXT_WIDTH_REM)).with_pixels(px(ui_components::BOOK_CARD_DETAIL_FIXED_WIDTH)),
@@ -250,10 +259,8 @@ pub(crate) fn book_card_policy(detailed: bool) -> PaginatorGroupPolicy {
         let width = PaginatorWidthPolicy::pixels(px(ui_components::BOOK_CARD_WIDTH));
         (width, PaginatorWidthPolicy::pixels(px(ui_components::BOOK_CARD_MAXIMUM_WIDTH)), ui_components::BOOK_COVER_ASPECT_RATIO, ui_components::BOOK_GRID_MINIMUM_COLUMNS)
     };
-    let mut sizing = PaginatorSizing::aspect_ratio(cover_ratio)
-        .with_rems(Rems(ui_components::BOOK_CARD_TITLE_HEIGHT_REM + ui_components::BOOK_CARD_METADATA_HEIGHT_REM))
-        .with_pixels(px(ui_components::BOOK_CARD_FIXED_HEIGHT))
-        .with_padding(px(ui_components::BOOK_CARD_PADDING));
+    let (extra_height, fixed_height) = text_block_height(if detailed { CoverText::Always } else { cover_text });
+    let mut sizing = PaginatorSizing::aspect_ratio(cover_ratio).with_rems(Rems(extra_height)).with_pixels(px(fixed_height)).with_padding(px(ui_components::BOOK_CARD_PADDING));
     if detailed {
         sizing = sizing.with_aspect_width_limit(px(ui_components::BOOK_CARD_CONTENT_WIDTH / ui_components::BOOK_CARD_DETAIL_COVER_FRACTION));
     }
@@ -263,17 +270,22 @@ pub(crate) fn book_card_policy(detailed: bool) -> PaginatorGroupPolicy {
 
 /// How tall the cards on a shelf resolve to, given the width of the row they
 /// sit in. The carousel fills its row, so the row's width is theirs.
-fn shelf_cards_height(cards_state_author: bool, row_width: Pixels, rem_size: Pixels) -> Pixels {
-    let policy = shelf_card_policy(cards_state_author);
+///
+/// Two named functions rather than one taking `cover_text`: the nested-height
+/// slot on [`PaginatorSizing`] is a bare function pointer, which cannot close
+/// over an argument, so the setting has to be baked in at the point
+/// `shelf_rows_policy` picks which one to hand it.
+fn shelf_cards_height(cover_text: CoverText, row_width: Pixels, rem_size: Pixels) -> Pixels {
+    let policy = shelf_card_policy(cover_text);
     policy.sizing.height(super::geometry::group_geometry(policy, 0, row_width, rem_size).child_width, rem_size)
 }
 
-fn shelf_cards_height_with_author(row_width: Pixels, rem_size: Pixels) -> Pixels {
-    shelf_cards_height(true, row_width, rem_size)
+fn shelf_cards_height_always(row_width: Pixels, rem_size: Pixels) -> Pixels {
+    shelf_cards_height(CoverText::Always, row_width, rem_size)
 }
 
-fn shelf_cards_height_title_only(row_width: Pixels, rem_size: Pixels) -> Pixels {
-    shelf_cards_height(false, row_width, rem_size)
+fn shelf_cards_height_cover_only(row_width: Pixels, rem_size: Pixels) -> Pixels {
+    shelf_cards_height(CoverText::CoverOnly, row_width, rem_size)
 }
 
 /// The page those shelves stack on: one full-width row each.
@@ -287,8 +299,11 @@ fn shelf_cards_height_title_only(row_width: Pixels, rem_size: Pixels) -> Pixels 
 /// nominal on a wide window, and a cover is sized by aspect ratio, so a row
 /// holding their nominal height would clip the bottom of every stretched cover
 /// and the title under it.
-pub(crate) fn shelf_rows_policy(cards_state_author: bool, subject_rows: usize) -> PaginatorGroupPolicy {
-    let cards: fn(Pixels, Pixels) -> Pixels = if cards_state_author { shelf_cards_height_with_author } else { shelf_cards_height_title_only };
+pub(crate) fn shelf_rows_policy(cover_text: CoverText, subject_rows: usize) -> PaginatorGroupPolicy {
+    let cards: fn(Pixels, Pixels) -> Pixels = match cover_text {
+        CoverText::Always => shelf_cards_height_always,
+        CoverText::CoverOnly => shelf_cards_height_cover_only,
+    };
     PaginatorGroupPolicy::new(
         PaginatorWidthPolicy::new(Rems(ui_components::SHELF_ROW_WIDTH_REM)),
         PaginatorSizing::rems(Rems(ui_components::shelf_heading_height_rem(subject_rows))).with_pixels(px(ui_components::CAROUSEL_CONTENT_GAP)).with_nested(cards),

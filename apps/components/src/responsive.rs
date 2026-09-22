@@ -8,8 +8,16 @@ pub const EXPANDED_WINDOW_WIDTH: f32 = 840.0;
 /// Mobile app navigation also serves compact browser windows. Kobo keeps its
 /// device controls instead of the phone's Back/title header.
 pub fn uses_mobile_navigation(window: &Window) -> bool {
+    has_native_back_button() || (cfg!(target_arch = "wasm32") && WindowWidthClass::for_window(window).is_compact())
+}
+
+/// Native mobile builds have a real OS back button/gesture (wired to the same
+/// dismiss/return actions as the on-screen one), so the mobile navigation
+/// heading skips its own back button there. Compact-width web builds share
+/// the mobile heading layout but have no such OS-level back to fall back on,
+/// so they keep the on-screen button.
+pub fn has_native_back_button() -> bool {
     cfg!(any(target_os = "android", target_os = "ios", all(feature = "mobile", not(feature = "kobo"))))
-        || (cfg!(target_arch = "wasm32") && WindowWidthClass::for_window(window).is_compact())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

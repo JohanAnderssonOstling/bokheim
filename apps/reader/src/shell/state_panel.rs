@@ -2,55 +2,70 @@
 
 use std::rc::Rc;
 
+use library_backend::ReaderAnnotation;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, Window};
 use gpui_component::list::ListItem;
 use gpui_component::tree::{TreeState, tree};
-use book_model::ReaderAnnotation;
 use ui_components as components;
 
 use crate::settings::ReaderSettings;
+pub(crate) use crate::settings::SidebarTab;
 use crate::shell::marks::MarkSession;
 
-/// The one sidebar a reader may display at a time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SidebarPanel {
-    Contents,
-    Annotations,
-}
-
-/// Shared sidebar visibility and selection state.
+/// Shared sidebar tab-selection state.
+///
+/// The sidebar itself is always visible on desktop while chrome is shown, so
+/// `active` is normally `Some`. It only goes `None` on the mobile bottom-bar
+/// layout, where tapping the already-open tab's icon closes its sheet while
+/// the bar itself stays put. On Kobo the sidebar starts closed, matching the
+/// device's minimal-chrome default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SidebarState {
-    active: Option<SidebarPanel>,
+    active: Option<SidebarTab>,
 }
 
 impl SidebarState {
     pub(crate) fn from_preferences(cx: &App) -> Self {
-        Self::with_contents_visible(ReaderSettings::preferences(cx).toc_visible)
+        let tab = ReaderSettings::preferences(cx).active_sidebar_tab;
+        Self { active: (!cfg!(feature = "kobo")).then_some(tab) }
     }
 
-    fn with_contents_visible(visible: bool) -> Self {
-        Self { active: visible.then_some(SidebarPanel::Contents) }
-    }
-
-    pub(crate) fn active(self) -> Option<SidebarPanel> {
+    pub(crate) fn active(self) -> Option<SidebarTab> {
         self.active
     }
 
-    pub(crate) fn shows(self, panel: SidebarPanel) -> bool {
-        self.active == Some(panel)
+    /// The tab that should actually be drawn: falls back to Annotations when
+    /// the stored/selected tab is Contents but no outline exists.
+    pub(crate) fn effective(self, contents_available: bool) -> Option<SidebarTab> {
+        match self.active {
+            Some(SidebarTab::Contents) if !contents_available => Some(SidebarTab::Annotations),
+            other => other,
+        }
+    }
+
+    /// [`Self::effective`], defaulting to a sensible tab instead of `None`.
+    ///
+    /// A persistent desktop split always shows some tab — there is no closed
+    /// state to fall back to once the toolbar's toggle button is gone — so
+    /// this is what the split render path reaches for instead of `effective`.
+    pub(crate) fn effective_or_default(self, contents_available: bool) -> SidebarTab {
+        self.effective(contents_available).unwrap_or(if contents_available { SidebarTab::Contents } else { SidebarTab::Annotations })
+    }
+
+    pub(crate) fn shows(self, tab: SidebarTab) -> bool {
+        self.active == Some(tab)
     }
 
     pub(crate) fn is_visible(self) -> bool {
         self.active.is_some()
     }
 
-    pub(crate) fn show(&mut self, panel: SidebarPanel) -> bool {
-        if self.active == Some(panel) {
+    pub(crate) fn show(&mut self, tab: SidebarTab) -> bool {
+        if self.active == Some(tab) {
             return false;
         }
-        self.active = Some(panel);
+        self.active = Some(tab);
         true
     }
 
@@ -61,64 +76,46 @@ impl SidebarState {
         self.active = None;
         true
     }
-
-    fn set_contents_visible(&mut self, visible: bool) -> bool {
-        if visible {
-            self.show(SidebarPanel::Contents)
-        } else if self.shows(SidebarPanel::Contents) {
-            self.close()
-        } else {
-            false
-        }
-    }
 }
 
-/// Selects one sidebar panel and persists whether contents should reopen in a
-/// future reader session.
-pub(crate) fn select_panel<C: 'static>(sidebar: &mut SidebarState, panel: SidebarPanel, cx: &mut Context<C>) -> bool {
-    let state_changed = sidebar.show(panel);
-    let preference_changed = ReaderSettings::update(cx, |preferences| preferences.toc_visible = panel == SidebarPanel::Contents);
+/// Selects a sidebar tab and persists it as the tab to reopen next session.
+pub(crate) fn select_tab<C: 'static>(sidebar: &mut SidebarState, tab: SidebarTab, cx: &mut Context<C>) -> bool {
+    let state_changed = sidebar.show(tab);
+    let preference_changed = ReaderSettings::update(cx, |preferences| preferences.active_sidebar_tab = tab);
     state_changed || preference_changed
 }
 
-/// Shows or hides contents without disturbing an open annotations panel.
-pub(crate) fn set_contents_visible<C: 'static>(sidebar: &mut SidebarState, visible: bool, cx: &mut Context<C>) -> bool {
-    let state_changed = sidebar.set_contents_visible(visible);
-    let preference_changed = ReaderSettings::update(cx, |preferences| preferences.toc_visible = visible);
-    state_changed || preference_changed
-}
-
-/// Applies the common sidebar-button policy. Contents is preferred when the
-/// document has it; annotations is the fallback for outline-free PDFs.
-pub(crate) fn toggle_sidebar<C: 'static>(sidebar: &mut SidebarState, contents_available: bool, cx: &mut Context<C>) -> bool {
-    let visible = sidebar.shows(SidebarPanel::Annotations) || (contents_available && sidebar.shows(SidebarPanel::Contents));
-    if visible {
-        let state_changed = sidebar.close();
-        let preference_changed = ReaderSettings::update(cx, |preferences| preferences.toc_visible = false);
-        state_changed || preference_changed
-    } else if contents_available {
-        set_contents_visible(sidebar, true, cx)
+/// The mobile bottom bar's self-toggling policy: tapping the tab that is
+/// already open closes its sheet; tapping any other tab opens it. Contents
+/// falls back to Annotations when there is no outline, the same fallback
+/// `SidebarState::effective` applies on desktop.
+pub(crate) fn toggle_tab<C: 'static>(sidebar: &mut SidebarState, tab: SidebarTab, contents_available: bool, cx: &mut Context<C>) -> bool {
+    let tab = if tab == SidebarTab::Contents && !contents_available { SidebarTab::Annotations } else { tab };
+    if sidebar.shows(tab) {
+        sidebar.close()
     } else {
-        select_panel(sidebar, SidebarPanel::Annotations, cx)
+        select_tab(sidebar, tab, cx)
     }
 }
 
-pub(crate) fn reader_sidebar_tabs<C, F>(id: &'static str, target: &Entity<C>, show_annotations: bool, outline_available: bool, cx: &mut Context<C>, on_toggle: F) -> AnyElement
+/// The three-tab strip shared by the desktop sidebar and the mobile sheet
+/// header. Contents is omitted entirely when there is no outline, rather than
+/// shown disabled — a PDF without bookmarks never had a Contents tab to begin
+/// with.
+pub(crate) fn reader_sidebar_tabs<C, F>(id: &'static str, target: &Entity<C>, active: SidebarTab, contents_available: bool, theme: components::BrowserTheme, on_select: F) -> AnyElement
 where
     C: 'static,
-    F: Fn(bool, &mut C, &mut Context<C>) + 'static,
+    F: Fn(SidebarTab, &mut C, &mut Context<C>) + 'static,
 {
-    let theme = components::browser_theme(cx);
-    let on_toggle = Rc::new(on_toggle);
+    let on_select = Rc::new(on_select);
     let mut tabs = components::browser_tab_strip();
-    for (annotations, label) in [(false, "Contents"), (true, "Annotations")] {
-        if !annotations && !outline_available {
+    for (index, tab, label) in [(0usize, SidebarTab::Contents, "Contents"), (1, SidebarTab::Annotations, "Annotations"), (2, SidebarTab::Settings, "Settings")] {
+        if tab == SidebarTab::Contents && !contents_available {
             continue;
         }
         let target = target.clone();
-        let on_toggle = on_toggle.clone();
-        let selected = annotations == (show_annotations || !outline_available);
-        tabs = tabs.child(components::browser_tab((id, usize::from(annotations)), label, None::<usize>, selected, theme).on_click(move |_, _, cx| target.update(cx, |this, cx| on_toggle(annotations, this, cx))));
+        let on_select = on_select.clone();
+        tabs = tabs.child(components::browser_tab((id, index), label, None::<usize>, tab == active, theme).on_click(move |_, _, cx| target.update(cx, |this, cx| on_select(tab, this, cx))));
     }
     components::browser_tab_bar().id(id).border_b_1().border_color(theme.rule).child(tabs).into_any_element()
 }
@@ -161,19 +158,20 @@ where
                 .on_click(move |_, window, cx| {
                     let id = select_id.clone();
                     select_target.update(cx, |this, cx| select(id, window, this, cx));
+                    // Clicking the annotation goes to its passage; there is no
+                    // Go button.
+                    let annotation = go_annotation.clone();
+                    go_target.update(cx, |this, cx| go(&annotation, this, cx));
                 })
                 .when(!annotation.exact_text.is_empty(), |card| card.child(components::reader_state_quote(format!("“{}”", annotation.exact_text))))
                 .when(!note.is_empty(), |card| card.child(components::reader_state_note(note, theme)))
                 .child(
-                    components::reader_state_actions()
-                        .child(components::reader_sidebar_action_button(("reader-state-annotation-go", index), "Go", gpui_component::IconName::ArrowRight, true).on_click(move |_, _, cx| {
-                            go_target.update(cx, |this, cx| go(&go_annotation, this, cx));
-                        }))
+                    components::action_row()
                         // Deleting lives here now that the note editor has no
                         // buttons of its own: an icon in `danger`, apart from
                         // the actions that keep the annotation.
                         .when(editable, |actions| {
-                            actions.child(components::reader_annotation_delete_button(("reader-state-annotation-delete", index), gpui::px(components::READER_ANNOTATION_ACTION_HEIGHT), theme).on_click(move |_, _, cx| {
+                            actions.child(components::reader_annotation_delete_button(("reader-state-annotation-delete", index), theme).on_click(move |_, _, cx| {
                                 let id = delete_id.clone();
                                 delete_target.update(cx, |this, cx| delete(id, this, cx));
                             }))
@@ -219,6 +217,8 @@ where
         // The tree insists on a `ListItem`, which is where its own click and
         // keyboard handling attach; the row inside it is the shared one, so a
         // sidebar entry and a chapter in the player are the same drawing.
+        // The tree uses a uniform list, so every entry reserves two lines even
+        // when its title fits on one. Otherwise later wrapped rows overlap.
         ListItem::new(("reader-toc-item", index)).w_full().min_w_0().p_0().child(components::contents_row(
             ("reader-toc-row", index),
             row,
@@ -227,29 +227,39 @@ where
             None,
             None,
             theme,
-        ))
+        ).h(gpui::rems(3.25)))
     })
     .into_any_element()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{SidebarPanel, SidebarState};
+    use super::{SidebarState, SidebarTab};
 
     #[test]
-    fn a_sidebar_has_exactly_one_active_panel() {
-        let mut sidebar = SidebarState::with_contents_visible(true);
-        assert_eq!(sidebar.active(), Some(SidebarPanel::Contents));
+    fn a_sidebar_has_exactly_one_active_tab() {
+        let mut sidebar = SidebarState::default();
+        sidebar.show(SidebarTab::Contents);
+        assert_eq!(sidebar.active(), Some(SidebarTab::Contents));
 
-        sidebar.show(SidebarPanel::Annotations);
-        assert_eq!(sidebar.active(), Some(SidebarPanel::Annotations));
+        sidebar.show(SidebarTab::Annotations);
+        assert_eq!(sidebar.active(), Some(SidebarTab::Annotations));
     }
 
     #[test]
-    fn hiding_contents_does_not_close_annotations() {
+    fn closing_clears_the_active_tab() {
         let mut sidebar = SidebarState::default();
-        sidebar.show(SidebarPanel::Annotations);
-        sidebar.set_contents_visible(false);
-        assert_eq!(sidebar.active(), Some(SidebarPanel::Annotations));
+        sidebar.show(SidebarTab::Annotations);
+        assert!(sidebar.close());
+        assert_eq!(sidebar.active(), None);
+        assert!(!sidebar.is_visible());
+    }
+
+    #[test]
+    fn contents_falls_back_to_annotations_without_an_outline() {
+        let mut sidebar = SidebarState::default();
+        sidebar.show(SidebarTab::Contents);
+        assert_eq!(sidebar.effective(true), Some(SidebarTab::Contents));
+        assert_eq!(sidebar.effective(false), Some(SidebarTab::Annotations));
     }
 }

@@ -1,1 +1,0 @@
-DELETE FROM sync_state_version WHERE state_kind=?1 AND state_key=?2 AND state_subkey=?3

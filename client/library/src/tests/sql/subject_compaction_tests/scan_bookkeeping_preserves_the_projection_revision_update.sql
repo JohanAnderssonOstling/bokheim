@@ -1,1 +1,0 @@
-UPDATE book_dir SET last_scan=last_scan+1,local_hash='new-fingerprint',is_downloaded=is_downloaded

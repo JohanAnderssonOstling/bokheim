@@ -1,8 +1,8 @@
 //! Multi-resource library workflows implemented on the public library handle.
-use super::LibrarySession;
 use super::filenames;
-use crate::BackendError;
+use super::LibrarySession;
 use crate::asset_workflow::AssetPlacementWorkflow;
+use crate::BackendError;
 use crate::{BlobKind, ContentHash, DownloadState};
 use book_model::BookFormat;
 use library_model::Dir;
@@ -46,12 +46,27 @@ impl LibrarySession {
     /// its placements, reading state, or relationships.
     pub(crate) fn remove_local_book_copy(&self, content_hash: ContentHash) -> Result<DownloadState, BackendError> {
         self.assets.evict_local_book(&self.db, &content_hash).map_err(BackendError::operation)?;
-        self.persistent_download_state(content_hash)
+        let state = self.persistent_download_state(content_hash)?;
+        self.emit(super::events::LibraryEvent::DownloadStatusChanged { content_hash, state: state.clone() });
+        self.notify_contents_changed();
+        Ok(state)
     }
 
     pub fn create_directory(&self, parent_id: &DirId, name: &str) -> Result<Dir, BackendError> {
-        let name = name.trim().to_owned();
-        let created = self.db.create_directory(parent_id, &name).map_err(BackendError::operation)?;
+        let name = filenames::validate_component(name.trim())?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let created = if self.assets.local_access_enabled() {
+            let id = DirId::new_v4();
+            let (_, path) = self.db.directory_creation_path(parent_id, &name)?;
+            let chosen = self.assets.placement().create_directory(&path, id).map_err(BackendError::operation)?;
+            let parent = path.rsplit_once('/').map(|(parent, _)| parent);
+            let path = parent.map_or_else(|| chosen.clone(), |parent| format!("{parent}/{chosen}"));
+            self.db.register_created_directory(&id, parent_id, &chosen, &path)?
+        } else {
+            self.db.create_directory(parent_id, &name)?
+        };
+        #[cfg(target_arch = "wasm32")]
+        let created = self.db.create_directory(parent_id, &name)?;
         self.notify_contents_changed();
         Ok(created)
     }
@@ -96,14 +111,14 @@ impl LibrarySession {
             }
             let Some((name, parent_path)) = path.split_last() else { continue };
             let Some(parent_id) = imported_directories.get(parent_path) else {
-                failures.push(crate::import_workflow::folder_failure(&path, "parent folder could not be imported"));
+                failures.push(import_pipeline::import_workflow::folder_failure(&path, "parent folder could not be imported"));
                 continue;
             };
             match create(parent_id, name, &path) {
                 Ok(directory) => {
                     imported_directories.insert(path, directory.id);
                 }
-                Err(error) => failures.push(crate::import_workflow::folder_failure(&path, &error.to_string())),
+                Err(error) => failures.push(import_pipeline::import_workflow::folder_failure(&path, &error.to_string())),
             }
         }
 
@@ -124,21 +139,20 @@ impl LibrarySession {
         self.finish_import(import, staged).await
     }
 
-    /// Inspection cache version for a format. Matches the extractor contract:
-    /// EPUB and PDF evidence versions with the shared extractor, others are 1.
-    fn inspection_version(format: BookFormat) -> i64 {
-        match format {
-            BookFormat::Epub | BookFormat::Pdf => i64::from(book_inspection::evidence::INSPECTION_VERSION),
-            _ => 1,
-        }
+    pub(super) async fn finish_import(&self, import: ValidatedImport, staged: crate::asset_store::StagedBook) -> Result<ContentHash, BackendError> {
+        self.finish_import_with_progress(import, staged, None).await
     }
 
-    pub(super) async fn finish_import(&self, import: ValidatedImport, staged: crate::asset_store::StagedBook) -> Result<ContentHash, BackendError> {
-        let reuse = import.format != BookFormat::Pdf
-            && self
-                .db
-                .has_import_inspection(&staged.content_hash(), import.format.canonical_extension(), Self::inspection_version(import.format))
-                .map_err(BackendError::operation)?;
+    pub(super) async fn finish_import_with_progress(&self, import: ValidatedImport, staged: crate::asset_store::StagedBook, progress: Option<crate::asset_store::ImportProgressObserver>) -> Result<ContentHash, BackendError> {
+        use library_model::ImportFileStage;
+        let report = |stage| {
+            if let Some(progress) = &progress {
+                progress(stage);
+            }
+        };
+        report(ImportFileStage::ReadingMetadata);
+        let started = web_time::Instant::now();
+        let reuse = import.format != BookFormat::Pdf && self.db.has_import_inspection(&staged.content_hash(), import.format.canonical_extension(), crate::inspection_version(import.format)).map_err(BackendError::operation)?;
         let inspection = if reuse {
             None
         } else {
@@ -146,13 +160,21 @@ impl LibrarySession {
             Some(
                 crate::worker_cpu::submit_book(crate::worker_cpu::Inspect { source_name: import.file_name.clone(), format: import.format }, reader)
                     .await
-                    .map_err(|error| BackendError::operation(format!("invalid {} book: {error}", import.format.canonical_extension().to_ascii_uppercase())))?,
+                    .map_err(|error| BackendError::message(format!("invalid {} book: {error}", import.format.canonical_extension().to_ascii_uppercase())))?,
             )
         };
         let content_hash = staged.content_hash();
+        log::info!(target: "import_timing", "inspection_finished reused={reuse} ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
         let checksum = staged.checksum();
         let size_bytes = staged.size_bytes();
-        let _lease = self.assets.lease_book(&content_hash).await.map_err(|error| BackendError::operation(format!("could not lock the imported book: {error}")))?;
+        // Inspection may overlap a delete/move. Do not publish into a folder
+        // that became unavailable while CPU or source I/O was in flight.
+        validate_import_destination(&self.db, &import.parent_id)?;
+        report(ImportFileStage::Publishing);
+        let started = web_time::Instant::now();
+        let _lease = self.assets.lease_book(&content_hash).await.map_err(|error| BackendError::message(format!("could not lock the imported book: {error}")))?;
+        log::info!(target: "import_timing", "book_lease_acquired ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+        let started = web_time::Instant::now();
         let prepared = staged.prepare_import().await.map_err(BackendError::operation)?;
 
         // Book precedes the metadata commit. On a database failure the
@@ -160,7 +182,11 @@ impl LibrarySession {
         let published = self.publish_import(&import, prepared).await?;
         let request_thumbnail = !self.assets.thumbnail_set_exists(&content_hash).map_err(BackendError::operation)?;
         let restore_paths = self.import_restore_paths(&content_hash)?;
+        log::info!(target: "import_timing", "publication_finished ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+        report(ImportFileStage::AddingToLibrary);
+        let started = web_time::Instant::now();
         self.commit_import(import, content_hash, checksum, size_bytes, inspection, published, request_thumbnail, restore_paths)?;
+        log::info!(target: "import_timing", "database_commit_finished ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
         drop(_lease);
         Ok(content_hash)
     }
@@ -170,20 +196,10 @@ impl LibrarySession {
     /// pass covers a concurrent rename before the bytes move.
     #[cfg(not(target_arch = "wasm32"))]
     async fn publish_import(&self, import: &ValidatedImport, prepared: crate::asset_store::PreparedImport) -> Result<library_database::PublishedImport, BackendError> {
-        self.assets
-            .placement()
-            .prepare_directory_with_database(&self.db, import.parent_id)
-            .await
-            .map_err(|error| BackendError::operation(format!("could not prepare the destination library folder for book: {error}")))?;
-        let relative = self
-            .db
-            .native_book_path(import.parent_id, &import.file_name)
-            .map_err(BackendError::operation)?
-            .ok_or_else(|| BackendError::operation("prepared directory no longer exists"))?;
-        let occupied = self.db.occupied_file_names(&import.parent_id).map_err(BackendError::operation)?;
-        let staged = prepared
-            .publish_snapshot(&self.assets, &relative, &occupied)
-            .map_err(|error| BackendError::operation(format!("could not publish the imported book: {error}")))?;
+        self.assets.placement().prepare_directory_with_database(&self.db, import.parent_id).await.map_err(|error| BackendError::message(format!("could not prepare the destination library folder for book: {error}")))?;
+        let relative = self.db.native_book_path(import.parent_id, &import.file_name).map_err(BackendError::operation)?.ok_or_else(|| BackendError::message("prepared directory no longer exists"))?;
+        let occupied = self.db.shared_occupied_file_names(&import.parent_id).map_err(BackendError::operation)?;
+        let staged = prepared.publish_snapshot(&self.assets, &relative, &occupied).map_err(|error| BackendError::message(format!("could not publish the imported book: {error}")))?;
         Ok(library_database::PublishedImport { name: staged.name, relative_path: staged.relative_path, published: staged.published, fingerprint: staged.fingerprint })
     }
 
@@ -200,11 +216,7 @@ impl LibrarySession {
     #[cfg(not(target_arch = "wasm32"))]
     fn import_restore_paths(&self, content_hash: &ContentHash) -> Result<Vec<String>, BackendError> {
         let candidates = self.db.import_restore_candidates(content_hash).map_err(BackendError::operation)?;
-        Ok(candidates
-            .into_iter()
-            .filter(|(path, materialized)| materialized.as_deref() != Some(path.as_str()) || !self.assets.placement_file_exists(path))
-            .map(|(path, _)| path)
-            .collect())
+        Ok(candidates.into_iter().filter(|(path, materialized)| materialized.as_deref() != Some(path.as_str()) || !self.assets.placement_file_exists(path)).map(|(path, _)| path).collect())
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -215,24 +227,12 @@ impl LibrarySession {
     /// Committing the metadata transaction is the import's success point.
     /// Resolve all fallible result data before it, and notify before optional work.
     fn commit_import(
-        &self, import: ValidatedImport, content_hash: ContentHash, checksum: ContentHash, size_bytes: u64, inspection: Option<book_metadata::InspectedBook>,
-        published: library_database::PublishedImport, request_thumbnail: bool, restore_paths: Vec<String>,
+        &self, import: ValidatedImport, content_hash: ContentHash, checksum: ContentHash, size_bytes: u64, inspection: Option<book_metadata::InspectedBook>, published: library_database::PublishedImport, request_thumbnail: bool,
+        restore_paths: Vec<String>,
     ) -> Result<(), BackendError> {
         let ValidatedImport { parent_id, file_name, format } = import;
         self.db
-            .commit_import(library_database::ImportCommit {
-                parent_id,
-                file_name,
-                format,
-                content_hash,
-                checksum,
-                size_bytes,
-                inspection_version: Self::inspection_version(format),
-                inspection,
-                published,
-                request_thumbnail,
-                restore_paths,
-            })
+            .commit_import(library_database::ImportCommit { parent_id, file_name, format, content_hash, checksum, size_bytes, inspection_version: crate::inspection_version(format), inspection, published, request_thumbnail, restore_paths })
             .map_err(BackendError::operation)?;
         self.notify_contents_changed();
         self.notify_storage_changed();

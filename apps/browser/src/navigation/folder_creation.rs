@@ -1,6 +1,6 @@
 //! Shared review rules for filesystem roots and provider-backed directory trees.
+use library_backend::BookFormat;
 use gpui::SelectedDirectory;
-use book_model::BookFormat;
 
 fn eligible(path: &[String]) -> bool {
     !path.iter().any(|part| part.starts_with('.')) && path.last().and_then(|name| std::path::Path::new(name).extension()).and_then(|ext| ext.to_str()).and_then(BookFormat::from_import_extension).is_some()
@@ -35,9 +35,9 @@ pub(super) fn estimate_label((books, bytes, unavailable): (u64, u64, u64)) -> St
         return format!("{books} eligible books · size unavailable");
     }
     format!(
-        "{books} eligible books · {}{:.1} MiB{}",
+        "{books} eligible books · {}{}{}",
         if unavailable > 0 { "at least " } else { "estimated " },
-        bytes as f64 / (1024.0 * 1024.0),
+        crate::services::format_storage_bytes(bytes),
         if unavailable > 0 { format!(" · {unavailable} entries could not be checked") } else { String::new() }
     )
 }
@@ -64,5 +64,10 @@ mod tests {
     fn unavailable_sizes_are_not_shown_as_zero() {
         assert_eq!(estimate_label((2, 0, 2)), "2 eligible books · size unavailable");
         assert!(estimate_label((2, 1024, 1)).contains("at least"));
+    }
+    #[test]
+    fn size_switches_to_gb_at_one_gb() {
+        assert!(estimate_label((5, 500_000_000, 0)).contains("MB"));
+        assert!(estimate_label((5, 1_000_000_000, 0)).contains("GB"));
     }
 }

@@ -29,7 +29,9 @@ fn main() {
         assert_eq!(receipt["files"][name].as_str(), Some(actual.as_str()), "PDFium prepared file checksum mismatch: {}", path.display());
     }
     println!("cargo:rustc-env=PDFIUM_NOTICES_PATH={}", directory.join("LICENSE").canonicalize().unwrap().display());
-    if env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32") { return; }
+    if env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32") {
+        return;
+    }
     let name = spec["files"].as_table().unwrap().values().next().unwrap().as_str().unwrap();
     println!("cargo:rustc-env=PDFIUM_LIBRARY_NAME={name}");
     println!("cargo:rustc-env=PDFIUM_BUILD_LIBRARY_PATH={}", directory.join(name).canonicalize().unwrap().display());

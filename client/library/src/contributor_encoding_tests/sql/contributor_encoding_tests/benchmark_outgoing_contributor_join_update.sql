@@ -1,1 +1,0 @@
-UPDATE book SET title=?1

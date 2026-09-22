@@ -106,7 +106,7 @@ build_id=${build_id:0:24}
 asset_base="pkg/${build_id}"
 mv "$bundle_dir" "$output_dir/${asset_base}"
 
-cp "$workspace_dir/client/backend/web/audiobook_service_worker.js" "$output_dir/audiobook_service_worker.js"
+cp "$workspace_dir/client/app/web/audiobook_service_worker.js" "$output_dir/audiobook_service_worker.js"
 # This file is generated only after production signing certificates are known.
 if [[ -f "$app_dir/assetlinks.json" ]]; then
     mkdir -p "$output_dir/.well-known"

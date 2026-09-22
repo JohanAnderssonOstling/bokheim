@@ -1,1 +1,0 @@
-INSERT INTO book_description(book_row_id,description) SELECT row_id,'Description' FROM book WHERE content_hash=?1

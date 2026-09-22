@@ -5,13 +5,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use web_time::Instant;
 
-use bokheim_backend::BoxedBookReader;
-use bokheim_backend::LibraryClient;
+use library_backend::BoxedBookReader;
+use library_backend::LibraryClient;
+use library_backend::BookFormat;
 use gpui::prelude::*;
 use gpui::{AnimationExt, AnyView, App, AppContext, Context, EventEmitter, IntoElement, Render, SharedString, Task, Window};
 use html_book::BookSourceFormat;
 use library_model::BookLocator;
-use book_model::BookFormat;
 
 use crate::epub::ReaderView as EpubReaderView;
 use crate::pdf::PdfReaderView;
@@ -37,20 +37,20 @@ enum PreparedBook {
     },
     #[cfg(feature = "audiobooks")]
     Audiobook {
-        resolved: bokheim_backend::ResolvedBook,
+        resolved: library_backend::ResolvedBook,
         initial_target: Option<String>,
     },
 }
 
 enum ReaderState {
-    Loading { stage: SharedString, download: Option<bokheim_backend::DownloadState> },
+    Loading { stage: SharedString, download: Option<app::DownloadState> },
     Ready(AnyView),
     Error(SharedString),
 }
 
 enum ReaderLoadUpdate {
     Stage(String),
-    Download(bokheim_backend::DownloadState),
+    Download(app::DownloadState),
 }
 
 /// The reader page installed directly in the application's single window.
@@ -71,7 +71,7 @@ fn report_stage(updates: &async_channel::Sender<ReaderLoadUpdate>, stage: impl I
 }
 
 async fn prepare_pdf(
-    locator: &BookLocator, content: bokheim_backend::ResolvedBook, library: &Rc<LibraryClient>, initial_target: Option<String>, startup_started: Instant, updates: &async_channel::Sender<ReaderLoadUpdate>,
+    locator: &BookLocator, content: library_backend::ResolvedBook, library: &Rc<LibraryClient>, initial_target: Option<String>, startup_started: Instant, updates: &async_channel::Sender<ReaderLoadUpdate>,
 ) -> Result<PreparedBook, String> {
     let phase_started = Instant::now();
     report_stage(updates, "Loading PDF reading position…");
@@ -90,7 +90,7 @@ async fn prepare_pdf(
 }
 
 async fn prepare_book(
-    locator: &BookLocator, content: bokheim_backend::ResolvedBook, format: BookFormat, library: &Rc<LibraryClient>, executor: &gpui::BackgroundExecutor, renderer_config: html_view_core::RendererInitialConfig,
+    locator: &BookLocator, content: library_backend::ResolvedBook, format: BookFormat, library: &Rc<LibraryClient>, executor: &gpui::BackgroundExecutor, renderer_config: html_view_core::RendererInitialConfig,
     initial_target: Option<String>, startup_started: Instant, updates: &async_channel::Sender<ReaderLoadUpdate>,
 ) -> Result<PreparedBook, String> {
     let phase_started = Instant::now();
@@ -128,7 +128,7 @@ async fn prepare_book(
 // The subscription is owned by this future: completion, failure, and dropping
 // the loading task all release it without waiting for another download event.
 #[cfg(not(target_arch = "wasm32"))]
-async fn with_download_progress<T>(operation: impl std::future::Future<Output = T>, states: async_channel::Receiver<bokheim_backend::DownloadState>, updates: &async_channel::Sender<ReaderLoadUpdate>) -> T {
+async fn with_download_progress<T>(operation: impl std::future::Future<Output = T>, states: async_channel::Receiver<app::DownloadState>, updates: &async_channel::Sender<ReaderLoadUpdate>) -> T {
     use futures_util::future::{Either, select};
     let mut operation = Box::pin(operation);
     loop {
@@ -210,7 +210,7 @@ impl ReaderView {
         cx.emit(CloseRequested);
     }
 
-    pub fn new(locator: BookLocator, title: String, initial_target: Option<String>, library: Rc<LibraryClient>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(locator: BookLocator, title: String, initial_target: Option<String>, app: app::AppClient, library: Rc<LibraryClient>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let startup_started = Instant::now();
         startup_phase!("phase=request content_hash={} elapsed_ms=0", locator.content_hash());
         #[cfg(feature = "kobo")]
@@ -226,11 +226,11 @@ impl ReaderView {
             let _ = reader_view.update(cx, Self::request_close);
         });
         let mut reader = Self { title: title.clone().into(), state: ReaderState::Loading { stage: SharedString::from("Starting book load…"), download: None }, _load_task: None };
-        reader.start_load(locator, title, initial_target, library, close_reader, startup_started, window, cx);
+        reader.start_load(locator, title, initial_target, app, library, close_reader, startup_started, window, cx);
         reader
     }
 
-    fn start_load(&mut self, locator: BookLocator, title: String, initial_target: Option<String>, library: Rc<LibraryClient>, close_reader: CloseReader, startup_started: Instant, _window: &mut Window, cx: &mut Context<Self>) {
+    fn start_load(&mut self, locator: BookLocator, title: String, initial_target: Option<String>, app: app::AppClient, library: Rc<LibraryClient>, close_reader: CloseReader, startup_started: Instant, _window: &mut Window, cx: &mut Context<Self>) {
         let load_locator = locator.clone();
         let executor = cx.background_executor().clone();
         let renderer_config = crate::epub::state::renderer_initial_config(cx);
@@ -262,9 +262,9 @@ impl ReaderView {
                         reader_view.state = ReaderState::Loading { stage: SharedString::from("Building reader interface…"), download: None };
                         let view: AnyView = match book {
                             PreparedBook::Pdf { reader, metadata, page_source, initial_page, initial_full_page_position } => {
-                                cx.new(|cx| PdfReaderView::new(locator, title, library, reader, metadata, page_source, initial_page, initial_full_page_position, close_reader, window, cx)).into()
+                                cx.new(|cx| PdfReaderView::new(locator, title, app, library, reader, metadata, page_source, initial_page, initial_full_page_position, close_reader, window, cx)).into()
                             }
-                            PreparedBook::Book { book, preparation } => cx.new(|cx| EpubReaderView::new(locator, title, library, book, preparation, close_reader, window, cx)).into(),
+                            PreparedBook::Book { book, preparation } => cx.new(|cx| EpubReaderView::new(locator, title, app, library, book, preparation, close_reader, window, cx)).into(),
                             #[cfg(feature = "audiobooks")]
                             PreparedBook::Audiobook { resolved, initial_target } => {
                                 // Narration speed lives with the reader's other
@@ -298,7 +298,7 @@ impl ReaderView {
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         let library_id = *library.id();
-                        let library_missing = match library.app().libraries().await {
+                        let library_missing = match app.libraries().await {
                             Ok(libraries) => !libraries.iter().any(|entry| entry.library_id() == &library_id),
                             Err(check_error) => {
                                 log::warn!("could not verify reader library {library_id} after load failure: {check_error}");
@@ -362,10 +362,10 @@ mod lifecycle_tests {
     fn cancelling_load_releases_subscription_after_forwarding_progress() {
         let (states, incoming) = async_channel::unbounded();
         let (updates, received) = async_channel::unbounded();
-        states.try_send(bokheim_backend::DownloadState::NotDownloaded).unwrap();
+        states.try_send(app::DownloadState::NotDownloaded).unwrap();
         let mut loading = Box::pin(with_download_progress(std::future::pending::<()>(), incoming, &updates));
         assert!(loading.as_mut().now_or_never().is_none());
-        assert!(matches!(received.try_recv(), Ok(ReaderLoadUpdate::Download(bokheim_backend::DownloadState::NotDownloaded))));
+        assert!(matches!(received.try_recv(), Ok(ReaderLoadUpdate::Download(app::DownloadState::NotDownloaded))));
         drop(loading);
         assert!(states.is_closed());
     }
@@ -401,13 +401,13 @@ impl Render for ReaderView {
                     .child(gpui::div().text_color(theme.text_muted).child(stage.clone()));
                 if let Some(state) = download {
                     let progress = match state {
-                        bokheim_backend::DownloadState::Queued => Some((None, SharedString::from("Waiting to download…"))),
-                        bokheim_backend::DownloadState::Downloading(progress) => {
+                        app::DownloadState::Queued => Some((None, SharedString::from("Waiting to download…"))),
+                        app::DownloadState::Downloading(progress) => {
                             let fraction = progress.value();
                             let label = if fraction > 0.0 { format!("Downloading… {:.0}%", fraction * 100.0) } else { "Starting download…".to_owned() };
                             Some(((fraction > 0.0).then_some(fraction), SharedString::from(label)))
                         }
-                        bokheim_backend::DownloadState::NotDownloaded | bokheim_backend::DownloadState::Downloaded => None,
+                        app::DownloadState::NotDownloaded | app::DownloadState::Downloaded => None,
                     };
                     if let Some((fraction, label)) = progress {
                         let indicator = match fraction {
@@ -446,7 +446,7 @@ impl Render for ReaderView {
                 .relative()
                 .size_full()
                 .child(content)
-                .child(gpui::div().absolute().top_0().left_0().right_0().pt(window.insets().safe_area.top).bg(theme.page_bg).child(ui_components::mobile_navigation_bar(self.title.clone(), back, theme)))
+                .child(gpui::div().absolute().top_0().left_0().right_0().pt(window.insets().safe_area.top).bg(theme.page_bg).child(ui_components::mobile_navigation_bar(self.title.clone(), Some(back), theme)))
                 .into_any_element()
         } else {
             content

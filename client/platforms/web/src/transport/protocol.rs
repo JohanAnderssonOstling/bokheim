@@ -1,6 +1,6 @@
 //! Typed transport envelopes. Application payloads and scheduling remain opaque.
+use super::{error_message, field};
 use wasm_bindgen::{JsCast, JsValue};
-use super::{field, error_message};
 
 pub(super) fn request_id(message: &JsValue) -> Result<u32, String> {
     let id = field(message, "id").as_f64().ok_or("Missing request id")?;
@@ -8,8 +8,7 @@ pub(super) fn request_id(message: &JsValue) -> Result<u32, String> {
 }
 
 fn bytes(value: &JsValue) -> Result<Vec<u8>, String> {
-    value.dyn_ref::<js_sys::Uint8Array>().map(|bytes| bytes.to_vec())
-        .ok_or_else(|| "Expected Uint8Array payload".into())
+    value.dyn_ref::<js_sys::Uint8Array>().map(|bytes| bytes.to_vec()).ok_or_else(|| "Expected Uint8Array payload".into())
 }
 
 pub(super) fn byte_result(message: &JsValue) -> Result<Result<Vec<u8>, String>, String> {
@@ -20,10 +19,10 @@ pub(super) fn byte_result(message: &JsValue) -> Result<Result<Vec<u8>, String>, 
 fn byte_payload(message: &JsValue) -> Result<Result<js_sys::Uint8Array, String>, String> {
     let error = field(message, "error");
     let payload = field(message, "bytes");
-    let payload = if payload.is_undefined() { None } else {
-        Some(payload.dyn_into::<js_sys::Uint8Array>().map_err(|_| "Expected Uint8Array payload".to_owned())?)
-    };
-    let error = if error.is_undefined() { None } else {
+    let payload = if payload.is_undefined() { None } else { Some(payload.dyn_into::<js_sys::Uint8Array>().map_err(|_| "Expected Uint8Array payload".to_owned())?) };
+    let error = if error.is_undefined() {
+        None
+    } else {
         if error.as_string().is_none() && field(&error, "message").as_string().is_none() {
             return Err("Expected error message".into());
         }
@@ -44,7 +43,9 @@ impl CpuRequest {
     }
     pub fn encode(self) -> (JsValue, js_sys::Array) {
         let (message, transfer) = super::byte_reply(&[("id", self.id.into()), ("source", self.source.clone())], Ok(self.bytes));
-        if !self.source.is_undefined() { transfer.push(&field(&self.source, "port")); }
+        if !self.source.is_undefined() {
+            transfer.push(&field(&self.source, "port"));
+        }
         (message, transfer)
     }
 }
@@ -59,7 +60,9 @@ impl CpuEvent {
         if field(message, "transport").as_string().as_deref() == Some("endpoint_failed") {
             return Ok(Self::Failed(field(message, "error").as_string().ok_or("Missing endpoint error")?));
         }
-        if field(message, "ready").as_bool() == Some(true) { return Ok(Self::Ready); }
+        if field(message, "ready").as_bool() == Some(true) {
+            return Ok(Self::Ready);
+        }
         Ok(Self::Reply { id: request_id(message)?, result: byte_result(message)? })
     }
 }
@@ -70,18 +73,31 @@ pub enum SyncEvent {
 }
 impl SyncEvent {
     pub fn decode(message: &JsValue) -> Result<Self, String> {
-        if field(message, "kind").as_string().as_deref() == Some("cancel") { return Ok(Self::Cancel); }
+        if field(message, "kind").as_string().as_deref() == Some("cancel") {
+            return Ok(Self::Cancel);
+        }
         Ok(Self::Reply { id: request_id(message)?, result: byte_result(message)? })
     }
 }
 
-pub enum TransferEvent { Cancel, Complete }
+pub enum TransferEvent {
+    Cancel,
+    Complete,
+    Progress(f64),
+}
 impl TransferEvent {
     pub fn decode(message: &JsValue) -> Result<Self, String> {
         match field(message, "kind").as_string().as_deref() {
             Some("cancel") => Ok(Self::Cancel),
-            Some("result") => { let _ = byte_payload(message)?; Ok(Self::Complete) },
-            Some("error") => { failure(message)?; Ok(Self::Complete) },
+            Some("progress") => Ok(Self::Progress(progress_fraction(message)?)),
+            Some("result") => {
+                let _ = byte_payload(message)?;
+                Ok(Self::Complete)
+            }
+            Some("error") => {
+                failure(message)?;
+                Ok(Self::Complete)
+            }
             _ => Err("Invalid transfer response".into()),
         }
     }
@@ -92,6 +108,7 @@ pub enum BridgeEvent {
     Complete(Result<Vec<u8>, String>),
     Storage { id: u32, bytes: Vec<u8> },
     Run,
+    Progress(f64),
 }
 impl BridgeEvent {
     pub fn decode(message: &JsValue) -> Result<Self, String> {
@@ -100,8 +117,18 @@ impl BridgeEvent {
             Some("error") => Ok(Self::Complete(Err(failure(message)?))),
             Some("storage") => Ok(Self::Storage { id: request_id(message)?, bytes: bytes(&field(message, "bytes"))? }),
             Some("run") => Ok(Self::Run),
+            Some("progress") => Ok(Self::Progress(progress_fraction(message)?)),
             _ => Err("Invalid worker bridge message".into()),
         }
+    }
+}
+
+fn progress_fraction(message: &JsValue) -> Result<f64, String> {
+    let fraction = field(message, "fraction").as_f64().ok_or("Missing transfer progress")?;
+    if fraction.is_finite() && (0.0..=1.0).contains(&fraction) {
+        Ok(fraction)
+    } else {
+        Err("Invalid transfer progress".into())
     }
 }
 
@@ -112,8 +139,7 @@ pub enum ImportCommand {
 impl ImportCommand {
     pub fn decode(message: &JsValue) -> Result<Self, String> {
         match field(message, "transport").as_string().as_deref() {
-            Some("initialize_import") => field(message, "database").dyn_into().map(Self::Initialize)
-                .map_err(|_| "Missing import database port".into()),
+            Some("initialize_import") => field(message, "database").dyn_into().map(Self::Initialize).map_err(|_| "Missing import database port".into()),
             Some("import_submit") => {
                 let job = field(message, "job");
                 let id = field(&job, "id").as_string().filter(|id| !id.is_empty()).ok_or("Missing import job id")?;

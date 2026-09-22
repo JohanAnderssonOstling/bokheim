@@ -3,11 +3,54 @@
 //! The runtime defines the wire command, but only the library module is
 //! allowed to interpret it against a resource-bearing LibrarySession.
 
-use library_runtime::wire::{ThumbnailResolution, WorkerPayload, encode_reply};
+use crate::ThumbnailResolution;
+use client_runtime::reply::Reply;
 
+use super::pending::OperationKind;
 use super::LibrarySession;
+use futures_util::future::LocalBoxFuture;
+use std::rc::Rc;
+
+pub(super) enum PreparedRequest {
+    Ready(Reply),
+    Pending(OperationKind, LocalBoxFuture<'static, Result<Reply, crate::BackendError>>),
+}
+
+/// Preparation owns the activity until the durable import coordinator takes
+/// over. Dropping an unpolled/rejected operation or unwinding cannot leak it.
+struct PreparingImport {
+    library: Rc<LibrarySession>,
+    activity: uuid::Uuid,
+    handed_off: bool,
+}
+impl PreparingImport {
+    fn hand_off(mut self) {
+        self.handed_off = true;
+    }
+}
+impl Drop for PreparingImport {
+    fn drop(&mut self) {
+        if !self.handed_off {
+            self.library.finish_directory_import(self.activity);
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum LibraryCommand {
+    Scanning,
+    DownloadState {
+        content_hash: crate::ContentHash,
+    },
+    TransferSnapshot,
+    ImportProgress {
+        activity: uuid::Uuid,
+    },
+    SyncStatus {
+        signed_in: bool,
+        remote_present: Option<bool>,
+    },
+    LocalStorageUsage,
     // Renewal only authorizes the original remote book. It must not reopen
     // metadata or change source type if the user downloaded a local copy.
     RenewRemoteAudio {
@@ -38,6 +81,12 @@ pub enum LibraryCommand {
     },
     DownloadSubject {
         query: library_model::LibraryBrowseQuery,
+    },
+    RemoveLocalBookCopy {
+        content_hash: crate::ContentHash,
+    },
+    EvictFolderDownloads {
+        directory_id: crate::DirId,
     },
     FolderDestinations,
     Trash,
@@ -124,6 +173,9 @@ pub enum LibraryCommand {
     SubjectContents {
         query: library_model::LibraryBrowseQuery,
     },
+    LibrarySearch {
+        query: String,
+    },
     BookDetail {
         content_hash: crate::ContentHash,
     },
@@ -158,15 +210,29 @@ pub enum LibraryCommand {
         annotation_id: String,
         modified_at: i64,
     },
-    EnrichmentStatus,
     #[cfg(target_arch = "wasm32")]
-    OpenRemoteAudio { content_hash: crate::ContentHash },
+    OpenRemoteAudio {
+        content_hash: crate::ContentHash,
+    },
     #[cfg(target_arch = "wasm32")]
-    ReadBookRange { capability: String, offset: u64, length: usize },
+    ReadBookRange {
+        capability: String,
+        offset: u64,
+        length: usize,
+    },
     #[cfg(target_arch = "wasm32")]
-    ImportStagedBook { parent_id: crate::DirId, file_name: String, physical: String, length: u64, hash: crate::ContentHash },
+    ImportStagedBook {
+        parent_id: crate::DirId,
+        file_name: String,
+        physical: String,
+        length: u64,
+        hash: crate::ContentHash,
+    },
     #[cfg(target_arch = "wasm32")]
-    CleanupStagedImport { job: String, files: u32 },
+    CleanupStagedImport {
+        job: String,
+        files: u32,
+    },
 }
 
 pub mod library_requests {
@@ -177,90 +243,100 @@ pub mod library_requests {
 pub trait LibraryReply: crate::executor::BackendOutput + serde::Serialize + serde::de::DeserializeOwned {}
 impl<T: crate::executor::BackendOutput + serde::Serialize + serde::de::DeserializeOwned> LibraryReply for T {}
 
-/// A typed request addressed to one already-open library.
-pub trait LibraryRequest: crate::executor::BackendSend + 'static {
-    fn command(self) -> LibraryCommand;
-}
-
-impl LibraryRequest for LibraryCommand {
-    fn command(self) -> LibraryCommand {
-        self
-    }
-}
-
-/// Runs one command against its owning session and encodes the reply.
-///
-/// Each arm names the session operation and nothing else: error conversion is
-/// `?` through `From<BackendError> for String`, and every reply — including the
-/// ones carrying bytes — leaves as a single encoded [`WorkerPayload`].
-pub(crate) async fn dispatch_library_request_in_session(library: &LibrarySession, command: LibraryCommand) -> Result<WorkerPayload, String> {
-    match command {
+/// Executes short commands in receive order, or prepares owned async work.
+/// The exhaustive match is the ordering audit: adding an async operation must
+/// choose its concurrency/cancellation class explicitly. Native replies stay
+/// typed; encoding still belongs only to the worker boundary.
+pub(super) fn prepare_library_request(library: Rc<LibrarySession>, command: LibraryCommand) -> Result<PreparedRequest, crate::BackendError> {
+    Ok(match command {
+        LibraryCommand::Scanning => PreparedRequest::Ready(Reply::new(library.scanner_running())),
+        LibraryCommand::DownloadState { content_hash } => PreparedRequest::Ready(Reply::new(library.download_state(content_hash)?)),
+        LibraryCommand::TransferSnapshot => PreparedRequest::Ready(Reply::new(library.transfer_snapshot()?)),
+        LibraryCommand::ImportProgress { activity } => PreparedRequest::Ready(Reply::new(library.directory_import_details_for(activity))),
+        LibraryCommand::SyncStatus { signed_in, remote_present } => PreparedRequest::Ready(Reply::new(library.sync_status(signed_in, remote_present)?)),
+        LibraryCommand::LocalStorageUsage => PreparedRequest::Pending(OperationKind::Read, Box::pin(async move { Ok(Reply::new(library.local_storage_usage().await?)) })),
         // Renewal only authorizes the original remote book. It must not reopen
         // metadata or change source type if the user downloaded a local copy.
-        LibraryCommand::RenewRemoteAudio { content_hash } => encode_reply(library.direct_audio_source(content_hash).await?),
-        LibraryCommand::ReadFileRange { source, offset, length } => encode_reply(serde_bytes::ByteBuf::from(library.read_file_range(&source, offset, length).await?)),
-        LibraryCommand::ReadFileBundle { source, ranges } => encode_reply(serde_bytes::ByteBuf::from(library.read_file_bundle(&source, ranges).await?)),
-        LibraryCommand::BookCount => encode_reply(library.book_count()?),
-        LibraryCommand::Home { limit } => encode_reply(library.home(limit, library.downloaded_books_only()?)?),
-        LibraryCommand::Thumbnail { content_hash, resolution } => encode_reply(library.thumbnail(content_hash, resolution).await?.map(serde_bytes::ByteBuf::from)),
-        LibraryCommand::DownloadBook { content_hash } => encode_reply(library.request_download(content_hash).await?),
-        LibraryCommand::DownloadFolder { query } => encode_reply(library.queue_browse_downloads(query, false)?),
-        LibraryCommand::DownloadSubject { query } => encode_reply(library.queue_browse_downloads(query, true)?),
-        LibraryCommand::FolderDestinations => encode_reply(library.folder_destinations()?),
-        LibraryCommand::Trash => encode_reply(library.trash()?),
-        LibraryCommand::RestoreBook { content_hash } => encode_reply(library.restore_book(&content_hash)?),
-        LibraryCommand::RestoreDirectory { directory_id, parent_id } => encode_reply(library.restore_directory(&directory_id, parent_id.as_ref())?),
-        LibraryCommand::PurgeBook { content_hash } => encode_reply(library.purge_book(&content_hash)?),
-        LibraryCommand::PurgeDirectory { directory_id } => encode_reply(library.purge_directory(&directory_id)?),
-        LibraryCommand::EmptyTrash => encode_reply(library.empty_trash()?),
+        LibraryCommand::RenewRemoteAudio { content_hash } => PreparedRequest::Pending(OperationKind::Read, Box::pin(async move { Ok(Reply::new(library.direct_audio_source(content_hash).await?)) })),
+        LibraryCommand::ReadFileRange { source, offset, length } => PreparedRequest::Pending(OperationKind::Read, Box::pin(async move { Ok(Reply::new(serde_bytes::ByteBuf::from(library.read_file_range(&source, offset, length).await?))) })),
+        LibraryCommand::ReadFileBundle { source, ranges } => PreparedRequest::Pending(OperationKind::Read, Box::pin(async move { Ok(Reply::new(serde_bytes::ByteBuf::from(library.read_file_bundle(&source, ranges).await?))) })),
+        LibraryCommand::BookCount => PreparedRequest::Ready(Reply::new(library.book_count()?)),
+        LibraryCommand::Home { limit } => PreparedRequest::Ready(Reply::new(library.home(limit, library.downloaded_books_only()?)?)),
+        LibraryCommand::Thumbnail { content_hash, resolution } => PreparedRequest::Pending(OperationKind::Read, Box::pin(async move { Ok(Reply::new(library.thumbnail(content_hash, resolution).await?.map(serde_bytes::ByteBuf::from))) })),
+        LibraryCommand::DownloadBook { content_hash } => PreparedRequest::Ready(Reply::new(library.queue_download(content_hash)?)),
+        LibraryCommand::DownloadFolder { query } => PreparedRequest::Ready(Reply::new(library.queue_browse_downloads(query, false)?)),
+        LibraryCommand::DownloadSubject { query } => PreparedRequest::Ready(Reply::new(library.queue_browse_downloads(query, true)?)),
+        LibraryCommand::RemoveLocalBookCopy { content_hash } => PreparedRequest::Ready(Reply::new(library.remove_local_book_copy(content_hash)?)),
+        LibraryCommand::EvictFolderDownloads { directory_id } => PreparedRequest::Ready(Reply::new(library.evict_folder_downloads(&directory_id)?)),
+        LibraryCommand::FolderDestinations => PreparedRequest::Ready(Reply::new(library.folder_destinations()?)),
+        LibraryCommand::Trash => PreparedRequest::Ready(Reply::new(library.trash()?)),
+        LibraryCommand::RestoreBook { content_hash } => PreparedRequest::Ready(Reply::new(library.restore_book(&content_hash)?)),
+        LibraryCommand::RestoreDirectory { directory_id, parent_id } => PreparedRequest::Ready(Reply::new(library.restore_directory(&directory_id, parent_id.as_ref())?)),
+        LibraryCommand::PurgeBook { content_hash } => PreparedRequest::Ready(Reply::new(library.purge_book(&content_hash)?)),
+        LibraryCommand::PurgeDirectory { directory_id } => PreparedRequest::Ready(Reply::new(library.purge_directory(&directory_id)?)),
+        LibraryCommand::EmptyTrash => PreparedRequest::Ready(Reply::new(library.empty_trash()?)),
         // The new folder identity stays server-side; callers refresh instead.
-        LibraryCommand::CreateDirectory { parent_id, name } => encode_reply(library.create_directory(&parent_id, &name).map(|_| ())?),
-        LibraryCommand::RenameDirectory { directory_id, name } => encode_reply(library.rename_directory(&directory_id, &name).await?),
-        LibraryCommand::MoveDirectory { directory_id, parent_id } => encode_reply(library.move_directory(&directory_id, &parent_id).await?),
-        LibraryCommand::CopyDirectory { directory_id, parent_id } => encode_reply(library.copy_directory(&directory_id, &parent_id)?),
-        LibraryCommand::RestoreBookPlacement { content_hash, directory_id } => encode_reply(library.restore_book_placement(&content_hash, &directory_id)?),
-        LibraryCommand::CopyBookToDirectory { content_hash, source_id, destination_id } => encode_reply(library.copy_book_to_directory(&content_hash, &source_id, &destination_id)?),
-        LibraryCommand::MoveBookToDirectory { content_hash, source_id, destination_id } => encode_reply(library.move_book_to_directory(&content_hash, &source_id, &destination_id)?),
-        LibraryCommand::RemoveBookFromDirectory { content_hash, source_id } => encode_reply(library.remove_book_from_directory(&content_hash, &source_id)?),
-        LibraryCommand::MoveBookToTrash { content_hash } => encode_reply(library.move_book_to_trash(&content_hash)?),
-        LibraryCommand::MoveDirectoryToTrash { directory_id } => encode_reply(library.move_directory_to_trash(&directory_id)?),
-        LibraryCommand::ImportBookBytes { parent_id, file_name, bytes } => encode_reply(library.import_book_bytes(&parent_id, file_name, bytes).await?),
+        LibraryCommand::CreateDirectory { parent_id, name } => PreparedRequest::Ready(Reply::new(library.create_directory(&parent_id, &name).map(|_| ())?)),
+        LibraryCommand::RenameDirectory { directory_id, name } => PreparedRequest::Ready(Reply::new(library.queue_directory_move(&directory_id, None, Some(&name))?)),
+        LibraryCommand::MoveDirectory { directory_id, parent_id } => PreparedRequest::Ready(Reply::new(library.queue_directory_move(&directory_id, Some(&parent_id), None)?)),
+        LibraryCommand::CopyDirectory { directory_id, parent_id } => PreparedRequest::Ready(Reply::new(library.copy_directory(&directory_id, &parent_id)?)),
+        LibraryCommand::RestoreBookPlacement { content_hash, directory_id } => PreparedRequest::Ready(Reply::new(library.restore_book_placement(&content_hash, &directory_id)?)),
+        LibraryCommand::CopyBookToDirectory { content_hash, source_id, destination_id } => PreparedRequest::Ready(Reply::new(library.copy_book_to_directory(&content_hash, &source_id, &destination_id)?)),
+        LibraryCommand::MoveBookToDirectory { content_hash, source_id, destination_id } => PreparedRequest::Ready(Reply::new(library.move_book_to_directory(&content_hash, &source_id, &destination_id)?)),
+        LibraryCommand::RemoveBookFromDirectory { content_hash, source_id } => PreparedRequest::Ready(Reply::new(library.remove_book_from_directory(&content_hash, &source_id)?)),
+        LibraryCommand::MoveBookToTrash { content_hash } => PreparedRequest::Ready(Reply::new(library.move_book_to_trash(&content_hash)?)),
+        LibraryCommand::MoveDirectoryToTrash { directory_id } => PreparedRequest::Ready(Reply::new(library.move_directory_to_trash(&directory_id)?)),
+        LibraryCommand::ImportBookBytes { parent_id, file_name, bytes } => PreparedRequest::Pending(OperationKind::Import, Box::pin(async move { Ok(Reply::new(library.import_book_bytes(&parent_id, file_name, bytes).await?)) })),
         // Staging registers the activity first so a failed preparation cannot
         // leave the import counted as running.
         LibraryCommand::PrepareStagedDirectoryImport { activity, job, parent_id, name, directories } => {
             library.begin_directory_import(activity);
-            let prepared = library.prepare_directory_import_job(&parent_id, name, directories, Some(job)).await;
-            if prepared.is_err() {
-                library.finish_directory_import(activity);
-            }
-            encode_reply(prepared?)
+            let activity = PreparingImport { library: library.clone(), activity, handed_off: false };
+            PreparedRequest::Pending(
+                OperationKind::Import,
+                Box::pin(async move {
+                    let prepared = library.prepare_directory_import_job(&parent_id, name, directories, Some(job)).await?;
+                    activity.hand_off();
+                    Ok(Reply::new(prepared))
+                }),
+            )
         }
-        LibraryCommand::FinishDirectoryImport { activity } => encode_reply(library.finish_directory_import(activity)),
-        LibraryCommand::DirectoryImportProgress => encode_reply(library.directory_import_progress()),
-        LibraryCommand::AdvanceDirectoryImport { activity, total, succeeded, failed } => encode_reply(library.advance_directory_import(activity, total, succeeded, failed)),
-        LibraryCommand::FolderContents { query } => encode_reply(library.folder_browse_data(&query, library.downloaded_books_only()?)?),
-        LibraryCommand::SubjectContents { query } => encode_reply(library.subject_browse_data(&query, library.downloaded_books_only()?)?),
-        LibraryCommand::BookDetail { content_hash } => encode_reply(library.book_detail(content_hash)?),
-        LibraryCommand::Authors { sort } => encode_reply(library.authors(sort, library.downloaded_books_only()?)?),
-        LibraryCommand::BookFormat { content_hash } => encode_reply(library.book_format(content_hash)?),
-        LibraryCommand::AudiobookPlaybackMetadata { content_hash } => encode_reply(library.audiobook_playback_metadata(content_hash).await?),
-        LibraryCommand::ReadingPosition { content_hash } => encode_reply(library.reading_position(content_hash)?),
-        LibraryCommand::PdfReadingPosition { content_hash } => encode_reply(library.pdf_reading_position(content_hash)?),
-        LibraryCommand::UpdateReadingPosition { content_hash, position, progress, entry } => encode_reply(library.update_reading_position(content_hash, &position, progress, entry.as_deref())?),
-        LibraryCommand::Annotations { content_hash } => encode_reply(library.annotations(content_hash)?),
-        LibraryCommand::UpsertAnnotation { annotation } => encode_reply(library.upsert_annotation(&annotation)?),
-        LibraryCommand::DeleteAnnotation { annotation_id, modified_at } => encode_reply(library.delete_annotation(&annotation_id, modified_at)?),
-        LibraryCommand::EnrichmentStatus => encode_reply(library.enrichment_status().await?),
+        LibraryCommand::FinishDirectoryImport { activity } => PreparedRequest::Ready(Reply::new(library.finish_directory_import(activity))),
+        LibraryCommand::DirectoryImportProgress => PreparedRequest::Ready(Reply::new(library.directory_import_details())),
+        LibraryCommand::AdvanceDirectoryImport { activity, total, succeeded, failed } => PreparedRequest::Ready(Reply::new(library.advance_directory_import(activity, total, succeeded, failed))),
+        LibraryCommand::FolderContents { query } => PreparedRequest::Ready(Reply::new(library.folder_browse_data(&query, library.downloaded_books_only()?)?)),
+        LibraryCommand::SubjectContents { query } => PreparedRequest::Ready(Reply::new(library.subject_browse_data(&query, library.downloaded_books_only()?)?)),
+        LibraryCommand::LibrarySearch { query } => PreparedRequest::Ready(Reply::new(library.library_search(&query, library.downloaded_books_only()?)?)),
+        LibraryCommand::BookDetail { content_hash } => PreparedRequest::Ready(Reply::new(library.book_detail(content_hash)?)),
+        LibraryCommand::Authors { sort } => PreparedRequest::Ready(Reply::new(library.authors(sort, library.downloaded_books_only()?)?)),
+        LibraryCommand::BookFormat { content_hash } => PreparedRequest::Ready(Reply::new(library.book_format(content_hash)?)),
+        LibraryCommand::AudiobookPlaybackMetadata { content_hash } => PreparedRequest::Pending(OperationKind::Read, Box::pin(async move { Ok(Reply::new(library.audiobook_playback_metadata(content_hash).await?)) })),
+        LibraryCommand::ReadingPosition { content_hash } => PreparedRequest::Ready(Reply::new(library.reading_position(content_hash)?)),
+        LibraryCommand::PdfReadingPosition { content_hash } => PreparedRequest::Ready(Reply::new(library.pdf_reading_position(content_hash)?)),
+        LibraryCommand::UpdateReadingPosition { content_hash, position, progress, entry } => PreparedRequest::Ready(Reply::new(library.update_reading_position(content_hash, &position, progress, entry.as_deref())?)),
+        LibraryCommand::Annotations { content_hash } => PreparedRequest::Ready(Reply::new(library.annotations(content_hash)?)),
+        LibraryCommand::UpsertAnnotation { annotation } => PreparedRequest::Ready(Reply::new(library.upsert_annotation(&annotation)?)),
+        LibraryCommand::DeleteAnnotation { annotation_id, modified_at } => PreparedRequest::Ready(Reply::new(library.delete_annotation(&annotation_id, modified_at)?)),
         #[cfg(target_arch = "wasm32")]
-        LibraryCommand::OpenRemoteAudio { content_hash } => encode_reply(crate::library::browser_audiobook::open_remote_audio(library, content_hash).await?),
+        LibraryCommand::OpenRemoteAudio { content_hash } => PreparedRequest::Pending(OperationKind::Read, Box::pin(async move { Ok(Reply::new(crate::library::browser_audiobook::open_remote_audio(&library, content_hash).await?)) })),
         #[cfg(target_arch = "wasm32")]
-        LibraryCommand::ReadBookRange { capability, offset, length } => encode_reply(serde_bytes::ByteBuf::from(crate::library::browser_book::read_range(*library.id(), &capability, offset, length)?)),
+        LibraryCommand::ReadBookRange { capability, offset, length } => PreparedRequest::Ready(Reply::new(serde_bytes::ByteBuf::from(crate::library::browser_book::read_range(*library.id(), &capability, offset, length)?))),
         #[cfg(target_arch = "wasm32")]
-        LibraryCommand::ImportStagedBook { parent_id, file_name, physical, length, hash } => encode_reply(library.import_staged_book(parent_id, file_name, physical, length, hash).await?),
+        LibraryCommand::ImportStagedBook { parent_id, file_name, physical, length, hash } => {
+            PreparedRequest::Pending(OperationKind::Import, Box::pin(async move { Ok(Reply::new(library.import_staged_book(parent_id, file_name, physical, length, hash).await?)) }))
+        }
         #[cfg(target_arch = "wasm32")]
         LibraryCommand::CleanupStagedImport { job, files } => {
-            client_platform_web::web_storage::cleanup_staged_import(&job, files)?;
-            encode_reply(())
+            client_platform_web::web_storage::cleanup_staged_import(*library.id(), &job, files)?;
+            PreparedRequest::Ready(Reply::new(()))
         }
+    })
+}
+
+#[cfg(test)]
+pub(crate) async fn dispatch_library_request_in_session(library: Rc<LibrarySession>, command: LibraryCommand) -> Result<Reply, crate::BackendError> {
+    match prepare_library_request(library, command)? {
+        PreparedRequest::Ready(reply) => Ok(reply),
+        PreparedRequest::Pending(_, operation) => operation.await,
     }
 }

@@ -5,13 +5,11 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use bzip2::read::MultiBzDecoder;
 use flate2::read::MultiGzDecoder;
 use metadata_contract::{
     AuthorIdentifier, AuthorMetadata, AuthorSource, Classification, ClassificationRequest, ClassificationResponse, ClassificationScheme, ClassificationSource, EditionIdentityMatch, EditionIdentityQuery, EditionIdentityRequest,
-    EditionIdentityResponse, EditionIdentityResult, EditionIdentityStatus, EditionTitleMatch, EntityReference, EntitySource, IsbnClassificationResult, IsbnMetadataResult, LookupStatus, MetadataEnrichmentRequest, MetadataEnrichmentResponse,
-    PersonEntity, PlaceEntity, RichIsbnMetadataResult, RichMetadataEnrichmentResponse, RichWorkMetadataMatch, SnapshotDescription, SubjectHeading, WorkClassificationMatch, WorkMetadataMatch, MAX_EDITION_QUERIES_PER_REQUEST,
-    MAX_ISBNS_PER_REQUEST, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
+    EditionIdentityResponse, EditionIdentityResult, EditionIdentityStatus, EditionTitleMatch, IsbnClassificationResult, IsbnMetadataResult, LookupStatus, MetadataEnrichmentRequest, MetadataEnrichmentResponse, RichIsbnMetadataResult,
+    RichMetadataEnrichmentResponse, RichWorkMetadataMatch, SnapshotDescription, SubjectHeading, WorkClassificationMatch, WorkMetadataMatch, MAX_EDITION_QUERIES_PER_REQUEST, MAX_ISBNS_PER_REQUEST, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
 };
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
@@ -19,18 +17,16 @@ use rayon::prelude::*;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
-use unicode_normalization::UnicodeNormalization;
 
 const SCHEMA_VERSION: i64 = 8;
 const WIKIDATA_SCHEMA_VERSION: i64 = 9;
@@ -38,28 +34,22 @@ const LEGACY_QUERY_SCHEMA_VERSION: i64 = 7;
 const BUILDER_SCHEMA_VERSION: i64 = 11;
 const DESCRIPTION_SCHEMA_VERSION: i64 = 2;
 const DESCRIPTION_BUILDER_VERSION: i64 = 2;
-const AUTHOR_PROFILE_SCHEMA_VERSION: i64 = 1;
-const AUTHOR_PROFILE_BUILDER_VERSION: i64 = 1;
 const MAX_REVERSE_TITLE_CANDIDATES: usize = 4_096;
+
 // One row beyond the public candidate ceiling is enough to prove that the
 // result is truncated without allowing a broad title to build an unbounded
 // intermediate result.
 const MAX_RAW_TITLE_CANDIDATES: usize = MAX_REVERSE_TITLE_CANDIDATES + 1;
 const MAX_EDITION_IDENTITY_REVIEW_CANDIDATES: usize = 256;
 const MAX_TITLE_SUBSTRINGS_PER_QUERY: usize = 64;
-const OL_PLACE_KIND: i64 = 1;
-const OL_PERSON_KIND: i64 = 2;
 // Scheme 1 is reserved for legacy Dewey rows; readers ignore it.
 const LCC_SCHEME: i64 = 2;
 const MAX_NOTATION_BYTES: usize = 256;
 const MAX_DESCRIPTION_BYTES: usize = 16 * 1024;
-const MAX_AUTHOR_BIOGRAPHY_BYTES: usize = 32 * 1024;
 const OPEN_LIBRARY_CHECKPOINT_RECORDS: usize = 250_000;
-const WIKIDATA_CHECKPOINT_RECORDS: usize = 20_000;
 const IMPORT_CACHE_KIB: usize = 1_048_576;
 const DESCRIPTION_IMPORT_CACHE_KIB: usize = 131_072;
 const PIPELINE_PARSE_RECORDS: usize = 25_000;
-const WIKIDATA_PIPELINE_PARSE_RECORDS: usize = 5_000;
 const PIPELINE_BUFFERED_BATCHES: usize = 1;
 const QUERY_CONCURRENCY: u32 = 4;
 const QUERY_EXECUTION_TIMEOUT: Duration = Duration::from_secs(8);
@@ -84,7 +74,6 @@ struct ServiceState {
     identity_pool: Pool<SqliteConnectionManager>,
     subject_index: Option<Arc<subject_index::SubjectIndex>>,
     description_pool: Option<Pool<SqliteConnectionManager>>,
-    author_profile_pool: Option<Pool<SqliteConnectionManager>>,
     query_slots: Arc<Semaphore>,
     snapshot: SnapshotDescription,
     schema_version: i64,
@@ -175,10 +164,6 @@ struct EditionRecord {
     isbn_13: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_string_array")]
     lc_classifications: Vec<String>,
-    #[serde(default, deserialize_with = "deserialize_string_array")]
-    subject_places: Vec<String>,
-    #[serde(default, deserialize_with = "deserialize_string_array")]
-    subject_people: Vec<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -194,10 +179,6 @@ struct WorkRecord {
     authors: Vec<KeyReference>,
     #[serde(default, deserialize_with = "deserialize_string_array")]
     lc_classifications: Vec<String>,
-    #[serde(default, deserialize_with = "deserialize_string_array")]
-    subject_places: Vec<String>,
-    #[serde(default, deserialize_with = "deserialize_string_array")]
-    subject_people: Vec<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -217,107 +198,36 @@ struct AuthorRecord {
     remote_ids: BTreeMap<String, serde_json::Value>,
 }
 
-#[derive(Default, Deserialize)]
-struct AuthorProfileRecord {
-    key: String,
-    #[serde(default, deserialize_with = "deserialize_optional_description")]
-    bio: Option<String>,
-}
-
-#[derive(Default, Deserialize)]
-struct WikidataRecord {
-    id: String,
-    #[serde(default)]
-    labels: BTreeMap<String, WikidataLocalizedValue>,
-    #[serde(default)]
-    aliases: BTreeMap<String, Vec<WikidataLocalizedValue>>,
-    #[serde(default)]
-    claims: WikidataClaims,
-}
-
-#[derive(Deserialize)]
-struct WikidataLocalizedValue {
-    value: String,
-}
-
-#[derive(Default, Deserialize)]
-struct WikidataClaims {
-    #[serde(default, rename = "P31")]
-    instances: Vec<WikidataClaim>,
-    #[serde(default, rename = "P279")]
-    subclasses: Vec<WikidataClaim>,
-    #[serde(default, rename = "P131")]
-    parents: Vec<WikidataClaim>,
-    #[serde(default, rename = "P17")]
-    countries: Vec<WikidataClaim>,
-    #[serde(default, rename = "P30")]
-    continents: Vec<WikidataClaim>,
-    #[serde(default, rename = "P625")]
-    coordinates: Vec<WikidataClaim>,
-    #[serde(default, rename = "P569")]
-    births: Vec<WikidataClaim>,
-    #[serde(default, rename = "P570")]
-    deaths: Vec<WikidataClaim>,
-}
-
-#[derive(Deserialize)]
-struct WikidataClaim {
-    mainsnak: WikidataSnak,
-}
-
-#[derive(Deserialize)]
-struct WikidataSnak {
-    datavalue: Option<WikidataDataValue>,
-}
-
-#[derive(Deserialize)]
-struct WikidataDataValue {
-    value: WikidataClaimValue,
-}
-
-#[derive(Default, Deserialize)]
-struct WikidataClaimValue {
-    id: Option<String>,
-    #[serde(rename = "numeric-id")]
-    numeric_id: Option<i64>,
-    latitude: Option<f64>,
-    longitude: Option<f64>,
-    time: Option<String>,
-}
-
 #[derive(Deserialize)]
 struct KeyReference {
     key: String,
 }
 
+mod audible;
 mod duplicate_work;
-mod wikidata_books;
 mod enrichment;
 mod http;
-mod audible;
 mod identity;
 mod import;
 mod library_of_congress;
-mod loc_background;
 mod librarything;
 mod librarything_background;
+mod loc_background;
 mod loc_dump;
 mod openlibrary;
 mod query;
 mod service;
 mod split;
 mod subject_index;
+mod wikidata_books;
 
-pub(crate) use enrichment::{
-    attach_authors, attach_rich_fields, classification_similarity_keys, collect_response_entities, load_author_biographies, load_embedded_work_descriptions, load_work_bisac_classifications, load_work_descriptions_from_table,
-    load_work_popularities, lookup_one, sql_placeholders,
-};
+pub(crate) use enrichment::{attach_authors, attach_rich_fields, classification_similarity_keys, load_embedded_work_descriptions, load_work_bisac_classifications, load_work_descriptions_from_table, lookup_one, sql_placeholders};
 pub use http::app;
 pub(crate) use identity::resolve_edition_batch;
-pub use import::{add_popularity_to_snapshot, import_author_profile_snapshot, import_description_snapshot, import_rich_snapshot_with_popularity, import_snapshot, import_snapshot_with_popularity};
+pub use import::{import_description_snapshot, import_snapshot};
 pub(crate) use openlibrary::{
     building_path, canonical_isbn13, deserialize_key_references, deserialize_optional_description, deserialize_optional_string, deserialize_string_array, deserialize_work_author_references, dump_date, error, open_description_pool,
-    open_library_id, open_read_pool, valid_dump_date, valid_open_library_author_biography, valid_open_library_description,
+    open_library_id, open_read_pool, valid_dump_date, valid_open_library_description,
 };
 pub(crate) use query::query_connection;
 pub use split::split_snapshot;
@@ -342,5 +252,5 @@ pub async fn lookup_librarything_isbn(key_file: &std::path::Path, cache_file: &s
 mod rebuild_titles;
 pub use rebuild_titles::rebuild_titles;
 
-mod catalog_ingestion;
-pub use catalog_ingestion::ingest_wikidata_catalog;
+mod authority_ingestion;
+pub use authority_ingestion::ingest_wikidata_authorities;

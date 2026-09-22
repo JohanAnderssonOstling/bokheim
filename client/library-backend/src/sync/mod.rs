@@ -6,23 +6,20 @@ mod library_sync;
 pub(crate) mod recovery;
 mod scheduler;
 mod state_sync;
-pub mod timing;
+pub(crate) mod transfer;
 #[cfg(target_arch = "wasm32")]
 mod web_coordinator;
-#[cfg(target_arch = "wasm32")]
-pub(crate) use state_sync::{apply_pull_page, inventory_checkpoint, save_inventory_checkpoint};
-pub(crate) mod transfer;
 
 pub(crate) use error::SyncError;
+pub(crate) use library_database::Database;
+pub use library_runtime::scheduler::{BackgroundTiming, SyncRequest, SyncScheduler};
 #[cfg(test)]
 pub(crate) use library_sync::PersistedSyncWork;
 pub use library_sync::{LibrarySync, LibrarySyncConfig};
-pub use library_runtime::scheduler::{SyncRequest, SyncScheduler};
 #[cfg(target_arch = "wasm32")]
 pub use scheduler::run_timed;
-#[cfg(target_arch = "wasm32")]
-pub(crate) use web_coordinator::synchronize;
+pub(crate) use sync_engine::SyncOutcome;
 #[cfg(target_arch = "wasm32")]
 pub use web_coordinator::run;
-pub(crate) use sync_engine::SyncOutcome;
-pub(crate) use library_database::Database;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use web_coordinator::synchronize;

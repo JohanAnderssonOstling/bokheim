@@ -137,6 +137,21 @@ impl BrowseAdapter for TestAdapter {
     fn prepare_book(_: &Entity<EmptyBook>, _: &mut Window, _: &mut App) {}
 }
 
+#[gpui::test]
+fn opening_a_leaf_keeps_the_folder_breadcrumb(cx: &mut gpui::TestAppContext) {
+    let queries = Rc::new(RefCell::new(Vec::new()));
+    let page = cx.new(|cx| BrowsePage::new(TestAdapter { queries: queries.clone(), controls: BrowseControls::library() }, BrowsePageConfig::new("root", "Root", "leaf-breadcrumb-test"), cx));
+    page.update(cx, |page, cx| {
+        page.open_split_path(vec![BrowseCrumb { location: "folder".into(), label: "Folder".into() }], cx);
+        page.open_leaf(BrowseCrumb { location: "book:abc".into(), label: "A Book".into() }, cx);
+    });
+
+    assert_eq!(queries.borrow().last().map(String::as_str), Some("book:abc"));
+    page.read_with(cx, |page, _| {
+        assert_eq!(page.breadcrumb_labels(), ["Folder"]);
+    });
+}
+
 #[cfg(not(feature = "mobile"))]
 #[gpui::test]
 fn chip_modifiers_and_toolbar_open_adjacent_panes(cx: &mut gpui::TestAppContext) {

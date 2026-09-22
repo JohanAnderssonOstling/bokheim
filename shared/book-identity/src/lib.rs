@@ -35,15 +35,15 @@ pub fn detect(reader: &mut (impl Read + Seek)) -> io::Result<Option<Format>> {
 }
 
 /// Reuse readable embedded identities and derive M4B identity from audio.
-/// Unreadable PDF catalogs and unfingerprintable audio use byte identity.
+/// Unreadable PDF documents and unfingerprintable audio use byte identity.
 /// A readable but malformed identity remains an error.
 pub fn read(reader: &mut (impl Read + Seek)) -> io::Result<Option<ContentHash>> {
     let identity = match detect(reader)? {
         Some(Format::Pdf) => {
-            let document = pdf_range_reader::catalog(&mut *reader).ok();
-            let catalog = document.as_ref().and_then(|doc| doc.catalog().ok());
-            if let Some(catalog) = catalog.filter(|catalog| catalog.has(PDF_KEY)) {
-                let value = catalog.get(PDF_KEY).and_then(lopdf::Object::as_str).map_err(invalid)?;
+            let document = pdf_range_reader::document_root(&mut *reader).ok();
+            let root_dict = document.as_ref().and_then(|doc| doc.catalog().ok());
+            if let Some(root_dict) = root_dict.filter(|root_dict| root_dict.has(PDF_KEY)) {
+                let value = root_dict.get(PDF_KEY).and_then(lopdf::Object::as_str).map_err(invalid)?;
                 Some(std::str::from_utf8(value).map_err(invalid)?.parse().map_err(invalid)?)
             } else {
                 None
@@ -56,7 +56,7 @@ pub fn read(reader: &mut (impl Read + Seek)) -> io::Result<Option<ContentHash>> 
             Ok(fingerprint) => Some(ContentHash::new(fingerprint.to_hex().as_str())),
             // Audio that cannot be fingerprinted is audio enrichment refuses to
             // rewrite, so those bytes never change and byte identity holds --
-            // the same fallback an unreadable PDF catalog takes above.
+            // the same fallback an unreadable PDF document takes above.
             Err(error) if error.kind() == io::ErrorKind::InvalidData => None,
             Err(error) => return Err(error),
         },
@@ -98,4 +98,3 @@ mod tests;
 
 mod m4b_audio;
 pub use m4b_audio::audio_fingerprint;
-

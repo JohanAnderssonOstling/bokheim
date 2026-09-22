@@ -10,12 +10,13 @@ kobo = ["mobile", "dep:gpui_kobo", "ui-components/kobo"]
 mobile = ["ui-components/mobile"]
 
 [dependencies]
+library-backend = { path = "../../client/library-backend" }
 subject-projection = { path = "../../shared/subject-projection" }
 book-model = { path = "../../shared/book-model" }
 async-channel = "2"
 account-contract = { path = "../../shared/account-contract" }
 app-preferences = { path = "../../client/preferences" }
-bokheim-backend = { path = "../../client/backend", default-features = false }
+app = { path = "../../client/app", default-features = false }
 ui-components = { path = "../components" }
 gpui.workspace = true
 gpui-component.workspace = true

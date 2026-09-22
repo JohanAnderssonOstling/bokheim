@@ -1,1 +1,0 @@
-UPDATE dir SET name='B' WHERE id=?1

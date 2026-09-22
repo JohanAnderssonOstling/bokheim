@@ -1,1 +1,0 @@
-INSERT OR IGNORE INTO local_purge_work(content_hash) VALUES(?1)

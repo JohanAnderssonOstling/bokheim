@@ -1,1 +1,0 @@
-SELECT book.title,p.value FROM book LEFT JOIN book_value p ON p.book_row_id=book.row_id AND p.kind='alternate_title' AND p.qualifier='subtitle' WHERE content_hash=?1

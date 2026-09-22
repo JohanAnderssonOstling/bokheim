@@ -1,9 +1,9 @@
 //! Native library-handle wrappers for shared reading-position persistence.
 
+use crate::library::playback::PlaybackMetadata;
+use crate::library::LibrarySession;
 use crate::BackendError;
 use crate::ContentHash;
-use crate::library::LibrarySession;
-use client_library::runtime_contracts::PlaybackMetadata;
 
 impl LibrarySession {
     pub(crate) fn book_format(&self, hash: ContentHash) -> Result<Option<book_model::BookFormat>, BackendError> {
@@ -12,14 +12,7 @@ impl LibrarySession {
 
     pub(crate) fn cached_audiobook_metadata(&self, hash: ContentHash) -> Result<Option<PlaybackMetadata>, String> {
         let snapshot = self.db.audiobook_playback_snapshot(&hash).map_err(|error| error.to_string())?;
-        Ok(snapshot.cached.map(|metadata| PlaybackMetadata {
-            title: snapshot.title,
-            author: snapshot.author,
-            narrator: metadata.narrator,
-            duration_ms: metadata.duration_ms,
-            chapters: metadata.chapters,
-            cover: Vec::new(),
-        }))
+        Ok(snapshot.cached.map(|metadata| PlaybackMetadata { title: snapshot.title, author: snapshot.author, narrator: metadata.narrator, duration_ms: metadata.duration_ms, chapters: metadata.chapters, cover: Vec::new() }))
     }
 
     pub(crate) async fn audiobook_playback_metadata(&self, hash: ContentHash) -> Result<Option<PlaybackMetadata>, String> {
