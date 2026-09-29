@@ -580,21 +580,6 @@ mod scanner {
     }
 
     #[test]
-    fn scan_commits_bisac_subjects_with_valid_relationships() {
-        let db = database();
-        let mut book = replacement();
-        book.inspection.metadata.book.subjects = vec![book_model::BookSubject::new(None, "History / United States / 20th Century", "dc:subject", Some("bisac".into()), Some("HIS036060".into())).unwrap()];
-        let snapshot = db.scan_snapshot().unwrap();
-        let discovery = FilesystemScan { readable: true, files: vec![observation(ROOT_DIR_ID, "book.epub", 2)], ..Default::default() };
-        assert_eq!(db.apply_filesystem_scan(&snapshot, &discovery, &InspectedFilesystemScan { failures: vec![], readable: true, books: vec![book] }).unwrap(), ScanApplyResult::Applied);
-        assert!(db.connection.query_row("SELECT count(*) FROM book_subject_assignment WHERE system_id='bisac'", [], |r| r.get::<_, i64>(0)).unwrap() > 0);
-        let coded_node: (String, bool) = db.connection.query_row("SELECT parent_path,assignable FROM subject_node WHERE system_id='bisac' AND code='HIS036060'", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-        assert!(coded_node.1);
-        assert!(db.connection.query_row("SELECT EXISTS(SELECT 1 FROM subject_node WHERE system_id='bisac' AND path=?1)", [&coded_node.0], |r| r.get::<_, bool>(0)).unwrap());
-        assert!(!db.connection.prepare("PRAGMA foreign_key_check").unwrap().exists([]).unwrap());
-    }
-
-    #[test]
     fn replacement_updates_only_the_old_placement_and_commits_other_discoveries() {
         let (db, old) = fixture();
         let other = db.create_directory(&ROOT_DIR_ID, &"Other".into()).unwrap().id;
@@ -1628,5 +1613,5 @@ fn rescan_recovers_legacy_projection_only_subjects() {
     db.commit_import(import()).unwrap();
     let refreshed = db.refresh_subject_enrichment(vec![hash], Default::default()).unwrap();
     assert_eq!(refreshed[0].book.subjects[0].code(), Some("DC38"));
-    assert_eq!(db.connection.query_row("SELECT count(*) FROM book_subject_assignment", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(db.connection.query_row("SELECT count(*) FROM book_subject_code WHERE system_id='lcc' AND code='DC38'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
 }

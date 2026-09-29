@@ -61,12 +61,9 @@ impl UnifiedCodeResolution {
 
 pub const BISAC_SYSTEM_ID: &str = "bisac";
 pub const BISAC_VERSION: &str = "2021";
-pub const BISAC_MATCHER_VERSION: i64 = 1;
 pub const DDC_SYSTEM_ID: &str = "ddc";
 pub const DDC_MATCHER_VERSION: i64 = 1;
 pub use runtime_index::{LCC_SYSTEM_ID, ROOT_SUBJECT_PATH, UNIFIED_VERSION};
-pub const LCC_VERSION: &str = "2024-outline-r2";
-pub const LCC_MATCHER_VERSION: i64 = 1;
 pub const UNIFIED_SYSTEM_ID: &str = "unified";
 pub const UNIFIED_MATCHER_VERSION: i64 = 134;
 const GENERIC_HISTORY_CONCEPT_ID: i64 = 3319;
@@ -124,48 +121,13 @@ impl ProjectedSubjectCode {
     }
 }
 
-pub fn project_subjects(subjects: &[BookSubject]) -> Vec<ProjectedSubjectAssignment> {
-    let mut projected = BTreeMap::<(String, String, i64), BTreeSet<usize>>::new();
-    for assignment in match_bisac_subjects(subjects) {
-        projected.entry((BISAC_SYSTEM_ID.to_owned(), assignment.node_path().to_owned(), BISAC_MATCHER_VERSION)).or_default().extend(assignment.evidence_positions());
-    }
-    for (position, subject) in subjects.iter().enumerate() {
-        let Some((system_id, authority_label)) = external_subject_system(subject.authority()) else { continue };
-        let notation = subject.code().unwrap_or_else(|| subject.name());
-        if system_id == LCC_SYSTEM_ID {
-            let paths = lcc_subject_paths(notation);
-            if !paths.is_empty() {
-                for path in paths {
-                    projected.entry((system_id.to_owned(), path, LCC_MATCHER_VERSION)).or_default().insert(position);
-                }
-                continue;
-            }
-        }
-        let (subject_path, matcher_version) = match system_id {
-            LCC_SYSTEM_ID => (lcc_subject_path(notation).unwrap_or_else(|| format!("LCC / Unclassified / {}", compact_whitespace(notation))), LCC_MATCHER_VERSION),
-            _ => {
-                let components = subject.name().split('/').map(compact_whitespace).filter(|component| !component.is_empty()).collect::<Vec<_>>();
-                if components.is_empty() {
-                    continue;
-                }
-                (["LCC".to_owned(), authority_label.to_owned()].into_iter().chain(components).collect::<Vec<_>>().join(" / "), 1)
-            }
-        };
-        projected.entry((system_id.to_owned(), subject_path, matcher_version)).or_default().insert(position);
-    }
-    projected
-        .into_iter()
-        .map(|((system_id, subject_path, matcher_version), evidence)| ProjectedSubjectAssignment { system_id, subject_path, matcher_version, evidence_positions: evidence.into_iter().collect(), lcc_evidence: Vec::new() })
-        .collect()
-}
-
 pub fn project_subject_codes(subjects: &[BookSubject]) -> Vec<ProjectedSubjectCode> {
     let mut projected = BTreeMap::<(String, String), BTreeSet<usize>>::new();
     for assignment in match_bisac_subjects(subjects) {
         let Some(code) = bisac_code_for_path(assignment.node_path()) else { continue };
         projected.entry((BISAC_SYSTEM_ID.to_owned(), code.to_owned())).or_default().extend(assignment.evidence_positions());
     }
-    let declared_lcc = subjects.iter().any(|subject| external_subject_system(subject.authority()).is_some_and(|(system, _)| system == LCC_SYSTEM_ID));
+    let declared_lcc = subjects.iter().any(|subject| subject.authority().and_then(canonical_subject_system) == Some(LCC_SYSTEM_ID));
     // DDC is a fallback classification. Once the record has an explicit LCC
     // or a resolved BISAC classification, projecting DDC as well creates
     // unrelated subject branches from secondary metadata (for example a
@@ -178,7 +140,7 @@ pub fn project_subject_codes(subjects: &[BookSubject]) -> Vec<ProjectedSubjectCo
                 .iter()
                 .enumerate()
                 .filter_map(|(position, subject)| {
-                    (external_subject_system(subject.authority())?.0 == DDC_SYSTEM_ID).then(|| ddc::canonical_ddc_notation(subject.code().unwrap_or_else(|| subject.name()))).flatten().map(|code| (position, code))
+                    (subject.authority().and_then(canonical_subject_system)? == DDC_SYSTEM_ID).then(|| ddc::canonical_ddc_notation(subject.code().unwrap_or_else(|| subject.name()))).flatten().map(|code| (position, code))
                 })
                 .collect::<Vec<_>>()
         })
@@ -207,7 +169,7 @@ pub fn project_subject_codes(subjects: &[BookSubject]) -> Vec<ProjectedSubjectCo
 /// subjects. Keep the original declaration and its evidence position unchanged.
 fn subject_lcc_code(subject: &BookSubject) -> Option<String> {
     if let Some(authority) = subject.authority() {
-        return (external_subject_system(Some(authority))?.0 == LCC_SYSTEM_ID).then(|| canonical_lcc_notation(subject.code().unwrap_or_else(|| subject.name()))).flatten();
+        return (canonical_subject_system(authority)? == LCC_SYSTEM_ID).then(|| canonical_lcc_notation(subject.code().unwrap_or_else(|| subject.name()))).flatten();
     }
     if !subject.source().rsplit(':').next()?.eq_ignore_ascii_case("subject") {
         return None;
@@ -249,7 +211,7 @@ pub fn project_unified_subjects(subjects: &[BookSubject]) -> Vec<ProjectedSubjec
             continue;
         }
         let canonical = subject_lcc_code(subject);
-        let declared = external_subject_system(subject.authority()).is_some_and(|(system, _)| system == LCC_SYSTEM_ID);
+        let declared = subject.authority().and_then(canonical_subject_system) == Some(LCC_SYSTEM_ID);
         if declared || canonical.is_some() {
             let original = subject.code().unwrap_or_else(|| subject.name());
             // Inference retains the strict boundary for uncontrolled subjects.
@@ -326,16 +288,6 @@ fn normalized_subject_terms(subject: &BookSubject) -> BTreeSet<String> {
     }
     labels.retain(|label| !label.is_empty());
     labels
-}
-
-fn external_subject_system(authority: Option<&str>) -> Option<(&'static str, &'static str)> {
-    match canonical_subject_system(authority?)? {
-        "lcsh" => Some(("lcsh", "LCSH")),
-        "lcgft" => Some(("lcgft", "LCGFT")),
-        "lcc" => Some((LCC_SYSTEM_ID, "LCC")),
-        "ddc" => Some((DDC_SYSTEM_ID, "DDC")),
-        _ => None,
-    }
 }
 
 pub(crate) fn canonical_subject_system(authority: &str) -> Option<&'static str> {

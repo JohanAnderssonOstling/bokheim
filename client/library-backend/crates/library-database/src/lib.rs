@@ -23,7 +23,7 @@ mod taxonomy_update;
 #[cfg(test)]
 mod test_support;
 
-pub const LIBRARY_SCHEMA_VERSION: i64 = 1;
+pub const LIBRARY_SCHEMA_VERSION: i64 = 2;
 
 pub use client_platform_runtime::executor;
 pub use client_platform_runtime::storage_queue;
@@ -189,7 +189,11 @@ impl Database {
         let transaction = self.connection.unchecked_transaction()?;
         const VERSION: i64 = LIBRARY_SCHEMA_VERSION;
         let version: i64 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version == VERSION {
+        if version == 1 {
+            transaction.execute_batch(include_str!("sync/sql/drop_legacy_subject_projection.sql"))?;
+            transaction.pragma_update(None, "user_version", VERSION)?;
+        }
+        if version == VERSION || version == 1 {
             let mut raw: Option<String> = None;
             transaction.shared_owner_replica_id(|row| {
                 raw = row.get::<_, Option<String>>(0)?;

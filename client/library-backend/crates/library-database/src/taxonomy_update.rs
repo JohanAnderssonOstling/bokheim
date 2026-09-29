@@ -19,7 +19,6 @@ impl Database {
         crate::transactions::with_remote_origin(&tx, |origin| {
             origin.mark(&tx)?;
             let tx = &tx;
-            tx.execute_batch("DELETE FROM source_concept_mapping; DELETE FROM subject_code_mapping;")?;
             // Keyset batches keep memory bounded without excluding unmatched books.
             let mut cursor = 0i64;
             loop {

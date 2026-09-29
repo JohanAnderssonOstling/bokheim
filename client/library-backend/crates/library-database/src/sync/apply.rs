@@ -88,8 +88,7 @@ pub(crate) struct PreparedBook {
     pub(crate) metadata: book_model::BookMetadata,
     pub(crate) encoded: Vec<u8>,
     pub(crate) subject_codes: Vec<subject_projection::ProjectedSubjectCode>,
-    pub(crate) assignments: Vec<subject_projection::ProjectedSubjectAssignment>,
-    pub(crate) concepts: Vec<(usize, i64, String)>,
+    pub(crate) concepts: Vec<(usize, i64)>,
     pub(crate) references: Vec<(String, Option<String>, Option<String>)>,
     pub(crate) classification_rows: Vec<ClassificationRows>,
 }
@@ -104,18 +103,16 @@ pub(crate) fn project_book(metadata: &book_model::BookMetadata, encoded: Vec<u8>
     timing.mark("clone_and_infer_isbns");
     let subject_codes = subject_projection::project_subject_codes(&metadata.subjects);
     timing.mark("subject_codes");
-    let assignments = subject_projection::project_subjects(&metadata.subjects);
-    timing.mark("subject_assignments");
     let mut concepts = Vec::new();
     for (index, code) in subject_codes.iter().enumerate() {
         for path in subject_projection::unified_subject_paths(code.system_id(), code.code()) {
-            concepts.push((index, subject_projection::unified_concept_id(&path).expect("projected subject exists in the taxonomy"), path));
+            concepts.push((index, subject_projection::unified_concept_id(&path).expect("projected subject exists in the taxonomy")));
         }
     }
     timing.mark("unified_concepts");
     let references = book_enrichment::related_isbn::lookup_candidates(&metadata.identifiers).into_iter().map(|isbn| (isbn, None, None)).collect();
     timing.mark("isbn_references");
-    let mut prepared = PreparedBook { metadata, encoded, subject_codes, assignments, concepts, references, classification_rows: Vec::new() };
+    let mut prepared = PreparedBook { metadata, encoded, subject_codes, concepts, references, classification_rows: Vec::new() };
     prepared.classification_rows = prepare_classification_rows(&prepared);
     timing.mark("classification_rows");
     Ok(prepared)
@@ -173,17 +170,9 @@ pub(crate) fn prepare_classification_rows(prepared: &PreparedBook) -> Vec<Classi
             codes.push(vec![(*pos as i64).into(), code.system_id().into(), code.code().into()]);
         }
     }
-    let mut assignments = Vec::new();
-    let mut evidence = Vec::new();
-    for assignment in &prepared.assignments {
-        assignments.push(vec![assignment.system_id().into(), assignment.subject_path().into(), assignment.matcher_version().into()]);
-        for pos in assignment.evidence_positions() {
-            evidence.push(vec![assignment.system_id().into(), assignment.subject_path().into(), (*pos as i64).into()]);
-        }
-    }
     let mut concepts = Vec::new();
     let mut unified_evidence = Vec::new();
-    for (index, concept, _) in &prepared.concepts {
+    for (index, concept) in &prepared.concepts {
         concepts.push(vec![(*concept).into(), subject_projection::UNIFIED_MATCHER_VERSION.into()]);
         let code = &prepared.subject_codes[*index];
         for pos in code.evidence_positions() {
@@ -196,27 +185,9 @@ pub(crate) fn prepare_classification_rows(prepared: &PreparedBook) -> Vec<Classi
     vec![
         rows("book_subject", 1, 5, subjects),
         rows("book_subject_code", 3, 3, codes),
-        rows("book_subject_assignment", 2, 3, assignments),
-        rows("book_subject_assignment_evidence", 3, 3, evidence),
         rows("book_unified_concept", 1, 2, concepts),
         rows("book_unified_concept_evidence", 4, 4, unified_evidence),
     ]
-}
-
-pub(crate) fn source_subject_version(system_id: &str) -> &'static str {
-    match system_id {
-        subject_projection::BISAC_SYSTEM_ID => subject_projection::BISAC_VERSION,
-        subject_projection::LCC_SYSTEM_ID => subject_projection::LCC_VERSION,
-        _ => "external",
-    }
-}
-
-pub(crate) fn source_mapping_type(system_id: &str) -> &'static str {
-    match system_id {
-        subject_projection::BISAC_SYSTEM_ID => "exact",
-        subject_projection::LCC_SYSTEM_ID => "broader",
-        _ => "related",
-    }
 }
 
 /// Persist canonical metadata and its normalized projections atomically.
@@ -282,64 +253,20 @@ pub(crate) fn write_subject_projection(tx: &rusqlite::Transaction<'_>, book_id: 
             if code.system_id()!=subject_projection::UNIFIED_SYSTEM_ID {continue;}
             let mut retained=Vec::new();
             for position in code.evidence_positions() {
-                let mut query=tx.prepare("SELECT DISTINCT e.concept_id,p.path FROM book_unified_concept_evidence e JOIN curated.unified_concept_paths p ON p.concept_id=e.concept_id WHERE e.book_row_id=?1 AND e.subject_position=?2 AND e.source_system_id='unified' AND e.source_code=?3")?;
-                retained.extend(query.query_map(rusqlite::params![book_id,*position as i64,code.code()],|r|Ok((index,r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?.collect::<Result<Vec<_>,_>>()?);
+                let mut query=tx.prepare(include_str!("sql/manual_unified_concept_evidence.sql"))?;
+                retained.extend(query.query_map(rusqlite::params![book_id,*position as i64,code.code()],|r|Ok((index,r.get::<_,i64>(0)?)))?.collect::<Result<Vec<_>,_>>()?);
             }
-            if !retained.is_empty() { adjusted.concepts.retain(|(i,_,_)| *i!=index); adjusted.concepts.extend(retained); }
+            if !retained.is_empty() { adjusted.concepts.retain(|(i,_)| *i!=index); adjusted.concepts.extend(retained); }
         }
         adjusted.classification_rows=prepare_classification_rows(&adjusted);
         &adjusted
     } else {projected};
 
     {
-        for assignment in &projected.assignments {
-            if assignment.system_id() == subject_projection::BISAC_SYSTEM_ID {
-                // These library-local FK targets are separate from the attached
-                // unified taxonomy. Materialize the assigned node and ancestors
-                // in the same transaction before inserting its book assignment.
-                let system = subject_projection::bisac_subject_system();
-                tx.ensure_bisac_system(system.version(), assignment.matcher_version())?;
-                let mut path = Some(assignment.subject_path());
-                while let Some(current) = path {
-                    let node = system.nodes().iter().find(|node| node.path() == current).ok_or_else(|| DatabaseError::message(format!("unknown BISAC subject path: {current}")))?;
-                    tx.ensure_bisac_node(node.path(), node.parent_path().unwrap_or(""), node.name(), node.code())?;
-                    path = node.parent_path();
-                }
-            } else {
-                let components: Vec<&str> = assignment.subject_path().split(" / ").map(str::trim).filter(|component| !component.is_empty()).collect();
-                tx.meta_ensure_external_subject_nodes_insert(assignment.system_id()).map_err(DatabaseError::operation)?;
-                let mut path = String::new();
-                let mut parent_path = String::new();
-                for component in components {
-                    if !path.is_empty() {
-                        path.push_str(" / ");
-                    }
-                    path.push_str(component);
-                    tx.meta_ensure_external_subject_nodes_insert_2(assignment.system_id(), &path, &parent_path, component).map_err(DatabaseError::operation)?;
-                    parent_path.clone_from(&path);
-                }
-                tx.meta_ensure_external_subject_nodes_update(assignment.system_id(), assignment.matcher_version()).map_err(DatabaseError::operation)?;
-            }
-        }
-        for (index, concept, path) in &projected.concepts {
-            let code = &projected.subject_codes[*index];
-            let version = source_subject_version(code.system_id());
-            tx.apply_insert(code.system_id(), version, code.code()).map_err(DatabaseError::operation)?;
-            tx.apply_insert_2(code.system_id(), version, code.code(), *concept, source_mapping_type(code.system_id()), subject_projection::UNIFIED_MATCHER_VERSION).map_err(DatabaseError::operation)?;
-            tx.apply_insert_3(code.system_id(), code.code(), path, subject_projection::UNIFIED_MATCHER_VERSION).map_err(DatabaseError::operation)?;
-        }
         for rows in &projected.classification_rows {
             let (select_sql, delete_sql, insert_sql): (&str, &str, &str) = match rows.table {
                 "book_subject" => (include_str!("sql/reconcile/book_subject_select.sql"), include_str!("sql/reconcile/book_subject_delete.sql"), include_str!("sql/reconcile/book_subject_insert.sql")),
                 "book_subject_code" => (include_str!("sql/reconcile/book_subject_code_select.sql"), include_str!("sql/reconcile/book_subject_code_delete.sql"), include_str!("sql/reconcile/book_subject_code_insert.sql")),
-                "book_subject_assignment" => {
-                    (include_str!("sql/reconcile/book_subject_assignment_select.sql"), include_str!("sql/reconcile/book_subject_assignment_delete.sql"), include_str!("sql/reconcile/book_subject_assignment_insert.sql"))
-                }
-                "book_subject_assignment_evidence" => (
-                    include_str!("sql/reconcile/book_subject_assignment_evidence_select.sql"),
-                    include_str!("sql/reconcile/book_subject_assignment_evidence_delete.sql"),
-                    include_str!("sql/reconcile/book_subject_assignment_evidence_insert.sql"),
-                ),
                 "book_unified_concept" => (include_str!("sql/reconcile/book_unified_concept_select.sql"), include_str!("sql/reconcile/book_unified_concept_delete.sql"), include_str!("sql/reconcile/book_unified_concept_insert.sql")),
                 "book_unified_concept_evidence" => {
                     (include_str!("sql/reconcile/book_unified_concept_evidence_select.sql"), include_str!("sql/reconcile/book_unified_concept_evidence_delete.sql"), include_str!("sql/reconcile/book_unified_concept_evidence_insert.sql"))
