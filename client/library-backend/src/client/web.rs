@@ -1,6 +1,6 @@
-use crate::ResolvedBookData;
 #[cfg(feature = "web-runtime-tests")]
 use crate::BookSource;
+use crate::ResolvedBookData;
 
 impl crate::library::web_reader::BookTransport for super::LibraryClient {
     async fn request<T: crate::library::commands::LibraryReply>(&self, command: crate::library::LibraryCommand) -> Result<T, String> {

@@ -22,7 +22,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Div, ElementId, MouseButton, SharedString, Stateful, Window, div, px};
 use gpui_component::{Icon, IconName};
 
-use crate::{BrowserTheme, CONTENTS_AMOUNT_WIDTH_REM, CONTENTS_DISCLOSURE_SIZE_REM, CONTENTS_ROW_GAP, CONTENTS_ROW_INDENT, RADIUS_SM, SPACE_SM, SPACE_XS, TEXT_SM, TEXT_XS};
+use crate::{BrowserTheme, CONTENTS_AMOUNT_WIDTH_REM, CONTENTS_DISCLOSURE_SIZE_REM, CONTENTS_ROW_GAP, CONTENTS_ROW_INDENT, SPACE_SM, SPACE_XS, TEXT_SM, TEXT_XS};
 
 /// What one row of a contents list is.
 ///
@@ -40,14 +40,17 @@ pub struct ContentsRow {
     /// its ancestors do not: a navigation document never says that a parent is
     /// partly read.
     pub marked: bool,
+    /// A leaf entry before the current position in reading order. Parent
+    /// entries stay neutral because they can contain both read and unread text.
+    pub read: bool,
     /// The keyboard cursor, which is not the same thing as where the reader is.
     pub focused: bool,
 }
 
-/// The list itself: one border around the whole thing, like every other list of
-/// things that can be acted on.
+/// An open contents list, beginning with a quiet rule. Rows draw their own
+/// hairlines so the same treatment works in detail views and reader sidebars.
 pub fn contents_panel(theme: BrowserTheme) -> Div {
-    div().w_full().min_w_0().flex().flex_col().border_1().border_color(theme.rule).rounded(px(RADIUS_SM))
+    div().w_full().min_w_0().flex().flex_col().border_t_1().border_color(theme.rule)
 }
 
 /// The title, as the row's own clickable region.
@@ -113,16 +116,13 @@ fn disclosure(id: impl Into<ElementId>, row: ContentsRow, theme: BrowserTheme, t
 /// One row, laid out and stated. The caller supplies the disclosure and hangs
 /// its own click on the returned row.
 ///
-/// The three states do not collide: hover is the neutral overlay, the keyboard
-/// cursor is `accent_wash`, and the entry the reader is inside is the solid
-/// accent. A cursor that lands on the marked row darkens instead of tinting,
-/// because a wash over the accent composites against the page and throws the
-/// fill away — the same rule `Interactive::selectable` states for cards.
+/// Hover is the neutral overlay, the keyboard cursor is `accent_wash`, and
+/// the current entry is solid accent. Earlier leaf entries use muted ink.
 pub fn contents_row(id: impl Into<ElementId>, row: ContentsRow, disclosure: AnyElement, title: impl IntoElement, number: Option<usize>, amount: Option<SharedString>, theme: BrowserTheme) -> Stateful<Div> {
     let (background, hovered, ink) = match (row.marked, row.focused) {
         (true, _) => (Some(theme.accent), theme.accent_hover, theme.accent_text),
-        (false, true) => (Some(theme.accent_wash), theme.accent_wash_hover, theme.text),
-        (false, false) => (None, theme.hover, theme.text),
+        (false, true) => (Some(theme.accent_wash), theme.accent_wash_hover, if row.read { theme.text_muted } else { theme.text }),
+        (false, false) => (None, theme.hover, if row.read { theme.text_muted } else { theme.text }),
     };
     let quiet = if row.marked { theme.accent_wash } else { theme.text_muted };
     div()
@@ -133,12 +133,15 @@ pub fn contents_row(id: impl Into<ElementId>, row: ContentsRow, disclosure: AnyE
         .flex_row()
         .items_center()
         .gap(px(CONTENTS_ROW_GAP))
+        .min_h(gpui::rems(2.25))
         .py(px(SPACE_XS))
         .px(px(SPACE_SM))
         .pl(px(SPACE_SM + CONTENTS_ROW_INDENT * row.depth.min(MAXIMUM_DRAWN_DEPTH) as f32))
         .cursor_pointer()
         .text_size(gpui::rems(TEXT_SM))
         .text_color(ink)
+        .border_b_1()
+        .border_color(theme.rule.opacity(0.45))
         .when_some(background, |element, colour| element.bg(colour))
         .hover(move |style| style.bg(hovered))
         .child(disclosure)

@@ -67,12 +67,7 @@ impl Journal {
     // replacement worker reports recovered results to its new import activity.
     pub(crate) fn advance_command(&mut self, activity: uuid::Uuid) -> Result<Option<crate::staged_import::AdvanceProgress>, String> {
         let total = self.sizes.as_ref().ok_or("import manifest is absent")?.len() as u64;
-        Ok(self.reporter.advance(total, (self.added_count() - self.failed) as u64, self.failed as u64)?.map(|delta| crate::staged_import::AdvanceProgress {
-            activity,
-            total: delta.total,
-            succeeded: delta.succeeded,
-            failed: delta.failed,
-        }))
+        Ok(self.reporter.advance(total, (self.added_count() - self.failed) as u64, self.failed as u64)?.map(|delta| crate::staged_import::AdvanceProgress { activity, total: delta.total, succeeded: delta.succeeded, failed: delta.failed }))
     }
 
     pub fn prepare_directories(&mut self, directories: Vec<(Vec<String>, DirId)>) {

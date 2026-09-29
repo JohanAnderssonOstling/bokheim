@@ -28,12 +28,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
 
-const SCHEMA_VERSION: i64 = 8;
-const WIKIDATA_SCHEMA_VERSION: i64 = 9;
-const LEGACY_QUERY_SCHEMA_VERSION: i64 = 7;
-const BUILDER_SCHEMA_VERSION: i64 = 11;
-const DESCRIPTION_SCHEMA_VERSION: i64 = 2;
-const DESCRIPTION_BUILDER_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 1;
+const BUILDER_SCHEMA_VERSION: i64 = 1;
+const DESCRIPTION_SCHEMA_VERSION: i64 = 1;
+const DESCRIPTION_BUILDER_VERSION: i64 = 1;
 const MAX_REVERSE_TITLE_CANDIDATES: usize = 4_096;
 
 // One row beyond the public candidate ceiling is enough to prove that the

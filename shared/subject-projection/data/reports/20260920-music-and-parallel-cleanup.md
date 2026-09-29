@@ -92,7 +92,7 @@ the final graph.
 
 ## Artifacts
 
-- [Migration](../migrations/20260920_music_and_parallel_subject_cleanup.sql)
+- Migration
 - [Exact merge, label, parent, and selector changes](20260920-music-and-parallel-cleanup.json)
 - [Validation summary and remaining non-merge differences](20260920-music-and-parallel-validation.json)
 - [Every changed observed classification](20260920-music-and-parallel-classification-changes.tsv)

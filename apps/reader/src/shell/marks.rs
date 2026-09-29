@@ -8,10 +8,10 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use library_backend::LibraryClient;
-use book_model::{AnnotationStyle};
-use library_backend::{ReaderAnnotation};
+use book_model::AnnotationStyle;
 use gpui::App;
+use library_backend::LibraryClient;
+use library_backend::ReaderAnnotation;
 
 use crate::shell::persistence::MutationWriter;
 

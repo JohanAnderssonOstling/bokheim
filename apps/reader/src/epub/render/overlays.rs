@@ -55,12 +55,14 @@ impl ReaderView {
         }
         Some(
             panel
-                .child(components::action_row().child(components::topbar_action_button("reader-footnote-open", "Go to note", gpui_component::IconName::ArrowRight, theme).on_click(cx.listener(|this, _, _, cx| this.navigate_from_footnote(cx)))).child(
-                    components::topbar_action_button("reader-footnote-close", "Close", gpui_component::IconName::Close, theme).on_click(cx.listener(|this, _, _, cx| {
-                        this.footnote = None;
-                        crate::invalidation::notify(cx, Component::ReaderShell, "footnote_closed");
-                    })),
-                ))
+                .child(
+                    components::action_row()
+                        .child(components::topbar_action_button("reader-footnote-open", "Go to note", gpui_component::IconName::ArrowRight, theme).on_click(cx.listener(|this, _, _, cx| this.navigate_from_footnote(cx))))
+                        .child(components::topbar_action_button("reader-footnote-close", "Close", gpui_component::IconName::Close, theme).on_click(cx.listener(|this, _, _, cx| {
+                            this.footnote = None;
+                            crate::invalidation::notify(cx, Component::ReaderShell, "footnote_closed");
+                        }))),
+                )
                 .into_any_element(),
         )
     }

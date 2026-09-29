@@ -16,6 +16,7 @@ impl AppClient {
 
     /// Resolve a destination only when the user imports or downloads a book.
     pub async fn library_for_import(&self, selected: Option<LibraryId>) -> Result<library_backend::LibraryClient, String> {
+        let explicitly_selected = selected.is_some();
         let id = match selected {
             Some(id) => id,
             None => {
@@ -23,7 +24,11 @@ impl AppClient {
                 *library.library_id()
             }
         };
-        Ok(self.library(id))
+        let library = self.library(id);
+        if explicitly_selected {
+            library.book_count().await.map_err(|error| format!("selected library is unavailable: {error}"))?;
+        }
+        Ok(library)
     }
 
     pub async fn set_library_asset_storage(&self, library_id: LibraryId, enabled: bool) -> Result<(), String> {

@@ -70,23 +70,33 @@ def prepare(target, *, cache=None, destination=None, archive=None, offline=False
                     raise RuntimeError(f"Invalid PDFium artifact member: {member_name}")
                 with source.extractfile(member) as data:
                     (staging / output_name).write_bytes(data.read())
-        notices_spec = manifest["targets"][spec["notices_target"]] if "notices_target" in spec else spec
-        notices_path = fetch(notices_spec, cache, None, offline) if "notices_target" in spec else source_path
-        with tarfile.open(notices_path, "r:gz") as source:
-            notices = []
-            for member in source.getmembers():
-                name = member.name
-                if member.isfile() and (name == "LICENSE" or name.startswith("licenses/")):
-                    raw = source.extractfile(member).read()
-                    try:
-                        notice = raw.decode("utf-8")
-                    except UnicodeDecodeError:
-                        notice = raw.decode("latin-1")
-                    notices.append(b"===== " + name.encode() + b" =====\n" + notice.encode("utf-8"))
-            if not notices:
-                raise RuntimeError(f"PDFium archive has no license notices: {source_path}")
-            (staging / "LICENSE").write_bytes(b"\n\n".join(notices))
-        (staging / "VERSION").write_text(f"PDFium {spec['version']}\n{spec['url']}\nSHA256 {spec['sha256']}\nNotices: {notices_spec['url']}\n")
+        if "library_sha256" in spec and digest(staging / "pdfium.lib") != spec["library_sha256"]:
+            raise RuntimeError("PDFium static library checksum mismatch")
+        if "notices_file" in spec:
+            notices = MANIFEST.parent / spec["notices_file"]
+            if digest(notices) != spec["notices_sha256"]:
+                raise RuntimeError("PDFium notices checksum mismatch")
+            shutil.copyfile(notices, staging / "LICENSE")
+            notices_origin = spec["notices_file"]
+        else:
+            notices_spec = manifest["targets"][spec["notices_target"]] if "notices_target" in spec else spec
+            notices_path = fetch(notices_spec, cache, None, offline) if "notices_target" in spec else source_path
+            with tarfile.open(notices_path, "r:gz") as source:
+                notices = []
+                for member in source.getmembers():
+                    name = member.name
+                    if member.isfile() and (name == "LICENSE" or name.startswith("licenses/")):
+                        raw = source.extractfile(member).read()
+                        try:
+                            notice = raw.decode("utf-8")
+                        except UnicodeDecodeError:
+                            notice = raw.decode("latin-1")
+                        notices.append(b"===== " + name.encode() + b" =====\n" + notice.encode("utf-8"))
+                if not notices:
+                    raise RuntimeError(f"PDFium archive has no license notices: {source_path}")
+                (staging / "LICENSE").write_bytes(b"\n\n".join(notices))
+            notices_origin = notices_spec["url"]
+        (staging / "VERSION").write_text(f"PDFium {spec['version']}\n{spec['url']}\nSHA256 {spec['sha256']}\nNotices: {notices_origin}\n")
         receipt = {"manifest_sha256": digest(MANIFEST), "target": target, "archive_sha256": spec["sha256"], "files": {
             item.name: digest(item) for item in staging.iterdir()
         }}

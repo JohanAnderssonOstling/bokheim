@@ -10,11 +10,8 @@ async fn committed_pages_notify_before_the_next_http_page_finishes() {
             if request.cursor.state_revision.is_some() {
                 return std::future::pending().await;
             }
-            binary_sync_response(&SyncExchangeResponse {
-                push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() },
-                pull: pull_response(vec![pulled_change(1, added(1, "First committed page", 10))], LibraryRevision::new(1).ok(), true),
-            })
-            .into_response()
+            binary_sync_response(&SyncExchangeResponse { push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() }, pull: pull_response(vec![pulled_change(1, added(1, 10))], LibraryRevision::new(1).ok(), true) })
+                .into_response()
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -64,7 +61,7 @@ async fn inactive_outbox_drains_acknowledged_changes_without_pulling() {
                 assert!(!request.mutations.is_empty(), "inactive libraries never issue pull-only requests");
                 binary_sync_response(&SyncExchangeResponse {
                     push: PushMutationsResponse { accepted: request.mutations.iter().map(|m| m.mutation_id).collect(), rejected: Vec::new() },
-                    pull: pull_response(vec![pulled_change(1, added(987, "Must not import", 10))], LibraryRevision::new(1).ok(), true),
+                    pull: pull_response(vec![pulled_change(1, added(u64::MAX, 10))], LibraryRevision::new(1).ok(), true),
                 })
             }
         }),
@@ -85,8 +82,7 @@ async fn inactive_outbox_drains_acknowledged_changes_without_pulling() {
     let conn = &manager.database;
     assert!(conn.sync_publishable_mutations().unwrap().is_empty());
     assert_eq!(conn.sync_pull_cursor().unwrap(), SyncCursor::default());
-    assert_eq!(conn.book_count_with_title("Must not import"), 0);
-    drop(conn);
+    assert_eq!(conn.count_books(&[fixture_content_hash(u64::MAX)]), 0);
     server.abort();
     let refused = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     manager.server_url = ServerUrl::parse(&format!("http://{}", refused.local_addr().unwrap())).unwrap();
@@ -106,9 +102,9 @@ async fn production_client_drains_all_pull_pages_before_finishing() {
         state.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let request = decode_sync_exchange(&headers, &body);
         let pull = match request.cursor.state_revision.map(LibraryRevision::get) {
-            None => pull_response(vec![pulled_change(1, added(1, "Paged book", 10))], LibraryRevision::new(1).ok(), true),
+            None => pull_response(vec![pulled_change(1, added(1, 10))], LibraryRevision::new(1).ok(), true),
             Some(1) => pull_response(vec![pulled_change(2, deleted(1))], LibraryRevision::new(2).ok(), false),
-            _ => PullStateResponse { mutations: Vec::new(), next_cursor: request.cursor, has_more: false },
+            _ => PullStateResponse { book_creations: Vec::new(), mutations: Vec::new(), next_cursor: request.cursor, has_more: false },
         };
         binary_sync_response(&SyncExchangeResponse { push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() }, pull })
     }
@@ -141,14 +137,11 @@ async fn restart_after_failed_pull_page_reapplies_the_whole_page_and_cursor() {
     async fn pull_page(axum::extract::State(state): axum::extract::State<PageState>, headers: axum::http::HeaderMap, body: axum::body::Bytes) -> axum::response::Response {
         let request = decode_sync_exchange(&headers, &body);
         assert_eq!(request.cursor, SyncCursor::default(), "a failed page must not advance either cursor channel");
-        let mut second = pulled_change(2, added(2, "Second book", 20));
+        let mut second = pulled_change(2, added(2, 20));
         if state.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
             second.mutation.value = vec![0xff];
         }
-        binary_sync_response(&SyncExchangeResponse {
-            push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() },
-            pull: pull_response(vec![pulled_change(1, added(1, "First book", 10)), second], LibraryRevision::new(2).ok(), false),
-        })
+        binary_sync_response(&SyncExchangeResponse { push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() }, pull: pull_response(vec![pulled_change(1, added(1, 10)), second], LibraryRevision::new(2).ok(), false) })
     }
 
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -193,7 +186,7 @@ async fn production_client_persists_exact_final_cursor_beyond_last_mutation() {
         let request = decode_sync_exchange(&headers, &body);
         binary_sync_response(&SyncExchangeResponse {
             push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() },
-            pull: pull_response(vec![pulled_change(1, added(1, "Cursor book", 10))], request.cursor.state_revision.or(LibraryRevision::new(10).ok()), false),
+            pull: pull_response(vec![pulled_change(1, added(1, 10))], request.cursor.state_revision.or(LibraryRevision::new(10).ok()), false),
         })
     }
     let app = axum::Router::new().route("/api/sync/exchange", axum::routing::post(pull_page));
@@ -258,10 +251,7 @@ async fn production_client_uses_exchange_then_drains_remaining_pull_pages() {
         match request.cursor.state_revision.map(LibraryRevision::get) {
             None => {
                 state.exchanges.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                binary_sync_response(&SyncExchangeResponse {
-                    push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() },
-                    pull: pull_response(vec![pulled_change(1, added(1, "Exchanged book", 10))], LibraryRevision::new(1).ok(), true),
-                })
+                binary_sync_response(&SyncExchangeResponse { push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() }, pull: pull_response(vec![pulled_change(1, added(1, 10))], LibraryRevision::new(1).ok(), true) })
             }
             Some(1) => {
                 state.pulls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -305,7 +295,7 @@ async fn push_and_pull_pagination_advance_in_the_same_exchange_loop() {
             0 => {
                 assert_eq!(request.cursor, SyncCursor::default());
                 assert_eq!(request.mutations.len(), sync_common::MAX_PUSH_MUTATIONS);
-                pull_response(vec![pulled_change(1, added(1, "Concurrent pages", 10))], LibraryRevision::new(1).ok(), true)
+                pull_response(vec![pulled_change(1, added(1, 10))], LibraryRevision::new(1).ok(), true)
             }
             1 => {
                 assert_eq!(request.cursor.state_revision, LibraryRevision::new(1).ok());
@@ -370,7 +360,7 @@ async fn transient_rejection_does_not_starve_later_push_pages() {
             assert_eq!(request.mutations.len(), 1);
             PushMutationsResponse { accepted: vec![request.mutations[0].mutation_id], rejected: Vec::new() }
         };
-        binary_sync_response(&SyncExchangeResponse { push, pull: PullStateResponse { mutations: Vec::new(), next_cursor: request.cursor, has_more: false } })
+        binary_sync_response(&SyncExchangeResponse { push, pull: PullStateResponse { book_creations: Vec::new(), mutations: Vec::new(), next_cursor: request.cursor, has_more: false } })
     }
 
     let state = ExchangeState { calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)), rejected: Arc::new(std::sync::Mutex::new(None)) };
@@ -418,7 +408,7 @@ async fn a_deferred_mutation_does_not_fail_the_surrounding_synchronization() {
         *state.deferred.lock().unwrap() = Some(deferred);
         binary_sync_response(&SyncExchangeResponse {
             push: PushMutationsResponse { accepted: vec![request.mutations[1].mutation_id], rejected: vec![MutationRejection { mutation_id: deferred, reason: MutationRejectionReason::TimestampTooFarFuture }] },
-            pull: pull_response(vec![pulled_change(1, added(1, "Pulled while deferred", 10))], LibraryRevision::new(1).ok(), false),
+            pull: pull_response(vec![pulled_change(1, added(1, 10))], LibraryRevision::new(1).ok(), false),
         })
     }
 
@@ -482,7 +472,14 @@ async fn permanent_rejection_is_an_outcome_after_applying_the_exchange_pull_half
         let rejected = request.mutations.first().expect("the fixture publishes one mutation").mutation_id;
         binary_sync_response(&SyncExchangeResponse {
             push: PushMutationsResponse { accepted: Vec::new(), rejected: vec![MutationRejection { mutation_id: rejected, reason: MutationRejectionReason::InvalidPayload }] },
-            pull: pull_response(vec![pulled_change(1, added(9, "Pulled despite rejection", 10))], LibraryRevision::new(1).ok(), false),
+            pull: pull_response(
+                vec![
+                    pulled_change(1, added(9, 10)),
+                    pulled_change(2, MutationBody::Metadata { content_hash: fixture_content_hash(9), value: library_replica::SyncBookMetadata { title: "Pulled despite rejection".into(), ..Default::default() } }),
+                ],
+                LibraryRevision::new(2).ok(),
+                false,
+            ),
         })
     }
 
@@ -503,7 +500,7 @@ async fn permanent_rejection_is_an_outcome_after_applying_the_exchange_pull_half
 
     let conn = &manager.database;
     assert!(conn.sync_publishable_mutations().unwrap().is_empty());
-    assert_eq!(conn.sync_pull_cursor().unwrap(), cursor(LibraryRevision::new(1).ok()));
+    assert_eq!(conn.sync_pull_cursor().unwrap(), cursor(LibraryRevision::new(2).ok()));
     let pulled_title: String = conn.book_title(&fixture_content_hash(9));
     assert_eq!(pulled_title, "Pulled despite rejection");
     server.abort();

@@ -6,6 +6,9 @@ impl AppClient {
     pub async fn account_snapshot(&self) -> Result<AccountSnapshot, String> {
         self.request(AppCommand::AccountSnapshot).await
     }
+    pub async fn local_storage_usage(&self) -> Result<Vec<crate::LocalLibraryStorageUsage>, String> {
+        self.request(AppCommand::LocalStorageUsage).await
+    }
     pub async fn login(&self, email: String, password: String) -> Result<AccountSnapshot, String> {
         self.request(AppCommand::Login { email, password }).await
     }

@@ -5,8 +5,8 @@ use futures_channel::oneshot;
 #[cfg(feature = "web-runtime-tests")]
 use js_sys::Promise;
 use js_sys::{Array, Uint8Array};
-use std::collections::HashMap;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 #[cfg(feature = "web-runtime-tests")]

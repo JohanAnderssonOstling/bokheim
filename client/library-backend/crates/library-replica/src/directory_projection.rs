@@ -1,5 +1,4 @@
 use crate::DirectoryLifecycleState;
-use crate::VersionKey;
 use std::collections::{HashMap, HashSet};
 use sync_common::{DirId, FileName, ROOT_DIR_ID};
 
@@ -9,7 +8,6 @@ pub struct DirectoryIntent {
     pub parent_id: DirId,
     pub name: FileName,
     pub lifecycle: DirectoryLifecycleState,
-    pub version: VersionKey,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -99,23 +97,23 @@ fn repair_cycles(intents: &HashMap<DirId, DirectoryIntent>, suppressed: &HashSet
 fn resolve_path_collisions(intents: &HashMap<DirId, DirectoryIntent>, parents: &HashMap<DirId, DirId>, suppressed: &HashSet<DirId>) -> HashMap<DirId, FileName> {
     let mut groups: HashMap<(DirId, String), Vec<&DirectoryIntent>> = HashMap::new();
     let mut occupied: HashMap<DirId, HashSet<String>> = HashMap::new();
-    let mut names = HashMap::new();
+    let mut names: HashMap<_, _> = intents.values().map(|intent| (intent.id, crate::project_folder_name(&intent.name))).collect();
     for intent in intents.values().filter(|intent| !suppressed.contains(&intent.id)) {
-        let key = crate::portable_name_key(&intent.name);
+        let key = crate::portable_name_key(&names[&intent.id]);
         occupied.entry(parents[&intent.id]).or_default().insert(key.clone());
         groups.entry((parents[&intent.id], key)).or_default().push(intent);
-        names.insert(intent.id, intent.name.clone());
     }
     let mut collisions: Vec<_> = groups.into_iter().filter(|(_, group)| group.len() > 1).collect();
     collisions.sort_by(|left, right| left.0.cmp(&right.0));
     for ((parent_id, _), mut group) in collisions {
-        group.sort_by(|left, right| right.version.cmp(&left.version).then_with(|| right.id.cmp(&left.id)));
-        let base = group[0].name.clone();
+        // Stable identity, not timestamps: recovery cannot reshuffle names.
+        group.sort_by(|left, right| right.id.cmp(&left.id));
+        let base = names[&group[0].id].clone();
         let parent_occupied = occupied.entry(parent_id).or_default();
         for (offset, loser) in group.into_iter().skip(1).enumerate() {
             let mut number = offset + 2;
             loop {
-                let candidate = format!("{base} {number}");
+                let candidate = crate::numbered_folder_name(&base, number);
                 if parent_occupied.insert(crate::portable_name_key(&candidate)) {
                     names.insert(loser.id, candidate);
                     break;
@@ -130,15 +128,10 @@ fn resolve_path_collisions(intents: &HashMap<DirId, DirectoryIntent>, parents: &
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sync_common::MutationId;
-    use test_support::{fixture_dir_id, fixture_replica_id};
-
-    fn version() -> VersionKey {
-        VersionKey::new(1, 0, fixture_replica_id("projection"), 1, MutationId::parse("00000000-0000-0000-0000-000000000001").unwrap())
-    }
+    use test_support::fixture_dir_id;
 
     fn intent(id: &str, parent: &str, name: &str) -> DirectoryIntent {
-        DirectoryIntent { id: fixture_dir_id(id), parent_id: fixture_dir_id(parent), name: name.to_owned(), lifecycle: DirectoryLifecycleState::Present, version: version() }
+        DirectoryIntent { id: fixture_dir_id(id), parent_id: fixture_dir_id(parent), name: name.to_owned(), lifecycle: DirectoryLifecycleState::Present }
     }
 
     fn intents(values: impl IntoIterator<Item = DirectoryIntent>) -> HashMap<DirId, DirectoryIntent> {
@@ -171,14 +164,7 @@ mod tests {
     }
     #[test]
     fn repairs_long_and_self_cycles_before_resolving_root_names() {
-        let make = || vec![
-            intent("a", "b", "A"),
-            intent("b", "c", "B"),
-            intent("c", "a", "Shelf"),
-            intent("child", "a", "Child"),
-            intent("self", "self", "Self"),
-            intent("existing", "00000000-0000-0000-0000-000000000000", "shelf"),
-        ];
+        let make = || vec![intent("a", "b", "A"), intent("b", "c", "B"), intent("c", "a", "Shelf"), intent("child", "a", "Child"), intent("self", "self", "Self"), intent("existing", "00000000-0000-0000-0000-000000000000", "shelf")];
         let input = intents(make());
         let projection = project_directories(&input);
         assert_eq!(projection, project_directories(&intents(make().into_iter().rev())));
@@ -198,5 +184,142 @@ mod tests {
             active.insert(*id);
         }
     }
+    #[test]
+    fn projection_v1_exhaustive_four_folder_graphs() {
+        for graph in 0..625u32 {
+            for deleted in 0..16u32 {
+                let make = |reverse: bool| {
+                    (0..4)
+                        .map(|step| {
+                            let index = if reverse { 3 - step } else { step };
+                            let id = DirId::from_u128((index + 1) as u128);
+                            (
+                                id,
+                                DirectoryIntent {
+                                    id,
+                                    parent_id: DirId::from_u128(((graph / 5u32.pow(index)) % 5) as u128),
+                                    name: if index % 2 == 0 { "Shelf" } else { "shelf" }.into(),
+                                    lifecycle: if deleted & (1 << index) == 0 { DirectoryLifecycleState::Present } else { DirectoryLifecycleState::Deleted },
+                                },
+                            )
+                        })
+                        .collect::<HashMap<_, _>>()
+                };
+                let projection = project_directories(&make(false));
+                assert_eq!(projection, project_directories(&make(true)));
+                let mut active = HashSet::from([ROOT_DIR_ID]);
+                let mut names = HashSet::new();
+                for id in projection.ordered_active {
+                    assert!(active.contains(&projection.parents[&id]));
+                    assert!(names.insert((projection.parents[&id], crate::portable_name_key(&projection.names[&id]))));
+                    active.insert(id);
+                }
+            }
+        }
+    }
 
+    #[test]
+    fn projection_v1_collision_priority_and_reserved_suffixes() {
+        let root = "00000000-0000-0000-0000-000000000000";
+        let values = intents([intent("a", root, "Shelf"), intent("b", root, "shelf"), intent("c", root, "SHELF"), intent("d", root, "SHELF 2")]);
+        let projection = project_directories(&values);
+        assert_eq!(projection.names[&fixture_dir_id("c")], "SHELF");
+        assert_eq!(projection.names[&fixture_dir_id("b")], "SHELF 3");
+        assert_eq!(projection.names[&fixture_dir_id("a")], "SHELF 4");
+        assert_eq!(projection.names[&fixture_dir_id("d")], "SHELF 2");
+    }
+}
+
+#[cfg(test)]
+mod safe_component_tests {
+    use super::*;
+
+    #[test]
+    fn collisions_after_sanitizing_and_truncating_reserve_existing_suffixes() {
+        let requests = ["A/B".to_owned(), "A\\B".to_owned(), "A_B 2".to_owned(), "..".to_owned(), "Folder".to_owned(), "CON.txt".to_owned(), "a".repeat(255), "a".repeat(256), format!("{} 2", "a".repeat(238))];
+        let make = |reverse: bool| {
+            let mut values = requests
+                .iter()
+                .enumerate()
+                .map(|(i, name)| {
+                    let id = DirId::from_u128(i as u128 + 1);
+                    (id, DirectoryIntent { id, parent_id: ROOT_DIR_ID, name: name.clone(), lifecycle: DirectoryLifecycleState::Present })
+                })
+                .collect::<Vec<_>>();
+            if reverse {
+                values.reverse();
+            }
+            values.into_iter().collect::<HashMap<_, _>>()
+        };
+        let input = make(false);
+        let projected = project_directories(&input);
+        assert_eq!(projected, project_directories(&make(true)));
+        let name = |id| &projected.names[&DirId::from_u128(id)];
+        assert_eq!(name(1), "A_B 3");
+        assert_eq!(name(2), "A_B");
+        assert_eq!(name(3), "A_B 2");
+        assert_eq!(name(4), "Folder 3");
+        assert_eq!(name(5), "Folder 2");
+        assert_eq!(name(6), "Folder");
+        assert_eq!(name(7), &format!("{} 3", "a".repeat(238)));
+        assert_eq!(name(8), &"a".repeat(240));
+        let mut occupied = HashSet::new();
+        for name in projected.names.values() {
+            assert_eq!(crate::filenames::validate_component(name).unwrap(), *name);
+            assert!(occupied.insert(crate::portable_name_key(name)));
+        }
+        assert_eq!(input[&DirId::from_u128(1)].name, "A/B", "projection must retain the original intent");
+    }
+}
+
+#[cfg(test)]
+mod adversarial_component_properties {
+    use super::*;
+
+    #[test]
+    fn sanitized_collision_groups_are_portable_unique_and_order_independent() {
+        let corpus = [
+            "".to_owned(),
+            "..".to_owned(),
+            "Folder".to_owned(),
+            "Folder 2".to_owned(),
+            "CON.txt".to_owned(),
+            "A/B".to_owned(),
+            "A\\B".to_owned(),
+            "A_B".to_owned(),
+            "A_B 2".to_owned(),
+            "Étage".to_owned(),
+            "E\u{301}tage".to_owned(),
+            "Ｓｈｅｌｆ".to_owned(),
+            "shelf".to_owned(),
+            "\0\n\u{0085}".to_owned(),
+            "界".repeat(100),
+            "a".repeat(255),
+            format!("{} 2", "a".repeat(238)),
+            format!("CON{}X", " ".repeat(237)),
+            "... valid ...".to_owned(),
+        ];
+        for seed in 0..128u64 {
+            let mut random = seed;
+            let mut input = HashMap::new();
+            for index in 1..=40 {
+                random = random.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let id = DirId::from_u128(index);
+                let name = corpus[(random >> 32) as usize % corpus.len()].clone();
+                input.insert(id, DirectoryIntent { id, parent_id: ROOT_DIR_ID, name, lifecycle: DirectoryLifecycleState::Present });
+            }
+            let projection = project_directories(&input);
+            let mut seen = HashSet::new();
+            let mut projected_input = HashMap::new();
+            for (id, name) in &projection.names {
+                assert_eq!(crate::filenames::validate_component(name).unwrap(), *name, "seed={seed}");
+                assert!(seen.insert(crate::portable_name_key(name)), "seed={seed}, duplicate={name}");
+                projected_input.insert(*id, DirectoryIntent { id: *id, parent_id: ROOT_DIR_ID, name: name.clone(), lifecycle: DirectoryLifecycleState::Present });
+            }
+            assert_eq!(project_directories(&projected_input), projection, "seed={seed}, projection is not a fixed point");
+            let mut reordered = input.into_iter().collect::<Vec<_>>();
+            reordered.sort_by(|a, b| b.0.cmp(&a.0));
+            assert_eq!(project_directories(&reordered.into_iter().collect()), projection, "seed={seed}, insertion order changed projection");
+        }
+    }
 }

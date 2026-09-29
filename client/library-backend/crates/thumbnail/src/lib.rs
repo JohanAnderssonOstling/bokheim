@@ -19,8 +19,8 @@ use std::io::{Read, Seek};
 /// is 600 real pixels. Anything smaller is upscaled on HiDPI displays and on
 /// phones.
 ///
-/// The 600px asset remains the synchronized source of truth. Smaller display
-/// buckets are device-local derivatives and can be rebuilt from it.
+/// The 600px asset remains the synchronized source of truth. The 300px browse
+/// bucket is cached on the server and device, and can be rebuilt from it.
 pub const BROWSE_THUMBNAIL_WIDTH: u32 = 300;
 pub const THUMBNAIL_WIDTH: u32 = 600;
 const MAX_COVER_IMAGE_BYTES: usize = 24 * 1024 * 1024;
@@ -33,8 +33,8 @@ const EPUB_FALLBACK_MAX_ASPECT_RATIO: f64 = 0.90;
 
 pub type ThumbnailResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// The synchronized high-density thumbnail and its smaller device-local browse
-/// derivative. Both are produced from the same decoded cover.
+/// The high-density thumbnail and its smaller browse derivative. Both are
+/// produced from the same decoded cover.
 pub struct ThumbnailVersions {
     pub browse: Vec<u8>,
     pub high_density: Vec<u8>,
@@ -443,6 +443,40 @@ pub fn generate_thumbnail_versions_with_pdf_renderer<R: Read + Seek + Send + Syn
             let tag = mp4ameta::Tag::read_from(&mut reader)?;
             tag.artwork().map(|artwork| decode_cover_image(artwork.data, image::guess_format(artwork.data)?)).transpose()?
         }
+        "mp3folder" => {
+            let mut archive = zip::ZipArchive::new(reader)?;
+            let mut cover = None;
+            for index in 0..archive.len() {
+                let mut entry = archive.by_index(index)?;
+                let name = entry.name().to_ascii_lowercase();
+                if ["cover.jpg", "cover.jpeg", "cover.png", "cover.webp", "folder.jpg", "folder.jpeg", "folder.png", "folder.webp"].contains(&name.as_str()) {
+                    if entry.size() > audiobook_folder::MAX_COVER_BYTES { return Err("audiobook cover exceeds the byte limit".into()); }
+                    let mut bytes = Vec::new();
+                    entry.read_to_end(&mut bytes)?;
+                    cover = image::guess_format(&bytes).ok().and_then(|format| decode_cover_image(&bytes, format).ok());
+                    break;
+                }
+            }
+            if cover.is_none() && archive.len() != 0 {
+                #[cfg(not(target_arch = "wasm32"))]
+                let facts = {
+                    let mut audio = tempfile::tempfile()?;
+                    std::io::copy(&mut archive.by_index(0)?, &mut audio)?;
+                    audio.seek(SeekFrom::Start(0))?;
+                    audiobook_folder::inspect_mp3(audio, true).ok()
+                };
+                #[cfg(target_arch = "wasm32")]
+                let facts = {
+                    let mut audio = Vec::new();
+                    archive.by_index(0)?.read_to_end(&mut audio)?;
+                    audiobook_folder::inspect_mp3(std::io::Cursor::new(audio), true).ok()
+                };
+                if let Some(bytes) = facts.and_then(|facts| facts.artwork) {
+                    cover = image::guess_format(&bytes).ok().and_then(|format| decode_cover_image(&bytes, format).ok());
+                }
+            }
+            cover
+        }
         "pdf" => Some(match pdf_cover::extract(&mut reader) {
             Some(image) => image,
             None => {
@@ -453,4 +487,49 @@ pub fn generate_thumbnail_versions_with_pdf_renderer<R: Read + Seek + Send + Syn
         _ => None,
     };
     cover.as_ref().map(ThumbnailVersions::from_image).transpose()
+}
+
+#[cfg(all(test, feature = "book-extractors"))]
+mod audiobook_sidecar_tests {
+    use super::*;
+    use std::io::Write as _;
+
+    #[test]
+    fn mp3_folder_cover_is_used_for_thumbnails() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(600, 900).write_to(&mut png, ImageFormat::Png).unwrap();
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        archive.start_file("01.mp3", stored).unwrap();
+        archive.write_all(b"audio").unwrap();
+        archive.start_file("cover.png", stored).unwrap();
+        archive.write_all(png.get_ref()).unwrap();
+        let bytes = archive.finish().unwrap().into_inner();
+        assert!(generate_thumbnail_versions_from_reader("mp3folder", std::io::Cursor::new(bytes)).unwrap().is_some());
+    }
+
+    #[test]
+    fn mp3_embedded_art_is_used_when_folder_has_no_cover_file() {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(600, 900).write_to(&mut png, ImageFormat::Png).unwrap();
+        let mut picture = vec![0];
+        picture.extend_from_slice(b"image/png\0");
+        picture.extend_from_slice(&[3, 0]);
+        picture.extend_from_slice(png.get_ref());
+        let mut frame = Vec::new();
+        frame.extend_from_slice(b"APIC");
+        frame.extend_from_slice(&(picture.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&[0, 0]);
+        frame.extend_from_slice(&picture);
+        let size = frame.len() as u32;
+        let mut mp3 = vec![b'I', b'D', b'3', 3, 0, 0, ((size >> 21) & 0x7f) as u8, ((size >> 14) & 0x7f) as u8, ((size >> 7) & 0x7f) as u8, (size & 0x7f) as u8];
+        mp3.extend(frame);
+        mp3.extend_from_slice(include_bytes!("../../book-metadata/tests/fixtures/silence.mp3"));
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        archive.start_file("01.mp3", stored).unwrap();
+        archive.write_all(&mp3).unwrap();
+        let bytes = archive.finish().unwrap().into_inner();
+        assert!(generate_thumbnail_versions_from_reader("mp3folder", std::io::Cursor::new(bytes)).unwrap().is_some());
+    }
 }

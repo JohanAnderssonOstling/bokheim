@@ -81,7 +81,7 @@ merge/delete list.
 
 ## Reproducible artifacts
 
-- [Migration](../migrations/20260920_broad_taxonomy_reconciliation.sql)
+- Migration
 - [Exact edits and ID mappings](20260920-broad-taxonomy-reconciliation.json)
 - [Validation counts, before/after depths, and database hash](20260920-broad-reconciliation-validation.json)
 - [Every changed observed classification](20260920-broad-classification-changes.tsv)

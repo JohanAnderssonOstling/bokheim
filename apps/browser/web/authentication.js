@@ -21,7 +21,7 @@ export function openAuthentication(themeJson, minimum, submit) {
         #bokheim-authentication :focus-visible { outline:2px solid var(--auth-accent); outline-offset:3px; }
         #bokheim-authentication button:disabled { opacity:.6; cursor:wait; }
         #bokheim-authentication .auth-links { display:flex; flex-direction:column; gap:6px; margin-top:16px; }
-        #bokheim-authentication .auth-links button { border-color:transparent; text-decoration:underline; }
+        #bokheim-authentication .auth-links button { border-color:transparent; color:var(--auth-textAccent); text-decoration:underline; }
         #bokheim-authentication .auth-actions { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
         #bokheim-authentication .auth-actions button { min-width:0; }
         #bokheim-authentication .auth-secret { position:relative; }

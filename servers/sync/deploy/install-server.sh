@@ -133,7 +133,7 @@ unset db_password
 
 # This is a development deployment target: every install wipes and recreates
 # the database rather than preserving data across deploys, so there is no
-# migration history to maintain -- `sync-server migrate` applies the current
+# upgrade history to maintain -- `sync-server migrate` applies the current
 # schema fresh each time. WITH (FORCE) drops the database even if the
 # previous deploy's service is still holding connections open.
 runuser -u postgres -- psql --set=ON_ERROR_STOP=1 postgres <<SQL

@@ -242,7 +242,7 @@ impl Database {
         let local_pending = !record.scan_complete || activity.scanning || activity.local_busy || pending_thumbnails > 0;
         let sync_pending = record.requires_sync && (remote_pending || activity.sync_busy || record.sync_unfinished || !checkpoint);
         let waiting_reason = if record.scan_failed {
-            Some("Some library files could not be scanned; reopen the library to retry".to_owned())
+            Some("Some library files could not be scanned; retrying automatically".to_owned())
         } else if let Some(error) = activity.file_error {
             Some(error.to_owned())
         } else if sync_pending && !activity.signed_in {

@@ -49,6 +49,8 @@ pub type LibrarySubjectView = LibraryHierarchyView<SubjectPath>;
 pub struct LibraryBrowseData {
     #[serde(default)]
     pub chip_groups: Vec<library_model::BrowseChipGroup>,
+    #[serde(default)]
+    pub sections: Vec<library_model::BrowseSection>,
     pub contents: library_model::BrowseContents,
     pub path: Vec<library_model::BrowsePathSegment>,
     pub language_counts: Vec<library_model::LibraryLanguageCount>,

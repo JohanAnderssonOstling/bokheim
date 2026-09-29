@@ -27,7 +27,7 @@ version before building the graphical executable.
 
 ```sh
 BOKHEIM_KOBO_ARCHIVE=/absolute/path/to/desktop-gpui-kobo.tar.gz \
-BOKHEIM_VERSION=0.1.6 \
+BOKHEIM_VERSION=0.1.0 \
 cargo run --manifest-path apps/kobo-installer/Cargo.toml
 ```
 

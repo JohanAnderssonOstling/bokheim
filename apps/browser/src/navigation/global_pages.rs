@@ -10,6 +10,7 @@ use crate::universal::sync::SyncPage;
 /// Owns the dependencies its pages are built from, so the shell only has to say
 /// which page it wants.
 pub(super) struct GlobalPages {
+    updates: Option<Entity<crate::services::UpdateControls>>,
     preferences: Entity<Preferences>,
     libraries: Entity<Libraries>,
     sync_page: Entity<SyncPage>,
@@ -21,8 +22,8 @@ impl GlobalPages {
     pub(super) fn apply_sync_event(&self, event: crate::SyncEvent, cx: &mut Context<BrowserShell>) {
         self.sync_page.update(cx, |page, cx| page.apply_event(event, cx));
     }
-    pub(super) fn new(preferences: Entity<Preferences>, libraries: Entity<Libraries>, sync_page: Entity<SyncPage>) -> Self {
-        Self { preferences, libraries, sync_page, settings: None }
+    pub(super) fn new(updates: Option<Entity<crate::services::UpdateControls>>, preferences: Entity<Preferences>, libraries: Entity<Libraries>, sync_page: Entity<SyncPage>) -> Self {
+        Self { updates, preferences, libraries, sync_page, settings: None }
     }
 
     /// Returns the page for `route`, building it on first use.
@@ -49,7 +50,7 @@ impl GlobalPages {
         if let Some(page) = &self.settings {
             return page.clone();
         }
-        let page = cx.new(|cx| SettingsPage::new(self.sync_page.clone(), self.preferences.clone(), self.libraries.clone(), cx));
+        let page = cx.new(|cx| SettingsPage::new(self.updates.clone(), self.sync_page.clone(), self.preferences.clone(), self.libraries.clone(), cx));
         self.settings = Some(page.clone());
         page
     }

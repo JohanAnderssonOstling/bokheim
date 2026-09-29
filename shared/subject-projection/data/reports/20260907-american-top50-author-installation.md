@@ -68,4 +68,4 @@ The [visible expansion policy](../LCC-VISIBLE-EXPANSION-POLICY.md#individual-aut
 | Nabokov, Vladimir Vladimirovich, 1899-1977 | 52159 | 395 | `PS3527.A15` |
 | Parker, Robert B. | 52160 | 395 | `PS3566.A686` |
 
-Migration: [20260907_extract_top50_american_authors.sql](../migrations/20260907_extract_top50_american_authors.sql). The [installation manifest](20260907-american-top50-author-manifest.json) retains the selector mappings and reference evidence. Full working verification artifacts are in `/home/johan/.cache/bokheim/american-top50-install/`.
+Migration: 20260907_extract_top50_american_authors.sql. The [installation manifest](20260907-american-top50-author-manifest.json) retains the selector mappings and reference evidence. Full working verification artifacts are in `/home/johan/.cache/bokheim/american-top50-install/`.

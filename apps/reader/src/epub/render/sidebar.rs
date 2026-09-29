@@ -1,8 +1,8 @@
 //! EPUB contents, annotation, and settings sidebar tabs.
 
-use library_backend::ReaderAnnotation;
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Entity, IntoElement, Window};
+use gpui::{AnyElement, App, Context, Entity, IntoElement, Window};
+use library_backend::ReaderAnnotation;
 use ui_components as components;
 
 use crate::epub::ReaderView;
@@ -17,8 +17,9 @@ impl ReaderView {
         })
     }
 
-    fn render_toc_body(&self, entity: Entity<Self>, theme: components::BrowserTheme) -> AnyElement {
-        let toc = state_panel::reader_toc_tree(&self.toc_tree, &entity, theme, |link, window, this: &mut Self, cx| {
+    fn render_toc_body(&self, entity: Entity<Self>, theme: components::BrowserTheme, cx: &App) -> AnyElement {
+        let active_link = self.toc.active_link();
+        let toc = state_panel::reader_toc_tree(&self.toc_tree, &entity, active_link.as_deref(), theme, cx, |link, window, this: &mut Self, cx| {
             this.navigate_to(link.to_owned(), cx);
             this.focus_document(window, cx);
             #[cfg(feature = "kobo")]
@@ -37,6 +38,13 @@ impl ReaderView {
                 &self.marks,
                 "Select text, then use Highlight to create an annotation.",
                 theme,
+                |annotation: &ReaderAnnotation| {
+                    annotation
+                        .toc_ordinal
+                        .and_then(|ordinal| usize::try_from(ordinal).ok())
+                        .and_then(|ordinal| self.toc.title_at_ordinal(ordinal).map(|title| (format!("chapter:{ordinal}"), title.to_owned())))
+                        .unwrap_or_else(|| ("other".to_owned(), "Other annotations".to_owned()))
+                },
                 |id, window, this: &mut Self, cx| {
                     this.annotation_popup_anchor = None;
                     this.select_annotation(id, window, cx);
@@ -52,7 +60,7 @@ impl ReaderView {
     pub(super) fn render_sidebar(&self, active: SidebarTab, entity: Entity<Self>, theme: components::BrowserTheme, window: &Window, cx: &mut Context<Self>) -> (AnyElement, AnyElement) {
         let tabs = self.render_sidebar_tabs(active, theme, cx);
         let body = match active {
-            SidebarTab::Contents => self.render_toc_body(entity, theme),
+            SidebarTab::Contents => self.render_toc_body(entity, theme, cx),
             SidebarTab::Annotations => self.render_annotations_body(theme, cx),
             SidebarTab::Settings => self.render_settings_panel(cx),
         };

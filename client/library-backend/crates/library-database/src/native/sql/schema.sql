@@ -3,7 +3,7 @@
 CREATE TABLE IF NOT EXISTS local_file_work(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         operation TEXT NOT NULL CHECK(operation IN ('trash','restore')),
-        content_hash TEXT NOT NULL REFERENCES book(content_hash),
+        content_hash TEXT NOT NULL,
         relative_path TEXT NOT NULL,
         UNIQUE(operation,content_hash,relative_path)
     );
@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS local_file_work(
         dir_id TEXT NOT NULL UNIQUE
     );
     CREATE TABLE IF NOT EXISTS local_book_work(id INTEGER PRIMARY KEY AUTOINCREMENT, content_hash TEXT NOT NULL UNIQUE);
-    CREATE TABLE IF NOT EXISTS local_purge_work(content_hash TEXT PRIMARY KEY NOT NULL REFERENCES book(content_hash));
+    CREATE TABLE IF NOT EXISTS local_purge_work(id INTEGER PRIMARY KEY AUTOINCREMENT, content_hash TEXT NOT NULL UNIQUE);
     CREATE TABLE IF NOT EXISTS local_file_projection(
         content_hash TEXT NOT NULL, dir_id TEXT NOT NULL, relative_path TEXT NOT NULL,
         PRIMARY KEY(content_hash,dir_id)
@@ -34,15 +34,20 @@ CREATE TABLE local_thumbnail_source(
     origin TEXT NOT NULL CHECK(origin IN ('local','remote'))
 ) STRICT;
 
+CREATE TABLE local_thumbnail_sidecar(
+    content_hash TEXT PRIMARY KEY NOT NULL REFERENCES book(content_hash) ON DELETE CASCADE
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS local_import_inspection(
         content_hash TEXT PRIMARY KEY REFERENCES book(content_hash) ON DELETE CASCADE,
         format TEXT NOT NULL,
         version INTEGER NOT NULL
     );
 
-CREATE TABLE IF NOT EXISTS local_subject_pipeline(
+    CREATE TABLE IF NOT EXISTS local_subject_pipeline(
         content_hash TEXT PRIMARY KEY REFERENCES book(content_hash) ON DELETE CASCADE,
-        state TEXT NOT NULL, metadata BLOB NOT NULL, title TEXT NOT NULL,
+        phase INTEGER NOT NULL, revision INTEGER NOT NULL,
+        metadata BLOB NOT NULL, title TEXT NOT NULL,
         complete INTEGER NOT NULL DEFAULT 0, retry_at INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS local_isbn_response(
@@ -78,30 +83,11 @@ CREATE TABLE IF NOT EXISTS pdf_reader_metadata (
 
 CREATE TRIGGER IF NOT EXISTS pdf_reader_metadata_insert AFTER INSERT ON pdf_reader_metadata
 BEGIN
-    INSERT INTO sync_outbox(state_kind,state_key,state_subkey,body,changed_at,conflict_rank)
-    SELECT 'pdf_reader_metadata',NEW.content_hash,NEW.checksum,bokheim_mutation('pdf_reader_metadata',NEW.content_hash,NEW.metadata),
-      CAST((julianday('now')-2440587.5)*86400000 AS INTEGER),0
-    WHERE COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1),'local')='local'
-    ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET
-      replica_seq=excluded.replica_seq,mutation_id=excluded.mutation_id,
-      body=excluded.body,changed_at=excluded.changed_at,conflict_rank=excluded.conflict_rank;
+    SELECT bokheim_accept_local(bokheim_mutation('pdf_reader_metadata',NEW.content_hash,NEW.metadata), CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)) WHERE COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1),'local')='local';
 END;
 CREATE TRIGGER IF NOT EXISTS pdf_reader_metadata_update AFTER UPDATE ON pdf_reader_metadata
 BEGIN
-    INSERT INTO sync_outbox(state_kind,state_key,state_subkey,body,changed_at,conflict_rank)
-    SELECT 'pdf_reader_metadata',NEW.content_hash,NEW.checksum,bokheim_mutation('pdf_reader_metadata',NEW.content_hash,NEW.metadata),
-      CAST((julianday('now')-2440587.5)*86400000 AS INTEGER),0
-    WHERE COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1),'local')='local'
-    ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET
-      replica_seq=excluded.replica_seq,mutation_id=excluded.mutation_id,
-      body=excluded.body,changed_at=excluded.changed_at,conflict_rank=excluded.conflict_rank;
-END;
-
-CREATE TRIGGER IF NOT EXISTS pdf_reader_metadata_purge AFTER UPDATE OF purged_at ON book
-WHEN NEW.purged_at IS NOT NULL
-BEGIN
-    DELETE FROM pdf_reader_metadata WHERE content_hash=NEW.content_hash;
-    DELETE FROM sync_outbox WHERE state_kind='pdf_reader_metadata' AND state_key=NEW.content_hash;
+    SELECT bokheim_accept_local(bokheim_mutation('pdf_reader_metadata',NEW.content_hash,NEW.metadata), CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)) WHERE COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1),'local')='local';
 END;
 
 -- name: schema_activity &
@@ -111,7 +97,7 @@ WHEN NEW.deleted_at IS NOT NULL
 BEGIN DELETE FROM local_thumbnail_work WHERE content_hash=NEW.content_hash AND state='pending'; END;
 CREATE TRIGGER IF NOT EXISTS thumbnail_restore_book AFTER UPDATE OF deleted_at ON book
 WHEN OLD.deleted_at IS NOT NULL AND NEW.deleted_at IS NULL
-BEGIN INSERT OR IGNORE INTO local_thumbnail_work(content_hash,state) VALUES(NEW.content_hash,'pending'); END;
+BEGIN INSERT INTO local_thumbnail_work(content_hash,state) VALUES(NEW.content_hash,'pending') ON CONFLICT(content_hash) DO NOTHING; END;
 CREATE TRIGGER IF NOT EXISTS thumbnail_reject_deleted_insert AFTER INSERT ON local_thumbnail_work
 WHEN NEW.state='pending' AND EXISTS(SELECT 1 FROM book WHERE content_hash=NEW.content_hash AND deleted_at IS NOT NULL)
 BEGIN DELETE FROM local_thumbnail_work WHERE content_hash=NEW.content_hash; END;

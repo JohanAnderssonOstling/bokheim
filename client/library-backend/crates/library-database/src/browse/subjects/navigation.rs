@@ -58,15 +58,15 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn compact_routes_preserve_every_matcher_path_and_multiple_parent_occurrences() {
+    fn route_ids_preserve_every_matcher_path_and_multiple_parent_occurrences() {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
         let expected =
             subject_projection::unified_taxonomy_routes().into_iter().filter(|r| r.path() != ROOT_SUBJECT_PATH).map(|r| (r.path().to_owned(), (r.concept_id(), r.parent_path().to_owned(), r.label().to_owned()))).collect::<BTreeMap<_, _>>();
-        let mut rows = db.prepare("SELECT route_id,path,concept_id,parent_path,label FROM curated.unified_concept_paths").unwrap();
+        let mut rows = db.connection.prepare("SELECT route_id,path,concept_id,parent_path,label FROM curated.unified_concept_paths").unwrap();
         let routes = rows.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, (r.get::<_, i64>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?)))).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
         let actual = routes.iter().map(|(_, path, data)| (path.clone(), data.clone())).collect::<BTreeMap<_, _>>();
-        assert_eq!(actual, expected, "route compaction must preserve the matcher/browse contract");
+        assert_eq!(actual, expected, "route IDs must preserve the matcher/browse contract");
         for (id, path, _) in &routes {
             assert_eq!(db.subject_route_path(*id).unwrap().as_deref(), Some(path.as_str()));
             assert_eq!(db.subject_route_id(path).unwrap(), Some(*id), "{path}");
@@ -76,7 +76,7 @@ mod tests {
         assert_eq!(db.subject_route_path(0).unwrap().as_deref(), Some(ROOT_SUBJECT_PATH));
         assert_eq!(db.subject_route_path(-1).unwrap(), None);
         assert_eq!(db.subject_route_id("No such subject / child").unwrap(), None);
-        let stored_text_columns: i64 = db.query_row("SELECT count(*) FROM pragma_table_info('unified_concept_route','curated') WHERE type='TEXT'", [], |r| r.get(0)).unwrap();
+        let stored_text_columns: i64 = db.connection.query_row("SELECT count(*) FROM pragma_table_info('unified_concept_route','curated') WHERE type='TEXT'", [], |r| r.get(0)).unwrap();
         assert_eq!(stored_text_columns, 0);
     }
 }

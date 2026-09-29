@@ -4,6 +4,39 @@ use std::future::Future;
 use std::time::Duration;
 use wasm_bindgen::{closure::Closure, JsCast};
 
+// Each database worker is an isolated WASM instance. Failed startup keeps this
+// gate closed until the worker is terminated; dropping a permit never releases it.
+thread_local! {
+    static STARTUP_GATE: std::cell::RefCell<Option<tokio::sync::watch::Receiver<bool>>> = const { std::cell::RefCell::new(None) };
+}
+
+pub struct StartupPermit(tokio::sync::watch::Sender<bool>);
+impl StartupPermit {
+    pub fn release(self) {
+        STARTUP_GATE.with(|gate| *gate.borrow_mut() = None);
+        self.0.send_replace(true);
+    }
+}
+
+pub fn defer_background_work() -> StartupPermit {
+    let (sender, receiver) = tokio::sync::watch::channel(false);
+    STARTUP_GATE.with(|gate| {
+        assert!(gate.borrow().is_none(), "startup work is already deferred");
+        *gate.borrow_mut() = Some(receiver);
+    });
+    StartupPermit(sender)
+}
+
+async fn startup_ready() {
+    let receiver = STARTUP_GATE.with(|gate| gate.borrow().clone());
+    if let Some(mut receiver) = receiver {
+        loop {
+            if *receiver.borrow_and_update() { break; }
+            if receiver.changed().await.is_err() { std::future::pending::<()>().await; }
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct BackendExecutor;
 
@@ -14,12 +47,12 @@ impl BackendExecutor {
 
     pub fn spawn<T: BackendOutput>(&self, future: impl BackendFuture<T>) -> BackendTask<T> {
         let (task, runner) = owned_task(future);
-        wasm_bindgen_futures::spawn_local(runner);
+        wasm_bindgen_futures::spawn_local(async move { startup_ready().await; runner.await });
         task
     }
 
     pub fn spawn_detached(&self, future: impl BackendFuture<()>) {
-        wasm_bindgen_futures::spawn_local(future);
+        wasm_bindgen_futures::spawn_local(async move { startup_ready().await; future.await });
     }
 }
 
@@ -28,7 +61,7 @@ pub async fn run_blocking<T: BackendOutput>(operation: impl FnOnce() -> T + Back
 }
 
 pub fn spawn_detached(future: impl BackendFuture<()>) {
-    wasm_bindgen_futures::spawn_local(future);
+    wasm_bindgen_futures::spawn_local(async move { startup_ready().await; future.await });
 }
 
 struct Timer {
@@ -131,4 +164,32 @@ pub fn available_parallelism() -> usize {
         .filter(|value| value.is_finite() && *value >= 1.0)
         .map(|value| value as usize)
         .unwrap_or(1)
+}
+
+/// Executed in a real browser worker by the update lifecycle fixture.
+#[cfg(feature = "web-runtime-tests")]
+pub async fn startup_gate_contract(abandon: bool) -> bool {
+    use std::{cell::Cell, rc::Rc};
+    let count = Rc::new(Cell::new(0));
+    let permit = defer_background_work();
+    let executor = BackendExecutor::new().unwrap();
+    let captured = count.clone();
+    let owned = executor.spawn(async move { captured.set(captured.get() + 1); });
+    let captured = count.clone();
+    executor.spawn_detached(async move { captured.set(captured.get() + 1); });
+    let captured = count.clone();
+    spawn_detached(async move { captured.set(captured.get() + 1); });
+    sleep(Duration::from_millis(5)).await;
+    if count.get() != 0 { return false; }
+    if abandon {
+        drop(permit);
+        sleep(Duration::from_millis(5)).await;
+        drop(owned);
+        count.get() == 0
+    } else {
+        permit.release();
+        sleep(Duration::from_millis(5)).await;
+        let _ = owned.await;
+        count.get() == 3
+    }
 }

@@ -134,11 +134,11 @@ impl State {
                 let library = library.ok_or_else(|| JsValue::from_str("Invalid import library"))?;
                 let io = state.open.call1(&JsValue::UNDEFINED, &job)?;
                 let io = JsFuture::from(Promise::resolve(&io)).await?;
-                super::import_workflow::run(job, io.unchecked_into(), &Client { state: state.clone(), library }, progress).await
+                crate::library::web_import::run(job, io.unchecked_into(), &Client { state: state.clone(), library }, progress).await
             }
             .await;
             match result {
-                Ok(failures) => state.post(&object(&[("transport", "import_result".into()), ("id", id), ("failures", super::import_workflow::failures_value(&failures).expect("import failures serialize"))])),
+                Ok(failures) => state.post(&object(&[("transport", "import_result".into()), ("id", id), ("failures", crate::library::web_import::failures_value(&failures).expect("import failures serialize"))])),
                 Err(error) if field(&error, "transport").as_bool() == Some(true) => state.fail(&error_message(&error)),
                 Err(error) => state.post(&object(&[("transport", "import_result".into()), ("id", id), ("error", error_message(&error).into()), ("storageFull", field(&error, "storageFull"))])),
             }
@@ -328,16 +328,16 @@ pub async fn workflow_contract(job: JsValue, io: JsValue, respond: Function, pro
         |_| panic!("invalid test peer message"),
     );
     let client = Client { state, library: crate::LibraryId::from_u128(123) };
-    let result = super::import_workflow::run(job, io.unchecked_into(), &client, Rc::new(move |value| progress.call1(&JsValue::UNDEFINED, &value).map(|_| ()))).await.and_then(|values| super::import_workflow::failures_value(&values));
+    let result = crate::library::web_import::run(job, io.unchecked_into(), &client, Rc::new(move |value| progress.call1(&JsValue::UNDEFINED, &value).map(|_| ()))).await.and_then(|values| crate::library::web_import::failures_value(&values));
     drop(peer);
     result
 }
 
 pub fn recover(manifest: &[u8], journal: &[u8]) -> Result<JsValue, JsValue> {
-    super::import_workflow::recover(manifest, journal)
+    crate::library::web_import::recover(manifest, journal)
 }
 
-impl super::import_workflow::ImportClient for Client {
+impl crate::library::web_import::ImportClient for Client {
     async fn request<T: crate::executor::BackendOutput + serde::de::DeserializeOwned>(&self, command: crate::library::LibraryCommand) -> Result<T, crate::BackendError> {
         self.request(command).await
     }

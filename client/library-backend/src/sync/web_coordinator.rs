@@ -2,8 +2,8 @@
 //! coordinator's network worker; this WASM entry point never opens storage.
 #![cfg(target_arch = "wasm32")]
 
-use serde::{Deserialize, Serialize};
 use library_runtime::events::{LibraryEvent, LibraryEventSender};
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use sync_common::{LibraryId, MutationId, PullStateResponse, ReplicaId, StateCell, SyncCursor};
 use sync_engine::{StoreFuture, SyncStore};
@@ -85,7 +85,8 @@ async fn storage_command(database: &library_database::Database, events: Option<&
 }
 
 pub(crate) async fn synchronize(
-    database: library_database::Database, events: Option<LibraryEventSender>, library_id: LibraryId, replica_id: ReplicaId, user_id: &str, credentials: &sync_transport::SyncCredentials, inventory_checked: &AtomicBool, outbox_only: bool, repair: bool,
+    database: library_database::Database, events: Option<LibraryEventSender>, library_id: LibraryId, replica_id: ReplicaId, user_id: &str, credentials: &sync_transport::SyncCredentials, inventory_checked: &AtomicBool, outbox_only: bool,
+    repair: bool,
 ) -> Result<(sync_engine::SyncOutcome, bool), sync_engine::SyncError> {
     let input = SyncInput { outbox_only, repair, library_id, replica_id, server_url: credentials.server_url().to_string(), access_token: credentials.access_token().to_owned(), inventory_checked: inventory_checked.load(Ordering::Acquire) };
     let bytes = rmp_serde::to_vec_named(&input).map_err(|error| sync_engine::SyncError::Failed(error.to_string()))?;

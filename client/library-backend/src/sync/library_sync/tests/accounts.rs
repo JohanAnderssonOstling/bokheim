@@ -18,7 +18,7 @@ async fn account_switch_applies_an_in_flight_native_page_and_acknowledgments() {
                     release.notified().await;
                     binary_sync_response(&SyncExchangeResponse {
                         push: PushMutationsResponse { accepted: request.mutations.iter().map(|m| m.mutation_id).collect(), rejected: Vec::new() },
-                        pull: pull_response(vec![pulled_change(1, added(99, "Old account book", 10))], LibraryRevision::new(1).ok(), false),
+                        pull: pull_response(vec![pulled_change(1, added(99, 10))], LibraryRevision::new(1).ok(), false),
                     })
                 }
             }),
@@ -37,7 +37,7 @@ async fn account_switch_applies_an_in_flight_native_page_and_acknowledgments() {
         if !queued {
             manager.database.clear_sync_outbox().unwrap();
         }
-        let pending = if queued { pending } else { 0 };
+        let _pending = if queued { pending } else { 0 };
         let (events, updates) = crate::library::events::library_event_channel();
         manager.event_tx = Some(events);
         let exchange = manager.synchronize_state();

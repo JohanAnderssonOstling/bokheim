@@ -5,14 +5,14 @@ extern crate core;
 pub mod host;
 
 mod api;
-mod library_client;
+mod app;
 #[cfg(not(target_arch = "wasm32"))]
 mod kobo_transfer;
-mod app;
-use client_platform_runtime::executor;
-pub(crate) use library_backend::integration as notification_interest;
+mod library_client;
 #[cfg(test)]
 pub(crate) use app::data as home;
+use client_platform_runtime::executor;
+pub(crate) use library_backend::integration as notification_interest;
 mod platform;
 pub(crate) mod runtime;
 
@@ -22,6 +22,7 @@ pub(crate) use app::{decode_worker_message, encode_worker_message, AppWorkerRequ
 pub use app::{AccountSnapshot, AppClient, AppStartupState, ThumbnailResolution};
 pub use app::{AccountStatus, AccountStorageUsage, AppDataLocation, LibraryEntry, LocalLibraryStorageUsage, ServerLibraryStorageUsage};
 pub use app::{APP_NAME, APP_NAME_LOWER};
+pub use client_runtime::BackendError;
 /// Compatibility exports for clients that still import library-owned modules
 /// through the application crate. New code should depend on `library-backend`.
 pub(crate) use library_backend::{asset_store, library, sync};
@@ -30,7 +31,6 @@ pub use library_backend::{
     DownloadProgressError, DownloadState, ImportFailure, ImportFailureKind, ImportProgress, ImportSource, ImportState, LibraryBrowseData, LibraryCommand, LibraryHandle, LibraryId, LibrarySession, LibrarySyncState, LibrarySyncStatus,
     LibraryTransfers, RelativeBookPath, RelativeBookPathError, RelativeDirPath, RelativeDirPathError, ResolvedBookData, ScanProgress, TransferJobKind, TransferOrigin, TransferState, TransferStatus, ROOT_DIR_ID,
 };
-pub use client_runtime::BackendError;
 pub(crate) type DeviceAccountSession = library_backend::integration::LibraryAccountSession<app::BackendContext>;
 
 #[cfg(target_arch = "wasm32")]
@@ -62,13 +62,12 @@ pub(crate) use app::{AppBackend, BackendContext};
 #[cfg(target_arch = "wasm32")]
 mod web;
 
+#[cfg(all(feature = "kobo", not(target_arch = "wasm32")))]
+pub use api::app::BatteryStatus;
+#[cfg(all(feature = "kobo", target_os = "linux"))]
+pub use api::app::{BluetoothDevice, BluetoothRequest, BluetoothStatus, WifiNetwork, WifiPhase, WifiRequest, WifiSecurity, WifiSnapshot};
 #[cfg(not(target_arch = "wasm32"))]
 pub use library::AudioStreamControl;
 #[cfg(target_arch = "wasm32")]
 pub use library_backend::library::browser_audiobook::{BrowserAudiobook, PlaybackLease};
 pub use library_backend::library::{AudiobookBook, DirectPlayback, DocumentBook, PlaybackLocation, PlaybackMetadata, PlaybackSource, ResolvedBook};
-#[cfg(all(feature = "kobo", not(target_arch = "wasm32")))]
-pub use api::app::BatteryStatus;
-#[cfg(all(feature = "kobo", target_os = "linux"))]
-pub use api::app::{BluetoothDevice, BluetoothRequest, BluetoothStatus, WifiNetwork, WifiPhase, WifiRequest, WifiSecurity, WifiSnapshot};
-

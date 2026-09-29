@@ -22,26 +22,14 @@ impl LibrarySession {
             }
             let outcome: Result<Option<bool>, BackendError> = async {
                 let existing = self.assets.read_bytes(crate::BlobKind::Thumbnail, &hash).await.map_err(BackendError::operation)?;
-                let replacing = if let Some(bytes) = &existing {
-                    let (width, height) = thumbnail::cover_image_dimensions(&bytes).map_err(BackendError::operation)?;
-                    // Near-square and landscape audiobook art can be upgraded;
-                    // leave portrait covers and other book formats alone.
-                    if *format != Some(book_model::BookFormat::M4b) || f64::from(width) / f64::from(height) < 0.9 {
-                        return self.apply_enriched_cover(hash, &expected, &existing, None).await;
-                    }
-                    true
-                } else {
-                    false
-                };
+                // The selected local or synced cover is authoritative, including
+                // square audiobook artwork. Network art fills missing covers.
+                if existing.is_some() {
+                    return self.apply_enriched_cover(hash, &expected, &existing, None).await;
+                }
                 for isbn in &isbns {
                     let result = self.metadata().cover(isbn).await;
                     let Some(bytes) = result.map_err(BackendError::operation)? else { continue };
-                    if replacing {
-                        let (width, height) = thumbnail::cover_image_dimensions(&bytes).map_err(BackendError::operation)?;
-                        if !thumbnail::reasonable_cover_dimensions(width, height) || f64::from(width) / f64::from(height) >= 0.9 {
-                            continue;
-                        }
-                    }
                     let versions = cpu_host::cover(&*self.cpu, bytes).await.map_err(BackendError::operation)?;
                     return self.apply_enriched_cover(hash, &expected, &existing, Some(&versions)).await;
                 }
@@ -162,8 +150,8 @@ mod tests {
         let db = library_database::Database::open(root.join("library.sqlite")).unwrap();
         db.initialize_library().unwrap();
         let hash = book_identity::identify(&mut std::io::Cursor::new(b"cover lease test")).unwrap();
-        db.execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'Book','epub')", [hash.as_str()]).unwrap();
-        db.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT ?1,row_id,'book.epub',content_hash,1 FROM book", [sync_common::ROOT_DIR_ID.to_string()]).unwrap();
+        crate::test_database::raw(&db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'Book','epub')", [hash.as_str()]).unwrap();
+        crate::test_database::raw(&db).execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT ?1,row_id,'book.epub',content_hash,1 FROM book", [sync_common::ROOT_DIR_ID.to_string()]).unwrap();
         db.seed_file_projection(&hash, &sync_common::ROOT_DIR_ID, "/book.epub");
         db.complete_thumbnail_work(&hash, false).unwrap();
         std::fs::write(root.join("book.epub"), b"cover lease test").unwrap();
@@ -182,11 +170,10 @@ mod tests {
     }
 
     fn matched_recording(library: &LibrarySession, hash: ContentHash) {
-        library.db.execute("UPDATE book SET format='m4b' WHERE content_hash=?1", [hash.as_str()]).unwrap();
-        library.db.execute("INSERT INTO audiobook_metadata(content_hash,duration_ms) VALUES(?1,600000)", [hash.as_str()]).unwrap();
+        crate::test_database::raw(&library.db).execute("UPDATE book SET format='m4b' WHERE content_hash=?1", [hash.as_str()]).unwrap();
+        crate::test_database::raw(&library.db).execute("INSERT INTO audiobook_metadata(content_hash,duration_ms) VALUES(?1,600000)", [hash.as_str()]).unwrap();
         let response = serde_json::json!({"status":"supported", "selected_asin":"B000000001", "selected_region":"us", "candidates":[{"asin":"B000000001","region":"us"}]});
-        library
-            .db
+        crate::test_database::raw(&library.db)
             .execute(
                 "INSERT INTO audible_enrichment_jobs(content_hash,policy,request_json,status,response_json,updated_at) VALUES(?1,'audible_v2','{}','applied',?2,0)",
                 library_database::rusqlite::params![hash.as_str(), response.to_string()],
@@ -205,8 +192,22 @@ mod tests {
         library.assets.write(crate::BlobKind::Thumbnail, &hash, b"existing cover").await.unwrap();
         assert_eq!(library.enrich_audible_cover_candidates(candidates).await.unwrap(), 0);
         assert_eq!(library.assets.read_bytes(crate::BlobKind::Thumbnail, &hash).await.unwrap(), Some(b"existing cover".to_vec()));
-        library.db.execute("UPDATE audible_enrichment_jobs SET status='ambiguous' WHERE content_hash=?1", [hash.as_str()]).unwrap();
+        crate::test_database::raw(&library.db).execute("UPDATE audible_enrichment_jobs SET status='ambiguous' WHERE content_hash=?1", [hash.as_str()]).unwrap();
         assert!(library.db.audible_cover_identity(&hash).unwrap().is_none());
+        assert!(library.db.audible_cover_candidates("audible_covers_v1", "", &scope).unwrap().is_empty());
+    }
+
+    #[test]
+    fn mp3_folder_uses_audible_artwork_only_without_a_local_cover() {
+        let root = tempfile::tempdir().unwrap();
+        let (library, hash) = fixture(root.path(), "http://127.0.0.1:1");
+        matched_recording(&library, hash);
+        crate::test_database::raw(&library.db).execute("UPDATE book SET format='mp3folder' WHERE content_hash=?1", [hash.as_str()]).unwrap();
+        let scope = serde_json::to_string(&vec![hash]).unwrap();
+        assert_eq!(library.db.audible_cover_identity(&hash).unwrap(), Some(("B000000001".into(), "us".into())));
+        assert_eq!(library.db.audible_cover_candidates("audible_covers_v1", "", &scope).unwrap(), vec![(hash, "B000000001".into(), "us".into())]);
+
+        library.db.complete_sidecar_thumbnail_work(&hash).unwrap();
         assert!(library.db.audible_cover_candidates("audible_covers_v1", "", &scope).unwrap().is_empty());
     }
 

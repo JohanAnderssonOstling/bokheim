@@ -8,6 +8,7 @@ publish = false
 workspace = true
 
 [dependencies]
+audiobook-folder = { path = "../../../../shared/audiobook-folder" }
 tracing = "0.1"
 book-identity = { path = "../../../../shared/book-identity" }
 blake3 = "1"

@@ -4,8 +4,8 @@ use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use app_preferences::LibraryView;
 use app::AppClient;
+use app_preferences::LibraryView;
 use gpui::{App, AppContext, Context, Entity, SharedString, Task, Window};
 use sync_common::LibraryId;
 

@@ -4,10 +4,16 @@ use crate::shared_sql::SharedSql;
 pub(crate) mod apply;
 pub(crate) mod functions;
 mod outbox;
-mod state;
+pub(crate) mod state;
 pub use state::CURSOR_RECOVERY_PENDING_KEY;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod convergence_tests;
+#[cfg(test)]
+mod creation_tests;
+#[cfg(test)]
+mod projection_repair_tests;
 
 use crate::DatabaseError;
 use include_sqlite_sql::include_sql;
@@ -110,21 +116,7 @@ pub(crate) fn decode_book_metadata(raw: &[u8]) -> Result<book_model::BookMetadat
     if raw.is_empty() {
         return Ok(book_model::BookMetadata::default());
     }
-    match sync_common::wire::decode(raw, sync_common::wire::MAX_DECODED_REQUEST_BYTES) {
-        Ok(metadata) => Ok(metadata),
-        Err(sync_common::wire::WireError::UnsupportedVersion(version @ (10 | 11))) if raw.starts_with(b"BKHM") && raw.get(4) == Some(&version) => {
-            let mut compatible = raw.to_vec();
-            compatible[4] = sync_common::wire::header_bytes()[4];
-            let metadata = sync_common::wire::decode::<book_model::BookMetadata>(&compatible, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(|error| invalid(error.to_string()))?;
-            let reencoded = sync_common::wire::encode(&metadata).map_err(|error| invalid(error.to_string()))?;
-            if reencoded.get(5..) != raw.get(5..) {
-                return Err(invalid(format!("wire version {version} book payload is not byte-compatible with the current wire version")));
-            }
-            log::info!("upgrading a byte-compatible book metadata value from wire version {version}");
-            Ok(metadata)
-        }
-        Err(error) => Err(invalid(error.to_string())),
-    }
+    sync_common::wire::decode(raw, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(|error| invalid(error.to_string()))
 }
 
 pub(crate) fn normalized_description(description: &str) -> String {
@@ -181,3 +173,9 @@ pub(crate) fn unix_millis() -> Result<i64, DatabaseError> {
     let millis = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_err(DatabaseError::operation)?.as_millis();
     i64::try_from(millis).map_err(DatabaseError::operation)
 }
+
+#[cfg(test)]
+mod randomized_convergence_tests;
+
+#[cfg(test)]
+mod adversarial_convergence_tests;

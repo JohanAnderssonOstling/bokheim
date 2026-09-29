@@ -95,7 +95,7 @@ impl BrowserShell {
         // Sync state belongs to the application shell, not to Settings. The
         // page stays alive across navigation and Settings only renders it.
         let sync_page = cx.new(|cx| SyncPage::new(services.clone(), sync_state, libraries.clone(), window, cx));
-        let global_pages = GlobalPages::new(preferences, libraries.clone(), sync_page);
+        let global_pages = GlobalPages::new(services.updates.clone(), preferences, libraries.clone(), sync_page);
         Self {
             #[cfg(not(target_arch = "wasm32"))]
             services,
@@ -270,10 +270,6 @@ impl BrowserShell {
 
     /// Closes shell overlays or returns a universal page to the library.
     pub(crate) fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if components::WindowWidthClass::for_window(window).is_compact() && self.navigation.read(cx).is_more_open() {
-            self.navigation.update(cx, |navigation, cx| navigation.close_more(cx));
-            return true;
-        }
         if self.navigation.read(cx).is_library_switcher_open() {
             self.navigation.update(cx, |navigation, cx| navigation.close_library_switcher(window, cx));
             return true;
@@ -336,15 +332,17 @@ impl Render for BrowserShell {
         let page = if compact_navigation {
             gpui::div().flex_1().min_h_0().min_w_0().flex().flex_col().pt(safe_area.top).child(content).children(footer()).child(navigation).into_any_element()
         } else {
-            components::browser_body().pt(safe_area.top).child(navigation).child(content).into_any_element()
+            // A wide window may still be a phone in landscape, where the OS
+            // button bar sits beside the page or along its bottom edge. The
+            // dock clears the bottom edge when there is one.
+            let bottom = if self.content_footer.is_some() { gpui::px(0.0) } else { safe_area.bottom };
+            components::browser_body().pt(safe_area.top).pl(safe_area.left).pr(safe_area.right).pb(bottom).child(navigation).child(content).into_any_element()
         };
 
-        let more_overlay = compact_navigation.then(|| sidebar.read(cx).more_overlay(sidebar.clone(), route, safe_area, cx)).flatten();
         // On compact windows the bottom nav bar already reserves `safe_area.bottom`
         // beneath itself, and the dock sits above that bar; on wide windows there
-        // is no such bar below the dock, so it needs its own bottom padding to
-        // clear the OS gesture/button bar.
-        let outer_footer = (!compact_navigation).then(footer).flatten().map(|footer| footer.pb(safe_area.bottom));
-        gpui::div().size_full().relative().flex().flex_col().child(page).children(outer_footer).children(more_overlay).children(sidebar.read(cx).library_switcher_overlay(sidebar.clone(), cx)).into_any_element()
+        // is no such bar, so the dock clears the OS gesture/button bar itself.
+        let outer_footer = (!compact_navigation).then(footer).flatten().map(|footer| footer.pb(safe_area.bottom).pl(safe_area.left).pr(safe_area.right));
+        gpui::div().size_full().relative().flex().flex_col().child(page).children(outer_footer).children(sidebar.read(cx).library_switcher_overlay(sidebar.clone(), window, cx)).into_any_element()
     }
 }

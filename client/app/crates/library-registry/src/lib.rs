@@ -77,10 +77,15 @@ impl LibraryRegistry {
     pub fn open_with_library_root(app_data_locator: impl Into<String>, default_library_root: impl Into<String>) -> RegistryResult<Self> {
         let app_data_locator = app_data_locator.into();
         let default_library_root = default_library_root.into();
-        let database_locator = join_locator(&app_data_locator, DATABASE_FILENAME);
+        let database_locator = Self::database_locator(&app_data_locator);
         let connection = device_sqlite::open(database_locator, device_sqlite::OpenOptions::new().busy_timeout(std::time::Duration::from_secs(5)))?;
         connection.execute_batch(SCHEMA)?;
         Ok(Self { app_data_locator, default_library_root, connection: Arc::new(Mutex::new(connection)) })
+    }
+
+    /// Actual registry filename in the selected platform storage namespace.
+    pub fn database_locator(app_data_locator: &str) -> String {
+        join_locator(app_data_locator, DATABASE_FILENAME)
     }
 
     /// Native databases belong to the device, independently of the content folder.
@@ -172,7 +177,18 @@ impl LibraryRegistry {
             Some(locator) => locator,
             None => platform::allocate_library_location(&self.effective_library_root()?, &generated_id, requested_name)?,
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        let pending_locator = std::path::Path::new(&requested_locator).canonicalize().unwrap_or_else(|_| std::path::PathBuf::from(&requested_locator)).to_string_lossy().into_owned();
+        #[cfg(target_arch = "wasm32")]
+        let pending_locator = requested_locator.clone();
+        let pending: bool = self.connection()?.query_row("SELECT EXISTS(SELECT 1 FROM pending_local_purge WHERE storage_path=?1)", [&pending_locator], |row| row.get(0))?;
+        if pending {
+            return Err("library location is pending deletion".into());
+        }
         let entry = platform::prepare_created_library(generated_id, requested_name, requested_locator)?;
+        if self.is_detached(entry.library_id())? {
+            return Err("library is pending deletion".into());
+        }
         let mut connection = self.connection()?;
         let tx = connection.transaction()?;
         tx.execute(include_str!("sql/set_sync_disabled.sql"), params![format!("library_sync_disabled:{}", entry.library_id), if asset_storage_enabled { b"0".as_slice() } else { b"1".as_slice() }])?;
@@ -250,7 +266,7 @@ impl LibraryRegistry {
     }
 
     pub fn is_detached(&self, library_id: &LibraryId) -> RegistryResult<bool> {
-        Ok(self.connection()?.query_row("SELECT EXISTS(SELECT 1 FROM detached_library WHERE library_id=?1)", [library_id.to_string()], |row| row.get(0))?)
+        Ok(self.connection()?.query_row("SELECT EXISTS(SELECT 1 FROM detached_library WHERE library_id=?1) OR EXISTS(SELECT 1 FROM pending_local_purge WHERE library_id=?1)", [library_id.to_string()], |row| row.get(0))?)
     }
 
     pub fn pending_server_deletions(&self) -> RegistryResult<Vec<LibraryId>> {
@@ -266,8 +282,7 @@ impl LibraryRegistry {
     }
 
     /// Hide the library and persist both server and local deletion intents
-    /// before any asynchronous OPFS removal can be interrupted.
-    #[cfg(any(target_arch = "wasm32", test))]
+    /// before physical cleanup can be interrupted.
     pub fn begin_local_removal(&self, library_id: &LibraryId) -> RegistryResult<()> {
         let entry = self.entry(library_id)?.ok_or("library is not registered")?;
         let mut connection = self.connection()?;
@@ -279,7 +294,6 @@ impl LibraryRegistry {
         Ok(())
     }
 
-    #[cfg(any(target_arch = "wasm32", test))]
     pub fn pending_local_purges(&self) -> RegistryResult<Vec<LibraryId>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare("SELECT library_id FROM pending_local_purge ORDER BY library_id")?;
@@ -287,12 +301,24 @@ impl LibraryRegistry {
         ids
     }
 
-    /// Database deletion is idempotent; keep the purge record if xDelete fails.
-    #[cfg(target_arch = "wasm32")]
+    /// Physical cleanup is idempotent. Keep the purge record if any step fails.
     pub fn complete_local_purge(&self, library_id: &LibraryId) -> RegistryResult<()> {
         let locator: Option<String> = self.connection()?.query_row("SELECT storage_path FROM pending_local_purge WHERE library_id=?1", [library_id.to_string()], |row| row.get(0)).optional()?;
         let Some(locator) = locator else { return Ok(()) };
+        #[cfg(target_arch = "wasm32")]
         platform::remove_database(&locator)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            platform::remove_library_state(library_id, &locator)?;
+            let database = self.library_database_locator(library_id, &locator);
+            for suffix in ["", "-wal", "-shm"] {
+                match std::fs::remove_file(format!("{database}{suffix}")) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
         self.connection()?.execute("DELETE FROM pending_local_purge WHERE library_id=?1", [library_id.to_string()])?;
         Ok(())
     }
@@ -304,31 +330,14 @@ impl LibraryRegistry {
         let discovered = platform::discover_libraries(parent)?;
         for entry in discovered {
             self.connection()?
-                .execute("INSERT INTO library_registry(library_id,library_name,storage_path) VALUES(?1,?2,?3) ON CONFLICT(library_id) DO NOTHING", params![entry.library_id.to_string(), entry.library_name, entry.storage_locator])?;
+                .execute("INSERT INTO library_registry(library_id,library_name,storage_path) SELECT ?1,?2,?3 WHERE NOT EXISTS (SELECT 1 FROM detached_library WHERE library_id=?1) AND NOT EXISTS (SELECT 1 FROM pending_local_purge WHERE library_id=?1) ON CONFLICT(library_id) DO NOTHING", params![entry.library_id.to_string(), entry.library_name, entry.storage_locator])?;
         }
         Ok(())
     }
 
     pub fn remove(&self, library_id: &LibraryId) -> RegistryResult<()> {
-        let entry = self.entry(library_id)?.ok_or("library is not registered")?;
-        platform::remove_library_state(&entry)?;
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let database = self.library_database_locator(library_id, entry.storage_locator());
-            for suffix in ["", "-wal", "-shm"] {
-                match std::fs::remove_file(format!("{database}{suffix}")) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
-                }
-            }
-        }
-        let mut connection = self.connection()?;
-        let transaction = connection.transaction()?;
-        transaction.execute("INSERT OR IGNORE INTO detached_library(library_id) VALUES(?1)", [entry.library_id.to_string()])?;
-        transaction.execute("DELETE FROM library_registry WHERE library_id=?1", [entry.library_id.to_string()])?;
-        transaction.commit()?;
-        Ok(())
+        self.begin_local_removal(library_id)?;
+        self.complete_local_purge(library_id)
     }
 
     pub fn read_value(&self, key: &str) -> RegistryResult<Option<Vec<u8>>> {
@@ -477,18 +486,22 @@ mod platform {
         Ok(found)
     }
 
-    pub(super) fn remove_library_state(entry: &LibraryEntry) -> RegistryResult<()> {
-        let root = Path::new(entry.storage_locator());
+    pub(super) fn remove_library_state(id: &LibraryId, locator: &str) -> RegistryResult<()> {
+        let root = Path::new(locator);
         // Folder-local state belongs to the on-disk identity, not the pathname.
-        if !read_manifest(root).ok().flatten().is_some_and(|(id, _)| id == *entry.library_id()) {
+        if !read_manifest(root)?.is_some_and(|(found, _)| found == *id) {
             return Ok(());
         }
         let metadata = root.join(METADATA_DIRECTORY);
         let database = metadata.join(FOLDER_DATABASE_FILENAME);
-        let mut paths = vec![root.join(LIBRARY_MANIFEST_FILENAME), metadata.join("library.json"), metadata.join("session.json"), database.clone()];
+        let mut paths = vec![metadata.join("session.json"), database.clone()];
         for suffix in ["-wal", "-shm"] {
             paths.push(database.with_file_name(format!("{FOLDER_DATABASE_FILENAME}{suffix}")));
         }
+        // Keep an identity marker until every other state file is gone. A
+        // failed purge can then retry without touching a replacement library.
+        paths.push(metadata.join("library.json"));
+        paths.push(root.join(LIBRARY_MANIFEST_FILENAME));
         for path in paths {
             match fs::symlink_metadata(&path) {
                 Ok(value) if value.file_type().is_symlink() => return Err(format!("refusing to remove symlinked library state file: {}", path.display()).into()),
@@ -581,10 +594,6 @@ mod platform {
         Err("library directory discovery is not available on this platform".into())
     }
 
-    pub(super) fn remove_library_state(entry: &LibraryEntry) -> RegistryResult<()> {
-        remove_database(entry.storage_locator())
-    }
-
     pub(super) fn remove_database(locator: &str) -> RegistryResult<()> {
         let filename = CString::new(locator)?;
         // The registered SQLite VFS owns OPFS naming and deletion. Calling its
@@ -625,6 +634,32 @@ mod tests {
         drop(registry);
         let reopened = LibraryRegistry::open(temp.path().join("state").to_string_lossy()).unwrap();
         assert_eq!(reopened.pending_local_purges().unwrap(), [id]);
+    }
+
+    #[test]
+    fn pending_native_purge_survives_cleanup_failure_and_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("libraries");
+        let registry = LibraryRegistry::open(temp.path().join("state").to_string_lossy()).unwrap();
+        let entry = registry.create("Books", Some(parent.join("books").to_string_lossy().into_owned())).unwrap();
+        let id = *entry.library_id();
+        let blocked_file = std::path::Path::new(entry.storage_locator()).join(".bokheim/library.db");
+        std::fs::create_dir(&blocked_file).unwrap();
+
+        registry.begin_local_removal(&id).unwrap();
+        registry.complete_server_deletion(&id).unwrap();
+        assert!(registry.is_detached(&id).unwrap(), "pending local cleanup still blocks reattachment");
+        registry.discover(&parent).unwrap();
+        assert!(registry.entry(&id).unwrap().is_none());
+        assert!(registry.complete_local_purge(&id).is_err());
+        assert_eq!(registry.pending_local_purges().unwrap(), [id]);
+        assert_eq!(read_library_manifest(std::path::Path::new(entry.storage_locator())).unwrap().unwrap().0, id);
+        assert!(registry.create("Replacement", Some(entry.storage_locator().to_owned())).is_err());
+
+        std::fs::remove_dir(&blocked_file).unwrap();
+        registry.complete_local_purge(&id).unwrap();
+        assert!(registry.pending_local_purges().unwrap().is_empty());
+        assert!(registry.entry(&id).unwrap().is_none());
     }
 
     #[test]

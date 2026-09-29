@@ -1,6 +1,6 @@
 //! PDF implementations of shared navigation commands.
 
-use gpui::{Context, Window};
+use gpui::{Context, Focusable, Window};
 use ui_components as components;
 
 use crate::invalidation::Component;
@@ -63,7 +63,11 @@ impl CommandTarget<ToggleToc> for PdfReaderView {
 impl CommandTarget<FocusReaderSearch> for PdfReaderView {
     fn execute(&mut self, _: &FocusReaderSearch, window: &mut Window, cx: &mut Context<Self>) {
         self.chrome.show(cx);
-        self.open_search(window, cx);
+        if components::uses_mobile_navigation(window) && self.sidebar.close() {
+            crate::invalidation::notify(cx, Component::PdfShell, "sidebar_closed_for_search");
+        }
+        self.open_search(cx);
+        self.search_input.read(cx).focus_handle(cx).focus(window, cx);
     }
 }
 
@@ -73,7 +77,10 @@ impl CommandTarget<ToggleSearch> for PdfReaderView {
         if self.search_match.is_some() {
             self.search_close(window, cx);
         } else {
-            self.open_search(window, cx);
+            self.open_search(cx);
+            if !components::uses_mobile_navigation(window) || !self.sidebar.is_visible() {
+                self.search_input.read(cx).focus_handle(cx).focus(window, cx);
+            }
         }
     }
 }

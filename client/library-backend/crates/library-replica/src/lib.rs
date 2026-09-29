@@ -5,10 +5,12 @@
 use book_model::AnnotationState;
 pub mod filenames;
 mod folder_management;
+mod folder_names;
+pub use folder_names::project_folder_name;
 mod library_state;
 
-pub use folder_management::{numbered_file_name, numbered_folder_name, unique_file_name, unique_folder_name, FolderDestinationPolicy};
-pub use library_state::{portable_name_key, BookLifecycleState, DirectoryLifecycleState, ReadingPositionState, SyncBookMetadata};
+pub use folder_management::{FolderDestinationPolicy, numbered_file_name, numbered_folder_name, unique_file_name, unique_folder_name};
+pub use library_state::{BookFacts, BookLifecycleState, DirectoryLifecycleState, ReadingPositionState, SyncBookMetadata, portable_name_key};
 
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +25,7 @@ pub use transfer_values::{BookPlacement, BookUploadIntent, RelativeBookPath, Rel
 
 mod directory_projection;
 mod mutation_protobuf;
-pub use directory_projection::{project_directories, DirectoryIntent, DirectoryProjection};
+pub use directory_projection::{DirectoryIntent, DirectoryProjection, project_directories};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum StateKey {
@@ -31,6 +33,7 @@ pub enum StateKey {
     DirectoryParent(DirId),
     DirectoryLifecycle(DirId),
     BookLifecycle(ContentHash),
+    BookFacts(ContentHash),
     Placement { content_hash: ContentHash, dir_id: DirId },
     ReadingPosition(ContentHash),
     Annotation(String),
@@ -95,6 +98,10 @@ pub enum MutationBody {
         content_hash: ContentHash,
         value: book_model::BookTocDocument,
     },
+    BookFacts {
+        content_hash: ContentHash,
+        value: BookFacts,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -104,6 +111,7 @@ pub struct StateMutation {
     pub body: MutationBody,
     pub changed_at: UnixMillis,
     pub replica_seq: ReplicaSeq,
+    pub origin: Option<sync_common::MutationOrigin>,
 }
 
 /// Reduces pending mutations produced by one replica without changing their
@@ -115,6 +123,12 @@ pub fn reduce_same_replica_mutations<'a>(mutations: impl IntoIterator<Item = &'a
     let mut registers = HashMap::<StateKey, &'a StateMutation>::new();
     let mut reduced = Vec::new();
     for mutation in mutations {
+        // Forwarded winners can belong to different replicas. Do not reduce
+        // them using the publisher's local sequence order.
+        if mutation.origin.is_some() {
+            reduced.push(mutation);
+            continue;
+        }
         let key = mutation.body.state_key();
         match registers.get(&key) {
             Some(current) if !same_replica_candidate_wins(current, mutation) => {}
@@ -156,7 +170,8 @@ impl MutationBody {
         match self {
             Self::DirectoryName { .. } | Self::DirectoryParent { .. } | Self::DirectoryLifecycle { .. } | Self::BookLifecycle { value: BookLifecycleState::Purged, .. } | Self::Placement { present: false, .. } => None,
             Self::Annotation { value, .. } => (!value.deleted).then_some(value.content_hash),
-            Self::BookLifecycle { content_hash, .. }
+            Self::BookFacts { content_hash, .. }
+            | Self::BookLifecycle { content_hash, .. }
             | Self::Placement { content_hash, .. }
             | Self::ReadingPosition { content_hash, .. }
             | Self::Metadata { content_hash, .. }
@@ -174,6 +189,7 @@ impl MutationBody {
             Self::DirectoryParent { .. } => sync_common::mutation_kind::DIRECTORY_PARENT,
             Self::DirectoryLifecycle { .. } => sync_common::mutation_kind::DIRECTORY_LIFECYCLE,
             Self::BookLifecycle { .. } => sync_common::mutation_kind::BOOK_LIFECYCLE,
+            Self::BookFacts { .. } => sync_common::mutation_kind::BOOK_FACTS,
             Self::Placement { .. } => sync_common::mutation_kind::PLACEMENT,
             Self::ReadingPosition { .. } => sync_common::mutation_kind::READING_POSITION,
             Self::Annotation { .. } => sync_common::mutation_kind::ANNOTATION,
@@ -192,16 +208,16 @@ impl MutationBody {
             Self::DirectoryLifecycle { dir_id, .. } => (dir_id.to_string(), String::new(), None),
             Self::BookLifecycle { content_hash, value } => {
                 let blob_reference = match value {
-                    BookLifecycleState::Present { .. } | BookLifecycleState::Deleted { .. } => DeclaredBlobReference { present: true, content_hash: Some(content_hash.clone()) },
+                    BookLifecycleState::Present | BookLifecycleState::Deleted { .. } => DeclaredBlobReference { present: true, content_hash: Some(content_hash.clone()) },
                     BookLifecycleState::Purged => DeclaredBlobReference { present: false, content_hash: None },
                 };
                 (content_hash.to_string(), String::new(), Some(blob_reference))
             }
             Self::Placement { dir_id, content_hash, .. } => (content_hash.to_string(), dir_id.to_string(), None),
             Self::ReadingPosition { content_hash, .. } => (content_hash.to_string(), String::new(), None),
-            Self::Annotation { annotation_id, .. } => (annotation_id.clone(), String::new(), None),
+            Self::Annotation { annotation_id, value } => (annotation_id.clone(), String::new(), Some(DeclaredBlobReference { present: !value.deleted, content_hash: Some(value.content_hash) })),
             Self::PdfReaderMetadata { content_hash, value } => (content_hash.to_string(), value.checksum.clone(), None),
-            Self::Metadata { content_hash, .. } | Self::Description { content_hash, .. } | Self::BookToc { content_hash, .. } => (content_hash.to_string(), String::new(), None),
+            Self::BookFacts { content_hash, .. } | Self::Metadata { content_hash, .. } | Self::Description { content_hash, .. } | Self::BookToc { content_hash, .. } => (content_hash.to_string(), String::new(), None),
         };
         // Non-lifecycle declarations are upload prerequisites only; they do not
         // increment the server's lifecycle reference count.
@@ -211,7 +227,7 @@ impl MutationBody {
                 .or_else(|| matches!(self, Self::Placement { present: false, .. } | Self::Annotation { .. }).then_some(DeclaredBlobReference { present: false, content_hash: None }))
         });
         let value = mutation_protobuf::encode(self)?;
-        Ok(WireMutation { mutation_id, kind: self.kind().to_owned(), entity_key, entity_subkey, value, conflict_rank: self.conflict_rank(), blob_reference, changed_at, replica_seq })
+        Ok(WireMutation { origin: None, mutation_id, kind: self.kind().to_owned(), entity_key, entity_subkey, value, conflict_rank: self.conflict_rank(), blob_reference, changed_at, replica_seq })
     }
 
     /// Decodes a recognized wire value. Unknown kinds are intentionally
@@ -223,6 +239,7 @@ impl MutationBody {
                 | sync_common::mutation_kind::DIRECTORY_PARENT
                 | sync_common::mutation_kind::DIRECTORY_LIFECYCLE
                 | sync_common::mutation_kind::BOOK_LIFECYCLE
+                | sync_common::mutation_kind::BOOK_FACTS
                 | sync_common::mutation_kind::PLACEMENT
                 | sync_common::mutation_kind::READING_POSITION
                 | sync_common::mutation_kind::ANNOTATION
@@ -245,6 +262,7 @@ impl MutationBody {
             Self::DirectoryParent { dir_id, parent_id: _ } => StateKey::DirectoryParent(dir_id.clone()),
             Self::DirectoryLifecycle { dir_id, value: _ } => StateKey::DirectoryLifecycle(dir_id.clone()),
             Self::BookLifecycle { content_hash, value: _ } => StateKey::BookLifecycle(content_hash.clone()),
+            Self::BookFacts { content_hash, value: _ } => StateKey::BookFacts(*content_hash),
             Self::Placement { dir_id, content_hash, .. } => StateKey::Placement { content_hash: content_hash.clone(), dir_id: dir_id.clone() },
             Self::ReadingPosition { content_hash, value: _ } => StateKey::ReadingPosition(content_hash.clone()),
             Self::Annotation { annotation_id, value: _ } => StateKey::Annotation(annotation_id.clone()),
@@ -269,11 +287,13 @@ impl MutationBody {
 
 impl StateMutation {
     pub fn to_wire(&self) -> Result<WireMutation, sync_common::transport::WireError> {
-        self.body.to_wire(self.mutation_id, self.changed_at, self.replica_seq)
+        let mut wire = self.body.to_wire(self.mutation_id, self.changed_at, self.replica_seq)?;
+        wire.origin = self.origin.clone();
+        Ok(wire)
     }
 
     pub fn from_wire(wire_mutation: &WireMutation) -> Result<Option<Self>, sync_common::transport::WireError> {
-        Ok(MutationBody::from_wire(wire_mutation)?.map(|body| Self { mutation_id: wire_mutation.mutation_id, body, changed_at: wire_mutation.changed_at, replica_seq: wire_mutation.replica_seq }))
+        Ok(MutationBody::from_wire(wire_mutation)?.map(|body| Self { mutation_id: wire_mutation.mutation_id, body, changed_at: wire_mutation.changed_at, replica_seq: wire_mutation.replica_seq, origin: wire_mutation.origin.clone() }))
     }
 }
 
@@ -308,7 +328,8 @@ mod tests {
             MutationBody::DirectoryName { dir_id: first_dir, name: "Shelf".to_owned() },
             MutationBody::DirectoryParent { dir_id: first_dir, parent_id: second_dir },
             MutationBody::DirectoryLifecycle { dir_id: first_dir, value: DirectoryLifecycleState::Present },
-            MutationBody::BookLifecycle { content_hash: first_hash, value: BookLifecycleState::Present { metadata: metadata(), added_at: 1, format: BookFormat::Epub } },
+            MutationBody::BookLifecycle { content_hash: first_hash, value: BookLifecycleState::Present },
+            MutationBody::BookFacts { content_hash: first_hash, value: BookFacts { added_at: 1, format: BookFormat::Epub } },
             MutationBody::Placement { dir_id: first_dir, content_hash: first_hash, present: true, origin_folder_id: None },
             MutationBody::ReadingPosition { content_hash: first_hash, value: ReadingPositionState { location: ReadingPosition::parse("epubcfi(/6/2)").unwrap(), progress: 0.5 } },
             MutationBody::Annotation {
@@ -331,15 +352,12 @@ mod tests {
             MutationBody::Description { content_hash: first_hash, value: "Independent description".into() },
             MutationBody::BookToc {
                 content_hash: first_hash,
-                value: book_model::BookTocDocument {
-                    entries: vec![book_model::BookTocEntry { title: "One".into(), target: book_model::audiobook_toc_target(0), children: Vec::new() }],
-                    duration_ms: Some(1000),
-                },
+                value: book_model::BookTocDocument { entries: vec![book_model::BookTocEntry { title: "One".into(), target: book_model::audiobook_toc_target(0), children: Vec::new() }], duration_ms: Some(1000), tracks: None },
             },
         ];
 
         for (index, body) in bodies.into_iter().enumerate() {
-            let mutation = StateMutation { mutation_id: MutationId::new(), body, changed_at: 100 + index as u64, replica_seq: ReplicaSeq::new(index as u64 + 1).unwrap() };
+            let mutation = StateMutation { origin: None, mutation_id: MutationId::new(), body, changed_at: 100 + index as u64, replica_seq: ReplicaSeq::new(index as u64 + 1).unwrap() };
             let wire = mutation.to_wire().unwrap();
             assert_eq!(wire.kind, mutation.body.kind());
             let dependency = (index >= 3).then_some(first_hash);
@@ -365,6 +383,7 @@ mod tests {
     #[test]
     fn unknown_service_payloads_remain_forward_compatible() {
         let wire = WireMutation {
+            origin: None,
             mutation_id: MutationId::new(),
             kind: "future_kind".to_owned(),
             entity_key: String::new(),
@@ -381,9 +400,9 @@ mod tests {
     #[test]
     fn placement_updates_coalesce_to_the_latest_register_value() {
         let dir_id = dir_id("11111111-1111-4111-8111-111111111111");
-        let claim = StateMutation { mutation_id: MutationId::new(), body: MutationBody::Placement { dir_id, content_hash: content_hash('a'), present: true, origin_folder_id: None }, changed_at: 1, replica_seq: ReplicaSeq::new(1).unwrap() };
+        let claim = StateMutation { origin: None, mutation_id: MutationId::new(), body: MutationBody::Placement { dir_id, content_hash: content_hash('a'), present: true, origin_folder_id: None }, changed_at: 1, replica_seq: ReplicaSeq::new(1).unwrap() };
         let release =
-            StateMutation { mutation_id: MutationId::new(), body: MutationBody::Placement { dir_id, content_hash: content_hash('a'), present: false, origin_folder_id: None }, changed_at: 2, replica_seq: ReplicaSeq::new(2).unwrap() };
+            StateMutation { origin: None, mutation_id: MutationId::new(), body: MutationBody::Placement { dir_id, content_hash: content_hash('a'), present: false, origin_folder_id: None }, changed_at: 2, replica_seq: ReplicaSeq::new(2).unwrap() };
         let reduced = coalesce_mutations_for_push(vec![claim, release]);
         assert!(matches!(reduced.as_slice(), [StateMutation { body: MutationBody::Placement { present: false, .. }, .. }]));
     }

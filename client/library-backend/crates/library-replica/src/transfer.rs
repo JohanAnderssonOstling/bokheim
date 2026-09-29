@@ -216,6 +216,9 @@ pub struct LibraryTransfers {
     pub thumbnail_progress: Option<ScanProgress>,
     #[serde(default)]
     pub thumbnail_waiting: bool,
+    /// Known cloud thumbnails ready on this device, and known cloud thumbnails total.
+    #[serde(default)]
+    pub thumbnail_download_coverage: (u64, u64),
     #[serde(default)]
     pub metadata_sync_running: bool,
     #[serde(default)]

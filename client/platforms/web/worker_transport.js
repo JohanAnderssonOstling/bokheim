@@ -20,11 +20,14 @@ export function runWorkerEndpoint(initialize, lifetimeLock = null) {
                 waiting.length = 0;
                 resolve();
                 // Ownership lasts until the worker is terminated. Never
-                // steal this lock when replacing a host: wait for release.
+                // steal this lock when replacing a host.
                 if (lifetimeLock) await new Promise(() => {});
             };
             const started = lifetimeLock
-                ? navigator.locks.request(lifetimeLock, {mode: 'exclusive'}, start)
+                ? navigator.locks.request(lifetimeLock, {mode: 'exclusive', ifAvailable: true}, lock => {
+                    if (!lock) throw new Error('BOKHEIM_STORAGE_BUSY');
+                    return start();
+                })
                 : start();
             started.catch(error => {
                 port.postMessage({transport: 'endpoint_failed', error: String(error)});

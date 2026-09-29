@@ -9,8 +9,6 @@ use std::collections::{HashMap, HashSet};
 use book_enrichment::{SubjectPhase, SubjectStep};
 use futures_util::{stream, StreamExt};
 
-pub const INSPECTION_REVISION: i64 = book_enrichment::SUBJECT_PIPELINE_REVISION;
-
 impl LibrarySession {
     pub(super) async fn cached_metadata_enrichment(&self, request: &MetadataEnrichmentRequest) -> Result<metadata_contract::RichMetadataEnrichmentResponse, BackendError> {
         let requested = request.isbns.clone();
@@ -56,6 +54,10 @@ impl LibrarySession {
 
     pub(super) async fn enrich_subject_batch(&self, scope: &HashSet<crate::ContentHash>) -> Result<usize, BackendError> {
         let mut updated = 0;
+        // Keep detailed per-book progress in memory while this run moves
+        // through the library-wide phases. SQLite stores only the current
+        // phase, so a restart repeats work from that phase's beginning.
+        let mut running_pipelines = HashMap::<crate::ContentHash, book_enrichment::SubjectPipeline>::new();
         let scope_json = std::sync::Arc::new(serde_json::to_string(scope).map_err(BackendError::operation)?);
         let through = scope.iter().map(|hash| hash.as_str()).max();
         for phase in SubjectPhase::ALL {
@@ -68,6 +70,11 @@ impl LibrarySession {
                 let mut jobs = self.db.subject_enrichment_candidates(&cursor, &scope_json).map_err(BackendError::operation)?;
                 let Some(last) = jobs.last() else { break };
                 after = last.hash.to_string();
+                for job in &mut jobs {
+                    if let Some(pipeline) = running_pipelines.get(&job.hash) {
+                        job.pipeline = pipeline.clone();
+                    }
+                }
                 // Finish this phase across every batch before starting any fallback.
                 jobs.retain_mut(|job| scope.contains(&job.hash) && job.pipeline.next_step_in_phase(&job.book, phase).is_some());
                 if !jobs.is_empty() {
@@ -185,20 +192,22 @@ impl LibrarySession {
                         } else {
                             0
                         };
-                        let state = job.pipeline.clone();
                         let expected = job.book.clone();
                         let title = job.title.clone();
-                        let mut state_value = serde_json::to_value(&state).map_err(BackendError::operation)?;
-                        state_value["inspection_revision"] = INSPECTION_REVISION.into();
                         checkpoints.push(library_database::SubjectCheckpointOutcome {
                             content_hash: hash,
-                            state: state_value.to_string(),
+                            phase: job.pipeline.phase(),
                             empty_metadata: expected == book_model::BookMetadata::default(),
                             expected: sync_common::wire::encode(&expected).map_err(BackendError::operation)?,
                             title,
                             complete,
                             retry_seconds: delay,
                         });
+                        if complete {
+                            running_pipelines.remove(&hash);
+                        } else {
+                            running_pipelines.insert(hash, job.pipeline.clone());
+                        }
                     }
                     for checkpoint in checkpoints {
                         self.db.save_subject_checkpoint(checkpoint).map_err(BackendError::operation)?;

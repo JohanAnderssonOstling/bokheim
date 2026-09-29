@@ -9,34 +9,17 @@
             globalThis.__BOKHEIM_ASSET_BASE__ = "./pkg";
             import {checkCompatibility, compatibilityMessage} from "./compatibility.mjs";
 
-            function showStartupMessage(title, issues) {
-                const panel = document.getElementById('startup-status');
-                panel.replaceChildren();
-                const heading = document.createElement('h1');
-                heading.textContent = title;
-                const list = document.createElement('ul');
-                for (const issue of issues) {
-                    const item = document.createElement('li');
-                    item.textContent = issue;
-                    list.append(item);
-                }
-                panel.append(heading, list);
-            }
-
-            try {
-                const issues = await checkCompatibility();
-                if (issues.length) {
-                    console.error('Bokheim compatibility check failed', issues);
-                    showStartupMessage('Browser not supported', [compatibilityMessage(navigator.userAgent)]);
-                } else {
-                    document.getElementById('startup-status').textContent = 'Opening Bokheim…';
+            import {startApplication} from "./startup.mjs";
+            const panel = document.getElementById('startup-status');
+            const issues = await checkCompatibility();
+            if (issues.length) {
+                console.error('Bokheim compatibility check failed', issues);
+                panel.textContent = compatibilityMessage(navigator.userAgent);
+            } else {
+                await startApplication(panel, async () => {
                     const {default: initialize} = await import("./pkg/web_gpui.js");
                     await initialize();
-                    document.getElementById('startup-status')?.remove();
-                }
-            } catch (error) {
-                console.error("Failed to start Bokheim", error);
-                showStartupMessage('Bokheim could not start', ['Reload the page to try again. If the problem continues, contact the site administrator.']);
+                });
             }
         </script>
         <style>

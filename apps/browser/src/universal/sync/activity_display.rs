@@ -2,8 +2,8 @@
 use super::LibraryActivitySummary;
 use app::TransferJobKind;
 use std::time::Duration;
-use web_time::Instant;
 use sync_common::LibraryId;
+use web_time::Instant;
 
 const SHOW_DELAY: Duration = Duration::from_millis(300);
 const IDLE_GRACE: Duration = Duration::from_millis(800);

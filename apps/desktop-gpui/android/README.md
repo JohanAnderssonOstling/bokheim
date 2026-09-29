@@ -13,6 +13,68 @@ Run these commands in this directory. `ANDROID_HOME` must point to the SDK.
 On a memory-constrained build machine, set `CARGO_BUILD_JOBS=2` and pass
 `--max-workers=2` to Gradle.
 
+Release packaging requires `BOKHEIM_ANDROID_KEYSTORE`,
+`BOKHEIM_ANDROID_STORE_PASSWORD`, `BOKHEIM_ANDROID_KEY_ALIAS`, and
+`BOKHEIM_ANDROID_KEY_PASSWORD` in the build environment. Keep the keystore outside
+the repository and preserve its identity across updates. These settings can also
+be placed in `~/.gradle/gradle.properties`; environment values take precedence.
+Use `BOKHEIM_ANDROID_STORE_PASSWORD_FILE` and optionally
+`BOKHEIM_ANDROID_KEY_PASSWORD_FILE` to reference private password files instead
+of storing password text in Gradle properties. The key password defaults to the
+store password. For example, local user properties can contain:
+
+```properties
+BOKHEIM_ANDROID_KEYSTORE=/absolute/private/path/bokheim-release.jks
+BOKHEIM_ANDROID_STORE_PASSWORD_FILE=/absolute/private/path/bokheim-release.password
+BOKHEIM_ANDROID_KEY_ALIAS=bokheim
+```
+
+For an explicitly local
+optimized test APK, pass `-Pbokheim.localSigning=true`; this uses the local debug
+certificate while retaining the optimized Rust release build. This explicit
+option overrides configured production signing for that invocation. It must not be
+distributed as the production application. Unit tests require no signing key.
+
+`versionName` comes from the desktop Cargo package. `versionCode` is
+`major * 1,000,000 + minor * 1,000 + patch`, with minor/patch limited to 999 and
+major limited to 2099. Stable versions must increase; publishing a correction
+requires a new patch version. Existing version-code-1 installs can update only
+when signed with the same certificate. Changing from a local debug certificate
+to the production certificate does not create an install-compatible update.
+
+## Direct APK updates
+
+`ApkInstaller` provides the OS handoff boundary. Before the explicit Install
+action it checks the private staged path, exact signed size/hash, package identity,
+version name and increasing Android version code. It grants the installer read
+access only to `files/updates/staging/` through a non-exported FileProvider.
+Update staging and its durable state are excluded from cloud backup and device
+transfer. The installer requires Android's unknown-app-sources permission; opening
+that settings page must also be an explicit user action.
+
+The shared coordinator is connected to the conditional Settings row. Only Update
+persists consent and stages downloads; Install opens Android's installer, and
+Grant permission opens its unknown-app-sources settings. Returning from the
+installer does not mark the update successful: the installed version on the next
+launch is authoritative, and data activation waits for it. Cancellation retains
+the staged package. The OS enforces package signing identity.
+
+Before the backend opens, a non-exported `:update_migration` service prepares
+private database copies in a fresh process. The caller waits for Binder death,
+so helper SQLite handles and taxonomy globals are gone before promotion. A
+30-minute timeout stops the helper; an absent result leaves live data untouched.
+The data journal restores interrupted trials. Background work remains gated until
+the first window initializes and commits the data generation. An explicit Restart
+uses a private restart activity in another process; normal update polling never
+restarts the application.
+
+These adapters have host/unit coverage; the two-APK installation, helper process
+lifecycle, process restart and crash recovery still require a device trial.
+Android owns code installation: this data rollback does not silently downgrade a
+badly behaving APK. Such code needs a corrected newer signed APK.
+
+See Android's [versioning rules](https://developer.android.com/studio/publish/versioning).
+
 ## Audiobooks
 
 The Android feature enables the shared audiobook reader. Open/import an M4B from
@@ -68,9 +130,8 @@ Credentials are not placed in Android saved-instance state.
 
 The app declares a credential association with `https://app.bokheim.se`.
 Before publishing that association, choose the production signing certificate.
-The current Gradle release configuration still uses the local debug key; do not
-publish that certificate as the production website's trusted identity. For Play
-App Signing, use the app signing certificate, not the upload certificate.
+Use the production APK signing certificate; never publish a local test certificate
+as the production website's trusted identity.
 
 From the repository root, generate the website file using its public SHA-256
 fingerprint (repeat `--sha256` for multiple production signing certificates):

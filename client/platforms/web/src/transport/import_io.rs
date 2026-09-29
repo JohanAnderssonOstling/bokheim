@@ -2,8 +2,7 @@ use wasm_bindgen::prelude::*;
 const SHORT_WRITE: &str = "Short import write: browser storage is full";
 
 pub fn storage_full(error: &JsValue) -> bool {
-    js_sys::Reflect::get(error, &"name".into()).ok().and_then(|name| name.as_string()).as_deref() == Some("QuotaExceededError")
-        || error.as_string().as_deref() == Some(SHORT_WRITE)
+    js_sys::Reflect::get(error, &"name".into()).ok().and_then(|name| name.as_string()).as_deref() == Some("QuotaExceededError") || error.as_string().as_deref() == Some(SHORT_WRITE)
 }
 #[wasm_bindgen]
 extern "C" {

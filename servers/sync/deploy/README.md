@@ -24,12 +24,13 @@ sudo /tmp/bokheim-deploy.ABC123/deploy-sudo.sh
 ```
 
 `deploy-sudo.sh` takes no arguments. It validates the staged artifacts and
-credentials before stopping services or replacing the database.
+credentials and the installed schema before stopping services.
 
 The script builds `sync-server`, transfers its release artifact and systemd
 unit over SSH, and invokes the fixed root-owned sync activation helper. It
-runs additive transactional migrations and never recreates the PostgreSQL
-database. Catalogue and metadata services are deployed independently. The
+runs a schema check and never recreates the PostgreSQL database. Provision a
+fresh database with `sync-server migrate` before the first release. Catalogue
+and metadata services are deployed independently. The
 script defaults to `192.168.1.68`;
 override the SSH account when needed:
 
@@ -348,6 +349,6 @@ fails. It reloads only Caddy and does not restart the Bokheim services.
 
 This is a development deployment target, not a production one. `install-server.sh`
 drops and recreates the `bokheim` database on every deploy, so there is no
-schema migration history and nothing to back up -- redeploying is the recovery
+schema upgrade history and nothing to back up -- redeploying is the recovery
 procedure. Do not point this at a deployment expected to hold data that must
 survive a redeploy without a design change to persist it first.

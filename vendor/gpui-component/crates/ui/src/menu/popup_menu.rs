@@ -299,6 +299,7 @@ pub struct PopupMenu {
     /// The parent menu of this menu, if this is a submenu
     parent_menu: Option<WeakEntity<Self>>,
     scrollable: bool,
+    touch_friendly: bool,
     external_link_icon: bool,
     scroll_handle: ScrollHandle,
     // This will update on render
@@ -335,6 +336,7 @@ impl PopupMenu {
             check_side: Side::Left,
             bounds: Bounds::default(),
             scrollable: false,
+            touch_friendly: false,
             scroll_handle: ScrollHandle::default(),
             external_link_icon: true,
             size: Size::default(),
@@ -419,6 +421,12 @@ impl PopupMenu {
     /// NOTE: If this is true, the sub-menus will cannot be support.
     pub fn scrollable(mut self, scrollable: bool) -> Self {
         self.scrollable = scrollable;
+        self
+    }
+
+    /// Give menu rows and the surrounding surface room for touch input.
+    pub fn touch_friendly(mut self, enabled: bool) -> Self {
+        self.touch_friendly = enabled;
         self
     }
 
@@ -1165,7 +1173,7 @@ impl PopupMenu {
 
         let selected = self.selected_index == Some(ix);
         const EDGE_PADDING: Pixels = px(4.);
-        const INNER_PADDING: Pixels = px(8.);
+        let inner_padding = if self.touch_friendly { px(16.) } else { px(8.) };
 
         let is_submenu = matches!(item, PopupMenuItem::Submenu { .. });
         let group_name = format!("{}:item-{}", cx.entity().entity_id(), ix);
@@ -1174,12 +1182,14 @@ impl PopupMenu {
             Size::Small => (px(20.), options.radius.half()),
             _ => (px(26.), options.radius),
         };
+        let item_height = if self.touch_friendly { px(48.) } else { item_height };
 
         let this = MenuItemElement::new(ix, &group_name)
             .relative()
             .text_sm()
+            .when(self.touch_friendly, |this| this.text_base())
             .py_0()
-            .px(INNER_PADDING)
+            .px(inner_padding)
             .rounded(radius)
             .items_center()
             .selected(selected)
@@ -1431,6 +1441,7 @@ impl Render for PopupMenu {
                 v_flex()
                     .id("items")
                     .p_1()
+                    .when(self.touch_friendly, |this| this.p(px(12.)))
                     .gap_y_0p5()
                     .min_w(rems(8.))
                     .when_some(self.min_width, |this, min_width| this.min_w(min_width))

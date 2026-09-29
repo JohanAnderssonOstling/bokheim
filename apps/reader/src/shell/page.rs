@@ -8,7 +8,7 @@ use crate::shell::input::{self, CommonReaderCommands};
 use crate::{CloseSearch, DecreaseScale, FocusReaderSearch, IncreaseScale, NextLine, NextPage, PreviousLine, PreviousPage, ReturnToLibrary, ToggleSearch, ToggleToc};
 
 pub(crate) fn reader_page<C: CommonReaderCommands>(
-    window: &mut Window, cx: &mut Context<C>, theme: components::BrowserTheme, document_ready: bool, loading_focus: &FocusHandle, chrome_visible: bool, bottom_bar: Option<AnyElement>, content: AnyElement,
+    window: &mut Window, cx: &mut Context<C>, theme: components::BrowserTheme, document_ready: bool, loading_focus: &FocusHandle, chrome_visible: bool, bottom_bar: Option<AnyElement>, mobile_search: Option<AnyElement>, content: AnyElement,
 ) -> Div {
     let safe_area = window.insets().safe_area;
     let mobile = components::uses_mobile_navigation(window);
@@ -30,14 +30,11 @@ pub(crate) fn reader_page<C: CommonReaderCommands>(
         .on_action(cx.listener(input::dispatch::<C, DecreaseScale>))
         .on_action(cx.listener(input::dispatch::<C, ReturnToLibrary>));
     if mobile {
-        // The bottom bar is the mobile reader's only permanent chrome now —
-        // Contents/Annotations/Settings/Search open as a sheet that
-        // `chrome::with_sidebar` already folded into `content`, bottom-anchored
-        // above this bar. Bottom-pinned rather than top: nothing else on this
-        // page reaches for the bottom edge, and it is where a thumb already is.
-        let bar = bottom_bar.map(|bar| {
+        // The document keeps the whole viewport; an unclaimed page tap
+        // toggles its controls without blocking links or images.
+        let controls = if bottom_bar.is_some() || mobile_search.is_some() {
             gpui::div()
-                .id("reader-mobile-bottom-bar")
+                .id("reader-mobile-controls")
                 .absolute()
                 .bottom_0()
                 .left_0()
@@ -46,12 +43,18 @@ pub(crate) fn reader_page<C: CommonReaderCommands>(
                 .pl(safe_area.left)
                 .pr(safe_area.right)
                 .bg(theme.page_bg)
+                .flex()
+                .flex_col()
                 .occlude()
                 .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                .child(bar)
-        });
+                .when_some(mobile_search, |controls, search| controls.child(search))
+                .when_some(bottom_bar, |controls, bar| controls.child(bar))
+                .into_any_element()
+        } else {
+            return page.child(components::reader_content().child(content));
+        };
         // The document always receives the full viewport; the bar only covers it.
-        page.child(components::reader_content().child(content)).children(bar)
+        page.child(components::reader_content().child(content)).child(controls)
     } else {
         page.child(components::reader_content().child(content))
     }
@@ -81,7 +84,7 @@ mod tests {
             let bar = self.chrome.then(|| gpui::div().debug_selector(|| "test-reader-bottom-bar".into()).h(px(64.)).into_any_element());
             let document = gpui::div().id("test-book-viewport").debug_selector(|| "test-book-viewport".into()).size_full().into_any_element();
             let theme = components::browser_theme(cx);
-            reader_page(window, cx, theme, false, &self.focus, self.chrome, bar, document)
+            reader_page(window, cx, theme, false, &self.focus, self.chrome, bar, None, document)
         }
     }
 

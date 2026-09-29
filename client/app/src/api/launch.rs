@@ -33,7 +33,7 @@ impl BackendLaunch {
         let context = BackendContext::open(self.data_dir, &self.default_library_root)?;
         if let Some((name, fallback)) = self.discovery {
             context.registry.discover(&self.default_library_root).map_err(|error| error.to_string())?;
-            if context.registry.entries().map_err(|error| error.to_string())?.is_empty() {
+            if context.registry.entries().map_err(|error| error.to_string())?.is_empty() && context.registry.pending_local_purges().map_err(|error| error.to_string())?.is_empty() {
                 context.registry.create(&name, Some(fallback.to_string_lossy().into_owned())).map_err(|error| error.to_string())?;
             }
         }
@@ -106,5 +106,22 @@ mod tests {
         let restarted = launch.into_context().unwrap().registry.entries().unwrap();
         assert_eq!(restarted.len(), 1);
         assert_eq!(restarted[0].library_id(), entries[0].library_id());
+    }
+
+    #[test]
+    fn discovery_does_not_recreate_a_library_awaiting_local_purge() {
+        let root = tempfile::tempdir().unwrap();
+        let location = AppDataLocation::native_path(root.path().join("app"));
+        let libraries = root.path().join("libraries");
+        let fallback = libraries.join("default");
+        let launch = BackendLaunch::initialize(location).unwrap().with_library_discovery(libraries, "Device library".into(), fallback);
+        let context = launch.clone().into_context().unwrap();
+        let id = *context.registry.entries().unwrap()[0].library_id();
+        context.registry.begin_local_removal(&id).unwrap();
+        drop(context);
+
+        let restarted = launch.into_context().unwrap();
+        assert!(restarted.registry.entries().unwrap().is_empty());
+        assert_eq!(restarted.registry.pending_local_purges().unwrap(), [id]);
     }
 }

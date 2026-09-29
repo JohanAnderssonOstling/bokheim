@@ -140,6 +140,10 @@ pub const TEXT_LG: f32 = 1.375;
 pub const TITLE_MD: f32 = 1.6875;
 pub const TITLE_LG: f32 = 2.125;
 
+/// Display face for prominent application headings. Reading text keeps the
+/// interface's Libertinus Serif default.
+pub const DISPLAY_FONT_FAMILY: &str = "Bodoni Moda";
+
 /// Real small caps from the interface face, not uppercased text.
 ///
 /// `smcp` maps lowercase onto the small-cap glyphs; `c2sc` does the same for
@@ -163,7 +167,7 @@ pub const BOOK_COVER_ASPECT_RATIO: f32 = 1.0 / 1.5;
 pub const BOOK_GRID_MINIMUM_COLUMNS: usize = 2;
 pub const BOOK_CARD_MINIMUM_WIDTH_REM: f32 = 10.0;
 /// Cover width in logical pixels, independent of the UI font size.
-pub const BOOK_CARD_CONTENT_WIDTH: f32 = 300.0;
+pub const BOOK_CARD_CONTENT_WIDTH: f32 = 200.0;
 pub const BOOK_CARD_WIDTH: f32 = BOOK_CARD_CONTENT_WIDTH + BOOK_CARD_PADDING * 2.0;
 /// Regular cards grow by up to 25% before spare row width expands gaps.
 pub const BOOK_CARD_MAXIMUM_WIDTH: f32 = BOOK_CARD_WIDTH * 1.25;
@@ -219,27 +223,26 @@ pub const BOOK_CARD_TITLE_HEIGHT_REM: f32 = {
     let with_subtitle = title_only + BOOK_CARD_SUBTITLE_SIZE * BOOK_CARD_TITLE_LINE_HEIGHT_EM * BOOK_CARD_SUBTITLE_LINES as f32;
     if title_only > with_subtitle { title_only } else { with_subtitle }
 };
-/// The download action on a card.
-///
-/// It was a 13px glyph the size of the title beside it — a real action
-/// carrying a click handler and a tooltip, drawn as though it were a status
-/// icon. Square and bordered like every other icon action in the interface, at
-/// a size that can actually be hit.
 /// The reader's place in the book, drawn on the cover's own bottom edge.
 pub const BOOK_COVER_PROGRESS_HEIGHT: f32 = 3.0;
 /// How tall a stripe of the cover the progress mark's scrim darkens, so the
 /// bar reads against art of any colour underneath it.
 pub const BOOK_COVER_PROGRESS_SCRIM_HEIGHT: f32 = 28.0;
-/// Width of the shadow suggesting a bound page block along the cover's
-/// leading edge — a hint of thickness, not a rendered spine.
-pub const BOOK_COVER_SPINE_WIDTH: f32 = 14.0;
+/// Width of the cover's binding-side spine shade, in logical pixels.
+pub const BOOK_COVER_SPINE_WIDTH: f32 = 10.0;
 /// A cover's own corner radius, apart from `RADIUS_SM`: every other square
 /// corner in the interface stays sharp, so rounding this alone is a
 /// deliberate departure rather than a change to the shared radius scale.
 /// Applied to the outer (right) edge only — see `book_cover_image`.
 pub const BOOK_COVER_RADIUS: f32 = 4.0;
-pub const BOOK_CARD_ACTION_SIZE: f32 = 26.0;
-pub const BOOK_CARD_ACTION_ICON_SIZE: f32 = 14.0;
+/// A download action's hit area — the badge on a cover, the slot at the end of
+/// a folder or subject chip — and the glyph inside it. Rems, so the glyph keeps
+/// its size against the text beside a chip and the target keeps up with it.
+pub const DOWNLOAD_ACTION_SIZE_REM: f32 = 1.75;
+pub const DOWNLOAD_ICON_SIZE_REM: f32 = 0.875;
+/// How far a cover badge sits in from the cover's corner: clear of its rounded
+/// edge, and of the hinge shading on the spine side.
+pub const BOOK_COVER_BADGE_INSET: f32 = SPACE_XS + 2.0;
 /// A card under the "cover text: cover only" setting: nothing below the
 /// cover at all, not even the gap — there is no second child to hold one
 /// open against.
@@ -283,18 +286,15 @@ pub const BOOK_DESCRIPTION_OVERLAY_HEIGHT_FRACTION: f32 = 0.75;
 /// squeezed beside the cover, here it is the thing being read.
 pub const BOOK_DESCRIPTION_OVERLAY_LINE_HEIGHT_EM: f32 = 1.5;
 
-/// One measure for the whole detail page.
-///
-/// Everything on it — the words beside the cover, the progress bar, the blurb,
-/// the contents — is constrained to the same width, because the alternative was
-/// tried: a hero sized to its cover beside a blurb sized to its prose left every
-/// block starting on a different line. Around eighty characters at the body
-/// size, which is where a column of prose stops being comfortable.
+/// The compact detail page's single measure. Desktop reading columns use the
+/// narrower limits below.
 pub const BOOK_DETAIL_PAGE_WIDTH_REM: f32 = 38.5;
-/// At expanded window widths the detail page places the cover/contents and the
-/// description beside one another. Each side keeps a readable measure instead
-/// of stretching the description across the whole window.
-pub const BOOK_DETAIL_WIDE_PAGE_WIDTH_REM: f32 = BOOK_DETAIL_PAGE_WIDTH_REM * 2.0 + 2.0;
+/// Desktop book detail widths approximate the 56ch contents and 65ch
+/// description limits in the HTML mock. GPUI lengths do not support `ch`.
+pub const BOOK_DETAIL_SIDEBAR_WIDTH_REM: f32 = 15.0;
+pub const BOOK_DETAIL_CONTENTS_WIDTH_REM: f32 = 28.0;
+pub const BOOK_DETAIL_DESCRIPTION_WIDTH_REM: f32 = 32.5;
+pub const BOOK_DETAIL_WIDE_PAGE_WIDTH_REM: f32 = BOOK_DETAIL_SIDEBAR_WIDTH_REM + BOOK_DETAIL_CONTENTS_WIDTH_REM + BOOK_DETAIL_DESCRIPTION_WIDTH_REM + 4.0;
 /// The cover takes at most half the hero, so a narrow window never leaves the
 /// title in a column one word wide.
 pub const BOOK_DETAIL_COVER_FRACTION: f32 = 0.5;
@@ -311,7 +311,7 @@ pub const CAROUSEL_CONTENT_GAP: f32 = SPACE_MD;
 pub const CAROUSEL_CONTROL_GAP: f32 = SPACE_XS;
 
 /// The line box of the title over a shelf. Stated rather than left to the font,
-/// because the row's height is computed from it.
+/// because the row's height is computed from it — see `shelf_rows_policy`.
 pub const SHELF_HEADING_LINE_HEIGHT_EM: f32 = 1.25;
 pub const SHELF_HEADING_HEIGHT_REM: f32 = CAROUSEL_TITLE_SIZE * SHELF_HEADING_LINE_HEIGHT_EM;
 /// Subject chips share the heading line with the title, so they are set at the
@@ -323,27 +323,6 @@ pub const SHELF_SUBJECT_SIZE: f32 = TEXT_XS;
 /// the band it is stacked in.
 pub const SHELF_SUBJECT_LINE_HEIGHT_EM: f32 = 1.5;
 pub const SHELF_SUBJECT_CHIP_HEIGHT_REM: f32 = SHELF_SUBJECT_SIZE * SHELF_SUBJECT_LINE_HEIGHT_EM;
-/// Between one row of chips and the next.
-///
-/// A rem where gaps are otherwise fixed pixels: this one is inside a height the
-/// paginator resolves in rems, and a pixel here would not survive a change of UI
-/// font — the second row would be clipped by exactly this much.
-pub const SHELF_SUBJECT_ROW_GAP_REM: f32 = 0.125;
-
-/// How tall a heading is, given how many rows of chips it has to hold.
-///
-/// A page with no chips is as tall as its title. A page with chips is as tall as
-/// the chips need, and the title is centred in that band rather than setting it —
-/// which is what keeps the name and the subjects beside it the same height.
-pub const fn shelf_heading_height_rem(subject_rows: usize) -> f32 {
-    if subject_rows == 0 {
-        return SHELF_HEADING_HEIGHT_REM;
-    }
-    let rows = subject_rows as f32;
-    let chips = SHELF_SUBJECT_CHIP_HEIGHT_REM * rows + SHELF_SUBJECT_ROW_GAP_REM * (rows - 1.0);
-    if chips > SHELF_HEADING_HEIGHT_REM { chips } else { SHELF_HEADING_HEIGHT_REM }
-}
-
 // A shelf row's height is not stated here. A shelf card is the ordinary book
 // card at its ordinary width — a shelf that sized its covers differently would
 // be a second visual language for the same object — and that card stretches
@@ -360,6 +339,30 @@ pub const SHELF_ROW_GAP: f32 = SPACE_MD;
 /// count is taken, so one column fits and it is exactly as wide as the content
 /// area — for one row as well as for two hundred.
 pub const SHELF_ROW_WIDTH_REM: f32 = 1000.0;
+
+/// The author index is a list of names, not a shelf: most authors in a library
+/// have one or two books, and a full-width shelf per name spent a screen on two
+/// or three of them. A name is a line of text with a small stack of its covers.
+///
+/// An entry is at least this wide. The row's slack widens every entry, so a wide
+/// window shows more columns rather than wider gaps.
+pub const AUTHOR_INDEX_ENTRY_WIDTH_REM: f32 = 26.0;
+/// Between one column of entries and the next.
+pub const AUTHOR_INDEX_COLUMN_GAP: f32 = SPACE_LG;
+/// A thumbnail's slot: the cover and the card padding around it. In rems rather
+/// than the pixels a book card is measured in, because here the cover sits
+/// beside a name and is sized against it — it has to grow with the text, or a
+/// large UI font would outgrow the entry.
+pub const AUTHOR_INDEX_COVER_SLOT_WIDTH_REM: f32 = 3.5;
+/// How many covers an entry shows before stating the rest as a count.
+pub const AUTHOR_INDEX_COVERS: usize = 3;
+/// An entry is as tall as a slot's width would make a cover. The cover inside is
+/// narrower by its padding, so it clears the entry with room to spare; the two
+/// text lines beside it are shorter still at every font size, being in rems too.
+pub const AUTHOR_INDEX_ENTRY_HEIGHT_REM: f32 = AUTHOR_INDEX_COVER_SLOT_WIDTH_REM / BOOK_COVER_ASPECT_RATIO;
+/// The heading over each letter: its line box, and the padding and rule around it.
+pub const AUTHOR_INDEX_LETTER_HEIGHT_REM: f32 = TEXT_LG * SHELF_HEADING_LINE_HEIGHT_EM;
+pub const AUTHOR_INDEX_LETTER_FIXED_HEIGHT: f32 = SPACE_MD + SPACE_XS + 1.0;
 
 /// The navigation rail and library switcher scale with the UI rem.
 ///
@@ -394,10 +397,13 @@ pub const NAV_RAIL_SIZE_REM: f32 = 5.0;
 pub const NAV_RAIL_LABEL_SIZE: f32 = 0.75;
 pub const NAV_RAIL_ICON_SIZE_REM: f32 = 1.5;
 pub const BOTTOM_NAV_HEIGHT_REM: f32 = 4.0;
-pub const TOPBAR_HEIGHT: f32 = TOPBAR_ACTION_HEIGHT + 2.0 * CONTENT_INSET;
-pub const TOPBAR_HEIGHT_REM: f32 = TOPBAR_HEIGHT / 16.0;
+/// The topbar is its actions plus a `CONTENT_INSET` above and below them, stated
+/// as one rem height: its actions are rems, so a pixel bar would be outgrown by
+/// its own buttons at a large UI font. The inset rides along at 16px to the rem
+/// rather than staying fixed, because a height made of a rem part and a pixel
+/// part cannot be given to a single element.
+pub const TOPBAR_HEIGHT_REM: f32 = TOPBAR_ACTION_HEIGHT_REM + 2.0 * CONTENT_INSET / 16.0;
 pub const TOPBAR_ACTION_HEIGHT_REM: f32 = 2.0;
-pub const TOPBAR_ACTION_HEIGHT: f32 = TOPBAR_ACTION_HEIGHT_REM * 16.0;
 pub const TOPBAR_ACTION_LABEL_WEIGHT: FontWeight = FontWeight::NORMAL;
 pub const TOPBAR_ACTION_GAP: f32 = SPACE_SM;
 pub const TOPBAR_ACTION_HORIZONTAL_PADDING: f32 = SPACE_SM;
@@ -406,17 +412,12 @@ pub const TOPBAR_ACTION_HORIZONTAL_PADDING: f32 = SPACE_SM;
 /// library rows, their delete buttons, the add button and the header all sit on
 /// it. It was repeated as a bare `40.0` in five places.
 pub const NAVIGATION_MODAL_ROW_HEIGHT_REM: f32 = 2.0;
-pub const NAVIGATION_MODAL_ROW_HEIGHT: f32 = NAVIGATION_MODAL_ROW_HEIGHT_REM * 16.0;
-/// Row pitch: the row plus the gap the panel puts between rows.
-pub const NAVIGATION_MODAL_ROW_PITCH: f32 = NAVIGATION_MODAL_ROW_HEIGHT + SPACE_XS;
-/// Everything above and below the rows — the header and its gap, plus the
-/// surface's own padding — minus the gap the last row does not have.
-pub const NAVIGATION_MODAL_CHROME_HEIGHT: f32 = NAVIGATION_MODAL_ROW_HEIGHT + SPACE_XS + SPACE_MD * 2.0 - SPACE_XS;
 /// The list stops growing here and scrolls instead.
-pub const NAVIGATION_MODAL_MAX_HEIGHT: f32 = 512.0;
-/// Wide enough for a library name without being wider than a modal wants to be.
-/// The panel still shrinks with the window through `max_w_full`.
-pub const NAVIGATION_MODAL_WIDTH: f32 = 328.0;
+pub const NAVIGATION_MODAL_MAX_HEIGHT_REM: f32 = 32.0;
+/// Wide enough for a library name without being wider than a modal wants to be,
+/// in rems because a library name is what it is wide for. The panel still
+/// shrinks with the window through `max_w_full`.
+pub const NAVIGATION_MODAL_WIDTH_REM: f32 = 20.5;
 
 /// Compact hierarchy items used when folders and books share the same
 /// paginator. These preserve the flat, borderless treatment of the original
@@ -428,6 +429,16 @@ pub const COMPACT_HIERARCHY_ITEM_TEXT_SIZE_REM: f32 = TEXT_LG;
 pub const COMPACT_HIERARCHY_ITEM_ROW_GAP: f32 = SPACE_SM;
 pub const COMPACT_HIERARCHY_ITEM_HORIZONTAL_PADDING: f32 = CONTENT_INSET;
 pub const COMPACT_HIERARCHY_ITEM_CONTENT_GAP: f32 = SPACE_SM;
+
+/// Section cards: a title and total over columns of child entries, with a
+/// single row of covers in the space left by the first column.
+pub const SECTION_CARD_HEADING_HEIGHT_REM: f32 = 2.5;
+pub const SECTION_CARD_SUBJECT_ROW_HEIGHT_REM: f32 = 1.5;
+pub const SECTION_CARD_SUBJECT_ROWS_PER_COLUMN: usize = 10;
+pub const SECTION_CARD_COLUMN_GAP: f32 = SPACE_MD;
+/// The cover art in a section card's strip. The cell adds the book card's
+/// padding around it.
+pub const SECTION_CARD_COVER_WIDTH: f32 = 150.0;
 
 /// The contents list, shared by the reader's sidebar, the audiobook player's
 /// chapter table and the library's detail page.
@@ -456,9 +467,7 @@ pub const TAB_UNDERLINE_HEIGHT: f32 = 2.0;
 
 /// Shared geometry for settings controls.
 pub const SETTINGS_CONTROL_SIZE_REM: f32 = 2.0;
-pub const SETTINGS_STEPPER_BUTTON_SIZE: f32 = 28.0;
 pub const SETTINGS_STEPPER_VALUE_WIDTH_REM: f32 = 4.5;
-pub const SETTINGS_STEPPER_VALUE_MAX_WIDTH: f32 = 80.0;
 pub const SETTINGS_CONTROL_GAP: f32 = 1.0;
 
 #[cfg(test)]

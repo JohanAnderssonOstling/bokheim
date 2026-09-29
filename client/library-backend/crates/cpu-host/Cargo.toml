@@ -5,6 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
+content-address = { path = "../../../../shared/content-address" }
 book-model = { path = "../../../../shared/book-model" }
 book-metadata = { path = "../book-metadata" }
 book-inspection = { path = "../book-inspection" }

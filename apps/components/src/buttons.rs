@@ -30,7 +30,7 @@ pub(crate) fn outlined_button(id: impl Into<ElementId>, theme: BrowserTheme) -> 
 /// match every other native surface and control). Semantic wrappers own any
 /// contextual state colour (hover, selection) on top of this baseline.
 pub fn outlined_icon_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: impl Into<Icon>, theme: BrowserTheme) -> Button {
-    base_button(id).text_color(theme.text).bg(theme.page_bg).icon(icon).size(gpui::rems(2.0)).tooltip(label)
+    base_button(id).ghost().text_color(theme.text).bg(theme.page_bg).icon(icon).size(gpui::rems(2.0)).tooltip(label)
 }
 
 /// A compact neutral outlined text button.
@@ -73,5 +73,5 @@ pub fn secondary_action_button(id: impl Into<ElementId>, label: impl Into<Shared
 /// rather than the way through it. It has no icon: an icon would give it the
 /// weight the shape exists to avoid.
 pub fn link_button(id: impl Into<ElementId>, label: impl Into<SharedString>, theme: BrowserTheme, disabled: bool) -> Button {
-    base_button(id).label(label).ghost().with_size(gpui_component::Size::Small).px(px(0.0)).text_color(theme.accent).text_size(gpui::rems(TEXT_SM)).disabled(disabled)
+    base_button(id).label(label).ghost().with_size(gpui_component::Size::Small).px(px(0.0)).text_color(theme.text_accent).text_size(gpui::rems(TEXT_SM)).disabled(disabled)
 }

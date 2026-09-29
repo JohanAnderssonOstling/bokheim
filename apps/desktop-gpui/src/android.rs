@@ -128,6 +128,30 @@ fn android_main(app: AndroidApp) {
     log::info!("Bokheim Android entry point started");
 
     let data_dir = app.internal_data_path().expect("Android did not provide a private application data directory");
+    let update_vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
+    let (update_class, update_context) = update_vm.attach_current_thread(|env| {
+        let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
+        let activity = unsafe { env.as_cast_raw::<jni::refs::Global<JObject>>(&raw_activity)? };
+        let class = env.get_object_class(activity.as_ref())?;
+        let class = env.new_global_ref(class)?;
+        let context = env.call_method(activity.as_ref(), jni::jni_str!("getApplicationContext"), jni::jni_sig!("()Landroid/content/Context;"), &[])?.l()?;
+        Ok::<_, jni::errors::Error>((class, env.new_global_ref(context)?))
+    }).expect("could not initialize Android update bridge");
+    let update_trial = crate::android_updates::initialize(&data_dir, move |command| {
+        update_vm.attach_current_thread(|env| {
+            let command = JString::from_str(env, command)?;
+            let result = env.call_static_method(&update_class, jni::jni_str!("updateCommand"),
+                jni::jni_sig!("(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;"),
+                &[jni::objects::JValue::Object(update_context.as_ref()), jni::objects::JValue::Object(command.as_ref())]);
+            if env.exception_check() {
+                env.exception_describe();
+                env.exception_clear();
+            }
+            let value = result?.l()?;
+            env.cast_local::<JString>(value)?.try_to_string(env)
+        }).map_err(|e| e.to_string())
+    }).expect("failed to recover Android update");
+    let startup_permit = update_trial.then(app::host::defer_background_work);
     let incoming_directory = data_dir.join("incoming");
     std::fs::create_dir_all(&incoming_directory).expect("failed to create Android incoming book directory");
     cleanup_abandoned_incoming_files(&incoming_directory);
@@ -157,9 +181,39 @@ fn android_main(app: AndroidApp) {
     log::info!("running GPUI application");
     application.run(move |cx| {
         log::info!("opening shared Bokheim UI");
-        open_ui(backend_context, UiLaunchOptions::MOBILE, Some(incoming_files), cx);
+        let opened = open_ui(backend_context, UiLaunchOptions::MOBILE, Some(incoming_files), cx);
+        if opened.is_some() {
+            crate::android_updates::healthy().expect("failed to commit Android update startup");
+            if let Some(permit) = startup_permit { permit.release(); }
+        }
         log::info!("shared Bokheim UI opened");
     });
+}
+
+#[unsafe(no_mangle)]
+extern "system" fn Java_se_bokheim_reader_gpui_UpdateMetadata_nativeJson<'caller>(mut unowned_env: EnvUnowned<'caller>, _class: jni::objects::JClass<'caller>) -> jni::sys::jstring {
+    unowned_env.with_env(|env| -> jni::errors::Result<jni::sys::jstring> {
+        match crate::update_metadata::json() {
+            Ok(json) => Ok(env.new_string(json)?.into_raw()),
+            Err(error) => {
+                log::error!("Could not read Android update metadata: {error}");
+                Ok(std::ptr::null_mut())
+            }
+        }
+    }).resolve::<jni::errors::LogErrorAndDefault>()
+}
+
+#[unsafe(no_mangle)]
+extern "system" fn Java_se_bokheim_reader_gpui_UpdateMigrationService_nativePrepare<'caller>(mut unowned_env: EnvUnowned<'caller>, _class: JObject<'caller>, job: JString<'caller>) {
+    unowned_env.with_env(|env| -> jni::errors::Result<()> {
+        let path = job.try_to_string(env)?;
+        if let Err(error) = linux_update_host::prepare_candidate(std::path::Path::new(&path), env!("CARGO_PKG_VERSION")) {
+            // No result file is produced on failure. The parent waits for helper
+            // process death before reading it or touching a live database.
+            log::error!("Android update candidate failed: {error}");
+        }
+        Ok(())
+    }).resolve::<jni::errors::LogErrorAndDefault>();
 }
 
 fn deliver_incoming_file(file: IncomingBookResult) {

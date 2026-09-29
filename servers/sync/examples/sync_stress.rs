@@ -103,6 +103,7 @@ fn wire_mutation(kind: &str, entity_key: impl Into<String>, entity_subkey: impl 
     // bytes, so it declares that it holds no reference.
     let blob_reference = (kind == sync_common::mutation_kind::BOOK_LIFECYCLE).then_some(DeclaredBlobReference { present: false, content_hash: None });
     Ok(WireMutation {
+        origin: None,
         mutation_id: MutationId::new(),
         kind: kind.to_owned(),
         entity_key: entity_key.into(),

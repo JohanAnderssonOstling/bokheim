@@ -1,6 +1,6 @@
 //! Subscription requests and live resources owned by one library.
 use client_runtime::reply::Reply;
-use client_runtime::wire::{WorkerPayload, encode_reply};
+use client_runtime::wire::{encode_reply, WorkerPayload};
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub enum LibrarySubscription {

@@ -17,6 +17,10 @@ impl LibraryScanner {
         cfg!(all(feature = "scanner", not(target_arch = "wasm32")))
     }
 
+    pub(crate) fn root(&self) -> &str {
+        &self.root
+    }
+
     pub(crate) fn discover(&self, snapshot: &library_database::ScanSnapshot) -> library_database::FilesystemScan {
         #[cfg(all(feature = "scanner", not(target_arch = "wasm32")))]
         {

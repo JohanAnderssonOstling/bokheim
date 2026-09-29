@@ -15,7 +15,6 @@ path = "src/lib.rs"
 library-backend = { path = "../../client/library-backend" }
 book-model = { path = "../../shared/book-model" }
 async-channel = "2"
-audiobook-library = { path = "../../client/audiobook-library" }
 app = { path = "../../client/app", default-features = false }
 library-model = { path = "../../client/library-model" }
 ui-components = { path = "../components" }

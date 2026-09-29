@@ -6,12 +6,13 @@
 // returned outcome. Sync works only on these values: no connection,
 // transaction, or callback crosses the boundary in either direction.
 //
-// Commit replays the same guarded methods the inline flow used, so a
-// placement that changed mid-drain is still rejected at commit time and
-// every replayed write is idempotent under credential-refresh retries.
+// Commit replays the guarded writes in one transaction, so a changed
+// placement is still rejected and a later error rolls back the whole drain.
 use super::{BookUploadCompletion, BookUploadSnapshot};
 use super::{RejectedAsset, TransfersSql};
+use crate::enrichment::EnrichmentSql;
 use crate::shared_sql::SharedSql;
+use crate::transactions::WriteOutcome;
 use crate::{BookPlacement, BookUploadIntent, Database, DatabaseError, NativeBookCompletion, NativeBookSnapshot, RelativeBookPath};
 use std::collections::HashMap;
 use sync_common::{ContentHash, DirId};
@@ -156,9 +157,8 @@ impl Database {
         Ok(snapshot)
     }
 
-    /// Replays one drain's durable effects in order through the same guarded
-    /// methods the inline flow used. Every replayed write is idempotent, so
-    /// credential-refresh retries that re-executed jobs commit safely.
+    /// Replays one drain's durable effects in order in a single transaction.
+    /// Every replayed write remains guarded for credential-refresh retries.
     ///
     /// Returns whether every completed upload's local version was still
     /// current at commit time. A queued batch retries a stale member on its
@@ -166,64 +166,90 @@ impl Database {
     /// synchronously (e.g. [`crate::assets::AssetStore`]'s single-book
     /// upload) has no later pass and must surface staleness as an error.
     pub fn commit_transfer_outcome(&self, outcome: &TransferOutcome) -> Result<bool, DatabaseError> {
-        let mut all_current = true;
-        for write in &outcome.writes {
-            match write {
-                TransferWrite::SettleManifest { intents, present_remotely, rejected } => {
-                    self.settle_book_manifest(intents, present_remotely, rejected)?;
-                }
-                TransferWrite::CompleteUploadedBook { hash, local_versions, intent } => {
-                    if !self.complete_book_upload_if_current(hash, local_versions, intent.as_ref())? {
-                        all_current = false;
+        if outcome.writes.is_empty() {
+            return Ok(true);
+        }
+        self.with_write_transaction(|transaction| {
+            let mut all_current = true;
+            for write in &outcome.writes {
+                match write {
+                    TransferWrite::SettleManifest { intents, present_remotely, rejected } => {
+                        Self::settle_book_manifest_in_transaction(transaction, intents, present_remotely, rejected)?;
                     }
-                }
-                TransferWrite::CompleteUploadedBatch { completions } => {
-                    if self.complete_book_upload_batch(completions)?.iter().any(|current| !current) {
-                        all_current = false;
+                    TransferWrite::CompleteUploadedBook { hash, local_versions, intent } => {
+                        if !Self::complete_book_upload_in_transaction(transaction, hash, local_versions, intent.as_ref())? {
+                            all_current = false;
+                        }
                     }
-                }
-                TransferWrite::CompleteDownload { hash } => {
-                    self.connection.shared_transfer_complete_download(hash.as_str())?;
-                }
-                TransferWrite::CancelDownload { hash } => {
-                    self.cancel_book_download(hash)?;
-                }
-                TransferWrite::CompleteRetainedDownload { hash, rel_path } => {
-                    let placement = BookPlacement::new(hash.clone(), RelativeBookPath::parse(rel_path).map_err(|error| DatabaseError::message(format!("stored placement path is not readable: {error:?}")))?);
-                    self.complete_retained_download(hash, &placement)?;
-                }
-                TransferWrite::SettleRejectedUpload { hash, intent, reason } => {
-                    self.settle_rejected_asset(hash, RejectedAsset::BookUpload { intent: intent.as_ref() }, reason)?;
-                }
-                TransferWrite::SettleRejectedThumbnail { hash, reason } => {
-                    self.settle_rejected_asset(hash, RejectedAsset::ThumbnailUpload, reason)?;
-                }
-                TransferWrite::SettleAvailability { available, missing } => {
-                    self.settle_thumbnail_availability(available, missing)?;
-                }
-                TransferWrite::RecordUploadedThumbnail { hash } => {
-                    self.record_uploaded_thumbnail(hash)?;
-                }
-                TransferWrite::CompleteDownloadedThumbnail { hash } => {
-                    self.complete_downloaded_thumbnail(hash)?;
-                }
-                TransferWrite::ForgetRemoteThumbnail { hash } => {
-                    self.forget_remote_thumbnail(hash)?;
-                }
-                TransferWrite::ConfirmThumbnailAvailable { hash } => {
-                    self.confirm_thumbnail_available(hash)?;
-                }
-                TransferWrite::RequestMissingThumbnail { hash } => {
-                    self.request_missing_thumbnail(hash)?;
-                }
-                TransferWrite::CompleteDownloadedBook { completion, thumbnail_set_exists } => {
-                    self.complete_downloaded_book(completion.clone(), *thumbnail_set_exists)?;
-                }
-                TransferWrite::CompleteLocalBookRequest { hash } => {
-                    self.complete_local_book_request(hash.clone())?;
+                    TransferWrite::CompleteUploadedBatch { completions } => {
+                        for completion in completions {
+                            if !Self::complete_book_upload_in_transaction(transaction, &completion.content_hash, &completion.local_versions, Some(&completion.intent))? {
+                                all_current = false;
+                            }
+                        }
+                    }
+                    TransferWrite::CompleteDownload { hash } => {
+                        transaction.shared_transfer_complete_download(hash.as_str())?;
+                    }
+                    TransferWrite::CancelDownload { hash } => {
+                        Self::cancel_book_download_on(transaction, hash)?;
+                    }
+                    TransferWrite::CompleteRetainedDownload { hash, rel_path } => {
+                        let placement = BookPlacement::new(hash.clone(), RelativeBookPath::parse(rel_path).map_err(|error| DatabaseError::message(format!("stored placement path is not readable: {error:?}")))?);
+                        Self::complete_retained_download_on(transaction, hash, &placement)?;
+                    }
+                    TransferWrite::SettleRejectedUpload { hash, intent, reason } => {
+                        Self::settle_rejected_asset_on(transaction, hash, RejectedAsset::BookUpload { intent: intent.as_ref() }, reason)?;
+                    }
+                    TransferWrite::SettleRejectedThumbnail { hash, reason } => {
+                        Self::settle_rejected_asset_on(transaction, hash, RejectedAsset::ThumbnailUpload, reason)?;
+                    }
+                    TransferWrite::SettleAvailability { available, missing } => {
+                        Self::settle_thumbnail_availability_on(transaction, available, missing)?;
+                    }
+                    TransferWrite::RecordUploadedThumbnail { hash } => {
+                        transaction.thumbnail_record_remote(hash.as_str())?;
+                    }
+                    TransferWrite::CompleteDownloadedThumbnail { hash } => {
+                        Self::complete_downloaded_thumbnail_on(transaction, hash)?;
+                    }
+                    TransferWrite::ForgetRemoteThumbnail { hash } => {
+                        transaction.thumbnail_forget_remote(hash.as_str())?;
+                    }
+                    TransferWrite::ConfirmThumbnailAvailable { hash } => {
+                        transaction.thumbnail_set_result(hash.as_str(), "ready")?;
+                    }
+                    TransferWrite::RequestMissingThumbnail { hash } => {
+                        transaction.thumbnail_request_missing(hash.as_str())?;
+                    }
+                    TransferWrite::CompleteDownloadedBook { completion, thumbnail_set_exists } => {
+                        Self::complete_downloaded_book_in_transaction(transaction, completion, *thumbnail_set_exists)?;
+                    }
+                    TransferWrite::CompleteLocalBookRequest { hash } => {
+                        Self::complete_local_book_request_on(transaction, hash)?;
+                    }
                 }
             }
-        }
-        Ok(all_current)
+            Ok(WriteOutcome::Commit(all_current))
+        })
+    }
+}
+
+#[cfg(test)]
+mod commit_tests {
+    use super::*;
+
+    #[test]
+    fn later_invalid_write_rolls_back_earlier_transfer_effects() {
+        let db = Database::open(":memory:").unwrap();
+        db.initialize_library().unwrap();
+        let hash = ContentHash::new(&"a".repeat(64));
+        let mut outcome = TransferOutcome::default();
+        outcome.record(TransferWrite::RecordUploadedThumbnail { hash });
+        outcome.record(TransferWrite::CompleteRetainedDownload { hash, rel_path: "../invalid".to_owned() });
+
+        assert!(db.commit_transfer_outcome(&outcome).is_err());
+        assert!(!db.has_remote_thumbnail(&hash).unwrap());
+        assert!(db.connection.is_autocommit());
     }
 }

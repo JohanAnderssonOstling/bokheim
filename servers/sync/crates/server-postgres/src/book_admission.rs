@@ -11,7 +11,7 @@ pub(super) fn dependency(change: &WireMutation) -> Result<Option<ContentHash>, R
         kind::DIRECTORY_NAME | kind::DIRECTORY_PARENT | kind::DIRECTORY_LIFECYCLE => Ok(None),
         kind::BOOK_LIFECYCLE | kind::PLACEMENT | kind::ANNOTATION
             if reference.is_some_and(|r| !r.present && r.content_hash.is_none()) => Ok(None),
-        kind::BOOK_LIFECYCLE | kind::PLACEMENT | kind::READING_POSITION | kind::METADATA
+        kind::BOOK_FACTS | kind::BOOK_LIFECYCLE | kind::PLACEMENT | kind::READING_POSITION | kind::METADATA
         | kind::DESCRIPTION | kind::PDF_READER_METADATA => {
             if let Some(reference) = reference {
                 if let Ok(identity) = change.entity_key.parse::<ContentHash>() {
@@ -21,6 +21,7 @@ pub(super) fn dependency(change: &WireMutation) -> Result<Option<ContentHash>, R
             }
             change.entity_key.parse::<ContentHash>().map(Some).map_err(|_| Reason::InvalidPayload)
         }
+        kind::ANNOTATION if reference.is_some_and(|r| !r.present && r.content_hash.is_some()) => Ok(None),
         kind::ANNOTATION => reference
             .filter(|r| r.present).and_then(|r| r.content_hash).map(Some).ok_or(Reason::MissingDependency),
         _ => Ok(reference.filter(|r| r.present).and_then(|r| r.content_hash)),

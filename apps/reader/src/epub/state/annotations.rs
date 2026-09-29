@@ -1,9 +1,9 @@
 //! EPUB annotation loading, editing, and renderer projection.
 
 use book_model::{AnnotationAnchor, AnnotationStyle};
-use library_backend::{ReaderAnnotation};
 use gpui::{Context, Window};
 use html_view_core::RendererCommand;
+use library_backend::ReaderAnnotation;
 
 use crate::epub::{ReaderView, Selection, marks};
 use crate::invalidation::Component;

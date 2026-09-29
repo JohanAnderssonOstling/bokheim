@@ -85,6 +85,9 @@ impl CommandTarget<ToggleToc> for ReaderView {
 impl CommandTarget<FocusReaderSearch> for ReaderView {
     fn execute(&mut self, _: &FocusReaderSearch, window: &mut Window, cx: &mut Context<Self>) {
         self.chrome.show(cx);
+        if components::uses_mobile_navigation(window) && self.sidebar.close() {
+            crate::invalidation::notify(cx, Component::ReaderShell, "sidebar_closed_for_search");
+        }
         if self.search.query.is_none() {
             self.open_search(cx);
         }
@@ -99,7 +102,9 @@ impl CommandTarget<ToggleSearch> for ReaderView {
             self.search_close(window, cx);
         } else {
             self.open_search(cx);
-            self.search_input.read(cx).focus_handle(cx).focus(window, cx);
+            if !components::uses_mobile_navigation(window) || !self.sidebar.is_visible() {
+                self.search_input.read(cx).focus_handle(cx).focus(window, cx);
+            }
         }
     }
 }

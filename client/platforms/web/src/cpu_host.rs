@@ -2,7 +2,7 @@
 
 use super::transport::{cpu_client, range::Server};
 use client_platform_runtime::executor::BoxedBackendFuture;
-use cpu_host::{BackendError, BookTask, BoxedCpuReader, CpuHost, CpuRequest, CpuResponse, InspectionCapabilities, Operation, ThumbnailBytes};
+use cpu_host::{BackendError, BookOperation, BookTask, BoxedCpuReader, CpuHost, CpuRequest, CpuResponse, InspectionCapabilities, Operation, ThumbnailBytes};
 use std::io::{Read, Seek, SeekFrom};
 use wasm_bindgen::JsValue;
 
@@ -56,4 +56,15 @@ pub fn serve_reader<R: Read + Seek + Send + 'static>(mut reader: R) -> Result<Re
         Ok(bytes)
     })
     .map(ReaderSource)
+}
+
+pub async fn run_book_operation<C: BookOperation, R: Read + Seek + Send + 'static>(operation: C, reader: R) -> Result<C::Reply, String> {
+    let server = serve_reader(reader)?;
+    run_book_operation_with_source(operation, server.source()).await
+}
+
+pub async fn run_book_operation_with_source<C: BookOperation>(operation: C, source: JsValue) -> Result<C::Reply, String> {
+    let bytes = rmp_serde::to_vec_named(&operation.request()).map_err(|error| error.to_string())?;
+    let response = cpu_client::request_with_source(bytes, source).map_err(|error| error.to_string())?.await.map_err(|error| error.to_string())?;
+    C::decode(rmp_serde::from_slice(&response).map_err(|error| error.to_string())?).map_err(|error| error.to_string())
 }

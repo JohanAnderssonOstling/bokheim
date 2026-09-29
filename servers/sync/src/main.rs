@@ -34,12 +34,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match arguments.next() {
         None => run_server().await,
         Some(command) if command == "migrate" && arguments.next().is_none() => run_migrate().await,
-        Some(command) if command == "upgrade" && arguments.next().is_none() => run_upgrade().await,
-        Some(command) => Err(io::Error::new(io::ErrorKind::InvalidInput, format!("unknown sync-server command: {}; expected no command, 'migrate', or 'upgrade'", command.to_string_lossy())).into()),
+        Some(command) if command == "verify-schema" && arguments.next().is_none() => run_verify_schema().await,
+        Some(command) => Err(io::Error::new(io::ErrorKind::InvalidInput, format!("unknown sync-server command: {}; expected no command, 'migrate', or 'verify-schema'", command.to_string_lossy())).into()),
     }
 }
 
-/// Applies the complete v14 baseline schema to an empty database. The server
+/// Applies the initial schema to an empty database. The server
 /// never applies schema implicitly on startup.
 async fn run_migrate() -> Result<(), Box<dyn std::error::Error>> {
     let database_url = secret_from_environment_or_systemd_credential("DATABASE_URL", "database_url")?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DATABASE_URL or the database_url systemd credential is required"))?;
@@ -48,10 +48,10 @@ async fn run_migrate() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn run_upgrade() -> Result<(), Box<dyn std::error::Error>> {
+async fn run_verify_schema() -> Result<(), Box<dyn std::error::Error>> {
     let database_url = secret_from_environment_or_systemd_credential("DATABASE_URL", "database_url")?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DATABASE_URL or the database_url systemd credential is required"))?;
     let database = server_postgres::connect(&database_url).await?;
-    server_postgres::upgrade_existing(&database).await?;
+    server_postgres::verify_schema(&database).await?;
     Ok(())
 }
 
@@ -60,6 +60,7 @@ async fn run_server() -> Result<(), Box<dyn std::error::Error>> {
     let database_url = secret_from_environment_or_systemd_credential("DATABASE_URL", "database_url")?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DATABASE_URL or the database_url systemd credential is required"))?;
     let database_pool = server_postgres::DatabasePoolConfig::from_env().map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let pool = server_postgres::connect_configured(&database_url, database_pool).await?;
+    server_postgres::verify_schema(&pool).await?;
 
     let account_token_key = secret_from_environment_or_systemd_credential("BOKHEIM_ACCOUNT_TOKEN_KEY", "account_token_key")?
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "BOKHEIM_ACCOUNT_TOKEN_KEY or the account_token_key systemd credential is required"))?;

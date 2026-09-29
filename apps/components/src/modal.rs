@@ -1,7 +1,7 @@
 use gpui::prelude::*;
 use gpui::{Div, ElementId, FontWeight, MouseButton, SharedString, Stateful, div, px, rems};
 
-use crate::{BrowserTheme, RADIUS_MD, SPACE_SM, TEXT_MD};
+use crate::{BrowserTheme, RADIUS_MD, SPACE_MD, SPACE_SM, TEXT_MD};
 
 /// The shared full-window layer for a centered modal. The caller supplies the
 /// scrim and surface so it can retain its own identity and dismissal behavior.
@@ -43,8 +43,8 @@ pub fn bottom_sheet_header(title: impl Into<SharedString>, theme: BrowserTheme) 
         .flex()
         .items_center()
         .justify_between()
-        .px(px(SPACE_SM))
-        .py(px(SPACE_SM))
+        .px(px(SPACE_MD))
+        .py(px(SPACE_SM + 4.0))
         .border_b_1()
         .border_color(theme.rule)
         .child(div().text_size(rems(TEXT_MD)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(title.into()))

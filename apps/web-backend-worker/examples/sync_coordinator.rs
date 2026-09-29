@@ -37,10 +37,9 @@ use coordinator::Coordinator;
 struct WorkerOptions {
     cpu: client_platform_web::transport::cpu::CpuWorkerOptions,
     sync: app::host::web::SyncOptions,
-    database_startup: std::time::Duration,
 }
 impl Default for WorkerOptions {
     fn default() -> Self {
-        Self { cpu: Default::default(), sync: Default::default(), database_startup: std::time::Duration::from_secs(15) }
+        Self { cpu: Default::default(), sync: Default::default() }
     }
 }

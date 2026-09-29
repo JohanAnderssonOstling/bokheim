@@ -130,6 +130,49 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
             let _lease = self.assets.lease_book(&hash).await.map_err(BackendError::operation)?;
             let book = self.db.thumbnail_book_format(hash)?;
             let Some(format) = book else { return Ok(false) };
+            let was_sidecar = self.db.has_sidecar_thumbnail(&hash)?;
+            let mut local_reader = match format {
+                book_model::BookFormat::Mp3Folder => self.assets.local_mp3_folder_archive(&hash).await.map_err(BackendError::operation)?,
+                book_model::BookFormat::M4b => self.assets.local_m4b_reader(&hash).await.map_err(BackendError::operation)?,
+                _ => None,
+            };
+            let local_source_available = local_reader.is_some();
+            if matches!(format, book_model::BookFormat::Mp3Folder | book_model::BookFormat::M4b) && local_reader.is_none() {
+                local_reader = self.assets.prepare_reader(BlobKind::Book, &hash).await.map_err(BackendError::operation)?;
+            }
+            let local_book_available = local_reader.is_some();
+            // Explicit local artwork takes priority over a previously cached
+            // embedded or remotely enriched cover when a scan queues work.
+            if format == book_model::BookFormat::M4b && local_source_available {
+                if let Some(bytes) = self.assets.m4b_sidecar_cover(&hash).await.map_err(BackendError::operation)? {
+                    match self.processor.decode(bytes).await {
+                        Ok(versions) => {
+                            self.store(hash, &versions, observer).await?;
+                            self.db.complete_sidecar_thumbnail_work(&hash)?;
+                            return Ok(true);
+                        }
+                        Err(error) => log::warn!("ignoring invalid M4B sidecar cover for {hash}: {error}"),
+                    }
+                }
+            }
+            if format == book_model::BookFormat::Mp3Folder {
+                if let Some(reader) = local_reader.as_mut() {
+                    if let Some(bytes) = audiobook_folder::archived_cover(&mut *reader).map_err(BackendError::operation)? {
+                        match self.processor.decode(bytes).await {
+                            Ok(versions) => {
+                                self.store(hash, &versions, observer).await?;
+                                self.db.complete_sidecar_thumbnail_work(&hash)?;
+                                return Ok(true);
+                            }
+                            Err(error) => log::warn!("ignoring invalid MP3 folder cover for {hash}: {error}"),
+                        }
+                    }
+                    reader.seek(std::io::SeekFrom::Start(0))?;
+                }
+            }
+            if was_sidecar && (local_book_available || self.assets.prepare_reader(BlobKind::Book, &hash).await.map_err(BackendError::operation)?.is_some()) {
+                self.assets.remove(BlobKind::Thumbnail, &hash).map_err(BackendError::operation)?;
+            }
             // A pending job may have left incomplete bytes behind. Decode the
             // cached master before confirming it, and rebuild its browse variant.
             let (_lease, cached) = if let Some(bytes) = self.assets.read_bytes(BlobKind::Thumbnail, &hash).await.map_err(BackendError::operation)? {
@@ -148,12 +191,16 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
                 self.db.confirm_thumbnail_available(&hash)?;
                 return Ok(true);
             }
-            let remote = self.db.has_remote_thumbnail(&hash)?;
+            let remote = !was_sidecar && self.db.has_remote_thumbnail(&hash)?;
             if remote {
                 self.db.defer_thumbnail_to_download(&hash)?;
                 return Ok(true);
             }
-            let Some(mut reader) = self.assets.prepare_reader(BlobKind::Book, &hash).await.map_err(BackendError::operation)? else { return Ok(false) };
+            let Some(mut reader) = (if matches!(format, book_model::BookFormat::Mp3Folder | book_model::BookFormat::M4b) {
+                local_reader
+            } else {
+                self.assets.prepare_reader(BlobKind::Book, &hash).await.map_err(BackendError::operation)?
+            }) else { return Ok(false) };
             if reader.seek(std::io::SeekFrom::End(0))? == 0 {
                 // Retire legacy empty-file jobs without making them candidates
                 // for external cover enrichment or publishing a thumbnail.
@@ -173,7 +220,11 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
             if let Some(versions) = versions {
                 self.store(hash, &versions, observer).await?;
             }
-            self.db.complete_thumbnail_work(&hash, has_cover)?;
+            if was_sidecar {
+                self.db.complete_replaced_sidecar_thumbnail_work(&hash, has_cover)?;
+            } else {
+                self.db.complete_thumbnail_work(&hash, has_cover)?;
+            }
             // Both ready and no_cover make external cover enrichment eligible.
             Ok(true)
         }

@@ -40,7 +40,7 @@ mod tests {
     fn runtime() -> UnifiedTaxonomyRuntime {
         let concepts = [(1, "History", vec![]), (2, "Geography", vec![]), (3, "Myanmar / Burma", vec![1, 2]), (4, "Modern", vec![3])]
             .into_iter()
-            .map(|(id, label, parents)| UnifiedConceptDefinition::new(id, label.into(), parents, BTreeMap::new(), vec![]))
+            .map(|(id, label, parents)| UnifiedConceptDefinition::new(id, label.into(), parents, BTreeMap::new()))
             .collect();
         build_runtime(concepts, false).unwrap()
     }
@@ -63,9 +63,9 @@ mod tests {
         assert!(matching_hierarchy_paths(&runtime, &heading("History -- History")).is_empty());
         let repeated = build_runtime(
             vec![
-                UnifiedConceptDefinition::new(1, "History".into(), vec![], BTreeMap::new(), vec![]),
-                UnifiedConceptDefinition::new(2, "Places".into(), vec![1], BTreeMap::new(), vec![]),
-                UnifiedConceptDefinition::new(3, "History".into(), vec![2], BTreeMap::new(), vec![]),
+                UnifiedConceptDefinition::new(1, "History".into(), vec![], BTreeMap::new()),
+                UnifiedConceptDefinition::new(2, "Places".into(), vec![1], BTreeMap::new()),
+                UnifiedConceptDefinition::new(3, "History".into(), vec![2], BTreeMap::new()),
             ],
             false,
         )

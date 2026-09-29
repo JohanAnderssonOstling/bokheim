@@ -79,13 +79,14 @@ impl Render for AccountIdentityView {
 /// nothing above them should be rebuilt at that rate.
 pub(crate) struct LibrariesView {
     page: Entity<SyncPage>,
+    expanded: std::collections::HashSet<sync_common::LibraryId>,
     _updates: gpui::Subscription,
 }
 
 impl LibrariesView {
     pub(crate) fn new(page: Entity<SyncPage>, cx: &mut Context<Self>) -> Self {
         let updates = cx.observe(&page, |_, _, cx| cx.notify());
-        Self { page, _updates: updates }
+        Self { page, expanded: std::collections::HashSet::new(), _updates: updates }
     }
 }
 
@@ -95,7 +96,7 @@ impl Render for LibrariesView {
         let compact = components::WindowWidthClass::for_window(window).is_compact();
         let page = self.page.clone();
         let rows = page.read(cx).library_rows(cx);
-        SyncPage::libraries_section(page.read(cx), &page, &rows, compact, theme)
+        SyncPage::libraries_section(page.read(cx), &page, &rows, &self.expanded, cx.entity(), compact, theme)
     }
 }
 
@@ -112,6 +113,7 @@ struct LibraryRow {
     status: LibrarySyncStatus,
     server_bytes: Option<u64>,
     local_bytes: Option<u64>,
+    thumbnail_download_coverage: Option<(u64, u64)>,
     /// What the library is doing at this moment, if anything.
     activities: Vec<LibraryActivitySummary>,
 }
@@ -163,6 +165,7 @@ impl SyncPage {
                     status,
                     server_bytes,
                     local_bytes,
+                    thumbnail_download_coverage: activity_jobs.thumbnail_download_coverage(library.library_id()),
                     activities,
                     #[cfg(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
                     local_path: library.local_path().map(str::to_owned),
@@ -481,7 +484,7 @@ impl SyncPage {
     /// is about this list — it decides where the next row in it will live — and
     /// a "Library storage" group of its own separated it from the only thing it
     /// refers to.
-    fn libraries_section(&self, page: &Entity<Self>, rows: &[LibraryRow], compact: bool, theme: components::BrowserTheme) -> Div {
+    fn libraries_section(&self, page: &Entity<Self>, rows: &[LibraryRow], expanded: &std::collections::HashSet<sync_common::LibraryId>, view: Entity<LibrariesView>, compact: bool, theme: components::BrowserTheme) -> Div {
         let mut libraries = components::browser_settings_fieldset("Libraries", theme);
 
         // The list is ruled off from the setting above it. Without that the
@@ -511,49 +514,77 @@ impl SyncPage {
                 };
                 components::library_activity_note(color, activity.text.clone(), activity.count.clone().map(SharedString::from), activity.progress, theme)
             });
-            let mut facts: Vec<(SharedString, gpui::AnyElement)> = Vec::new();
-            let local_bytes = row.local_bytes.map(format_storage_bytes).unwrap_or_else(|| {
-                if row.status.state == LibrarySyncState::Unavailable {
-                    "Unavailable".to_owned()
-                } else {
-                    "Calculating…".to_owned()
-                }
-            });
-            facts.push(("On this device".into(), SharedString::from(local_bytes).into_any_element()));
-            if let Some(state) = Self::library_state(row, theme) {
-                facts.push(("Status".into(), state));
-            }
-
+            let local_bytes = row.local_bytes.map(format_storage_bytes).unwrap_or_else(|| if row.status.state == LibrarySyncState::Unavailable { "Unavailable".to_owned() } else { "Calculating…".to_owned() });
+            let (status, status_color) = match row.status.state {
+                LibrarySyncState::Checking => ("Loading status…", theme.text_muted),
+                LibrarySyncState::Unavailable => ("Unavailable", theme.warning),
+                LibrarySyncState::Receiving => ("Receiving library…", theme.accent),
+                LibrarySyncState::Synced => ("Up to date", theme.accent),
+                LibrarySyncState::SyncPending if row.status.last_synced_at.is_none() => ("Sync pending", theme.warning),
+                LibrarySyncState::SyncPending => ("Changes pending", theme.warning),
+                LibrarySyncState::RemoteMissing => ("Not on server", theme.warning),
+                LibrarySyncState::LocalOnly => ("On this device", theme.text_muted),
+            };
+            let library_id = row.status.library_id;
+            let is_expanded = expanded.contains(&library_id);
+            let toggle_view = view.clone();
+            let toggle = components::outlined_icon_button(SharedString::from(format!("library-details-{library_id}")), if is_expanded { "Hide library details" } else { "Show library details" }, IconName::Ellipsis, theme)
+                .on_click(move |_, _, cx| toggle_view.update(cx, |view, cx| {
+                    if !view.expanded.insert(library_id) {
+                        view.expanded.remove(&library_id);
+                    }
+                    cx.notify();
+                }));
             #[cfg(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-            if let Some(path) = row.local_path.as_ref() {
-                let destination = std::path::PathBuf::from(path);
+            let path = row.local_path.as_ref().map(|path| components::library_path_label(std::path::Path::new(path)));
+            #[cfg(not(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
+            let path: Option<String> = None;
+            let title = div().min_w_0().flex_1().flex().flex_col()
+                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(gpui::FontWeight::SEMIBOLD).text_size(gpui::rems(components::TEXT_SM)).text_color(theme.text).child(row.name.clone()))
+                .children(path.map(|path| div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(components::TEXT_XS)).text_color(theme.text_muted).child(path)));
+            let size = div().flex_none().text_size(gpui::rems(components::TEXT_XS)).text_color(theme.text_muted).child(local_bytes.clone());
+            let state = div().min_w_0().flex().items_center().gap(px(6.0)).text_size(gpui::rems(components::TEXT_XS)).text_color(theme.text)
+                .child(div().w(px(8.0)).h(px(8.0)).rounded(px(4.0)).bg(status_color))
+                .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(status));
+            let meta = if compact { div().w_full().flex().items_center().gap(px(12.0)).child(size).child(state.flex_1()).child(toggle) }
+                else { div().flex_none().flex().items_center().gap(px(12.0)).child(size).child(state).child(toggle) };
+            let heading = if compact { div().w_full().flex().flex_col().gap(px(6.0)).child(title).child(meta) }
+                else { div().w_full().flex().items_center().gap(px(14.0)).child(title).child(meta) };
+            let mut summary = div().w_full().px(px(components::SPACE_MD)).py(px(12.0)).flex().flex_col().gap(px(8.0)).child(heading).children(activity);
+            if is_expanded {
+                let mut facts: Vec<(SharedString, gpui::AnyElement)> = Vec::new();
+                if let Some((ready, available)) = row.thumbnail_download_coverage.filter(|(_, available)| *available > 0) {
+                    facts.push(("Thumbnails on this device".into(), SharedString::from(format!("{ready} / {available}")).into_any_element()));
+                }
+
+                #[cfg(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+                if let Some(path) = row.local_path.as_ref() {
+                    let destination = std::path::PathBuf::from(path);
+                    facts.push((
+                        "Folder".into(),
+                        components::browser_settings_path_button(SharedString::from(format!("library-path-{}", row.status.library_id)), components::library_path_label(&destination), theme)
+                            .max_w_full()
+                            .overflow_hidden()
+                            .tooltip(path.clone())
+                            .on_click(move |_, _, cx| cx.open_with_system(&destination))
+                            .into_any_element(),
+                    ));
+                }
+
+                let page = page.clone();
                 facts.push((
-                    "Folder".into(),
-                    components::browser_settings_path_button(SharedString::from(format!("library-path-{}", row.status.library_id)), components::library_path_label(&destination), theme)
-                        .max_w_full()
-                        .overflow_hidden()
-                        .tooltip(path.clone())
-                        .on_click(move |_, _, cx| cx.open_with_system(&destination))
+                    SharedString::default(),
+                    Checkbox::new(SharedString::from(format!("asset-storage-{library_id}")))
+                        .label("Store on cloud")
+                        .checked(row.status.asset_storage_enabled)
+                        .disabled(self.asset_storage_pending.contains(&library_id))
+                        .on_click(move |enabled, _, cx| page.update(cx, |page, cx| page.change_asset_storage(library_id, *enabled, cx)))
                         .into_any_element(),
                 ));
+
+                summary = summary.child(components::library_usage_details(facts, compact, theme).pt(px(8.0)).border_t_1().border_color(theme.rule));
             }
-
-            let library_id = row.status.library_id;
-            let page = page.clone();
-            // No label of its own: the checkbox says what it does, and a "Cloud
-            // storage" label in front of it would name the account's quota
-            // group, which is a different thing.
-            facts.push((
-                SharedString::default(),
-                Checkbox::new(SharedString::from(format!("asset-storage-{library_id}")))
-                    .label("Store on cloud")
-                    .checked(row.status.asset_storage_enabled)
-                    .disabled(self.asset_storage_pending.contains(&library_id))
-                    .on_click(move |enabled, _, cx| page.update(cx, |page, cx| page.change_asset_storage(library_id, *enabled, cx)))
-                    .into_any_element(),
-            ));
-
-            usage_rows.push(components::library_usage_row(row.name.clone(), facts, activity, compact, theme));
+            usage_rows.push(summary);
         }
         libraries.child(components::library_usage_list(usage_rows, theme).when(ruled, |list| list.border_t_1().border_color(theme.rule)))
     }
@@ -581,27 +612,6 @@ impl SyncPage {
         .detach();
     }
 
-    /// Where a library stands with the server, as the value of its "Status"
-    /// fact.
-    ///
-    /// Exactly one of these is ever true — the backend derives a single
-    /// [`LibrarySyncState`] by priority — so this is one value, never a set of
-    /// badges. A settled library says so in plain text: a tag is what marks the
-    /// rows worth stopping at, and one on every row marks nothing.
-    /// Local-only libraries have no server-status fact; their activity is shown separately.
-    fn library_state(row: &LibraryRow, theme: components::BrowserTheme) -> Option<gpui::AnyElement> {
-        let (label, tag) = match row.status.state {
-            LibrarySyncState::Checking => ("Loading status…", Tag::secondary()),
-            LibrarySyncState::Unavailable => ("Unavailable on this device", Tag::warning()),
-            LibrarySyncState::Receiving => ("Receiving library…", Tag::secondary()),
-            LibrarySyncState::Synced => return Some(div().text_color(theme.text_muted).child("Up to date").into_any_element()),
-            LibrarySyncState::SyncPending if row.status.last_synced_at.is_none() => ("Sync pending", Tag::secondary()),
-            LibrarySyncState::SyncPending => ("Changes pending", Tag::warning()),
-            LibrarySyncState::RemoteMissing => ("Not on server", Tag::warning()),
-            LibrarySyncState::LocalOnly => return None,
-        };
-        Some(tag.rounded(px(components::RADIUS_SM)).with_size(Size::Small).child(label.to_owned()).into_any_element())
-    }
 }
 
 impl Render for SyncPage {

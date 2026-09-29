@@ -85,6 +85,29 @@ pub fn fingerprint(path: impl AsRef<Path>) -> std::io::Result<u64> {
     client_platform_native::file_fingerprint::file_metadata_fingerprint(&std::fs::metadata(path)?)
 }
 
+/// Fingerprint the ordered tracks as one scanned placement. Both the scanner
+/// and download publisher use this so a fresh download is already up to date.
+pub fn audiobook_fingerprint(folder: &Path, tracks: &[audiobook_folder::Track]) -> std::io::Result<u64> {
+    let mut hasher = blake3::Hasher::new();
+    for track in tracks {
+        hasher.update(track.name.as_bytes());
+        hasher.update(&fingerprint(&track.path)?.to_le_bytes());
+    }
+    if let Some(nfo) = audiobook_folder::discover_nfo(folder)? {
+        hasher.update(nfo.name.as_bytes());
+        hasher.update(&fingerprint(&nfo.path)?.to_le_bytes());
+    }
+    if let Some(cue) = audiobook_folder::discover_cue(folder)? {
+        hasher.update(cue.name.as_bytes());
+        hasher.update(&fingerprint(&cue.path)?.to_le_bytes());
+    }
+    if let Some(cover) = audiobook_folder::discover_cover(folder)? {
+        hasher.update(cover.name.as_bytes());
+        hasher.update(&fingerprint(&cover.path)?.to_le_bytes());
+    }
+    Ok(u64::from_le_bytes(hasher.finalize().as_bytes()[..8].try_into().unwrap()))
+}
+
 fn walk_error(error: walkdir::Error) -> std::io::Error {
     let message = error.to_string();
     error.into_io_error().unwrap_or_else(|| std::io::Error::other(message))

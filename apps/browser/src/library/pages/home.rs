@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use library_backend::LibraryClient;
 
-use crate::library::pages::shelves::{ShelfFuture, ShelfPage, ShelfRow, ShelfSort, ShelfSource};
+use crate::library::pages::shelves::{ShelfFuture, ShelfPage, ShelfRow, ShelfSource};
 
 const HOME_BOOK_LIMIT: i32 = 20;
 
@@ -20,8 +20,7 @@ impl ShelfSource for HomeShelves {
     const ID: &'static str = "home";
     const LOADING_MESSAGE: &'static str = "Loading library…";
 
-    // Home declares no orders, so it is never asked for one.
-    fn load(library: LibraryClient, _sort: Option<ShelfSort>) -> ShelfFuture {
+    fn load(library: LibraryClient) -> ShelfFuture {
         Box::pin(async move {
             let mut data = library.home(HOME_BOOK_LIMIT).await?;
             let threshold = library_model::FINISHED_PROGRESS_THRESHOLD;
@@ -46,7 +45,7 @@ impl ShelfSource for HomeShelves {
             let rows = [("recently-read", "Recently read", in_progress), ("furthest-along", "Furthest along", data.most_progress), ("finished", "Finished", finished), ("recently-added", "Recently added", data.recently_added)];
             // An empty section is not a section: a library with nothing finished
             // says so by having no Finished shelf, not by an empty row.
-            Ok(rows.into_iter().filter(|(_, _, books)| !books.is_empty()).map(|(id, title, books)| ShelfRow { id: id.into(), title: title.into(), subjects: Vec::new(), books }).collect())
+            Ok(rows.into_iter().filter(|(_, _, books)| !books.is_empty()).map(|(id, title, books)| ShelfRow { id: id.into(), title: title.into(), books }).collect())
         })
     }
 }

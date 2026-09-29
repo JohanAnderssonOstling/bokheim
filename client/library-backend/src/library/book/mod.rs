@@ -25,7 +25,10 @@ impl ResolvedBook {
     pub fn format(&self) -> BookFormat {
         match self {
             Self::Document(book) => book.format,
-            Self::Audiobook(_) => BookFormat::M4b,
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Audiobook(book) => book.format,
+            #[cfg(target_arch = "wasm32")]
+            Self::Audiobook(book) => book.metadata.format,
         }
     }
     pub fn into_document(self) -> Result<DocumentBook, String> {

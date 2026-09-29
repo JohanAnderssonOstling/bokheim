@@ -220,4 +220,4 @@ Only ranking uses the local hit counts. Name mappings come from local LCC record
 | `PR6054.O95` | [Catalog](https://ci.nii.ac.jp/ncid/BA22934146) |
 | `PR6069.W47` | [Catalog](https://ci.nii.ac.jp/ncid/BA03428937) |
 
-Migration: [20260907_extract_top100_english_author_groups.sql](../migrations/20260907_extract_top100_english_author_groups.sql). The [manifest](20260907-english-top100-author-manifest.json) retains ranks, mappings and installed IDs. Working artifacts: `/home/johan/.cache/bokheim/english-top100-install/`.
+Migration: 20260907_extract_top100_english_author_groups.sql. The [manifest](20260907-english-top100-author-manifest.json) retains ranks, mappings and installed IDs. Working artifacts: `/home/johan/.cache/bokheim/english-top100-install/`.

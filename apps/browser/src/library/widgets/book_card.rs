@@ -8,10 +8,9 @@ use web_time::Instant;
 const COVER_FADE_DURATION: Duration = Duration::from_millis(180);
 
 use gpui::prelude::*;
-use gpui::{Anchor, App, AppContext, Context, DismissEvent, Entity, Focusable as _, IntoElement, Pixels, Point, PromptLevel, Render, RenderImage, Subscription, Task, Window, anchored, deferred, px};
+use gpui::{App, AppContext, Context, DismissEvent, Entity, Focusable as _, IntoElement, Pixels, Point, PromptLevel, Render, RenderImage, Subscription, Task, Window, px};
 use gpui_component::menu::PopupMenu;
-use gpui_component::tag::Tag;
-use gpui_component::{IconName, Sizable, Size};
+use gpui_component::IconName;
 use library_model::BookCardRow;
 use ui_components as components;
 
@@ -21,6 +20,8 @@ use zune_core::bytestream::ZCursor;
 use zune_core::colorspace::ColorSpace;
 use zune_core::options::DecoderOptions;
 use zune_jpeg::JpegDecoder;
+
+use super::mobile_context_menu;
 
 #[derive(Clone)]
 pub(crate) struct LoadedCover {
@@ -46,7 +47,7 @@ pub(crate) type RemoveBook = std::rc::Rc<dyn Fn(sync_common::ContentHash, DirId,
 
 /// A decoded cover's width over its height, for boxing it at its own
 /// proportions instead of the placeholder's.
-fn cover_aspect_ratio(image: &RenderImage) -> f32 {
+pub(crate) fn cover_aspect_ratio(image: &RenderImage) -> f32 {
     let size = image.size(0);
     size.width.0.max(1) as f32 / size.height.0.max(1) as f32
 }
@@ -56,6 +57,19 @@ fn cover_aspect_ratio(image: &RenderImage) -> f32 {
 /// generates the same cover every time it is shown.
 fn generated_cover_variant(content_hash: sync_common::ContentHash) -> usize {
     content_hash.as_str().bytes().fold(0usize, |acc, byte| acc.wrapping_add(byte as usize))
+}
+
+/// Short enough to fit on a cover while still distinguishing, for example,
+/// a seven-hour book from one that runs nearly eight hours.
+fn audiobook_card_length(duration_ms: u64) -> String {
+    let total_minutes = (duration_ms / 60_000).max(1);
+    let hours = total_minutes / 60;
+    let minutes = total_minutes % 60;
+    match (hours, minutes) {
+        (0, minutes) => format!("{minutes} m"),
+        (hours, 0) => format!("{hours} h"),
+        (hours, minutes) => format!("{hours} h {minutes} m"),
+    }
 }
 
 pub(crate) fn loaded_cover_from_jpeg(bytes: Vec<u8>) -> Option<LoadedCover> {
@@ -104,6 +118,13 @@ pub(crate) struct BookCardView {
     /// in by the page, exactly like the cursor — the grid decides how wide a
     /// cell is, and the card decides what to put in one.
     detailed: bool,
+    /// A cover carousel can reuse the book's cover loading and activation
+    /// behavior without adding title or author text around the artwork.
+    cover_only: bool,
+    /// Section covers keep their total padding, with the artwork optically
+    /// aligned to the section heading when a page starts with books.
+    section_cover_left_aligned: bool,
+    cover_top_aligned: bool,
     /// When the artwork arrived, which is what the fade is computed from.
     ///
     /// A timestamp rather than an element animation: the paginator repaints its
@@ -178,6 +199,9 @@ impl BookCardView {
             selected: false,
             marquee: false,
             detailed: false,
+            cover_only: false,
+            section_cover_left_aligned: false,
+            cover_top_aligned: false,
             cover_loaded_at: None,
             cover: CoverState::Pending,
             ui,
@@ -234,6 +258,30 @@ impl BookCardView {
             return;
         }
         self.detailed = detailed;
+        cx.notify();
+    }
+
+    pub(crate) fn set_cover_only(&mut self, cover_only: bool, cx: &mut Context<Self>) {
+        if self.cover_only == cover_only {
+            return;
+        }
+        self.cover_only = cover_only;
+        cx.notify();
+    }
+
+    pub(crate) fn set_section_cover_left_aligned(&mut self, aligned: bool, cx: &mut Context<Self>) {
+        if self.section_cover_left_aligned == aligned {
+            return;
+        }
+        self.section_cover_left_aligned = aligned;
+        cx.notify();
+    }
+
+    pub(crate) fn set_cover_top_aligned(&mut self, aligned: bool, cx: &mut Context<Self>) {
+        if self.cover_top_aligned == aligned {
+            return;
+        }
+        self.cover_top_aligned = aligned;
         cx.notify();
     }
 
@@ -358,6 +406,13 @@ impl BookCardView {
         }
     }
 
+    /// Allows a container to fetch a card's cover before the card is visible.
+    /// A visible card also starts this request from its own render path.
+    pub(crate) fn prefetch_for_window(card: &Entity<Self>, window: &Window, cx: &mut gpui::App) {
+        let resolution = Self::thumbnail_resolution(window);
+        card.update(cx, |card, cx| card.prepare(resolution, cx));
+    }
+
     /// What a book's page opens with: the row this card is drawing, and the
     /// cover it has already decoded. Handing both over is why that page paints
     /// complete in the frame the card was clicked in.
@@ -394,15 +449,7 @@ impl BookCardView {
     /// Runs a confirmed book command from the card menu: one prompt, then the
     /// backend call, with failures surfaced as toasts.
     fn confirm_menu_action(
-        target: Entity<Self>,
-        title: String,
-        detail: String,
-        choices: [&str; 2],
-        error_id: &'static str,
-        error_prefix: String,
-        operation: impl std::future::Future<Output = Result<(), String>> + 'static,
-        window: &mut Window,
-        cx: &mut App,
+        target: Entity<Self>, title: String, detail: String, choices: [&str; 2], error_id: &'static str, error_prefix: String, operation: impl std::future::Future<Output = Result<(), String>> + 'static, window: &mut Window, cx: &mut App,
     ) {
         let answer = window.prompt(PromptLevel::Warning, &title, Some(&detail), &choices, cx);
         target.update(cx, |_, cx| {
@@ -421,6 +468,7 @@ impl BookCardView {
     }
 
     fn open_context_menu(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let mobile_size = mobile_context_menu::size(window);
         let new_window = crate::OpenInNewWindow(crate::NewWindowTarget::Book { locator: library_model::BookLocator::new(*self.ui.backend().id(), self.book.content_hash), title: self.book.title.clone() });
         let source_directory = self.source_directory;
         let content_hash = self.book.content_hash;
@@ -484,7 +532,17 @@ impl BookCardView {
                     menu = menu.item(components::menu_item_with_icon("Remove from folder", components::navigation_icon(components::NavigationIcon::Folder), move |_, window, cx| {
                         let library = library.clone();
                         let operation = async move { library.remove_book_from_directory(content_hash, source_id).await.map(|_| ()) };
-                        Self::confirm_menu_action(direct_target.clone(), "Remove this book from the folder?".to_owned(), detail.clone(), ["Remove", "Cancel"], "book-remove-error", "Could not remove book from folder".to_owned(), operation, window, cx);
+                        Self::confirm_menu_action(
+                            direct_target.clone(),
+                            "Remove this book from the folder?".to_owned(),
+                            detail.clone(),
+                            ["Remove", "Cancel"],
+                            "book-remove-error",
+                            "Could not remove book from folder".to_owned(),
+                            operation,
+                            window,
+                            cx,
+                        );
                     }));
                 }
                 let library = backend.clone();
@@ -505,7 +563,7 @@ impl BookCardView {
                     Self::confirm_menu_action(trash_target.clone(), "Move this book to Trash?".to_owned(), detail.clone(), ["Move to Trash", "Cancel"], "book-trash-error", "Could not move book to Trash".to_owned(), operation, window, cx);
                 }));
             }
-            menu
+            mobile_context_menu::configure(menu, mobile_size)
         });
         let subscription = cx.subscribe(&menu, |card, _, _: &DismissEvent, cx| {
             card.context_menu = None;
@@ -521,6 +579,7 @@ impl BookCardView {
 
 impl Render for BookCardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.prepare(Self::thumbnail_resolution(window), cx);
         let theme = components::browser_theme(cx);
         let highlighted = self.focused || self.selected;
         let cover_opacity = match self.cover_loaded_at {
@@ -539,11 +598,40 @@ impl Render for BookCardView {
         let element_id = format!("book-card-{}", book.content_hash);
         let cover_id = format!("book-cover-{}", book.content_hash);
 
-        let cover_text = if self.detailed { app_preferences::CoverText::Always } else { crate::stores::current_cover_text(cx) };
+        let cover_text = if self.cover_only {
+            app_preferences::CoverText::CoverOnly
+        } else if self.detailed {
+            app_preferences::CoverText::Always
+        } else {
+            crate::stores::current_cover_text(cx)
+        };
         let open_target = cx.entity();
         let cover_ratio = match &cover {
             CoverState::Loaded(cover, _) => cover_aspect_ratio(&cover.image),
+            CoverState::Pending | CoverState::Missing if book.format_category == library_model::LibraryFileTypeFilter::Audiobook => 1.0,
             CoverState::Pending | CoverState::Missing => components::BOOK_COVER_ASPECT_RATIO,
+        };
+        // A book not on this device says so on its cover, in the corner nothing
+        // else uses, and the mark is the way to fetch it. A downloaded book
+        // carries no mark: which state is the rarer one differs from device to
+        // device, and marking only the one that needs acting on keeps a mostly
+        // downloaded library quiet and a mostly remote one legible.
+        let download_state = self.ui.updates().read(cx).download_state(book.content_hash).unwrap_or(app::DownloadState::Queued);
+        let download_badge = match download_state {
+            app::DownloadState::Downloaded => None,
+            app::DownloadState::Queued | app::DownloadState::Downloading(_) => Some(components::book_cover_download_badge(format!("book-download-{}", book.content_hash), true)),
+            app::DownloadState::NotDownloaded => {
+                let download_target = cx.entity();
+                Some(
+                    components::book_cover_download_badge(format!("book-download-{}", book.content_hash), false)
+                        .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Download to this device").build(window, cx))
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            download_target.update(cx, |card, cx| card.download(cx));
+                        }),
+                )
+            }
         };
         let cover_frame = components::book_cover_frame(theme, cover_ratio)
             .id(cover_id)
@@ -554,49 +642,32 @@ impl Render for BookCardView {
                 // A blank placeholder says nothing without the title line
                 // under it, so "cover only" replaces it with a generated
                 // cover that carries the title itself.
-                CoverState::Missing if cover_text == app_preferences::CoverText::CoverOnly => components::book_cover_generated(book.title.clone(), book.subtitle.as_deref(), generated_cover_variant(book.content_hash), theme),
-                CoverState::Missing => components::missing_book_cover(if book.format_category == library_model::LibraryFileTypeFilter::Audiobook { "Audiobook" } else { "No cover" }, theme),
+                CoverState::Missing if cover_text == app_preferences::CoverText::CoverOnly => components::book_cover_generated(book.title.clone(), book.subtitle.as_deref(), generated_cover_variant(book.content_hash), theme).aspect_ratio(cover_ratio),
+                CoverState::Missing => components::missing_book_cover("No cover", theme).aspect_ratio(cover_ratio),
             })
-            .children(components::book_cover_progress(book.progress, theme))
-            .when(book.format_category == library_model::LibraryFileTypeFilter::Audiobook, |frame| {
-                frame.child(Tag::primary().rounded(px(components::RADIUS_SM)).with_size(Size::Small).child("AUDIOBOOK").absolute().left(gpui::px(8.0)).bottom(gpui::px(8.0)))
+            .when(!self.cover_only, |frame| frame.children(components::book_cover_progress(book.progress, theme)).children(download_badge))
+            .when(!self.cover_only && book.format_category == library_model::LibraryFileTypeFilter::Audiobook, |frame| {
+                frame.child(components::book_cover_audiobook_length(book.audiobook_duration_ms.map(audiobook_card_length)))
             });
 
-        let context_menu = self.context_menu.as_ref().map(|active| deferred(anchored().position(active.position).snap_to_window_with_margin(px(8.0)).anchor(Anchor::TopLeft).child(active.menu.clone())).with_priority(1));
+        let context_menu = self.context_menu.as_ref().map(|active| mobile_context_menu::render(active.menu.clone(), active.position, window));
         let context_menu_target = cx.entity();
-        let download_state = self.ui.updates().read(cx).download_state(book.content_hash).unwrap_or(app::DownloadState::Queued);
-        let (downloaded, download_pending) = match download_state {
-            app::DownloadState::Downloaded => (true, false),
-            app::DownloadState::Queued | app::DownloadState::Downloading(_) => (false, true),
-            app::DownloadState::NotDownloaded => (false, false),
-        };
-        let mut download_indicator = components::book_download_indicator(downloaded, download_pending, theme);
-        if !downloaded && !download_pending {
-            let download_target = cx.entity();
-            download_indicator = download_indicator.map(|indicator| {
-                gpui::div()
-                    .id(format!("book-download-{}", book.content_hash))
-                    .flex_none()
-                    .cursor_pointer()
-                    .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Download to this device").build(window, cx))
-                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(move |_, _, cx| {
-                        cx.stop_propagation();
-                        download_target.update(cx, |card, cx| card.download(cx));
-                    })
-                    .child(indicator)
-                    .into_any_element()
+        let section_cover = self.section_cover_left_aligned;
+        let card = components::book_card(element_id, highlighted, self.marquee, theme)
+            .when(self.section_cover_left_aligned, |card| card.pl(px(4.0)).pr(px(components::BOOK_CARD_PADDING * 2.0 - 4.0)))
+            .on_mouse_down(gpui::MouseButton::Right, move |_, _, cx| {
+                if section_cover {
+                    cx.stop_propagation();
+                }
+            })
+            .on_aux_click(move |event, window, cx| {
+                // A card inside a selection is not the subject of its own menu:
+                // the page opens one over everything the band picked up.
+                if event.is_secondary() && !context_menu_target.read(cx).selected {
+                    context_menu_target.update(cx, |card, cx| card.open_context_menu(event.position(), window, cx));
+                    cx.stop_propagation();
+                }
             });
-        }
-
-        let card = components::book_card(element_id, highlighted, self.marquee, theme).on_aux_click(move |event, window, cx| {
-            // A card inside a selection is not the subject of its own menu:
-            // the page opens one over everything the band picked up.
-            if event.is_secondary() && !context_menu_target.read(cx).selected {
-                context_menu_target.update(cx, |card, cx| card.open_context_menu(event.position(), window, cx));
-                cx.stop_propagation();
-            }
-        });
 
         // The two modes differ in where the cover stands, so each lays the card
         // out itself rather than sharing a stack the cover is threaded into.
@@ -604,22 +675,24 @@ impl Render for BookCardView {
             let description = components::book_card_description(format!("book-description-{}", book.content_hash), &book.description, theme);
             card.child(
                 components::book_card_detail_body()
-                    .child(components::book_card_detail_cover().child(cover_frame).child(components::book_card_text().child(components::book_card_title_row(book.title, book.subtitle.as_deref(), download_indicator))))
+                    .child(components::book_card_detail_cover().child(cover_frame).child(components::book_card_text().child(components::book_card_title_row(book.title, book.subtitle.as_deref()))))
                     .child(components::book_card_detail_text().children(description)),
             )
         } else {
             let card = card.child(cover_frame);
             // No text block at all under "cover only", not an empty one: an
             // empty child would still hold the cover-to-text gap open under
-            // a cover that has nothing under it. The download control goes
-            // with it — see `book_card_title_row`, which is the only place
-            // that draws one for a compact card.
+            // a cover that has nothing under it. The download mark is on the
+            // cover, so it stays.
             match cover_text {
-                app_preferences::CoverText::Always => card.child(components::book_card_text_title_only().child(components::book_card_title_row(book.title, book.subtitle.as_deref(), download_indicator))),
+                app_preferences::CoverText::Always => card.child(components::book_card_text_title_only().child(components::book_card_title_row(book.title, book.subtitle.as_deref()))),
                 app_preferences::CoverText::CoverOnly => card,
             }
         };
 
-        components::book_card_cell().child(card.children(context_menu)).into_any_element()
+        components::book_card_cell()
+            .when(self.cover_top_aligned, |cell| cell.justify_start())
+            .child(card.children(context_menu))
+            .into_any_element()
     }
 }

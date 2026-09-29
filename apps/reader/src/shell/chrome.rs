@@ -6,7 +6,7 @@
 //! annotation genuinely offer different actions.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, IntoElement, Window, div, px};
+use gpui::{AnyElement, App, ClickEvent, Context, IntoElement, Window, div, px};
 use ui_components::WindowWidthClass;
 
 use crate::invalidation::Component;
@@ -32,17 +32,13 @@ pub(crate) struct ChromeState {
     /// reveal strip. Ignore that one synthetic/replayed move; otherwise the
     /// close click immediately opens the sidebar again.
     suppress_next_pointer_reveal: bool,
-    /// Android reports transient system-bar visibility as a change in the
-    /// bottom safe inset. While reader chrome is hidden, a return from zero
-    /// means the user performed the OS edge-bar reveal gesture.
-    hidden_safe_bottom: Option<f32>,
     system_bars_visible: std::cell::Cell<Option<bool>>,
     component: Component,
 }
 
 impl ChromeState {
     pub(crate) fn new(component: Component) -> Self {
-        Self { hidden: false, suppress_next_pointer_reveal: false, hidden_safe_bottom: None, system_bars_visible: std::cell::Cell::new(None), component }
+        Self { hidden: false, suppress_next_pointer_reveal: false, system_bars_visible: std::cell::Cell::new(None), component }
     }
 
     pub(crate) fn is_visible(&self) -> bool {
@@ -79,31 +75,14 @@ impl ChromeState {
         was_hidden
     }
 
-    pub(crate) fn toggle<C: 'static>(&mut self, cx: &mut Context<C>) {
-        self.set_hidden(!self.hidden, cx);
+    pub(crate) fn show_from_touch<C: 'static>(&mut self, cx: &mut Context<C>) -> bool {
+        let was_hidden = self.hidden;
+        self.show(cx);
+        was_hidden
     }
 
-    /// Opens the reader sidebar from Android's own system-bars gesture. This
-    /// observes the platform state directly instead of trying to reinterpret a
-    /// touch gesture that belongs to book navigation.
-    /// Returns `true` only when it changed hidden reader chrome to visible.
-    /// The format owner uses that signal to select its sidebar tab in the
-    /// same render; chrome visibility alone does not imply a mobile sheet.
-    pub(crate) fn reveal_when_system_bars_return<C: 'static>(&mut self, window: &Window, cx: &mut Context<C>) -> bool {
-        if !cfg!(target_os = "android") {
-            return false;
-        }
-        let bottom = f32::from(window.insets().safe_area.bottom);
-        if !self.hidden {
-            self.hidden_safe_bottom = None;
-            return false;
-        }
-        if self.hidden_safe_bottom.is_some_and(|previous| bottom > previous + 0.5) {
-            self.show(cx);
-            return true;
-        }
-        self.hidden_safe_bottom = Some(bottom);
-        false
+    pub(crate) fn toggle<C: 'static>(&mut self, cx: &mut Context<C>) {
+        self.set_hidden(!self.hidden, cx);
     }
 
     fn set_hidden<C: 'static>(&mut self, hidden: bool, cx: &mut Context<C>) {
@@ -111,7 +90,6 @@ impl ChromeState {
             return;
         }
         self.hidden = hidden;
-        self.hidden_safe_bottom = None;
         crate::invalidation::notify(cx, self.component, if hidden { "chrome_hidden" } else { "chrome_shown" });
     }
 }
@@ -119,9 +97,9 @@ impl ChromeState {
 /// Builds the platform-specific interaction layer over a reading surface.
 ///
 /// Kobo uses left/right page zones and a central sidebar toggle. Other touch
-/// devices use the center to reveal a hidden sidebar, while pointer-driven
-/// readers reveal it from the left edge. Navigation itself remains owned by
-/// the format-specific reader through `on_action`.
+/// readers handle unclaimed document taps in their document container, so
+/// links and images receive them first. Pointer-driven readers reveal the
+/// sidebar from the left edge.
 pub(crate) fn surface_interactions<C: 'static>(
     reader_id: &'static str, chrome_visible: bool, sidebar_visible: bool, touch_input: bool, cx: &mut Context<C>, on_action: impl Fn(&mut C, SurfaceAction, &mut Window, &mut Context<C>) + Clone + 'static,
 ) -> Vec<AnyElement> {
@@ -166,25 +144,23 @@ pub(crate) fn surface_interactions<C: 'static>(
                 .into_any_element(),
         ];
     }
-    if chrome_visible {
+    if touch_input {
         return Vec::new();
     }
-    if touch_input {
-        // Android's transient system-bars gesture emits the same ShowChrome
-        // action through the platform bridge. Do not put a competing touch
-        // gesture over the document: every one-finger direction is book
-        // navigation on mobile.
+    if chrome_visible {
         return Vec::new();
     }
     // The sidebar is the reader's only chrome now and sits on the left, so a
     // pointer-driven reader reaches for the left edge to bring it back rather
     // than the top edge a toolbar used to occupy.
     let reveal_on_move = on_action.clone();
-    vec![
-        ui_components::reader_chrome_reveal_left()
-            .on_mouse_move(cx.listener(move |reader, _, window, cx| reveal_on_move(reader, SurfaceAction::ShowChrome, window, cx)))
-            .into_any_element(),
-    ]
+    vec![ui_components::reader_chrome_reveal_left().on_mouse_move(cx.listener(move |reader, _, window, cx| reveal_on_move(reader, SurfaceAction::ShowChrome, window, cx))).into_any_element()]
+}
+
+/// A single unclaimed document tap toggles mobile controls. Links, images,
+/// selections, and gestures consume their own input before this check runs.
+pub(crate) fn is_page_tap(event: &ClickEvent) -> bool {
+    matches!(event, ClickEvent::Mouse(_) | ClickEvent::Touch(_)) && event.standard_click() && event.click_count() == 1
 }
 
 /// Places `sidebar` beside `document`, with a draggable divider whose width is

@@ -15,9 +15,29 @@ impl Database {
         let options = super::BrowseOptions::from_query(query, downloaded_only);
         self.with_folder_cache(|| {
             let (contents, chip_groups) = self.grouped_folder_contents(&directory_id, &options)?;
+            let sections = if options.search.is_empty() {
+                let mut panel_parents = Vec::new();
+                let mut child_offset = 0;
+                for group in &chip_groups {
+                    panel_parents.extend(contents.children[child_offset..group.start].iter().cloned());
+                    panel_parents.push(group.parent.clone());
+                    child_offset = group.end;
+                }
+                panel_parents.extend(contents.children[child_offset..].iter().cloned());
+                panel_parents
+                    .iter()
+                    .map(|parent| {
+                        let child_id = DirId::parse_str(&parent.id).map_err(DatabaseError::operation)?;
+                        let child_contents = self.folder_contents(&child_id, &options)?;
+                        Ok(library_model::BrowseSection { parent: parent.clone(), children: child_contents.children, books: child_contents.books })
+                    })
+                    .collect::<Result<Vec<_>, DatabaseError>>()?
+            } else {
+                Vec::new()
+            };
             let (language_counts, format_counts) = self.folder_facets(&directory_id, &options)?;
             let path = self.browse_directory_path(&directory_id)?;
-            Ok(super::LibraryBrowseData { contents, chip_groups, path, language_counts, format_counts })
+            Ok(super::LibraryBrowseData { contents, chip_groups, sections, path, language_counts, format_counts })
         })
     }
 

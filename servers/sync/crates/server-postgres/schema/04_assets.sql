@@ -56,33 +56,6 @@ CREATE TABLE book_upload_reservation (
 
 CREATE INDEX idx_book_upload_reservation_expiry ON book_upload_reservation USING btree (expires_at);
 
--- Thumbnails are physically scoped per account, so their quota identity is
--- the user/hash pair rather than the globally deduplicated blob_object row.
--- The first library that uploads a thumbnail owns its usage attribution.
-CREATE TABLE user_thumbnail_charge (
-    user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    library_id text NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
-    content_hash text NOT NULL,
-    size_bytes bigint NOT NULL CHECK (size_bytes >= 0),
-    charged_at timestamp with time zone NOT NULL DEFAULT now(),
-    PRIMARY KEY (user_id, content_hash)
-);
-
-CREATE INDEX idx_user_thumbnail_charge_library ON user_thumbnail_charge USING btree (library_id);
-
-CREATE TABLE thumbnail_upload_reservation (
-    id text PRIMARY KEY,
-    user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    library_id text NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
-    content_hash text NOT NULL,
-    size_bytes bigint NOT NULL CHECK (size_bytes >= 0),
-    expires_at timestamp with time zone NOT NULL,
-    created_at timestamp with time zone NOT NULL DEFAULT now(),
-    UNIQUE (user_id, content_hash)
-);
-
-CREATE INDEX idx_thumbnail_upload_reservation_expiry ON thumbnail_upload_reservation USING btree (expires_at);
-
 -- Permanent publication identities are account scoped. Blob checksums remain
 -- global, immutable addresses of verified bytes.
 CREATE TABLE user_book_revision (
@@ -93,16 +66,16 @@ CREATE TABLE user_book_revision (
 );
 CREATE INDEX idx_user_book_revision_blob ON user_book_revision(user_id, blob_hash);
 
-CREATE TABLE IF NOT EXISTS library_blob_claim (
+CREATE TABLE library_blob_claim (
     library_id text NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
     user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     content_hash text NOT NULL,
     blob_hash text NOT NULL REFERENCES blob_object(content_hash),
     PRIMARY KEY(library_id, content_hash)
 );
-CREATE INDEX IF NOT EXISTS library_blob_claim_user_blob ON library_blob_claim(user_id, blob_hash);
+CREATE INDEX library_blob_claim_user_blob ON library_blob_claim(user_id, blob_hash);
 
-CREATE TABLE IF NOT EXISTS cloud_storage_change (
+CREATE TABLE cloud_storage_change (
  library_id text NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
  change_id uuid NOT NULL,
  PRIMARY KEY(library_id,change_id)

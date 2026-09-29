@@ -6,6 +6,28 @@ val androidNdkVersion = "29.0.13599879"
 val rustTarget = "aarch64-linux-android"
 val rustAbi = "arm64-v8a"
 val workspaceRoot = rootProject.projectDir.resolve("../../..").canonicalFile
+val desktopVersion = Regex("(?m)^version = \"([^\"]+)\"$")
+    .find(workspaceRoot.resolve("apps/desktop-gpui/Cargo.toml").readText())?.groupValues?.get(1)
+    ?: throw GradleException("Missing desktop Cargo version")
+val versionParts = desktopVersion.split('.').map { it.toIntOrNull() }
+if (versionParts.size != 3 || versionParts.any { it == null || it < 0 } ||
+    versionParts[0]!! > 2099 || versionParts[1]!! > 999 || versionParts[2]!! > 999) {
+    throw GradleException("Android releases require a stable MAJOR.MINOR.PATCH version (major <= 2099, minor/patch <= 999)")
+}
+val androidVersionCode = versionParts[0]!! * 1_000_000 + versionParts[1]!! * 1_000 + versionParts[2]!!
+if (androidVersionCode <= 0) throw GradleException("Android release version must be greater than 0.0.0")
+// Environment values take precedence in CI. Local Gradle user properties may
+// reference private files without copying passwords into the repository.
+fun signingSetting(name: String): String? = providers.environmentVariable(name)
+    .orElse(providers.gradleProperty(name)).orNull
+fun signingPassword(name: String): String? = signingSetting(name)
+    ?: signingSetting("${name}_FILE")?.let { file(it).readText().trimEnd('\r', '\n') }
+val releaseKeyStore = signingSetting("BOKHEIM_ANDROID_KEYSTORE")
+val releaseStorePassword = signingPassword("BOKHEIM_ANDROID_STORE_PASSWORD")
+val releaseKeyAlias = signingSetting("BOKHEIM_ANDROID_KEY_ALIAS")
+val releaseKeyPassword = signingPassword("BOKHEIM_ANDROID_KEY_PASSWORD") ?: releaseStorePassword
+val productionSigning = listOf(releaseKeyStore, releaseStorePassword, releaseKeyAlias, releaseKeyPassword).all { !it.isNullOrEmpty() }
+val localSigning = providers.gradleProperty("bokheim.localSigning").orNull == "true"
 val rustDebugLibrary = workspaceRoot.resolve("target/$rustTarget/debug/libdesktop_gpui.so")
 val rustReleaseLibrary = workspaceRoot.resolve("target/$rustTarget/release/libdesktop_gpui.so")
 val stagedRustDebugLibraries = layout.buildDirectory.dir("rustJniLibs/debug")
@@ -21,9 +43,12 @@ android {
         ndk { abiFilters += rustAbi }
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.6"
+        versionCode = androidVersionCode
+        versionName = desktopVersion
+        testInstrumentationRunner = "se.bokheim.reader.gpui.UpdateMetadataInstrumentation"
     }
+
+    testBuildType = "release"
 
     testOptions.unitTests.isIncludeAndroidResources = true
 
@@ -31,9 +56,34 @@ android {
     sourceSets.getByName("debug").jniLibs.srcDir(stagedRustDebugLibraries)
     sourceSets.getByName("release").jniLibs.srcDir(stagedRustReleaseLibraries)
 
+    signingConfigs {
+        if (productionSigning) {
+            create("production") {
+                storeFile = file(releaseKeyStore!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
     buildTypes {
         getByName("release") {
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = when {
+                localSigning -> signingConfigs.getByName("debug")
+                productionSigning -> signingConfigs.getByName("production")
+                else -> null
+            }
+        }
+    }
+}
+
+val requireReleaseSigning by tasks.registering {
+    doLast {
+        if (!productionSigning && !localSigning) {
+            throw GradleException("Configure BOKHEIM_ANDROID_KEYSTORE, STORE_PASSWORD, KEY_ALIAS and KEY_PASSWORD (each with BOKHEIM_ANDROID_ prefix). For an explicitly local optimized APK only, use -Pbokheim.localSigning=true.")
+        }
+        if (!localSigning && productionSigning && !file(releaseKeyStore!!).isFile) {
+            throw GradleException("The configured Android release keystore does not exist")
         }
     }
 }
@@ -106,6 +156,7 @@ val buildRustRelease by tasks.registering(Exec::class) {
         "desktop-gpui",
         "--lib",
         "--release",
+        "--locked",
         "--no-default-features",
         "--features",
         "android",
@@ -140,6 +191,7 @@ val stageRustRelease by tasks.registering(Copy::class) {
 }
 
 tasks.configureEach {
+    if (name == "packageRelease" || name == "signReleaseBundle") dependsOn(requireReleaseSigning)
     if (name == "mergeDebugJniLibFolders" || name == "mergeDebugNativeLibs") {
         dependsOn(stageRustDebug)
     }

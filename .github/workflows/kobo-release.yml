@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: read
+  statuses: read
 
 concurrency:
   group: kobo-release-${{ github.ref }}
@@ -97,10 +98,10 @@ jobs:
             bokheim/apps/kobo-installer/target
           key: kobo-installer-windows-v3-${{ runner.os }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('bokheim/apps/kobo-installer/Cargo.lock') }}
 
-      - name: Test installer extraction safeguards
+      - name: Test platform path conventions
         working-directory: bokheim
         shell: pwsh
-        run: cargo test --locked --manifest-path apps/kobo-installer/Cargo.toml --lib
+        run: cargo test --release --locked --manifest-path apps/kobo-installer/Cargo.toml --lib tests::names_package_entries_with_slashes_on_every_platform -- --exact
 
       - name: Build portable Windows installer
         working-directory: bokheim
@@ -138,26 +139,6 @@ jobs:
           path: bokheim/release/*
           if-no-files-found: error
 
-      - name: Upload Windows installer to shared release
-        if: startsWith(github.ref, 'refs/tags/') || inputs.publish == true
-        working-directory: bokheim
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN }}
-          RELEASE_TAG: v${{ needs.version.outputs.version }}
-        run: |
-          if ! gh release view "$RELEASE_TAG" --repo JohanAnderssonOstling/bokheim-release >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" \
-              --repo JohanAnderssonOstling/bokheim-release \
-              --target main \
-              --draft \
-              --generate-notes \
-              --title "Bokheim ${RELEASE_TAG#v}" || \
-              gh release view "$RELEASE_TAG" --repo JohanAnderssonOstling/bokheim-release >/dev/null
-          fi
-          gh release upload "$RELEASE_TAG" release/* \
-            --repo JohanAnderssonOstling/bokheim-release \
-            --clobber
 
   build-linux-installer:
     name: Linux USB installer AppImage
@@ -233,9 +214,9 @@ jobs:
             --output "$RUNNER_TEMP/appimagetool-x86_64.AppImage"
           chmod +x "$RUNNER_TEMP/linuxdeploy-x86_64.AppImage" "$RUNNER_TEMP/appimagetool-x86_64.AppImage"
 
-      - name: Test installer extraction safeguards
+      - name: Test platform path conventions
         working-directory: bokheim
-        run: cargo test --locked --manifest-path apps/kobo-installer/Cargo.toml --lib
+        run: cargo test --release --locked --manifest-path apps/kobo-installer/Cargo.toml --lib tests::names_package_entries_with_slashes_on_every_platform -- --exact
 
       - name: Build Linux installer
         working-directory: bokheim
@@ -273,23 +254,44 @@ jobs:
           path: bokheim/release/*
           if-no-files-found: error
 
-      - name: Upload Linux installer to shared release
-        if: startsWith(github.ref, 'refs/tags/') || inputs.publish == true
-        working-directory: bokheim
-        shell: bash
+
+  publish-draft:
+    permissions:
+      contents: write
+      statuses: read
+    name: Publish verified draft artifacts
+    needs: [build-windows-installer, build-linux-installer]
+    if: startsWith(github.ref, 'refs/tags/') || inputs.publish == true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Require shared tests for the exact source commit
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_REPOSITORY_TOKEN }}
-          RELEASE_TAG: v${{ needs.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+        run: python3 scripts/ci/require-shared-tests.py "$SOURCE_REPOSITORY" "$(git rev-parse HEAD)"
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: bokheim-kobo-installer-*
+          path: release
+          merge-multiple: true
+      - name: Upload completed platform builds to draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          if ! gh release view "$RELEASE_TAG" --repo JohanAnderssonOstling/bokheim-release >/dev/null 2>&1; then
+          VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' apps/desktop-gpui/Cargo.toml | head -n 1)
+          test -n "$VERSION"
+          RELEASE_TAG="v${VERSION}"
+          if ! gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" \
-              --repo JohanAnderssonOstling/bokheim-release \
-              --target main \
-              --draft \
-              --generate-notes \
-              --title "Bokheim ${RELEASE_TAG#v}" || \
-              gh release view "$RELEASE_TAG" --repo JohanAnderssonOstling/bokheim-release >/dev/null
+              --repo "$GH_REPO" \
+              --target "$GITHUB_SHA" --draft --generate-notes --title "Bokheim ${VERSION}" || \
+              gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null
           fi
+          # Refuse to overwrite assets after a release has become public.
+          test "$(gh release view "$RELEASE_TAG" --repo "$GH_REPO" --json isDraft --jq .isDraft)" = true
+          printf '%s\n' "$(git rev-parse HEAD)" > release/kobo-source-commit.txt
           gh release upload "$RELEASE_TAG" release/* \
-            --repo JohanAnderssonOstling/bokheim-release \
-            --clobber
+            --repo "$GH_REPO" --clobber

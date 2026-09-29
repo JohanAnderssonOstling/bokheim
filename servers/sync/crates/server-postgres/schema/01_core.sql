@@ -2,16 +2,11 @@
 -- file's foreign keys ultimately point back to users/libraries, so this
 -- file must be applied first.
 --
--- This is the complete protocol-v14 baseline schema. Databases created from
--- it carry an explicit baseline marker; `sync-server upgrade` accepts that
--- marker and applies only immutable post-v14 migrations.
-
-CREATE TABLE bokheim_schema_migration (
-    version text PRIMARY KEY,
-    applied_at timestamp with time zone NOT NULL DEFAULT now()
+-- A new installation starts at schema version 1.
+CREATE TABLE bokheim_schema_version (
+    version integer PRIMARY KEY CHECK (version = 1)
 );
-
-INSERT INTO bokheim_schema_migration(version) VALUES ('14-baseline');
+INSERT INTO bokheim_schema_version(version) VALUES (1);
 
 CREATE TABLE users (
     id text PRIMARY KEY,

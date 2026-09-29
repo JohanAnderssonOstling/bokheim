@@ -65,7 +65,7 @@ impl Render for BatteryPanel {
             .child(self.status.as_ref().map(|status| format!("{}% · {}", status.percent, status.status)).unwrap_or_else(|| self.error.clone().unwrap_or_else(|| "Loading…".into())))
     }
 }
-pub(super) fn popover(panel: &Entity<BatteryPanel>, cx: &gpui::App) -> Popover {
+pub(super) fn popover(panel: &Entity<BatteryPanel>, top: gpui::Pixels, cx: &gpui::App) -> Popover {
     let state = panel.read(cx);
     let icon = match &state.status {
         Some(status) if status.status == "Charging" => IconName::BatteryCharging,
@@ -78,7 +78,7 @@ pub(super) fn popover(panel: &Entity<BatteryPanel>, cx: &gpui::App) -> Popover {
     let refresh = panel.clone();
     Popover::new("kobo-battery-popup")
         .anchor(gpui::Anchor::TopRight)
-        .top(px(super::POPUP_TOP))
+        .top(top)
         .p_0()
         .trigger(super::device_button("kobo-battery-button", format!("Battery: {label}"), icon))
         .on_open_change(move |open, _, cx| {

@@ -59,12 +59,7 @@ impl BrowserRoot {
     pub fn new(services: AppServices, sync_state: Entity<crate::SyncState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.set_system_bars_visible(true);
         #[cfg(target_arch = "wasm32")]
-        let import_notifications = crate::services::import_progress::watch_browser_imports(
-            services.backend.clone(),
-            services.sync_events.clone().expect("web sync event inbox"),
-            window,
-            cx,
-        );
+        let import_notifications = crate::services::import_progress::watch_browser_imports(services.backend.clone(), services.sync_events.clone().expect("web sync event inbox"), window, cx);
         let preferences = cx.new(|cx| Preferences::new(services.clone(), cx));
         let theme_preferences = preferences.clone();
         cx.set_global(ui_components::theme::PaletteSelectionHandler(std::rc::Rc::new(move |theme, appearance, cx| {

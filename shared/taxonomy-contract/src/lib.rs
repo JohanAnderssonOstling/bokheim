@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const API_VERSION: &str = "v1";
-pub const SNAPSHOT_MEDIA_TYPE: &str = "application/vnd.bokheim.taxonomy+sqlite3; version=5";
+pub const SNAPSHOT_MEDIA_TYPE: &str = "application/vnd.bokheim.taxonomy+sqlite3; version=1";
 pub const MAX_CODE_BYTES: usize = 256;
 pub const MAX_CODES_PER_REQUEST: usize = 512;
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
@@ -33,7 +33,6 @@ pub struct TaxonomyDescription {
     pub concept_count: u64,
     pub edge_count: u64,
     pub selector_count: u64,
-    pub source_label_count: u64,
     pub root_count: u64,
     pub snapshot_bytes: u64,
 }
@@ -49,7 +48,6 @@ pub struct TaxonomyConcept {
     pub preferred_label: String,
     pub parents: Vec<TaxonomyParent>,
     pub source_selectors: BTreeMap<String, Vec<String>>,
-    pub source_labels: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

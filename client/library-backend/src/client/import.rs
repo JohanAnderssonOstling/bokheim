@@ -14,7 +14,7 @@ impl LibraryClient {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn directory_import_progress_for(&self, activity: uuid::Uuid) -> Result<Option<library_model::DirectoryImportProgress>, String> {
-        Ok(self.transport.handle().map_err(|error| error.to_string())?.directory_import_progress_for(activity).await.map_err(|error| error.to_string())?)
+        self.transport.handle().map_err(|error| error.to_string())?.directory_import_progress_for(activity).await.map_err(|error| error.to_string())
     }
 
     /// Browser imports transfer ownership to the shared import coordinator.

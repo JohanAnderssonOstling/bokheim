@@ -15,7 +15,6 @@ use client_platform_web::transport::endpoint::WorkerEndpoint;
 type WorkerFactory = Rc<dyn Fn(&str, &str) -> Result<WorkerEndpoint, JsValue>>;
 
 struct State {
-    startup_cancel: RefCell<Option<futures_channel::oneshot::Sender<()>>>,
     failure_handler: RefCell<Option<Rc<dyn Fn(String, bool)>>>,
     ready_handler: RefCell<Option<Rc<dyn Fn()>>>,
     lifecycle: RefCell<CoordinatorLifecycle>,
@@ -69,7 +68,6 @@ impl State {
         if !self.lifecycle.borrow().accepting_work() {
             return;
         }
-        self.startup_cancel.borrow_mut().take();
         if let Some(handler) = self.failure_handler.borrow().clone() {
             handler(error, !self.lifecycle.borrow().starting());
             return;
@@ -142,7 +140,6 @@ impl State {
                 }
             }
             Some("backend_ready") => {
-                self.startup_cancel.borrow_mut().take();
                 self.clients.resume();
                 if let Some(handler) = self.ready_handler.borrow().clone() {
                     handler();
@@ -201,7 +198,6 @@ impl Coordinator {
     }
 
     pub(crate) fn suspend(&self) {
-        self.0.startup_cancel.borrow_mut().take();
         self.0.clients.suspend();
         let actions = self.0.lifecycle.borrow_mut().fail("Database host changed; interrupted writes may have committed".into());
         self.0.execute(actions.into_iter().filter(|action| !matches!(action, Action::FailClients { .. } | Action::Close)).collect());
@@ -216,7 +212,6 @@ impl Coordinator {
         let connect_storage = move |port: MessagePort| storage.post_message_with_transfer(&object(&[("transport", "connect".into()), ("port", port.clone().into())]), &Array::of1(&port));
         clients.set_connector(connect_storage);
         let state = Rc::new(State {
-            startup_cancel: RefCell::new(None),
             failure_handler: RefCell::new(None),
             ready_handler: RefCell::new(None),
             lifecycle: RefCell::new(CoordinatorLifecycle::new()),
@@ -253,19 +248,9 @@ impl Coordinator {
             state.route_network(message);
             Ok(())
         });
-        let weak = Rc::downgrade(&state);
-        let (cancel, cancelled) = futures_channel::oneshot::channel();
-        *state.startup_cancel.borrow_mut() = Some(cancel);
-        wasm_bindgen_futures::spawn_local(async move {
-            if client_platform_runtime::pending::until_cancelled(client_platform_runtime::executor::sleep(options.database_startup), cancelled).await.is_none() {
-                return;
-            }
-            if let Some(state) = weak.upgrade() {
-                if state.lifecycle.borrow().starting() {
-                    state.fail("Database worker startup timed out".into());
-                }
-            }
-        });
+        // Startup includes transactional schema/taxonomy migrations. Their
+        // duration depends on the library size; a wall-clock deadline would
+        // repeatedly abort healthy work. Worker errors still call State::fail.
         Ok(Self(state))
     }
 }

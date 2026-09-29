@@ -7,6 +7,7 @@ pub enum BookFormat {
     Pdf,
     Mobi,
     M4b,
+    Mp3Folder,
 }
 
 impl BookFormat {
@@ -17,6 +18,7 @@ impl BookFormat {
             "pdf" => Some(Self::Pdf),
             "mobi" | "azw" | "azw3" => Some(Self::Mobi),
             "m4b" => Some(Self::M4b),
+            "mp3folder" => Some(Self::Mp3Folder),
             _ => None,
         }
     }
@@ -32,6 +34,7 @@ impl BookFormat {
             Self::Pdf => "pdf",
             Self::Mobi => "mobi",
             Self::M4b => "m4b",
+            Self::Mp3Folder => "mp3folder",
         }
     }
 }

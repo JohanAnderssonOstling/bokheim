@@ -156,6 +156,7 @@ impl AudiobookFixture {
         let mutations = kinds.iter().enumerate().map(|(index, kind)| {
             let sequence = index as u64 + 1;
             WireMutation {
+                origin: None,
                 mutation_id: MutationId::new(),
                 kind: (*kind).into(),
                 entity_key: self.identity.to_string(),

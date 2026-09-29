@@ -213,9 +213,9 @@ mod tests {
                 let directory = writer.create_directory(&ROOT_DIR_ID, &".Pending".into())?;
                 // Creation alone leaves membership clean; a directory update
                 // exercises invalidation while the old snapshot remains open.
-                writer.execute("UPDATE dir SET name='Concurrent' WHERE id=?1", [directory.id.to_string()])?;
+                writer.connection.execute("UPDATE dir SET name='Concurrent' WHERE id=?1", [directory.id.to_string()])?;
                 assert_eq!(cache_state(&reader.connection)?, (false, false));
-                let found: bool = reader.query_row("SELECT EXISTS(SELECT 1 FROM dir WHERE name='Concurrent')", [], |r| r.get(0))?;
+                let found: bool = reader.connection.query_row("SELECT EXISTS(SELECT 1 FROM dir WHERE name='Concurrent')", [], |r| r.get(0))?;
                 assert!(!found);
                 Ok(())
             })
@@ -224,7 +224,7 @@ mod tests {
         reader
             .with_folder_cache(|| {
                 assert_eq!(cache_state(&reader.connection)?, (false, false));
-                let found: bool = reader.query_row("SELECT EXISTS(SELECT 1 FROM dir WHERE name='Concurrent')", [], |r| r.get(0))?;
+                let found: bool = reader.connection.query_row("SELECT EXISTS(SELECT 1 FROM dir WHERE name='Concurrent')", [], |r| r.get(0))?;
                 assert!(found);
                 Ok(())
             })

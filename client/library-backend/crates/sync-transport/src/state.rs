@@ -102,6 +102,7 @@ mod tests {
     fn mutations(count: usize) -> Vec<sync_common::WireMutation> {
         (1..=count)
             .map(|sequence| sync_common::WireMutation {
+                origin: None,
                 mutation_id: sync_common::MutationId::new(),
                 kind: sync_common::mutation_kind::BOOK_LIFECYCLE.to_owned(),
                 entity_key: fixture_content_hash(sequence as u64).to_string(),
@@ -134,7 +135,7 @@ mod tests {
                     let request: SyncExchangeRequest = sync_common::transport::decode(&body, sync_common::transport::MAX_DECODED_REQUEST_BYTES).unwrap();
                     let response = SyncExchangeResponse {
                         push: PushMutationsResponse { accepted: request.mutations.iter().map(|mutation| mutation.mutation_id).collect(), rejected: Vec::new() },
-                        pull: PullStateResponse { mutations: Vec::new(), next_cursor: SyncCursor::default(), has_more: false },
+                        pull: PullStateResponse { book_creations: Vec::new(), mutations: Vec::new(), next_cursor: SyncCursor::default(), has_more: false },
                     };
                     let encoded = sync_common::transport::encode(&response).unwrap();
                     let mut response = encoded.into_response();
@@ -187,7 +188,7 @@ mod tests {
         let app = Router::new().route(
             "/api/sync/exchange",
             post(|| async {
-                Json(SyncExchangeResponse { push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() }, pull: PullStateResponse { mutations: Vec::new(), next_cursor: SyncCursor::default(), has_more: false } })
+                Json(SyncExchangeResponse { push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() }, pull: PullStateResponse { book_creations: Vec::new(), mutations: Vec::new(), next_cursor: SyncCursor::default(), has_more: false } })
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

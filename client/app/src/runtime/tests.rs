@@ -46,11 +46,17 @@ async fn native_and_wire_handlers_preserve_imports_reads_and_subscriptions() {
         let hash = library.import_book_bytes(crate::ROOT_DIR_ID, "book.epub".into(), bytes.clone()).await.unwrap();
         assert_eq!(library.book_count().await.unwrap(), 1);
         let annotation = library_backend::ReaderAnnotation {
-            id: uuid::Uuid::new_v4().to_string(), content_hash: hash,
+            id: uuid::Uuid::new_v4().to_string(),
+            content_hash: hash,
             anchor: library_backend::AnnotationAnchor::epub_cfi("epubcfi(/6/2!/4/2:0)"),
-            exact_text: "A passage".into(), style: library_backend::AnnotationStyle::Highlight,
-            color: "yellow".into(), note: "Library-owned annotation".into(),
-            created_at: 1, modified_at: 1, toc_ordinal: Some(0), progress: Some(0.5),
+            exact_text: "A passage".into(),
+            style: library_backend::AnnotationStyle::Highlight,
+            color: "yellow".into(),
+            note: "Library-owned annotation".into(),
+            created_at: 1,
+            modified_at: 1,
+            toc_ordinal: Some(0),
+            progress: Some(0.5),
         };
         library.upsert_annotation(annotation.clone()).await.unwrap();
         let stored = library.annotations(hash).await.unwrap();

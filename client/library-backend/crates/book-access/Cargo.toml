@@ -19,7 +19,7 @@ serde = { version = "1", features = ["derive"] }
 futures-util = "0.3"
 crossbeam-channel = "0.5"
 tokio = { version = "1", features = ["macros", "sync"] }
-pdf-view-common = { path = "../../../../apps/reader/crates/pdf/view-common", optional = true }
+pdf-view-common = { path = "../../../../shared/pdf-view-common", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "stream"] }
@@ -29,6 +29,7 @@ tokio = { version = "1", features = ["rt", "time", "net"] }
 client-platform-web = { path = "../../../platforms/web" }
 reqwest = { version = "0.11", default-features = false, features = ["stream"] }
 wasm-bindgen-futures = "0.4"
+wasm-bindgen = "0.2"
 futures-channel = "0.3"
 
 [dev-dependencies]

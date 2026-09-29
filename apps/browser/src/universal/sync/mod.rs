@@ -18,16 +18,15 @@ mod web_authentication;
 use std::sync::Arc;
 
 use app::{AccountStatus, AccountStorageUsage, LibrarySyncState, LibrarySyncStatus, LocalLibraryStorageUsage, ServerLibraryStorageUsage};
-use gpui::prelude::*;
-use gpui::{Context, Div, Entity, IntoElement, Render, SharedString, Subscription, Window, div, px};
 #[cfg(not(target_arch = "wasm32"))]
 use gpui::Task;
+use gpui::prelude::*;
+use gpui::{Context, Div, Entity, IntoElement, Render, SharedString, Subscription, Window, div, px};
 use gpui_component::IconName;
 use gpui_component::alert::Alert;
 use gpui_component::button::ButtonVariants;
 #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
 use gpui_component::input::{Input, InputState, OtpInput};
-use gpui_component::tag::Tag;
 use gpui_component::{Sizable, Size};
 use ui_components as components;
 
@@ -55,22 +54,19 @@ pub struct SyncState {
 
 impl SyncState {
     pub fn new(services: &AppServices) -> Self {
-        Self {
-            account_status: services.startup.account_status.clone(),
-            storage_usage: None,
-            sync_statuses: Vec::new(),
-            local_storage_usage: Vec::new(),
-            server_storage_usage: None,
-            transfer_groups: Arc::new(Vec::new()),
-        }
+        Self { account_status: services.startup.account_status.clone(), storage_usage: None, sync_statuses: Vec::new(), local_storage_usage: Vec::new(), server_storage_usage: None, transfer_groups: Arc::new(Vec::new()) }
     }
 
     pub fn apply_account_snapshot(&mut self, snapshot: &app::AccountSnapshot, cx: &mut Context<Self>) {
         self.account_status = snapshot.account.clone();
         self.storage_usage = snapshot.storage_usage;
         self.sync_statuses = snapshot.sync_statuses.clone();
-        self.local_storage_usage = snapshot.local_storage_usage.clone();
         self.server_storage_usage = snapshot.server_storage_usage.clone();
+        cx.notify();
+    }
+
+    pub fn apply_local_storage_usage(&mut self, usage: Vec<LocalLibraryStorageUsage>, cx: &mut Context<Self>) {
+        self.local_storage_usage = usage;
         cx.notify();
     }
 
@@ -97,6 +93,8 @@ pub enum SyncEvent {
     AccountRefreshDue,
     AccountRefreshRequested,
     AccountSnapshot { generation: u64, result: Result<app::AccountSnapshot, String> },
+    LocalStorageUsageRequested,
+    LocalStorageUsage { generation: u64, result: Result<Vec<app::LocalLibraryStorageUsage>, String> },
     LogoutRequested,
     AccountOperation { generation: u64, result: Result<app::AccountSnapshot, String>, success: &'static str, reveal_password_reset_on_error: bool },
     TransferRefreshDue,
@@ -155,6 +153,12 @@ pub(crate) struct SyncPage {
     task: Option<Task<()>>,
     refresh_scheduled: bool,
     refresh_pending: bool,
+    /// File sizes change independently of account notifications. Read them
+    /// on entry, explicit refresh, and when the library set changes.
+    local_usage_due: bool,
+    local_usage_libraries: std::collections::HashSet<sync_common::LibraryId>,
+    #[cfg(not(target_arch = "wasm32"))]
+    local_usage_generation: u64,
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
     authentication: AuthenticationInputs,
     #[cfg(target_arch = "wasm32")]
@@ -179,13 +183,27 @@ impl SyncPage {
 
     pub(crate) fn new(services: AppServices, state: Entity<SyncState>, active_library: Entity<Libraries>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let account_status = state.read(cx).account_status.clone();
+        let local_usage_libraries = active_library.read(cx).entries().iter().map(|entry| *entry.library_id()).collect();
         let page_entity = cx.entity();
         let identity = cx.new(|_| view::AccountIdentityView::new(page_entity, account_status.clone()));
         #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
         let authentication = AuthenticationInputs::new(window, cx);
-        let activity_jobs = cx.new(|cx| LibraryActivity::new(#[cfg(not(target_arch = "wasm32"))] services.backend.clone(), #[cfg(target_arch = "wasm32")] services.sync_events.clone(), cx));
+        let activity_jobs = cx.new(|cx| {
+            LibraryActivity::new(
+                #[cfg(not(target_arch = "wasm32"))]
+                services.backend.clone(),
+                #[cfg(target_arch = "wasm32")]
+                services.sync_events.clone(),
+                cx,
+            )
+        });
         let activity_on_library_change = activity_jobs.clone();
         let active_library_subscription = cx.observe(&active_library, move |page, _, cx| {
+            let library_ids = page.active_library.read(cx).entries().iter().map(|entry| *entry.library_id()).collect();
+            if page.local_usage_libraries != library_ids {
+                page.local_usage_libraries = library_ids;
+                page.local_usage_due = true;
+            }
             page.schedule_refresh(cx);
             activity_on_library_change.update(cx, |activity, cx| activity.refresh_now(cx));
             cx.notify();
@@ -226,6 +244,10 @@ impl SyncPage {
             task: None,
             refresh_scheduled: false,
             refresh_pending: false,
+            local_usage_due: true,
+            local_usage_libraries,
+            #[cfg(not(target_arch = "wasm32"))]
+            local_usage_generation: 0,
             #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
             authentication,
             #[cfg(target_arch = "wasm32")]
@@ -306,7 +328,7 @@ impl SyncPage {
                 cx.notify();
             }
             SyncEvent::WebAuthenticated => self.schedule_refresh(cx),
-            SyncEvent::AccountRefreshRequested | SyncEvent::LogoutRequested | SyncEvent::TransferRefreshRequested | SyncEvent::TransferSnapshot { .. } | SyncEvent::AssetStorageRequested { .. } | SyncEvent::Authenticate { .. } => {
+            SyncEvent::AccountRefreshRequested | SyncEvent::LocalStorageUsageRequested | SyncEvent::LocalStorageUsage { .. } | SyncEvent::LogoutRequested | SyncEvent::TransferRefreshRequested | SyncEvent::TransferSnapshot { .. } | SyncEvent::AssetStorageRequested { .. } | SyncEvent::Authenticate { .. } => {
                 unreachable!("sync commands are handled by ApplicationRoot")
             }
         }

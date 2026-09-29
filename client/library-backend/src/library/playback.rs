@@ -8,14 +8,20 @@ use sync_common::ContentHash;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlaybackMetadata {
+    #[serde(default = "default_audio_format")]
+    pub format: book_model::BookFormat,
     pub title: String,
     pub author: String,
     pub narrator: Option<String>,
     pub duration_ms: u64,
     pub chapters: Vec<library_model::AudiobookChapter>,
+    #[serde(default)]
+    pub tracks: Vec<book_model::AudiobookTrack>,
     #[serde(with = "serde_bytes")]
     pub cover: Vec<u8>,
 }
+
+fn default_audio_format() -> book_model::BookFormat { book_model::BookFormat::M4b }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DirectPlayback {
@@ -34,6 +40,7 @@ impl std::fmt::Debug for DirectPlayback {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PlaybackLocation {
     LocalUrl(String),
+    LocalTracks(Vec<String>),
     Direct(DirectPlayback),
 }
 

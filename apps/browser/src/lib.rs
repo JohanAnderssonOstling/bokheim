@@ -57,17 +57,21 @@ fn directory_import(selected: gpui::SelectedDirectory) -> app::DirectoryImport {
     app::DirectoryImport {
         name: selected.name,
         directories: selected.directories,
-        files: selected.files.into_iter().map(|mut file| {
-            let path = file.path.clone();
-            #[cfg(target_arch = "wasm32")]
-            let source = app::ImportSource::from_export(file.take_browser_file());
-            #[cfg(not(target_arch = "wasm32"))]
-            let source = {
-                let size_bytes = file.size_bytes;
-                app::ImportSource::new(Box::new(move || Box::pin(async move { file.open().await.map_err(|error| error.to_string()) }))).with_size_bytes(size_bytes)
-            };
-            app::DirectoryImportFile { path, source }
-        }).collect(),
+        files: selected
+            .files
+            .into_iter()
+            .map(|mut file| {
+                let path = file.path.clone();
+                #[cfg(target_arch = "wasm32")]
+                let source = app::ImportSource::from_export(file.take_browser_file());
+                #[cfg(not(target_arch = "wasm32"))]
+                let source = {
+                    let size_bytes = file.size_bytes;
+                    app::ImportSource::new(Box::new(move || Box::pin(async move { file.open().await.map_err(|error| error.to_string()) }))).with_size_bytes(size_bytes)
+                };
+                app::DirectoryImportFile { path, source }
+            })
+            .collect(),
     }
 }
 
@@ -75,11 +79,11 @@ pub use navigation::{GlobalRoute, LibraryRoute, Route};
 pub use root::{BookDetailDismissed, BrowserRoot, OpenBookRequested};
 #[cfg(feature = "kobo")]
 pub use services::SaveKoboAutoRotate;
-pub use services::{AppServices, AppStartup};
+pub use services::{AppServices, AppStartup, UpdateAction, UpdateActionHandler, UpdateControls, UpdateView};
+pub use services::{LibraryRemovalHook, LibraryRemovalPreparation, library_is_being_removed};
 #[cfg(target_arch = "wasm32")]
 pub use universal::sync::SyncEvent;
 pub use universal::sync::SyncState;
-pub use services::{LibraryRemovalHook, LibraryRemovalPreparation, library_is_being_removed};
 
 actions!(
     bokheim_browser,

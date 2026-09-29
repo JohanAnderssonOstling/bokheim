@@ -8,8 +8,8 @@ use gpui::{
 use gpui_component::ElementExt;
 use image::{Frame, RgbaImage};
 use pdf_reader_core::{
-    FitWidthAnchor, FitWidthAnchorPager, FitWidthColumn, FitWidthPage, FitWidthPlan, FitWidthViewport, NormalizedRect, PageRenderKey, PdfDocumentInfo, PdfDocumentSession, PdfPageTextLayout, PdfResult, PdfSearchHit, PdfTextSelection, PixelCrop, ReaderInteractionStyle,
-    SelectionGranularity, SelectionOptions, crop_normalized_rect,
+    FitWidthAnchor, FitWidthAnchorPager, FitWidthColumn, FitWidthPage, FitWidthPlan, FitWidthViewport, NormalizedRect, PageRenderKey, PdfDocumentInfo, PdfDocumentSession, PdfPageTextLayout, PdfResult, PdfSearchHit, PdfTextSelection,
+    PixelCrop, ReaderInteractionStyle, SelectionGranularity, SelectionOptions, crop_normalized_rect,
 };
 use smallvec::SmallVec;
 use std::cell::{Cell, RefCell};
@@ -17,6 +17,8 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Seek};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
+use web_time::Instant;
 use ui_components as components;
 
 const DISPLAY_CACHE_BUDGET: usize = 128 * 1024 * 1024;
@@ -85,6 +87,7 @@ pub enum PdfViewEvent {
     PageChanged { current: usize, total: usize },
     SearchChanged { current: usize, total: usize },
     AnnotationActivated { id: String, position: Point<Pixels> },
+    PageTapped,
     LoadFailed(String),
 }
 
@@ -157,6 +160,7 @@ pub struct PdfView {
     selection_anchor: Option<(f32, f32)>,
     selection_anchor_source_index: Option<usize>,
     selection_active: Option<(f32, f32)>,
+    tap_start: Option<(Point<Pixels>, Instant)>,
     selection_page: Option<usize>,
     selection_page_column: Option<u32>,
     selection_granularity: SelectionGranularity,
@@ -317,6 +321,7 @@ impl PdfView {
             selection_anchor: None,
             selection_anchor_source_index: None,
             selection_active: None,
+            tap_start: None,
             selection_page: None,
             selection_page_column: None,
             selection_granularity: SelectionGranularity::Character,
@@ -761,10 +766,7 @@ impl PdfView {
                         this.current_page = this.current_page.min(this.page_count().saturating_sub(1));
                         if let Some(info) = &this.info {
                             if info.skippable_pages().binary_search(&this.current_page).is_ok() && info.skippable_pages().len() < info.page_count() {
-                                this.current_page = (this.current_page..info.page_count())
-                                    .chain(0..this.current_page)
-                                    .find(|page| info.skippable_pages().binary_search(page).is_err())
-                                    .unwrap_or(this.current_page);
+                                this.current_page = (this.current_page..info.page_count()).chain(0..this.current_page).find(|page| info.skippable_pages().binary_search(page).is_err()).unwrap_or(this.current_page);
                             }
                         }
                         this.rebuild_fit_width_plan();
@@ -1011,10 +1013,7 @@ impl PdfView {
     /// results, and future scrollbar targets may all name an anchor that has
     /// never been visible before.
     fn seek_viewport_anchor(&mut self, anchor: FitWidthAnchor, remember_previous: bool, cx: &mut Context<Self>) -> bool {
-        let reflowed = self
-            .viewport_pager
-            .as_mut()
-            .and_then(|pager| pager.seek(anchor, remember_previous).ok().map(|_| pager.window().plan().clone()));
+        let reflowed = self.viewport_pager.as_mut().and_then(|pager| pager.seek(anchor, remember_previous).ok().map(|_| pager.window().plan().clone()));
         let Some(plan) = reflowed else {
             return false;
         };
@@ -1271,11 +1270,7 @@ impl PdfView {
             .pages()
             .iter()
             .enumerate()
-            .filter(|(page_index, _)| {
-                *page_index == self.revealed_page.unwrap_or(usize::MAX)
-                    || info.skippable_pages().binary_search(page_index).is_err()
-                    || (info.skippable_pages().len() == info.page_count() && *page_index == 0)
-            })
+            .filter(|(page_index, _)| *page_index == self.revealed_page.unwrap_or(usize::MAX) || info.skippable_pages().binary_search(page_index).is_err() || (info.skippable_pages().len() == info.page_count() && *page_index == 0))
             .filter_map(|(page_index, page)| {
                 let (width, height) = self.effective_page_sizes.get(&(page_index, self.trim_margins)).copied().unwrap_or((page.width_points(), page.height_points()));
                 FitWidthPage::new(page_index, width, height)
@@ -1436,7 +1431,12 @@ impl PdfView {
 
     fn flow_anchor(&self) -> Option<(FitWidthColumn, f32)> {
         self.flow_anchor_at(self.flow_offset).map(|anchor| {
-            let column = columns_for_page(self.fit_width_plan.columns(), anchor.page_index()).iter().copied().find(|column| column.page_point_to_column((0.5, anchor.page_y())).is_some()).or_else(|| self.fit_width_plan.columns().iter().copied().find(|column| column.page_index() == anchor.page_index())).expect("source anchor belongs to the current plan");
+            let column = columns_for_page(self.fit_width_plan.columns(), anchor.page_index())
+                .iter()
+                .copied()
+                .find(|column| column.page_point_to_column((0.5, anchor.page_y())).is_some())
+                .or_else(|| self.fit_width_plan.columns().iter().copied().find(|column| column.page_index() == anchor.page_index()))
+                .expect("source anchor belongs to the current plan");
             let column_y = column.page_point_to_column((0.5, anchor.page_y())).map(|(_, y)| y).unwrap_or(0.0);
             (column, column_y)
         })
@@ -1895,7 +1895,8 @@ impl Render for PdfView {
             for (stream_index, current_index) in screen_column_stream(base_index, slot_index, total).enumerate() {
                 stream.push(build_logical_column(current_index, slot_index * 2 + stream_index).into_any_element());
             }
-            screen_columns.push(div().id(("pdf-flow-slot", slot_index)).w(px(column_width)).h(px(column_height)).overflow_hidden().flex_shrink_0().child(div().w_full().flex().flex_col().mt(px(-remainder)).children(stream)).into_any_element());
+            screen_columns
+                .push(div().id(("pdf-flow-slot", slot_index)).w(px(column_width)).h(px(column_height)).overflow_hidden().flex_shrink_0().child(div().w_full().flex().flex_col().mt(px(-remainder)).children(stream)).into_any_element());
         }
         let document = div().id("pdf-flow").w_full().h(px(column_height)).flex().flex_row().items_start().flex_shrink_0().children(screen_columns);
         let surface_bounds = Rc::new(Cell::new(Bounds::default()));
@@ -1938,6 +1939,7 @@ impl Render for PdfView {
                     };
                     let Some(anchor_source_index) = view.selection_anchor_source_index(target) else { return };
                     view.begin_selection(target.page_index, target.column.page_column_index(), target.page_point, anchor_source_index, granularity, cx);
+                    view.tap_start = Some((event.position, Instant::now()));
                     cx.stop_propagation();
                 });
             })
@@ -1952,9 +1954,15 @@ impl Render for PdfView {
                     }
                 });
             })
-            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+            .on_mouse_up(MouseButton::Left, move |event, _, cx| {
                 mouse_up_target.update(cx, |view, cx| {
                     if view.selection_anchor.take().is_some() {
+                        if let Some((start, started_at)) = view.tap_start.take() {
+                            let moved = f32::from(event.position.x - start.x).abs() > 8.0 || f32::from(event.position.y - start.y).abs() > 8.0;
+                            if !moved && event.click_count == 1 && started_at.elapsed() < Duration::from_millis(600) {
+                                cx.emit(PdfViewEvent::PageTapped);
+                            }
+                        }
                         view.selection_anchor_source_index = None;
                         view.selection_active = None;
                         cx.stop_propagation();
@@ -1964,6 +1972,7 @@ impl Render for PdfView {
             .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
                 mouse_up_out_target.update(cx, |view, _| {
                     view.selection_anchor = None;
+                    view.tap_start = None;
                     view.selection_anchor_source_index = None;
                     view.selection_active = None;
                 });

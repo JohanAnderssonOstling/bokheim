@@ -10,6 +10,7 @@ kobo = ["mobile", "dep:gpui_kobo", "ui-components/kobo"]
 mobile = ["ui-components/mobile"]
 
 [dependencies]
+update-client = { path = "../../shared/update-client" }
 library-backend = { path = "../../client/library-backend" }
 subject-projection = { path = "../../shared/subject-projection" }
 book-model = { path = "../../shared/book-model" }

@@ -100,6 +100,24 @@ impl TocState {
         self.resolutions.iter().position(|resolved| &resolved.link == active)
     }
 
+    /// A stored annotation ordinal refers to resolved TOC order, which may
+    /// omit publisher entries the renderer could not place.
+    pub(crate) fn title_at_ordinal(&self, ordinal: usize) -> Option<&str> {
+        let link = self.resolutions.get(ordinal)?.link.as_str();
+        fn find<'a>(entries: &'a [TocEntry], link: &str) -> Option<&'a str> {
+            for entry in entries {
+                if entry.link == link {
+                    return Some(entry.title.as_str());
+                }
+                if let Some(title) = find(&entry.children, link) {
+                    return Some(title);
+                }
+            }
+            None
+        }
+        find(&self.entries, link)
+    }
+
     /// The title of the active entry, searched depth-first through the tree.
     pub(crate) fn active_title(&self) -> Option<String> {
         fn find(entries: &[TocEntry], active: &str) -> Option<String> {
@@ -156,6 +174,13 @@ mod tests {
         assert_eq!(toc.ordinal_of_active(), Some(2));
         toc.set_active_link(Some("gone.xhtml".to_owned()));
         assert_eq!(toc.ordinal_of_active(), None, "unknown links resolve to nothing, not a guess");
+    }
+
+    #[test]
+    fn annotation_ordinal_names_the_resolved_nested_chapter() {
+        let toc = sample();
+        assert_eq!(toc.title_at_ordinal(1), Some("The Second Part"));
+        assert_eq!(toc.title_at_ordinal(3), None);
     }
 
     #[test]

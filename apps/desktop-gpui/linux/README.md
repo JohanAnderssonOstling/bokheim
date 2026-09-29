@@ -2,12 +2,9 @@
 
 ## AppImage
 
-GitHub tag releases publish an x86-64 AppImage, its zsync delta metadata, and
-its SHA-256 checksum. The AppImage embeds this update location:
-
-```text
-https://github.com/JohanAnderssonOstling/bokheim/releases/latest/download/Bokheim-x86_64.AppImage.zsync
-```
+The release workflow builds an x86-64 AppImage and its SHA-256 checksum.
+GitHub can store these artifacts, while in-app update discovery uses the signed
+Bokheim feed. The package does not embed a separate zsync update endpoint.
 
 Build the release binary and package it with versioned releases of
 `linuxdeploy` and `appimagetool` available on `PATH`:
@@ -17,21 +14,24 @@ python3 apps/desktop-gpui/scripts/build.py
 apps/desktop-gpui/linux/appimage/build-appimage.sh
 ```
 
-The packaging script writes `Bokheim-x86_64.AppImage`, its `.zsync` file, and
+The packaging script writes `Bokheim-x86_64.AppImage` and
 its `.sha256` file to `release/`. Set `RELEASE_DIRECTORY`, `DESKTOP_BINARY`,
-`LINUXDEPLOY`, `APPIMAGETOOL`, or `UPDATE_INFORMATION` to override the defaults.
+`LINUXDEPLOY`, or `APPIMAGETOOL` to override the defaults.
 The release workflow also inspects the AppImage runtime and every packaged ELF
 file and rejects an artifact that requires a glibc version newer than 2.35.
 
-The Settings page exposes Bokheim's updater only when the `APPIMAGE`
-environment variable identifies a writable file. Native development builds and
-root-owned package-manager installations therefore do not check for updates.
-Package launchers can explicitly disable the updater by setting
-`BOKHEIM_DISABLE_SELF_UPDATE=1`; the AUR package must set this variable. Direct
-AppImages check the latest public GitHub release at startup and notify the user
-when a newer version exists. They download only after the user opens the update
-action, verify the matching GitHub checksum, retain the previous AppImage beside
-the replacement, and restart only after the user asks.
+Update discovery is enabled only when the build contains a valid public signing
+key. Settings shows one row when an update is available. Explicit Update consent
+persists approval and stages verified packages; activation waits for a later
+launch. Restart is an optional explicit action. Database/taxonomy changes and the
+AppImage replacement use a recoverable startup transaction.
+
+The `APPIMAGE` environment variable identifies the package that can be replaced.
+Without it, the host can offer compatible taxonomy updates only. Package launchers
+can also disable application replacement using `BOKHEIM_DISABLE_SELF_UPDATE=1`;
+the AUR package must set this variable. Installation permissions and actual storage
+deficits appear only when action is required. See `servers/updates/README.md` for
+public-key configuration, release preparation and signed feed publication.
 
 The GitHub workflow checks out the companion GPUI-Fork, HtmlEngine, and
 HtmlViewCore repositories beside this repository because the Cargo workspace

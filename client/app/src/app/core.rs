@@ -93,7 +93,6 @@ impl AppBackend {
         super::account::tasks::start_maintenance(&executor, &weak, (account_scheduler.clone(), account_wake_rx));
         let core = Self { state };
         core.open_registered_libraries()?;
-        #[cfg(target_arch = "wasm32")]
         core.start_pending_local_purges();
         core.state.account_scheduler.request_remote_refresh();
         Ok(core)
@@ -152,5 +151,41 @@ mod library_client_lifecycle_tests {
         assert_eq!(fresh.book_count().await.unwrap(), 0);
         assert!(old.book_count().await.is_err(), "an old client must not retarget to a new actor generation");
         drop(worker);
+    }
+
+    #[tokio::test]
+    async fn import_destination_skips_a_registered_library_that_cannot_open() {
+        let root = tempfile::tempdir().unwrap();
+        let context = BackendContext::initialize(AppDataLocation::native_path(root.path())).unwrap();
+        let unavailable = context.registry.create("Unavailable", None).unwrap();
+        let database = context.registry.library_database_locator(unavailable.library_id(), unavailable.storage_locator());
+        std::fs::create_dir_all(&database).unwrap();
+        let backend = AppBackend::new(context).unwrap();
+
+        let destination = backend.ensure_import_library().unwrap();
+        assert_ne!(destination.library_id(), unavailable.library_id());
+        assert!(backend.library_directory().get(destination.library_id()).is_ok());
+        assert_eq!(backend.libraries().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn failed_local_cleanup_keeps_deleted_library_hidden_and_retryable() {
+        let root = tempfile::tempdir().unwrap();
+        let context = BackendContext::initialize(AppDataLocation::native_path(root.path())).unwrap();
+        let entry = context.registry.create("Books", None).unwrap();
+        let id = *entry.library_id();
+        let blocked_file = std::path::Path::new(entry.storage_locator()).join(".bokheim/library.db");
+        std::fs::create_dir(&blocked_file).unwrap();
+        let backend = AppBackend::new(context).unwrap();
+        assert!(backend.library_directory().get(&id).is_ok());
+
+        assert!(backend.delete_library(&id).await.is_err());
+        assert!(backend.libraries().unwrap().is_empty());
+        assert!(backend.library_directory().get(&id).is_err());
+        assert_eq!(backend.state.registry.pending_local_purges().unwrap(), [id]);
+
+        std::fs::remove_dir(&blocked_file).unwrap();
+        backend.state.registry.complete_local_purge(&id).unwrap();
+        assert!(backend.state.registry.pending_local_purges().unwrap().is_empty());
     }
 }

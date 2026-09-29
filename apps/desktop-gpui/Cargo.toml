@@ -1,6 +1,6 @@
 [package]
 name = "desktop-gpui"
-version = "0.1.6"
+version = "0.1.0"
 edition = "2024"
 
 [lib]
@@ -15,9 +15,8 @@ desktop = [
     "reader-ui/native-audio",
     "dep:gpui_platform",
     "dep:image",
-    "dep:reqwest",
-    "dep:semver",
-    "dep:sha2",
+    "dep:update-client",
+    "dep:linux-update-host",
     "browser-ui/filesystem-libraries",
 ]
 # Flatpak installs PDFium as /app/lib/libpdfium.so. Keep this separate from the
@@ -28,7 +27,7 @@ flatpak = ["desktop", "reader-ui/packaged-pdfium", "application-shell/packaged-p
 # to turn a page on a touchscreen reader.
 kobo = ["mobile", "dep:gpui_kobo", "dep:kobo-device", "browser-ui/kobo", "reader-ui/kobo", "application-shell/kobo"]
 mobile = ["browser-ui/mobile", "reader-ui/mobile", "application-shell/mobile", "ui-components/mobile"]
-android = ["mobile", "audiobooks", "dep:audiobook-player", "dep:gpui_android", "dep:gpui_platform"]
+android = ["mobile", "audiobooks", "dep:audiobook-player", "dep:gpui_android", "dep:gpui_platform", "dep:update-client", "dep:linux-update-host"]
 
 [[bin]]
 name = "desktop-gpui"
@@ -55,13 +54,11 @@ fs2 = "0.4"
 image = { version = "0.25.1", default-features = false, features = ["png"], optional = true }
 kobo-device = { path = "../kobo-device", optional = true }
 log = "0.4"
-reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
 reader-ui = { path = "../reader", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-semver = { version = "1", optional = true }
+update-client = { path = "../../shared/update-client", features = ["blocking"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = { version = "0.10", optional = true }
 tokio = { version = "1", features = ["net", "rt", "time"] }
 tempfile = "3"
 
@@ -70,3 +67,6 @@ audiobook-player = { path = "../audiobook-player", default-features = false, opt
 anyhow = "1"
 jni = "0.22.4"
 uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "android", target_os = "windows"))'.dependencies]
+linux-update-host = { path = "../../client/update-host", optional = true }

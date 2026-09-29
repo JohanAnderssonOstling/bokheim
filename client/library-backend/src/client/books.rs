@@ -45,4 +45,9 @@ impl LibraryClient {
             crate::library::web_reader::resolve_book(self, content_hash).await
         }
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn resolve_audiobook_track(&self, content_hash: crate::ContentHash, index: usize) -> Result<crate::ResolvedBook, String> {
+        self.transport.handle().map_err(|error| error.to_string())?.resolve_audiobook_track(content_hash, index).await.map_err(|error| error.to_string())
+    }
 }

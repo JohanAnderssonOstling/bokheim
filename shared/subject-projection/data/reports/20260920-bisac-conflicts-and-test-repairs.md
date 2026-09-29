@@ -3,7 +3,7 @@
 The seven unresolved BISAC codes were incomplete selector moves, not a defect
 in the matcher's ambiguity handling.
 
-The [approved Bible-group migration](../migrations/20260908_add_approved_bible_groups_with_selectors.sql)
+The approved Bible-group migration
 added these codes to specific groups without removing their previous broad
 owners. The groups occupy separate branches, so ancestor pruning could not
 remove the broad owners. The bundled [BISAC 2021 headings](../bisac-2021.csv)
@@ -19,7 +19,7 @@ support the specific destinations selected by that migration.
 | REL006890 | New Testament | Apocrypha & Pseudepigrapha |
 | REL009000 | Systematic Theology | Creeds & Catechisms |
 
-The [repair migration](../migrations/20260920_resolve_bible_bisac_conflicts.sql)
+The repair migration
 was applied to `unified-taxonomy-v2.sqlite3`. It removes only these seven rows,
 checks that each retained destination exists, and is idempotent. Subject
 relationships and LCC ranges are unchanged. The matcher content revision is

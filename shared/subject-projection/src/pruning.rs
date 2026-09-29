@@ -24,7 +24,7 @@ pub fn redundant_lcc_exact_selectors(concepts: &[UnifiedConceptDefinition]) -> R
                 }
             }
         }
-        range_definitions.push(UnifiedConceptDefinition::new(concept.concept_id(), concept.preferred_label().to_owned(), concept.parent_ids().to_vec(), BTreeMap::from([("lcc".into(), ranges)]), vec![]));
+        range_definitions.push(UnifiedConceptDefinition::new(concept.concept_id(), concept.preferred_label().to_owned(), concept.parent_ids().to_vec(), BTreeMap::from([("lcc".into(), ranges)])));
     }
     let ranges = UnifiedTaxonomy::from_concepts(range_definitions)?;
     let mut redundant = Vec::new();
@@ -68,11 +68,11 @@ pub fn redundant_lcc_exact_selectors(concepts: &[UnifiedConceptDefinition]) -> R
 mod tests {
     use super::*;
     fn concept(id: i64, codes: &[&str]) -> UnifiedConceptDefinition {
-        UnifiedConceptDefinition::new(id, format!("Subject {id}"), vec![], BTreeMap::from([("lcc".into(), codes.iter().map(|code| (*code).into()).collect())]), vec![])
+        UnifiedConceptDefinition::new(id, format!("Subject {id}"), vec![], BTreeMap::from([("lcc".into(), codes.iter().map(|code| (*code).into()).collect())]))
     }
     #[test]
     fn pruning_keeps_cutters_ambiguity_and_printed_ranges() {
-        let definitions = vec![concept(1, &["QA1..QA100@0", "QA10", "QA10.A1", "QA20.A1.B2", "QA20.A1.B2.C3", "QA30", "QA1-100"]), concept(2, &["QA20", "QA30"])];
+        let definitions = vec![concept(1, &["QA1..QA100", "QA10", "QA10.A1", "QA20.A1.B2", "QA20.A1.B2.C3", "QA30", "QA1-100"]), concept(2, &["QA20", "QA30"])];
         let removed = redundant_lcc_exact_selectors(&definitions).unwrap();
         assert_eq!(removed, [(1, "QA10".into()), (1, "QA10.A1".into()), (1, "QA20.A1.B2.C3".into())]);
         let before = UnifiedTaxonomy::from_concepts(definitions.clone()).unwrap();
@@ -81,7 +81,7 @@ mod tests {
                 .into_iter()
                 .map(|definition| {
                     let selectors = definition.source_selectors("lcc").iter().filter(|selector| !removed.contains(&(definition.concept_id(), (*selector).clone()))).cloned().collect();
-                    UnifiedConceptDefinition::new(definition.concept_id(), definition.preferred_label().into(), vec![], BTreeMap::from([("lcc".into(), selectors)]), vec![])
+                    UnifiedConceptDefinition::new(definition.concept_id(), definition.preferred_label().into(), vec![], BTreeMap::from([("lcc".into(), selectors)]))
                 })
                 .collect(),
         )

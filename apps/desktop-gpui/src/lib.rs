@@ -1,29 +1,27 @@
 #[cfg(all(target_os = "android", feature = "android"))]
 mod android;
+#[cfg(all(target_os = "android", feature = "android"))]
+mod android_updates;
 mod blocking_worker;
 mod session;
 #[cfg(feature = "desktop")]
 mod single_instance;
-// The three modules below are parked: nothing presents updates today, so
-// nothing calls check/install/restart. See `updates.rs` for re-wiring.
 #[cfg(all(feature = "desktop", target_os = "linux"))]
-#[allow(dead_code)]
-mod updater;
-#[cfg(feature = "desktop")]
-#[allow(dead_code)]
-mod updates;
+pub mod linux_updates;
 #[cfg(all(feature = "desktop", target_os = "windows"))]
-#[allow(dead_code)]
-mod windows_updater;
-
+pub mod windows_updates;
+#[cfg(all(feature = "desktop", any(target_os = "linux", target_os = "windows")))]
+pub mod update_entry;
+#[cfg(any(all(feature = "desktop", any(target_os = "linux", target_os = "windows")), all(feature = "android", target_os = "android")))]
+mod update_metadata;
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
 #[cfg(feature = "desktop")]
 use std::sync::{Arc, LazyLock};
 
-use application_shell::ApplicationRoot;
 use app::{AppClient, AppStartupState, host::BackendLaunch};
+use application_shell::ApplicationRoot;
 #[cfg(feature = "kobo")]
 use browser_ui::SaveKoboAutoRotate;
 use browser_ui::{AppServices, AppStartup};
@@ -126,6 +124,9 @@ pub fn open_ui(
     if let Err(error) = cx.text_system().add_fonts(vec![
         Cow::Borrowed(include_bytes!("../assets/fonts/LibertinusSerif-Regular.otf")),
         Cow::Borrowed(include_bytes!("../assets/fonts/LibertinusSerif-Bold.otf")),
+        Cow::Borrowed(include_bytes!("../assets/fonts/LibertinusSerif-Italic.otf")),
+        Cow::Borrowed(include_bytes!("../assets/fonts/BodoniModa-Regular.ttf")),
+        Cow::Borrowed(include_bytes!("../assets/fonts/BodoniModa-SemiBold.ttf")),
         #[cfg(feature = "kobo")]
         Cow::Borrowed(include_bytes!("../../../reference/plato/fonts/TerminusTTF-Regular.ttf")),
         #[cfg(feature = "kobo")]
@@ -133,6 +134,12 @@ pub fn open_ui(
     ]) {
         log::warn!("failed to install application fonts: {error}");
     }
+    #[cfg(all(feature = "desktop", target_os = "linux"))]
+    let update_controls = linux_updates::bind(cx);
+    #[cfg(all(feature = "desktop", target_os = "windows"))]
+    let update_controls = windows_updates::bind(cx);
+    #[cfg(all(feature = "android", target_os = "android"))]
+    let update_controls = android_updates::bind(cx);
     let session_path = session_path(backend_context.app_data_dir());
     let playback_restore_path = Some(backend_context.app_data_dir().join("active-audiobook.json"));
     let saved_session = Rc::new(RefCell::new(UiSession::load(&session_path)));
@@ -243,7 +250,7 @@ pub fn open_ui(
                 focus: true,
                 app_id,
                 icon,
-                window_decorations: cfg!(all(target_os = "linux", feature = "desktop", not(feature = "mobile"))).then_some(gpui::WindowDecorations::Client),
+                window_decorations: cfg!(all(target_os = "linux", feature = "desktop", not(feature = "mobile"))).then_some(gpui::WindowDecorations::Server),
                 ..Default::default()
             },
             move |window, cx| {
@@ -251,6 +258,8 @@ pub fn open_ui(
                 let services = AppServices::new(backend_worker, startup, save_kobo_auto_rotate.clone());
                 #[cfg(all(any(feature = "desktop", feature = "mobile"), not(feature = "kobo")))]
                 let services = AppServices::new(backend_worker, startup);
+                #[cfg(any(all(feature = "desktop", any(target_os = "linux", target_os = "windows")), all(feature = "android", target_os = "android")))]
+                let services = match update_controls { Some(updates) => services.with_updates(updates), None => services };
                 #[cfg(all(feature = "desktop", not(feature = "mobile")))]
                 {
                     let services = services.clone();
@@ -325,7 +334,7 @@ fn open_extra_window(services: AppServices, backend: AppClient, playback_restore
             focus: true,
             app_id,
             icon,
-            window_decorations: cfg!(all(target_os = "linux", feature = "desktop", not(feature = "mobile"))).then_some(gpui::WindowDecorations::Client),
+            window_decorations: cfg!(all(target_os = "linux", feature = "desktop", not(feature = "mobile"))).then_some(gpui::WindowDecorations::Server),
             ..Default::default()
         },
         move |window, cx| {

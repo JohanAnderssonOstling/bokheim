@@ -3,11 +3,11 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use crate::api::BackendLaunch;
-#[cfg(not(target_arch = "wasm32"))]
-pub use library_registry::LIBRARY_MANIFEST_FILENAME;
 #[cfg(target_arch = "wasm32")]
 pub use crate::runtime::BackendWorkerHost;
 pub use crate::runtime::{decode_worker_message, encode_worker_message, AppWorkerClientMessage, AppWorkerRequest, AppWorkerStartupMessage, ResolvedBookData, WorkerCommand, WorkerDispatchResult, WorkerPayload, WorkerSubscription};
+#[cfg(not(target_arch = "wasm32"))]
+pub use library_registry::LIBRARY_MANIFEST_FILENAME;
 
 /// Browser worker startup, ports, and transport integration.
 #[cfg(target_arch = "wasm32")]
@@ -44,6 +44,9 @@ pub use crate::runtime::coordinator_lifecycle;
 /// Mounted Kobo discovery and application-owned library transfers.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod kobo {
-    pub use client_platform_kobo::{detect_kobo_devices, KoboDevice};
     pub use crate::kobo_transfer::{transfer_libraries_to_kobo, KoboTransferSummary};
+    pub use client_platform_kobo::{detect_kobo_devices, KoboDevice};
 }
+
+/// Gate background side effects during a host-owned update startup trial.
+pub use client_platform_runtime::executor::defer_background_work;

@@ -6,4 +6,4 @@ Added **Fantastic Literature Studies** (subject 52323) beneath Literary Theory /
 
 Six selector, descendant-Cutter, and neighboring-code probes pass. Migration replay, SQLite integrity and foreign keys, graph acyclicity and parent placement pass. Unrelated concurrent Biblical Studies selector edits were preserved; matching was rerun against the installed snapshot before publication. Usage counts, matching cache and viewer are refreshed, with the displayed hit and selector totals verified.
 
-Migration: [20260907_extract_fantastic_literature_studies.sql](../migrations/20260907_extract_fantastic_literature_studies.sql). [Manifest](20260907-fantastic-literature-manifest.json). Working artifacts: `/home/johan/.cache/bokheim/fantastic-literature-install/`.
+Migration: 20260907_extract_fantastic_literature_studies.sql. [Manifest](20260907-fantastic-literature-manifest.json). Working artifacts: `/home/johan/.cache/bokheim/fantastic-literature-install/`.

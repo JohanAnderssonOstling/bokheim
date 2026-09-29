@@ -20,7 +20,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     format!("Subject {}", c.concept_id()),
                     c.parent_ids().to_vec(),
                     ["lcc", "bisac", "ddc"].into_iter().map(|s| (s.to_owned(), c.source_selectors(s).to_vec())).collect(),
-                    c.source_labels().to_vec(),
                 )
             })
             .collect();

@@ -128,8 +128,8 @@ fn complete_pages_keep_cards_facets_and_paths_on_one_snapshot() {
         let db = &holder.database;
         let directory = db.create_directory(&sync_common::ROOT_DIR_ID, &"Original folder".into()).unwrap().id;
         commit_book(db, &directory, "1", "Original book", "Writer", "book.epub");
-        db.execute("INSERT INTO book_language SELECT row_id,0,'en-US' FROM book", []).unwrap();
-        db.execute("INSERT INTO book_unified_concept SELECT row_id,(SELECT concept_id FROM curated.unified_concept_route WHERE concept_id>0 LIMIT 1),1 FROM book", []).unwrap();
+        db.connection.execute("INSERT INTO book_language SELECT row_id,0,'en-US' FROM book", []).unwrap();
+        db.connection.execute("INSERT INTO book_unified_concept SELECT row_id,(SELECT concept_id FROM curated.unified_concept_route WHERE concept_id>0 LIMIT 1),1 FROM book", []).unwrap();
         let query = page_query(if subject { "Subject".into() } else { directory.to_string() });
         let browse = || if subject { db.browse_subject(&query, false) } else { db.browse_folder(&query, false) };
         // Build membership first so the hook only intercepts a clean read.
@@ -139,12 +139,12 @@ fn complete_pages_keep_cards_facets_and_paths_on_one_snapshot() {
         let mutation = Arc::new(Mutex::new(None));
         let result = mutation.clone();
         let path = holder.path.clone();
-        db.authorizer(Some(move |context: AuthContext<'_>| {
+        db.connection.authorizer(Some(move |context: AuthContext<'_>| {
             if matches!(context.action, AuthAction::Read { table_name: "book", column_name: "title" }) && !observed.swap(true, Ordering::SeqCst) {
                 let update = (|| -> Result<(), crate::DatabaseError> {
                     let writer = Database::open(&path)?;
-                    writer.execute_batch("UPDATE sync_metadata SET change_origin='remote'; UPDATE book SET title='Changed book',format='pdf'; UPDATE book_language SET language_tag='sv';")?;
-                    writer.execute("UPDATE dir SET name='Changed folder' WHERE id=?1", [directory.to_string()])?;
+                    writer.connection.execute_batch("UPDATE sync_metadata SET change_origin='remote'; UPDATE book SET title='Changed book',format='pdf'; UPDATE book_language SET language_tag='sv';")?;
+                    writer.connection.execute("UPDATE dir SET name='Changed folder' WHERE id=?1", [directory.to_string()])?;
                     Ok(())
                 })();
                 *result.lock().unwrap() = Some(update.map_err(|error| error.to_string()));
@@ -153,7 +153,7 @@ fn complete_pages_keep_cards_facets_and_paths_on_one_snapshot() {
         }))
         .unwrap();
         let page = browse().unwrap();
-        db.authorizer(None::<fn(AuthContext<'_>) -> Authorization>).unwrap();
+        db.connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>).unwrap();
         assert!(fired.load(Ordering::SeqCst), "concurrent mutation must be exercised");
         assert_eq!(mutation.lock().unwrap().as_ref(), Some(&Ok(())), "WAL writer must complete during browsing");
         assert_eq!(page.contents.books[0].title, "Original book");
@@ -179,10 +179,11 @@ fn card_queries_return_the_same_named_fields() {
     let directory = sync_common::ROOT_DIR_ID;
     let hash = commit_book(db, &directory, "2", "First book", "Shared author", "first.epub");
     let other = commit_book(db, &directory, "3", "Second book", "Shared author", "second.epub");
-    db.execute_batch("UPDATE sync_metadata SET change_origin='remote'; UPDATE book SET added_at=row_id*1000,read_progress=25;").unwrap();
-    db.execute("INSERT INTO book_unified_concept SELECT row_id,(SELECT concept_id FROM curated.unified_concept_route WHERE concept_id>0 LIMIT 1),1 FROM book", []).unwrap();
-    db.execute("UPDATE sync_metadata SET change_origin='local'", []).unwrap();
+    db.connection.execute_batch("UPDATE book SET added_at=row_id*1000,read_progress=25;").unwrap();
+    db.connection.execute("INSERT INTO book_unified_concept SELECT row_id,(SELECT concept_id FROM curated.unified_concept_route WHERE concept_id>0 LIMIT 1),1 FROM book", []).unwrap();
+    db.connection.execute("UPDATE sync_metadata SET change_origin='local'", []).unwrap();
     db.update_reading_position(&hash, "epubcfi(/6/2!/4/2/1:0)", Some(25.), None).unwrap();
+    db.connection.execute("INSERT OR IGNORE INTO book_unified_concept SELECT row_id,(SELECT concept_id FROM curated.unified_concept_route WHERE concept_id>0 LIMIT 1),1 FROM book", []).unwrap();
     let expected = db.browse_book_detail(hash).unwrap().book;
     assert_eq!(expected.added_at, 1000);
     let home = db.browse_home(10, false).unwrap();
@@ -227,8 +228,9 @@ fn scoped_search_filters_card_formats_and_membership() {
     let pdf = commit_book(db, &nested, "4", "Shared title", "Writer", "first.pdf");
     let epub = commit_book(db, &shelf, "5", "Another title", "Shared author", "second.epub");
     commit_book(db, &sync_common::ROOT_DIR_ID, "6", "Shared elsewhere", "Writer", "outside.epub");
-    db.execute("UPDATE book SET format='pdf' WHERE content_hash=?1", [pdf.as_str()]).unwrap();
-    db.execute("INSERT INTO book_unified_concept SELECT row_id,(SELECT concept_id FROM curated.unified_concept_route WHERE concept_id>0 LIMIT 1),1 FROM book WHERE content_hash=?1", [pdf.as_str()]).unwrap();
+    db.connection.execute("UPDATE sync_metadata SET change_origin='remote'",[]).unwrap();
+    db.connection.execute("UPDATE book SET format='pdf' WHERE content_hash=?1", [pdf.as_str()]).unwrap();
+    db.connection.execute("INSERT INTO book_unified_concept SELECT row_id,(SELECT concept_id FROM curated.unified_concept_route WHERE concept_id>0 LIMIT 1),1 FROM book WHERE content_hash=?1", [pdf.as_str()]).unwrap();
     let pdf_result = db.browse_library_search_folder(&shelf, "shared", LibraryFileTypeFilter::Pdf, false).unwrap();
     assert_eq!(pdf_result.title_matches.iter().map(|card| card.content_hash).collect::<Vec<_>>(), [pdf]);
     assert!(pdf_result.author_matches.is_empty());
@@ -252,8 +254,8 @@ fn blank_language_selections_and_home_limits() {
     let db = &holder.database;
     let hash = commit_book(db, &sync_common::ROOT_DIR_ID, "7", "Book", "Author", "book.epub");
     db.update_reading_position(&hash, "epubcfi(/6/2!/4/2/1:0)", Some(25.), None).unwrap();
-    db.execute("INSERT INTO book_language SELECT row_id,0,'en-US' FROM book", []).unwrap();
-    db.execute("INSERT INTO book_unified_concept SELECT row_id,(SELECT concept_id FROM curated.unified_concept_route WHERE concept_id>0 LIMIT 1),1 FROM book", []).unwrap();
+    db.connection.execute("INSERT INTO book_language SELECT row_id,0,'en-US' FROM book", []).unwrap();
+    db.connection.execute("INSERT INTO book_unified_concept SELECT row_id,(SELECT concept_id FROM curated.unified_concept_route WHERE concept_id>0 LIMIT 1),1 FROM book", []).unwrap();
     for location in [sync_common::ROOT_DIR_ID.to_string(), "Subject".into()] {
         let mut query = page_query(location.clone());
         let browse = |query: &library_model::LibraryBrowseQuery| if location == "Subject" { db.browse_subject(query, false) } else { db.browse_folder(query, false) }.unwrap();
@@ -287,17 +289,18 @@ fn home_authors_and_detail_hold_a_snapshot_between_component_queries() {
         let directory = db.create_directory(&sync_common::ROOT_DIR_ID, &"Original folder".into()).unwrap().id;
         let hash = commit_book(db, &directory, "8", "Original book", "Author", "book.epub");
         db.update_reading_position(&hash, "epubcfi(/6/2!/4/2/1:0)", Some(25.), None).unwrap();
+    db.connection.execute("INSERT OR IGNORE INTO book_unified_concept SELECT row_id,(SELECT concept_id FROM curated.unified_concept_route WHERE concept_id>0 LIMIT 1),1 FROM book", []).unwrap();
         let outcome = Arc::new(Mutex::new(None));
         let observed = outcome.clone();
         let path = holder.path.clone();
-        db.authorizer(Some(move |context: AuthContext<'_>| {
+        db.connection.authorizer(Some(move |context: AuthContext<'_>| {
             if let AuthAction::Read { table_name, column_name } = context.action {
                 let mut result = observed.lock().unwrap();
                 if table_name == table && column_name == column && result.is_none() {
                     *result = Some(
                         (|| -> Result<(), crate::DatabaseError> {
                             let writer = Database::open(&path)?;
-                            writer.execute_batch("UPDATE sync_metadata SET change_origin='remote'; UPDATE book SET title='Changed'; UPDATE book_dir SET deleted_at=1;")?;
+                            writer.connection.execute_batch("UPDATE sync_metadata SET change_origin='remote'; UPDATE book SET title='Changed'; UPDATE book_dir SET deleted_at=1;")?;
                             Ok(())
                         })()
                         .map_err(|error| error.to_string()),
@@ -328,7 +331,7 @@ fn home_authors_and_detail_hold_a_snapshot_between_component_queries() {
                 assert_eq!(detail.path.last().unwrap().name, "Original folder");
             }
         }
-        db.authorizer(None::<fn(AuthContext<'_>) -> Authorization>).unwrap();
+        db.connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>).unwrap();
         assert_eq!(outcome.lock().unwrap().as_ref(), Some(&Ok(())), "{view}: writer ran between component queries");
         assert_eq!(db.browse_book_count().unwrap(), 0, "{view}: snapshot released");
         assert!(db.connection.is_autocommit());
@@ -347,7 +350,7 @@ fn search_keeps_classification_and_membership_on_one_snapshot() {
         let db = &holder.database;
         let directory = db.create_directory(&sync_common::ROOT_DIR_ID, &"Folder".into()).unwrap().id;
         let hash = commit_book(db, &directory, "9", "Shared title", "Shared author", "book.epub");
-        db.execute("INSERT INTO book_unified_concept SELECT row_id,(SELECT concept_id FROM curated.unified_concept_route WHERE concept_id>0 LIMIT 1),1 FROM book", []).unwrap();
+        db.connection.execute("INSERT INTO book_unified_concept SELECT row_id,(SELECT concept_id FROM curated.unified_concept_route WHERE concept_id>0 LIMIT 1),1 FROM book", []).unwrap();
         let browse = || match scope {
             "folder" => db.browse_library_search_folder(&directory, "shared", LibraryFileTypeFilter::All, false),
             "subject" => db.browse_library_search_subject(Some("Subject"), "shared", LibraryFileTypeFilter::All, false),
@@ -365,7 +368,7 @@ fn search_keeps_classification_and_membership_on_one_snapshot() {
                 if needle == "shared" && !observed.swap(true, Ordering::SeqCst) {
                     let update = (|| -> Result<(), crate::DatabaseError> {
                         let writer = Database::open(&path)?;
-                        writer.execute_batch("UPDATE sync_metadata SET change_origin='remote'; UPDATE book SET title='Changed'; UPDATE book_dir SET deleted_at=1;")?;
+                        writer.connection.execute_batch("UPDATE sync_metadata SET change_origin='remote'; UPDATE book SET title='Changed'; UPDATE book_dir SET deleted_at=1;")?;
                         Ok(())
                     })();
                     update.map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
@@ -391,7 +394,7 @@ fn scoped_search_cost_does_not_grow_with_unrelated_books() {
     let db = &holder.database;
     let directory = db.create_directory(&sync_common::ROOT_DIR_ID, &"Small shelf".into()).unwrap().id;
     commit_book(db, &directory, "a", "Shared title", "Writer", "book.epub");
-    db.execute("INSERT INTO book_unified_concept SELECT row_id,(SELECT concept_id FROM curated.unified_concept_route WHERE concept_id>0 LIMIT 1),1 FROM book", []).unwrap();
+    db.connection.execute("INSERT INTO book_unified_concept SELECT row_id,(SELECT concept_id FROM curated.unified_concept_route WHERE concept_id>0 LIMIT 1),1 FROM book", []).unwrap();
     let measure = || {
         db.browse_library_search_folder(&directory, "shared", LibraryFileTypeFilter::All, false).unwrap();
         db.browse_library_search_subject(Some("Subject"), "shared", LibraryFileTypeFilter::All, false).unwrap();
@@ -415,7 +418,7 @@ fn scoped_search_cost_does_not_grow_with_unrelated_books() {
         })
     };
     let before = measure();
-    db.execute_batch(
+    db.connection.execute_batch(
         "UPDATE sync_metadata SET change_origin='remote';
         WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<2000)
         INSERT INTO book(content_hash,title,format) SELECT printf('%064x',i),'Shared unrelated','epub' FROM n;
@@ -471,27 +474,30 @@ fn assert_untitled_search(db: &Database, hash: sync_common::ContentHash, search:
 fn untitled_books_share_search_matches_and_facets_across_views() {
     let holder = open_test_database();
     let db = &holder.database;
-    // No title at insertion time: exercise initial projection creation too.
+    // This browse fixture owns derived rows, including the distinction between NULL and empty title.
+    db.connection.execute("UPDATE sync_metadata SET change_origin='remote'",[]).unwrap();
     let hash = sync_common::ContentHash::new(&"c".repeat(64));
-    db.execute("INSERT INTO book(content_hash,format,subtitle) VALUES(?1,'epub','Écology')", [hash.as_str()]).unwrap();
-    db.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT ?1,row_id,'untitled.epub','',1 FROM book", [sync_common::ROOT_DIR_ID.to_string()]).unwrap();
-    db.execute("INSERT INTO book_language SELECT row_id,0,'en' FROM book", []).unwrap();
-    db.execute("INSERT INTO book_unified_concept SELECT row_id,(SELECT concept_id FROM curated.unified_concept_route WHERE concept_id>0 LIMIT 1),1 FROM book", []).unwrap();
+    db.connection.execute("INSERT INTO book(content_hash,format,subtitle) VALUES(?1,'epub','Écology')", [hash.as_str()]).unwrap();
+    db.connection.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT ?1,row_id,'untitled.epub','',1 FROM book", [sync_common::ROOT_DIR_ID.to_string()]).unwrap();
+    db.sync_publishable_mutations().unwrap();
+    db.connection.execute("UPDATE sync_metadata SET change_origin='remote'",[]).unwrap();
+    db.connection.execute("INSERT INTO book_language SELECT row_id,0,'en' FROM book", []).unwrap();
+    db.connection.execute("INSERT INTO book_unified_concept SELECT row_id,(SELECT concept_id FROM curated.unified_concept_route WHERE concept_id>0 LIMIT 1),1 FROM book", []).unwrap();
     for search in ["untitled", hash.as_str(), "ecology"] {
         assert_untitled_search(db, hash, search, 1);
     }
     let display = format!("Untitled ({hash}): Écology");
     assert_untitled_search(db, hash, &display, 1);
     assert_eq!(db.browse_book_detail(hash).unwrap().book.title, format!("Untitled ({hash})"));
-    assert_eq!(db.query_row("SELECT sort_title FROM book_browse_text", [], |row| row.get::<_, String>(0)).unwrap(), "", "search fallback does not change alphabetical ordering");
+    assert_eq!(db.connection.query_row("SELECT sort_title FROM book_browse_text", [], |row| row.get::<_, String>(0)).unwrap(), "", "search fallback does not change alphabetical ordering");
 
     for title in ["Named book", ""] {
-        db.execute("UPDATE book SET title=?1", [title]).unwrap();
+        db.connection.execute("UPDATE book SET title=?1", [title]).unwrap();
         assert_untitled_search(db, hash, "untitled", 0);
         assert_untitled_search(db, hash, hash.as_str(), 0);
         assert_untitled_search(db, hash, "ecology", 1);
     }
-    db.execute_batch("UPDATE book SET title=NULL,subtitle=NULL;").unwrap();
+    db.connection.execute_batch("UPDATE book SET title=NULL,subtitle=NULL;").unwrap();
     assert_untitled_search(db, hash, "untitled", 1);
     assert_untitled_search(db, hash, "ecology", 0);
 }

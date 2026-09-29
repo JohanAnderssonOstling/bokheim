@@ -14,7 +14,7 @@ Reviewed all 55 pairs from the original range-hierarchy audit. The findings are:
 
 These counts describe the original pair list, not 55 independent defects.
 Multiple pairs share the same bad range. The applied
-[migration](../migrations/20260920_review_unrelated_lcc_crossings.sql) repairs
+migration repairs
 28 existing range rows, adds bounded supporting ranges, moves one exact
 selector, and corrects three concepts' ancestry. It also renames the former
 Canon Criminal Law concept to Comparative Religious Criminal Law, consistent

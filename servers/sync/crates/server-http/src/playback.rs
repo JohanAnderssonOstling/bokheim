@@ -1,6 +1,6 @@
 //! Bounded, process-local, read-only capabilities for native browser media.
 //! Restart invalidates them; the authenticated client obtains a fresh grant.
-use crate::{assets::stream_asset, extract::{asset_error, AuthUser}, state::AppState};
+use crate::{assets::{stream_asset, stream_audio_track}, extract::{asset_error, AuthUser}, state::AppState};
 use axum::{extract::{Path, State}, http::{header, HeaderMap, Method, StatusCode}, response::Response};
 use server_asset_store::AssetKind;
 use std::{collections::HashMap, sync::{Arc, Mutex}, time::{Duration, Instant}};
@@ -62,6 +62,21 @@ pub(crate) async fn read(State(state): State<AppState>, Path(ticket): Path<Strin
     if asset.checksum != grant.checksum { return Err(StatusCode::PRECONDITION_FAILED); }
     let mut response = stream_asset(asset, AssetKind::Book, &headers, state.transfer_governor.clone(), grant.user).await?;
     response.headers_mut().insert(header::CONTENT_TYPE, header::HeaderValue::from_static("audio/mp4"));
+    response.headers_mut().insert(header::CACHE_CONTROL, header::HeaderValue::from_static("private, no-store"));
+    response.headers_mut().insert(header::REFERRER_POLICY, header::HeaderValue::from_static("no-referrer"));
+    response.headers_mut().insert(header::HeaderName::from_static("cross-origin-resource-policy"), header::HeaderValue::from_static("cross-origin"));
+    if method == Method::HEAD { *response.body_mut() = axum::body::Body::empty(); }
+    Ok(response)
+}
+
+pub(crate) async fn read_track(State(state): State<AppState>, Path((ticket, index)): Path<(String, usize)>, method: Method, headers: HeaderMap) -> Result<Response, StatusCode> {
+    if index >= audiobook_folder::MAX_TRACKS { return Err(StatusCode::NOT_FOUND); }
+    let grant = state.playback.get(&ticket, Instant::now())?;
+    let session = state.account.resolve_token(&grant.credential).await.map_err(server_account::auth_error)?;
+    if session.user_id != grant.user { return Err(StatusCode::FORBIDDEN); }
+    let (asset, track) = state.assets.audiobook_track(&grant.user, &grant.library, &grant.hash, index).await.map_err(asset_error)?.ok_or(StatusCode::NOT_FOUND)?;
+    if asset.checksum != grant.checksum { return Err(StatusCode::PRECONDITION_FAILED); }
+    let mut response = stream_audio_track(asset, track.offset, track.length, &headers, state.transfer_governor.clone(), grant.user).await?;
     response.headers_mut().insert(header::CACHE_CONTROL, header::HeaderValue::from_static("private, no-store"));
     response.headers_mut().insert(header::REFERRER_POLICY, header::HeaderValue::from_static("no-referrer"));
     response.headers_mut().insert(header::HeaderName::from_static("cross-origin-resource-policy"), header::HeaderValue::from_static("cross-origin"));

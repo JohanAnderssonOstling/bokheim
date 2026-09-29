@@ -77,7 +77,7 @@ async fn one_batch_drain_stops_before_the_next_claim() {
     let snapshot = library_database::TransferSnapshot::default();
     let mut out = library_database::TransferOutcome::default();
     let runner = TransferRunner { queue: &queue, host: &host };
-    runner.drain_one_batch(&snapshot, &mut out).await.unwrap();
+    runner.drain_one_batch(&snapshot, &mut out).await.committed(&queue).unwrap();
     assert_eq!(*host.batches.lock().unwrap(), vec![1]);
     let status = queue.statuses();
     assert_eq!(status[0].completed_items, 1);
@@ -85,6 +85,23 @@ async fn one_batch_drain_stops_before_the_next_claim() {
     runner.drain_ready(&snapshot, &mut out).await.unwrap();
     assert_eq!(*host.batches.lock().unwrap(), vec![1, 1, 1]);
     assert!(queue.statuses().is_empty());
+}
+
+#[tokio::test]
+async fn claimed_job_stays_running_until_database_replay_succeeds() {
+    let queue = books();
+    let host = Host::default();
+    let snapshot = library_database::TransferSnapshot::default();
+    let mut out = library_database::TransferOutcome::default();
+    let drain = TransferRunner { queue: &queue, host: &host }.drain_one_batch(&snapshot, &mut out).await;
+    let status = queue.statuses();
+    assert_eq!(status[0].completed_items, 0);
+    assert_eq!(status[0].total_items, 3);
+    drain.commit_failed(&queue, &TransferError::retryable("database commit failed"));
+    let status = queue.statuses();
+    assert_eq!(status[0].completed_items, 0);
+    assert_eq!(status[0].total_items, 3);
+    assert!(queue.download_error(test_support::fixture_content_hash(1)).unwrap().contains("database commit failed"));
 }
 
 #[tokio::test]

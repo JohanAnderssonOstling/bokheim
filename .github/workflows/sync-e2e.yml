@@ -1,92 +1,49 @@
-name: Sync PostgreSQL E2E
+name: Shared release tests (own runner)
 
+# Never execute untrusted pull requests automatically on the private runner.
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - ".github/workflows/sync-e2e.yml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "client/app/**"
-      - "client/library-backend/**"
-      - "client/test-support/**"
-      - "client/account-client/**"
-      - "shared/book-model/**"
-      - "client/platforms/**"
-      - "scripts/checks/library-sql.py"
-      - "scripts/checks/backend-boundaries.py"
-      - "scripts/checks/tests/**"
-      - "servers/sync/**"
-      - "shared/account-contract/**"
-      - "shared/protocol-test-support/**"
-      - "shared/sync-common/**"
-      - "shared/wire/**"
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/sync-e2e.yml"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "client/app/**"
-      - "client/library-backend/**"
-      - "client/test-support/**"
-      - "client/account-client/**"
-      - "shared/book-model/**"
-      - "client/platforms/**"
-      - "scripts/checks/library-sql.py"
-      - "scripts/checks/backend-boundaries.py"
-      - "scripts/checks/tests/**"
-      - "servers/sync/**"
-      - "shared/account-contract/**"
-      - "shared/protocol-test-support/**"
-      - "shared/sync-common/**"
-      - "shared/wire/**"
 
 permissions:
   contents: read
+  statuses: write
+
+concurrency:
+  group: shared-tests-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
-  sync-e2e:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_DB: sync_e2e
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_USER: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d sync_e2e"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+  shared-tests:
+    runs-on: [self-hosted, linux, x64, bokheim-shared]
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: bokheim
     env:
-      SYNC_E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/sync_e2e
+      RUSTUP_TOOLCHAIN: '1.95.0'
+      RUSTC_BOOTSTRAP: '1'
       CARGO_TERM_COLOR: always
-
+      GH_TOKEN: ${{ github.token }}
+      REPORT_REPOSITORY: ${{ github.repository }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Test architecture checks
-        run: python3 -m unittest discover -s scripts/checks/tests
-
-      - name: Check feature SQL organization
-        run: python3 scripts/checks/library-sql.py
-
-      - name: Check backend service boundaries
-        run: python3 scripts/checks/backend-boundaries.py
-
-      - name: Install Rust
-        run: |
-          rustup toolchain install 1.95.0 --profile minimal
-          rustup default 1.95.0
-
-      - name: Test extracted client services
-        run: cargo test --release -p account-client -p book-access -p book-enrichment -p book-model -p library-files -p asset-transfer -p client-platform-runtime -p sync-engine --all-features --lib
-
-      - name: Run synchronization E2E suite
-        run: client/app/tests/run_sync_e2e.sh
+      - uses: actions/checkout@v6
+        with:
+          path: bokheim
+      # Match the pinned sibling sources used by desktop-release.yml.
+      - uses: actions/checkout@v6
+        with:
+          repository: JohanAnderssonOstling/GPUI-Fork
+          ref: cb2f5b981889d421153d5804526929e32c0788fd
+          path: GPUI-Fork
+      - uses: actions/checkout@v6
+        with:
+          repository: JohanAnderssonOstling/HtmlEngine
+          ref: 91766fb2db8d56b38dc0336ddf74972da9872520
+          path: HtmlEngine
+      - uses: actions/checkout@v6
+        with:
+          repository: JohanAnderssonOstling/HtmlViewCore
+          ref: 0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7
+          path: HtmlViewCore
+      - name: Run shared suite and report this commit
+        run: python3 scripts/ci/shared-tests.py --report "$REPORT_REPOSITORY"

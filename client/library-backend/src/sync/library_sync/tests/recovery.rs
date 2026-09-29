@@ -15,7 +15,7 @@ async fn independent_repair_republishes_state_missing_from_the_server_inventory(
         state.0.lock().unwrap().extend(request.mutations.iter().map(|mutation| mutation.kind.clone()));
         binary_sync_response(&SyncExchangeResponse {
             push: PushMutationsResponse { accepted: request.mutations.iter().map(|mutation| mutation.mutation_id).collect(), rejected: Vec::new() },
-            pull: PullStateResponse { mutations: Vec::new(), next_cursor: request.cursor, has_more: false },
+            pull: PullStateResponse { book_creations: Vec::new(), mutations: Vec::new(), next_cursor: request.cursor, has_more: false },
         })
     }
 
@@ -94,7 +94,7 @@ async fn inventory_repair_resumes_its_checkpoint_after_a_failed_page() {
     }
     assert!(manager.repair_inventory().await.is_err());
     assert!(manager.database.sync_inventory_checkpoint().unwrap().is_some());
-    assert!(manager.database.query_row("SELECT operation_sync_unfinished FROM sync_metadata WHERE singleton=1", [], |row| row.get::<_, bool>(0)).unwrap());
+    assert!(crate::test_database::raw(&manager.database).query_row("SELECT operation_sync_unfinished FROM sync_metadata WHERE singleton=1", [], |row| row.get::<_, bool>(0)).unwrap());
     // A fresh handle has no in-memory progress, but reads the durable checkpoint.
     let url = manager.server_url.clone();
     drop(manager);
@@ -106,8 +106,8 @@ async fn inventory_repair_resumes_its_checkpoint_after_a_failed_page() {
     assert_eq!(calls[0].len(), 256);
     assert_eq!(calls[1], calls[2], "retry resumes the failed page, not the completed first page");
     assert!(manager.database.sync_inventory_checkpoint().unwrap().is_none());
-    assert!(!manager.database.query_row("SELECT operation_sync_unfinished FROM sync_metadata WHERE singleton=1", [], |row| row.get::<_, bool>(0)).unwrap());
-    assert!(manager.database.query_row("SELECT last_successful_sync_at IS NULL FROM sync_metadata WHERE singleton=1", [], |row| row.get::<_, bool>(0)).unwrap(), "repair is not a full-sync checkpoint");
+    assert!(!crate::test_database::raw(&manager.database).query_row("SELECT operation_sync_unfinished FROM sync_metadata WHERE singleton=1", [], |row| row.get::<_, bool>(0)).unwrap());
+    assert!(crate::test_database::raw(&manager.database).query_row("SELECT last_successful_sync_at IS NULL FROM sync_metadata WHERE singleton=1", [], |row| row.get::<_, bool>(0)).unwrap(), "repair is not a full-sync checkpoint");
     server.abort();
 }
 
@@ -132,7 +132,7 @@ async fn a_rejected_cursor_is_dropped_and_the_exchange_recovers() {
             Some(99) => axum::http::StatusCode::GONE.into_response(),
             None => binary_sync_response(&SyncExchangeResponse {
                 push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() },
-                pull: pull_response(vec![pulled_change(1, added(1, "Republished", 10))], LibraryRevision::new(1).ok(), false),
+                pull: pull_response(vec![pulled_change(1, added(1, 10))], LibraryRevision::new(1).ok(), false),
             }),
             Some(1) => binary_sync_response(&SyncExchangeResponse {
                 push: PushMutationsResponse { accepted: request.mutations.iter().map(|mutation| mutation.mutation_id).collect(), rejected: Vec::new() },

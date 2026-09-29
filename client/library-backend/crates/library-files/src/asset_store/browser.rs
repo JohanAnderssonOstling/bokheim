@@ -150,10 +150,6 @@ pub(super) fn exists(handle: &Handle, asset_name: String) -> Result<bool, AssetS
     client_platform_web::web_storage::file_exists(&name(handle, asset_name)).map_err(AssetStoreError::operation)
 }
 
-pub(super) async fn book_bytes(library_locator: &str) -> Result<u64, AssetStoreError> {
-    client_platform_web::web_storage::total_file_bytes(&format!("{}/book/", namespace(library_locator)?)).await.map_err(AssetStoreError::operation)
-}
-
 pub(super) async fn book_bytes_at_handle(handle: &Handle) -> Result<u64, AssetStoreError> {
     client_platform_web::web_storage::total_file_bytes(&format!("{}/book/", handle.namespace)).await.map_err(AssetStoreError::operation)
 }

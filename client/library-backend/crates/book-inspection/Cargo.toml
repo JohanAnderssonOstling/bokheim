@@ -14,7 +14,7 @@ workspace = true
 pdf-range-reader = { path = "../../../../shared/pdf-range-reader" }
 mobi = { workspace = true, optional = true }
 book-enrichment = { path = "../book-enrichment" }
-pdf-reader-core = { path = "../../../../apps/reader/crates/pdf/core" }
+pdf-reader-core = { path = "../../../../shared/pdf-reader-core" }
 metadata-contract = { path = "../../../../shared/metadata-contract" }
 epub_provider = { path = "../../../../shared/epub" }
 lopdf = { version = "0.44", default-features = false }

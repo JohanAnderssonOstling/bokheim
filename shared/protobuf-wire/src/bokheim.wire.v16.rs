@@ -76,7 +76,7 @@ pub struct MapEntry {
 /// them. Additive fields must remain optional or have a safe zero default.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MutationValue {
-    #[prost(oneof = "mutation_value::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14")]
+    #[prost(oneof = "mutation_value::Kind", tags = "1, 2, 3, 4, 5, 6, 7, 11, 12, 13, 14, 15")]
     pub kind: ::core::option::Option<mutation_value::Kind>,
 }
 /// Nested message and enum types in `MutationValue`.
@@ -105,6 +105,8 @@ pub mod mutation_value {
         PdfReaderMetadata(::prost::alloc::vec::Vec<u8>),
         #[prost(bytes, tag = "14")]
         BookToc(::prost::alloc::vec::Vec<u8>),
+        #[prost(message, tag = "15")]
+        BookFacts(super::BookFacts),
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -125,12 +127,12 @@ pub mod book_lifecycle {
     }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct PresentBook {
-    #[prost(message, optional, tag = "1")]
-    pub metadata: ::core::option::Option<BookRecord>,
-    #[prost(uint64, tag = "2")]
+pub struct PresentBook {}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BookFacts {
+    #[prost(uint64, tag = "1")]
     pub added_at: u64,
-    #[prost(enumeration = "BookFormat", tag = "3")]
+    #[prost(enumeration = "BookFormat", tag = "2")]
     pub format: i32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -434,6 +436,7 @@ pub enum BookFormat {
     Html = 6,
     Webpub = 7,
     M4b = 8,
+    Mp3Folder = 9,
 }
 impl BookFormat {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -451,6 +454,7 @@ impl BookFormat {
             Self::Html => "BOOK_FORMAT_HTML",
             Self::Webpub => "BOOK_FORMAT_WEBPUB",
             Self::M4b => "BOOK_FORMAT_M4B",
+            Self::Mp3Folder => "BOOK_FORMAT_MP3_FOLDER",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -465,6 +469,7 @@ impl BookFormat {
             "BOOK_FORMAT_HTML" => Some(Self::Html),
             "BOOK_FORMAT_WEBPUB" => Some(Self::Webpub),
             "BOOK_FORMAT_M4B" => Some(Self::M4b),
+            "BOOK_FORMAT_MP3_FOLDER" => Some(Self::Mp3Folder),
             _ => None,
         }
     }

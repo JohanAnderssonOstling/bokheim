@@ -1,7 +1,7 @@
 //! PDF projection of shared reader annotations.
 
-use book_model::{AnnotationStyle};
-use library_backend::{ReaderAnnotation};
+use book_model::AnnotationStyle;
+use library_backend::ReaderAnnotation;
 use pdf_reader_core::NormalizedRect;
 use pdf_view_gpui::{PdfAnnotationOverlay, PdfAnnotationStyle};
 

@@ -143,16 +143,35 @@ pub(crate) struct PaginatorGroupPolicy {
     /// leftover goes. This margin makes the row narrower rather than pushing
     /// children off the end.
     pub(crate) edge_inset: Pixels,
+    /// Keep the gaps at their width and leave a row's slack after its last
+    /// child, rather than spreading it into the gaps.
+    pub(crate) pack_start: bool,
+    /// Paint shared one-pixel cell rules after children, inside the paginator's
+    /// clipping bounds. Used by the flush browse section grid.
+    pub(crate) grid_rules: bool,
 }
 
 impl PaginatorGroupPolicy {
     pub(crate) fn new(width: PaginatorWidthPolicy, sizing: PaginatorSizing, row_gap: Pixels) -> Self {
-        Self { intrinsic: false, width, sizing, row_gap: px(f32::from(row_gap).max(0.0)), column_gap: px(COLUMN_GAP), maximum_width: None, minimum_columns: 1, inset_edges: true, edge_inset: Pixels::ZERO }
+        Self { intrinsic: false, width, sizing, row_gap: px(f32::from(row_gap).max(0.0)), column_gap: px(COLUMN_GAP), maximum_width: None, minimum_columns: 1, inset_edges: true, edge_inset: Pixels::ZERO, pack_start: false, grid_rules: false }
     }
 
     /// Wrap measured child widths with fixed gaps and no stretching.
     pub(crate) fn intrinsic(mut self) -> Self {
         self.intrinsic = true;
+        self
+    }
+
+    /// Packs children against the row's start at their own width, with fixed
+    /// gaps; whatever width is left over stays empty after the last child.
+    pub(crate) fn pack_start(mut self) -> Self {
+        self.pack_start = true;
+        self.inset_edges = false;
+        self
+    }
+
+    pub(crate) fn with_grid_rules(mut self) -> Self {
+        self.grid_rules = true;
         self
     }
 
@@ -199,11 +218,9 @@ impl PaginatorGroupPolicy {
 
 /// A one-row horizontal shelf of ordinary book cards.
 ///
-/// Home's carousels and the author index's shelves are the same thing seen in
-/// two places, so they resolve their geometry here rather than each restating
-/// it. The cards are the ordinary book cards at their ordinary width: a shelf
-/// that sized its covers differently would be a second visual language for the
-/// same object.
+/// The cards are the ordinary book cards at their ordinary width: a shelf that
+/// sized its covers differently would be a second visual language for the same
+/// object.
 ///
 /// Rows start flush with their heading. Cards grow up to 25%, then spare
 /// width expands the gaps.
@@ -268,6 +285,84 @@ pub(crate) fn book_card_policy(detailed: bool, cover_text: CoverText) -> Paginat
     PaginatorGroupPolicy::new(width, sizing, gap).with_gap(gap).with_maximum_width(maximum_width).with_minimum_columns(minimum_columns).flush_edges()
 }
 
+/// Cover-only cards in the graph sidebar. The preferred width is 200 px and
+/// may stretch to 300 px; the paginator computes row height from the resolved
+/// width and the cover aspect ratio. Phones keep two columns so the covers fit
+/// in the bottom pane beside the graph.
+pub(crate) fn graph_cover_policy() -> PaginatorGroupPolicy {
+    let width = PaginatorWidthPolicy::pixels(px(200.0));
+    let gap = px(ui_components::BOOK_GRID_BOOK_GAP);
+    PaginatorGroupPolicy::new(
+        width,
+        PaginatorSizing::aspect_ratio(ui_components::BOOK_COVER_ASPECT_RATIO).with_padding(px(ui_components::BOOK_CARD_PADDING)),
+        gap,
+    )
+    .with_gap(gap)
+    .with_maximum_width(PaginatorWidthPolicy::pixels(px(300.0)))
+    .with_minimum_columns(if ui_components::has_native_back_button() { 2 } else { 1 })
+    .with_edge_inset(px(12.0))
+}
+
+/// Section cards in the mixed subject/folder browse flow. Every card in a row
+/// is the same width and height, which makes backward page filling produce
+/// the same rows as forward filling. The preferred width fits one column of
+/// child entries beside a single row of covers at their original size.
+pub(super) const BROWSE_SECTION_CARD_WIDTH: f32 = 390.0;
+
+fn section_cover_cell_width() -> f32 {
+    ui_components::SECTION_CARD_COVER_WIDTH + ui_components::BOOK_CARD_PADDING * 2.0
+}
+
+/// Keep the original cover height while giving child entries enough rows to
+/// fill that space before taking another horizontal column.
+pub(crate) fn browse_section_body_height(_width: Pixels, rem_size: Pixels) -> Pixels {
+    let entries = f32::from(rem_size) * ui_components::SECTION_CARD_SUBJECT_ROW_HEIGHT_REM * ui_components::SECTION_CARD_SUBJECT_ROWS_PER_COLUMN as f32;
+    px(entries.max(f32::from(browse_section_cover_policy().sizing.height(px(section_cover_cell_width()), rem_size))))
+}
+
+/// Section cards are at least `BROWSE_SECTION_CARD_WIDTH` wide, which decides
+/// how many fit in a row; the row's slack then widens every card equally
+/// rather than the gaps between them.
+pub(crate) fn browse_section_card_policy() -> PaginatorGroupPolicy {
+    let width = PaginatorWidthPolicy::pixels(px(BROWSE_SECTION_CARD_WIDTH));
+    // Exactly the frame (padding, border, heading and the gap under it) around
+    // the entry-led body.
+    let frame = px(ui_components::SPACE_MD * 2.0 + 2.0 + ui_components::SPACE_SM);
+    let sizing = PaginatorSizing::pixels(frame).with_rems(Rems(ui_components::SECTION_CARD_HEADING_HEIGHT_REM)).with_nested(browse_section_body_height);
+    // Keep the gap between tiles, while the first tile starts at the same
+    // content inset as the breadcrumb and the first book cover.
+    PaginatorGroupPolicy::new(width, sizing, px(ui_components::SPACE_MD))
+        .with_gap(px(ui_components::SPACE_MD))
+        .with_edge_inset(px(ui_components::CONTENT_INSET))
+        .flush_edges()
+}
+
+/// A cover-only book row inside a browse section card. The cell width
+/// includes the normal book-card padding around the artwork.
+pub(crate) fn browse_section_cover_policy() -> PaginatorGroupPolicy {
+    let width = PaginatorWidthPolicy::pixels(px(section_cover_cell_width()));
+    let gap = px(ui_components::BOOK_GRID_BOOK_GAP);
+    PaginatorGroupPolicy::new(
+        width,
+        PaginatorSizing::aspect_ratio(ui_components::BOOK_COVER_ASPECT_RATIO).with_padding(px(ui_components::BOOK_CARD_PADDING)),
+        gap,
+    )
+    .with_gap(gap)
+    .with_maximum_width(width)
+    .pack_start()
+}
+
+/// One shared horizontal sequence of child-entry columns followed by covers.
+/// Cover cells already have their own padding. The final child column adds
+/// its own trailing space when direct books follow it.
+pub(crate) fn browse_section_item_policy() -> PaginatorGroupPolicy {
+    let width = PaginatorWidthPolicy::pixels(px(section_cover_cell_width()));
+    PaginatorGroupPolicy::new(width, PaginatorSizing::pixels(Pixels::ZERO).with_nested(browse_section_body_height), Pixels::ZERO)
+        .with_gap(Pixels::ZERO)
+        .with_maximum_width(width)
+        .pack_start()
+}
+
 /// How tall the cards on a shelf resolve to, given the width of the row they
 /// sit in. The carousel fills its row, so the row's width is theirs.
 ///
@@ -299,15 +394,31 @@ fn shelf_cards_height_cover_only(row_width: Pixels, rem_size: Pixels) -> Pixels 
 /// nominal on a wide window, and a cover is sized by aspect ratio, so a row
 /// holding their nominal height would clip the bottom of every stretched cover
 /// and the title under it.
-pub(crate) fn shelf_rows_policy(cover_text: CoverText, subject_rows: usize) -> PaginatorGroupPolicy {
+pub(crate) fn shelf_rows_policy(cover_text: CoverText) -> PaginatorGroupPolicy {
     let cards: fn(Pixels, Pixels) -> Pixels = match cover_text {
         CoverText::Always => shelf_cards_height_always,
         CoverText::CoverOnly => shelf_cards_height_cover_only,
     };
     PaginatorGroupPolicy::new(
         PaginatorWidthPolicy::new(Rems(ui_components::SHELF_ROW_WIDTH_REM)),
-        PaginatorSizing::rems(Rems(ui_components::shelf_heading_height_rem(subject_rows))).with_pixels(px(ui_components::CAROUSEL_CONTENT_GAP)).with_nested(cards),
+        PaginatorSizing::rems(Rems(ui_components::SHELF_HEADING_HEIGHT_REM)).with_pixels(px(ui_components::CAROUSEL_CONTENT_GAP)).with_nested(cards),
         px(ui_components::SHELF_ROW_GAP),
     )
     .flush_edges()
+}
+
+/// The names on the author index. An entry is at least
+/// `AUTHOR_INDEX_ENTRY_WIDTH_REM` wide, which decides how many columns fit; the
+/// row's slack then widens every entry rather than the gaps, so the columns stay
+/// an even rhythm down the page. Entries are rows of a list, so they sit flush
+/// on top of each other and their own rules separate them.
+pub(crate) fn author_index_entry_policy() -> PaginatorGroupPolicy {
+    PaginatorGroupPolicy::new(PaginatorWidthPolicy::new(Rems(ui_components::AUTHOR_INDEX_ENTRY_WIDTH_REM)), PaginatorSizing::rems(Rems(ui_components::AUTHOR_INDEX_ENTRY_HEIGHT_REM)), Pixels::ZERO)
+        .with_gap(px(ui_components::AUTHOR_INDEX_COLUMN_GAP))
+        .flush_edges()
+}
+
+/// The heading over each letter of the author index.
+pub(crate) fn author_index_letter_sizing() -> PaginatorSizing {
+    PaginatorSizing::rems(Rems(ui_components::AUTHOR_INDEX_LETTER_HEIGHT_REM)).with_pixels(px(ui_components::AUTHOR_INDEX_LETTER_FIXED_HEIGHT))
 }

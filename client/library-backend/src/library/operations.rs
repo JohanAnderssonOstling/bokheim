@@ -34,10 +34,8 @@ impl LibrarySession {
             crate::ThumbnailResolution::Browse => self.assets.read_thumbnail_variant(&content_hash, resolution.width()).await.map_err(BackendError::operation)?,
             crate::ThumbnailResolution::HighDensity => self.assets.read_bytes(BlobKind::Thumbnail, &content_hash).await.map_err(BackendError::operation)?,
         };
-        if bytes.is_none() && self.assets.exists(BlobKind::Book, &content_hash).map_err(BackendError::operation)? {
-            if self.db.thumbnail_book_format(content_hash).map_err(BackendError::operation)?.is_some() {
-                self.db.request_missing_thumbnail(&content_hash).map_err(BackendError::operation)?;
-            }
+        if bytes.is_none() && self.assets.exists(BlobKind::Book, &content_hash).map_err(BackendError::operation)? && self.db.thumbnail_book_format(content_hash).map_err(BackendError::operation)?.is_some() {
+            self.db.request_missing_thumbnail(&content_hash).map_err(BackendError::operation)?;
         }
         Ok(bytes)
     }
@@ -158,7 +156,7 @@ impl LibrarySession {
         } else {
             let reader = staged.open_reader().map_err(BackendError::operation)?;
             Some(
-                cpu_host::submit_book(&*self.cpu, cpu_host::Inspect { source_name: import.file_name.clone(), format: import.format }, cpu_host::as_cpu_reader(reader))
+                cpu_host::submit_book(&*self.cpu, cpu_host::Inspect { source_name: import.file_name.clone(), format: import.format, checksum: Some(staged.checksum()) }, cpu_host::as_cpu_reader(reader))
                     .await
                     .map_err(|error| BackendError::message(format!("invalid {} book: {error}", import.format.canonical_extension().to_ascii_uppercase())))?,
             )

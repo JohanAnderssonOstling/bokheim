@@ -36,22 +36,6 @@ impl StoredVersion {
     }
 }
 
-// Field order matches record_versions_batch's JSON array contract.
-type VersionRow<'a> = (&'a str, &'a str, &'a str, i64, i64, String, i64, String);
-
-fn version_row<'a>(change: &sync_common::ServerMutation, identity: &'a (&str, String, String)) -> Result<VersionRow<'a>, DatabaseError> {
-    Ok((
-        identity.0,
-        identity.1.as_str(),
-        identity.2.as_str(),
-        storage_i64(change.mutation.changed_at, "change timestamp").map_err(DatabaseError::operation)?,
-        i64::from(change.mutation.conflict_rank),
-        change.replica_id.to_string(),
-        storage_i64(change.mutation.replica_seq.get(), "actor sequence").map_err(DatabaseError::operation)?,
-        change.mutation.mutation_id.to_string(),
-    ))
-}
-
 fn read_version(conn: &rusqlite::Connection, kind: &str, key: &str, subkey: &str) -> Result<Option<library_replica::VersionKey>, DatabaseError> {
     let mut stored = None;
     conn.read_sync_state_version_select(kind, key, subkey, |row| {
@@ -64,15 +48,14 @@ fn read_version(conn: &rusqlite::Connection, kind: &str, key: &str, subkey: &str
 /// Decoded wire values and state identities only. Never snapshots database
 /// state: winning versions and lifecycle checks still run under the writer.
 struct PreparedRemoteChanges<'a> {
-    changes: Vec<(&'a sync_common::ServerMutation, MutationBody, (&'static str, String, String))>,
+    changes: Vec<(&'a sync_common::ServerMutation, MutationBody)>,
 }
 
 fn prepare_remote_changes(changes: &[sync_common::ServerMutation]) -> Result<PreparedRemoteChanges<'_>, Box<dyn std::error::Error + Send + Sync>> {
     let mut prepared = Vec::with_capacity(changes.len());
     for change in changes {
         if let Some(body) = MutationBody::from_wire(&change.mutation)? {
-            let identity = sync_state_identity(&body);
-            prepared.push((change, body, identity));
+            prepared.push((change, body));
         } else {
             log::debug!("Skipping unknown synchronized state kind {}", change.mutation.kind);
         }
@@ -80,11 +63,12 @@ fn prepare_remote_changes(changes: &[sync_common::ServerMutation]) -> Result<Pre
     Ok(PreparedRemoteChanges { changes: prepared })
 }
 
-fn sync_state_identity(body: &MutationBody) -> (&'static str, String, String) {
+pub(crate) fn sync_state_identity(body: &MutationBody) -> (&'static str, String, String) {
     match body {
         MutationBody::DirectoryName { dir_id, .. } => ("directory_name", dir_id.to_string(), String::new()),
         MutationBody::DirectoryParent { dir_id, .. } => ("directory_parent", dir_id.to_string(), String::new()),
         MutationBody::DirectoryLifecycle { dir_id, .. } => ("directory_lifecycle", dir_id.to_string(), String::new()),
+        MutationBody::BookFacts { content_hash, .. } => ("book_facts", content_hash.to_string(), String::new()),
         MutationBody::BookLifecycle { content_hash, .. } => ("book_lifecycle", content_hash.to_string(), String::new()),
         MutationBody::Placement { dir_id, content_hash, .. } => ("placement", content_hash.to_string(), dir_id.to_string()),
         MutationBody::ReadingPosition { content_hash, .. } => ("reading_position", content_hash.to_string(), String::new()),
@@ -96,43 +80,10 @@ fn sync_state_identity(body: &MutationBody) -> (&'static str, String, String) {
     }
 }
 
-/// Read snapshots only for independent additions; mixed pages retain ordered reads.
-struct BookSnapshot {
-    version: Option<library_replica::VersionKey>,
-    has_metadata: bool,
-    is_purged: bool,
-    exists: bool,
-}
-
-fn independent_additions(changes: &PreparedRemoteChanges<'_>) -> bool {
-    let mut seen = std::collections::HashSet::new();
-    !changes.changes.is_empty() && changes.changes.iter().all(|(_, body, _)| matches!(body, MutationBody::BookLifecycle { content_hash, value: library_replica::BookLifecycleState::Present { .. } } if seen.insert(*content_hash)))
-}
-
-fn independent_metadata(changes: &PreparedRemoteChanges<'_>) -> bool {
-    let mut seen = std::collections::HashSet::new();
-    !changes.changes.is_empty() && changes.changes.iter().all(|(_, body, _)| matches!(body, MutationBody::Metadata { content_hash, .. } if seen.insert(*content_hash)))
-}
-
-fn incoming_version(change: &sync_common::ServerMutation) -> library_replica::VersionKey {
-    library_replica::VersionKey::new(change.mutation.changed_at, change.mutation.conflict_rank, change.replica_id.clone(), change.mutation.replica_seq.get(), change.mutation.mutation_id)
-}
-
-/// Single-statement snapshot read, same shape as the cursor helpers: one
-/// cached statement, no transaction orchestration.
-fn read_book_snapshots(conn: &rusqlite::Connection, keys_json: &str) -> Result<Vec<BookSnapshot>, DatabaseError> {
-    let mut snapshots = Vec::new();
-    conn.book_addition_snapshots(keys_json, |row| {
-        snapshots.push(BookSnapshot { has_metadata: row.get(0)?, version: if row.get::<_, Option<i64>>(1)?.is_some() { StoredVersion::decode_row(row, 1)? } else { None }, is_purged: row.get(6)?, exists: row.get(7)? });
-        Ok(())
-    })
-    .map_err(DatabaseError::operation)?;
-    Ok(snapshots)
-}
-
 /// CPU-only book projection, built before the writer runs its
 /// statements. Mirrors the enrichment write path: identical inputs project
 /// identical rows.
+#[derive(Clone)]
 pub(crate) struct PreparedBook {
     pub(crate) metadata: book_model::BookMetadata,
     pub(crate) encoded: Vec<u8>,
@@ -206,6 +157,7 @@ impl rusqlite::types::ToSql for Cell {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct ClassificationRows {
     pub(crate) table: &'static str,
     pub(crate) keys: usize,
@@ -297,11 +249,48 @@ pub(crate) fn write_book_projection(tx: &rusqlite::Transaction<'_>, hash: &str, 
         tx.insert_book_identifier(book_id, position as i64, &identifier_scheme_label(identifier.scheme()), identifier.value(), identifier.canonical_value().as_deref(), identifier_scope_label(identifier.scope()))
             .map_err(DatabaseError::operation)?;
     }
-    // Languages are immutable per book; INSERT OR IGNORE keeps this idempotent
-    // without checking prior state.
+    // Languages are a projection of the complete winning metadata value.
+    tx.execute("DELETE FROM book_language WHERE book_row_id=?1", [book_id])?;
     for (position, language) in projected.metadata.languages.iter().enumerate() {
         tx.insert_book_language(book_id, position as i64, language.as_str()).map_err(DatabaseError::operation)?;
     }
+    write_subject_projection(tx, book_id, projected)?;
+    for (kind, values) in [("enrichment_isbn", projected.references.clone())] {
+        tx.meta_replace_prepared_projections_delete(book_id, kind).map_err(DatabaseError::operation)?;
+        for (position, (value, qualifier, secondary)) in values.iter().enumerate() {
+            tx.insert_book_value(book_id, kind, position as i64, value, qualifier.as_deref(), secondary.as_deref()).map_err(DatabaseError::operation)?;
+        }
+    }
+    Ok(())
+}
+
+mod pull;
+pub(crate) use pull::rebuild_remote_directories;
+
+pub(crate) mod registers;
+pub(crate) use pull::project_dirty;
+pub(crate) use registers::commit;
+
+/// Reconcile derived subject rows without changing canonical metadata or other projections.
+pub(crate) fn write_subject_projection(tx: &rusqlite::Transaction<'_>, book_id: i64, projected: &PreparedBook) -> Result<(), DatabaseError> {
+    // Manual subject paths are legacy canonical evidence. Retain their stable
+    // concept IDs across renames/reparenting without rewriting synchronized metadata.
+    let mut adjusted;
+    let projected = if projected.subject_codes.iter().any(|c| c.system_id()==subject_projection::UNIFIED_SYSTEM_ID) {
+        adjusted=projected.clone();
+        for (index,code) in adjusted.subject_codes.iter().enumerate() {
+            if code.system_id()!=subject_projection::UNIFIED_SYSTEM_ID {continue;}
+            let mut retained=Vec::new();
+            for position in code.evidence_positions() {
+                let mut query=tx.prepare("SELECT DISTINCT e.concept_id,p.path FROM book_unified_concept_evidence e JOIN curated.unified_concept_paths p ON p.concept_id=e.concept_id WHERE e.book_row_id=?1 AND e.subject_position=?2 AND e.source_system_id='unified' AND e.source_code=?3")?;
+                retained.extend(query.query_map(rusqlite::params![book_id,*position as i64,code.code()],|r|Ok((index,r.get::<_,i64>(0)?,r.get::<_,String>(1)?)))?.collect::<Result<Vec<_>,_>>()?);
+            }
+            if !retained.is_empty() { adjusted.concepts.retain(|(i,_,_)| *i!=index); adjusted.concepts.extend(retained); }
+        }
+        adjusted.classification_rows=prepare_classification_rows(&adjusted);
+        &adjusted
+    } else {projected};
+
     {
         for assignment in &projected.assignments {
             if assignment.system_id() == subject_projection::BISAC_SYSTEM_ID {
@@ -387,14 +376,5 @@ pub(crate) fn write_book_projection(tx: &rusqlite::Transaction<'_>, hash: &str, 
             }
         }
     }
-    for (kind, values) in [("enrichment_isbn", projected.references.clone())] {
-        tx.meta_replace_prepared_projections_delete(book_id, kind).map_err(DatabaseError::operation)?;
-        for (position, (value, qualifier, secondary)) in values.iter().enumerate() {
-            tx.insert_book_value(book_id, kind, position as i64, value, qualifier.as_deref(), secondary.as_deref()).map_err(DatabaseError::operation)?;
-        }
-    }
     Ok(())
 }
-
-mod pull;
-pub(crate) use pull::rebuild_remote_directories;

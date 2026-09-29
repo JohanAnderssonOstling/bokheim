@@ -351,7 +351,7 @@ impl LibrarySync {
             asset_storage_enabled: self.asset_storage_enabled.clone(),
             assets: self.assets.clone(),
             http_client: self.http_client.clone(),
-            library_id: self.library_id.clone(),
+            library_id: self.library_id,
             event_tx: self.event_tx.clone(),
             queue: self.transfer_queue.clone(),
             credentials: self.credentials.clone(),

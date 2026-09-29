@@ -13,17 +13,6 @@ fn split_lcc_range(selector: &str) -> Result<(&str, &str), String> {
     Ok((start, end))
 }
 
-fn upgrade_lcc_ranges(connection: &Connection) -> Result<(), String> {
-    let version: String = connection.query_row("SELECT value FROM taxonomy_meta WHERE key='format_version'", [], |r| r.get(0)).map_err(|e| e.to_string())?;
-    if version == "7" {
-        connection.execute_batch(include_str!("../data/migrations/20260907_lcc_range_endpoints_v8.sql")).map_err(|e| format!("failed to migrate LCC ranges: {e}"))?;
-    }
-    super::range_storage::upgrade(connection)?;
-    super::label_storage::upgrade(connection)?;
-    connection.execute_batch("CREATE TABLE IF NOT EXISTS ddc_selector(selector TEXT NOT NULL CHECK(length(selector)=3 AND selector GLOB '[0-9][0-9][0-9]'),concept_id INTEGER NOT NULL REFERENCES concept(concept_id) ON DELETE CASCADE,PRIMARY KEY(selector)) STRICT, WITHOUT ROWID; CREATE INDEX IF NOT EXISTS ddc_selector_concept_idx ON ddc_selector(concept_id);").map_err(|e| format!("failed to initialize DDC selectors: {e}"))?;
-    Ok(())
-}
-
 pub(crate) fn read_embedded_unified_taxonomy() -> Result<Vec<UnifiedConceptDefinition>, String> {
     let mut connection = Connection::open_in_memory().map_err(|error| format!("failed to open embedded taxonomy database: {error}"))?;
     connection.deserialize_bytes("main", DEFAULT_UNIFIED_TAXONOMY_SQLITE).map_err(|error| format!("failed to open embedded taxonomy database image: {error}"))?;
@@ -60,7 +49,7 @@ pub fn has_unified_taxonomy_overlay(path: &Path) -> Result<bool, String> {
 
 pub fn has_unified_taxonomy_overlay_in(connection: &Connection, source: &str) -> Result<bool, String> {
     let format_version = connection.query_row("SELECT value FROM taxonomy_meta WHERE key='format_version'", [], |row| row.get::<_, String>(0)).map_err(|error| format!("failed to read taxonomy database format {source}: {error}"))?;
-    if !matches!(format_version.as_str(), "7" | "8" | "9" | "10" | "11") {
+    if format_version != "1" {
         return Err(format!("unsupported unified taxonomy database format {format_version} in {source}"));
     }
     connection.query_row("SELECT EXISTS(SELECT 1 FROM taxonomy_meta WHERE key='server_release_id')", [], |row| row.get::<_, bool>(0)).map_err(|error| format!("failed to inspect taxonomy overlay marker {source}: {error}"))
@@ -151,9 +140,8 @@ pub fn merge_unified_taxonomy_sqlite_with_resolutions(path: &Path, server_releas
 
 pub fn merge_unified_taxonomy_connection(connection: &mut Connection, server_release_id: u64, concepts: &[UnifiedConceptDefinition], resolutions: &[UnifiedCodeResolution], source: &str) -> Result<(), String> {
     connection.pragma_update(None, "foreign_keys", true).map_err(|error| format!("failed to enable local taxonomy constraints {source}: {error}"))?;
-    upgrade_lcc_ranges(connection)?;
     let format_version = connection.query_row("SELECT value FROM taxonomy_meta WHERE key='format_version'", [], |row| row.get::<_, String>(0)).map_err(|error| format!("failed to read local taxonomy format {source}: {error}"))?;
-    if !matches!(format_version.as_str(), "7" | "8" | "9" | "10" | "11") {
+    if format_version != "1" {
         return Err(format!("unsupported local unified taxonomy format {format_version} in {source}"));
     }
     let transaction = connection.transaction().map_err(|error| format!("failed to start local taxonomy merge {source}: {error}"))?;
@@ -270,38 +258,12 @@ mod tests {
         let mut db = Connection::open_in_memory().unwrap();
         reset_unified_taxonomy_connection(&mut db).unwrap();
         for (release, display) in [(1, "Political History"), (2, "Äldre Historia")] {
-            let concept = UnifiedConceptDefinition::new(999991, display.into(), vec![], BTreeMap::new(), vec!["Unwanted alias".into()]);
-            assert!(concept.source_labels().is_empty());
+            let concept = UnifiedConceptDefinition::new(999991, display.into(), vec![], BTreeMap::new());
             merge_unified_taxonomy_connection(&mut db, release, &[concept], &[], "preferred name test").unwrap();
             let row = db.query_row("SELECT preferred_label,normalized_label FROM concept WHERE concept_id=999991", [], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).unwrap();
             assert_eq!(row, (display.to_owned(), super::super::runtime::normalize_source_label(display)));
         }
         assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name='source_label'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-    }
-
-    #[test]
-
-    fn historical_boundary_corrections_work_for_read_only_and_writable_caches() {
-        let mut db = Connection::open_in_memory().unwrap();
-        let mut source = Connection::open_in_memory().unwrap();
-        source.deserialize_bytes("main", include_bytes!("../data/unified-taxonomy-v2.sqlite3")).unwrap();
-        {
-            let backup = rusqlite::backup::Backup::new(&source, &mut db).unwrap();
-            assert!(matches!(backup.step(-1).unwrap(), rusqlite::backup::StepResult::Done));
-        }
-        db.execute("UPDATE lcc_range SET end_code='D552.A-Z' WHERE concept_id=10305 AND start_code='D551'", []).unwrap();
-        db.execute("UPDATE lcc_range SET end_code='DK908.68.2' WHERE concept_id=54459 AND start_code='DK908.67'", []).unwrap();
-        db.execute_batch("PRAGMA query_only=ON").unwrap();
-        let read_only = read_unified_taxonomy_connection(&db, "historical read-only snapshot").unwrap();
-        assert!(read_only.iter().find(|c| c.concept_id() == 10305).unwrap().source_selectors("lcc").contains(&"D551..D552.Z".to_owned()));
-        assert!(read_only.iter().find(|c| c.concept_id() == 54459).unwrap().source_selectors("lcc").contains(&"DK908.67..DK908.68".to_owned()));
-        db.execute_batch("PRAGMA query_only=OFF").unwrap();
-        upgrade_lcc_ranges(&db).unwrap();
-        upgrade_lcc_ranges(&db).unwrap();
-        let repaired = read_unified_taxonomy_connection(&db, "repaired snapshot").unwrap();
-        assert_eq!(read_only, repaired);
-        assert_eq!(db.query_row("SELECT count(*) FROM pragma_table_info('lcc_range') WHERE name IN ('start_code','end_code')", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-        assert_eq!(db.query_row("SELECT count(*) FROM lcc_selector WHERE concept_id=54459 AND selector='DK908.682'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
     }
 
     #[test]
@@ -318,7 +280,7 @@ mod tests {
         let mut connection = Connection::open_in_memory().unwrap();
         reset_unified_taxonomy_connection(&mut connection).unwrap();
         let parent = read_unified_taxonomy_connection(&connection, "test").unwrap().into_iter().find(|concept| concept.parent_ids().is_empty()).unwrap().concept_id();
-        let child = UnifiedConceptDefinition::new(999990, "Selector order test".into(), vec![parent], BTreeMap::from([("lcc".into(), vec!["QA9".into(), "QA1".into()])]), vec![]);
+        let child = UnifiedConceptDefinition::new(999990, "Selector order test".into(), vec![parent], BTreeMap::from([("lcc".into(), vec!["QA9".into(), "QA1".into()])]));
         merge_unified_taxonomy_connection(&mut connection, 1, &[child.clone()], &[], "test").unwrap();
         let restored = read_unified_taxonomy_connection(&connection, "test").unwrap().into_iter().find(|concept| concept.concept_id() == child.concept_id()).unwrap();
         assert_eq!(restored, child);
@@ -346,7 +308,7 @@ mod tests {
         reset_unified_taxonomy_connection(&mut connection).unwrap();
         let encoded_ranges: i64 = connection.query_row("SELECT count(*) FROM lcc_selector WHERE instr(selector,'..')>0", [], |row| row.get(0)).unwrap();
         assert_eq!(encoded_ranges, 0);
-        let (owner, start_code, end_code) = super::super::range_storage::read_ranges(&connection, "9").unwrap().into_iter().next().unwrap();
+        let (owner, start_code, end_code) = super::super::range_storage::read_ranges(&connection).unwrap().into_iter().next().unwrap();
         let other = connection.query_row("SELECT concept_id FROM concept WHERE concept_id<>?1 LIMIT 1", [owner], |row| row.get::<_, i64>(0)).unwrap();
         assert!(super::super::range_storage::insert_range(&connection, other, &start_code, &end_code).is_err());
     }
@@ -375,7 +337,7 @@ mod tests {
         let existing = read_unified_taxonomy_sqlite(&path).unwrap();
         // Persistence is independent of the curated root names.
         let parent = existing.iter().find(|concept| concept.parent_ids().is_empty()).unwrap();
-        let fetched = UnifiedConceptDefinition::new(999999, "Server Detail".to_owned(), vec![parent.concept_id()], BTreeMap::from([("lcc".to_owned(), vec!["ZZ999..ZZ999@5".to_owned()])]), vec!["Server detail source caption".to_owned()]);
+        let fetched = UnifiedConceptDefinition::new(999999, "Server Detail".to_owned(), vec![parent.concept_id()], BTreeMap::from([("lcc".to_owned(), vec!["ZZ999..ZZ999".to_owned()])]));
         merge_unified_taxonomy_sqlite(&path, 1, &[fetched]).unwrap();
         assert!(has_unified_taxonomy_overlay(&path).unwrap());
         let merged = read_unified_taxonomy_sqlite(&path).unwrap();
@@ -428,29 +390,5 @@ mod tests {
         let resolved = read_resolved_unified_taxonomy_codes(&path, &candidates).unwrap();
         assert!(!resolved.contains(&("lcc".to_owned(), "ZZZZ999".to_owned())));
         assert!(resolved.contains(&("bisac".to_owned(), "SCI000000".to_owned())));
-    }
-    #[test]
-    fn version_seven_overlay_upgrades_and_round_trips_complete_endpoints() {
-        let mut db = Connection::open_in_memory().unwrap();
-        reset_unified_taxonomy_connection(&mut db).unwrap();
-        // A minimal v7 range table exercises the device cache migration.
-        db.execute_batch(
-            "DROP TABLE lcc_range;
-            CREATE TABLE lcc_range(class_letters TEXT,start_value TEXT,end_value TEXT,concept_id INTEGER REFERENCES concept(concept_id),PRIMARY KEY(class_letters,start_value,end_value));
-            UPDATE taxonomy_meta SET value='7' WHERE key='format_version';",
-        )
-        .unwrap();
-        let parent = read_unified_taxonomy_connection(&db, "v7").unwrap().into_iter().find(|c| c.parent_ids().is_empty()).unwrap().concept_id();
-        db.execute("INSERT INTO lcc_range VALUES('QA','1','10',?1)", [parent]).unwrap();
-        let before = read_unified_taxonomy_connection(&db, "v7").unwrap();
-        let child = UnifiedConceptDefinition::new(999980, "Cross subclass test".into(), vec![parent], BTreeMap::from([("lcc".into(), vec!["D1..DX301".into(), "R..RZ".into(), "QB1.A1..QB1.C5".into()])]), vec![]);
-        merge_unified_taxonomy_connection(&mut db, 99, &[child.clone()], &[], "v7").unwrap();
-        let after = read_unified_taxonomy_connection(&db, "v8").unwrap();
-        for original in before {
-            assert!(after.contains(&original));
-        }
-        assert!(after.contains(&child));
-        assert_eq!(db.query_row("SELECT value FROM taxonomy_meta WHERE key='format_version'", [], |r| r.get::<_, String>(0)).unwrap(), "11");
-        assert_eq!(db.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
     }
 }

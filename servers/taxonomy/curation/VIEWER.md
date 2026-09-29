@@ -15,12 +15,9 @@ subjects or reuse deleted IDs. Clients consume the published IDs and do not
 allocate them. Shared master/curated subjects use the same IDs; importing a new
 master revision must preserve those identities.
 
-There is no conversion or compatibility reader for string IDs. Library schema
-31 requires integer concept references; older library schemas are rejected.
-The historical `*-v2.sqlite3` artifact filenames remain, but their internal
-`taxonomy_meta.format_version` is 5. Historical SQL curation passes and reports
-refer to the releases they were written against, and must not be replayed onto
-this format.
+The `*-v2.sqlite3` artifact filenames remain, and their internal
+`taxonomy_meta.format_version` is 1. Historical curation reports describe
+earlier source data and are not input to the release build.
 
 Generate the self-contained viewer with:
 

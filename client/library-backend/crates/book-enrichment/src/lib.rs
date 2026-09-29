@@ -7,8 +7,8 @@ pub mod related_isbn;
 mod subject_pipeline;
 pub mod title_identity;
 use book_model::{from_metadata_value, BookMetadata, Scheme};
-pub use subject_pipeline::{isbn_key, SubjectCode, SubjectPhase, SubjectPipeline, SubjectStep};
 use serde::{Deserialize, Serialize};
+pub use subject_pipeline::{isbn_key, SubjectCode, SubjectPhase, SubjectPipeline, SubjectStep};
 
 /// Library-wide enrichment waves. Hosts may execute a wave using their own
 /// storage and workers, but must not start a later wave while an earlier wave

@@ -11,15 +11,15 @@ use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, FocusHandle, Window};
 use gpui_component::IconName;
 use ui_components as components;
-
 use super::state_panel::SidebarTab;
+
 
 /// Operations provided by the entity that owns a reader sidebar.
 pub(crate) trait SidebarTarget: Sized + 'static {
     #[cfg(feature = "kobo")]
     fn brightness_controls(&self) -> Entity<super::brightness::BrightnessControls>;
     fn close_reader(&mut self, window: &mut Window, cx: &mut Context<Self>);
-    fn hide_sidebar(&mut self, cx: &mut Context<Self>);
+    fn hide_sidebar(&mut self, window: &Window, cx: &mut Context<Self>);
     fn search_is_open(&self) -> bool;
     fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>);
 }
@@ -51,14 +51,11 @@ pub(crate) fn reader_sidebar<C: SidebarTarget>(owner: &C, target: &Entity<C>, co
     let search_target = target.clone();
     let document_focus = content.document_focus;
 
-    let heading = gpui::div()
-        .min_w_0()
-        .flex_1()
-        .flex()
-        .items_center()
-        .gap(gpui::px(components::SPACE_SM))
-        .child(components::reader_toolbar_title(content.title))
-        .child(components::reader_progress(content.progress_label, content.progress_detail, theme));
+    let heading = gpui::div().min_w_0().flex_1().flex().items_center().gap(gpui::px(components::SPACE_SM)).child(components::reader_toolbar_title(content.title)).child(components::reader_progress(
+        content.progress_label,
+        content.progress_detail,
+        theme,
+    ));
 
     let header = gpui::div()
         .flex_none()
@@ -84,54 +81,46 @@ pub(crate) fn reader_sidebar<C: SidebarTarget>(owner: &C, target: &Entity<C>, co
             };
             header
         })
-        .child(components::selectable_button(components::reader_control_button_icon("reader-search", if owner.search_is_open() { "Hide search" } else { "Search" }, IconName::Search, theme), owner.search_is_open(), theme).on_click(
-            move |_, window, cx| {
-                search_target.update(cx, |this, cx| this.toggle_search(window, cx));
-            },
-        ))
-        .child(components::reader_control_button_icon("reader-sidebar-close", "Close sidebar", IconName::Close, theme).on_click(move |_, _, cx| {
-            sidebar_target.update(cx, |this, cx| this.hide_sidebar(cx));
+        .when(!components::uses_mobile_navigation(window), |header| {
+            header.child(components::selectable_button(components::reader_control_button_icon("reader-search", if owner.search_is_open() { "Hide search" } else { "Search" }, IconName::Search, theme), owner.search_is_open(), theme).on_click(
+                move |_, window, cx| {
+                    search_target.update(cx, |this, cx| this.toggle_search(window, cx));
+                },
+            ))
+        })
+        .child(components::reader_control_button_icon("reader-sidebar-close", "Close sidebar", IconName::Close, theme).on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            sidebar_target.update(cx, |this, cx| this.hide_sidebar(window, cx));
         }));
 
-    gpui::div()
-        .size_full()
-        .min_h_0()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .bg(theme.page_bg)
-        .child(header)
-        .children(search)
-        .child(content.tabs)
-        .child(gpui::div().flex_1().min_h_0().min_w_0().child(content.body))
-        .into_any_element()
+    let mobile = components::uses_mobile_navigation(window);
+    gpui::div().size_full().min_h_0().min_w_0().flex().flex_col().bg(theme.page_bg).child(header).children(search).when(!mobile, |panel| panel.child(content.tabs)).child(gpui::div().flex_1().min_h_0().min_w_0().child(content.body)).into_any_element()
 }
 
-/// The mobile reader's only permanent chrome: Back, Search, and the sidebar's
-/// three tabs, each self-toggling its own sheet. Contents is omitted when
-/// there is no outline, matching `state_panel::reader_sidebar_tabs`.
-pub(crate) fn reader_bottom_bar<C: SidebarTarget, F>(id: &'static str, owner: &C, target: &Entity<C>, active: Option<SidebarTab>, contents_available: bool, theme: components::BrowserTheme, on_select: F) -> AnyElement
-where
-    F: Fn(SidebarTab, &mut C, &mut Context<C>) + 'static,
-{
-    let on_select = std::rc::Rc::new(on_select);
-    let close_target = target.clone();
-    let search_target = target.clone();
-
-    let mut bar = components::bottom_navigation(theme).id(id).child(components::bottom_navigation_item("reader-bottom-back", IconName::ArrowLeft, "Back", false, theme).on_click(move |_, window, cx| {
-        close_target.update(cx, |this, cx| this.close_reader(window, cx));
-    }));
-    bar = bar.child(components::bottom_navigation_item("reader-bottom-search", IconName::Search, "Search", owner.search_is_open(), theme).on_click(move |_, window, cx| {
-        search_target.update(cx, |this, cx| this.toggle_search(window, cx));
-    }));
-    for (index, tab, label, icon) in [(0usize, SidebarTab::Contents, "Contents", IconName::Menu), (1, SidebarTab::Annotations, "Notes", IconName::Star), (2, SidebarTab::Settings, "Settings", IconName::Settings2)] {
+/// Mobile keeps its tab navigation at the bottom of the screen. It is shown
+/// only while the reader controls are open; the mobile sidebar has no desktop
+/// tab strip of its own.
+pub(crate) fn reader_bottom_bar(
+    id: &'static str,
+    active: Option<SidebarTab>,
+    contents_available: bool,
+    search_active: bool,
+    theme: components::BrowserTheme,
+    on_select: std::rc::Rc<dyn Fn(SidebarTab, &mut Window, &mut gpui::App)>,
+    on_search: std::rc::Rc<dyn Fn(&mut Window, &mut gpui::App)>,
+) -> AnyElement {
+    let mut bar = components::bottom_navigation(theme).id(id);
+    bar = bar.child(components::bottom_navigation_item("reader-bottom-search", IconName::Search, "Search", search_active, theme).on_click(move |_, window, cx| on_search(window, cx)));
+    for (index, (tab, label, icon)) in [
+        (SidebarTab::Contents, "Contents", IconName::BookOpen),
+        (SidebarTab::Annotations, "Annotations", IconName::File),
+        (SidebarTab::Settings, "Settings", IconName::Settings),
+    ].into_iter().enumerate() {
         if tab == SidebarTab::Contents && !contents_available {
             continue;
         }
-        let target = target.clone();
         let on_select = on_select.clone();
-        let selected = active == Some(tab);
-        bar = bar.child(components::bottom_navigation_item(("reader-bottom-tab", index), icon, label, selected, theme).on_click(move |_, _, cx| target.update(cx, |this, cx| on_select(tab, this, cx))));
+        bar = bar.child(components::bottom_navigation_item((id, index), icon, label, Some(tab) == active, theme).on_click(move |_, window, cx| on_select(tab, window, cx)));
     }
     bar.into_any_element()
 }
@@ -147,7 +136,7 @@ mod tests {
 
     impl SidebarTarget for TestReader {
         fn close_reader(&mut self, _: &mut Window, _: &mut Context<Self>) {}
-        fn hide_sidebar(&mut self, _: &mut Context<Self>) {}
+        fn hide_sidebar(&mut self, _: &Window, _: &mut Context<Self>) {}
         fn search_is_open(&self) -> bool {
             self.search_open
         }

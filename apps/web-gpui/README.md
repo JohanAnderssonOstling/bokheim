@@ -266,22 +266,22 @@ See [the benchmark fixture and recorded comparison](../../client/library-backend
 
 ## Tabs across web deployments
 
-The shared coordinator uses `/web_backend_worker_loader.js` as its stable entry
-URL. This bootstrap imports one immutable release bundle; existing coordinators
-keep running while new tabs attach to the same coordinator. Dedicated workers
-use their host tab's bundle URLs. Deployment retains older immutable worker
-assets so live tabs can still request them after a release switch.
+Each immutable release bundle has its own coordinator URL. Tabs running the same
+bundle share that coordinator. A newer bundle waits for the user to close older
+tabs before it can acquire database ownership and migrate local data. Existing
+tabs keep running; deployment retains their immutable assets for later requests.
 
-Run the full-app Firefox regression after building:
+Run the full-app Chromium regression after an optimized release build:
 
 ```sh
-node client/app/scripts/test-web-release-tabs.mjs
+BOKHEIM_TEST_DIST=/path/to/release node apps/web-gpui/scripts/deployment.browser-test.mjs
 ```
 
-It serves two release URLs on one origin and checks that both tabs share one
-database owner, client reload does not create another database, and closing the
-host elects exactly one replacement. `PLAYWRIGHT_MODULE` and
-`PLAYWRIGHT_BROWSERS_PATH` select the browser test installation.
+It serves the compiled application under two deployment identities and checks
+that the older tab keeps running, the newer tab reports the storage conflict,
+and closing the older tab allows the newer deployment to open on reload.
+This checks bundle isolation and ownership, not historical schema migration.
+`PLAYWRIGHT_MODULE` and `CHROMIUM_PATH` select the browser test installation.
 
 ## Authentication form checks
 

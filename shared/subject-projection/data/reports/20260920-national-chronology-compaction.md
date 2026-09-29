@@ -23,4 +23,4 @@ Pending end-of-batch validation includes:
 
 The frozen database before these deferred batches is `/tmp/taxonomy-before-english-era-compaction.sqlite3`. This phase also has `/tmp/taxonomy-before-national-chronologies.sqlite3` for an isolated comparison.
 
-Artifacts: [migration](../migrations/20260920_national_chronology_compaction.sql), [exact merge and preservation manifest](20260920-national-chronology-compaction.json).
+Artifacts: migration, [exact merge and preservation manifest](20260920-national-chronology-compaction.json).

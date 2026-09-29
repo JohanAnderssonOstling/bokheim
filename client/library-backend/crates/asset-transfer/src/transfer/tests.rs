@@ -317,7 +317,10 @@ fn worker_with_placement(root: &Path, server_url: ServerUrl, content_hash: &Cont
         database.add_book_placement(&dir_id, content_hash, "book.epub", "", false);
         database.queue_directory_work(&ROOT_DIR_ID).unwrap();
     }
-    let assets = library_files::asset_store::AssetStore::open(root.to_str().unwrap()).unwrap().with_database_path(db_path.clone());
+    let lookup_path = db_path.clone();
+    let assets = library_files::asset_store::AssetStore::open(root.to_str().unwrap()).unwrap().with_book_paths(move |hash| {
+        library_database::Database::book_paths_at(&lookup_path, hash).map_err(library_files::asset_store::AssetStoreError::operation)
+    });
     let worker = TransferWorker {
         asset_storage_enabled: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         account: None,
@@ -709,7 +712,11 @@ async fn thumbnail_batch_download_uses_one_request_for_multiple_hashes() {
                 let request: sync_common::api::assets::ThumbnailBatchDownloadRequest = sync_common::transport::decode(&body, sync_common::wire::MAX_DECODED_REQUEST_BYTES).unwrap();
                 request_count.fetch_add(1, Ordering::SeqCst);
                 requested_hash_count.store(request.content_hashes.len(), Ordering::SeqCst);
-                let thumbnails = request.content_hashes.into_iter().map(|content_hash| sync_common::api::assets::ThumbnailBatchEntry { content_hash, bytes: jpeg.as_ref().clone() }).collect();
+                let thumbnails = request.content_hashes.into_iter().map(|content_hash| sync_common::api::assets::ThumbnailBatchDownloadEntry {
+                    content_hash,
+                    bytes: jpeg.as_ref().clone(),
+                    browse_bytes: (content_hash == first).then(|| jpeg.as_ref().clone()),
+                }).collect();
                 let response = sync_common::api::assets::ThumbnailBatchDownloadResponse { thumbnails, missing: Vec::new() };
                 Body::from(sync_common::transport::encode(&response).unwrap())
             }
@@ -741,6 +748,8 @@ async fn thumbnail_batch_download_uses_one_request_for_multiple_hashes() {
     let stored = std::fs::read_dir(root.path().join(APP_HIDDEN_DIR).join("assets/thumbnail")).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect::<Vec<_>>();
     assert!(worker.assets.exists(BlobKind::Thumbnail, &first).unwrap(), "stored thumbnails: {stored:?}");
     assert!(worker.assets.exists(BlobKind::Thumbnail, &second).unwrap(), "stored thumbnails: {stored:?}");
+    assert_eq!(worker.assets.read_thumbnail_variant(&first, thumbnail::BROWSE_THUMBNAIL_WIDTH).await.unwrap().unwrap(), *jpeg);
+    assert!(worker.assets.read_thumbnail_variant(&second, thumbnail::BROWSE_THUMBNAIL_WIDTH).await.unwrap().is_some());
     let ready = std::iter::from_fn(|| event_rx.try_recv().ok())
         .filter_map(|event| match event {
             library_runtime::events::LibraryEvent::ThumbnailGenerated { content_hash } => Some(content_hash),
@@ -1152,7 +1161,7 @@ async fn missing_browse_thumbnail_is_repaired_without_credentials_or_network() {
 
 #[tokio::test]
 async fn thumbnail_availability_only_queues_missing_locally_authored_covers() {
-    use sync_common::api::assets::{ThumbnailBatchDownloadRequest, ThumbnailBatchDownloadResponse, ThumbnailBatchEntry};
+    use sync_common::api::assets::{ThumbnailBatchDownloadRequest, ThumbnailBatchDownloadResponse, ThumbnailBatchDownloadEntry};
     let hash = fixture_content_hash(91);
     let mode = Arc::new(AtomicUsize::new(0));
     let response_mode = mode.clone();
@@ -1165,7 +1174,7 @@ async fn thumbnail_availability_only_queues_missing_locally_authored_covers() {
                 let request: ThumbnailBatchDownloadRequest = sync_common::transport::decode(&body, sync_common::wire::MAX_DECODED_REQUEST_BYTES).unwrap();
                 assert_eq!(request.content_hashes, vec![hash]);
                 let response = match mode {
-                    0 => ThumbnailBatchDownloadResponse { thumbnails: vec![ThumbnailBatchEntry { content_hash: hash, bytes: vec![0xff, 0xd8, 0xff] }], missing: vec![] },
+                    0 => ThumbnailBatchDownloadResponse { thumbnails: vec![ThumbnailBatchDownloadEntry { content_hash: hash, bytes: vec![0xff, 0xd8, 0xff], browse_bytes: None }], missing: vec![] },
                     1 => ThumbnailBatchDownloadResponse { thumbnails: vec![], missing: vec![hash] },
                     _ => ThumbnailBatchDownloadResponse { thumbnails: vec![], missing: vec![] },
                 };
@@ -1182,7 +1191,7 @@ async fn thumbnail_availability_only_queues_missing_locally_authored_covers() {
     // A cover becomes uploadable after its parent book has reached the
     // server. Its local upload intent has already been consumed by then.
     pool.record_remote_asset(BlobKind::Book, &hash).unwrap();
-    pool.execute("DELETE FROM sync_outbox WHERE state_kind='book_lifecycle' AND state_key=?1", [hash.as_str()]).unwrap();
+    library_database::open_fixture_connection(pool.path()).unwrap().execute("DELETE FROM sync_outbox WHERE state_kind='book_lifecycle' AND state_key=?1", [hash.as_str()]).unwrap();
     pool.complete_thumbnail_work(&hash, true).unwrap();
     // Planning negotiates over a snapshot and the session commits before
     // asserting, exactly like the production planning pass.

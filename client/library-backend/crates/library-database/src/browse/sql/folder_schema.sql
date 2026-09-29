@@ -27,20 +27,27 @@ INSERT OR IGNORE INTO browse_projection_state(projection,dirty) VALUES('folder_o
 -- Placement writes only invalidate; Rust rebuilds membership once per batch.
 CREATE TRIGGER IF NOT EXISTS folder_dirty_placement_insert AFTER INSERT ON book_dir
 WHEN NEW.deleted_at IS NULL
-BEGIN INSERT OR IGNORE INTO folder_browse_dirty_book VALUES(NEW.book_row_id); END;
+BEGIN
+    INSERT INTO folder_browse_dirty_book(book_row_id)
+    SELECT NEW.book_row_id WHERE NOT EXISTS(SELECT 1 FROM folder_browse_dirty_book WHERE book_row_id=NEW.book_row_id);
+END;
 CREATE TRIGGER IF NOT EXISTS folder_dirty_placement_delete AFTER DELETE ON book_dir
 WHEN OLD.deleted_at IS NULL
-BEGIN INSERT OR IGNORE INTO folder_browse_dirty_book VALUES(OLD.book_row_id); END;
+BEGIN
+    INSERT INTO folder_browse_dirty_book(book_row_id)
+    SELECT OLD.book_row_id WHERE NOT EXISTS(SELECT 1 FROM folder_browse_dirty_book WHERE book_row_id=OLD.book_row_id);
+END;
 CREATE TRIGGER IF NOT EXISTS folder_dirty_placement_update AFTER UPDATE OF dir_id,book_row_id,deleted_at,is_downloaded ON book_dir
 WHEN OLD.dir_id IS NOT NEW.dir_id OR OLD.book_row_id IS NOT NEW.book_row_id OR OLD.deleted_at IS NOT NEW.deleted_at OR OLD.is_downloaded IS NOT NEW.is_downloaded
 BEGIN
-    INSERT OR IGNORE INTO folder_browse_dirty_book VALUES(OLD.book_row_id);
-    INSERT OR IGNORE INTO folder_browse_dirty_book VALUES(NEW.book_row_id);
+    INSERT INTO folder_browse_dirty_book(book_row_id)
+    SELECT OLD.book_row_id WHERE NOT EXISTS(SELECT 1 FROM folder_browse_dirty_book WHERE book_row_id=OLD.book_row_id);
+    INSERT INTO folder_browse_dirty_book(book_row_id)
+    SELECT NEW.book_row_id WHERE NOT EXISTS(SELECT 1 FROM folder_browse_dirty_book WHERE book_row_id=NEW.book_row_id);
 END;
 CREATE TRIGGER IF NOT EXISTS folder_dirty_directory_update AFTER UPDATE OF parent_id,name,deleted_at,purged_at ON dir
 WHEN OLD.parent_id IS NOT NEW.parent_id OR (OLD.name LIKE '.%') IS NOT (NEW.name LIKE '.%') OR OLD.deleted_at IS NOT NEW.deleted_at OR OLD.purged_at IS NOT NEW.purged_at
 BEGIN UPDATE browse_projection_state SET dirty=1 WHERE projection='folder_ownership'; END;
 CREATE TRIGGER IF NOT EXISTS folder_dirty_directory_delete AFTER DELETE ON dir
 BEGIN UPDATE browse_projection_state SET dirty=1 WHERE projection='folder_ownership'; END;
-
 

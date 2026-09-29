@@ -1,6 +1,6 @@
 //! Native library-file access and adjacent transfer staging.
 mod projection;
-pub(super) use projection::{create_directory, evict_book_files, prepare_directory_with_database, stage_directory_with_database, readable_book_paths};
+pub(super) use projection::{create_directory, evict_book_files, prepare_directory_with_database, readable_book_paths, stage_directory_with_database};
 use projection::{projection_error, readable_path};
 
 use super::{AssetStoreError, ContentHash};
@@ -8,8 +8,14 @@ use book_access::BoxedBookReader;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 const RESERVED_STORAGE_BYTES: u64 = 128 * 1024 * 1024;
-#[derive(Clone, Debug)]
-pub(super) struct Handle(PathBuf, String, PathBuf, Option<PathBuf>, std::sync::Arc<std::sync::atomic::AtomicBool>);
+#[derive(Clone)]
+pub(super) struct Handle(PathBuf, String, PathBuf, Option<super::BookPathLookup>, std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl std::fmt::Debug for Handle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Handle").field("root", &self.0).finish_non_exhaustive()
+    }
+}
 
 pub(super) fn upload_stream(book: super::VerifiedBook) -> impl futures_util::Stream<Item = Result<Vec<u8>, std::io::Error>> + Send {
     futures_util::stream::try_unfold((book, 0u64), |(mut book, sent)| async move {
@@ -118,6 +124,55 @@ pub(super) fn placement_path(handle: &Handle, relative: &str) -> Result<PathBuf,
     checked_placement_path(handle.0.parent().unwrap().parent().unwrap(), relative)
 }
 
+pub(super) fn m4b_sidecar_cover(handle: &Handle, hash: &ContentHash) -> Result<Option<Vec<u8>>, AssetStoreError> {
+    use std::io::Read as _;
+    let Some(lookup) = handle.3.as_ref() else { return Ok(None); };
+    for relative in lookup.paths(hash)? {
+        let path = placement_path(handle, &relative)?;
+        if !path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("m4b")) { continue; }
+        if let Some(cover) = audiobook_folder::discover_m4b_cover(&path)? {
+            let mut bytes = Vec::new();
+            std::fs::File::open(cover.path)?.take(audiobook_folder::MAX_COVER_BYTES + 1).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > audiobook_folder::MAX_COVER_BYTES { return Err(AssetStoreError::operation("M4B cover exceeds byte limit")); }
+            return Ok(Some(bytes));
+        }
+    }
+    Ok(None)
+}
+
+pub(super) fn local_mp3_folder_archive(handle: &Handle, hash: &ContentHash) -> Result<Option<BoxedBookReader>, AssetStoreError> {
+    use std::io::Seek as _;
+    let Some(lookup) = handle.3.as_ref() else { return Ok(None); };
+    for relative in lookup.paths(hash)? {
+        let path = placement_path(handle, &relative)?;
+        if !path.is_dir() { continue; }
+        let tracks = audiobook_folder::discover(&path)?;
+        if tracks.is_empty() || ContentHash::new(audiobook_folder::identity(&tracks)?.to_hex().as_str()) != *hash { continue; }
+        let nfo = audiobook_folder::discover_nfo(&path)?;
+        let cue = audiobook_folder::discover_cue(&path)?;
+        let cover = audiobook_folder::discover_cover(&path)?;
+        let mut archive = audiobook_folder::write_archive_with_sidecars(tempfile::tempfile()?, &tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref())?;
+        archive.rewind()?;
+        return Ok(Some(Box::new(archive)));
+    }
+    Ok(None)
+}
+
+pub(super) fn local_m4b_reader(handle: &Handle, hash: &ContentHash) -> Result<Option<BoxedBookReader>, AssetStoreError> {
+    let Some(lookup) = handle.3.as_ref() else { return Ok(None); };
+    for relative in lookup.paths(hash)? {
+        let path = placement_path(handle, &relative)?;
+        if !path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("m4b")) { continue; }
+        if !path.is_file() || !content_matches(&path, hash)? { continue; }
+        match std::fs::File::open(path) {
+            Ok(file) => return Ok(Some(Box::new(file))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(None)
+}
+
 fn checked_placement_path(root: &Path, relative: &str) -> Result<PathBuf, AssetStoreError> {
     let mut path = root.to_path_buf();
     for component in Path::new(relative.trim_start_matches('/')).components() {
@@ -139,6 +194,10 @@ pub(super) fn directory_available(handle: &Handle, relative: &str) -> bool {
 }
 
 fn content_matches(path: &Path, hash: &ContentHash) -> Result<bool, AssetStoreError> {
+    if path.is_dir() {
+        let tracks = audiobook_folder::discover(path)?;
+        return Ok(!tracks.is_empty() && ContentHash::new(audiobook_folder::identity(&tracks)?.to_hex().as_str()) == *hash);
+    }
     let mut file = std::fs::File::open(path)?;
     Ok(book_identity::identify(&mut file)? == *hash)
 }
@@ -151,7 +210,7 @@ pub(super) fn placement_conflicts(handle: &Handle, hash: &ContentHash, relative:
     let (parent, name) = relative.rsplit_once('/').unwrap_or(("", relative));
     let path = placement_path(handle, parent)?.join(name);
     match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => Ok(true),
+        Ok(metadata) if !(metadata.is_file() || metadata.is_dir()) || metadata.file_type().is_symlink() => Ok(true),
         Ok(_) => Ok(!content_matches(&path, hash)?),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.into()),
@@ -162,14 +221,19 @@ pub(super) fn placement_conflicts(handle: &Handle, hash: &ContentHash, relative:
 // action checks that verified paths have not changed while preparing the job.
 pub(super) struct VerifiedPath {
     path: PathBuf,
+    hash: ContentHash,
+    directory: bool,
     length: u64,
     modified: std::time::SystemTime,
 }
 
 impl VerifiedPath {
     fn new(path: PathBuf, hash: &ContentHash) -> Result<Self, AssetStoreError> {
-        let metadata = std::fs::metadata(&path)?;
-        let verified = Self { path, length: metadata.len(), modified: metadata.modified()? };
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() || !(metadata.is_file() || metadata.is_dir()) {
+            return Err(AssetStoreError::operation("unsupported book placement"));
+        }
+        let verified = Self { path, hash: *hash, directory: metadata.is_dir(), length: metadata.len(), modified: metadata.modified()? };
         if !content_matches(&verified.path, hash)? {
             return Err(AssetStoreError::operation("file contains different book bytes"));
         }
@@ -179,7 +243,7 @@ impl VerifiedPath {
 
     fn check(&self) -> Result<(), AssetStoreError> {
         let metadata = std::fs::symlink_metadata(&self.path)?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != self.length || metadata.modified()? != self.modified {
+        if metadata.is_dir() != self.directory || metadata.file_type().is_symlink() || metadata.len() != self.length || metadata.modified()? != self.modified || (self.directory && !content_matches(&self.path, &self.hash)?) {
             return Err(AssetStoreError::operation("book changed while preparing file work"));
         }
         Ok(())
@@ -191,6 +255,10 @@ pub(super) enum PreparedPlacement {
     Existing(VerifiedPath),
     Restore {
         output: tempfile::NamedTempFile,
+        destination: PathBuf,
+    },
+    RestoreFolder {
+        output: tempfile::TempDir,
         destination: PathBuf,
     },
     /// A move whose source is also queued for trash: nothing else can need
@@ -215,6 +283,11 @@ impl PreparedPlacement {
                 persist_book_noclobber(output.into_temp_path(), &destination).map_err(|error| AssetStoreError::operation(error))?;
                 sync_parent(&destination)
             }
+            Self::RestoreFolder { output, destination } => {
+                if destination.exists() { return Err(AssetStoreError::operation("restore destination changed")); }
+                std::fs::rename(output.path(), &destination)?;
+                sync_parent(&destination)
+            }
             Self::Renamed { source, destination } => {
                 if destination.exists() {
                     return Err(AssetStoreError::operation("restore destination changed"));
@@ -234,7 +307,7 @@ impl PreparedPlacement {
                 source.check()?;
                 if let Some(existing) = existing {
                     existing.check()?;
-                    std::fs::remove_file(&source.path)?;
+                    if source.directory { std::fs::remove_dir_all(&source.path)?; } else { std::fs::remove_file(&source.path)?; }
                 } else {
                     // A concurrent replay for this hash is excluded by its lease.
                     if destination.exists() {
@@ -273,12 +346,15 @@ pub(super) fn prepare_restore(handle: &Handle, hash: &ContentHash, relative: &st
         if !content_matches(path, hash)? {
             return Ok(false);
         }
+        // The ZIP is a transport representation. The ordered source bytes
+        // already established the folder's identity above.
+        if path.is_dir() { return Ok(true); }
         let Some(expected) = expected else { return Ok(true) };
         let mut hasher = blake3::Hasher::new();
         hasher.update_reader(std::fs::File::open(path)?)?;
         Ok(hasher.finalize().to_hex().as_str() == expected)
     };
-    let found = source_paths.iter().filter_map(|relative| placement_path(handle, relative).ok().map(|path| (relative, path))).find(|(_, path)| path.is_file() && matches_version(path).unwrap_or(false));
+    let found = source_paths.iter().filter_map(|relative| placement_path(handle, relative).ok().map(|path| (relative, path))).find(|(_, path)| (path.is_file() || path.is_dir()) && matches_version(path).unwrap_or(false));
     // Only a source with a queued trash job for this path is safe to move.
     if let Some((source_relative, source)) = &found {
         if movable_sources.iter().any(|movable| movable == *source_relative) {
@@ -296,7 +372,7 @@ pub(super) fn prepare_restore(handle: &Handle, hash: &ContentHash, relative: &st
         if let Ok(entries) = std::fs::read_dir(directory) {
             for entry in entries {
                 let path = entry?.path();
-                if path.is_file() && matches_version(&path)? {
+                if (path.is_file() || path.is_dir()) && matches_version(&path)? {
                     found = Some(path);
                     break;
                 }
@@ -307,6 +383,27 @@ pub(super) fn prepare_restore(handle: &Handle, hash: &ContentHash, relative: &st
     let Some(source) = source else { return Ok(None) };
     if !destination.parent().unwrap().is_dir() {
         return Err(AssetStoreError::operation("restore folder is unavailable"));
+    }
+    if source.is_dir() {
+        let output = tempfile::Builder::new().prefix(".bokheim-restore-").tempdir_in(destination.parent().unwrap())?;
+        for track in audiobook_folder::discover(&source)? {
+            let target = output.path().join(&track.name);
+            std::fs::create_dir_all(target.parent().unwrap())?;
+            std::fs::copy(&track.path, target)?;
+        }
+        if let Some(nfo) = audiobook_folder::discover_nfo(&source)? {
+            std::fs::copy(nfo.path, output.path().join(nfo.name))?;
+        }
+        if let Some(cue) = audiobook_folder::discover_cue(&source)? {
+            std::fs::copy(cue.path, output.path().join(cue.name))?;
+        }
+        if let Some(cover) = audiobook_folder::discover_cover(&source)? {
+            std::fs::copy(cover.path, output.path().join(cover.name))?;
+        }
+        if !matches_version(output.path())? {
+            return Err(AssetStoreError::operation("audiobook changed during restore"));
+        }
+        return Ok(Some(PreparedPlacement::RestoreFolder { output, destination }));
     }
     let mut output = tempfile::Builder::new().prefix(".bokheim-restore-").tempfile_in(destination.parent().unwrap())?;
     let mut input = std::fs::File::open(source)?;
@@ -578,32 +675,16 @@ pub(super) fn remove(handle: &Handle, name: String) -> Result<bool, AssetStoreEr
 }
 
 pub(super) fn exists(handle: &Handle, name: String) -> Result<bool, AssetStoreError> {
-    Ok(readable_path(handle, name)?.is_some())
-}
-
-pub(super) fn book_bytes(library_locator: &str, database_locator: &str) -> Result<u64, AssetStoreError> {
-    let mut total = 0_u64;
-    let root = Path::new(library_locator);
-    let database = Path::new(database_locator);
-    if database.is_file() {
-        let conn = rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        // Pending moves can leave bytes at the remembered source or the live
-        // destination. Resolve all placements together using the shared path view.
-        let paths = conn.prepare(include_str!("../sql/native_assets/book_bytes_select.sql"))?.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-        let mut counted = HashSet::new();
-        for relative in paths {
-            let path = checked_placement_path(root, &relative)?;
-            if counted.insert(path.clone()) {
-                match std::fs::metadata(&path) {
-                    Ok(metadata) if metadata.is_file() => total = total.saturating_add(metadata.len()),
-                    Ok(_) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
-                }
-            }
+    if let Some(hash) = name.strip_prefix("book/") {
+        if !enabled(handle) { return Ok(false); }
+        let hash = hash.parse::<ContentHash>().map_err(projection_error)?;
+        for path in readable_book_paths(handle, &hash)? {
+            if path.is_file() { return Ok(true); }
+            if path.is_dir() && audiobook_folder::discover(&path).is_ok_and(|tracks| !tracks.is_empty()) { return Ok(true); }
         }
+        return Ok(false);
     }
-    Ok(total)
+    Ok(readable_path(handle, name)?.is_some())
 }
 
 #[cfg(test)]
@@ -720,7 +801,7 @@ mod prepared_file_tests {
         let retained = trash_path(&handle, &hash, "/book.epub");
         std::fs::create_dir_all(retained.parent().unwrap()).unwrap();
         std::fs::write(&retained, b"original").unwrap();
-        let prepared = prepare_restore(&handle, &hash, "/book.epub", None, &[]).unwrap().unwrap();
+        let prepared = prepare_restore(&handle, &hash, "/book.epub", None, &[], &[]).unwrap().unwrap();
         let destination = root.path().join("book.epub");
         std::fs::write(&destination, b"unrelated user file").unwrap();
         assert!(prepared.publish().is_err());
@@ -752,8 +833,8 @@ mod identity_tests {
         assert!(!content_matches(&trash, &ContentHash::new(&"0".repeat(64))).unwrap());
     }
 }
-pub(super) fn with_database_path(mut handle: Handle, path: PathBuf) -> Handle {
-    handle.3 = Some(path);
+pub(super) fn with_book_paths(mut handle: Handle, lookup: super::BookPathLookup) -> Handle {
+    handle.3 = Some(lookup);
     handle
 }
 
@@ -763,10 +844,10 @@ pub(super) fn enabled(handle: &Handle) -> bool {
 pub(super) fn suspend(handle: &Handle) {
     handle.4.store(false, std::sync::atomic::Ordering::Release);
 }
-pub(super) fn unavailable(locator: &str, database: PathBuf) -> Handle {
+pub(super) fn unavailable(locator: &str) -> Handle {
     let root = Path::new(locator).join(crate::APP_HIDDEN_DIR).join("assets");
     let leases = root.join("leases");
-    Handle(root, String::new(), leases, Some(database), std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)))
+    Handle(root, String::new(), leases, None, std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)))
 }
 
 fn create_child_directory(path: &Path) -> Result<(), std::io::Error> {

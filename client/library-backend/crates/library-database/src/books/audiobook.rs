@@ -88,6 +88,10 @@ impl Database {
         let transaction = self.connection.unchecked_transaction()?;
         let duration_ms = i64::try_from(metadata.duration_ms).map_err(|_| DatabaseError::message("audiobook duration exceeds SQLite integer range"))?;
         transaction.audiobook_upsert_metadata(hash.as_str(), duration_ms)?;
+        if !metadata.tracks.is_empty() {
+            let tracks_json = serde_json::to_string(&metadata.tracks).map_err(DatabaseError::operation)?;
+            transaction.audiobook_upsert_tracks(hash.as_str(), &tracks_json)?;
+        }
         // Preserve a database-only chapter plan while the imported evidence is unchanged.
         let mut applied_request = None;
         transaction.audiobook_applied_request(hash.as_str(), |row| {
@@ -108,12 +112,21 @@ impl Database {
         let request_json = serde_json::to_string(&request).map_err(DatabaseError::operation)?;
         let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_err(DatabaseError::operation)?.as_secs() as i64;
         transaction.audiobook_discover_job(hash.as_str(), metadata_contract::audible::POLICY_VERSION, &request_json, now)?;
-        transaction.commit()?;
+        crate::sync::apply::commit(transaction)?;
         let entries = match navigation {
             Some(entries) => entries,
             None => navigation_from_chapters(&metadata.chapters),
         };
         Ok(AudiobookPlaybackMetadata { duration_ms: metadata.duration_ms, chapters: chapters_from_navigation(&entries, metadata.duration_ms), narrator: metadata.recording.narrators.first().cloned() })
+    }
+
+    pub fn audiobook_tracks(&self, hash: &sync_common::ContentHash) -> Result<Vec<book_model::AudiobookTrack>, DatabaseError> {
+        let mut tracks = None;
+        self.connection.audiobook_track_index_select(hash.as_str(), |row| {
+            tracks = Some(serde_json::from_str::<Vec<book_model::AudiobookTrack>>(&row.get::<_, String>(0)?).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?);
+            Ok(())
+        })?;
+        Ok(tracks.unwrap_or_default())
     }
 
     /// An audiobook's chapters projected into the shared navigation form. A

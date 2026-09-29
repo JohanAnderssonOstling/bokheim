@@ -220,20 +220,61 @@ pub struct BookTocEntry {
 /// turns the last chapter's start into its end, so a replica that only
 /// receives entries can show navigation but cannot play the book.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudiobookTrack {
+    pub name: String,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub offset: u64,
+    pub length: u64,
+    /// ZIP revision whose stored byte offsets this track index describes.
+    #[serde(default)]
+    pub archive_checksum: Option<content_address::ContentHash>,
+}
+
+impl AudiobookTrack {
+    pub fn valid(&self) -> bool {
+        !self.name.is_empty()
+            && self.name.split('/').all(|part| !part.is_empty() && part != "." && part != ".." && !part.contains('\\'))
+            && self.name.to_ascii_lowercase().ends_with(".mp3")
+            && self.end_ms > self.start_ms
+            && self.length > 0
+            && self.offset.checked_add(self.length).is_some()
+    }
+}
+
+pub fn tracks_match_archive(tracks: &[AudiobookTrack], checksum: content_address::ContentHash) -> bool {
+    !tracks.is_empty() && tracks.iter().all(|track| track.valid() && track.archive_checksum == Some(checksum))
+}
+
+/// Complete value of the navigation register. Replacement includes absence:
+/// `None` clears a prior duration or track index; empty entries clear the TOC.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookTocDocument {
     pub entries: Vec<BookTocEntry>,
     pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub tracks: Option<Vec<AudiobookTrack>>,
 }
 
 impl BookTocDocument {
     pub fn entries(entries: Vec<BookTocEntry>) -> Self {
-        Self { entries, duration_ms: None }
+        Self { entries, duration_ms: None, tracks: None }
     }
 }
 
 #[cfg(test)]
 mod toc_document_tests {
     use super::*;
+
+    #[test]
+    fn track_index_only_matches_the_archive_revision_it_describes() {
+        let first = content_address::ContentHash::new(&"a".repeat(64));
+        let second = content_address::ContentHash::new(&"b".repeat(64));
+        let track = AudiobookTrack { name: "01.mp3".into(), start_ms: 0, end_ms: 1000, offset: 42, length: 100, archive_checksum: Some(first) };
+        assert!(tracks_match_archive(&[track.clone()], first));
+        assert!(!tracks_match_archive(&[track.clone()], second));
+        assert!(!tracks_match_archive(&[AudiobookTrack { archive_checksum: None, ..track }], first));
+    }
 
     fn entry(title: &str, target: &str) -> BookTocEntry {
         BookTocEntry { title: title.into(), target: target.into(), children: Vec::new() }
@@ -243,7 +284,7 @@ mod toc_document_tests {
     fn document_round_trips_with_and_without_duration() {
         let without_duration = BookTocDocument::entries(vec![entry("One", "audiobook-position-ms:0")]);
         assert_eq!(serde_json::from_str::<BookTocDocument>(&serde_json::to_string(&without_duration).unwrap()).unwrap(), without_duration);
-        let with_duration = BookTocDocument { entries: vec![entry("One", "audiobook-position-ms:0")], duration_ms: Some(1000) };
+        let with_duration = BookTocDocument { entries: vec![entry("One", "audiobook-position-ms:0")], duration_ms: Some(1000), tracks: None };
         assert_eq!(serde_json::from_str::<BookTocDocument>(&serde_json::to_string(&with_duration).unwrap()).unwrap(), with_duration);
     }
 }

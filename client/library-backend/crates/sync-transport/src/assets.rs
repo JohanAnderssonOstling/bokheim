@@ -91,6 +91,15 @@ pub fn thumbnail_batch_endpoint(server_url: &reqwest::Url, library_id: &LibraryI
 pub fn thumbnail_presence_endpoint(server_url: &reqwest::Url, library_id: &LibraryId) -> reqwest::Url {
     server_url.join(&format!("api/libraries/{library_id}/thumbnails/presence")).expect("valid endpoint")
 }
+pub fn thumbnail_endpoint(server_url: &reqwest::Url, library_id: &LibraryId, content_hash: &ContentHash) -> reqwest::Url {
+    server_url.join(&format!("api/libraries/{library_id}/thumbnails/{content_hash}")).expect("valid endpoint")
+}
+
+pub async fn delete_thumbnail(client: &reqwest::Client, server_url: &reqwest::Url, access_token: &str, library_id: &LibraryId, content_hash: &ContentHash) -> Result<(), AssetResponseError> {
+    let response = client.delete(thumbnail_endpoint(server_url, library_id, content_hash)).bearer_auth(access_token).send().await.map_err(AssetResponseError::Retryable)?;
+    validate_streaming_asset_response(response)?;
+    Ok(())
+}
 pub async fn thumbnail_presence(client: &reqwest::Client, credentials: &SyncCredentials, library_id: &LibraryId, content_hashes: Vec<ContentHash>) -> Result<ThumbnailPresenceResponse, SyncRequestError> {
     Ok(send(client.post(credentials.endpoint(&format!("api/libraries/{library_id}/thumbnails/presence"))).bearer_auth(credentials.access_token()), &ThumbnailPresenceRequest { content_hashes }).await?)
 }
@@ -172,7 +181,7 @@ pub async fn download_thumbnail_batch(client: &reqwest::Client, server_url: &req
         .map_err(AssetResponseError::Retryable)?;
     let response = validate_streaming_asset_response(response)?;
     let bytes = response.bytes().await.map_err(AssetResponseError::Retryable)?;
-    sync_common::transport::decode(&bytes, sync_common::api::assets::MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024).map_err(AssetResponseError::Wire)
+    sync_common::transport::decode(&bytes, sync_common::api::assets::MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES).map_err(AssetResponseError::Wire)
 }
 
 #[cfg(test)]

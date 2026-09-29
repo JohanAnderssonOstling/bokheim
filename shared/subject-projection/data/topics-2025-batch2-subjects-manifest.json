@@ -145,6 +145,5 @@
       ]
     }
   ],
-  "existing_subjects": [],
-  "migration": "shared/subject-projection/data/migrations/20260905_add_2025_topic_subjects_batch2.sql"
+  "existing_subjects": []
 }

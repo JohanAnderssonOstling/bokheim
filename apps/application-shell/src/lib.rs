@@ -98,7 +98,18 @@ impl ApplicationRoot {
                 cx.spawn(async move |_, _| {
                     let result = backend.account_snapshot().await;
                     let _ = sender.try_send(SyncEvent::AccountSnapshot { generation, result });
-                }).detach();
+                })
+                .detach();
+            }
+            SyncEvent::LocalStorageUsageRequested => {
+                let generation = self.account_generation;
+                let backend = self.backend.clone();
+                let sender = self.sync_sender.clone();
+                cx.spawn(async move |_, _| {
+                    let result = backend.local_storage_usage().await;
+                    let _ = sender.try_send(SyncEvent::LocalStorageUsage { generation, result });
+                })
+                .detach();
             }
             SyncEvent::LogoutRequested => {
                 self.account_generation = self.account_generation.wrapping_add(1);
@@ -108,7 +119,8 @@ impl ApplicationRoot {
                 cx.spawn(async move |_, _| {
                     let result = backend.logout().await;
                     let _ = sender.try_send(SyncEvent::AccountOperation { generation, result, success: "Signed out", reveal_password_reset_on_error: false });
-                }).detach();
+                })
+                .detach();
             }
             SyncEvent::TransferRefreshRequested => {
                 self.transfer_generation = self.transfer_generation.wrapping_add(1);
@@ -118,7 +130,8 @@ impl ApplicationRoot {
                 cx.spawn(async move |_, _| {
                     let result = backend.transfers().await;
                     let _ = sender.try_send(SyncEvent::TransferSnapshot { generation, result });
-                }).detach();
+                })
+                .detach();
             }
             SyncEvent::AssetStorageRequested { library_id, enabled } => {
                 let backend = self.backend.clone();
@@ -126,7 +139,8 @@ impl ApplicationRoot {
                 cx.spawn(async move |_, _| {
                     let result = backend.set_library_asset_storage(library_id, enabled).await;
                     let _ = sender.try_send(SyncEvent::AssetStorageChanged { library_id, enabled, result });
-                }).detach();
+                })
+                .detach();
             }
             SyncEvent::Authenticate { action, email, secret, token, reply } => {
                 let backend = self.backend.clone();
@@ -146,9 +160,10 @@ impl ApplicationRoot {
                     if authenticated {
                         let _ = sender.try_send(SyncEvent::WebAuthenticated);
                     }
-                }).detach();
+                })
+                .detach();
             }
-            SyncEvent::AccountSnapshot { generation, .. } | SyncEvent::AccountOperation { generation, .. } if generation != self.account_generation => {}
+            SyncEvent::AccountSnapshot { generation, .. } | SyncEvent::AccountOperation { generation, .. } | SyncEvent::LocalStorageUsage { generation, .. } if generation != self.account_generation => {}
             SyncEvent::TransferSnapshot { generation, .. } if generation != self.transfer_generation => {}
             SyncEvent::AccountSnapshot { generation, result } => {
                 if let Ok(snapshot) = &result {
@@ -156,6 +171,10 @@ impl ApplicationRoot {
                 }
                 self.browser.update(cx, |browser, cx| browser.apply_sync_event(SyncEvent::AccountSnapshot { generation, result }, cx));
             }
+            SyncEvent::LocalStorageUsage { result, .. } => match result {
+                Ok(usage) => self.sync_state.update(cx, |state, cx| state.apply_local_storage_usage(usage, cx)),
+                Err(error) => log::warn!("could not read local storage usage: {error}"),
+            },
             SyncEvent::AccountOperation { generation, result, success, reveal_password_reset_on_error } => {
                 if let Ok(snapshot) = &result {
                     self.sync_state.update(cx, |state, cx| state.apply_account_snapshot(snapshot, cx));
@@ -347,7 +366,7 @@ impl ApplicationRoot {
             self.opening = true;
             cx.notify();
             self.open_task = Some(cx.spawn(async move |root, cx| {
-                let audio = matches!(library.book_format(locator.content_hash()).await, Ok(Some(book_model::BookFormat::M4b)));
+                let audio = matches!(library.book_format(locator.content_hash()).await, Ok(Some(book_model::BookFormat::M4b | book_model::BookFormat::Mp3Folder)));
                 let _ = root.update_in(cx, |root, window, cx| {
                     if audio {
                         if !root.playback.update(cx, |controller, cx| controller.prepare_open(audio_request, &locator, cx)) {
@@ -609,25 +628,16 @@ impl Render for ApplicationRoot {
                         .child(gpui_component::TitleBar::new().child(self.application_title.clone())),
                 )
             } else {
-                root.child(
-                    div()
-                        .id("window-titlebar-reveal")
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .right_0()
-                        .h(NATIVE_TITLEBAR_HOVER_HEIGHT)
-                        .on_hover(cx.listener(|root, hovered: &bool, window, cx| {
-                            if *hovered && root.titlebar_reveal_armed {
-                                root.titlebar_reveal_armed = false;
-                                root.native_pointer_left_client = false;
-                                window.request_decorations(gpui::WindowDecorations::Server);
-                                root.native_decorations_visible = matches!(window.window_decorations(), gpui::Decorations::Server);
-                                root.window_titlebar_visible = !root.native_decorations_visible;
-                                cx.notify();
-                            }
-                        })),
-                )
+                root.child(div().id("window-titlebar-reveal").absolute().top_0().left_0().right_0().h(NATIVE_TITLEBAR_HOVER_HEIGHT).on_hover(cx.listener(|root, hovered: &bool, window, cx| {
+                    if *hovered && root.titlebar_reveal_armed {
+                        root.titlebar_reveal_armed = false;
+                        root.native_pointer_left_client = false;
+                        window.request_decorations(gpui::WindowDecorations::Server);
+                        root.native_decorations_visible = matches!(window.window_decorations(), gpui::Decorations::Server);
+                        root.window_titlebar_visible = !root.native_decorations_visible;
+                        cx.notify();
+                    }
+                })))
             }
         });
         root

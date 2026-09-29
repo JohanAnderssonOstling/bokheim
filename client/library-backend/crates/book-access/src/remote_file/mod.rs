@@ -293,7 +293,7 @@ where
 #[cfg(target_arch = "wasm32")]
 mod browser;
 #[cfg(target_arch = "wasm32")]
-pub use browser::{browser_bundle_fetch, browser_reader};
+pub use browser::{browser_bundle_fetch, browser_reader, BrowserReader};
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;

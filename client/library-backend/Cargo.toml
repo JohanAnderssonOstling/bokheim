@@ -19,7 +19,7 @@ book-model = { path = "../../shared/book-model" }
 library-files = { path = "crates/library-files" }
 client-platform-runtime = { path = "../platforms/runtime" }
 book-access = { path = "crates/book-access", features = ["pdf"] }
-pdf-view-common = { path = "../../apps/reader/crates/pdf/view-common" }
+pdf-view-common = { path = "../../shared/pdf-view-common" }
 book-enrichment = { path = "crates/book-enrichment" }
 book-inspection = { path = "crates/book-inspection" }
 book-identity = { path = "../../shared/book-identity" }
@@ -75,6 +75,7 @@ walkdir = { version = "2.5", optional = true }
 crossbeam-channel = { version = "0.5", optional = true }
 
 [dev-dependencies]
+library-database = { path = "crates/library-database", features = ["fixture-sql"] }
 test-support = { path = "../test-support", features = ["pdf-fixtures"] }
 account-contract = { path = "../../shared/account-contract" }
 image = { version = "0.24.9", default-features = false, features = ["jpeg", "png", "webp"] }

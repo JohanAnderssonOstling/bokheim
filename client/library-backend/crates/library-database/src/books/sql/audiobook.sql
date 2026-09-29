@@ -43,3 +43,14 @@ INSERT INTO audiobook_metadata(content_hash,duration_ms)
 VALUES(:content_hash,:duration_ms)
 ON CONFLICT(content_hash) DO UPDATE SET
     duration_ms=excluded.duration_ms;
+
+-- name: audiobook_upsert_tracks!
+-- param: content_hash: &str
+-- param: tracks_json: &str
+INSERT INTO audiobook_track_index(content_hash,tracks_json)
+VALUES(:content_hash,:tracks_json)
+ON CONFLICT(content_hash) DO UPDATE SET tracks_json=excluded.tracks_json;
+
+-- name: audiobook_track_index_select?
+-- param: content_hash: &str
+SELECT tracks_json FROM audiobook_track_index WHERE content_hash=:content_hash;

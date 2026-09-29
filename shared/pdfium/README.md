@@ -41,9 +41,16 @@ Applications never use that build-machine directory at runtime (unit tests do).
 
 - Desktop: `python3 apps/desktop-gpui/scripts/build.py` builds release and stages
   `target/release/pdfium/`. `--target` supports cross builds; `--offline` disables
-  dependency downloads. Distribute the executable with its `pdfium/` directory.
+  dependency downloads. Distribute the executable with its `pdfium/` directory on Linux; Windows links PDFium statically.
 - AppImage: the packaging script stages PDFium and includes native dependencies.
-- Windows: the Inno Setup installer includes the adjacent `pdfium/` directory.
+- Windows x64 MSVC: PDFium 8046b and its /MT C runtime are statically linked.
+  Both installer and update ZIP deliver the executable without a PDFium directory.
+  The target-specific Cargo configuration enables the static CRT and selects
+  `.pdfium/x86_64-pc-windows-msvc` for linking. Custom prepared directories must
+  also set `PDFIUM_STATIC_LIB_PATH_x86_64_pc_windows_msvc` to the same directory.
+  The pinned archive and library hashes are checked before use; notices from
+  PdfReviewer are preserved in `windows-static/` with their source receipts.
+  Windows has no PDFium runtime path override or temporary DLL extraction.
 - Flatpak: prepare first, build with `--features flatpak`, and install the native
   library at `/app/lib/libpdfium.so`. `PDFIUM_PACKAGED_PATH` customizes this prefix.
 - Metadata server: the remote build prepares and stages PDFium; server installers

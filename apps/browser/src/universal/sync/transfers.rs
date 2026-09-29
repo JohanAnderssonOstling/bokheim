@@ -10,18 +10,18 @@
 //! several times a second, and the settings controls around the library list
 //! must not be rebuilt at that rate.
 
-use std::{sync::Arc, time::Duration};
-use web_time::Instant;
 #[cfg(not(target_arch = "wasm32"))]
 use std::rc::Rc;
+use std::{sync::Arc, time::Duration};
+use web_time::Instant;
 
 #[path = "activity_display.rs"]
 mod display;
 use display::{ActivityDisplay, ActivityKind};
 
-use app::{LibraryTransfers, TransferJobKind, TransferState};
 #[cfg(not(target_arch = "wasm32"))]
 use app::AppClient;
+use app::{LibraryTransfers, TransferJobKind, TransferState};
 use gpui::{Context, Task};
 use sync_common::LibraryId;
 
@@ -110,6 +110,10 @@ impl LibraryActivity {
     /// Every current local activity; idle libraries have no activity lines.
     pub(super) fn summaries(&self, library_id: &LibraryId) -> Vec<LibraryActivitySummary> {
         self.display.rows(*library_id, false)
+    }
+
+    pub(super) fn thumbnail_download_coverage(&self, library_id: &LibraryId) -> Option<(u64, u64)> {
+        self.groups.iter().find(|group| &group.library_id == library_id).map(|group| group.thumbnail_download_coverage)
     }
 
     pub(super) fn set_groups(&mut self, groups: Vec<LibraryTransfers>, cx: &mut Context<Self>) {
@@ -400,7 +404,9 @@ pub(super) fn transfer_summaries(group: &LibraryTransfers) -> Vec<LibraryActivit
             summaries.push(LibraryActivitySummary { kind, urgent: false, state: ActivityState::Running, text: label.to_owned(), count: None, progress: None });
         }
     }
-    summaries.extend(group.transfers.iter().filter(|transfer| operation.is_none() || transfer.origin == app::TransferOrigin::UserInitiated).filter_map(|transfer| {
+    // The operation rows summarize uploads, but thumbnail downloads are
+    // independent background work and otherwise disappear during a sync.
+    summaries.extend(group.transfers.iter().filter(|transfer| operation.is_none() || transfer.origin == app::TransferOrigin::UserInitiated || transfer.kind == TransferJobKind::DownloadThumbnail).filter_map(|transfer| {
         // A queued or retrying batch knows exactly as much about itself as a
         // running one. It used to report none of it, so a transfer that stalled
         // lost the progress it had already made — the moment the number matters
@@ -530,6 +536,12 @@ mod tests {
         library.transfers[1].state = TransferState::Running;
         assert_eq!(first[4].text, "Syncing library changes");
         assert!(transfer_summaries(&library).is_empty());
+        library.transfers.push(transfer(TransferJobKind::DownloadThumbnail, TransferState::Running, 3, 8, "2"));
+        let downloads = transfer_summaries(&library);
+        assert_eq!(downloads.len(), 1);
+        assert_eq!(downloads[0].text, "Downloading thumbnails");
+        assert_eq!(downloads[0].count.as_deref(), Some("3 / 8"));
+        assert_eq!(downloads[0].progress, Some(3. / 8.));
         library.scanner_running = false;
         let operation = library.operation.as_mut().unwrap();
         operation.scanning = false;
@@ -638,6 +650,7 @@ mod tests {
             thumbnail_work_running: false,
             thumbnail_progress: None,
             thumbnail_waiting: false,
+            thumbnail_download_coverage: (0, 0),
             metadata_sync_running: false,
             preparing_transfers: false,
             scanner_running,

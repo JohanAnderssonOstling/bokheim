@@ -11,6 +11,9 @@ use super::LibrarySession;
 use futures_util::future::LocalBoxFuture;
 use std::rc::Rc;
 
+#[cfg(target_arch = "wasm32")]
+mod web;
+
 pub(super) enum PreparedRequest {
     Ready(Reply),
     Pending(OperationKind, LocalBoxFuture<'static, Result<Reply, crate::BackendError>>),
@@ -301,9 +304,15 @@ pub(super) fn prepare_library_request(library: Rc<LibrarySession>, command: Libr
                 }),
             )
         }
-        LibraryCommand::FinishDirectoryImport { activity } => PreparedRequest::Ready(Reply::new(library.finish_directory_import(activity))),
+        LibraryCommand::FinishDirectoryImport { activity } => PreparedRequest::Ready({
+            library.finish_directory_import(activity);
+            Reply::new(())
+        }),
         LibraryCommand::DirectoryImportProgress => PreparedRequest::Ready(Reply::new(library.directory_import_details())),
-        LibraryCommand::AdvanceDirectoryImport { activity, total, succeeded, failed } => PreparedRequest::Ready(Reply::new(library.advance_directory_import(activity, total, succeeded, failed))),
+        LibraryCommand::AdvanceDirectoryImport { activity, total, succeeded, failed } => PreparedRequest::Ready({
+            library.advance_directory_import(activity, total, succeeded, failed);
+            Reply::new(())
+        }),
         LibraryCommand::FolderContents { query } => PreparedRequest::Ready(Reply::new(library.folder_browse_data(&query, library.downloaded_books_only()?)?)),
         LibraryCommand::SubjectContents { query } => PreparedRequest::Ready(Reply::new(library.subject_browse_data(&query, library.downloaded_books_only()?)?)),
         LibraryCommand::LibrarySearch { query } => PreparedRequest::Ready(Reply::new(library.library_search(&query, library.downloaded_books_only()?)?)),
@@ -318,20 +327,15 @@ pub(super) fn prepare_library_request(library: Rc<LibrarySession>, command: Libr
         LibraryCommand::UpsertAnnotation { annotation } => PreparedRequest::Ready(Reply::new(library.upsert_annotation(&annotation)?)),
         LibraryCommand::DeleteAnnotation { annotation_id, modified_at } => PreparedRequest::Ready(Reply::new(library.delete_annotation(&annotation_id, modified_at)?)),
         #[cfg(target_arch = "wasm32")]
-        LibraryCommand::OpenRemoteAudio { content_hash } => PreparedRequest::Pending(OperationKind::Read, Box::pin(async move { Ok(Reply::new(crate::library::browser_audiobook::open_remote_audio(&library, content_hash).await?)) })),
+        LibraryCommand::OpenRemoteAudio { content_hash } => PreparedRequest::Pending(OperationKind::Read, Box::pin(async move { Ok(Reply::new(web::open_remote_audio(&library, content_hash).await?)) })),
         #[cfg(target_arch = "wasm32")]
-        LibraryCommand::ReadBookRange { capability, offset, length } => PreparedRequest::Ready(Reply::new(serde_bytes::ByteBuf::from(crate::library::book::browser::read_local_range(*library.id(), &capability, offset, length)?))),
+        LibraryCommand::ReadBookRange { capability, offset, length } => PreparedRequest::Ready(Reply::new(web::read_book_range(&library, &capability, offset, length)?)),
         #[cfg(target_arch = "wasm32")]
         LibraryCommand::ImportStagedBook { parent_id, file_name, physical, length, hash } => {
             PreparedRequest::Pending(OperationKind::Import, Box::pin(async move { Ok(Reply::new(library.import_staged_book(parent_id, file_name, physical, length, hash).await?)) }))
         }
         #[cfg(target_arch = "wasm32")]
-        LibraryCommand::CleanupStagedImport { job, files } => {
-            uuid::Uuid::parse_str(&job).map_err(crate::BackendError::operation)?;
-            let prefix = format!("__libraries/{}/imports/{job}/", library.id());
-            client_platform_web::web_storage::cleanup_staged_import(&prefix, files)?;
-            PreparedRequest::Ready(Reply::new(()))
-        }
+        LibraryCommand::CleanupStagedImport { job, files } => PreparedRequest::Ready(Reply::new(web::cleanup_staged_import(&library, &job, files)?)),
     })
 }
 

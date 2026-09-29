@@ -282,6 +282,10 @@ impl AudioEngine {
         }
     }
 
+    pub fn finished(&self) -> bool {
+        self.state.playback_finished()
+    }
+
     pub fn toggle(&mut self) -> Result<(), String> {
         #[cfg(feature = "kobo")]
         if self.state.playback_finished() || self.output.thread.as_ref().is_some_and(|thread| thread.is_finished()) {

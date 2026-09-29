@@ -47,7 +47,7 @@ mod tests {
     async fn cloud_storage_releases_quota_preserves_shared_books_and_blocks_late_uploads() {
         let pool = crate::test_support::isolated_pool("cloud_storage", 6).await.expect("SYNC_E2E_DATABASE_URL is required");
         let database = crate::PostgresDatabase::from_pool(pool.clone());
-        crate::upgrade_existing(&database).await.unwrap();
+        crate::verify_schema(&database).await.unwrap();
         let repo = PostgresSyncRepository::new(database.clone());
         let user = uuid::Uuid::new_v4().to_string();
         sqlx::query(include_str!("sql/cloud_storage/test_seed_user.sql")).bind(&user).bind(format!("{user}@example.com")).execute(&pool).await.unwrap();
@@ -79,7 +79,7 @@ mod tests {
         assert!(repo.set_cloud_storage("other-user", &a, uuid::Uuid::new_v4(), true).await.is_err());
         repo.set_cloud_storage(&user, &b, uuid::Uuid::new_v4(), false).await.unwrap();
         assert_eq!(assets::storage_usage(&pool, &user).await.unwrap().used_bytes, 0);
-        crate::upgrade_existing(&database).await.unwrap();
+        crate::verify_schema(&database).await.unwrap();
         assert!(repo.cloud_storage(&user).await.unwrap().iter().all(|library| !library.enabled));
         repo.set_cloud_storage(&user, &a, uuid::Uuid::new_v4(), true).await.unwrap();
         // Retrying an acknowledged older change cannot undo a later choice.

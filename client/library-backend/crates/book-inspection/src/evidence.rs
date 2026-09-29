@@ -4,8 +4,10 @@ use book_model::{BookRecord, BookSubject, Identifier, Scheme, Scope};
 use regex::Regex;
 use std::sync::OnceLock;
 
-pub const INSPECTION_VERSION: u32 = 9;
+pub const INSPECTION_VERSION: u32 = 10;
 pub const EDGE_SECTIONS: usize = 8;
+
+const LOCAL_CIP_SOURCE_PREFIX: &str = "inspection:local-cip:";
 
 pub use book_enrichment::evidence::{IsbnEvidence, IsbnScope, SectionEvidence, MAX_SECTION_BYTES};
 
@@ -137,15 +139,49 @@ pub fn inspect_section(_book: &BookRecord, location: &str, text: &str) -> Sectio
     }
     {
         static LCC: OnceLock<Regex> = OnceLock::new();
-        let pattern = LCC.get_or_init(|| Regex::new(r"\b[A-Z]{1,3}[0-9]{1,4}(?:\.[0-9]+)?(?:\s*\.[A-Z][0-9]+)?(?:\s*[A-Z][0-9]+)?(?:\s+(?:19|20)[0-9]{2})?\b").unwrap());
-        for m in pattern.find_iter(text).take(16) {
+        // Full CIP call numbers commonly include a Cutter. Some pages
+        // concatenate a four-digit date directly onto the class
+        // (HB37172008 .B55 2013); split that date back out before matching.
+        let pattern = LCC.get_or_init(|| Regex::new(r"\b(?P<class>[A-Z]{1,3}[0-9]{1,4}(?:\.[0-9]+)?)(?P<class_year>(?:19|20)[0-9]{2})?\s*(?P<cutter>\.[A-Z][0-9]+(?:[A-Z][0-9]+)?)(?:\s+(?P<item_year>(?:19|20)[0-9]{2}))?\b").unwrap());
+        for captures in pattern.captures_iter(text).take(16) {
+            let class = captures.name("class").unwrap().as_str();
+            let class_year = captures.name("class_year").map_or(String::new(), |year| format!(" {}", year.as_str()));
+            let cutter = captures.name("cutter").unwrap().as_str();
+            let item_year = captures.name("item_year").map_or(String::new(), |year| format!(" {}", year.as_str()));
+            let code = format!("{class}{class_year} {cutter}{item_year}");
             // Publisher control numbers (e.g. QBI04-200396) are not LCC codes.
-            if text[m.end()..].starts_with('-') {
+            if captures.get(0).is_some_and(|matched| text[matched.end()..].starts_with('-')) {
                 continue;
             }
-            let code = m.as_str().split_whitespace().collect::<Vec<_>>().join(" ");
             if !out.lcc.contains(&code) {
                 out.lcc.push(code);
+            }
+        }
+        // A classification number need not have a Cutter. Accept class-only
+        // values when explicitly labeled, including CIP layouts that put the
+        // value on the following line. Also accept a code-only line in a
+        // clearly identified CIP block, but only if no complete call number
+        // was found in that block. This avoids treating code-like fragments
+        // embedded in prose or publisher addresses as classifications.
+        static LABELED_LCC: OnceLock<Regex> = OnceLock::new();
+        let labeled = LABELED_LCC.get_or_init(|| Regex::new(r"(?im)^[\t ]*(?:classification[\t ]*:[\t ]*)?LCC[\t ]*:?[\t ]*(?:\r?\n[\t ]*)?(?P<class>[A-Z]{1,3}[0-9]{1,4}(?:\.[0-9]+)?)(?:[\t ]+(?P<year>(?:19|20)[0-9]{2}))?[\t ]*$").unwrap());
+        for captures in labeled.captures_iter(text).take(16) {
+            let class = captures.name("class").unwrap().as_str().to_ascii_uppercase();
+            let year = captures.name("year").map_or(String::new(), |year| format!(" {}", year.as_str()));
+            let code = format!("{class}{year}");
+            if !out.lcc.contains(&code) {
+                out.lcc.push(code);
+            }
+        }
+        static CIP_HEADING: OnceLock<Regex> = OnceLock::new();
+        let cip_heading = CIP_HEADING.get_or_init(|| Regex::new(r"(?i)\b(?:library of congress cataloging|cataloging[- ]in[- ]publication)\b").unwrap());
+        if out.lcc.is_empty() && cip_heading.is_match(text) {
+            static STANDALONE_LCC: OnceLock<Regex> = OnceLock::new();
+            let standalone = STANDALONE_LCC.get_or_init(|| Regex::new(r"(?m)^[\t ]*(?P<class>[A-Z]{1,3}[0-9]{1,4}(?:\.[0-9]+)?)(?:[\t ]+(?P<year>(?:19|20)[0-9]{2}))?[\t ]*$").unwrap());
+            if let Some(captures) = standalone.captures(text) {
+                let class = captures.name("class").unwrap().as_str().to_ascii_uppercase();
+                let year = captures.name("year").map_or(String::new(), |year| format!(" {}", year.as_str()));
+                out.lcc.push(format!("{class}{year}"));
             }
         }
     }
@@ -168,30 +204,36 @@ pub fn usable_lcc(code: &str) -> bool {
 }
 
 fn promotable_lcc(_section: &SectionEvidence, code: &str) -> bool {
-    static CUTTER: OnceLock<Regex> = OnceLock::new();
-    let has_cutter = CUTTER.get_or_init(|| Regex::new(r"\.[A-Z][0-9]").unwrap());
-    usable_lcc(code) && has_cutter.is_match(code)
+    usable_lcc(code)
 }
 
 /// Promote only locally established evidence. Every accepted ISBN becomes a
 /// `Scope::Edition` identifier: a checksum-valid reference that may name a
 /// different edition of this book, never a claim that it is the book itself.
 pub fn apply_evidence(book: &mut BookRecord, evidence: &[SectionEvidence], format: &str) {
-    // Printed classifications supersede conflicting embedded classifications.
-    if evidence.iter().filter(|e| e.accepted).take(32).any(|e| e.lcc.iter().any(|code| promotable_lcc(e, code))) {
-        book.book.subjects.retain(|s| !s.authority().is_some_and(|a| a.eq_ignore_ascii_case("lcc")));
-    }
+    // Rebuild our own prior page-derived classifications from current evidence.
+    // Never let free-text inspection replace an LCC code from package or
+    // catalog metadata, which is a higher-confidence source.
+    book.book.subjects.retain(|subject| {
+        !(subject.authority().is_some_and(|authority| authority.eq_ignore_ascii_case("lcc")) && subject.source().starts_with(LOCAL_CIP_SOURCE_PREFIX))
+    });
+    let has_metadata_lcc = book.book.subjects.iter().any(|subject| {
+        subject.authority().is_some_and(|authority| authority.eq_ignore_ascii_case("lcc"))
+            && subject.code().is_some_and(|code| !code.trim().is_empty())
+    });
     for section in evidence.iter().filter(|e| e.accepted).take(32) {
-        let source = format!("inspection:local-cip:{}", section.location);
-        for code in &section.lcc {
-            if !promotable_lcc(section, code) {
-                continue;
-            }
-            if book.book.subjects.iter().any(|s| s.authority() == Some("lcc") && s.code() == Some(code)) {
-                continue;
-            }
-            if let Ok(subject) = BookSubject::new(None, code, &source, Some("lcc".into()), Some(code.clone())) {
-                book.book.subjects.push(subject);
+        if !has_metadata_lcc {
+            let source = format!("{LOCAL_CIP_SOURCE_PREFIX}{}", section.location);
+            for code in &section.lcc {
+                if !promotable_lcc(section, code) {
+                    continue;
+                }
+                if book.book.subjects.iter().any(|subject| subject.authority().is_some_and(|authority| authority.eq_ignore_ascii_case("lcc")) && subject.code() == Some(code)) {
+                    continue;
+                }
+                if let Ok(subject) = BookSubject::new(None, code, &source, Some("lcc".into()), Some(code.clone())) {
+                    book.book.subjects.push(subject);
+                }
             }
         }
         for candidate in &section.isbns {

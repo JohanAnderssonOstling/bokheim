@@ -126,11 +126,7 @@ mod tests {
     fn purging_one_library_preserves_other_library_assets() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         initialize(&conn).unwrap();
-        for (name, physical) in [
-            ("assets/a/book/first", "__libraries/a/book/one"),
-            ("assets/a/thumbnail/first", "__libraries/a/thumbnail/two"),
-            ("assets/ab/book/second", "__libraries/ab/book/three"),
-        ] {
+        for (name, physical) in [("assets/a/book/first", "__libraries/a/book/one"), ("assets/a/thumbnail/first", "__libraries/a/thumbnail/two"), ("assets/ab/book/second", "__libraries/ab/book/three")] {
             publish(&conn, name, physical, 10).unwrap();
             conn.execute("INSERT INTO asset_revision(physical_name,checksum) VALUES(?1,'checksum')", [physical]).unwrap();
         }

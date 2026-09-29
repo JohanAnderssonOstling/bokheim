@@ -61,7 +61,7 @@ impl LibrarySession {
             let response = match outcome {
                 Ok(response) => response,
                 Err(error) => {
-                    let failures = batch.iter().map(|candidate| (candidate.content_hash.clone(), candidate.title.clone())).collect::<Vec<_>>();
+                    let failures = batch.iter().map(|candidate| (candidate.content_hash, candidate.title.clone())).collect::<Vec<_>>();
                     record_enrichment_failures(self, OPEN_LIBRARY_EDITION_IDENTITY_PROVIDER, failures, error.to_string()).await?;
                     log::warn!("Open Library edition matching skipped a batch of {} books after an error: {error}", batch.len());
                     continue;

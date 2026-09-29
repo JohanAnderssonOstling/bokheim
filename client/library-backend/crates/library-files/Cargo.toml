@@ -12,17 +12,17 @@ library-model = { path = "../../../library-model" }
 library-replica = { path = "../library-replica" }
 book-access = { path = "../book-access" }
 book-identity = { path = "../../../../shared/book-identity" }
-pdf-view-common = { path = "../../../../apps/reader/crates/pdf/view-common" }
+pdf-view-common = { path = "../../../../shared/pdf-view-common" }
 client-platform-runtime = { path = "../../../platforms/runtime" }
 thumbnail = { path = "../thumbnail" }
 metadata-contract = { path = "../../../../shared/metadata-contract" }
 sync-common = { path = "../../../../shared/sync-common" }
-rusqlite = { version = "0.40", features = ["bundled"] }
 blake3 = "1"
 futures-util = { version = "0.3", features = ["io"] }
 log = "0.4"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+audiobook-folder = { path = "../../../../shared/audiobook-folder" }
 client-platform-native = { path = "../../../platforms/native" }
 book-identity = { path = "../../../../shared/book-identity", features = ["native-write"] }
 reqwest = { version = "0.11", default-features = false, features = ["stream", "rustls-tls"] }
@@ -38,6 +38,7 @@ web-sys = { version = "0.3", features = ["Blob"] }
 reqwest = { version = "0.11", default-features = false, features = ["stream"] }
 
 [dev-dependencies]
+library-database = { path = "../library-database", features = ["fixture-sql"] }
 serde_json = "1"
 test-support = { path = "../../../test-support", features = ["pdf-fixtures"] }
 async-channel = "2"

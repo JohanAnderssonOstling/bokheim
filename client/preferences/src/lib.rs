@@ -27,14 +27,13 @@ pub const UI_FONT_SIZE_MIN: u8 = 12;
 pub const UI_FONT_SIZE_MAX: u8 = 32;
 pub const UI_FONT_SIZE_DEFAULT: u8 = 16;
 
-/// Two themes, and the only thing that separates them is the tint.
+/// Two light themes with distinct tints, plus a shared dark palette.
 ///
 /// They were three — `GrecoFuturistic`, `LibrarySerif` and `ClassicWhite`,
 /// labelled Sage, Sepia and Paper — and the names described neither what they
 /// were nor what distinguished them: Sage was documented as "cool" while its
 /// own neutrals sat at hue 87, a cream. What actually varies between them is
-/// the hue of the neutral surfaces and of the accent. So the names say that,
-/// and nothing else.
+/// the hue of the neutral surfaces and of the accent in light appearance.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApplicationTheme {

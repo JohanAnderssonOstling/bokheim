@@ -1,4 +1,3 @@
-
 //! Bounded front/back matter inspection. TOC fragments delimit sections inside
 //! combined XHTML documents; body chapters are never joined to copyright text.
 use crate::evidence::{self, SectionEvidence};

@@ -69,7 +69,7 @@ impl Database {
 
     pub fn pending_download_requests(&self) -> Result<Vec<ContentHash>, DatabaseError> {
         let mut hashes = Vec::new();
-        self.transfer_pending_download_requests(|row| {
+        self.connection.transfer_pending_download_requests(|row| {
             hashes.push(ContentHash::new(&row.get::<_, String>(0)?));
             Ok(())
         })?;
@@ -78,40 +78,55 @@ impl Database {
 
     pub fn complete_local_book_request(&self, hash: ContentHash) -> Result<(), DatabaseError> {
         let transaction = self.connection.unchecked_transaction()?;
-        transaction.shared_set_book_hash_downloaded(hash.as_str(), 1)?;
+        Self::complete_local_book_request_on(&transaction, &hash)?;
+        transaction.commit().map_err(Into::into)
+    }
+
+    pub(super) fn complete_local_book_request_on(connection: &rusqlite::Connection, hash: &ContentHash) -> Result<(), DatabaseError> {
+        connection.shared_set_book_hash_downloaded(hash.as_str(), 1)?;
         let mut placements = Vec::new();
-        transaction.transfer_live_placements(hash.as_str(), |row| {
+        connection.transfer_live_placements(hash.as_str(), |row| {
             placements.push(row.get::<_, String>(2)?);
             Ok(())
         })?;
         for path in placements {
-            transaction.transfer_queue_restore(hash.as_str(), &path)?;
+            connection.transfer_queue_restore(hash.as_str(), &path)?;
         }
-        transaction.shared_transfer_complete_download(hash.as_str())?;
-        transaction.commit().map_err(Into::into)
+        connection.shared_transfer_complete_download(hash.as_str())?;
+        Ok(())
     }
 
     pub fn complete_retained_download(&self, hash: &ContentHash, placement: &BookPlacement) -> Result<bool, DatabaseError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let matches = Self::complete_retained_download_on(&transaction, hash, placement)?;
+        transaction.commit()?;
+        Ok(matches)
+    }
+
+    pub(super) fn complete_retained_download_on(connection: &rusqlite::Connection, hash: &ContentHash, placement: &BookPlacement) -> Result<bool, DatabaseError> {
         let mut matches = false;
-        self.connection.transfer_placement_matches(hash.as_str(), placement.rel_path.as_str(), |row| {
+        connection.transfer_placement_matches(hash.as_str(), placement.rel_path.as_str(), |row| {
             matches = row.get(0)?;
             Ok(())
         })?;
         if !matches {
             return Ok(false);
         }
-        let transaction = self.connection.unchecked_transaction()?;
-        transaction.shared_set_book_hash_downloaded(hash.as_str(), 1)?;
-        transaction.shared_transfer_complete_download(hash.as_str())?;
-        transaction.commit()?;
+        connection.shared_set_book_hash_downloaded(hash.as_str(), 1)?;
+        connection.shared_transfer_complete_download(hash.as_str())?;
         Ok(true)
     }
 
     pub fn cancel_book_download(&self, hash: &ContentHash) -> Result<(), DatabaseError> {
         let transaction = self.connection.unchecked_transaction()?;
-        transaction.forget_remote_asset(BlobKind::Book.storage(), hash.as_str())?;
-        transaction.shared_transfer_complete_download(hash.as_str())?;
+        Self::cancel_book_download_on(&transaction, hash)?;
         transaction.commit().map_err(Into::into)
+    }
+
+    pub(super) fn cancel_book_download_on(connection: &rusqlite::Connection, hash: &ContentHash) -> Result<(), DatabaseError> {
+        connection.forget_remote_asset(BlobKind::Book.storage(), hash.as_str())?;
+        connection.shared_transfer_complete_download(hash.as_str())?;
+        Ok(())
     }
 
     pub fn book_placement_is_current(&self, placement: &BookPlacement, hash: &ContentHash) -> Result<bool, DatabaseError> {

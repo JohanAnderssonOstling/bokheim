@@ -11,7 +11,6 @@ pub(crate) mod requests;
 mod tab_host;
 pub use tab_host::{WebConfiguration, WebConnection};
 mod import_queue;
-mod import_workflow;
 pub mod import_worker;
 use client_platform_web::transport::cpu;
 pub(crate) use client_platform_web::transport::cpu_client;

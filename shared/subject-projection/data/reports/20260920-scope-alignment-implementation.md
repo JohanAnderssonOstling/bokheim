@@ -22,4 +22,4 @@ All nine curated scope regression tests pass in the optimized release build. The
 - `tests::declared_damaged_lcc_reaches_unified_projection_with_original_position`
 - `tests::frequent_russian_geographic_codes_resolve_to_specific_regions`
 
-Artifacts: [migration](../migrations/20260920_scope_alignment.sql), [subject change manifest](20260920-scope-alignment.json), [observed classification changes](20260920-scope-alignment-classification-changes.tsv).
+Artifacts: migration, [subject change manifest](20260920-scope-alignment.json), [observed classification changes](20260920-scope-alignment-classification-changes.tsv).

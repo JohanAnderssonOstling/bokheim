@@ -3,7 +3,10 @@ use super::AppClient;
 impl AppClient {
     #[cfg(all(feature = "kobo", target_os = "linux"))]
     pub async fn kobo_bluetooth(&self, request: client_platform_kobo::device::bluetooth::Request) -> Result<client_platform_kobo::device::bluetooth::Status, String> {
-        self.transport.run(move |_| async move { crate::executor::run_blocking(move || client_platform_kobo::device::bluetooth::request(request).map_err(crate::BackendError::operation)).await.map_err(crate::BackendError::operation)? }).await.map_err(|error| error.to_string())
+        self.transport
+            .run(move |_| async move { crate::executor::run_blocking(move || client_platform_kobo::device::bluetooth::request(request).map_err(crate::BackendError::operation)).await.map_err(crate::BackendError::operation)? })
+            .await
+            .map_err(|error| error.to_string())
     }
 
     pub async fn kobo_natural_light(&self) -> Result<Option<u8>, String> {

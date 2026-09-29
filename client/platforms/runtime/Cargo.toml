@@ -22,3 +22,8 @@ web-sys = { version = "0.3", features = ["WorkerGlobalScope"] }
 
 [dev-dependencies]
 futures-executor = "0.3"
+
+[[example]]
+name = "startup_gate_browser"
+crate-type = ["cdylib"]
+required-features = ["web-runtime-tests"]

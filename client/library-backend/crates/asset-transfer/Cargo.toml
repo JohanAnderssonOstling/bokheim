@@ -6,6 +6,8 @@ publish = false
 
 [dependencies]
 book-access = { path = "../book-access" }
+audiobook-folder = { path = "../../../../shared/audiobook-folder" }
+book-model = { path = "../../../../shared/book-model" }
 client-runtime = { path = "../../../client-runtime" }
 cpu-host = { path = "../cpu-host" }
 thumbnail = { path = "../thumbnail" }
@@ -28,6 +30,7 @@ uuid = { version = "1", features = ["v4"] }
 web-time = "1"
 
 [dev-dependencies]
+library-database = { path = "../library-database", features = ["fixture-sql"] }
 account-client = { path = "../../../account-client" }
 async-channel = "2"
 blake3 = "1"
@@ -35,7 +38,6 @@ book-identity = { path = "../../../../shared/book-identity", features = ["native
 client-platform-native = { path = "../../../platforms/native" }
 image = { version = "0.24.9", default-features = false, features = ["jpeg", "png", "webp"] }
 book-metadata = { path = "../book-metadata" }
-book-model = { path = "../../../../shared/book-model" }
 test-support = { path = "../../../test-support" }
 axum = "0.7"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "test-util"] }

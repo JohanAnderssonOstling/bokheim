@@ -394,7 +394,7 @@ impl PlaybackController {
             return;
         }
         self.stop_current(cx);
-        let metadata = app::PlaybackMetadata { title, author: String::new(), narrator: None, duration_ms: 0, chapters: vec![], cover: vec![] };
+        let metadata = app::PlaybackMetadata { format: book_model::BookFormat::M4b, title, author: String::new(), narrator: None, duration_ms: 0, chapters: vec![], tracks: vec![], cover: vec![] };
         let record = ActiveAudiobook::new(locator, 0, 1.0, metadata);
         self.install(record, session, false, cx);
         self.save_current(true, cx);
@@ -652,7 +652,7 @@ mod tests {
             BookLocator::new(library, "d".repeat(64).parse().unwrap()),
             42_000,
             1.25,
-            app::PlaybackMetadata { title: "Recoverable book".into(), author: "Author".into(), narrator: None, duration_ms: 100_000, chapters: vec![], cover: vec![] },
+            app::PlaybackMetadata { format: book_model::BookFormat::M4b, title: "Recoverable book".into(), author: "Author".into(), narrator: None, duration_ms: 100_000, chapters: vec![], tracks: vec![], cover: vec![] },
         );
         controller.update(cx, |controller, cx| {
             let session = reader_ui::restore_audiobook(&record, backend.library(library), cx);

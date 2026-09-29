@@ -1,11 +1,7 @@
-//! One page of shelves, drawn twice: Home and the author index.
-//!
-//! Both are the same object — a vertical paginator of full-width rows, each a
-//! heading over a horizontal shelf of book cards — and they differed only in
-//! where the rows came from and what a heading says. That difference is a
+//! A page of shelves: a vertical paginator of full-width rows, each a heading
+//! over a horizontal shelf of book cards. Where the rows come from is a
 //! [`ShelfSource`]; everything else (loading, reuse across reloads, the keyboard
-//! cursor, paging, the error banner) lives here once, the way folder and subject
-//! browsing share one page behind an adapter.
+//! cursor, paging, the error banner) lives here.
 //!
 //! The vertical axis is paged rather than scrolled. A paginator turns the wheel
 //! into a page it animates, so the page always shows whole rows instead of
@@ -15,17 +11,14 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
-use std::rc::Rc;
 
-use library_backend::LibraryClient;
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, FocusHandle, Focusable, IntoElement, KeyDownEvent, Render, SharedString, Subscription, Window, div};
-use gpui_component::menu::DropdownMenu as _;
 use gpui_component::{Disableable, IconName};
+use library_backend::LibraryClient;
 use library_model::BookCardRow;
 use ui_components as components;
 
-use crate::library::pages::browse::controls::SearchField;
 use crate::library::pages::library_empty_state;
 use crate::library::services::{LatestRequest, LibraryContentsChanged, LibraryContext, LibraryScanChanged};
 use crate::library::widgets::{BookCardView, CursorMove, Paginator, PaginatorAxis, PaginatorChild, PaginatorGroup, shelf_card_policy, shelf_rows_policy};
@@ -39,55 +32,16 @@ pub(crate) struct ShelfRow {
     /// keeps its shelf — and with it the page the reader had turned to.
     pub(crate) id: SharedString,
     pub(crate) title: SharedString,
-    /// What the shelf is about, drawn as chips beside the title. Home's sections
-    /// are about nothing in particular and leave this empty.
-    /// Each chip with the parent it was reached through, where it has one.
-    pub(crate) subjects: Vec<(Option<SharedString>, SharedString)>,
     pub(crate) books: Vec<BookCardRow>,
 }
 
-/// An order a shelf page can be read in. Only sources that offer a choice
-/// declare any; the rest load in whatever order they already had.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ShelfSort {
-    Name,
-    BookCount,
-}
-
-impl ShelfSort {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Name => "Name",
-            Self::BookCount => "Most books",
-        }
-    }
-}
-
-/// Where a page's rows come from, and what its chrome says about them.
+/// Where a page's rows come from.
 pub(crate) trait ShelfSource: 'static {
     /// Prefix for the page's element ids.
     const ID: &'static str;
-    /// How many rows of subject chips a heading reserves beside its title. Zero
-    /// where the rows have nothing to qualify, which is what keeps Home's
-    /// headings as short as the name they state.
-    const SUBJECT_ROWS: usize = 0;
     /// Shown while the first load is outstanding.
     const LOADING_MESSAGE: &'static str;
-    /// The page's topbar title. `None` draws no topbar, which is what Home
-    /// wants: its rows say what they are and nothing above them has to.
-    const TITLE: Option<&'static str> = None;
-
-    /// The orders the reader may choose between, first one default. Empty draws
-    /// no control: Home's rows are sections, and their order is the point.
-    const SORTS: &'static [ShelfSort] = &[];
-
-    /// The topbar's detail line, given how many rows came back.
-    fn count_label(_rows: usize) -> String {
-        String::new()
-    }
-
-    /// `sort` is one of [`Self::SORTS`], or `None` where the source declares none.
-    fn load(library: LibraryClient, sort: Option<ShelfSort>) -> ShelfFuture;
+    fn load(library: LibraryClient) -> ShelfFuture;
 }
 
 /// One row as the page holds it. The heading is data; the shelf is an entity
@@ -95,27 +49,16 @@ pub(crate) trait ShelfSource: 'static {
 struct ShelfEntry {
     id: SharedString,
     title: SharedString,
-    subjects: Vec<(Option<SharedString>, SharedString)>,
     shelf: Entity<Paginator>,
     cards: Vec<Entity<BookCardView>>,
 }
 
 pub(crate) struct ShelfPage<S: ShelfSource> {
     ui: LibraryContext,
-    /// One entry per *shown* row, in the order the source returned them.
+    /// One entry per row, in the order the source returned them.
     /// Parallel to the outer paginator's children, so the paginator's cursor
     /// indexes it.
     rows: Vec<ShelfEntry>,
-    /// Every row the source returned, before the search narrowed them. Retained
-    /// so typing filters what is already here instead of asking the library
-    /// again: the rows are a whole-library answer either way.
-    source_rows: Vec<ShelfRow>,
-    /// The order the rows were asked for, from [`ShelfSource::SORTS`].
-    sort: Option<ShelfSort>,
-    search: SharedString,
-    search_field: Option<SearchField>,
-    search_open: bool,
-    _search_subscription: Option<Subscription>,
     error: Option<SharedString>,
     refresh: LatestRequest,
     /// Whether the current load has resolved. No rows means "still loading"
@@ -136,23 +79,7 @@ impl<S: ShelfSource> ShelfPage<S> {
             cx.subscribe(&updates, |_, _, _: &LibraryScanChanged, cx| cx.notify()),
             cx.observe_global::<crate::stores::CoverTextSetting>(|page, cx| page.refresh_cover_text(cx)),
         ];
-        let mut page = Self {
-            ui,
-            rows: Vec::new(),
-            source_rows: Vec::new(),
-            sort: S::SORTS.first().copied(),
-            search: SharedString::default(),
-            search_field: None,
-            search_open: false,
-            _search_subscription: None,
-            error: None,
-            refresh: LatestRequest::default(),
-            loaded: false,
-            paginator,
-            focus: cx.focus_handle().tab_index(0).tab_stop(true),
-            _updates: update_subscriptions,
-            source: PhantomData,
-        };
+        let mut page = Self { ui, rows: Vec::new(), error: None, refresh: LatestRequest::default(), loaded: false, paginator, focus: cx.focus_handle().tab_index(0).tab_stop(true), _updates: update_subscriptions, source: PhantomData };
         page.refresh(cx);
         page
     }
@@ -163,7 +90,7 @@ impl<S: ShelfSource> ShelfPage<S> {
         if S::ID == "home" {
             crate::services::library_add_trace::mark(library_id, "home_request_started");
         }
-        let load = S::load(self.ui.backend().clone(), self.sort);
+        let load = S::load(self.ui.backend().clone());
         let task = cx.spawn(async move |page, cx| {
             let result = load.await;
             if S::ID == "home" {
@@ -183,8 +110,7 @@ impl<S: ShelfSource> ShelfPage<S> {
                 match result {
                     Ok(rows) => {
                         page.error = None;
-                        page.source_rows = rows;
-                        page.install_matching_rows(cx);
+                        page.install(rows, cx);
                     }
                     Err(error) => {
                         log::error!("failed to load {}: {error}", S::ID);
@@ -197,101 +123,6 @@ impl<S: ShelfSource> ShelfPage<S> {
         self.refresh.install(task);
     }
 
-    /// Narrows the loaded rows to the search and installs what is left.
-    ///
-    /// A row survives on its own name or on a book's, and a row kept only for
-    /// its books is narrowed to those: searching an author shows their whole
-    /// shelf, searching a title shows the shelves it appears on holding it
-    /// alone. An empty query keeps everything, which is the unsearched page.
-    fn install_matching_rows(&mut self, cx: &mut Context<Self>) {
-        let query = self.search.trim().to_lowercase();
-        let rows = if query.is_empty() {
-            self.source_rows.clone()
-        } else {
-            self.source_rows
-                .iter()
-                .filter_map(|row| {
-                    let matches = |text: &str| text.to_lowercase().contains(&query);
-                    if matches(&row.title) {
-                        return Some(row.clone());
-                    }
-                    let books = row.books.iter().filter(|book| matches(&book.title) || matches(&book.author)).cloned().collect::<Vec<_>>();
-                    (!books.is_empty()).then(|| ShelfRow { books, ..row.clone() })
-                })
-                .collect()
-        };
-        self.install(rows, cx);
-    }
-
-    fn search_changed(&mut self, cx: &mut Context<Self>) {
-        let Some(search_field) = &self.search_field else { return };
-        let query = SharedString::from(search_field.query(cx));
-        if self.search == query {
-            return;
-        }
-        self.search = query;
-        // The rows are already here, so the page narrows on the keystroke
-        // rather than after a debounce that would only wait for itself.
-        self.install_matching_rows(cx);
-        cx.notify();
-    }
-
-    /// Choosing an order is a new question for the library, not a narrowing of
-    /// the answer it already gave, so this reloads where the search does not.
-    fn select_sort(&mut self, sort: ShelfSort, cx: &mut Context<Self>) {
-        if self.sort == Some(sort) {
-            return;
-        }
-        self.sort = Some(sort);
-        self.refresh(cx);
-        cx.notify();
-    }
-
-    fn render_sort_control(&self, theme: components::BrowserTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let default_sort = S::SORTS.first().copied()?;
-        let selected = self.sort.unwrap_or(default_sort);
-        let page = cx.entity();
-        // An accent edge marks a non-default order as applied, matching how the
-        // browse page marks its own filters. It is not the selected treatment:
-        // this is a dropdown trigger, not a thing chosen in the toolbar.
-        let trigger = components::outlined_icon_button(format!("{}-sort", S::ID), "Sort", IconName::Settings2, theme).when(selected != default_sort, |button| button.border_color(theme.accent).text_color(theme.accent));
-        Some(
-            trigger
-                .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
-                    let mut menu = menu.item(components::menu_section("Sort"));
-                    for sort in S::SORTS.iter().copied() {
-                        let page = page.clone();
-                        menu = menu.item(
-                            components::menu_item(sort.label(), move |_, _, cx| {
-                                page.update(cx, |page, cx| page.select_sort(sort, cx));
-                            })
-                            .checked(sort == selected),
-                        );
-                    }
-                    menu
-                })
-                .into_any_element(),
-        )
-    }
-
-    fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.search_open {
-            self.search_open = false;
-            self.focus.focus(window, cx);
-        } else {
-            if self.search_field.is_none() {
-                let (search_field, subscription) = SearchField::new(Some("Search books or authors"), |page: &mut Self, cx| page.search_changed(cx), window, cx);
-                self.search_field = Some(search_field);
-                self._search_subscription = Some(subscription);
-            }
-            self.search_open = true;
-            if let Some(search) = &self.search_field {
-                search.focus(window, cx);
-            }
-        }
-        cx.notify();
-    }
-
     fn install(&mut self, rows: Vec<ShelfRow>, cx: &mut Context<Self>) {
         // A reload is not a new page. Cards carry a cover that was fetched and
         // faded in once; rebuilding them for every library update refetches
@@ -299,21 +130,19 @@ impl<S: ShelfSource> ShelfPage<S> {
         // card that already stand for this row and this book, and replace only
         // what they hold.
         //
-        // A row states a title and its chips over a shelf entity, so those and
-        // their order are all a rebuilt page would say differently; a shelf's
-        // own contents are replaced through the entity the row already holds.
-        let unchanged = self.rows.len() == rows.len() && self.rows.iter().zip(&rows).all(|(entry, row)| entry.id == row.id && entry.title == row.title && entry.subjects == row.subjects);
+        // A row states a title over a shelf entity, so the titles and their order
+        // are all a rebuilt page would say differently; a shelf's own contents
+        // are replaced through the entity the row already holds.
+        let unchanged = self.rows.len() == rows.len() && self.rows.iter().zip(&rows).all(|(entry, row)| entry.id == row.id && entry.title == row.title);
         let mut reusable = self.rows.drain(..).map(|entry| (entry.id.clone(), entry)).collect::<HashMap<_, _>>();
         for row in rows {
             let mut entry = reusable.remove(&row.id).unwrap_or_else(|| ShelfEntry {
                 id: row.id.clone(),
                 title: SharedString::default(),
-                subjects: Vec::new(),
                 shelf: cx.new(|_| Paginator::new(format!("{}-shelf-{}", S::ID, row.id), []).max_rows(1).flow_axis(PaginatorAxis::Horizontal).horizontal_only()),
                 cards: Vec::new(),
             });
             entry.title = row.title;
-            entry.subjects = row.subjects;
 
             let shelf_unchanged = entry.cards.iter().map(|card| card.read(cx).content_hash()).eq(row.books.iter().map(|book| book.content_hash));
             let mut cards = entry.cards.drain(..).map(|card| (card.read(cx).content_hash(), card)).collect::<HashMap<_, _>>();
@@ -353,12 +182,11 @@ impl<S: ShelfSource> ShelfPage<S> {
             .iter()
             .map(|card| {
                 let card = card.clone();
-                let prepared_card = card.clone();
+                let prefetched_card = card.clone();
                 let open_card = card.clone();
-                PaginatorChild::new(move |_, _| div().w_full().min_w_0().child(card.clone()).into_any_element()).with_activate(move |window, cx| BookCardView::activate(&open_card, window, cx)).with_prepare(move |window, cx| {
-                    let resolution = BookCardView::thumbnail_resolution(window);
-                    prepared_card.update(cx, |card, cx| card.prepare(resolution, cx))
-                })
+                PaginatorChild::new(move |_, _, _| div().w_full().min_w_0().child(card.clone()).into_any_element())
+                    .with_activate(move |window, cx| BookCardView::activate(&open_card, window, cx))
+                    .with_prepare(move |window, cx| BookCardView::prefetch_for_window(&prefetched_card, window, cx))
             })
             .collect()
     }
@@ -381,12 +209,7 @@ impl<S: ShelfSource> ShelfPage<S> {
     }
 
     /// The rows, as one group of full-width children.
-    ///
-    /// `cursor` carries the paginator's keyboard cursor into the row closures,
-    /// which run inside the paginator's own render: reading the entity back
-    /// there would borrow something already borrowed.
     fn row_groups(&self, cx: &mut Context<Self>) -> Vec<PaginatorGroup> {
-        let cursor = Rc::new(std::cell::Cell::new(self.paginator.read(cx).cursor()));
         let show_controls = !cx.supports_touch_input();
         let children = self
             .rows
@@ -395,12 +218,10 @@ impl<S: ShelfSource> ShelfPage<S> {
             .map(|(index, entry)| {
                 let id = entry.id.clone();
                 let title = entry.title.clone();
-                let subjects = entry.subjects.clone();
                 let shelf = entry.shelf.clone();
-                let cursor = cursor.clone();
-                PaginatorChild::new(move |_, cx| {
+                PaginatorChild::new(move |state, _, cx| {
                     let theme = components::browser_theme(cx);
-                    let mut heading = components::shelf_heading(S::SUBJECT_ROWS).child(components::shelf_title(title.clone(), cursor.get() == Some(index), theme)).child(components::shelf_subjects(subjects.iter().cloned(), theme));
+                    let mut heading = components::shelf_heading().child(components::shelf_title(title.clone(), state.cursor == Some(index), theme));
                     if show_controls {
                         heading = heading.child(shelf_controls(&id, &shelf, theme, cx));
                     }
@@ -411,7 +232,7 @@ impl<S: ShelfSource> ShelfPage<S> {
         if children.is_empty() {
             return Vec::new();
         }
-        vec![PaginatorGroup::new(shelf_rows_policy(crate::stores::current_cover_text(cx), S::SUBJECT_ROWS), children)]
+        vec![PaginatorGroup::new(shelf_rows_policy(crate::stores::current_cover_text(cx)), children)]
     }
 
     /// Up and down walk the rows and turn the page at the edges; left and right
@@ -420,16 +241,6 @@ impl<S: ShelfSource> ShelfPage<S> {
     /// leaving the page.
     fn navigate(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if event.keystroke.modifiers != gpui::Modifiers::default() {
-            return;
-        }
-        // Escape leaves the search before anything else reads the key, and while
-        // the field has focus the arrows belong to the text, not to the shelves.
-        if self.search_open && event.keystroke.key == "escape" {
-            self.toggle_search(window, cx);
-            cx.stop_propagation();
-            return;
-        }
-        if self.search_field.as_ref().is_some_and(|search| search.is_focused(window, cx)) {
             return;
         }
         let handled = match event.keystroke.key.as_str() {
@@ -534,54 +345,6 @@ impl<S: ShelfSource> ShelfPage<S> {
             body
         }
     }
-
-    fn render_topbar(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let title = S::TITLE?;
-        let theme = components::browser_theme(cx);
-        let paginator = self.paginator.read(cx);
-        let has_previous = paginator.has_previous();
-        let has_next = paginator.has_next();
-        let can_previous = paginator.can_previous();
-        let can_next = paginator.can_next();
-        let previous = has_previous.then(|| {
-            components::outlined_icon_button(format!("{}-previous", S::ID), "Previous", IconName::ChevronUp, theme)
-                .disabled(!can_previous)
-                .on_click(cx.listener(|page, _, _, cx| {
-                    page.paginator.update(cx, |paginator, cx| paginator.previous_with_axis(PaginatorAxis::Vertical, cx));
-                }))
-                .into_any_element()
-        });
-        let next = has_next.then(|| {
-            components::outlined_icon_button(format!("{}-next", S::ID), "Next", IconName::ChevronDown, theme)
-                .disabled(!can_next)
-                .on_click(cx.listener(|page, _, _, cx| {
-                    page.paginator.update(cx, |paginator, cx| paginator.next_with_axis(PaginatorAxis::Vertical, cx));
-                }))
-                .into_any_element()
-        });
-        let search_label = if self.search_open { "Hide search" } else { "Search books or authors" };
-        let controls = components::browser_topbar_right()
-            .when(self.search_open, |controls| controls.flex_1())
-            .children(self.search_open.then(|| div().flex_1().min_w(gpui::rems(8.0)).child(self.search_field.as_ref().expect("search field exists while the search is open").render())))
-            .child(
-                components::outlined_icon_button(format!("{}-search", S::ID), search_label, IconName::Search, theme)
-                    .when(self.search_open || !self.search.is_empty(), |button| button.bg(theme.accent).text_color(theme.accent_text))
-                    .on_click(cx.listener(|page, _, window, cx| page.toggle_search(window, cx))),
-            )
-            .children(self.render_sort_control(theme, cx))
-            .child(components::paginator_controls(previous, next));
-        Some(
-            components::browser_topbar(theme)
-                .child(if components::uses_mobile_navigation(window) {
-                    let back = (!components::has_native_back_button()).then(|| components::mobile_back_button(theme).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::DismissSettings), cx)));
-                    components::mobile_navigation_heading(title, back)
-                } else {
-                    components::browser_topbar_left().child(components::browser_page_title(title, S::count_label(self.rows.len()), theme))
-                })
-                .child(controls)
-                .into_any_element(),
-        )
-    }
 }
 
 /// A shelf's own controls, which step it sideways. They act on the shelf entity
@@ -621,10 +384,8 @@ impl<S: ShelfSource> Render for ShelfPage<S> {
                 });
             }
         }
-        if self.loaded {}
-        let topbar = self.render_topbar(window, cx);
         let body = self.render_body(cx);
-        components::full_size_column().track_focus(&self.focus).on_key_down(cx.listener(Self::navigate)).children(topbar).child(components::remaining_space_column().child(body))
+        components::full_size_column().track_focus(&self.focus).on_key_down(cx.listener(Self::navigate)).child(components::remaining_space_column().child(body))
     }
 }
 

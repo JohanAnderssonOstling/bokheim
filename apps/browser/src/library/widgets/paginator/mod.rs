@@ -15,7 +15,7 @@ use gpui::{AnyElement, App, Bounds, Context, ElementId, EventEmitter, Pixels, Po
 use web_time::Instant;
 
 use element::PaginatorElement;
-pub(crate) use policy::{PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy, book_card_policy, shelf_card_policy, shelf_rows_policy};
+pub(crate) use policy::{PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy, author_index_entry_policy, author_index_letter_sizing, book_card_policy, browse_section_card_policy, browse_section_item_policy, graph_cover_policy, shelf_card_policy, shelf_rows_policy};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PaginatorAxis {
@@ -32,11 +32,12 @@ pub(crate) enum CursorMove {
     Down,
 }
 
-type RenderChild = dyn Fn(&mut Window, &mut App) -> AnyElement;
+type RenderChild = dyn Fn(&PaginatorState, &mut Window, &mut App) -> AnyElement;
 type PrepareChild = dyn Fn(&mut Window, &mut App);
 type ActivateChild = dyn Fn(&mut Window, &mut App);
+type ContextMenuHandler = dyn Fn(Option<usize>, Point<Pixels>, &mut Window, &mut App);
 
-const PAGE_TRANSITION_DURATION: Duration = Duration::from_millis(200);
+const PAGE_TRANSITION_DURATION: Duration = Duration::from_millis(140);
 /// How far a press has to travel before it is a rubber band rather than a
 /// click. Without it, every click on empty space would flicker a band.
 const MARQUEE_THRESHOLD: f32 = 4.0;
@@ -101,6 +102,17 @@ impl PaginatorSwipe {
     }
 }
 
+/// What the paginator knows about its children this frame, handed to each child
+/// as it is drawn. The paginator owns the cursor, the selection and the drag
+/// state; a child only has to look.
+#[derive(Default)]
+pub(crate) struct PaginatorState {
+    pub(crate) cursor: Option<usize>,
+    pub(crate) selection: BTreeSet<usize>,
+    /// Whether a rubber band is sweeping. See [`PaginatorMarqueeChanged`].
+    pub(crate) marquee: bool,
+}
+
 #[derive(Clone)]
 pub(crate) struct PaginatorChild {
     pub(super) activate: Option<Rc<ActivateChild>>,
@@ -111,7 +123,7 @@ pub(crate) struct PaginatorChild {
 }
 
 impl PaginatorChild {
-    pub(crate) fn new(render: impl Fn(&mut Window, &mut App) -> AnyElement + 'static) -> Self {
+    pub(crate) fn new(render: impl Fn(&PaginatorState, &mut Window, &mut App) -> AnyElement + 'static) -> Self {
         Self { activate: None, prepare: None, render: Rc::new(render), intrinsic_width: None, measured_width: Rc::new(std::cell::Cell::new(Pixels::ZERO)) }
     }
 
@@ -216,11 +228,6 @@ impl PaginatorData {
 /// back, the way it reads the cursor.
 pub(crate) struct PaginatorSelectionChanged;
 
-/// The child a drag is hovering over changed. The paginator knows which child
-/// is under the pointer; whether that child can take a drop, and what that
-/// looks like, is the page's.
-pub(crate) struct PaginatorDropTargetChanged;
-
 /// A rubber-band drag started or finished.
 ///
 /// The band sweeps the pointer across every child it selects, and a child that
@@ -229,15 +236,6 @@ pub(crate) struct PaginatorDropTargetChanged;
 /// Children suppress hover while this is running, so only the band itself says
 /// what it has picked up.
 pub(crate) struct PaginatorMarqueeChanged;
-
-/// A secondary click the paginator is answering for: on the selection, or on
-/// its empty space. The paginator knows where its children are; what they mean,
-/// and what a menu should offer, is the page's.
-pub(crate) struct PaginatorContextMenu {
-    /// The child clicked, or `None` for the space between them.
-    pub(crate) child_index: Option<usize>,
-    pub(crate) position: Point<Pixels>,
-}
 
 /// A rubber band in flight. Both points are in window coordinates, which is
 /// what the element reports its child bounds in.
@@ -285,12 +283,14 @@ pub(crate) struct Paginator {
     /// Opt-in: pages that have nothing to do with a selection should not grow
     /// mouse handlers for one.
     selectable: bool,
+    /// Answers a secondary click on the selection, or on the space between
+    /// children. The paginator knows where its children are; what they mean,
+    /// and what a menu should offer, is the page's.
+    on_context_menu: Option<Rc<ContextMenuHandler>>,
     marquee: Option<Marquee>,
     /// Children the band has picked up, in flat child order. Indices are valid
     /// only for the current children; every path that replaces them clears it.
     selection: BTreeSet<usize>,
-    /// The child a drag is currently over, if any.
-    drop_target: Option<usize>,
     /// Where the last painted frame put each visible child, in window
     /// coordinates. The element is the only place this is known, so it reports
     /// it back for hit-testing between frames and for anchoring a menu on the
@@ -330,9 +330,9 @@ impl Paginator {
             transition_sequence: 0,
             transition: None,
             selectable: false,
+            on_context_menu: None,
             marquee: None,
             selection: BTreeSet::new(),
-            drop_target: None,
             child_bounds: Rc::new(Vec::new()),
             #[cfg(feature = "mobile")]
             swipe: None,
@@ -342,6 +342,13 @@ impl Paginator {
     /// Enables rubber-band selection over the children.
     pub(crate) fn selectable(mut self) -> Self {
         self.selectable = true;
+        self
+    }
+
+    /// Handles a secondary click on the selection, with the child clicked, or
+    /// on the space between children, with `None`.
+    pub(crate) fn on_context_menu(mut self, handler: impl Fn(Option<usize>, Point<Pixels>, &mut Window, &mut App) + 'static) -> Self {
+        self.on_context_menu = Some(Rc::new(handler));
         self
     }
 
@@ -441,7 +448,6 @@ impl Paginator {
             cx.emit(PaginatorSelectionChanged);
         }
         self.marquee = None;
-        self.drop_target = None;
         self.child_bounds = Rc::new(Vec::new());
         self.content_height = None;
         self.direction = AssignmentDirection::Forward;
@@ -516,27 +522,17 @@ impl Paginator {
         self.cursor
     }
 
+    /// Keep keyboard focus with a page turned by its controls without
+    /// replacing the page or cancelling its transition.
+    pub(crate) fn focus_child_on_current_page(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.data.children.len() {
+            self.cursor = Some(index);
+            cx.notify();
+        }
+    }
+
     pub(crate) fn selection(&self) -> &BTreeSet<usize> {
         &self.selection
-    }
-
-    pub(crate) fn drop_target(&self) -> Option<usize> {
-        self.drop_target
-    }
-
-    pub(super) fn set_drop_target(&mut self, child_index: Option<usize>, cx: &mut Context<Self>) {
-        if self.drop_target == child_index {
-            return;
-        }
-        self.drop_target = child_index;
-        cx.emit(PaginatorDropTargetChanged);
-        cx.notify();
-    }
-
-    /// Which child the last painted frame put under `point`, in window
-    /// coordinates — what a drag hovering over the listing is aiming at.
-    pub(crate) fn child_at(&self, point: Point<Pixels>) -> Option<usize> {
-        self.child_bounds.iter().find(|(_, bounds)| bounds.contains(&point)).map(|(index, _)| *index)
     }
 
     /// Where the last painted frame put a child, for anchoring a menu opened
@@ -613,6 +609,13 @@ impl Paginator {
 
     pub(crate) fn child_anchor(&self) -> usize {
         self.visible_page.map_or(self.child_offset, |page| page.first_child)
+    }
+
+    /// Position in a one-row, single-group horizontal strip.
+    pub(crate) fn horizontal_page_position(&self) -> (usize, usize) {
+        let columns = self.columns_for_group(0).max(1);
+        let total = self.data.children.len().div_ceil(columns).max(1);
+        (self.child_anchor() / columns + 1, total)
     }
 
     /// Columns a group is laid out at, for the width the element last used.
@@ -776,6 +779,20 @@ impl Paginator {
         cx.notify();
     }
 
+    /// Places the keyboard cursor on the final child and lays out the page that
+    /// contains it. Used when spatial navigation enters a nested carousel from
+    /// its right or lower edge.
+    pub(crate) fn focus_last_child(&mut self, cx: &mut Context<Self>) {
+        let Some(last_child) = self.data.children.len().checked_sub(1) else { return };
+        self.child_offset = last_child;
+        self.direction = AssignmentDirection::Backward;
+        self.cursor = Some(last_child);
+        self.visible_page = None;
+        self.prefetched = None;
+        self.cancel_page_transition();
+        cx.notify();
+    }
+
     /// Positions a newly installed bounded result window at its final page.
     /// This is used when crossing a remote window boundary backwards.
     pub(crate) fn show_end(&mut self, cx: &mut Context<Self>) {
@@ -787,6 +804,7 @@ impl Paginator {
         self.cancel_page_transition();
         cx.notify();
     }
+
 
     pub(crate) fn is_empty(&self) -> bool {
         self.data.children.is_empty()
@@ -1007,9 +1025,7 @@ impl Paginator {
 }
 
 impl EventEmitter<PaginatorSelectionChanged> for Paginator {}
-impl EventEmitter<PaginatorDropTargetChanged> for Paginator {}
 impl EventEmitter<PaginatorMarqueeChanged> for Paginator {}
-impl EventEmitter<PaginatorContextMenu> for Paginator {}
 
 impl Render for Paginator {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1049,6 +1065,7 @@ impl Render for Paginator {
             Some(_) => (0.0, 0.0),
             None => rendered_transition.as_ref().and_then(|(transition, progress)| progress.map(|progress| page_transition_vector(transition.axis, page_transition_offsets(transition.direction, progress).1))).unwrap_or((0.0, 0.0)),
         };
+        let state = Rc::new(PaginatorState { cursor: self.cursor, selection: self.selection.clone(), marquee: self.marquee_active() });
         let incoming = PaginatorElement::new(
             ElementId::named_usize(format!("{id}-layout"), self.children_revision),
             cx.entity().downgrade(),
@@ -1062,6 +1079,7 @@ impl Render for Paginator {
             None,
             window.rem_size(),
             self.flow_axis,
+            state.clone(),
         )
         .with_selection(self.selectable, self.marquee_bounds())
         .with_page_offset(incoming_offset.0, incoming_offset.1)
@@ -1086,6 +1104,7 @@ impl Render for Paginator {
                 Some(transition.outgoing_page),
                 window.rem_size(),
                 self.flow_axis,
+                state,
             )
             .passive()
             .with_page_offset(outgoing_offset.0, outgoing_offset.1)

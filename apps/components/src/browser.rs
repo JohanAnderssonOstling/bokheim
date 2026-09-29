@@ -4,11 +4,11 @@ use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{Bounds, Div, ElementId, FocusHandle, FontWeight, Pixels, ScrollHandle, SharedString, div, px};
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::{Icon, IconName, Sizable};
+use gpui_component::{Icon, IconName};
 
 use crate::{
-    BrowserTheme, RADIUS_MD, RADIUS_SM, SETTINGS_CONTROL_SIZE_REM, SETTINGS_CONTROL_GAP, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, THEME_PICKER_WIDTH,
-    TAB_UNDERLINE_HEIGHT, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT, TOPBAR_ACTION_HEIGHT_REM, TOPBAR_ACTION_HORIZONTAL_PADDING,
+    BrowserTheme, RADIUS_MD, RADIUS_SM, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_SIZE_REM, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, TAB_UNDERLINE_HEIGHT, TEXT_MD, TEXT_SM, TEXT_XS, THEME_PICKER_WIDTH_REM,
+    TITLE_MD, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT_REM, TOPBAR_ACTION_HORIZONTAL_PADDING,
 };
 
 // Button installs its own hover style during render. Setting a Div hover
@@ -66,12 +66,17 @@ pub fn more_navigation_overlay() -> Div {
 /// A modal list sized from its fixed-height header and rows.
 /// Sized to its contents up to a cap, then scrolls.
 ///
-/// The arithmetic was `72.0 + count * 44.0` — correct, but the two constants
-/// stood unexplained and silently encoded the row height, the panel's row gap,
-/// the header and the surface padding.
-pub fn navigation_modal_list(item_count: usize, theme: BrowserTheme) -> Scrollable<Div> {
-    let height = (crate::NAVIGATION_MODAL_CHROME_HEIGHT + item_count as f32 * crate::NAVIGATION_MODAL_ROW_PITCH).min(crate::NAVIGATION_MODAL_MAX_HEIGHT);
-    crate::modal_surface(theme).w(px(crate::NAVIGATION_MODAL_WIDTH)).max_w_full().h(px(height)).max_h_full().overflow_y_scrollbar()
+/// The height is stated rather than left to the contents because the list
+/// scrolls, and a scroll container needs a definite height. It is worked out at
+/// the window's `rem_size`: the header and rows are rems, the gaps and padding
+/// are pixels, and a height reckoned at a fixed 16px rem cut the rows off at
+/// any larger UI font.
+pub fn navigation_modal_list(item_count: usize, rem_size: Pixels, theme: BrowserTheme) -> Scrollable<Div> {
+    let rem = f32::from(rem_size);
+    let rows = (item_count + 1) as f32 * crate::NAVIGATION_MODAL_ROW_HEIGHT_REM * rem;
+    let gaps = item_count as f32 * SPACE_XS + SPACE_MD * 2.0;
+    let height = (rows + gaps).min(crate::NAVIGATION_MODAL_MAX_HEIGHT_REM * rem);
+    crate::modal_surface(theme).w(gpui::rems(crate::NAVIGATION_MODAL_WIDTH_REM)).max_w_full().h(px(height)).max_h_full().overflow_y_scrollbar()
 }
 
 pub fn more_navigation_header(theme: BrowserTheme) -> Div {
@@ -152,7 +157,7 @@ pub fn library_section_content() -> Div {
 
 pub fn library_switcher_group(theme: BrowserTheme) -> Div {
     let _ = theme;
-    div().relative().w_full().h(px(crate::TOPBAR_HEIGHT)).flex_none().flex().items_center().gap(px(SPACE_SM))
+    div().relative().w_full().h(gpui::rems(crate::TOPBAR_HEIGHT_REM)).flex_none().flex().items_center().gap(px(SPACE_SM))
 }
 
 /// The topbar carries neither fill nor underline. Its old `bg(theme.page_bg)`
@@ -161,7 +166,7 @@ pub fn library_switcher_group(theme: BrowserTheme) -> Div {
 /// actions already make obvious. See [`crate::nav_rail_destinations`].
 pub fn browser_topbar(theme: BrowserTheme) -> Div {
     let _ = theme;
-    div().w_full().h(px(crate::TOPBAR_HEIGHT)).flex_none().flex().flex_row().items_center().gap(px(SPACE_MD))
+    div().w_full().h(gpui::rems(crate::TOPBAR_HEIGHT_REM)).flex_none().flex().flex_row().items_center().gap(px(SPACE_MD))
 }
 
 pub fn browser_topbar_left() -> Div {
@@ -176,7 +181,7 @@ pub fn mobile_back_button(theme: BrowserTheme) -> Button {
 /// is `None` on native mobile, where the OS back button/gesture already does
 /// the same thing — see `has_native_back_button`.
 pub fn mobile_navigation_heading(title: impl Into<SharedString>, back: Option<Button>) -> Div {
-    div().flex_1().min_w_0().flex().items_center().gap(px(SPACE_SM)).pl(px(crate::CONTENT_INSET)).children(back).child(div().flex_1().min_w_0().truncate().text_size(gpui::rems(crate::TEXT_MD)).child(title.into()))
+    div().flex_1().min_w_0().flex().items_center().gap(px(SPACE_SM)).pl(px(crate::CONTENT_INSET)).children(back).child(div().flex_1().min_w_0().truncate().font_family(crate::DISPLAY_FONT_FAMILY).text_size(gpui::rems(crate::TEXT_MD)).child(title.into()))
 }
 
 pub fn mobile_navigation_bar(title: impl Into<SharedString>, back: Option<Button>, theme: BrowserTheme) -> Div {
@@ -206,7 +211,7 @@ pub fn browser_page_title(title: impl Into<SharedString>, detail: impl Into<Shar
         .items_baseline()
         .gap(px(SPACE_SM))
         .text_size(gpui::rems(crate::TEXT_LG))
-        .child(div().flex_none().child(title.into()))
+        .child(div().flex_none().font_family(crate::DISPLAY_FONT_FAMILY).child(title.into()))
         .child(div().min_w_0().text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(detail.into()))
 }
 
@@ -245,7 +250,7 @@ fn browser_actionable_empty_parts(title: SharedString, description: Option<Share
         .justify_center()
         .gap(px(SPACE_SM))
         .text_center()
-        .child(div().text_size(gpui::rems(TITLE_MD)).child(title))
+        .child(div().font_family(crate::DISPLAY_FONT_FAMILY).text_size(gpui::rems(TITLE_MD)).child(title))
         .children(description.map(|description| div().text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(description)))
         .child(div().mt(px(SPACE_XS)).child(actions))
 }
@@ -261,7 +266,7 @@ fn browser_actionable_empty_parts(title: SharedString, description: Option<Share
 /// both at `SPACE_MD` the rightmost tab and the leftmost action were the same
 /// distance apart as two tabs, and the bar read as one row of six things.
 pub fn browser_tab_bar() -> Div {
-    div().w_full().h(px(TOPBAR_ACTION_HEIGHT)).flex_none().flex().flex_row().items_stretch().gap(px(SPACE_XL))
+    div().w_full().h(gpui::rems(TOPBAR_ACTION_HEIGHT_REM)).flex_none().flex().flex_row().items_stretch().gap(px(SPACE_XL))
 }
 
 /// The tabs themselves, at the left of a [`browser_tab_bar`].
@@ -327,13 +332,13 @@ pub fn library_switcher_trigger(label: impl Into<SharedString>, theme: BrowserTh
     crate::base_button("library-switcher-trigger")
         .ghost()
         .w_full()
-        .h(px(crate::TOPBAR_HEIGHT))
+        .h(gpui::rems(crate::TOPBAR_HEIGHT_REM))
         .flex_none()
         .p_0()
         .overflow_hidden()
         .text_size(gpui::rems(crate::NAV_RAIL_LABEL_SIZE))
         .font_weight(FontWeight::NORMAL)
-        .text_color(theme.accent)
+        .text_color(theme.text_accent)
         .child(
             div()
                 .size_full()
@@ -343,7 +348,7 @@ pub fn library_switcher_trigger(label: impl Into<SharedString>, theme: BrowserTh
                 .items_center()
                 .justify_center()
                 .gap(px(SPACE_XXS))
-                .child(navigation_icon(NavigationIcon::BookOpen).large())
+                .child(navigation_icon(NavigationIcon::BookOpen).size(gpui::rems(crate::NAV_RAIL_ICON_SIZE_REM)))
                 .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().font_features(crate::small_caps()).child(label)),
         )
 }
@@ -401,14 +406,13 @@ pub fn topbar_action_button(id: impl Into<ElementId>, label: impl Into<SharedStr
     crate::outlined_button(id, theme)
         .label(label)
         .icon(icon)
-        .text_color(theme.accent)
+        .text_color(theme.text_accent)
         .text_size(gpui::rems(TEXT_SM))
         .font_weight(crate::TOPBAR_ACTION_LABEL_WEIGHT)
         .h(gpui::rems(TOPBAR_ACTION_HEIGHT_REM))
         .px(px(TOPBAR_ACTION_HORIZONTAL_PADDING))
         .rounded(px(RADIUS_MD))
 }
-
 
 /// Base surface for a clickable row or card.
 pub fn clickable_surface(theme: BrowserTheme) -> Div {
@@ -435,8 +439,10 @@ pub fn browser_settings_section(focus: &FocusHandle, bounds: Rc<Cell<Bounds<Pixe
     div().w_full().relative().track_focus(focus).child(crate::measured_bounds(bounds)).child(child)
 }
 
+/// The column the groups stack in, with the same air below the last group as
+/// above the first, so a page scrolled to its end does not stop on a border.
 pub fn browser_settings_content() -> Div {
-    div().w_full().max_w(px(580.0)).flex().flex_col().gap(px(SPACE_MD)).pt(px(SPACE_MD))
+    div().w_full().max_w(px(580.0)).flex().flex_col().gap(px(SPACE_MD)).py(px(SPACE_MD))
 }
 
 pub fn browser_settings_row(title: impl Into<SharedString>, description: impl Into<SharedString>, control: impl IntoElement, theme: BrowserTheme) -> Div {
@@ -474,8 +480,12 @@ pub fn browser_settings_group(theme: BrowserTheme) -> Div {
 
 /// A titled block. The title is a header on the group rather than a floating
 /// label above it, so it is inside the region it names.
+///
+/// Its header is the same bar a group with actions has, empty on the right:
+/// the title was once a bare line in the group's corner, flush against the
+/// border while every row under it and the account's title were inset.
 pub fn browser_settings_fieldset(title: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    browser_settings_group(theme).child(browser_settings_legend(title, theme))
+    browser_settings_group(theme).child(browser_settings_header(title, theme))
 }
 
 /// A titled block whose header carries a control of its own, on the right.
@@ -485,20 +495,24 @@ pub fn browser_settings_fieldset(title: impl Into<SharedString>, theme: BrowserT
 /// setting inside the group, it is what the group is about, so it sits in the
 /// header beside the name instead of becoming the first row.
 pub fn browser_settings_fieldset_with_actions(title: impl Into<SharedString>, actions: impl IntoElement, theme: BrowserTheme) -> Div {
-    browser_settings_group(theme).child(
-        div()
-            .w_full()
-            .px(px(SPACE_MD))
-            .py(px(SPACE_SM))
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .justify_between()
-            .gap(px(SPACE_SM))
-            .child(browser_settings_legend(title, theme).flex_none().w_auto())
-            .child(div().flex_none().flex().flex_row().items_center().gap(px(SPACE_SM)).child(actions)),
-    )
+    browser_settings_group(theme).child(browser_settings_header(title, theme).child(div().flex_none().flex().flex_row().items_center().gap(px(SPACE_SM)).child(actions)))
+}
+
+/// A group's header bar: inset like the rows under it, so the title starts on
+/// their line, and at least as tall as a header button, so a group whose header
+/// has none is exactly as tall as one whose header does.
+fn browser_settings_header(title: impl Into<SharedString>, theme: BrowserTheme) -> Div {
+    div()
+        .w_full()
+        .px(px(SPACE_MD))
+        .py(px(SPACE_SM))
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap(px(SPACE_SM))
+        .child(browser_settings_legend(title, theme).flex_none().w_auto().min_h(gpui::rems(SETTINGS_CONTROL_SIZE_REM)).flex().items_center())
 }
 
 /// An action in a settings group's header.
@@ -511,7 +525,6 @@ pub fn browser_settings_header_button(id: impl Into<ElementId>, label: impl Into
         .label(label)
         .ghost()
         .h(gpui::rems(SETTINGS_CONTROL_SIZE_REM))
-        .min_h(px(32.0))
         .px(px(SPACE_MD))
         .rounded(px(RADIUS_SM))
         .border_1()
@@ -546,7 +559,7 @@ pub fn browser_settings_group_error(text: impl Into<SharedString>, theme: Browse
 /// It matters more than a separator normally would, because it is also what an
 /// unselected segment falls back to if it does not paint its own surface.
 pub fn browser_settings_button_group(theme: BrowserTheme) -> Div {
-    div().w(px(THEME_PICKER_WIDTH)).max_w_full().flex().flex_row().gap(px(SETTINGS_CONTROL_GAP)).overflow_hidden().rounded(px(RADIUS_SM)).border_1().border_color(theme.border).bg(theme.rule)
+    div().w(gpui::rems(THEME_PICKER_WIDTH_REM)).max_w_full().flex().flex_row().gap(px(SETTINGS_CONTROL_GAP)).overflow_hidden().rounded(px(RADIUS_SM)).border_1().border_color(theme.border).bg(theme.rule)
 }
 
 /// One setting: its name on the left, its control on the right.
@@ -591,7 +604,6 @@ pub fn browser_settings_choice_button(id: impl Into<ElementId>, label: impl Into
         .flex_1()
         .min_w_0()
         .h(gpui::rems(SETTINGS_CONTROL_SIZE_REM))
-        .min_h(px(32.0))
         .px(px(SPACE_SM))
         .rounded(px(0.0))
         .border_0()
@@ -609,7 +621,7 @@ pub fn browser_settings_choice_button(id: impl Into<ElementId>, label: impl Into
 /// that identifies it — rather than the root, which is the same for every path
 /// a user is choosing between.
 pub fn browser_settings_path_button(id: impl Into<ElementId>, path: impl Into<SharedString>, theme: BrowserTheme) -> Button {
-    crate::outlined_text_button(id, path).h(gpui::rems(SETTINGS_CONTROL_SIZE_REM)).min_h(px(32.0)).px(px(SPACE_SM)).rounded(px(RADIUS_SM)).border_color(theme.border).text_color(theme.text).text_size(gpui::rems(TEXT_XS))
+    crate::outlined_text_button(id, path).h(gpui::rems(SETTINGS_CONTROL_SIZE_REM)).px(px(SPACE_SM)).rounded(px(RADIUS_SM)).border_color(theme.border).text_color(theme.text).text_size(gpui::rems(TEXT_XS))
 }
 
 /// Abbreviate only a complete home-directory prefix; keep the actual path for

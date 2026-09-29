@@ -70,7 +70,7 @@ fn push_pages_stop_before_the_encoded_byte_target() {
 fn push_coalesces_reading_positions_per_book_by_winning_version() {
     let changes = vec![
         reading_change(1, 1, "epubcfi(/6/10)", 10),
-        StateMutation { mutation_id: sync_common::MutationId::new(), body: added(3, "preserved", 1), changed_at: millis(1), replica_seq: local_seq(2) },
+        StateMutation { origin: None, mutation_id: sync_common::MutationId::new(), body: added(3, 1), changed_at: millis(1), replica_seq: local_seq(2) },
         reading_change(3, 2, "epubcfi(/6/12)", 30),
         reading_change(4, 1, "epubcfi(/6/14)", 20),
         // Later local sequence, but an older wall clock: the server retains
@@ -89,15 +89,16 @@ fn push_coalesces_every_protocol_singleton_but_preserves_append_events() {
     let dir_id = test_support::fixture_dir_id("singleton-dir");
     let changes = vec![
         StateMutation {
+            origin: None,
             mutation_id: sync_common::MutationId::new(),
             // The tombstone wins an exact wall-clock tie through conflict_rank,
             // even though the later local sequence below says present.
-            body: MutationBody::DirectoryLifecycle { dir_id: dir_id.clone(), value: library_replica::DirectoryLifecycleState::Deleted },
+            body: MutationBody::DirectoryLifecycle { dir_id, value: library_replica::DirectoryLifecycleState::Deleted },
             changed_at: millis(10),
             replica_seq: local_seq(1),
         },
-        StateMutation { mutation_id: sync_common::MutationId::new(), body: added(2, "canonical lifecycle", 10), changed_at: millis(10), replica_seq: local_seq(3) },
-        StateMutation { mutation_id: sync_common::MutationId::new(), body: MutationBody::DirectoryLifecycle { dir_id, value: library_replica::DirectoryLifecycleState::Present }, changed_at: millis(10), replica_seq: local_seq(4) },
+        StateMutation { origin: None, mutation_id: sync_common::MutationId::new(), body: added(2, 10), changed_at: millis(10), replica_seq: local_seq(3) },
+        StateMutation { origin: None, mutation_id: sync_common::MutationId::new(), body: MutationBody::DirectoryLifecycle { dir_id, value: library_replica::DirectoryLifecycleState::Present }, changed_at: millis(10), replica_seq: local_seq(4) },
         reading_change(6, 1, "epubcfi(/6/18)", 10),
         reading_change(7, 1, "epubcfi(/6/20)", 20),
     ];
@@ -112,7 +113,7 @@ fn push_coalesces_every_protocol_singleton_but_preserves_append_events() {
 fn coalesced_push_does_not_checkpoint_across_an_interleaved_rejection() {
     let changes = coalesce_mutations_for_push(vec![
         reading_change(1, 1, "epubcfi(/6/18)", 10),
-        StateMutation { mutation_id: sync_common::MutationId::new(), body: added(2, "barrier", 1), changed_at: millis(1), replica_seq: local_seq(2) },
+        StateMutation { origin: None, mutation_id: sync_common::MutationId::new(), body: added(2, 1), changed_at: millis(1), replica_seq: local_seq(2) },
         reading_change(3, 1, "epubcfi(/6/22)", 20),
     ]);
     assert_eq!(changes.iter().map(|change| change.replica_seq).collect::<Vec<_>>(), vec![local_seq(2), local_seq(3)]);
@@ -126,7 +127,7 @@ fn coalesced_push_does_not_checkpoint_across_an_interleaved_rejection() {
 
 #[test]
 fn push_acceptance_uses_mutation_identity() {
-    let requested = vec![reading_change(1, 1, "epubcfi(/6/24)", 1), reading_change(2, 2, "epubcfi(/6/26)", 2)];
+    let requested = [reading_change(1, 1, "epubcfi(/6/24)", 1), reading_change(2, 2, "epubcfi(/6/26)", 2)];
     let response = PushMutationsResponse { accepted: requested.iter().rev().map(|mutation| mutation.mutation_id).collect(), rejected: Vec::new() };
     let requested_ids = requested.iter().map(|mutation| mutation.mutation_id).collect::<Vec<_>>();
     assert_eq!(validate_push_response(&requested_ids, &response).unwrap().accepted, response.accepted);
@@ -134,7 +135,7 @@ fn push_acceptance_uses_mutation_identity() {
 
 #[test]
 fn permanent_rejection_is_reported_by_mutation_identity() {
-    let requested = vec![reading_change(1, 1, "epubcfi(/6/24)", 1)];
+    let requested = [reading_change(1, 1, "epubcfi(/6/24)", 1)];
     let response = PushMutationsResponse { accepted: Vec::new(), rejected: vec![MutationRejection { mutation_id: requested[0].mutation_id, reason: MutationRejectionReason::InvalidPayload }] };
     let requested_ids = requested.iter().map(|mutation| mutation.mutation_id).collect::<Vec<_>>();
     assert_eq!(validate_push_response(&requested_ids, &response).unwrap().issues, vec![sync_common::MutationIssue::Rejected(MutationRejection { mutation_id: requested[0].mutation_id, reason: MutationRejectionReason::InvalidPayload })]);
@@ -142,7 +143,7 @@ fn permanent_rejection_is_reported_by_mutation_identity() {
 
 #[test]
 fn incomplete_or_contradictory_acknowledgments_are_rejected() {
-    let requested = vec![reading_change(1, 1, "epubcfi(/6/24)", 1), reading_change(2, 2, "epubcfi(/6/26)", 2)];
+    let requested = [reading_change(1, 1, "epubcfi(/6/24)", 1), reading_change(2, 2, "epubcfi(/6/26)", 2)];
     let requested_ids = requested.iter().map(|mutation| mutation.mutation_id).collect::<Vec<_>>();
     let missing = PushMutationsResponse { accepted: vec![requested[0].mutation_id], rejected: Vec::new() };
     assert!(matches!(validate_push_response(&requested_ids, &missing), Err(PushResponseError::InvalidAcknowledgments(_))));

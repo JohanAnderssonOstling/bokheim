@@ -1,12 +1,13 @@
-//! Resumable subject-enrichment order. Hosts execute steps and merge returned
-//! evidence before requesting the next step. A failed request does not advance.
+//! Subject-enrichment phase order. Hosts execute steps and merge returned
+//! evidence before requesting the next step. A failed request does not advance;
+//! durable checkpoints resume at phase boundaries and may repeat work in a phase.
 use crate::related_isbn;
 use book_model::from_metadata_value;
 use book_model::{BookMetadata, Scheme};
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
 pub enum SubjectPhase {
     #[default]
     MetadataCodes,
@@ -21,6 +22,14 @@ pub enum SubjectPhase {
 
 impl SubjectPhase {
     pub const ALL: [Self; 8] = [Self::MetadataCodes, Self::MetadataIsbns, Self::Pages, Self::PageCodes, Self::PageIsbns, Self::TitleAuthor, Self::FinalIsbns, Self::Exhausted];
+
+    pub const fn checkpoint_id(self) -> u8 {
+        self as u8
+    }
+
+    pub fn from_checkpoint_id(id: u8) -> Option<Self> {
+        Self::ALL.get(usize::from(id)).copied()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,7 +49,7 @@ pub enum SubjectStep {
     Exhausted,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default)]
 pub struct SubjectPipeline {
     stage: SubjectPhase,
     checked_codes: BTreeSet<(String, String)>,
@@ -48,13 +57,26 @@ pub struct SubjectPipeline {
     pending_codes: BTreeSet<(String, String)>,
     pending_isbns: BTreeSet<String>,
     pending: bool,
-    #[serde(default)]
     pages_inspected: bool,
-    #[serde(default)]
     pending_pages: bool,
 }
 
 impl SubjectPipeline {
+    pub fn phase(&self) -> SubjectPhase {
+        self.stage
+    }
+
+    /// Stores only the current phase. Work inside that phase may be repeated
+    /// after a crash; checked-code and checked-ISBN sets remain in memory only.
+    pub fn checkpoint_id(&self) -> u8 {
+        self.stage.checkpoint_id()
+    }
+
+    /// Resume at the start of a phase, with no per-item progress restored.
+    pub fn resume_at_phase(phase: SubjectPhase) -> Self {
+        Self { stage: phase, ..Self::default() }
+    }
+
     /// Probe without advancing a book into a later library-wide phase.
     pub fn next_step_in_phase(&mut self, metadata: &BookMetadata, phase: SubjectPhase) -> Option<SubjectStep> {
         let mut next = self.clone();
@@ -133,7 +155,7 @@ impl SubjectPipeline {
 
     /// Call only after the requested step has finished successfully, including
     /// a definitive no-match/no-LCC result. On timeout or omitted results, retain
-    /// the pending step for retry. Persist this state alongside cached evidence.
+    /// the pending step for retry.
     pub fn finish_step(&mut self) {
         if !self.pending {
             return;
@@ -183,7 +205,7 @@ mod tests {
         m.subjects.push(BookSubject::new(None, value, "test", Some(authority.into()), Some(value.into())).unwrap());
     }
     #[test]
-    fn fallback_waits_for_its_library_phase_and_resumes_after_serialization() {
+    fn fallback_waits_for_its_library_phase_and_resumes_at_a_coarse_checkpoint() {
         let mut metadata = BookMetadata::default();
         isbn(&mut metadata, "9781934356555");
         let mut pipeline = SubjectPipeline::default();
@@ -191,11 +213,11 @@ mod tests {
         assert!(matches!(pipeline.next_step_in_phase(&metadata, SubjectPhase::MetadataIsbns), Some(SubjectStep::LookupIsbns(_))));
         pipeline.finish_step();
         assert!(pipeline.next_step_in_phase(&metadata, SubjectPhase::MetadataIsbns).is_none());
-        let mut restored: SubjectPipeline = serde_json::from_str(&serde_json::to_string(&pipeline).unwrap()).unwrap();
+        let mut restored = SubjectPipeline::resume_at_phase(pipeline.phase());
         assert_eq!(restored.next_step_in_phase(&metadata, SubjectPhase::Pages), Some(SubjectStep::InspectPages));
         restored.finish_step();
         assert!(restored.next_step_in_phase(&metadata, SubjectPhase::Pages).is_none());
-        assert_eq!(restored.next_step_in_phase(&metadata, SubjectPhase::TitleAuthor), Some(SubjectStep::SearchTitleAuthor));
+        assert_eq!(restored.phase(), SubjectPhase::PageCodes);
     }
 
     #[test]
@@ -248,7 +270,7 @@ mod tests {
         assert_eq!(p.next_step(&m), SubjectStep::Complete);
     }
     #[test]
-    fn retries_and_resume_do_not_repeat_successful_isbn_requests() {
+    fn coarse_resume_repeats_work_from_the_saved_phase() {
         let mut m = BookMetadata::default();
         isbn(&mut m, "1934356557");
         let mut p = SubjectPipeline::default();
@@ -256,10 +278,12 @@ mod tests {
         assert_eq!(request, SubjectStep::LookupIsbns(vec!["1934356557".into()]));
         assert_eq!(p.next_step(&m), request); // Timeout: no finish_step.
         p.finish_step();
-        let mut p: SubjectPipeline = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        let mut p = SubjectPipeline::resume_at_phase(p.phase());
         assert_eq!(p.next_step(&m), SubjectStep::InspectPages);
-        isbn(&mut m, "9781934356555"); // Same ISBN in 13-digit form on page.
         p.finish_step();
-        assert_eq!(p.next_step(&m), SubjectStep::SearchTitleAuthor);
+        // A restart forgets checked identifiers, so this phase may reconsider
+        // an earlier ISBN. The durable provider-attempt ledger suppresses a
+        // duplicate request in the enrichment host.
+        assert_eq!(p.next_step(&m), SubjectStep::LookupIsbns(vec!["1934356557".into()]));
     }
 }

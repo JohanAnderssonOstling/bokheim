@@ -41,12 +41,6 @@ impl From<std::io::Error> for AssetStoreError {
     }
 }
 
-impl From<rusqlite::Error> for AssetStoreError {
-    fn from(error: rusqlite::Error) -> Self {
-        Self::operation(error)
-    }
-}
-
 impl From<library_database::DatabaseError> for AssetStoreError {
     fn from(error: library_database::DatabaseError) -> Self {
         Self::operation(error)
@@ -56,10 +50,66 @@ impl From<library_database::DatabaseError> for AssetStoreError {
 #[derive(Clone, Debug)]
 pub struct AssetStore(imp::Handle);
 
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub(super) struct BookPathLookup(std::sync::Arc<dyn Fn(&ContentHash) -> Result<Vec<String>, AssetStoreError> + Send + Sync>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl BookPathLookup {
+    fn paths(&self, hash: &ContentHash) -> Result<Vec<String>, AssetStoreError> {
+        (self.0)(hash)
+    }
+}
+
 impl AssetStore {
+    /// Returns an explicit sibling cover for a native M4B placement.
+    pub async fn m4b_sidecar_cover(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>, AssetStoreError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let handle = self.0.clone();
+            let hash = *hash;
+            client_platform_runtime::executor::run_blocking(move || imp::m4b_sidecar_cover(&handle, &hash)).await.map_err(AssetStoreError::operation)?
+        }
+        #[cfg(target_arch = "wasm32")]
+        { let _ = hash; Ok(None) }
+    }
+
+    /// Read a scanned MP3 directory as the same transfer archive used for sync.
+    /// Native scans may have no cached book blob yet.
+    pub async fn local_mp3_folder_archive(&self, hash: &ContentHash) -> Result<Option<BoxedBookReader>, AssetStoreError> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = hash;
+            Ok(None)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let handle = self.0.clone();
+            let hash = *hash;
+            client_platform_runtime::executor::run_blocking(move || imp::local_mp3_folder_archive(&handle, &hash))
+                .await
+                .map_err(AssetStoreError::operation)?
+        }
+    }
+
+    pub async fn local_m4b_reader(&self, hash: &ContentHash) -> Result<Option<BoxedBookReader>, AssetStoreError> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = hash;
+            Ok(None)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let handle = self.0.clone();
+            let hash = *hash;
+            client_platform_runtime::executor::run_blocking(move || imp::local_m4b_reader(&handle, &hash))
+                .await
+                .map_err(AssetStoreError::operation)?
+        }
+    }
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn unavailable(locator: &str, database: std::path::PathBuf) -> Self {
-        Self(imp::unavailable(locator, database))
+    pub fn unavailable(locator: &str) -> Self {
+        Self(imp::unavailable(locator))
     }
     #[cfg(not(target_arch = "wasm32"))]
     pub fn suspend_local_access(&self) {
@@ -82,8 +132,8 @@ impl AssetStore {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn with_database_path(self, path: std::path::PathBuf) -> Self {
-        Self(imp::with_database_path(self.0, path))
+    pub fn with_book_paths(self, lookup: impl Fn(&ContentHash) -> Result<Vec<String>, AssetStoreError> + Send + Sync + 'static) -> Self {
+        Self(imp::with_book_paths(self.0, BookPathLookup(std::sync::Arc::new(lookup))))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -173,7 +223,22 @@ impl AssetStore {
                 use std::io::{Read as _, Seek as _};
                 let lease = imp::lease(&store.0, hash.as_str(), true)?.ok_or_else(|| AssetStoreError::operation("book is in use; retry verification"))?;
                 for relative_path in paths {
-                    let Some(mut reader) = imp::open_book_at_path(&store.0, &relative_path)? else { continue };
+                    let path = imp::placement_path(&store.0, &relative_path)?;
+                    let (mut reader, folder_identity): (BoxedBookReader, Option<ContentHash>) = if path.is_dir() {
+                        let tracks = audiobook_folder::discover(&path)?;
+                        if tracks.is_empty() { continue; }
+                        let identity = ContentHash::new(audiobook_folder::identity(&tracks)?.to_hex().as_str());
+                        if identity != hash { continue; }
+                        let nfo = audiobook_folder::discover_nfo(&path)?;
+                        let cue = audiobook_folder::discover_cue(&path)?;
+                        let cover = audiobook_folder::discover_cover(&path)?;
+                        let mut archive = audiobook_folder::write_archive_with_sidecars(tempfile::tempfile()?, &tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref())?;
+                        archive.rewind()?;
+                        (Box::new(archive), Some(identity))
+                    } else {
+                        let Some(reader) = imp::open_book_at_path(&store.0, &relative_path)? else { continue };
+                        (reader, None)
+                    };
                     let mut hasher = blake3::Hasher::new();
                     let mut buffer = [0_u8; 64 * 1024];
                     loop {
@@ -188,7 +253,15 @@ impl AssetStore {
                         continue;
                     }
                     reader.seek(std::io::SeekFrom::Start(0))?;
-                    if book_identity::read(&mut reader)?.unwrap_or(checksum) != hash {
+                    let actual_identity = match folder_identity {
+                        Some(identity) => {
+                            let tracks = audiobook_folder::discover(&path)?;
+                            if ContentHash::new(audiobook_folder::identity(&tracks)?.to_hex().as_str()) != identity { continue; }
+                            identity
+                        }
+                        None => book_identity::read(&mut reader)?.unwrap_or(checksum),
+                    };
+                    if actual_identity != hash {
                         continue;
                     }
                     reader.seek(std::io::SeekFrom::Start(0))?;
@@ -456,7 +529,7 @@ impl AssetStore {
     /// without holding the writer.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn placement_file_exists(&self, relative: &str) -> bool {
-        imp::placement_path(&self.0, relative).is_ok_and(|path| path.is_file())
+        imp::placement_path(&self.0, relative).is_ok_and(|path| path.is_file() || path.is_dir() && audiobook_folder::discover(&path).is_ok_and(|tracks| !tracks.is_empty()))
     }
 
     /// Best-effort filesystem ensure of a placement's parent directory, with
@@ -502,8 +575,8 @@ impl AssetStore {
         if !self.placement().root_available() {
             return Err(AssetStoreError::operation("library storage is unavailable"));
         }
-        let Some(snapshot) = database.purge_book_snapshot(&hash).map_err(|error| AssetStoreError::operation(error))? else { return Ok(()) };
         let Some(_exclusive) = imp::lease(&self.0, hash.as_str(), true)? else { return Ok(()) };
+        let Some(snapshot) = database.purge_book_snapshot(&hash).map_err(|error| AssetStoreError::operation(error))? else { return Ok(()) };
         if snapshot.remove_bytes {
             self.remove(BlobKind::Book, &hash)?;
             self.remove(BlobKind::Thumbnail, &hash)?;
@@ -512,21 +585,6 @@ impl AssetStore {
         }
         database.acknowledge_purge_book(snapshot).map_err(|error| AssetStoreError::operation(error))?;
         Ok(())
-    }
-}
-
-/// Read usage without opening an asset store, creating directories or acquiring leases.
-pub async fn book_bytes(library_locator: &str, database_locator: &str) -> Result<u64, AssetStoreError> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let locator = library_locator.to_owned();
-        let database = database_locator.to_owned();
-        client_platform_runtime::executor::run_blocking(move || imp::book_bytes(&locator, &database)).await.map_err(|error| AssetStoreError::operation(error))?
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = database_locator;
-        imp::book_bytes(library_locator).await
     }
 }
 
@@ -643,7 +701,17 @@ impl AsyncAssetWriter {
     pub async fn finish_book(mut self) -> Result<StagedBook, AssetStoreError> {
         self.verify().await?;
         let temporary_path = self.inner.finish_book().await?;
-        if book_identity::read(&mut std::fs::File::open(&temporary_path)?)?.unwrap_or(self.transfer_checksum) != self.expected_hash {
+        let mut source = std::fs::File::open(&temporary_path)?;
+        let identity = if let Some(identity) = book_identity::read(&mut source)? {
+            identity
+        } else if self.expected_hash != self.transfer_checksum {
+            audiobook_folder::archive_identity(std::fs::File::open(&temporary_path)?)
+                .map(|hash| ContentHash::new(hash.to_hex().as_str()))
+                .unwrap_or(self.transfer_checksum)
+        } else {
+            self.transfer_checksum
+        };
+        if identity != self.expected_hash {
             return Err(AssetStoreError::operation("downloaded book identity does not match the requested book"));
         }
         Ok(StagedBook { inner: imp::StagedBook { temporary_path, content_hash: self.expected_hash.as_str().to_owned(), checksum: self.transfer_checksum, size_bytes: self.written, direct: None } })
@@ -677,7 +745,7 @@ impl StagedBook {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn publish_snapshot(self, store: &AssetStore, relative_path: &str, occupied_names: &[String]) -> Result<PublishedStagedBook, AssetStoreError> {
         let hash = self.content_hash();
-        let imp::StagedBook { temporary_path, direct, .. } = self.inner;
+        let imp::StagedBook { temporary_path, direct, checksum, .. } = self.inner;
         // A direct import already wrote its bytes straight to the final
         // destination; re-running the move/dedup logic below would find that
         // path already occupied by itself and discard it as a duplicate.
@@ -687,6 +755,38 @@ impl StagedBook {
             let name = relative_path.rsplit_once('/').map_or(relative_path, |(_, tail)| tail).to_owned();
             temporary_path.keep().map_err(|error| AssetStoreError::operation(format!("could not finalize the imported book '{}': {}", direct.path.display(), error.error)))?;
             return Ok(PublishedStagedBook { name, relative_path: relative_path.to_owned(), published: true, fingerprint });
+        }
+        if checksum != hash && audiobook_folder::archive_identity(std::fs::File::open(&temporary_path)?).is_ok_and(|identity| ContentHash::new(identity.to_hex().as_str()) == hash) {
+            let (parent, requested) = relative_path.rsplit_once('/').unwrap_or(("", relative_path));
+            let mut occupied = occupied_names.to_vec();
+            let mut name = requested.to_owned();
+            loop {
+                let relative = if parent.is_empty() { name.clone() } else { format!("{parent}/{name}") };
+                let destination = imp::placement_path(&store.0, &relative)?;
+                if destination.exists() {
+                    if destination.is_dir() {
+                        let tracks = audiobook_folder::discover(&destination)?;
+                        if !tracks.is_empty() && ContentHash::new(audiobook_folder::identity(&tracks)?.to_hex().as_str()) == hash {
+                            temporary_path.close()?;
+                            return Ok(PublishedStagedBook { name, relative_path: relative, published: false, fingerprint: None });
+                        }
+                    }
+                    occupied.push(name);
+                    name = library_replica::unique_folder_name(requested, occupied.iter().map(String::as_str));
+                    continue;
+                }
+                let staged = tempfile::Builder::new().prefix(".bokheim-audio-").tempdir_in(destination.parent().unwrap())?;
+                audiobook_folder::extract_archive(std::fs::File::open(&temporary_path)?, staged.path())?;
+                let tracks = audiobook_folder::discover(staged.path())?;
+                if ContentHash::new(audiobook_folder::identity(&tracks)?.to_hex().as_str()) != hash {
+                    return Err(AssetStoreError::operation("extracted audiobook identity does not match the download"));
+                }
+                let fingerprint = crate::filesystem::audiobook_fingerprint(staged.path(), &tracks)?.to_string();
+                std::fs::rename(staged.path(), &destination)?;
+                temporary_path.close()?;
+                imp::sync_parent(&destination)?;
+                return Ok(PublishedStagedBook { name, relative_path: relative, published: true, fingerprint: Some(fingerprint) });
+            }
         }
         let (parent, name) = relative_path.rsplit_once('/').unwrap_or(("", relative_path));
         let mut occupied = occupied_names.to_vec();
@@ -756,55 +856,60 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn failed_file_work_blocks_only_its_own_book() {
+    async fn mp3_folder_download_extracts_and_upload_repackages_same_revision() {
         let library = tempfile::tempdir().unwrap();
-        let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(include_str!("sql/asset_store/failed_file_work_blocks_only_its_own_book_create.sql")).unwrap();
-        let hash = blake3::hash(b"original").to_hex().to_string();
-        let other = blake3::hash(b"independent").to_hex().to_string();
-        std::fs::write(library.path().join("first.epub"), b"externally changed").unwrap();
-        std::fs::write(library.path().join("second.epub"), b"original").unwrap();
-        std::fs::write(library.path().join("other.epub"), b"independent").unwrap();
-        for (id, hash, path) in [(1, &hash, "/first.epub"), (2, &hash, "/second.epub"), (3, &other, "/other.epub")] {
-            conn.execute(include_str!("sql/asset_store/failed_file_work_blocks_only_its_own_book_insert.sql"), rusqlite::params![id, hash, path]).unwrap();
-        }
-
-        assert!(store.placement().reconcile_file_work_fixture(&mut conn).is_err());
-        assert!(library.path().join("second.epub").exists());
-        assert!(!library.path().join("other.epub").exists());
-        assert_eq!(conn.query_row(include_str!("../../tests/fixtures/trash_recovery_contract_select.sql"), [], |row| row.get::<_, i64>(0)).unwrap(), 2);
-
-        // A full pass also advances independent work while reporting failure.
-        conn.execute(include_str!("sql/asset_store/failed_file_work_blocks_only_its_own_book_insert_2.sql"), [&other]).unwrap();
-        assert!(store.placement().reconcile_file_work_fixture(&mut conn).is_err());
-        assert_eq!(conn.query_row(include_str!("../../tests/fixtures/trash_recovery_contract_select.sql"), [], |row| row.get::<_, i64>(0)).unwrap(), 2);
-        std::fs::write(library.path().join("first.epub"), b"original").unwrap();
-        store.placement().reconcile_file_work_fixture(&mut conn).unwrap();
-        assert!(!library.path().join("second.epub").exists());
-        assert_eq!(conn.query_row(include_str!("../../tests/fixtures/trash_recovery_contract_select.sql"), [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        let source = tempfile::tempdir().unwrap();
+        std::fs::create_dir(source.path().join("Disc 1")).unwrap();
+        std::fs::write(source.path().join("Disc 1/01.mp3"), b"opening").unwrap();
+        std::fs::write(source.path().join("Disc 1/02.mp3"), b"ending").unwrap();
+        std::fs::write(source.path().join("book.nfo"), b"Title: Story\n").unwrap();
+        std::fs::write(source.path().join("book.cue"), b"FILE \"Disc 1/01.mp3\" MP3\nTRACK 01 AUDIO\nTITLE \"Opening\"\nINDEX 01 00:00:00\n").unwrap();
+        std::fs::write(source.path().join("cover.jpg"), b"cover fixture").unwrap();
+        let tracks = audiobook_folder::discover(source.path()).unwrap();
+        let hash = ContentHash::new(audiobook_folder::identity(&tracks).unwrap().to_hex().as_str());
+        let nfo = audiobook_folder::discover_nfo(source.path()).unwrap();
+        let cue = audiobook_folder::discover_cue(source.path()).unwrap();
+        let cover = audiobook_folder::discover_cover(source.path()).unwrap();
+        let archive = audiobook_folder::write_archive_with_sidecars(std::io::Cursor::new(Vec::new()), &tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref()).unwrap().into_inner();
+        let checksum = ContentHash::new(blake3::hash(&archive).to_hex().as_str());
+        let store = AssetStore::open(library.path().to_str().unwrap()).unwrap().with_book_paths(|_| Ok(vec!["Story".into()]));
+        let mut writer = store.begin_book_write("Story", &hash).await.unwrap();
+        writer.set_transfer_checksum(checksum);
+        writer.write_all(&archive).await.unwrap();
+        let staged = writer.finish_book().await.unwrap();
+        let published = staged.publish_snapshot(&store, "Story", &[]).unwrap();
+        assert!(published.published);
+        assert_eq!(published.name, "Story");
+        assert_eq!(std::fs::read(library.path().join("Story/Disc 1/02.mp3")).unwrap(), b"ending");
+        assert_eq!(std::fs::read(library.path().join("Story/book.nfo")).unwrap(), b"Title: Story\n");
+        assert_eq!(std::fs::read(library.path().join("Story/book.cue")).unwrap(), b"FILE \"Disc 1/01.mp3\" MP3\nTRACK 01 AUDIO\nTITLE \"Opening\"\nINDEX 01 00:00:00\n");
+        assert_eq!(std::fs::read(library.path().join("Story/cover.jpg")).unwrap(), b"cover fixture");
+        assert!(store.exists(BlobKind::Book, &hash).unwrap());
+        let verified = store.verified_book_version_reader_at_paths(hash, Some(checksum), vec!["Story".into()]).await.unwrap().unwrap();
+        assert_eq!(verified.length, archive.len() as u64);
+        assert_eq!(verified.checksum, checksum);
+        use futures_util::StreamExt as _;
+        let result = verified.into_upload_stream().collect::<Vec<_>>().await.into_iter().collect::<Result<Vec<_>, _>>().unwrap().concat();
+        assert_eq!(result, archive);
     }
 
-    #[tokio::test]
-    async fn file_work_advances_past_leases_and_preserves_work_queued_during_book() {
+    #[test]
+    fn mp3_folder_survives_trash_restore_and_local_eviction() {
         let library = tempfile::tempdir().unwrap();
         let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(include_str!("sql/asset_store/file_work_advances_past_leases_and_preserves_work_queued_during_book_create.sql")).unwrap();
-        let hash = ContentHash::new(blake3::hash(b"leased job").to_hex().as_str());
-        for id in 1..=34 {
-            let value = if id == 1 { hash.to_string() } else { blake3::hash(id.to_string().as_bytes()).to_hex().to_string() };
-            conn.execute(include_str!("sql/asset_store/file_work_advances_past_leases_and_preserves_work_queued_during_book_insert.sql"), rusqlite::params![id, value]).unwrap();
-        }
-        let lease = store.lease_book(&hash).await.unwrap();
-        conn.execute_batch(include_str!("sql/asset_store/file_work_advances_past_leases_and_preserves_work_queued_during_book_create_2.sql")).unwrap();
-        store.placement().reconcile_file_work_fixture(&mut conn).unwrap();
-        let ids =
-            conn.prepare(include_str!("sql/asset_store/file_work_advances_past_leases_and_preserves_work_queued_during_book_select.sql")).unwrap().query_map([], |row| row.get::<_, i64>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-        assert_eq!(ids, vec![1, 35]);
-        drop(lease);
-        store.placement().reconcile_file_work_fixture(&mut conn).unwrap();
-        assert_eq!(conn.query_row(include_str!("../../tests/fixtures/trash_recovery_contract_select.sql"), [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        let folder = library.path().join("Story");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("01.mp3"), b"opening").unwrap();
+        std::fs::write(folder.join("book.nfo"), b"Title: Story\n").unwrap();
+        let hash = ContentHash::new(audiobook_folder::identity(&audiobook_folder::discover(&folder).unwrap()).unwrap().to_hex().as_str());
+        imp::prepare_trash(&store.0, &hash, "Story").unwrap().publish().unwrap();
+        assert!(!folder.exists());
+        imp::prepare_restore(&store.0, &hash, "Story", None, &[], &[]).unwrap().unwrap().publish().unwrap();
+        assert_eq!(std::fs::read(folder.join("01.mp3")).unwrap(), b"opening");
+        assert_eq!(std::fs::read(folder.join("book.nfo")).unwrap(), b"Title: Story\n");
+        imp::evict_book_files(&store.0, &["Story".into()], &hash).unwrap();
+        assert!(!folder.join("01.mp3").exists());
+        assert_eq!(std::fs::read(folder.join("book.nfo")).unwrap(), b"Title: Story\n");
     }
 
     #[tokio::test]

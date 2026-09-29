@@ -2,8 +2,6 @@
 use crate::library::LibrarySession;
 use crate::BackendError;
 use metadata_contract::audible::{LookupResponse, LookupStatus};
-#[cfg(test)]
-use std::time::Duration;
 use web_time::{SystemTime, UNIX_EPOCH};
 
 fn now() -> i64 {

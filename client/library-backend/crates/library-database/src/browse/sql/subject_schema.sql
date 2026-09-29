@@ -102,6 +102,12 @@ CREATE TABLE IF NOT EXISTS subject_browse_member(
     PRIMARY KEY(route_id,book_row_id)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS subject_browse_member_book ON subject_browse_member(book_row_id,route_id);
+CREATE TABLE IF NOT EXISTS subject_browse_visible_route(route_id INTEGER PRIMARY KEY,parent_route_id INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS subject_browse_placement(
+    route_id INTEGER NOT NULL, book_row_id INTEGER NOT NULL, source_branch_id INTEGER NOT NULL,
+    PRIMARY KEY(route_id,book_row_id,source_branch_id)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS subject_browse_placement_branch ON subject_browse_placement(source_branch_id,route_id,book_row_id);
 CREATE TRIGGER IF NOT EXISTS subject_dirty_book_insert AFTER INSERT ON book
 
 BEGIN
@@ -150,4 +156,3 @@ BEGIN
     INSERT INTO subject_browse_dirty_book SELECT NEW.book_row_id WHERE NOT EXISTS(SELECT 1 FROM subject_browse_dirty_book WHERE book_row_id=NEW.book_row_id);
 END;
 UPDATE subject_browse_state SET built_revision=-1 WHERE id=1;
-

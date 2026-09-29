@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use epub_provider::{EpubCreator, EpubMetadata, EpubProvider};
-use html::resources::{ResourceMetadata, ResourceProvider, TocEntry};
+use html::resources::{ResourceMetadata, ResourceProvider};
 use regex::{Captures, Regex};
 
 /// A container-neutral book ready for the native HTML renderer.
@@ -40,13 +40,11 @@ pub enum BookLayout {
 
 struct EpubHtmlProvider {
     epub: Arc<EpubProvider>,
-    toc: Option<Vec<TocEntry>>,
 }
 
 impl EpubHtmlProvider {
     fn new(epub: Arc<EpubProvider>) -> Self {
-        let toc = epub.toc().ok().flatten().map(|entries| entries.into_iter().map(renderer_toc_entry).collect());
-        Self { epub, toc }
+        Self { epub }
     }
 }
 
@@ -70,14 +68,6 @@ impl ResourceProvider for EpubHtmlProvider {
     fn list_html_candidates(&self, _root: &str) -> io::Result<Vec<String>> {
         self.epub.document_uris()
     }
-
-    fn toc(&self) -> io::Result<Option<Vec<TocEntry>>> {
-        Ok(self.toc.clone())
-    }
-}
-
-fn renderer_toc_entry(entry: epub_provider::TocEntry) -> TocEntry {
-    TocEntry { title: entry.title, link: entry.link, children: entry.children.into_iter().map(renderer_toc_entry).collect() }
 }
 
 impl BookSource {
@@ -220,7 +210,7 @@ impl BookSource {
         if let Some(author) = book.author().filter(|author| !author.trim().is_empty()) {
             metadata.creators.push(EpubCreator::author(author));
         }
-        Ok(Self { provider: Arc::new(VirtualProvider::new(resources, Vec::new())), document_uris, document_weights, start_index: 0, metadata, layout: BookLayout::Reflowable })
+        Ok(Self { provider: Arc::new(VirtualProvider::new(resources)), document_uris, document_weights, start_index: 0, metadata, layout: BookLayout::Reflowable })
     }
 }
 
@@ -390,12 +380,11 @@ fn palmdoc_decompress_into(data: &[u8], output: &mut Vec<u8>, output_limit: usiz
 
 struct VirtualProvider {
     resources: HashMap<String, Vec<u8>>,
-    toc: Vec<TocEntry>,
 }
 
 impl VirtualProvider {
-    fn new(resources: HashMap<String, Vec<u8>>, toc: Vec<TocEntry>) -> Self {
-        Self { resources, toc }
+    fn new(resources: HashMap<String, Vec<u8>>) -> Self {
+        Self { resources }
     }
 }
 
@@ -413,9 +402,6 @@ impl ResourceProvider for VirtualProvider {
         let mut docs = self.resources.keys().filter(|uri| uri.ends_with(".html") || uri.ends_with(".xhtml")).cloned().collect::<Vec<_>>();
         docs.sort();
         Ok(docs)
-    }
-    fn toc(&self) -> io::Result<Option<Vec<TocEntry>>> {
-        Ok((!self.toc.is_empty()).then(|| self.toc.clone()))
     }
 }
 

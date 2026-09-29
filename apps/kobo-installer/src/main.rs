@@ -283,7 +283,7 @@ fn main() {
     gpui_platform::application().run(|cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(520.0), px(190.0)), cx);
         cx.text_system()
-            .add_fonts(vec![Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/LibertinusSerif-Regular.otf")), Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/LibertinusSerif-Bold.otf"))])
+            .add_fonts(vec![Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/LibertinusSerif-Regular.otf")), Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/LibertinusSerif-Bold.otf")), Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/LibertinusSerif-Italic.otf")), Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/BodoniModa-Regular.ttf")), Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/BodoniModa-SemiBold.ttf"))])
             .expect("failed to register embedded Libertinus fonts");
         cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar: Some(gpui::TitlebarOptions { title: Some("Bokheim".into()), ..Default::default() }), focus: true, ..Default::default() }, |_, cx| {
             cx.new(Installer::new)

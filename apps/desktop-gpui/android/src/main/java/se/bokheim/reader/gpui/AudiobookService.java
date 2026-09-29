@@ -363,6 +363,7 @@ public final class AudiobookService extends MediaSessionService {
                     && player.getPlaybackState() == Player.STATE_BUFFERING
                     && player.getPlaybackSuppressionReason() == Player.PLAYBACK_SUPPRESSION_REASON_NONE)
                 .put("ready", player.getPlaybackState() == Player.STATE_READY || player.getPlaybackState() == Player.STATE_ENDED)
+                .put("ended", player.getPlaybackState() == Player.STATE_ENDED)
                 .put("released", released).put("speed", player.getPlaybackParameters().speed).put("force", force)
                 .put("sleepFinished", sleepFinished);
             if (sleepReset != null) state.put("sleepReset", sleepReset);

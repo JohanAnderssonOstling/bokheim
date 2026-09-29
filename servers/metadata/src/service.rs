@@ -2,7 +2,7 @@ use super::{
     attach_authors, attach_rich_fields, error, load_embedded_work_descriptions, load_work_bisac_classifications, load_work_descriptions_from_table, lookup_one, open_description_pool, open_library_id, open_read_pool, query_connection,
     resolve_edition_batch, Arc, AtomicU64, BTreeMap, BTreeSet, Classification, ClassificationRequest, ClassificationResponse, Connection, EditionIdentityRequest, EditionIdentityResponse, EndpointMetrics, Instant, IsbnMetadataResult,
     MetadataEnrichmentRequest, MetadataEnrichmentResponse, MetadataError, MetadataService, PathBuf, QueryConnection, RichIsbnMetadataResult, RichMetadataEnrichmentResponse, RichWorkMetadataMatch, Semaphore, ServiceState,
-    SnapshotDescription, WorkMetadataMatch, DESCRIPTION_SCHEMA_VERSION, LEGACY_QUERY_SCHEMA_VERSION, MAX_EDITION_QUERIES_PER_REQUEST, MAX_ISBNS_PER_REQUEST, QUERY_CONCURRENCY, SCHEMA_VERSION, WIKIDATA_SCHEMA_VERSION,
+    SnapshotDescription, WorkMetadataMatch, DESCRIPTION_SCHEMA_VERSION, MAX_EDITION_QUERIES_PER_REQUEST, MAX_ISBNS_PER_REQUEST, QUERY_CONCURRENCY, SCHEMA_VERSION,
 };
 use crate::http::validate_isbn_count;
 use crate::library_of_congress::{LibraryOfCongressClient, LibraryOfCongressLookup};
@@ -38,8 +38,8 @@ impl MetadataService {
             let snapshot = connection.query_row("SELECT schema_version,dump_date,imported_at_ms FROM snapshot WHERE singleton=1", (), |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))).map_err(error)?;
             (snapshot.0, snapshot.1, snapshot.2)
         };
-        if !matches!(schema_version, LEGACY_QUERY_SCHEMA_VERSION | SCHEMA_VERSION | WIKIDATA_SCHEMA_VERSION) {
-            return Err(MetadataError(format!("unsupported metadata database schema {schema_version}; expected {LEGACY_QUERY_SCHEMA_VERSION}, {SCHEMA_VERSION}, or {WIKIDATA_SCHEMA_VERSION}")));
+        if schema_version != SCHEMA_VERSION {
+            return Err(MetadataError(format!("unsupported metadata database schema {schema_version}; expected {SCHEMA_VERSION}")));
         }
         let rich_pool = open_read_pool(&rich_database.into())?;
         validate_store_snapshot(&rich_pool, &dump_date, "rich")?;

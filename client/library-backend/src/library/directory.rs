@@ -5,6 +5,7 @@
 //! running sessions for the current process.
 
 use crate::{BackendError, LibraryId};
+use futures_util::{stream, StreamExt, TryStreamExt};
 use std::{
     collections::HashMap,
     sync::{Mutex, MutexGuard},
@@ -71,10 +72,10 @@ impl LibraryDirectory {
     /// application may display this aggregate, but does not inspect sessions.
     pub async fn transfer_snapshots(&self) -> Result<Vec<crate::LibraryTransfers>, BackendError> {
         let handles = self.all()?;
-        let mut snapshots = Vec::with_capacity(handles.len());
-        for handle in handles {
-            snapshots.push(handle.transfer_snapshot().await?);
-        }
+        let mut snapshots: Vec<_> = stream::iter(handles.into_iter().map(|handle| async move { handle.transfer_snapshot().await }))
+            .buffered(4)
+            .try_collect()
+            .await?;
         snapshots.sort_by(|left, right| left.library_name.cmp(&right.library_name));
         Ok(snapshots)
     }

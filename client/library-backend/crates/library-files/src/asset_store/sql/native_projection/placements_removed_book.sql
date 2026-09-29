@@ -1,1 +1,0 @@
-SELECT p.content_hash,p.relative_path FROM local_file_projection p WHERE p.content_hash=?1 AND NOT EXISTS(SELECT 1 FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id JOIN dir d ON d.id=bd.dir_id WHERE b.content_hash=p.content_hash AND bd.dir_id=p.dir_id AND bd.deleted_at IS NULL AND b.deleted_at IS NULL AND d.deleted_at IS NULL)

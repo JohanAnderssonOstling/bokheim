@@ -23,16 +23,20 @@ impl Database {
             state.created_at = u64::try_from(existing.created_at).unwrap_or(state.created_at);
         }
         let detail = state.detail_json().map_err(DatabaseError::operation)?;
-        self.connection.upsert_annotation(&value.id, value.content_hash.as_str(), value.toc_ordinal, value.progress, &detail, value.modified_at, None)?;
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.upsert_annotation(&value.id, value.content_hash.as_str(), value.toc_ordinal, value.progress, &detail, value.modified_at, None)?;
+        crate::sync::apply::commit(transaction)?;
         Ok(())
     }
 
     pub fn delete_annotation(&self, id: &str, modified_at: i64) -> Result<(), DatabaseError> {
         u64::try_from(modified_at).map_err(DatabaseError::operation)?;
-        let changed = self.connection.delete_annotation(id, modified_at)?;
+        let transaction = self.connection.unchecked_transaction()?;
+        let changed = transaction.delete_annotation(id, modified_at)?;
         if changed == 0 {
             return Err(DatabaseError::message("annotation not found"));
         }
+        crate::sync::apply::commit(transaction)?;
         Ok(())
     }
 

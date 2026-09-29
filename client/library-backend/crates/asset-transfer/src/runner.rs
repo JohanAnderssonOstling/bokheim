@@ -63,23 +63,63 @@ pub struct TransferRunner<'a, H> {
     pub queue: &'a TransferQueue,
     pub host: &'a H,
 }
+
+enum QueueSettlement {
+    Complete(u64, Option<String>),
+    Retry(u64, String),
+    Release(u64),
+}
+
+/// Queue results for one database replay. Claimed jobs stay running until the
+/// owner confirms that every recorded database write has been replayed.
+pub struct TransferDrain {
+    result: TransferRunResult,
+    claimed: Vec<ClaimedTransferJob>,
+    settlements: Vec<QueueSettlement>,
+}
+
+impl TransferDrain {
+    pub fn committed(self, queue: &TransferQueue) -> TransferRunResult {
+        for settlement in self.settlements {
+            match settlement {
+                QueueSettlement::Complete(id, error) => queue.complete(id, error),
+                QueueSettlement::Retry(id, error) => { queue.retry(id, error); }
+                QueueSettlement::Release(id) => {
+                    if let Some(item) = self.claimed.iter().find(|item| item.id == id) {
+                        queue.release(std::slice::from_ref(item));
+                    }
+                }
+            }
+        }
+        self.result
+    }
+
+    pub fn commit_failed(self, queue: &TransferQueue, error: &TransferError) {
+        for item in &self.claimed {
+            queue.retry(item.id, error.to_string());
+        }
+    }
+}
+
 impl<H: TransferHost> TransferRunner<'_, H> {
     /// Drives due batches with snapshot inputs, accumulating durable writes
     /// into `out`. The orchestrator commits `out` even when this returns an
     /// error; write records are idempotent replays of the guarded commits.
+    #[cfg(test)]
     pub async fn drain_ready(&self, snapshot: &TransferSnapshot, out: &mut TransferOutcome) -> TransferRunResult {
-        self.drain_with_limit(snapshot, out, None).await
+        self.drain_with_limit(snapshot, out, None).await.committed(self.queue)
     }
 
     /// One claimed batch per database snapshot. The production driver commits
     /// the resulting writes before claiming more work, so a slow audiobook or
     /// continuously refilled queue cannot hide completed transfers.
-    pub async fn drain_one_batch(&self, snapshot: &TransferSnapshot, out: &mut TransferOutcome) -> TransferRunResult {
+    pub async fn drain_one_batch(&self, snapshot: &TransferSnapshot, out: &mut TransferOutcome) -> TransferDrain {
         self.drain_with_limit(snapshot, out, Some(1)).await
     }
 
-    async fn drain_with_limit(&self, snapshot: &TransferSnapshot, out: &mut TransferOutcome, limit: Option<usize>) -> TransferRunResult {
+    async fn drain_with_limit(&self, snapshot: &TransferSnapshot, out: &mut TransferOutcome, limit: Option<usize>) -> TransferDrain {
         let mut processed = 0;
+        let mut drain = TransferDrain { result: Ok(()), claimed: Vec::new(), settlements: Vec::new() };
         loop {
             if limit.is_some_and(|limit| processed >= limit) {
                 break;
@@ -89,6 +129,7 @@ impl<H: TransferHost> TransferRunner<'_, H> {
             if claimed.is_empty() {
                 break;
             }
+            drain.claimed.extend(claimed.iter().cloned());
             processed += 1;
             self.host.changed();
             if claimed[0].job.batch_kind() == Some(TransferJobKind::UploadBook) {
@@ -119,10 +160,10 @@ impl<H: TransferHost> TransferRunner<'_, H> {
                                     }
                                 }
                                 match prepared.dropped.iter().find(|dropped| dropped_hash(dropped) == &hash) {
-                                    Some(DroppedUpload::Completed { .. }) => self.queue.complete(item.id, None),
-                                    Some(DroppedUpload::Rejected { reason, .. }) => self.queue.complete(item.id, Some(reason.clone())),
+                                    Some(DroppedUpload::Completed { .. }) => drain.settlements.push(QueueSettlement::Complete(item.id, None)),
+                                    Some(DroppedUpload::Rejected { reason, .. }) => drain.settlements.push(QueueSettlement::Complete(item.id, Some(reason.clone()))),
                                     _ => {
-                                        let _ = self.queue.retry(item.id, "upload intent changed during transfer".to_owned());
+                                        drain.settlements.push(QueueSettlement::Retry(item.id, "upload intent changed during transfer".to_owned()));
                                     }
                                 }
                                 false
@@ -131,13 +172,14 @@ impl<H: TransferHost> TransferRunner<'_, H> {
                         self.host.changed();
                     }
                     Err(TransferError::AuthenticationRequired) => {
-                        self.queue.release(&claimed);
+                        drain.settlements.extend(claimed.iter().map(|item| QueueSettlement::Release(item.id)));
                         self.host.changed();
-                        return Err(TransferError::AuthenticationRequired);
+                        drain.result = Err(TransferError::AuthenticationRequired);
+                        return drain;
                     }
                     Err(error) => {
                         for item in &claimed {
-                            self.queue.retry(item.id, error.to_string());
+                            drain.settlements.push(QueueSettlement::Retry(item.id, error.to_string()));
                         }
                         self.host.changed();
                         continue;
@@ -153,27 +195,28 @@ impl<H: TransferHost> TransferRunner<'_, H> {
                 match outcome {
                     Ok(()) => {
                         for item in &claimed {
-                            self.queue.complete(item.id, None);
+                            drain.settlements.push(QueueSettlement::Complete(item.id, None));
                         }
                     }
                     Err(TransferError::Retryable(message)) => {
                         log::warn!("Retryable thumbnail batch error: {message}");
                         for item in &claimed {
-                            self.queue.retry(item.id, message.to_string());
+                            drain.settlements.push(QueueSettlement::Retry(item.id, message.to_string()));
                         }
                     }
                     Err(TransferError::Rejected(message)) => {
                         log::warn!("Rejected thumbnail batch: {message}");
                         for item in &claimed {
                             self.host.settle_rejection(&item.job, &message.to_string(), out);
-                            self.queue.complete(item.id, Some(message.to_string()));
+                            drain.settlements.push(QueueSettlement::Complete(item.id, Some(message.to_string())));
                         }
                     }
                     Err(TransferError::AuthenticationRequired) => {
-                        self.queue.release(&claimed);
+                        drain.settlements.extend(claimed.iter().map(|item| QueueSettlement::Release(item.id)));
                         self.host.changed();
                         self.host.flush();
-                        return Err(TransferError::AuthenticationRequired);
+                        drain.result = Err(TransferError::AuthenticationRequired);
+                        return drain;
                     }
                 }
             } else {
@@ -200,24 +243,25 @@ impl<H: TransferHost> TransferRunner<'_, H> {
                     let outcome = batch_results.pop_front().expect("one result per claimed job");
                     trace.finish(outcome.is_ok());
                     match outcome {
-                        Ok(()) => self.queue.complete(item.id, None),
+                        Ok(()) => drain.settlements.push(QueueSettlement::Complete(item.id, None)),
                         Err(TransferError::Retryable(message)) => {
                             log::warn!("Retryable transfer error for job {}: {message}", item.id);
-                            self.queue.retry(item.id, message.to_string());
+                            drain.settlements.push(QueueSettlement::Retry(item.id, message.to_string()));
                         }
                         Err(TransferError::Rejected(message)) => {
                             log::warn!("Rejected transfer for job {}: {message}", item.id);
                             self.host.settle_rejection(&item.job, &message.to_string(), out);
-                            self.queue.complete(item.id, Some(message.to_string()));
+                            drain.settlements.push(QueueSettlement::Complete(item.id, Some(message.to_string())));
                         }
                         Err(TransferError::AuthenticationRequired) => {
                             // Release the current and all not-yet-processed
                             // jobs. Authentication is global; file failures are
                             // deliberately not.
-                            self.queue.release(&claimed[index..]);
+                            drain.settlements.extend(claimed[index..].iter().map(|item| QueueSettlement::Release(item.id)));
                             self.host.changed();
                             self.host.flush();
-                            return Err(TransferError::AuthenticationRequired);
+                            drain.result = Err(TransferError::AuthenticationRequired);
+                            return drain;
                         }
                     }
                     self.host.changed();
@@ -226,11 +270,12 @@ impl<H: TransferHost> TransferRunner<'_, H> {
             self.host.changed();
         }
         self.host.flush();
-        Ok(())
+        drain
     }
 
     /// Run until idle or authentication pauses the queue. The host owns spawning
     /// and must first acquire the queue with `try_start_scheduler`.
+    #[cfg(test)]
     pub async fn run(&self, snapshot: &TransferSnapshot, out: &mut TransferOutcome) {
         loop {
             if let Err(TransferError::AuthenticationRequired) = self.drain_ready(snapshot, out).await {

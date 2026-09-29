@@ -47,4 +47,4 @@ Validation: 53 exact-selector, Cutter and numeric-range boundary probes; complet
 
 Captions and range endpoints were checked against the local LCC reference during the [investigation](20260907-general-literature-extraction-investigation.md). Literature & History and Literature & Science were additional report suggestions, beyond the four thematic candidates presented for this batch, and remain unmodified.
 
-Migration: [20260907_extract_general_literature_studies.sql](../migrations/20260907_extract_general_literature_studies.sql). [Installed manifest](20260907-general-literature-manifest.json). Working artifacts: `/home/johan/.cache/bokheim/general-literature-install/`; large derived files may be regenerated from retained database snapshots.
+Migration: 20260907_extract_general_literature_studies.sql. [Installed manifest](20260907-general-literature-manifest.json). Working artifacts: `/home/johan/.cache/bokheim/general-literature-install/`; large derived files may be regenerated from retained database snapshots.

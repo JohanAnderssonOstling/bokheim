@@ -46,4 +46,4 @@ For example, the Boston route now ends at:
 
 Thirteen curated scope tests pass using an optimized release build. Selector/endpoint checks cover 54,700 probes; the European reparenting alone changed no destinations, and all combined boundary changes match the intended local-period merges. Full observed-code totals, integrity checks and viewer verification are recorded in the [validation report](20260920-europe-local-validation.json). The usage table and viewer reflect the final combined taxonomy.
 
-Artifacts: [European migration](../migrations/20260920_europe_subregions.sql), [local-period migration](../migrations/20260920_local_history_periods.sql), [49-merge manifest](20260920-local-history-periods.json), [remaining deep paths](20260920-europe-local-deep-paths.json), [observed classification changes](20260920-europe-local-classification-changes.tsv).
+Artifacts: European migration, local-period migration, [49-merge manifest](20260920-local-history-periods.json), [remaining deep paths](20260920-europe-local-deep-paths.json), [observed classification changes](20260920-europe-local-classification-changes.tsv).

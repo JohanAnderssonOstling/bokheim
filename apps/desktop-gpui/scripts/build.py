@@ -32,7 +32,8 @@ def main():
         output = ROOT / output
     if requested_target:
         output /= target
-    prepare(target, destination=output / "release/pdfium", offline=True)
+    if target != "x86_64-pc-windows-msvc":
+        prepare(target, destination=output / "release/pdfium", offline=True)
 
 
 if __name__ == "__main__":

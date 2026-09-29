@@ -26,8 +26,8 @@ fn old_sql(source: &str) -> String {
 fn fixture(books: usize) -> (Database, i64, String) {
     let db = Database::open(":memory:").unwrap();
     db.initialize_library().unwrap();
-    db.execute("UPDATE sync_metadata SET change_origin='remote'", []).unwrap();
-    let concepts = db
+    db.connection.execute("UPDATE sync_metadata SET change_origin='remote'", []).unwrap();
+    let concepts = db.connection
         .prepare("SELECT concept_id FROM curated.unified_concept_route WHERE concept_id>0 GROUP BY concept_id HAVING count(*)>1 ORDER BY concept_id LIMIT 2")
         .unwrap()
         .query_map([], |r| r.get::<_, i64>(0))
@@ -35,10 +35,10 @@ fn fixture(books: usize) -> (Database, i64, String) {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(concepts.len(), 2);
-    let (route, label): (i64, String) = db
+    let (route, label): (i64, String) = db.connection
         .query_row("SELECT r.route_id,c.preferred_label FROM curated.unified_concept_route r JOIN curated.concept c USING(concept_id) WHERE r.concept_id=?1 ORDER BY r.route_id LIMIT 1", [concepts[0]], |r| Ok((r.get(0)?, r.get(1)?)))
         .unwrap();
-    let tx = db.unchecked_transaction().unwrap();
+    let tx = db.connection.unchecked_transaction().unwrap();
     for i in 1..=books as i64 {
         tx.execute("INSERT INTO book(content_hash,title,format) VALUES(?1,?2,?3)", params![format!("{i:064x}"), format!("Book {i}"), ["epub", "pdf", "m4b"][i as usize % 3]]).unwrap();
         tx.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) VALUES(?1,?2,?3,'',?4)", params![sync_common::ROOT_DIR_ID.to_string(), i, format!("{i}.epub"), i % 2]).unwrap();
@@ -52,19 +52,19 @@ fn fixture(books: usize) -> (Database, i64, String) {
         }
     }
     tx.commit().unwrap();
-    db.execute_batch("CREATE TABLE subject_book_ownership(route_id INTEGER NOT NULL,book_row_id INTEGER NOT NULL,assignment_count INTEGER NOT NULL,PRIMARY KEY(route_id,book_row_id)); CREATE INDEX idx_subject_book_ownership_book ON subject_book_ownership(book_row_id,route_id);").unwrap();
+    db.connection.execute_batch("CREATE TABLE subject_book_ownership(route_id INTEGER NOT NULL,book_row_id INTEGER NOT NULL,assignment_count INTEGER NOT NULL,PRIMARY KEY(route_id,book_row_id)); CREATE INDEX idx_subject_book_ownership_book ON subject_book_ownership(book_row_id,route_id);").unwrap();
     refresh(&db);
     (db, route, book_model::normalize_search_text(&label))
 }
 fn refresh(db: &Database) {
     db.browse_subject_facet_counts("Subject", "", &[], &[], false).unwrap();
     // Independent reconstruction from assignments, not the new membership cache.
-    db.execute("DELETE FROM subject_book_ownership", []).unwrap();
+    db.connection.execute("DELETE FROM subject_book_ownership", []).unwrap();
     let prefix = OLD_FORMAT.split("WITH RECURSIVE ").nth(1).unwrap().split("), subject_book_ownership").next().unwrap();
-    db.execute_batch(&format!("INSERT INTO subject_book_ownership WITH RECURSIVE {prefix}) SELECT route_id,book_row_id,1 FROM assigned_routes UNION SELECT 0,book_row_id,1 FROM assigned_routes;")).unwrap();
+    db.connection.execute_batch(&format!("INSERT INTO subject_book_ownership WITH RECURSIVE {prefix}) SELECT route_id,book_row_id,1 FROM assigned_routes UNION SELECT 0,book_row_id,1 FROM assigned_routes;")).unwrap();
 }
 fn read(db: &Database, query: &str, route: i64, search: &str, downloaded: bool) -> (Vec<(String, i64)>, i32) {
-    let mut stmt = db.prepare_cached(query).unwrap();
+    let mut stmt = db.connection.prepare_cached(query).unwrap();
     stmt.reset_status(StatementStatus::FullscanStep);
     for (key, value) in [(":route_id", route), (":downloaded_only", i64::from(downloaded)), (":file_types", 0)] {
         if let Some(i) = stmt.parameter_index(key).unwrap() {
@@ -102,7 +102,7 @@ fn bulk_membership_changes_preserve_subject_facets() {
         "UPDATE book SET hidden_at=NULL,deleted_at=NULL; UPDATE book_dir SET deleted_at=NULL",
         "DELETE FROM book WHERE row_id%11=0",
     ] {
-        db.execute_batch(mutation).unwrap();
+        db.connection.execute_batch(mutation).unwrap();
         refresh(&db);
         for (new, old) in &queries {
             for selected in [route, 0, -1] {
@@ -126,7 +126,7 @@ fn median(mut values: Vec<Duration>) -> Duration {
 // Replay the common cache-refresh SQL, optionally adding the exact retired
 // ownership maintenance. Both variants use the same connection and transaction.
 fn refresh_batch(db: &Database, count: i64, old: bool) -> Duration {
-    let tx = db.unchecked_transaction().unwrap();
+    let tx = db.connection.unchecked_transaction().unwrap();
     tx.execute("UPDATE main.book SET row_id=row_id WHERE 0", []).unwrap();
     let start = Instant::now();
     for book in 1..=count {
@@ -158,7 +158,7 @@ fn refresh_batch(db: &Database, count: i64, old: bool) -> Duration {
 fn subject_ownership_performance() {
     for size in [1000, 10000] {
         let (db, route, label) = fixture(size);
-        println!("FIXTURE books={size} membership_rows={}", db.query_row("SELECT count(*) FROM subject_browse_member", [], |r| r.get::<_, i64>(0)).unwrap());
+        println!("FIXTURE books={size} membership_rows={}", db.connection.query_row("SELECT count(*) FROM subject_browse_member", [], |r| r.get::<_, i64>(0)).unwrap());
         benchmark_facets(&db, size, route, &label);
         for count in [1, 100, size as i64] {
             let mut before = Vec::new();
@@ -177,7 +177,7 @@ fn subject_ownership_performance() {
 }
 
 fn combined_rows(db: &Database, route: i64, search: &str, formats: i32, languages: &str, downloaded: bool) -> Vec<(i64, String, i64)> {
-    db.prepare_cached(sql("get_subject_facets?\n"))
+    db.connection.prepare_cached(sql("get_subject_facets?\n"))
         .unwrap()
         .query_map(named_params! {":route_id":route,":normalized_query":search,":file_types":formats,":languages":languages,":downloaded_only":downloaded}, |r| {
             let value = if r.get::<_, i64>(0)? == 0 { r.get::<_, i64>(1)?.to_string() } else { r.get::<_, String>(1)? };
@@ -193,7 +193,7 @@ fn split_rows(db: &Database, route: i64, search: &str, formats: i32, languages: 
     for (kind, name) in [(0, "get_subject_format_facets"), (1, "get_subject_language_facets")] {
         let marker = format!("-- name: {name}?\n");
         let query = source.split(&marker).nth(1).unwrap().split("-- name:").next().unwrap();
-        let mut stmt = db.prepare_cached(query).unwrap();
+        let mut stmt = db.connection.prepare_cached(query).unwrap();
         for (key, value) in [(":route_id", route), (":downloaded_only", i64::from(downloaded)), (":file_types", i64::from(formats))] {
             if let Some(i) = stmt.parameter_index(key).unwrap() {
                 stmt.raw_bind_parameter(i, value).unwrap();
@@ -214,7 +214,7 @@ fn split_rows(db: &Database, route: i64, search: &str, formats: i32, languages: 
 #[test]
 fn combined_facets_share_search_and_preserve_cross_filters() {
     let (db, route, label) = fixture(240);
-    let parent: i64 = db.query_row("SELECT parent_route_id FROM curated.unified_concept_route WHERE route_id=?1", [route], |r| r.get(0)).unwrap();
+    let parent: i64 = db.connection.query_row("SELECT parent_route_id FROM curated.unified_concept_route WHERE route_id=?1", [route], |r| r.get(0)).unwrap();
     for selected in [route, parent, 0, -1] {
         for search in ["", "book 1", label.as_str(), "qzx-no-match"] {
             if selected == 0 && !search.is_empty() {
@@ -233,12 +233,12 @@ fn combined_facets_share_search_and_preserve_cross_filters() {
             }
         }
     }
-    let mut stmt = db.prepare(&format!("EXPLAIN QUERY PLAN {}", sql("get_subject_facets?\n"))).unwrap();
+    let mut stmt = db.connection.prepare(&format!("EXPLAIN QUERY PLAN {}", sql("get_subject_facets?\n"))).unwrap();
     let plan = stmt.query_map(named_params! {":route_id":parent,":normalized_query":label,":file_types":0,":languages":"",":downloaded_only":false}, |r| r.get::<_, String>(3)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
     assert_eq!(plan.iter().filter(|line| line.as_str() == "MATERIALIZE search_matches").count(), 1, "{plan:?}");
 }
 fn benchmark_facets(db: &Database, size: usize, route: i64, label: &str) {
-    let parent: i64 = db.query_row("SELECT parent_route_id FROM curated.unified_concept_route WHERE route_id=?1", [route], |r| r.get(0)).unwrap();
+    let parent: i64 = db.connection.query_row("SELECT parent_route_id FROM curated.unified_concept_route WHERE route_id=?1", [route], |r| r.get(0)).unwrap();
     for (case, selected, search, formats, languages, downloaded) in [
         ("root", 0, "", 0, "", false),
         ("branch", route, "", 0, "", false),

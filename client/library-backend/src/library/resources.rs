@@ -65,7 +65,10 @@ impl LibrarySession {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn open_assets(root: &str, database_locator: &str, _cpu: &std::sync::Arc<dyn cpu_host::CpuHost>) -> Result<AssetStore, BackendError> {
-    Ok(crate::asset_store::open(root).map_err(BackendError::operation)?.with_database_path(database_locator.into()))
+    let database_path = std::path::PathBuf::from(database_locator);
+    Ok(crate::asset_store::open(root).map_err(BackendError::operation)?.with_book_paths(move |hash| {
+        Database::book_paths_at(&database_path, hash).map_err(crate::asset_store::AssetStoreError::operation)
+    }))
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -139,7 +139,7 @@ mod tests {
             Ok(WriteOutcome::Commit(()))
         })
         .unwrap();
-        let rows = db
+        let rows = db.connection
             .prepare("SELECT b.content_hash,c.position,c.name,c.role FROM book_contributor c JOIN book b ON b.row_id=c.book_row_id ORDER BY b.content_hash,c.position")
             .unwrap()
             .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?)))

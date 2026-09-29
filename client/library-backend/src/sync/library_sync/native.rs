@@ -12,7 +12,7 @@ impl LibrarySync {
         self.engine_for(user, credentials)
     }
 
-    fn engine_for(&self, user: Option<String>, credentials: Option<sync_transport::SyncCredentials>) -> SyncResult<sync_engine::SyncEngine<'_, crate::sync::state_sync::AccountStore<'_>>> {
+    fn engine_for(&self, _user: Option<String>, credentials: Option<sync_transport::SyncCredentials>) -> SyncResult<sync_engine::SyncEngine<'_, crate::sync::state_sync::AccountStore<'_>>> {
         Ok(sync_engine::SyncEngine::new(sync_engine::SyncEngineConfig {
             store: crate::sync::state_sync::AccountStore { sync: self },
             http_client: &self.http_client,

@@ -14,7 +14,7 @@ pub fn read_unified_taxonomy_connection(connection: &Connection, source: &str) -
         return Err(format!("unified taxonomy database contains {foreign_key_violations} invalid relationships: {source}"));
     }
     let format_version = connection.query_row("SELECT value FROM taxonomy_meta WHERE key='format_version'", [], |row| row.get::<_, String>(0)).map_err(|error| format!("failed to read taxonomy database format {source}: {error}"))?;
-    if !matches!(format_version.as_str(), "7" | "8" | "9" | "10" | "11") {
+    if format_version != "1" {
         return Err(format!("unsupported unified taxonomy database format {format_version} in {source}"));
     }
 
@@ -37,15 +37,7 @@ pub fn read_unified_taxonomy_connection(connection: &Connection, source: &str) -
         }
     }
     {
-        for (concept_id, start, end) in super::range_storage::read_ranges(connection, &format_version)? {
-            // Apply the two reviewed data corrections when reading older,
-            // potentially read-only snapshots. This is not permissive parsing:
-            // all other malformed stored endpoints remain validation errors.
-            let end = match (concept_id, start.as_str(), end.as_str()) {
-                (10305, "D551", "D552.A-Z") => "D552.Z".to_owned(),
-                (54459, "DK908.67", "DK908.68.2") => "DK908.68".to_owned(),
-                _ => end,
-            };
+        for (concept_id, start, end) in super::range_storage::read_ranges(connection)? {
             selectors.entry(concept_id).or_default().entry("lcc".to_owned()).or_default().push(format!("{start}..{end}"));
         }
     }
@@ -56,7 +48,7 @@ pub fn read_unified_taxonomy_connection(connection: &Connection, source: &str) -
     for row in rows {
         let (concept_id, preferred_label) = row.map_err(|error| format!("failed to read taxonomy concept {source}: {error}"))?;
         let parent_ids = parents.remove(&concept_id).unwrap_or_default();
-        concepts.push(UnifiedConceptDefinition::new(concept_id.clone(), preferred_label, parent_ids, selectors.remove(&concept_id).unwrap_or_default(), Vec::new()));
+        concepts.push(UnifiedConceptDefinition::new(concept_id.clone(), preferred_label, parent_ids, selectors.remove(&concept_id).unwrap_or_default()));
     }
     Ok(concepts)
 }

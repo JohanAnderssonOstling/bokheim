@@ -1,6 +1,6 @@
-use library_backend::LibraryClient;
 use futures_util::future::join_all;
 use gpui::{App, Context, Entity, FileDialogFilter, PathPromptOptions, Window};
+use library_backend::LibraryClient;
 use library_model::BookLocator;
 use std::rc::Rc;
 use sync_common::{ContentHash, DirId};
@@ -206,8 +206,7 @@ fn scan_dropped_path(path: &std::path::Path) -> Result<DroppedImport, String> {
     let path = path.to_path_buf();
     let file = app::DirectoryImportFile {
         path: vec![name.clone()],
-        source: app::ImportSource::new(Box::new(move || Box::pin(async move { std::fs::File::open(&path).map(|file| Box::new(file) as app::DirectoryImportReader).map_err(|error| error.to_string()) })))
-            .with_size_bytes(Some(metadata.len())),
+        source: app::ImportSource::new(Box::new(move || Box::pin(async move { std::fs::File::open(&path).map(|file| Box::new(file) as app::DirectoryImportReader).map_err(|error| error.to_string()) }))).with_size_bytes(Some(metadata.len())),
     };
     Ok(DroppedImport { directory: app::DirectoryImport { name, directories: Vec::new(), files: vec![file] }, create_root: false })
 }

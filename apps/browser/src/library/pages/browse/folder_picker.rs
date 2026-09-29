@@ -190,7 +190,7 @@ impl Render for FolderPicker {
         const ROW_HEIGHT: f32 = 36.0;
         let rows = columns.iter().map(|destinations| destinations.len()).max().unwrap_or(0);
         let column_content_height = rows as f32 * ROW_HEIGHT + components::SPACE_XS * 2.0;
-        let panel_height = (58.0 + column_content_height).min(components::NAVIGATION_MODAL_MAX_HEIGHT);
+        let panel_height = (58.0 + column_content_height).min(components::NAVIGATION_MODAL_MAX_HEIGHT_REM * f32::from(window.rem_size()));
         let mut column_strip = div().flex_1().min_h_0().min_w_0().flex().flex_row().overflow_x_scrollbar();
         for (depth, destinations) in columns.into_iter().enumerate() {
             let mut contents = div().w_full().flex().flex_col().p(px(components::SPACE_XS));

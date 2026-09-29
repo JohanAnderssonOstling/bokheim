@@ -81,16 +81,14 @@ impl TaxonomyService {
         roots.sort_by(|left, right| sort_orders[left].cmp(&sort_orders[right]).then_with(|| concepts[left].preferred_label.to_lowercase().cmp(&concepts[right].preferred_label.to_lowercase())).then_with(|| left.cmp(right)));
         let edge_count = concepts.values().map(|concept| concept.parents.len() as u64).sum();
         let selector_count = concepts.values().flat_map(|concept| concept.source_selectors.values()).map(|selectors| selectors.len() as u64).sum();
-        let source_label_count = concepts.values().map(|concept| concept.source_labels.len() as u64).sum();
         let description = TaxonomyDescription {
             api_version: API_VERSION.to_owned(),
             release_id,
-            format_version: 6,
+            format_version: 1,
             taxonomy_name: "Bokheim Unified Subjects".to_owned(),
             concept_count: concepts.len() as u64,
             edge_count,
             selector_count,
-            source_label_count,
             root_count: roots.len() as u64,
             snapshot_bytes: snapshot.len() as u64,
         };
@@ -134,7 +132,7 @@ fn contract_concept(definition: &UnifiedConceptDefinition) -> TaxonomyConcept {
             (!selectors.is_empty()).then(|| (system.to_owned(), selectors.to_vec()))
         })
         .collect();
-    TaxonomyConcept { concept_id: definition.concept_id().to_owned(), preferred_label: definition.preferred_label().to_owned(), parents, source_selectors, source_labels: definition.source_labels().to_vec() }
+    TaxonomyConcept { concept_id: definition.concept_id().to_owned(), preferred_label: definition.preferred_label().to_owned(), parents, source_selectors }
 }
 
 pub fn app(service: TaxonomyService) -> Router {
@@ -336,12 +334,12 @@ mod tests {
     async fn concepts_and_children_are_expandable_on_demand() {
         let roots_response = app(service()).oneshot(Request::builder().uri("/v1/roots").body(Body::empty()).unwrap()).await.unwrap();
         let roots: TaxonomySlice = json(roots_response).await;
-        let root = roots.concepts.iter().find(|concept| concept.preferred_label == "Humanities").expect("Humanities root");
+        let root = roots.concepts.iter().find(|concept| concept.preferred_label == "Arts & Media").expect("Arts & Media root");
         let uri = format!("/v1/concepts/{}/children", root.concept_id);
         let response = app(service()).oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let slice: TaxonomySlice = json(response).await;
-        assert!(slice.concepts.iter().any(|concept| concept.preferred_label == "History"));
+        assert!(slice.concepts.iter().any(|concept| concept.preferred_label == "Music"));
         assert!(slice.requested_concept_ids.iter().all(|concept_id| slice.concepts.iter().any(|concept| &concept.concept_id == concept_id)));
     }
 

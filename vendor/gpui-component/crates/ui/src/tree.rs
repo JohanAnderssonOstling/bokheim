@@ -256,6 +256,11 @@ impl TreeState {
         self.selected_ix
     }
 
+    /// Visible position of a tree item, independent of the keyboard cursor.
+    pub fn index_of_id(&self, id: &str) -> Option<usize> {
+        self.entries.iter().position(|entry| entry.item.id.as_ref() == id)
+    }
+
     /// Set the selected index, or `None` to clear selection.
     pub fn set_selected_index(&mut self, ix: Option<usize>, cx: &mut Context<Self>) {
         self.selected_ix = ix;

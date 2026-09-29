@@ -1,17 +1,20 @@
 //! Application-owned transport and lifetime adapters for the library client.
-use library_backend::client::{ClientTransport, LibraryClient};
 use crate::{AppClient, LibraryId};
+use library_backend::client::{ClientTransport, LibraryClient};
 
 pub(crate) fn connect(app: AppClient, library_id: LibraryId) -> LibraryClient {
     #[cfg(not(target_arch = "wasm32"))]
     let handle = app.transport.libraries.get(&library_id);
-    LibraryClient::new(library_id, Connection {
-        app,
-        #[cfg(target_arch = "wasm32")]
+    LibraryClient::new(
         library_id,
-        #[cfg(not(target_arch = "wasm32"))]
-        handle,
-    })
+        Connection {
+            app,
+            #[cfg(target_arch = "wasm32")]
+            library_id,
+            #[cfg(not(target_arch = "wasm32"))]
+            handle,
+        },
+    )
 }
 
 struct Connection {
@@ -59,7 +62,10 @@ impl ClientTransport for Connection {
 mod tests {
     #[tokio::test]
     async fn native_library_client_retains_worker_without_app_client() {
-        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
         let root = tempfile::tempdir().unwrap();
         let context = crate::BackendContext::initialize(crate::AppDataLocation::native_path(root.path())).unwrap();
         let backend = crate::app::AppBackend::new(context).unwrap();
@@ -80,6 +86,10 @@ mod tests {
             assert!(!stopped.load(Ordering::SeqCst));
             drop(library);
         };
-        tokio::time::timeout(std::time::Duration::from_secs(10), async { tokio::join!(serve, requests); }).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(serve, requests);
+        })
+        .await
+        .unwrap();
     }
 }

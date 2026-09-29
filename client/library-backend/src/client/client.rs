@@ -1,12 +1,12 @@
 use crate::library::commands::LibraryReply;
-use crate::LibraryId;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::BackendError;
+use crate::LibraryId;
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::Arc as Shared;
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc as Shared;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc as Shared;
 
 /// A library-scoped client. The host supplies access without exposing application services.
 #[derive(Clone)]

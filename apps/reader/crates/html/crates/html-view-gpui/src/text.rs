@@ -9,7 +9,7 @@ use web_time::Instant;
 
 use gpui::{Hsla, TextRun, font, px, rgba};
 use html_view_core::text_backend::{
-    FontMetricsRequest, FontRelativeMetrics, FontSlant, GlyphId, GlyphMetric, GlyphRegistry, GlyphShaper, OpenTypeFeature, ShapeError, ShapedLine, ShapedTextRun, TextRunShapeRequest, TextShapeRequest, TextStyleSpan,
+    FontMetricsRequest, FontRelativeMetrics, FontSlant, GlyphId, GlyphMetric, GlyphResourceStore, GlyphShaper, OpenTypeFeature, ShapeError, ShapedLine, ShapedTextRun, TextRunShapeRequest, TextShapeRequest, TextStyleSpan,
 };
 use smallvec::SmallVec;
 
@@ -174,9 +174,17 @@ pub(crate) struct GpuiRunGlyph {
 pub(crate) type RunStore = Rc<RefCell<Vec<Arc<GpuiTextRun>>>>;
 
 struct DocumentTextResources {
+    resources: GlyphResourceStore,
     table: HashMap<GlyphKey, GlyphId>,
     glyphs: GlyphStore,
     runs: RunStore,
+}
+
+struct AppendTextResources {
+    resources: GlyphResourceStore,
+    table: HashMap<GlyphKey, GlyphId>,
+    glyphs: Vec<GpuiGlyph>,
+    runs: Vec<Arc<GpuiTextRun>>,
 }
 
 #[derive(Clone)]
@@ -306,10 +314,12 @@ const LINE_SHAPE_CACHE_CAPACITY: usize = 1024;
 pub(crate) struct GpuiTextCache {
     text_system: Arc<gpui::WindowTextSystem>,
     font_families: HashMap<String, String>,
+    resources: GlyphResourceStore,
     table: HashMap<GlyphKey, GlyphId>,
     glyphs: GlyphStore,
     runs: RunStore,
     previous_document: Option<DocumentTextResources>,
+    previous_append: Option<AppendTextResources>,
     shapes: HashMap<GlyphKey, CachedGlyphShape>,
     shape_order: VecDeque<GlyphKey>,
     shape_cache_stats: TextShapeCacheStats,
@@ -324,10 +334,12 @@ impl GpuiTextCache {
         Self {
             text_system,
             font_families,
+            resources: GlyphResourceStore::default(),
             table: HashMap::new(),
             glyphs: Rc::new(RefCell::new(Vec::new())),
             runs: Rc::new(RefCell::new(Vec::new())),
             previous_document: None,
+            previous_append: None,
             shapes: HashMap::with_capacity(SHAPE_CACHE_CAPACITY),
             shape_order: VecDeque::with_capacity(SHAPE_CACHE_CAPACITY),
             shape_cache_stats: TextShapeCacheStats::default(),
@@ -445,9 +457,38 @@ fn paint_color_spans(text: &str, colors: &[u32]) -> Option<Vec<(Range<usize>, Hs
 
 impl GlyphShaper for GpuiTextCache {
     fn reset(&mut self) {
+        self.resources.clear();
         self.table.clear();
         self.glyphs.borrow_mut().clear();
         self.runs.borrow_mut().clear();
+    }
+
+    fn glyph_resources(&mut self) -> &mut GlyphResourceStore {
+        &mut self.resources
+    }
+
+    fn begin_append_shaping(&mut self) -> Result<(), ShapeError> {
+        debug_assert!(self.previous_append.is_none(), "append shaping transactions cannot be nested");
+        self.previous_append = Some(AppendTextResources {
+            resources: self.resources.clone(),
+            table: self.table.clone(),
+            glyphs: self.glyphs.borrow().clone(),
+            runs: self.runs.borrow().clone(),
+        });
+        Ok(())
+    }
+
+    fn commit_append_shaping(&mut self) {
+        self.previous_append = None;
+    }
+
+    fn rollback_append_shaping(&mut self) {
+        if let Some(previous) = self.previous_append.take() {
+            self.resources = previous.resources;
+            self.table = previous.table;
+            *self.glyphs.borrow_mut() = previous.glyphs;
+            *self.runs.borrow_mut() = previous.runs;
+        }
     }
 
     fn begin_document_shaping(&mut self) {
@@ -456,7 +497,7 @@ impl GlyphShaper for GpuiTextCache {
         }
         debug_assert!(self.previous_document.is_none(), "document shaping transactions cannot be nested");
         let previous =
-            DocumentTextResources { table: std::mem::take(&mut self.table), glyphs: std::mem::replace(&mut self.glyphs, Rc::new(RefCell::new(Vec::new()))), runs: std::mem::replace(&mut self.runs, Rc::new(RefCell::new(Vec::new()))) };
+            DocumentTextResources { resources: std::mem::take(&mut self.resources), table: std::mem::take(&mut self.table), glyphs: std::mem::replace(&mut self.glyphs, Rc::new(RefCell::new(Vec::new()))), runs: std::mem::replace(&mut self.runs, Rc::new(RefCell::new(Vec::new()))) };
         self.previous_document = Some(previous);
     }
 
@@ -469,6 +510,7 @@ impl GlyphShaper for GpuiTextCache {
 
     fn rollback_document_shaping(&mut self) {
         if let Some(previous) = self.previous_document.take() {
+            self.resources = previous.resources;
             self.table = previous.table;
             self.glyphs = previous.glyphs;
             self.runs = previous.runs;
@@ -501,19 +543,19 @@ impl GlyphShaper for GpuiTextCache {
         Ok(FontRelativeMetrics::from_line_ratios(x_height_ratio, ch_advance_ratio, cap_height_ratio, ascent_ratio, descent_ratio).unwrap_or_else(FontRelativeMetrics::fallback))
     }
 
-    fn shape_glyph<'a>(&mut self, glyph_metrics: &mut GlyphRegistry<'a>, ch: char, font_size: f32, font_weight: u16, font_slant: FontSlant, color: u32, family: Option<&str>) -> Result<GlyphId, ShapeError> {
+    fn shape_glyph(&mut self, ch: char, font_size: f32, font_weight: u16, font_slant: FontSlant, color: u32, family: Option<&str>) -> Result<GlyphId, ShapeError> {
         let family = self.resolve_family(family);
         let font_style_key = font_slant_key(font_slant);
         let key = GlyphKey { ch, font_size: font_size.to_bits(), font_weight, font_style: font_style_key, color, family: family.clone() };
         if let Some(glyph) = self.table.get(&key)
-            && glyph_metrics.contains(*glyph)
+            && self.resources.contains(*glyph)
         {
             return Ok(*glyph);
         }
 
         if let Some(cached) = self.shapes.get(&key).cloned() {
             self.shape_cache_stats.glyph_hits += 1;
-            let registry_glyph = glyph_metrics.register(cached.metric)?;
+            let registry_glyph = self.resources.register(cached.metric)?;
             let mut glyphs = self.glyphs.borrow_mut();
             debug_assert_eq!(glyphs.len(), registry_glyph as usize);
             glyphs.push(GpuiGlyph::Layout { layout: cached.layout, color: cached.color });
@@ -528,7 +570,7 @@ impl GlyphShaper for GpuiTextCache {
         // not send it through native shaping.
         if font_size == 0.0 {
             let metric = GlyphMetric::try_new(ch, 0.0, 0.0, 0.0, 0.0).map_err(ShapeError::rejected_metric)?;
-            let registry_glyph = glyph_metrics.register(metric)?;
+            let registry_glyph = self.resources.register(metric)?;
             let mut glyphs = self.glyphs.borrow_mut();
             debug_assert_eq!(glyphs.len(), registry_glyph as usize);
             glyphs.push(GpuiGlyph::Empty);
@@ -552,7 +594,7 @@ impl GlyphShaper for GpuiTextCache {
         let mut glyphs = self.glyphs.borrow_mut();
         let glyph = glyphs.len() as GlyphId;
         let metric = GlyphMetric::try_new(ch, f32::from(layout.width), f32::from(layout.ascent), f32::from(layout.descent), f32::from(layout.ascent)).map_err(ShapeError::rejected_metric)?;
-        let registry_glyph = glyph_metrics.register(metric)?;
+        let registry_glyph = self.resources.register(metric)?;
         debug_assert_eq!(glyph, registry_glyph);
         glyphs.push(GpuiGlyph::Layout { layout: layout.clone(), color });
         drop(glyphs);
@@ -562,7 +604,7 @@ impl GlyphShaper for GpuiTextCache {
         Ok(registry_glyph)
     }
 
-    fn shape_glyph_run<'a>(&mut self, glyph_metrics: &mut GlyphRegistry<'a>, request: TextRunShapeRequest<'_>, glyphs: &mut [GlyphId]) -> Result<Option<ShapedTextRun>, ShapeError> {
+    fn shape_glyph_run(&mut self, request: TextRunShapeRequest<'_>, glyphs: &mut [GlyphId]) -> Result<Option<ShapedTextRun>, ShapeError> {
         let benchmark_enabled = western_shaping_benchmark_enabled();
         let run_text = request.text();
         let run_style = request.style().clone();
@@ -585,7 +627,7 @@ impl GlyphShaper for GpuiTextCache {
                 *slot = if cached != GlyphId::MAX {
                     cached
                 } else {
-                    let glyph = self.shape_glyph(glyph_metrics, character, style.font_size(), style.font_weight(), style.font_slant(), style.color(), style.font_family())?;
+                    let glyph = self.shape_glyph(character, style.font_size(), style.font_weight(), style.font_slant(), style.color(), style.font_family())?;
                     if character.is_ascii() {
                         ascii[character as usize] = glyph
                     } else {
@@ -608,7 +650,7 @@ impl GlyphShaper for GpuiTextCache {
                 for (index, ((slot, character), advance)) in glyphs.iter_mut().zip(run_text.chars()).zip(native.advances()).enumerate() {
                     let color = Hsla::from(rgba(paint_colors.and_then(|colors| colors.get(index)).copied().unwrap_or_else(|| run_style.color())));
                     let metric = GlyphMetric::try_new(character, *advance, f32::from(run.ascent), f32::from(run.descent), f32::from(run.ascent)).map_err(ShapeError::rejected_metric)?;
-                    let glyph = glyph_metrics.register(metric)?;
+                    let glyph = self.resources.register(metric)?;
                     debug_assert_eq!(glyph as usize, store.len());
                     let range = index as u32..index as u32 + 1;
                     let glyph_ranges = run.glyph_ranges(range.clone());
@@ -631,7 +673,7 @@ impl GlyphShaper for GpuiTextCache {
                 let style = &run_style;
                 for (index, (slot, character)) in glyphs.iter_mut().zip(run_text.chars()).enumerate() {
                     let color = paint_colors.get(index).copied().unwrap_or_else(|| style.color());
-                    *slot = self.shape_glyph(glyph_metrics, character, style.font_size(), style.font_weight(), style.font_slant(), color, style.font_family())?;
+                    *slot = self.shape_glyph(character, style.font_size(), style.font_weight(), style.font_slant(), color, style.font_family())?;
                 }
             } else {
                 let mut ascii = [GlyphId::MAX; 128];
@@ -642,7 +684,7 @@ impl GlyphShaper for GpuiTextCache {
                     *slot = if cached != GlyphId::MAX {
                         cached
                     } else {
-                        let glyph = self.shape_glyph(glyph_metrics, character, style.font_size(), style.font_weight(), style.font_slant(), style.color(), style.font_family())?;
+                        let glyph = self.shape_glyph(character, style.font_size(), style.font_weight(), style.font_slant(), style.color(), style.font_family())?;
                         if character.is_ascii() {
                             ascii[character as usize] = glyph
                         } else {

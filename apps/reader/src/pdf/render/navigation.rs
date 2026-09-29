@@ -10,6 +10,24 @@ use super::PdfReaderView;
 use crate::pdf::toc::pdf_toc_tree_items;
 
 impl PdfReaderView {
+    pub(super) fn load_database_toc(&self, cx: &mut Context<Self>) {
+        let library = self.library.clone();
+        let content_hash = self.locator.content_hash();
+        cx.spawn(async move |this, cx| {
+            match library.book_detail(content_hash).await {
+                Ok(detail) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.set_toc(detail.toc, cx);
+                        let current_page = this.current_page;
+                        this.update_active_toc(current_page, cx);
+                    });
+                }
+                Err(error) => log::warn!("could not load PDF table of contents from library database: {error}"),
+            }
+        })
+        .detach();
+    }
+
     /// Unconditionally claim both OS-window and document focus on pointer hover.
     pub(super) fn reclaim_hover_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         window.activate_window();
@@ -51,8 +69,8 @@ impl PdfReaderView {
         self.toc.active_title()
     }
 
-    pub(super) fn render_toc_body(&self, entity: Entity<Self>, theme: components::BrowserTheme) -> gpui::AnyElement {
-        let toc = crate::shell::state_panel::reader_toc_tree(&self.toc_tree, &entity, theme, |id, window, this: &mut Self, cx| {
+    pub(super) fn render_toc_body(&self, entity: Entity<Self>, theme: components::BrowserTheme, cx: &gpui::App) -> gpui::AnyElement {
+        let toc = crate::shell::state_panel::reader_toc_tree(&self.toc_tree, &entity, self.toc.active_id(), theme, cx, |id, window, this: &mut Self, cx| {
             this.navigate_to_toc(id, cx);
             this.focus_document(window, cx);
         });

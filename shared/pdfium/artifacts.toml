@@ -10,11 +10,15 @@ sha256 = "019665c8877d46fe65f625f80fd714ab07aac68554b0636acf2a2adf9288adb2"
 "lib/libpdfium.so" = "libpdfium.so"
 
 [targets.x86_64-pc-windows-msvc]
-version = "7961"
-url = "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7961/pdfium-win-x64.tgz"
-sha256 = "88276459349b291c41f10422dad0210f007c04d919c8fa56472b6b7c6406adf4"
+version = "8046b"
+linkage = "static"
+url = "https://github.com/paulocoutinhox/pdfium-lib/releases/download/8046b/windows.tgz"
+sha256 = "8a3458f0c42d4979e6e013d5e4e90f1c968ff7d7e8db0350151e57ab7c796242"
+library_sha256 = "ca287df1524d55dacd4049e483691ab280abf202ccec1d8089b23611748fad22"
+notices_file = "windows-static/NOTICES.txt"
+notices_sha256 = "5dc511236dc6438f112e53f049a576a49d7777859718d5892ed84c05688f22f8"
 [targets.x86_64-pc-windows-msvc.files]
-"bin/pdfium.dll" = "pdfium.dll"
+"release/lib/x64/pdfium.lib" = "pdfium.lib"
 
 [targets.aarch64-linux-android]
 version = "7961"

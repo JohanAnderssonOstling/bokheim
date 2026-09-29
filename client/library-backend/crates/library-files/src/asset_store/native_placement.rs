@@ -156,14 +156,14 @@ impl NativePlacement<'_> {
                     }
                     let Some((desired, old)) = paths.get(&id) else { continue };
                     for (candidate, (candidate_desired, candidate_old)) in &paths {
-                        if [desired, old].into_iter().flatten().any(|path| {
-                            [candidate_desired, candidate_old].into_iter().flatten().any(|other| overlaps(path, other))
-                        }) {
+                        if [desired, old].into_iter().flatten().any(|path| [candidate_desired, candidate_old].into_iter().flatten().any(|other| overlaps(path, other))) {
                             selected.insert(*candidate);
                         }
                     }
                 }
-                if selected.len() == before { break; }
+                if selected.len() == before {
+                    break;
+                }
             }
             directories.retain(|id| selected.contains(id));
             directories.extend(selected);
@@ -201,38 +201,5 @@ impl NativePlacement<'_> {
         database.complete_native_directory_replay(&work.into_iter().filter(|(_, directory)| selected.contains(directory)).map(|(id, _)| id).collect::<Vec<_>>()).map_err(AssetStoreError::operation)
     }
 
-    // Small-schema regression fixtures predate the concrete database owner.
-    // Keep their physical replay assertion local to tests; production callers
-    // exclusively use the snapshot/acknowledgement API above.
-    #[cfg(test)]
-    pub fn reconcile_file_work_fixture(&self, conn: &mut rusqlite::Connection) -> Result<(), AssetStoreError> {
-        let jobs = conn
-            .prepare("SELECT id,operation,content_hash,relative_path FROM local_file_work ORDER BY id")?
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut failure = None;
-        for (id, operation, hash, path) in jobs {
-            let preceding: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM local_file_work WHERE content_hash=?1 AND id<?2)", rusqlite::params![hash, id], |row| row.get(0))?;
-            if preceding {
-                continue;
-            }
-            let Some(_lease) = imp::lease(&self.store.0, &hash, true)? else {
-                continue;
-            };
-            if operation == "trash" {
-                match imp::prepare_trash(&self.store.0, &ContentHash::new(&hash), &path).and_then(|prepared| prepared.publish()) {
-                    Ok(()) => {
-                        conn.execute("DELETE FROM local_file_projection WHERE content_hash=?1 AND relative_path=?2", rusqlite::params![hash, path])?;
-                        conn.execute("DELETE FROM local_file_work WHERE id=?1", [id])?;
-                    }
-                    Err(error) => {
-                        failure.get_or_insert(error);
-                    }
-                }
-            } else {
-                conn.execute("DELETE FROM local_file_work WHERE id=?1", [id])?;
-            }
-        }
-        failure.map_or(Ok(()), Err)
-    }
+
 }

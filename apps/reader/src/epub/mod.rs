@@ -12,12 +12,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use library_backend::LibraryClient;
 use gpui::{Entity, FocusHandle, Pixels, Point, Subscription};
 use gpui_component::input::InputState;
 use gpui_component::tree::TreeState;
 use html_view_core::SearchOptions;
 use html_view_gpui::HtmlView;
+use library_backend::LibraryClient;
 use library_model::BookLocator;
 
 use crate::epub::toc::TocState;
@@ -84,6 +84,7 @@ pub(crate) struct ReaderView {
     /// Same shape as the browse paginator, so both surfaces feel alike.
     wheel_delta: f32,
     wheel_debounce: Option<gpui::Task<()>>,
+    touch_swipe_active: bool,
     search_input: Entity<InputState>,
     search: SearchState,
     book: Arc<crate::book::NativeBook>,
@@ -96,8 +97,10 @@ pub(crate) struct ReaderView {
     annotation_popup_anchor: Option<Point<Pixels>>,
     footnote: Option<(html_view_core::FootnotePreview, html_view_gpui::PreparedNote)>,
     image_preview: Option<(String, Arc<gpui::Image>)>,
+    context_sheet: Option<crate::shell::context_sheet::ContextActions>,
     focus: FocusHandle,
     renderer_subscription: Option<Subscription>,
+    document_tap_subscription: Option<Subscription>,
     reading_positions: ReadingPositionWriter,
     close_reader: crate::CloseReader,
     _search_subscription: Subscription,

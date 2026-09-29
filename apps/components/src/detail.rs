@@ -1,8 +1,8 @@
 //! The shape of one book's page.
 //!
-//! Compact pages use one measure. At expanded widths, the cover and contents
-//! keep that measure on the left while the description gains its own reading
-//! column on the right.
+//! Compact pages keep the cover beside the title. Desktop pages place book
+//! details in a sidebar; contents and description sit beside it when space
+//! allows, or stack in one reading column.
 //!
 //! These functions style and lay out. What a button does, which entry the reader
 //! is inside, and whether the file is on the device are the page's business.
@@ -11,12 +11,12 @@ use gpui::prelude::*;
 use gpui::{Div, SharedString, div, px, rems};
 
 use crate::{
-    BOOK_COVER_WIDTH, BOOK_DETAIL_COVER_FRACTION, BOOK_DETAIL_DESCRIPTION_LINE_HEIGHT_EM, BOOK_DETAIL_DESCRIPTION_SIZE, BOOK_DETAIL_HERO_GAP, BOOK_DETAIL_PAGE_WIDTH_REM, BOOK_DETAIL_SECTION_GAP,
-    BOOK_DETAIL_WIDE_PAGE_WIDTH_REM, BrowserTheme, SPACE_LG, SPACE_SM, SPACE_XS, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD,
+    BOOK_COVER_WIDTH, BOOK_DETAIL_CONTENTS_WIDTH_REM, BOOK_DETAIL_COVER_FRACTION, BOOK_DETAIL_DESCRIPTION_LINE_HEIGHT_EM, BOOK_DETAIL_DESCRIPTION_SIZE, BOOK_DETAIL_DESCRIPTION_WIDTH_REM,
+    BOOK_DETAIL_HERO_GAP, BOOK_DETAIL_PAGE_WIDTH_REM, BOOK_DETAIL_SECTION_GAP, BOOK_DETAIL_SIDEBAR_WIDTH_REM, BOOK_DETAIL_WIDE_PAGE_WIDTH_REM, BrowserTheme, SPACE_LG, SPACE_SM, SPACE_XS,
+    TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_LG, TITLE_MD,
 };
 
-/// The page, with its one measure centred in whatever width it is given. Wider
-/// windows give the page more margin, never a longer line.
+/// The page centres whichever responsive measure the caller selects.
 ///
 /// The caller makes it scroll — `overflow_y_scrollbar` wraps an element that
 /// already has its children, so it cannot be applied from in here.
@@ -24,19 +24,35 @@ pub fn book_detail_page() -> Div {
     div().size_full().min_h_0().min_w_0().flex().flex_col().items_center().p(px(SPACE_LG))
 }
 
-/// The measure everything on the page is constrained to — one width, so the
-/// cover, the progress bar, the contents and the blurb all start and end on the
-/// same two lines. A wider window gives the page more margin, never a longer
-/// line.
+/// The compact page's single measure.
 pub fn book_detail_measure() -> Div {
     div().w_full().max_w(rems(BOOK_DETAIL_PAGE_WIDTH_REM)).min_w_0().flex().flex_col().gap(px(BOOK_DETAIL_SECTION_GAP))
 }
 
-/// The expanded-page measure. Its two children are still individually limited
-/// to the compact measure, so the extra width creates a second column rather
-/// than longer prose lines.
+/// The three-column desktop measure.
 pub fn book_detail_wide_measure() -> Div {
     div().w_full().max_w(rems(BOOK_DETAIL_WIDE_PAGE_WIDTH_REM)).min_w_0().flex().flex_col()
+}
+
+/// At medium widths the sidebar stays beside one reading column.
+pub fn book_detail_medium_measure() -> Div {
+    div().w_full().max_w(rems(BOOK_DETAIL_SIDEBAR_WIDTH_REM + BOOK_DETAIL_DESCRIPTION_WIDTH_REM + 2.0)).min_w_0().flex().flex_col()
+}
+
+pub fn book_detail_sidebar() -> Div {
+    div().w(rems(BOOK_DETAIL_SIDEBAR_WIDTH_REM)).flex_none().min_w_0().flex().flex_col().gap(px(SPACE_LG))
+}
+
+pub fn book_detail_sidebar_cover_slot() -> Div {
+    div().relative().w(px(180.0)).max_w_full().flex_none()
+}
+
+pub fn book_detail_contents_column() -> Div {
+    div().flex_1().min_w_0().max_w(rems(BOOK_DETAIL_CONTENTS_WIDTH_REM)).flex().flex_col().gap(px(BOOK_DETAIL_SECTION_GAP))
+}
+
+pub fn book_detail_description_column() -> Div {
+    div().flex_1().min_w_0().max_w(rems(BOOK_DETAIL_DESCRIPTION_WIDTH_REM)).flex().flex_col().gap(px(BOOK_DETAIL_SECTION_GAP))
 }
 
 /// The cover and the words beside it. The two stand side by side at every width
@@ -60,12 +76,12 @@ pub fn book_detail_headline() -> Div {
     div().flex_1().min_w_0().flex().flex_col().gap(px(SPACE_SM))
 }
 
-pub fn book_detail_title(title: impl Into<SharedString>, subtitle: Option<&str>, theme: BrowserTheme) -> Div {
+pub fn book_detail_title(title: impl Into<SharedString>, subtitle: Option<&str>, large: bool, theme: BrowserTheme) -> Div {
     div()
         .flex()
         .flex_col()
         .gap(px(SPACE_XS))
-        .child(div().text_size(rems(TITLE_MD)).text_color(theme.text).child(title.into()))
+        .child(div().font_family(crate::DISPLAY_FONT_FAMILY).text_size(rems(if large { TITLE_LG } else { TITLE_MD })).text_color(theme.text).child(title.into()))
         .children(subtitle.filter(|subtitle| !subtitle.trim().is_empty()).map(|subtitle| div().text_size(rems(TEXT_MD)).text_color(theme.text_muted).child(subtitle.to_owned())))
 }
 
@@ -78,7 +94,7 @@ pub fn book_detail_credit_line(role: Option<impl Into<SharedString>>, theme: Bro
 
 /// A name that goes somewhere — an author's own page.
 pub fn book_detail_name_link(id: impl Into<gpui::ElementId>, name: impl Into<SharedString>, theme: BrowserTheme) -> gpui::Stateful<Div> {
-    div().id(id).cursor_pointer().text_color(theme.accent).hover(move |style| style.text_color(theme.accent_hover)).child(name.into())
+    div().id(id).cursor_pointer().text_color(theme.text_accent).hover(move |style| style.underline()).child(name.into())
 }
 
 /// The facts a reader checks rather than reads — how long an audiobook runs,
@@ -97,7 +113,7 @@ pub fn book_detail_facts(facts: impl IntoIterator<Item = SharedString>, theme: B
 }
 
 pub fn book_detail_subjects() -> Div {
-    div().flex().flex_row().flex_wrap().gap(px(SPACE_XS))
+    div().flex().flex_col().items_start().gap(px(SPACE_XS))
 }
 
 /// Where the reader is, in the book's own words rather than as a percentage:
@@ -131,16 +147,9 @@ pub fn book_detail_sections() -> Div {
     div().w_full().min_w_0().flex().flex_col().gap(px(SPACE_LG))
 }
 
-/// The expanded page's two columns. A flex layout lets them shrink gracefully
-/// inside a window close to the expanded breakpoint.
+/// Desktop columns shrink with the window while retaining readable limits.
 pub fn book_detail_columns() -> Div {
     div().w_full().min_w_0().flex().flex_row().items_start().gap(px(BOOK_DETAIL_SECTION_GAP))
-}
-
-/// One column in the expanded detail page. Both columns preserve the compact
-/// page's maximum measure.
-pub fn book_detail_column() -> Div {
-    div().flex_1().min_w_0().max_w(rems(BOOK_DETAIL_PAGE_WIDTH_REM)).flex().flex_col().gap(px(BOOK_DETAIL_SECTION_GAP))
 }
 
 pub fn book_detail_section() -> Div {
@@ -148,7 +157,7 @@ pub fn book_detail_section() -> Div {
 }
 
 pub fn book_detail_heading(heading: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().text_size(rems(TEXT_LG)).text_color(theme.text).child(heading.into())
+    div().font_family(crate::DISPLAY_FONT_FAMILY).text_size(rems(TEXT_LG)).text_color(theme.text).child(heading.into())
 }
 
 /// The blurb, read as the markup it is. Publishers write descriptions in HTML
@@ -185,8 +194,4 @@ mod tests {
         assert!(BOOK_COVER_WIDTH / (BOOK_DETAIL_PAGE_WIDTH_REM * 16.0) < BOOK_DETAIL_COVER_FRACTION, "at the page's full measure the cover is at its natural width, not the cap");
     }
 
-    #[test]
-    fn wide_detail_measure_holds_two_compact_columns_and_a_gutter() {
-        assert!(BOOK_DETAIL_WIDE_PAGE_WIDTH_REM > BOOK_DETAIL_PAGE_WIDTH_REM * 2.0);
-    }
 }

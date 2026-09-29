@@ -6,6 +6,17 @@ create table if not exists remote_asset(
     primary key (kind, hash)
 );
 
+CREATE TABLE IF NOT EXISTS remote_thumbnail_revision(
+    content_hash TEXT PRIMARY KEY NOT NULL REFERENCES book(content_hash) ON DELETE CASCADE,
+    revision TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS local_thumbnail_sync_pending(
+    content_hash TEXT PRIMARY KEY NOT NULL REFERENCES book(content_hash) ON DELETE CASCADE,
+    action TEXT NOT NULL CHECK(action IN ('put', 'delete')),
+    generation INTEGER NOT NULL DEFAULT 1
+) STRICT;
+
 -- Durable download intent for content-addressed assets.
 create table if not exists download_requests(
     target_kind     TEXT not null check(target_kind in ('book', 'thumbnail')),
@@ -166,9 +177,9 @@ BEGIN
     ON CONFLICT(content_hash) DO UPDATE SET id=excluded.id;
 END;
 
-CREATE TRIGGER asset_work_book_update AFTER UPDATE OF content_hash,format,deleted_at,purged_at,hidden_at ON book
+CREATE TRIGGER asset_work_book_update AFTER UPDATE OF content_hash,format,deleted_at,hidden_at ON book
 WHEN OLD.content_hash IS NOT NEW.content_hash OR OLD.format IS NOT NEW.format
-  OR OLD.deleted_at IS NOT NEW.deleted_at OR OLD.purged_at IS NOT NEW.purged_at
+  OR OLD.deleted_at IS NOT NEW.deleted_at
   OR OLD.hidden_at IS NOT NEW.hidden_at
 BEGIN
     INSERT INTO asset_work(content_hash) SELECT NEW.content_hash WHERE NEW.content_hash!=''

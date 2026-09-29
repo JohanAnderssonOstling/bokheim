@@ -1,9 +1,9 @@
 //! PDF annotation loading, editing, navigation, and sidebar presentation.
 
 use book_model::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, annotation_progress};
-use library_backend::{ReaderAnnotation};
 use gpui::prelude::*;
 use gpui::{Context, Window};
+use library_backend::ReaderAnnotation;
 use pdf_reader_core::NormalizedRect;
 use ui_components as components;
 
@@ -126,6 +126,17 @@ impl PdfReaderView {
                 &self.marks,
                 "Select PDF text, then use Highlight or Note.",
                 theme,
+                |annotation: &ReaderAnnotation| {
+                    let page = annotation.pdf_anchor().map(|anchor| anchor.page_index as usize);
+                    let ordinal = annotation.toc_ordinal.and_then(|ordinal| usize::try_from(ordinal).ok()).or_else(|| page.and_then(|page| self.toc.ordinal_at(page)));
+                    if let Some((ordinal, title)) = ordinal.and_then(|ordinal| self.toc.title_at_ordinal(ordinal).map(|title| (ordinal, title))) {
+                        (format!("section:{ordinal}"), title.to_owned())
+                    } else if let Some(page) = page {
+                        (format!("page:{page}"), format!("Page {}", page + 1))
+                    } else {
+                        ("other".to_owned(), "Other annotations".to_owned())
+                    }
+                },
                 |id, window, this: &mut Self, cx| {
                     this.annotation_popup_anchor = None;
                     this.select_annotation(id, window, cx);

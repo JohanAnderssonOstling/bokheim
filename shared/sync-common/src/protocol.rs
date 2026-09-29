@@ -1,6 +1,6 @@
 //! Transport-independent validation for synchronization pages.
 
-use crate::{mutation_kind, LibraryRevision, MutationId, MutationRejection, MutationRejectionReason, PullStateResponse, PushMutationsResponse, SyncCursor, WireMutation};
+use crate::{LibraryRevision, MutationId, MutationRejection, MutationRejectionReason, PullStateResponse, PushMutationsResponse, SyncCursor, WireMutation, mutation_kind};
 use std::collections::{HashSet, VecDeque};
 
 #[derive(Debug)]
@@ -90,6 +90,17 @@ fn revision(value: Option<LibraryRevision>) -> u64 {
 }
 
 pub fn validate_pull_batch(response: &PullStateResponse, cursor: SyncCursor) -> Result<(), PullBatchError> {
+    let mut creations = std::collections::HashSet::new();
+    for creation in &response.book_creations {
+        let mutation = &creation.mutation;
+        if mutation.kind != mutation_kind::BOOK_LIFECYCLE
+            || !mutation.entity_subkey.is_empty()
+            || !mutation.blob_reference.as_ref().is_some_and(|reference| reference.present && reference.content_hash.as_ref().is_some_and(|hash| hash.as_str() == mutation.entity_key))
+            || !creations.insert(&mutation.entity_key)
+        {
+            return Err(PullBatchError("invalid or duplicate book creation prerequisite".into()));
+        }
+    }
     let starting_state = revision(cursor.state_revision);
     let starting_reading = revision(cursor.reading_revision);
     let mut observed_state = starting_state;
@@ -193,6 +204,7 @@ mod tests {
     fn server_mutation(kind: &str, revision: u64) -> crate::ServerMutation {
         crate::ServerMutation {
             mutation: crate::WireMutation {
+                origin: None,
                 mutation_id: MutationId::new(),
                 kind: kind.to_owned(),
                 entity_key: "key".to_owned(),
@@ -208,8 +220,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn creation_prerequisites_roundtrip_without_advancing_the_cursor() {
+        let mut creation = server_mutation(mutation_kind::BOOK_LIFECYCLE, 1);
+        let hash = crate::ContentHash::new(&"a".repeat(64));
+        creation.mutation.entity_key = hash.to_string();
+        creation.mutation.blob_reference = Some(crate::DeclaredBlobReference { present: true, content_hash: Some(hash) });
+        let cursor = SyncCursor { state_revision: Some(LibraryRevision::new(50).unwrap()), reading_revision: None };
+        let page = PullStateResponse { book_creations: vec![creation.clone()], mutations: vec![], next_cursor: cursor, has_more: false };
+        let encoded = crate::transport::encode(&page).unwrap();
+        let decoded: PullStateResponse = crate::transport::decode(&encoded, crate::transport::MAX_DECODED_REQUEST_BYTES).unwrap();
+        assert_eq!(decoded.book_creations, page.book_creations);
+        assert_eq!(decoded.next_cursor, cursor);
+        validate_pull_batch(&decoded, cursor).unwrap();
+        let mut invalid = decoded;
+        invalid.book_creations.push(creation);
+        assert!(validate_pull_batch(&invalid, cursor).is_err());
+        invalid.book_creations.pop();
+        invalid.book_creations[0].mutation.blob_reference.as_mut().unwrap().present = false;
+        assert!(validate_pull_batch(&invalid, cursor).is_err());
+    }
+
     fn wire_mutation(sequence: u64, value_bytes: usize) -> WireMutation {
         WireMutation {
+            origin: None,
             mutation_id: MutationId::new(),
             kind: mutation_kind::ANNOTATION.to_owned(),
             entity_key: sequence.to_string(),
@@ -289,7 +323,7 @@ mod tests {
 
     #[test]
     fn final_cursor_may_advance_past_the_last_returned_state() {
-        let response = PullStateResponse { mutations: Vec::new(), next_cursor: SyncCursor { state_revision: LibraryRevision::new(10).ok(), reading_revision: LibraryRevision::new(7).ok() }, has_more: false };
+        let response = PullStateResponse { book_creations: Vec::new(), mutations: Vec::new(), next_cursor: SyncCursor { state_revision: LibraryRevision::new(10).ok(), reading_revision: LibraryRevision::new(7).ok() }, has_more: false };
         validate_pull_batch(&response, SyncCursor { state_revision: LibraryRevision::new(5).ok(), reading_revision: None }).unwrap();
         let _ = "replica".to_owned();
     }
@@ -297,6 +331,7 @@ mod tests {
     #[test]
     fn reading_progress_does_not_consume_the_state_channel() {
         let response = PullStateResponse {
+            book_creations: Vec::new(),
             mutations: vec![server_mutation(mutation_kind::READING_POSITION, 22)],
             next_cursor: SyncCursor { state_revision: LibraryRevision::new(10).ok(), reading_revision: LibraryRevision::new(22).ok() },
             has_more: true,

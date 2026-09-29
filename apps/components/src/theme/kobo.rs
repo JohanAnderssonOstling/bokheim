@@ -4,9 +4,11 @@ use gpui_component::ThemeColor;
 
 pub(super) const PALETTE: ApplicationPalette = ApplicationPalette {
     surface_bg: 0xffffff,
+    raised_bg: 0xffffff,
     ink_text: 0x000000,
     subtle_text: 0x444444,
     accent: 0x000000,
+    text_accent: 0x000000,
     accent_hover: 0x333333,
     accent_active: 0x555555,
     accent_text: 0xffffff,

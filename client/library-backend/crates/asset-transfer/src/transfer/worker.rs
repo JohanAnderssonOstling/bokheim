@@ -70,12 +70,24 @@ impl TransferWorker {
         let database = self.commit_connection()?;
         let snapshot = database.transfer_snapshot(&self.queue.due_hashes())?;
         let mut outcome = TransferOutcome::default();
-        let result = self.runner().drain_one_batch(&snapshot, &mut outcome).await;
+        let drain = self.runner().drain_one_batch(&snapshot, &mut outcome).await;
         // A stale member's next planning pass simply re-queues it; this batch
         // path only needs the commit to have happened, not stayed current.
-        let commit = database.commit_transfer_outcome(&outcome).map_err(TransferError::from).and_then(|_| self.publish_committed_downloads(&database, &outcome));
-        self.flush_availability_changes();
-        result.and(commit)
+        match database.commit_transfer_outcome(&outcome) {
+            Ok(_) => {
+                let result = drain.committed(&self.queue);
+                self.send_transfer_status_changed();
+                let published = self.publish_committed_downloads(&database, &outcome);
+                self.flush_availability_changes();
+                result.and(published)
+            }
+            Err(error) => {
+                let error = TransferError::from(error);
+                drain.commit_failed(&self.queue, &error);
+                self.send_transfer_status_changed();
+                Err(error)
+            }
+        }
     }
 
     /// Final availability is announced only after its SQLite outcome commits.
@@ -160,6 +172,9 @@ impl TransferWorker {
         // The host works in local futures, so the driver is not `Send` and
         // cannot move onto the shared runtime. It gets its own thread with a
         // current-thread runtime instead; the queue rendezvous across it.
+        #[cfg(target_arch = "wasm32")]
+        client_platform_runtime::executor::spawn_detached(async move { worker.drive_detached().await });
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("transfer driver runtime");
             runtime.block_on(worker.drive_detached());

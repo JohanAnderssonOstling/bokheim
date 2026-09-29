@@ -68,8 +68,8 @@ def main():
         if not root.is_absolute():
             raise RuntimeError('asset directory is not absolute')
         (report / 'mount.txt').write_text(command(['findmnt', '-T', str(root), '-o', 'TARGET,SOURCE,FSTYPE,OPTIONS']))
-        migrations = sql('SELECT version,applied_at FROM bokheim_schema_migration ORDER BY applied_at,version', args.database)
-        (report / 'migrations.json').write_text(json.dumps(migrations, indent=2))
+        schema_version = sql('SELECT version FROM bokheim_schema_version', args.database)
+        (report / 'schema-version.json').write_text(json.dumps(schema_version, indent=2))
         owners = sql("SELECT id,name,user_id,created_at,deleted_at FROM libraries WHERE id='{}'".format(library), args.database)
         (report / 'library.json').write_text(json.dumps(owners, indent=2))
         if len(owners) != 1:

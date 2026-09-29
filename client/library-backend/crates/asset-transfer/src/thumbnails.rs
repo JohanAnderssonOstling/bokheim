@@ -127,7 +127,11 @@ where
                 return Err(TransferError::retryable("thumbnail batch returned invalid bytes"));
             }
             self.assets.write(BlobKind::Thumbnail, &thumbnail.content_hash, &thumbnail.bytes).await?;
-            let browse = (self.resize)(thumbnail.bytes, thumbnail::BROWSE_THUMBNAIL_WIDTH).await.map_err(TransferError::retryable)?;
+            let browse = match thumbnail.browse_bytes {
+                Some(browse) if browse.len() <= MAX_THUMBNAIL_BYTES && browse.starts_with(&[0xff, 0xd8, 0xff]) => browse,
+                Some(_) => return Err(TransferError::retryable("thumbnail batch returned invalid browse bytes")),
+                None => (self.resize)(thumbnail.bytes, thumbnail::BROWSE_THUMBNAIL_WIDTH).await.map_err(TransferError::retryable)?,
+            };
             self.assets.write_thumbnail_variant(&thumbnail.content_hash, thumbnail::BROWSE_THUMBNAIL_WIDTH, &browse).await?;
             self.check_transfer_account(&credentials)?;
             out.record(library_database::TransferWrite::CompleteDownloadedThumbnail { hash: thumbnail.content_hash });

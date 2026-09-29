@@ -100,24 +100,18 @@ pub(crate) fn encode_trigger_mutation(context: &FunctionContext<'_>) -> rusqlite
             };
             MutationBody::DirectoryLifecycle { dir_id, value }
         }
-        "book_lifecycle" if context.len() == 10 => {
+        "book_lifecycle" if context.len() == 6 => {
             let content_hash = function_content_hash(context, 1)?;
             let value = match context.get::<i64>(2)? {
-                0 => BookLifecycleState::Present {
-                    metadata: SyncBookMetadata { title: context.get(3)?, subtitle: context.get(4)?, contributors: function_contributors(context, 5)?, book: function_book(context, 6)? },
-                    added_at: function_timestamp(context, 7)?,
-                    // A book is only ever added by the scanner, which refuses to
-                    // index a file whose extension it cannot classify, so a live
-                    // row always carries a format. There is deliberately no
-                    // fallback: an unnamed format would silently become a wrong
-                    // filename on every device that downloads the book.
-                    format: function_book_format(context, 8)?,
-                },
-                1 => BookLifecycleState::Deleted { origin_folder_id: context.get(9)? },
+                0 => BookLifecycleState::Present,
+                1 => BookLifecycleState::Deleted { origin_folder_id: context.get(5)? },
                 2 => BookLifecycleState::Purged,
                 _ => return Err(function_error("invalid book lifecycle state")),
             };
             MutationBody::BookLifecycle { content_hash, value }
+        }
+        "book_facts" if context.len() == 4 => {
+            MutationBody::BookFacts { content_hash: function_content_hash(context, 1)?, value: library_replica::BookFacts { added_at: function_timestamp(context, 2)?, format: function_book_format(context, 3)? } }
         }
         "metadata" if context.len() == 6 => MutationBody::Metadata {
             content_hash: function_content_hash(context, 1)?,
@@ -128,12 +122,13 @@ pub(crate) fn encode_trigger_mutation(context: &FunctionContext<'_>) -> rusqlite
             let value = serde_json::from_slice(&bytes).map_err(|_| function_error("invalid PDF reader metadata"))?;
             MutationBody::PdfReaderMetadata { content_hash: function_content_hash(context, 1)?, value }
         }
-        "book_toc" if context.len() == 4 => {
+        "book_toc" if context.len() == 5 => {
             let toc_json: String = context.get(2)?;
             let entries = serde_json::from_str(&toc_json).map_err(|_| function_error("invalid navigation document"))?;
             // A negative duration is the trigger's spelling of unknown.
             let duration_ms = context.get::<i64>(3).map(|duration| (duration >= 0).then_some(duration as u64))?;
-            MutationBody::BookToc { content_hash: function_content_hash(context, 1)?, value: book_model::BookTocDocument { entries, duration_ms } }
+            let tracks = context.get::<Option<String>>(4)?.map(|json| serde_json::from_str(&json).map_err(|_| function_error("invalid audiobook track index"))).transpose()?;
+            MutationBody::BookToc { content_hash: function_content_hash(context, 1)?, value: book_model::BookTocDocument { entries, duration_ms, tracks } }
         }
         "description" if context.len() == 3 => MutationBody::Description { content_hash: function_content_hash(context, 1)?, value: context.get(2)? },
         "placement" if context.len() == 5 => {
@@ -163,7 +158,8 @@ pub(crate) fn register_sync_functions(conn: &Connection) -> rusqlite::Result<()>
     // metadata_batch_flag is registered once by Database::open with the same
     // Arc used by the RAII batching guard. Re-registering it here disconnects
     // the SQL triggers from that guard during connection/schema initialization.
-    conn.create_scalar_function("bokheim_mutation", -1, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, encode_trigger_mutation)?;
+    conn.create_scalar_function("bokheim_accept_local", 2, FunctionFlags::SQLITE_UTF8, crate::sync::apply::registers::accept_local)?;
+    conn.create_scalar_function("bokheim_mutation", -1, FunctionFlags::SQLITE_UTF8, encode_trigger_mutation)?;
     conn.create_scalar_function("normalize_search_text", 1, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, |context| Ok(book_model::normalize_search_text(&context.get::<String>(0)?)))?;
     conn.create_scalar_function("portable_name_key", 1, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, |context| Ok(library_replica::portable_name_key(&context.get::<String>(0)?)))?;
     // Not SQLITE_DETERMINISTIC: this function re-enters the connection to

@@ -11,8 +11,6 @@ mod runtime;
 fn compact_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
-#[path = "src/label_storage.rs"]
-mod label_storage;
 #[path = "src/range_storage.rs"]
 mod range_storage;
 #[path = "src/taxonomy_reader.rs"]
@@ -29,18 +27,16 @@ fn main() {
         println!("cargo:rerun-if-changed={path}");
     }
     println!("cargo:rerun-if-changed=data/unified-taxonomy-v2.sqlite3");
-    println!("cargo:rerun-if-changed=data/master-taxonomy-v2.sqlite3");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_AUTHORITATIVE_TAXONOMY");
-    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_MASTER_TAXONOMY");
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"));
-    let database_path = if env::var_os("CARGO_FEATURE_MASTER_TAXONOMY").is_some() { manifest_dir.join("data/master-taxonomy-v2.sqlite3") } else { manifest_dir.join("data/unified-taxonomy-v2.sqlite3") };
+    let database_path = manifest_dir.join("data/unified-taxonomy-v2.sqlite3");
     let connection = Connection::open(&database_path).unwrap_or_else(|error| panic!("failed to open {}: {error}", database_path.display()));
     let integrity: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0)).expect("check taxonomy database integrity");
     assert_eq!(integrity, "ok", "taxonomy database failed its integrity check");
     let foreign_key_violations: i64 = connection.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| row.get(0)).expect("check taxonomy database foreign keys");
     assert_eq!(foreign_key_violations, 0, "taxonomy database contains invalid relationships");
     let format_version: String = connection.query_row("SELECT value FROM taxonomy_meta WHERE key='format_version'", [], |row| row.get(0)).expect("taxonomy database has a format version");
-    assert_eq!(format_version, "8", "unsupported taxonomy database format");
+    assert_eq!(format_version, "1", "unsupported taxonomy database format");
     let published_release_id: u64 =
         connection.query_row("SELECT value FROM taxonomy_meta WHERE key='release_id'", [], |row| row.get::<_, String>(0)).expect("taxonomy database has a release identifier").parse().expect("taxonomy release identifier is an integer");
     assert!(published_release_id > 0, "taxonomy release identifier must be positive");
@@ -55,8 +51,9 @@ fn main() {
     let client_connection = Connection::open(&client_database_path).unwrap_or_else(|error| panic!("failed to open {}: {error}", client_database_path.display()));
     // Route IDs identify occurrences, so a concept can retain several parents.
     client_connection.execute_batch(include_str!("src/route_storage.sql")).expect("compile curated navigation routes");
-    range_storage::upgrade(&client_connection).expect("compile structured LCC ranges");
-    label_storage::upgrade(&client_connection).expect("compile preferred-name lookup keys");
+    // Route and lookup index construction can leave partially filled pages.
+    // Compact the final image before it is embedded in client binaries.
+    client_connection.execute_batch("VACUUM;").expect("compact bundled taxonomy database");
     let concepts = taxonomy_reader::read_unified_taxonomy_connection(&client_connection, "build-time taxonomy").expect("read bundled taxonomy");
     let matcher = runtime::build_runtime(concepts, false).expect("compile bundled taxonomy matcher");
     let encoded = bincode::serde::encode_to_vec(&matcher, bincode::config::standard()).expect("encode taxonomy matcher");
@@ -73,7 +70,7 @@ fn build_client_database(authority_path: &PathBuf, client_path: &PathBuf) {
         .execute_batch(
             "PRAGMA foreign_keys=ON;
              CREATE TABLE taxonomy_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;
-             CREATE TABLE concept(concept_id INTEGER PRIMARY KEY,preferred_label TEXT NOT NULL CHECK(length(trim(preferred_label))>0)) STRICT;
+             CREATE TABLE concept(concept_id INTEGER PRIMARY KEY,preferred_label TEXT NOT NULL CHECK(length(trim(preferred_label))>0),normalized_label TEXT NOT NULL) STRICT;
              CREATE TABLE concept_parent(
                  concept_id INTEGER NOT NULL REFERENCES concept(concept_id) ON DELETE CASCADE,
                  parent_concept_id INTEGER NOT NULL REFERENCES concept(concept_id),
@@ -95,24 +92,14 @@ fn build_client_database(authority_path: &PathBuf, client_path: &PathBuf) {
                  concept_id INTEGER NOT NULL REFERENCES concept(concept_id) ON DELETE CASCADE,
                  PRIMARY KEY(selector)
              ) STRICT, WITHOUT ROWID;
-             CREATE TABLE lcc_range(
-                 start_code TEXT NOT NULL CHECK(length(trim(start_code))>0),
-                 end_code TEXT NOT NULL CHECK(length(trim(end_code))>0),
-                 concept_id INTEGER NOT NULL REFERENCES concept(concept_id) ON DELETE CASCADE,
-                 PRIMARY KEY(start_code,end_code)
-             ) STRICT, WITHOUT ROWID;
-             CREATE TABLE source_label(
-                 concept_id INTEGER NOT NULL REFERENCES concept(concept_id) ON DELETE CASCADE,
-                 label TEXT NOT NULL CHECK(length(trim(label))>0),ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-                 PRIMARY KEY(concept_id,label),UNIQUE(concept_id,ordinal)
-             ) STRICT;
              CREATE INDEX concept_parent_parent_idx ON concept_parent(parent_concept_id,ordinal,concept_id);
              CREATE INDEX lcc_selector_lookup_idx ON lcc_selector(selector,concept_id);
              CREATE INDEX bisac_selector_lookup_idx ON bisac_selector(selector,concept_id);
              CREATE INDEX ddc_selector_concept_idx ON ddc_selector(concept_id);
-             CREATE INDEX lcc_range_concept_idx ON lcc_range(concept_id);",
+             CREATE INDEX concept_label_lookup_idx ON concept(normalized_label,concept_id);",
         )
         .expect("create client taxonomy schema");
+    client.execute_batch(include_str!("src/range_storage.sql")).expect("create client range schema");
     client.execute("ATTACH DATABASE ?1 AS authority", [authority_path.to_string_lossy().as_ref()]).expect("attach authoritative taxonomy");
     client
         .execute_batch(&format!(
@@ -134,13 +121,12 @@ fn build_client_database(authority_path: &PathBuf, client_path: &PathBuf) {
              SELECT DISTINCT concept_id FROM ancestors;
              INSERT INTO taxonomy_meta SELECT key,value FROM authority.taxonomy_meta;
              INSERT INTO taxonomy_meta(key,value) VALUES('client_seed_depth','{CLIENT_TAXONOMY_DEPTH}');
-             INSERT INTO concept SELECT concept_id,preferred_label FROM authority.concept WHERE concept_id IN client_concept ORDER BY rowid;
+             INSERT INTO concept SELECT concept_id,preferred_label,normalized_label FROM authority.concept WHERE concept_id IN client_concept ORDER BY rowid;
              INSERT INTO concept_parent SELECT concept_id,parent_concept_id,ordinal FROM authority.concept_parent WHERE concept_id IN client_concept ORDER BY concept_id,ordinal;
              INSERT INTO lcc_selector SELECT concept_id,selector FROM authority.lcc_selector WHERE concept_id IN client_concept ORDER BY concept_id,selector;
              INSERT INTO bisac_selector SELECT concept_id,selector FROM authority.bisac_selector WHERE concept_id IN client_concept ORDER BY concept_id,selector;
              INSERT INTO ddc_selector SELECT selector,concept_id FROM authority.ddc_selector WHERE concept_id IN client_concept ORDER BY selector;
-             INSERT INTO lcc_range SELECT start_code,end_code,concept_id FROM authority.lcc_range WHERE concept_id IN client_concept ORDER BY start_code,end_code;
-             INSERT INTO source_label SELECT concept_id,label,ordinal FROM authority.source_label WHERE concept_id IN client_concept ORDER BY concept_id,ordinal;"
+             INSERT INTO lcc_range SELECT concept_id,start_letters,start_number,start_cutters,end_letters,end_number,end_cutters FROM authority.lcc_range WHERE concept_id IN client_concept ORDER BY concept_id,start_letters,start_number,start_cutters,end_letters,end_number,end_cutters;"
         ))
         .expect("populate client taxonomy seed");
     client.execute_batch("DETACH DATABASE authority; VACUUM; PRAGMA optimize;").expect("finalize client taxonomy seed");

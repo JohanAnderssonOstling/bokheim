@@ -59,11 +59,11 @@ fi
 
 server_target=${SYNC_E2E_SERVER_TARGET_DIR:-$repo_root/servers/sync/target}
 backend_target=${SYNC_E2E_BACKEND_TARGET_DIR:-$repo_root/target}
-CARGO_TARGET_DIR="$server_target" cargo build --release --manifest-path "$repo_root/servers/sync/Cargo.toml"
+CARGO_TARGET_DIR="$server_target" cargo build --release --locked --manifest-path "$repo_root/servers/sync/Cargo.toml"
 
 SYNC_E2E_DATABASE_URL="$database_url" \
 CARGO_TARGET_DIR="$server_target" \
-cargo test --release \
+cargo test --release --locked \
     --manifest-path "$repo_root/servers/sync/Cargo.toml" \
     -p server-account \
     -p server-postgres \
@@ -73,7 +73,7 @@ cargo test --release \
 
 SYNC_E2E_DATABASE_URL="$database_url" \
 CARGO_TARGET_DIR="$server_target" \
-cargo test --release \
+cargo test --release --locked \
     --manifest-path "$repo_root/servers/sync/Cargo.toml" \
     -p sync-server \
     --test public_registration \
@@ -111,7 +111,7 @@ SYNC_E2E_SERVER_BIN="$server_target/release/sync-server" \
 SYNC_E2E_SERVER_URL="http://127.0.0.1:$server_port" \
 SYNC_E2E_ADMIN_PASSWORD="sync-e2e-admin-password" \
 CARGO_TARGET_DIR="$backend_target" \
-cargo test --release \
+cargo test --release --locked \
     --manifest-path "$repo_root/client/app/Cargo.toml" \
     --lib \
     production_http_postgres_ \

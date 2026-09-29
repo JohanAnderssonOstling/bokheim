@@ -16,14 +16,7 @@ INSERT INTO audible_enrichment_jobs(content_hash,policy,request_json,status,upda
 SELECT request_json FROM audible_enrichment_jobs WHERE content_hash=:content_hash AND status='applied';
 
 -- name: batch_flag_flush&
-INSERT INTO sync_outbox(state_kind,state_key,body,changed_at,conflict_rank)
-            SELECT 'metadata',b.content_hash,
-              bokheim_mutation('metadata',b.content_hash,COALESCE(b.title,''),b.subtitle,contributors_for_book(b.row_id),b.book_metadata),
-              CAST((julianday('now')-2440587.5)*86400000 AS INTEGER),0
-            FROM pending_metadata_payload p JOIN book b ON b.row_id=p.book_row_id WHERE 1
-            ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET
-              replica_seq=excluded.replica_seq,mutation_id=excluded.mutation_id,
-              body=excluded.body,changed_at=excluded.changed_at,conflict_rank=excluded.conflict_rank;
+SELECT bokheim_accept_local(bokheim_mutation('metadata',b.content_hash,COALESCE(b.title,''),b.subtitle,contributors_for_book(b.row_id),b.book_metadata), CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)) FROM pending_metadata_payload p JOIN book b ON b.row_id=p.book_row_id WHERE 1;
             DELETE FROM pending_metadata_payload;
 
 -- name: existing_book_contributor_credit?
@@ -85,24 +78,6 @@ SELECT '/' || CASE WHEN dp.path='' THEN bd.file_name ELSE dp.path || '/' || bd.f
 -- name: scan_seq_update!
 -- param: scan_seq: i64
 INSERT INTO sync_metadata(singleton, scan_seq) VALUES (1, :scan_seq) ON CONFLICT(singleton) DO UPDATE SET scan_seq = excluded.scan_seq;
-
--- name: scanned_book_exists_select?
--- param: content_hash: &str
-SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=:content_hash);
-
--- name: scanned_fold_lifecycle_update!
--- param: content_hash: &str
-UPDATE sync_outbox
-             SET body=(SELECT bokheim_mutation('book_lifecycle', book.content_hash, 0,
-                         COALESCE(book.title, book.content_hash), book.subtitle, contributors_for_book(book.row_id),
-                         book.book_metadata,
-                         COALESCE(book.added_at, 0), book.format, NULL)
-                       FROM book WHERE book.content_hash=:content_hash)
-             WHERE state_kind='book_lifecycle' AND state_key=:content_hash;
-
--- name: scanned_fold_metadata_delete!
--- param: content_hash: &str
-DELETE FROM sync_outbox WHERE state_kind='metadata' AND state_key=:content_hash;
 
 -- name: set_description!
 -- param: content_hash: &str

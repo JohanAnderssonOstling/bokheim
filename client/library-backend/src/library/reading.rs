@@ -12,7 +12,9 @@ impl LibrarySession {
 
     pub(crate) fn cached_audiobook_metadata(&self, hash: ContentHash) -> Result<Option<PlaybackMetadata>, String> {
         let snapshot = self.db.audiobook_playback_snapshot(&hash).map_err(|error| error.to_string())?;
-        Ok(snapshot.cached.map(|metadata| PlaybackMetadata { title: snapshot.title, author: snapshot.author, narrator: metadata.narrator, duration_ms: metadata.duration_ms, chapters: metadata.chapters, cover: Vec::new() }))
+        let tracks = self.db.audiobook_tracks(&hash).map_err(|error| error.to_string())?;
+        let format = self.db.book_format(&hash).map_err(|error| error.to_string())?.unwrap_or(book_model::BookFormat::M4b);
+        Ok(snapshot.cached.map(|metadata| PlaybackMetadata { format, title: snapshot.title, author: snapshot.author, narrator: metadata.narrator, duration_ms: metadata.duration_ms, chapters: metadata.chapters, tracks, cover: Vec::new() }))
     }
 
     pub(crate) async fn audiobook_playback_metadata(&self, hash: ContentHash) -> Result<Option<PlaybackMetadata>, String> {

@@ -1,7 +1,7 @@
 use super::*;
 pub use library_backend::ThumbnailResolution;
 
-pub use client_runtime::wire::{WorkerPayload, decode_worker_message, decode_worker_payload, encode_reply, encode_worker_message};
+pub use client_runtime::wire::{decode_worker_message, decode_worker_payload, encode_reply, encode_worker_message, WorkerPayload};
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct AppStartupState {
@@ -81,9 +81,7 @@ pub struct AccountSnapshot {
     pub account: crate::AccountStatus,
     pub storage_usage: Option<crate::AccountStorageUsage>,
     pub sync_statuses: Vec<crate::LibrarySyncStatus>,
-    pub local_storage_usage: Vec<crate::LocalLibraryStorageUsage>,
     pub server_storage_usage: Option<Vec<crate::ServerLibraryStorageUsage>>,
-    pub transfers: Vec<crate::LibraryTransfers>,
 }
 
 pub enum WorkerSubscription {

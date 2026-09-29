@@ -3,7 +3,6 @@ use book_model::BookFormat;
 use std::{collections::HashSet, path::PathBuf};
 
 /// Returns eligible files, physical bytes and unreadable entries. No file bodies
-
 /// Returns None when cancelled. Checks between entries; an in-progress OS call
 /// must return before cancellation can be observed.
 pub fn estimate_folders_cancellable(roots: Vec<PathBuf>, cancelled: impl Fn() -> bool) -> Option<(u64, u64, u64)> {

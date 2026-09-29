@@ -326,16 +326,6 @@ mod tests {
     use crate::runtime_index::validate;
 
     #[test]
-    fn legacy_aliases_do_not_participate_in_matching_or_revision() {
-        let definition = |aliases| UnifiedConceptDefinition::new(1, "Preferred Name".into(), vec![], BTreeMap::new(), aliases);
-        let with_alias = build_runtime(vec![definition(vec!["Old Alias".into()])], true).unwrap();
-        let without_alias = build_runtime(vec![definition(vec![])], true).unwrap();
-        assert_eq!(with_alias, without_alias);
-        assert_eq!(with_alias.labels.get("preferred name"), Some(&BTreeSet::from([1])));
-        assert!(!with_alias.labels.contains_key("old alias"));
-    }
-
-    #[test]
     fn reviewed_history_ranges_cover_their_complete_boundaries() {
         let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(10305, "Eastern campaigns", &[], &["D551..D552.Z"]), concept(54459, "Kazakh political history", &[], &["DK908.67..DK908.68", "DK908.682"])]).unwrap();
         for code in ["D551", "D552.A1", "D552.L5", "D552.T3", "D552.Z9"] {
@@ -494,7 +484,7 @@ mod tests {
 
     #[test]
     fn legacy_priorities_do_not_resolve_equal_ranges_or_preserve_duplicates() {
-        let left = concept(1, "Shared label", &[], &["QA1..QA10@1", "QA1..QA10@9"]);
+        let left = concept(1, "Shared label", &[], &["QA1..QA10", "QA1..QA10"]);
         assert_eq!(left.source_selectors("lcc"), &["QA1..QA10"]);
         let taxonomy = UnifiedTaxonomy::from_concepts(vec![left, concept(2, "Shared label", &[], &["QA1..QA10"])]).unwrap();
         assert_eq!(taxonomy.lcc_match_candidates("QA5"), vec![1, 2]);
@@ -512,10 +502,10 @@ mod tests {
     #[test]
     fn fallback_ranges_preserve_exact_and_existing_range_assignments() {
         let taxonomy = UnifiedTaxonomy::from_concepts(vec![
-            concept(17, "Mathematics", &[], &["QA1..QA939@0"]),
-            concept(9, "Computing", &[17], &["QA75.5..QA76.95@1"]),
+            concept(17, "Mathematics", &[], &["QA1..QA939"]),
+            concept(9, "Computing", &[17], &["QA75.5..QA76.95"]),
             concept(24, "Specific topic", &[9], &["QA76.73.R87"]),
-            concept(2, "Analysis", &[17], &["QA299.6..QA433@0"]),
+            concept(2, "Analysis", &[17], &["QA299.6..QA433"]),
         ])
         .unwrap();
         assert_eq!(taxonomy.matching_concept_ids("lcc", "QA76.73.R87 .A1 2025"), vec![24]);
@@ -528,7 +518,7 @@ mod tests {
 
     #[test]
     fn specificity_unrelated_ties_are_unresolved_for_every_code_system() {
-        let mut definitions = vec![concept(15, "Left", &[], &["QA1..QA10@1"]), concept(21, "Right", &[], &["QA1..QA10@9"])];
+        let mut definitions = vec![concept(15, "Left", &[], &["QA1..QA10"]), concept(21, "Right", &[], &["QA1..QA10"])];
         for definition in &mut definitions {
             definition.source_selectors.insert("bisac".into(), vec!["COM000000".into()]);
         }
@@ -540,7 +530,7 @@ mod tests {
 
     #[test]
     fn subclass_specificity_beats_cross_class_priority_and_keeps_unknown_subclasses() {
-        let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Broad", &[], &["A1..AZ100@2"]), concept(2, "Known subclass", &[], &["AC"]), concept(3, "Lower priority", &[], &["AC1..AC10@1"])]).unwrap();
+        let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Broad", &[], &["A1..AZ100"]), concept(2, "Known subclass", &[], &["AC"]), concept(3, "Lower priority", &[], &["AC1..AC10"])]).unwrap();
         assert_eq!(taxonomy.lcc_match_candidates("AC5"), vec![3]);
         assert_eq!(taxonomy.lcc_match_candidates("A1"), vec![1]);
         assert_eq!(taxonomy.lcc_match_candidates("AZ100"), vec![1]);
@@ -552,7 +542,7 @@ mod tests {
 
     #[test]
     fn specificity_descendants_win_even_against_exact_ancestors_and_higher_priorities() {
-        let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Parent", &[], &["QA76", "QA1..QA100@9"]), concept(2, "Child", &[1], &["QA75..QA80@0"]), concept(3, "Grandchild", &[2], &["QA76..QA77@0"])]).unwrap();
+        let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Parent", &[], &["QA76", "QA1..QA100"]), concept(2, "Child", &[1], &["QA75..QA80"]), concept(3, "Grandchild", &[2], &["QA76..QA77"])]).unwrap();
         assert_eq!(taxonomy.matching_concept_ids("lcc", "QA76.A1"), vec![3]);
         assert_eq!(taxonomy.matching_concept_ids("lcc", "QA78"), vec![2]);
         assert_eq!(taxonomy.matching_concept_ids("lcc", "QA90"), vec![1]);
@@ -560,7 +550,7 @@ mod tests {
 
     #[test]
     fn specificity_narrower_unrelated_ranges_win_before_priority() {
-        let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Broad", &[], &["QA1..QA100@9"]), concept(2, "Specific", &[], &["QA10..QA20@0"])]).unwrap();
+        let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Broad", &[], &["QA1..QA100"]), concept(2, "Specific", &[], &["QA10..QA20"])]).unwrap();
         assert_eq!(taxonomy.matching_concept_ids("lcc", "QA15"), vec![2]);
     }
 
@@ -631,7 +621,7 @@ mod tests {
 
     fn concept(id: i64, label: &str, parents: &[i64], lcc: &[&str]) -> UnifiedConceptDefinition {
         let source_selectors = if lcc.is_empty() { BTreeMap::new() } else { BTreeMap::from([(LCC_SYSTEM_ID.to_owned(), lcc.iter().map(|value| (*value).to_owned()).collect())]) };
-        UnifiedConceptDefinition::new(id.to_owned(), label.to_owned(), parents.iter().map(|value| (*value).to_owned()).collect(), source_selectors, Vec::new())
+        UnifiedConceptDefinition::new(id.to_owned(), label.to_owned(), parents.iter().map(|value| (*value).to_owned()).collect(), source_selectors)
     }
 
     #[test]
@@ -728,9 +718,9 @@ mod tests {
 
     #[test]
     fn broad_ranges_do_not_count_as_exact_local_code_coverage() {
-        let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(22, "Social Sciences", &[], &[]), concept(4, "Business", &[22], &["HF1..HF6182@1"]), concept(1, "Accounting", &[4], &["HF5601"])]).unwrap();
+        let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(22, "Social Sciences", &[], &[]), concept(4, "Business", &[22], &["HF1..HF6182"]), concept(1, "Accounting", &[4], &["HF5601"])]).unwrap();
 
-        let broad_only = UnifiedTaxonomy::from_concepts(vec![concept(22, "Social Sciences", &[], &[]), concept(4, "Business", &[22], &["HF1..HF6182@1"])]).unwrap();
+        let broad_only = UnifiedTaxonomy::from_concepts(vec![concept(22, "Social Sciences", &[], &[]), concept(4, "Business", &[22], &["HF1..HF6182"])]).unwrap();
         assert!(!broad_only.matching_concept_ids(LCC_SYSTEM_ID, "HF5601").is_empty());
         assert!(!broad_only.has_exact_source_code(LCC_SYSTEM_ID, "HF5601"));
         assert!(taxonomy.has_exact_source_code(LCC_SYSTEM_ID, "hf5601"));
@@ -739,7 +729,7 @@ mod tests {
     #[test]
     fn lcc_wildcards_require_a_curated_structural_subclass() {
         let taxonomy =
-            UnifiedTaxonomy::from_concepts(vec![concept(22, "Subjects", &[], &[]), concept(13, "History", &[22], &["C*"]), concept(18, "Music", &[22], &["M*", "ML", "ML1..ML3930@1"]), concept(14, "Law", &[22], &["K*", "KKT1..KKT9999@1"])])
+            UnifiedTaxonomy::from_concepts(vec![concept(22, "Subjects", &[], &[]), concept(13, "History", &[22], &["C*"]), concept(18, "Music", &[22], &["M*", "ML", "ML1..ML3930"]), concept(14, "Law", &[22], &["K*", "KKT1..KKT9999"])])
                 .unwrap();
 
         for shelf_mark in ["CPB", "CPB Box no. 1574 vol. 4", "MLCS", "MLCS 2021/45060 (P)"] {
@@ -807,17 +797,23 @@ mod tests {
     fn decorative_arts_lcc_detail_routes_to_existing_concepts() {
         install_authoritative_taxonomy_for_tests();
         let expected = [
-            ("NK3700", "Design & Decorative Arts / Decorative Arts / Ceramics"),
-            ("NK5100", "Design & Decorative Arts / Decorative Arts / Glass"),
-            ("NK6400", "Design & Decorative Arts / Decorative Arts / Art metalwork"),
-            ("NK8555", "Design & Decorative Arts / Decorative Arts / Papercrafts"),
-            ("NK8800", "Design & Decorative Arts / Decorative Arts / Textile arts"),
-            ("NK9600", "Design & Decorative Arts / Decorative Arts / Woodwork"),
+            ("NK3700", "Ceramics"),
+            ("NK5100", "Glass"),
+            ("NK6400", "Art metalwork"),
+            ("NK8555", "Papercrafts"),
+            ("NK8800", "Textile arts"),
+            ("NK9600", "Woodwork"),
         ];
 
-        for (call_number, suffix) in expected {
+        for (call_number, subject) in expected {
             let paths = unified_lcc_subject_paths(call_number);
-            assert!(paths.iter().any(|path| path.ends_with(suffix)), "{call_number} did not resolve beneath {suffix}: {paths:?}");
+            assert!(
+                paths.iter().any(|path| {
+                    path.starts_with("Arts & Media / Design / Decorative Arts / ")
+                        && path.ends_with(&format!("/ {subject}"))
+                }),
+                "{call_number} did not resolve beneath Decorative Arts / {subject}: {paths:?}"
+            );
         }
     }
 

@@ -1,9 +1,9 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use library_backend::LibraryClient;
 use futures_util::{FutureExt, select_biased};
 use gpui::{App, IntoElement, ParentElement, Styled, Window, div, px};
 use gpui_component::{WindowExt, notification::Notification, progress::Progress};
+use library_backend::LibraryClient;
 use library_model::{DirectoryImportProgress, ImportFileStage};
 
 /// The import owns this guard; completion, failure, and cancellation all close
@@ -201,12 +201,7 @@ fn presentation(progress: Option<DirectoryImportProgress>) -> Presentation {
 
 /// One styled notification per coordinator job, including recovered imports.
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn watch_browser_imports(
-    backend: Rc<app::AppClient>,
-    sync_events: async_channel::Sender<crate::SyncEvent>,
-    window: &mut Window,
-    cx: &mut App,
-) -> gpui::Task<()> {
+pub(crate) fn watch_browser_imports(backend: Rc<app::AppClient>, sync_events: async_channel::Sender<crate::SyncEvent>, window: &mut Window, cx: &mut App) -> gpui::Task<()> {
     use super::import_presentation::browser_presentation;
     use app::ImportProgress;
     use std::collections::BTreeMap;

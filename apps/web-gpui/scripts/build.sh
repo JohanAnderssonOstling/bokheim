@@ -31,6 +31,8 @@ bundle_dir="${output_dir}/pkg/.building"
 )
 rm -rf -- "$output_dir"
 mkdir -p "$bundle_dir"
+install -d "$output_dir/assets/icons"
+cp -a "$workspace_dir/vendor/gpui-component/crates/assets/assets/icons/." "$output_dir/assets/icons/"
 if [[ -x "$local_bindgen" ]]; then
     wasm_bindgen="$local_bindgen"
 else
@@ -42,12 +44,13 @@ bind_module() {
     local module_name="$1"
     local module_binary="$2"
     "$wasm_bindgen" --target web --out-dir "$bundle_dir/$module_name" --out-name "$module_name" "$module_binary"
-    printf 'export { default } from "./%s/%s.js";\nexport * from "./%s/%s.js";\n' "$module_name" "$module_name" "$module_name" "$module_name" > "$bundle_dir/$module_name.js"
+    printf 'import initialize from "./%s/%s.js";\nimport { compressedWasm } from "./compressed_wasm.js";\nexport * from "./%s/%s.js";\nexport default async function init(options) {\n  if (options !== undefined) return initialize(options);\n  const response = await compressedWasm(new URL("./%s/%s_bg.wasm.gz", import.meta.url));\n  return initialize(response ? { module_or_path: response } : undefined);\n}\n' "$module_name" "$module_name" "$module_name" "$module_name" "$module_name" "$module_name" > "$bundle_dir/$module_name.js"
 }
 bind_module web_gpui "$target_dir/wasm32-unknown-unknown/web-release/web_gpui.wasm"
 bind_module web_backend_worker "$target_dir/wasm32-unknown-unknown/web-release/web_backend_worker.wasm"
 bind_module cpu_worker "$target_dir/wasm32-unknown-unknown/web-release/examples/cpu_worker.wasm"
 bind_module sync_coordinator "$target_dir/wasm32-unknown-unknown/web-release/examples/sync_coordinator.wasm"
+cp "$app_dir/compressed_wasm.js" "$bundle_dir/compressed_wasm.js"
 python3 - "$bundle_dir/sync_coordinator/sync_coordinator.js" <<'PY'
 from pathlib import Path
 import sys
@@ -70,6 +73,12 @@ if command -v wasm-opt >/dev/null 2>&1; then
 else
     echo "warning: wasm-opt is unavailable; shipping the size-optimized Rust output without Binaryen post-processing" >&2
 fi
+
+# A sidecar keeps the regular WASM path available for browsers without
+# DecompressionStream while avoiding a full-size download on supported ones.
+for wasm in "$bundle_dir"/*/*_bg.wasm; do
+    gzip -9 -c "$wasm" > "${wasm}.gz"
+done
 
 # Some optimizers can leave an empty output after an exhausted filesystem.
 # Reject incomplete artifacts before assigning an immutable bundle identity.
@@ -114,9 +123,10 @@ if [[ -f "$app_dir/assetlinks.json" ]]; then
 fi
 cp "$app_dir/index.html" "$output_dir/index.html"
 cp "$app_dir/compatibility.mjs" "$output_dir/compatibility.mjs"
+cp "$app_dir/startup.mjs" "$output_dir/startup.mjs"
 sed -i "s|\"\./pkg\"|\"./${asset_base}\"|" "$output_dir/index.html"
 sed -i "s|\./pkg/web_gpui\.js|./${asset_base}/web_gpui.js|" "$output_dir/index.html"
 
-# SharedWorker identity is its URL and name. Keep its entry URL stable while
-# pinning each newly started coordinator to one immutable release bundle.
+# Compatibility entry for older clients. Current clients connect directly to
+# the coordinator inside their immutable bundle.
 printf 'import "./%s/web_backend_worker_loader.js";\n' "$asset_base" > "$output_dir/web_backend_worker_loader.js"

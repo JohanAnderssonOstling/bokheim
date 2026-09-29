@@ -15,14 +15,10 @@ use crate::{BrowserTheme, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, TEXT_SM, TEXT
 
 /// Height of the account quota meter.
 const METER_HEIGHT: f32 = 10.0;
-/// The progress track on an activity line. Wide enough to read as a quantity
-/// rather than as a dash — it was 48px, which at a glance says only "something
-/// is happening", which the dot beside it already says.
-const ACTIVITY_PROGRESS_WIDTH: f32 = 96.0;
 /// The initial beside the address in the header chip.
 const ACCOUNT_AVATAR_SIZE_REM: f32 = 1.5;
 /// How much header an address may take before it truncates.
-const ACCOUNT_CHIP_MAX_WIDTH: f32 = 256.0;
+const ACCOUNT_CHIP_MAX_WIDTH_REM: f32 = 16.0;
 const EVENT_DOT_SIZE: f32 = 8.0;
 const PROGRESS_HEIGHT: f32 = 3.0;
 /// Keeps a library row the height it had when its name was a button, so the
@@ -47,14 +43,26 @@ const LIBRARY_FACT_HEIGHT_REM: f32 = 1.5;
 /// The address truncates rather than wrapping; the caller gives the button the
 /// full address as its tooltip, because a header cannot grow.
 pub fn account_chip(id: impl Into<gpui::ElementId>, initial: impl Into<SharedString>, email: impl Into<SharedString>, theme: BrowserTheme) -> Button {
-    crate::base_button(id).ghost().h(gpui::rems(crate::SETTINGS_CONTROL_SIZE_REM)).min_h(px(32.0)).max_w(px(ACCOUNT_CHIP_MAX_WIDTH)).px(px(SPACE_XS)).rounded(px(crate::RADIUS_SM)).border_1().border_color(theme.border).child(
+    crate::base_button(id).ghost().h(gpui::rems(crate::SETTINGS_CONTROL_SIZE_REM)).max_w(gpui::rems(ACCOUNT_CHIP_MAX_WIDTH_REM)).px(px(SPACE_XS)).rounded(px(crate::RADIUS_SM)).border_1().border_color(theme.border).child(
         div()
             .flex()
             .flex_row()
             .items_center()
             .gap(px(SPACE_SM))
             .min_w_0()
-            .child(div().w(gpui::rems(ACCOUNT_AVATAR_SIZE_REM)).h(gpui::rems(ACCOUNT_AVATAR_SIZE_REM)).flex_none().flex().items_center().justify_center().bg(theme.accent).text_color(theme.accent_text).text_size(gpui::rems(TEXT_XS)).child(initial.into()))
+            .child(
+                div()
+                    .w(gpui::rems(ACCOUNT_AVATAR_SIZE_REM))
+                    .h(gpui::rems(ACCOUNT_AVATAR_SIZE_REM))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(theme.accent)
+                    .text_color(theme.accent_text)
+                    .text_size(gpui::rems(TEXT_XS))
+                    .child(initial.into()),
+            )
             .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(TEXT_XS)).text_color(theme.text).child(email.into())),
     )
 }
@@ -139,7 +147,7 @@ pub fn library_usage_empty(text: impl Into<SharedString>, theme: BrowserTheme) -
 /// lines stay a column; an empty track says the job has no denominator, which
 /// is itself worth knowing.
 pub fn library_activity_note(state_color: Hsla, text: impl Into<SharedString>, count: Option<SharedString>, progress: Option<f32>, theme: BrowserTheme) -> Div {
-    let track = div().w(px(ACTIVITY_PROGRESS_WIDTH)).h(px(PROGRESS_HEIGHT)).flex_none().flex().flex_row().overflow_hidden().bg(theme.rule);
+    let track = div().min_w(px(48.0)).flex_1().h(px(PROGRESS_HEIGHT)).flex().flex_row().overflow_hidden().bg(theme.rule);
     div()
         .w_full()
         .flex()
@@ -147,9 +155,9 @@ pub fn library_activity_note(state_color: Hsla, text: impl Into<SharedString>, c
         .items_center()
         .gap(px(SPACE_SM))
         .child(div().w(px(EVENT_DOT_SIZE)).h(px(EVENT_DOT_SIZE)).flex_none().rounded(px(EVENT_DOT_SIZE / 2.0)).bg(state_color))
-        .child(div().flex_1().min_w_0().text_size(gpui::rems(TEXT_XS)).text_color(theme.text).child(text.into()))
-        .children(count.map(|count| div().flex_none().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(count)))
+        .child(div().min_w_0().text_size(gpui::rems(TEXT_XS)).text_color(theme.text).child(text.into()))
         .child(track.children(progress.map(|progress| div().h_full().w(relative(progress.clamp(0.0, 1.0))).bg(state_color))))
+        .children(count.map(|count| div().flex_none().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(count)))
 }
 
 /// The name a library is read by in the server-storage list. Nothing is done to
@@ -196,6 +204,15 @@ pub fn library_usage_row(name: impl Into<SharedString>, facts: impl IntoIterator
     div().w_full().px(px(SPACE_MD)).py(px(SPACE_MD)).flex().flex_col().gap(px(SPACE_SM)).child(title).child(list).children(activity)
 }
 
+/// The controls and less frequently needed facts revealed from a summary row.
+pub fn library_usage_details(facts: impl IntoIterator<Item = (SharedString, AnyElement)>, compact: bool, theme: BrowserTheme) -> Div {
+    let mut list = div().w_full().flex().flex_col().gap(px(SPACE_XS));
+    for (label, value) in facts {
+        list = list.child(library_fact(label, value, compact, theme));
+    }
+    list
+}
+
 /// One labelled fact about a library.
 ///
 /// The label column is fixed rather than sized to its contents, because the
@@ -215,7 +232,11 @@ fn library_fact(label: SharedString, value: AnyElement, compact: bool, theme: Br
     if compact && unlabelled {
         return div().w_full().flex().child(value);
     }
-    if compact { div().w_full().flex().flex_col().gap(px(SPACE_XXS)).child(label).child(value) } else { div().w_full().flex().flex_row().items_center().gap(px(SPACE_MD)).child(label.w(gpui::rems(LIBRARY_FACT_LABEL_WIDTH_REM)).max_w(px(LIBRARY_FACT_LABEL_MAX_WIDTH))).child(value) }
+    if compact {
+        div().w_full().flex().flex_col().gap(px(SPACE_XXS)).child(label).child(value)
+    } else {
+        div().w_full().flex().flex_row().items_center().gap(px(SPACE_MD)).child(label.w(gpui::rems(LIBRARY_FACT_LABEL_WIDTH_REM)).max_w(px(LIBRARY_FACT_LABEL_MAX_WIDTH))).child(value)
+    }
 }
 
 /// Vertical rhythm for the storage block/// The signed-out form: a title, the inputs, the actions, and whatever the last

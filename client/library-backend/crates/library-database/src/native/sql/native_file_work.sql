@@ -56,7 +56,7 @@ SELECT EXISTS(
 -- name: native_directory_rename!
 -- param: dir_id: &str
 -- param: name: &str
-UPDATE dir SET name = :name WHERE id = :dir_id AND deleted_at IS NULL;
+UPDATE dir SET name = :name, intent_name = :name WHERE id = :dir_id AND deleted_at IS NULL;
 
 -- name: native_directory_queue_work!
 -- param: dir_id: &str
@@ -95,14 +95,13 @@ LIMIT 32;
 
 -- name: purge_book_is_retired ->
 -- param: content_hash: &str
-SELECT EXISTS(
-    SELECT 1 FROM book WHERE content_hash = :content_hash AND purged_at IS NOT NULL
-);
+SELECT NOT EXISTS(SELECT 1 FROM book WHERE content_hash = :content_hash);
 
 -- name: acknowledge_purge_book!
 -- param: content_hash: &str
+-- param: work_id: i64
 DELETE FROM local_purge_work
-WHERE content_hash = :content_hash;
+WHERE content_hash = :content_hash AND id = :work_id;
 
 -- Native book staging and conditional publish.
 

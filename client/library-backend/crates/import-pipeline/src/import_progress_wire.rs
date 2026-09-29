@@ -51,7 +51,9 @@ impl TryFrom<WireImportProgress> for ImportProgress {
                 }
                 ImportState::Adding { processed, total, failed }
             }
-            WirePhase::Failed => ImportState::Paused { reason: ImportFailure { kind: if value.storage_full == Some(true) { ImportFailureKind::StorageFull } else { ImportFailureKind::Interrupted }, path: Vec::new(), diagnostic: value.error } },
+            WirePhase::Failed => {
+                ImportState::Paused { reason: ImportFailure { kind: if value.storage_full == Some(true) { ImportFailureKind::StorageFull } else { ImportFailureKind::Interrupted }, path: Vec::new(), diagnostic: value.error } }
+            }
             WirePhase::Complete => {
                 let total = value.total_files.ok_or("missing total file count")?;
                 let failed_files = value.failed.unwrap_or_else(|| failures.iter().filter(|failure| failure.kind == ImportFailureKind::File).count() as u64);

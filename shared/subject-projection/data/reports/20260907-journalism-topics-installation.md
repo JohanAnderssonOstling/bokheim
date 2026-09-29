@@ -20,4 +20,4 @@ Journalistic Editing is kept distinct from the broader Editing & Proofreading su
 Validation: 32 exact-selector, descendant-Cutter and neighboring-code probes, full before/after matching, migration replay, SQLite integrity and foreign keys, graph acyclicity and parent placement. Published usage counts, matching cache and viewer are refreshed; all eight displayed hit totals, selector totals and parent routes are verified.
 The installed database equals the audited staging database.
 
-Caption evidence is retained from the local LCC reference in the [manifest](20260907-journalism-topics-manifest.json). Migration: [20260907_extract_practical_journalism_topics.sql](../migrations/20260907_extract_practical_journalism_topics.sql). Working files: `/home/johan/.cache/bokheim/journalism-topics-install/`.
+Caption evidence is retained from the local LCC reference in the [manifest](20260907-journalism-topics-manifest.json). Migration: 20260907_extract_practical_journalism_topics.sql. Working files: `/home/johan/.cache/bokheim/journalism-topics-install/`.

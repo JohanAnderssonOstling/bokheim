@@ -27,7 +27,7 @@ impl LibrarySession {
             let response = match outcome {
                 Ok(response) => response,
                 Err(error) => {
-                    let failures = candidates.iter().map(|candidate| (candidate.content_hash.clone(), candidate.isbns.join(","))).collect::<Vec<_>>();
+                    let failures = candidates.iter().map(|candidate| (candidate.content_hash, candidate.isbns.join(","))).collect::<Vec<_>>();
                     record_enrichment_failures(self, OPEN_LIBRARY_RICH_PROVIDER, failures, error.to_string()).await?;
                     return Err(error);
                 }

@@ -4,8 +4,8 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use application_shell::ApplicationRoot;
 use app::AppClient;
+use application_shell::ApplicationRoot;
 use browser_ui::{AppServices, AppStartup};
 use gpui::{App, AppContext, Bounds, SharedString, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
@@ -32,9 +32,7 @@ pub fn start() {
             Ok(initialized) => initialized,
             Err(error) => {
                 log::error!("failed to start SQLite web backend: {error}");
-                if let Some(window) = web_sys::window() {
-                    let _ = window.alert_with_message("Bokheim could not open its local storage.\n\nFully quit your browser and reopen Bokheim, then try again.");
-                }
+                notify_startup("__BOKHEIM_STARTUP_FAILED__", &error);
                 return;
             }
         };
@@ -43,9 +41,18 @@ pub fn start() {
         preferences.apply_synchronized(&state.reader_preferences);
         let handle = application.run_embedded(move |cx| {
             open_bokheim(backend, startup, preferences, cx);
+            notify_startup("__BOKHEIM_STARTUP_READY__", "");
         });
         APPLICATION.with(|application| *application.borrow_mut() = Some(handle));
     });
+}
+
+fn notify_startup(name: &str, detail: &str) {
+    if let Ok(callback) = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str(name)) {
+        if let Some(callback) = callback.dyn_ref::<js_sys::Function>() {
+            let _ = callback.call1(&JsValue::UNDEFINED, &JsValue::from_str(detail));
+        }
+    }
 }
 
 async fn connect_backend() -> Result<(AppClient, app::AppStartupState), String> {
@@ -88,7 +95,7 @@ async fn browser_delay(milliseconds: i32) {
 
 fn open_bokheim(backend: AppClient, startup: AppStartup, reader_preferences: reader_ui::ReaderPreferences, cx: &mut App) {
     if let Err(error) =
-        cx.text_system().add_fonts(vec![Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/LibertinusSerif-Regular.otf")), Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/LibertinusSerif-Bold.otf"))])
+        cx.text_system().add_fonts(vec![Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/LibertinusSerif-Regular.otf")), Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/LibertinusSerif-Bold.otf")), Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/LibertinusSerif-Italic.otf")), Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/BodoniModa-Regular.ttf")), Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/BodoniModa-SemiBold.ttf"))])
     {
         log::warn!("failed to install Bokheim fonts: {error}");
     }

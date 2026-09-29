@@ -15,13 +15,14 @@ pub const MAX_THUMBNAIL_UPLOAD_DURATION: Duration = Duration::from_secs(2 * 60);
 pub enum AssetKind {
     Book,
     Thumbnail,
+    ThumbnailBrowse,
 }
 
 impl AssetKind {
     pub const fn max_bytes(self) -> Option<u64> {
         match self {
             Self::Book => None,
-            Self::Thumbnail => Some(sync_common::MAX_THUMBNAIL_BYTES),
+            Self::Thumbnail | Self::ThumbnailBrowse => Some(sync_common::MAX_THUMBNAIL_BYTES),
         }
     }
 }
@@ -202,6 +203,7 @@ impl FsAssetStore {
         Ok(match kind {
             AssetKind::Book => self.books_root.join(&hash.as_str()[..2]).join(hash.as_str()),
             AssetKind::Thumbnail => self.thumbnails_root.join("users").join(Self::user_scope(user_id)).join(format!("{hash}.jpg")),
+            AssetKind::ThumbnailBrowse => self.thumbnails_root.join("users").join(Self::user_scope(user_id)).join(format!("{hash}-300.jpg")),
         })
     }
 
@@ -254,6 +256,42 @@ impl FsAssetStore {
         }
     }
 
+    pub async fn remove_thumbnail(&self, user_id: &str, hash: &ContentHash) -> Result<(), AssetError> {
+        for kind in [AssetKind::Thumbnail, AssetKind::ThumbnailBrowse] {
+            let path = self.path(user_id, kind, hash)?;
+            match tokio::fs::remove_file(path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(AssetError::Storage(error.to_string())),
+            }
+        }
+        Ok(())
+    }
+
+    /// A cheap validator for the current cover file. Replacing a cover uses
+    /// atomic rename, so a new inode changes this token even when byte length
+    /// and filesystem timestamp resolution are unchanged.
+    pub async fn thumbnail_revision(&self, user_id: &str, hash: &ContentHash) -> Result<Option<ContentHash>, AssetError> {
+        let metadata = match tokio::fs::metadata(self.path(user_id, AssetKind::Thumbnail, hash)?).await {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(AssetError::Storage(error.to_string())),
+        };
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&metadata.len().to_le_bytes());
+        let modified = metadata.modified().map_err(|error| AssetError::Storage(error.to_string()))?
+            .duration_since(std::time::UNIX_EPOCH).map_err(|error| AssetError::Storage(error.to_string()))?;
+        hasher.update(&modified.as_nanos().to_le_bytes());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            hasher.update(&metadata.dev().to_le_bytes());
+            hasher.update(&metadata.ino().to_le_bytes());
+        }
+        Ok(Some(ContentHash::new(hasher.finalize().to_hex().as_str())))
+    }
+
     pub async fn open_from(&self, user_id: &str, kind: AssetKind, hash: &ContentHash, offset: u64) -> Result<Option<StoredAsset>, AssetError> {
         let mut file = match File::open(self.path(user_id, kind, hash)?).await {
             Ok(file) => file,
@@ -274,7 +312,21 @@ impl FsAssetStore {
         let checksum = *checksum;
         tokio::task::spawn_blocking(move || {
             let mut file = std::fs::File::open(path).map_err(|error| AssetError::Storage(error.to_string()))?;
-            book_identity::read(&mut file).map(|identity| identity.unwrap_or(checksum)).map_err(|error| AssetError::InvalidInput(error.to_string()))
+            if let Some(identity) = book_identity::read(&mut file).map_err(|error| AssetError::InvalidInput(error.to_string()))? {
+                return Ok(identity);
+            }
+            let identity = audiobook_folder::archive_identity(file)
+                .map(|hash| ContentHash::new(hash.to_hex().as_str()))
+                .unwrap_or(checksum);
+            Ok(identity)
+        }).await.map_err(|error| AssetError::Storage(error.to_string()))?
+    }
+
+    pub async fn book_tracks(&self, checksum: &ContentHash) -> Result<Vec<audiobook_folder::ArchivedTrack>, AssetError> {
+        let path = self.path("", AssetKind::Book, checksum)?;
+        tokio::task::spawn_blocking(move || {
+            let file = std::fs::File::open(path).map_err(|error| AssetError::Storage(error.to_string()))?;
+            audiobook_folder::archived_tracks(file).map_err(|error| AssetError::InvalidInput(error.to_string()))
         }).await.map_err(|error| AssetError::Storage(error.to_string()))?
     }
 
@@ -335,18 +387,23 @@ impl FsAssetStore {
         drop(durable_file);
         tracing::debug!(target: "sync_performance", phase = "file_flush_fsync", elapsed_ms = durable_started.elapsed().as_secs_f64() * 1000.0);
         let publish_started = std::time::Instant::now();
-        // Publish immutably: hard-link creation is atomic and fails rather
-        // than overwriting an already published content-addressed object.
-        match tokio::fs::hard_link(temp.path(), &final_path).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let existing_len = tokio::fs::metadata(&final_path).await.map_err(|metadata_error| AssetError::Storage(metadata_error.to_string()))?.len();
-                if kind == AssetKind::Book && existing_len != total {
-                    return Err(AssetError::Storage(format!("existing content-addressed asset has length {existing_len}, uploaded copy has length {total}")));
+        if kind == AssetKind::Book {
+            // Book revisions are content addressed and remain immutable.
+            match tokio::fs::hard_link(temp.path(), &final_path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let existing_len = tokio::fs::metadata(&final_path).await.map_err(|metadata_error| AssetError::Storage(metadata_error.to_string()))?.len();
+                    if existing_len != total {
+                        return Err(AssetError::Storage(format!("existing content-addressed asset has length {existing_len}, uploaded copy has length {total}")));
+                    }
+                    return Ok(existing_len);
                 }
-                return Ok(existing_len);
+                Err(error) => return Err(AssetError::Storage(error.to_string())),
             }
-            Err(error) => return Err(AssetError::Storage(error.to_string())),
+        } else {
+            // A cover may change while the audiobook identity stays fixed.
+            // Rename publishes complete bytes atomically over the old image.
+            tokio::fs::rename(temp.path(), &final_path).await.map_err(|error| AssetError::Storage(error.to_string()))?;
         }
         temp.remove().map_err(|error| AssetError::Storage(error.to_string()))?;
         std::fs::File::open(parent).and_then(|directory| directory.sync_all()).map_err(|error| AssetError::Storage(error.to_string()))?;
@@ -477,6 +534,13 @@ mod tests {
         store.put("user", AssetKind::Thumbnail, &hash, None, reader(jpeg([1, 2, 3]))).await.unwrap();
         assert!(store.size("user", AssetKind::Thumbnail, &hash).await.unwrap().is_some());
         assert!(store.size("other-user", AssetKind::Thumbnail, &hash).await.unwrap().is_none(), "covers must not cross account boundaries");
+        let browse = jpeg([4, 5, 6]);
+        store.put("user", AssetKind::ThumbnailBrowse, &hash, Some(browse.len() as u64), reader(browse.clone())).await.unwrap();
+        let mut stored_browse = store.open_from("user", AssetKind::ThumbnailBrowse, &hash, 0).await.unwrap().unwrap();
+        let mut stored_browse_bytes = Vec::new();
+        stored_browse.reader.read_to_end(&mut stored_browse_bytes).await.unwrap();
+        assert_eq!(stored_browse_bytes, browse);
+        assert!(store.size("other-user", AssetKind::ThumbnailBrowse, &hash).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -551,15 +615,24 @@ mod tests {
         let first = jpeg([1, 2, 3]);
         let second = jpeg([9, 8, 7]);
         store.put("alice", AssetKind::Thumbnail, &hash, None, reader(first.clone())).await.unwrap();
+        let first_revision = store.thumbnail_revision("alice", &hash).await.unwrap().unwrap();
         store.put("alice", AssetKind::Thumbnail, &hash, None, reader(second.clone())).await.unwrap();
+        assert_ne!(store.thumbnail_revision("alice", &hash).await.unwrap(), Some(first_revision));
         store.put("bob", AssetKind::Thumbnail, &hash, None, reader(second.clone())).await.unwrap();
 
-        for (user, expected) in [("alice", &first), ("bob", &second)] {
+        for (user, expected) in [("alice", &second), ("bob", &second)] {
             let mut stored = store.open_from(user, AssetKind::Thumbnail, &hash, 0).await.unwrap().unwrap();
             let mut actual = Vec::new();
             stored.reader.read_to_end(&mut actual).await.unwrap();
-            assert_eq!(&actual, expected, "each account gets its own original immutable bytes");
+            assert_eq!(&actual, expected, "each account has its own latest cover bytes");
         }
+        store.put("alice", AssetKind::ThumbnailBrowse, &hash, None, reader(first.clone())).await.unwrap();
+        store.remove_thumbnail("alice", &hash).await.unwrap();
+        store.remove_thumbnail("alice", &hash).await.unwrap();
+        assert!(store.size("alice", AssetKind::Thumbnail, &hash).await.unwrap().is_none());
+        assert!(store.thumbnail_revision("alice", &hash).await.unwrap().is_none());
+        assert!(store.size("alice", AssetKind::ThumbnailBrowse, &hash).await.unwrap().is_none());
+        assert!(store.size("bob", AssetKind::Thumbnail, &hash).await.unwrap().is_some());
 
         // The server intentionally does not inspect cover contents. Clients
         // validate and decode within their own limits before display.

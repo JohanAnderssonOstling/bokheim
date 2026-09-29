@@ -46,6 +46,7 @@ struct Status {
     position: Duration,
     playing: bool,
     buffering: bool,
+    ended: bool,
     confirmed: bool,
     error: Option<String>,
     last_saved: Option<Duration>,
@@ -62,6 +63,8 @@ struct Session {
     reader: Mutex<Option<Box<dyn ReadSeek>>>,
     _file: Option<std::fs::File>,
     duration: Duration,
+    global_offset: Duration,
+    global_duration: Duration,
     updates: async_channel::Sender<PlaybackPosition>,
     status: Arc<Mutex<Status>>,
 }
@@ -119,7 +122,7 @@ pub(crate) struct AudioEngine {
 }
 impl AudioEngine {
     pub(crate) fn open(
-        mut reader: Box<dyn ReadSeek>, file: Option<std::fs::File>, control: Option<app::AudioStreamControl>, book: &AudiobookBook, initial: Duration, updates: async_channel::Sender<PlaybackPosition>,
+        mut reader: Box<dyn ReadSeek>, file: Option<std::fs::File>, control: Option<app::AudioStreamControl>, book: &AudiobookBook, track: Option<&book_model::AudiobookTrack>, initial: Duration, updates: async_channel::Sender<PlaybackPosition>,
     ) -> Result<Self, String> {
         BRIDGE.get().ok_or("Android audio bridge is not initialized")?;
         #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -131,7 +134,10 @@ impl AudioEngine {
         let path: Option<PathBuf> = None;
         let length = if path.is_none() { reader.seek(std::io::SeekFrom::End(0)).map_err(|e| e.to_string())? } else { 0 };
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let load = json!({"command":"load", "id":id, "path":path, "length":length, "title":book.title, "author":book.author, "position":initial.min(book.duration).as_millis() as u64, "chapterEnds":book.chapters.iter().map(|chapter| chapter.end.as_millis() as u64).collect::<Vec<_>>()});
+        let global_offset = track.map(|track| Duration::from_millis(track.start_ms)).unwrap_or_default();
+        let duration = track.map(|track| Duration::from_millis(track.end_ms - track.start_ms)).unwrap_or(book.duration);
+        let chapter_ends = book.chapters.iter().filter_map(|chapter| (chapter.end > global_offset && chapter.start < global_offset + duration).then_some(chapter.end.saturating_sub(global_offset).min(duration).as_millis() as u64)).collect::<Vec<_>>();
+        let load = json!({"command":"load", "id":id, "path":path, "length":length, "title":book.title, "author":book.author, "position":initial.min(duration).as_millis() as u64, "chapterEnds":chapter_ends});
         let session = Arc::new(Session {
             read_generation: AtomicU64::new(0),
             control,
@@ -139,9 +145,11 @@ impl AudioEngine {
             stop_error: Mutex::new(None),
             reader: Mutex::new(path.is_none().then_some(reader)),
             _file: file,
-            duration: book.duration,
+            duration,
+            global_offset,
+            global_duration: book.duration,
             updates,
-            status: Arc::new(Mutex::new(Status { position: initial.min(book.duration), ..Status::default() })),
+            status: Arc::new(Mutex::new(Status { position: initial.min(duration), ..Status::default() })),
         });
         Ok(Self { id, session, load, started: AtomicBool::new(false) })
     }
@@ -171,6 +179,10 @@ impl AudioEngine {
     }
     pub fn is_playing(&self) -> bool {
         self.session.status.lock().unwrap().playing
+    }
+    pub fn finished(&self) -> bool {
+        let status = self.session.status.lock().unwrap();
+        status.confirmed && status.ended && !status.playing && !status.buffering
     }
     pub fn is_buffering(&self) -> bool {
         self.session.status.lock().unwrap().buffering
@@ -212,10 +224,10 @@ impl AudioEngine {
         }
         dispatch(json!({"command":"sleep", "id":self.id,
             "remaining":remaining.map(|time| time.as_millis() as u64),
-            "chapterEnd":chapter_end.map(|time| time.as_millis() as u64)}))
+            "chapterEnd":chapter_end.map(|time| time.saturating_sub(self.session.global_offset).as_millis() as u64)}))
     }
     pub fn take_sleep_reset(&self) -> Option<(Option<web_time::Instant>, Option<Duration>)> {
-        self.session.status.lock().unwrap().sleep_reset.take()
+        self.session.status.lock().unwrap().sleep_reset.take().map(|(deadline, chapter_end)| (deadline, chapter_end.map(|end| self.session.global_offset.saturating_add(end))))
     }
     pub fn take_sleep_finished(&self) -> bool {
         std::mem::take(&mut self.session.status.lock().unwrap().sleep_finished)
@@ -293,13 +305,15 @@ pub fn playback_state(event: &str) {
         }
         status.playing = playing;
         status.buffering = event["buffering"].as_bool().unwrap_or(false);
+        status.ended = event["ended"].as_bool().unwrap_or(false);
         if let Some(control) = &session.control {
             let requested = event["requested"].as_bool().unwrap_or(playing || status.buffering);
             control.set_paused(!requested);
         }
         status.rate = event["speed"].as_f64().filter(|rate| rate.is_finite() && *rate > 0.0);
         if status.confirmed && position_save_required(status.last_saved, status.position, force) {
-            let _ = session.updates.try_send((status.position, playback_progress(status.position, session.duration)));
+            let position = session.global_offset.saturating_add(status.position);
+            let _ = session.updates.try_send((position, playback_progress(position, session.global_duration)));
             status.last_saved = Some(status.position);
         }
     }
@@ -328,6 +342,8 @@ mod tests {
             reader: Mutex::new(Some(Box::new(std::io::Cursor::new(Vec::<u8>::new())))),
             _file: None,
             duration: Duration::from_secs(600),
+            global_offset: Duration::ZERO,
+            global_duration: Duration::from_secs(600),
             updates,
             status: Arc::new(Mutex::new(Status::default())),
         });
@@ -539,7 +555,7 @@ mod tests {
         }
         let reads = Arc::new(AtomicU64::new(0));
         let reader = TrackedReader { cursor: std::io::Cursor::new(b"seekable M4B bytes"), reads: reads.clone() };
-        let mut audio = AudioEngine::open(Box::new(reader), None, None, &book, Duration::from_secs(90), updates).unwrap();
+        let mut audio = AudioEngine::open(Box::new(reader), None, None, &book, None, Duration::from_secs(90), updates).unwrap();
         assert_eq!(reads.load(Ordering::Relaxed), 0, "opening must not copy the stream");
         assert!(audio.load["path"].is_null());
         assert_eq!(audio.load["length"], 18);
@@ -567,7 +583,7 @@ mod tests {
             let file = std::fs::File::open(&original).unwrap();
             let (updates, _) = async_channel::unbounded();
             // An empty reader proves playback did not copy its bytes.
-            let audio = AudioEngine::open(Box::new(std::io::Cursor::new(Vec::<u8>::new())), Some(file), None, &book, Duration::ZERO, updates).unwrap();
+            let audio = AudioEngine::open(Box::new(std::io::Cursor::new(Vec::<u8>::new())), Some(file), None, &book, None, Duration::ZERO, updates).unwrap();
             assert!(audio.session.reader.lock().unwrap().is_none());
             let descriptor_path = PathBuf::from(audio.load["path"].as_str().unwrap());
             audio.play();

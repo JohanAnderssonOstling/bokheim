@@ -54,10 +54,7 @@ pub fn start() -> Result<(), JsValue> {
                     Ok(app::host::cpu::CpuRequest::Book {
                         task: app::host::cpu::BookTask::Thumbnail { extension }
                     }) if extension == "pdf")
-                    || matches!(
-                        rmp_serde::from_slice::<app::host::cpu::CpuRequest>(&bytes),
-                        Ok(app::host::cpu::CpuRequest::Book { task: app::host::cpu::BookTask::Inspect { format: book_model::BookFormat::Pdf, .. } })
-                    )
+                    || matches!(rmp_serde::from_slice::<app::host::cpu::CpuRequest>(&bytes), Ok(app::host::cpu::CpuRequest::Book { task: app::host::cpu::BookTask::Inspect { format: book_model::BookFormat::Pdf, .. } }))
                 {
                     initialize_pdfium().await?;
                 }

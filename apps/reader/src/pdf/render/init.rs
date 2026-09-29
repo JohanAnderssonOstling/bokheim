@@ -2,12 +2,12 @@
 
 use std::rc::Rc;
 
-use library_backend::BoxedBookReader;
-use library_backend::LibraryClient;
 use gpui::prelude::*;
 use gpui::{Context, Entity, Window};
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::tree::TreeState;
+use library_backend::BoxedBookReader;
+use library_backend::LibraryClient;
 use library_model::BookLocator;
 use pdf_view_gpui::{PdfView, PdfViewEvent};
 
@@ -25,8 +25,8 @@ use super::PdfReaderView;
 
 impl PdfReaderView {
     pub(crate) fn new(
-        locator: BookLocator, title: String, _app: app::AppClient, library: Rc<LibraryClient>, reader: BoxedBookReader, metadata: Option<pdf_reader_core::PdfReaderMetadata>, page_source: Option<std::sync::Arc<dyn pdf_reader_core::PdfPageSource>>,
-        initial_page: usize, initial_full_page_position: f32, close_reader: crate::CloseReader, window: &mut Window, cx: &mut Context<Self>,
+        locator: BookLocator, title: String, _app: app::AppClient, library: Rc<LibraryClient>, reader: BoxedBookReader, metadata: Option<pdf_reader_core::PdfReaderMetadata>,
+        page_source: Option<std::sync::Arc<dyn pdf_reader_core::PdfPageSource>>, initial_page: usize, initial_full_page_position: f32, close_reader: crate::CloseReader, window: &mut Window, cx: &mut Context<Self>,
     ) -> Self {
         let preferences = ReaderSettings::preferences(cx);
         let zoom_mode = stored_zoom_mode(preferences);
@@ -78,6 +78,7 @@ impl PdfReaderView {
             marks,
             annotation_note_input,
             annotation_popup_anchor: None,
+            context_sheet: None,
             current_page: 0,
             page_count: 0,
             positions,
@@ -86,6 +87,7 @@ impl PdfReaderView {
             _subscriptions: vec![pdf_subscription, search_subscription],
         };
         reader.load_reader_state(cx);
+        reader.load_database_toc(cx);
         reader
     }
 
@@ -94,11 +96,6 @@ impl PdfReaderView {
             PdfViewEvent::PageChanged { current, total } => {
                 let current_page = current.saturating_sub(1);
                 let full_page_position = pdf.read(cx).full_page_position();
-                if !self.toc.is_loaded() {
-                    let outline = pdf.read(cx).info().map(|info| info.outline().to_vec()).unwrap_or_default();
-                    self.set_toc(outline, cx);
-                    self.focus_document(window, cx);
-                }
                 let unchanged = self.current_page == current_page && self.page_count == *total;
                 self.current_page = current_page;
                 self.page_count = *total;
@@ -116,6 +113,7 @@ impl PdfReaderView {
                     crate::invalidation::notify(cx, Component::PdfShell, "match_changed");
                 }
             }
+            PdfViewEvent::PageTapped => self.toggle_mobile_controls(window, cx),
             PdfViewEvent::AnnotationActivated { id, position } => {
                 crate::shell::state_panel::select_tab(&mut self.sidebar, SidebarTab::Annotations, cx);
                 self.annotation_popup_anchor = Some(*position);

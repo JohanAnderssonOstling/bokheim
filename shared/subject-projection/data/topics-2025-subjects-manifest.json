@@ -117,6 +117,5 @@
         "TS183.25"
       ]
     }
-  ],
-  "migration": "shared/subject-projection/data/migrations/20260905_add_2025_topic_subjects.sql"
+  ]
 }

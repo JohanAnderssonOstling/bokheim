@@ -3,7 +3,7 @@ mod text;
 mod view;
 
 pub use text::TextShapeCacheStats;
-pub use view::{HtmlLayoutGeometry, HtmlNoteElement, HtmlView, PaintCacheStats, PreparedNote};
+pub use view::{DocumentTap, HtmlLayoutGeometry, HtmlNoteElement, HtmlView, PaintCacheStats, PreparedNote};
 
 #[cfg(test)]
 mod boundary_tests {

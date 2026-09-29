@@ -10,15 +10,14 @@ use test_support::{fixture_content_hash, fixture_dir_id, fixture_library_id, fix
 const TEST_CONTENT_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const TEST_AUTH_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 use crate::BlobKind;
-use asset_transfer::should_download_thumbnail;
 use asset_transfer::TransferJob;
+use asset_transfer::should_download_thumbnail;
 use library_database::CURSOR_RECOVERY_PENDING_KEY;
 use library_replica::coalesce_mutations_for_push;
 use library_replica::prepare_push;
-use sync_common::api::assets::BlobManifestEntry;
 use sync_common::SyncExchangeResponse;
 use sync_common::{PullStateResponse, PushMutationsResponse};
-use sync_transport::{validate_pull_batch, validate_push_response, PushResponseError};
+use sync_transport::{PushResponseError, validate_pull_batch, validate_push_response};
 
 mod accounts;
 mod assets;
@@ -50,7 +49,7 @@ fn session_credentials(session: &account_client::Session) -> sync_transport::Syn
 }
 
 fn test_content_hash() -> ContentHash {
-    ContentHash::new(&TEST_CONTENT_HASH)
+    ContentHash::new(TEST_CONTENT_HASH)
 }
 
 fn test_epub(payload: &[u8]) -> Vec<u8> {
@@ -82,7 +81,7 @@ fn millis(value: u64) -> sync_common::UnixMillis {
 
 fn pulled_change(server_sequence: u64, body: MutationBody) -> ServerMutation {
     ServerMutation {
-        mutation: StateMutation { mutation_id: sync_common::MutationId::new(), body, changed_at: millis(10), replica_seq: local_seq(server_sequence) }.to_wire().unwrap(),
+        mutation: StateMutation { origin: None, mutation_id: sync_common::MutationId::new(), body, changed_at: millis(10), replica_seq: local_seq(server_sequence) }.to_wire().unwrap(),
         replica_id: test_support::fixture_replica_id("remote-device"),
         revision: LibraryRevision::new(server_sequence).unwrap(),
     }
@@ -92,15 +91,8 @@ fn deleted(content_hash: u64) -> MutationBody {
     MutationBody::BookLifecycle { content_hash: fixture_content_hash(content_hash), value: BookLifecycleState::Deleted { origin_folder_id: None } }
 }
 
-fn added(content_hash: u64, title: &str, added_at: u64) -> MutationBody {
-    MutationBody::BookLifecycle {
-        content_hash: fixture_content_hash(content_hash),
-        value: BookLifecycleState::Present {
-            metadata: library_replica::SyncBookMetadata { title: title.to_owned(), subtitle: None, contributors: Vec::new(), book: Default::default() },
-            added_at: millis(added_at),
-            format: BookFormat::Epub,
-        },
-    }
+fn added(content_hash: u64, added_at: u64) -> MutationBody {
+    MutationBody::BookLifecycle { content_hash: fixture_content_hash(content_hash), value: BookLifecycleState::Present }
 }
 
 fn cursor(revision: Option<LibraryRevision>) -> SyncCursor {
@@ -121,7 +113,7 @@ fn pull_response(mutations: Vec<ServerMutation>, next_revision: Option<LibraryRe
     } else {
         cursor(next_revision)
     };
-    PullStateResponse { mutations, next_cursor, has_more }
+    PullStateResponse { book_creations: crate::sync::fixture_book_creations(&mutations), mutations, next_cursor, has_more }
 }
 
 fn binary_sync_response<T: serde::Serialize>(value: &T) -> axum::response::Response {
@@ -143,9 +135,9 @@ fn decode_sync_exchange(headers: &axum::http::HeaderMap, body: &[u8]) -> sync_co
 /// exchange did accomplish -- notably asset transfers and the completion
 /// checkpoint -- behind one mutation the server will not take yet, which
 /// for a device whose clock is ahead never resolves on its own.
-
 fn reading_change(sequence: u64, content_hash: u64, cfi: &str, changed_at: u64) -> StateMutation {
     StateMutation {
+        origin: None,
         mutation_id: sync_common::MutationId::new(),
         body: MutationBody::ReadingPosition { content_hash: fixture_content_hash(content_hash), value: ReadingPositionState { location: book_model::ReadingPosition::parse(cfi).unwrap(), progress: 0.0 } },
         changed_at: millis(changed_at),
@@ -161,6 +153,7 @@ fn transmittable(changes: Vec<StateMutation>) -> sync_common::PushBatcher {
 
 fn annotation_change(sequence: u64, text: String) -> StateMutation {
     StateMutation {
+        origin: None,
         mutation_id: sync_common::MutationId::new(),
         body: MutationBody::Annotation {
             annotation_id: uuid::Uuid::new_v4().to_string(),
@@ -248,7 +241,7 @@ fn test_manager_with_replica(root: &Path, replica_id: &str) -> TestManager {
     database.initialize_library().unwrap();
     let sync = LibrarySync::new(LibrarySyncConfig {
         database_path: db_path.clone(),
-        assets: crate::asset_store::open(root.to_str().unwrap()).unwrap().with_database_path(db_path),
+        assets: crate::asset_store::open(root.to_str().unwrap()).unwrap().with_book_paths(move |hash| Database::book_paths_at(&db_path, hash).map_err(crate::asset_store::AssetStoreError::operation)),
         replica_id: fixture_replica_id(replica_id),
         server_url: ServerUrl::parse("http://127.0.0.1:9").unwrap(),
         library_id: fixture_library_id("library"),
@@ -260,4 +253,25 @@ fn test_manager_with_replica(root: &Path, replica_id: &str) -> TestManager {
         cpu: crate::default_cpu_host(),
     });
     TestManager { sync, database }
+}
+
+// Asset scheduling refreshes cover revisions even when book bytes are local.
+async fn empty_thumbnail_presence(body: axum::body::Bytes) -> axum::response::Response {
+    let _: sync_common::api::assets::ThumbnailPresenceRequest = sync_common::transport::decode(&body, sync_common::transport::MAX_DECODED_REQUEST_BYTES).unwrap();
+    binary_sync_response(&sync_common::api::assets::ThumbnailPresenceResponse { present: Vec::new(), revisions: Vec::new() })
+}
+
+struct CoverPresenceServer(tokio::task::JoinHandle<()>);
+impl Drop for CoverPresenceServer {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn serve_empty_cover_presence(manager: &mut TestManager) -> CoverPresenceServer {
+    let app = axum::Router::new().route("/api/libraries/:library_id/thumbnails/presence", axum::routing::post(empty_thumbnail_presence));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    manager.server_url = ServerUrl::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    manager.credentials = test_shared_credentials(&manager.server_url);
+    CoverPresenceServer(tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }))
 }

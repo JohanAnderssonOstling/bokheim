@@ -24,20 +24,15 @@ pub(crate) struct PdfTocState {
     entries: Vec<BookTocEntry>,
     /// The entry the current page sits under, if any.
     active_id: Option<String>,
-    /// Whether the outline has been read off the document yet. The PDF reports
-    /// its outline only once loading finishes, so this distinguishes "no
-    /// outline" from "not asked yet".
-    loaded: bool,
 }
 
 impl PdfTocState {
-    pub(crate) fn is_loaded(&self) -> bool {
-        self.loaded
+    pub(crate) fn has_entries(&self) -> bool {
+        !self.entries.is_empty()
     }
 
     pub(crate) fn replace_entries(&mut self, entries: Vec<BookTocEntry>) {
         self.entries = entries;
-        self.loaded = true;
     }
 
     /// Changes the active outline entry and reports whether it moved.
@@ -75,6 +70,14 @@ impl PdfTocState {
     /// The title of the active entry, shown in the reader toolbar.
     pub(crate) fn active_title(&self) -> Option<&str> {
         Some(self.entry(self.active_id.as_ref()?)?.title.as_str())
+    }
+
+    pub(crate) fn active_id(&self) -> Option<&str> {
+        self.active_id.as_deref()
+    }
+
+    pub(crate) fn title_at_ordinal(&self, ordinal: usize) -> Option<&str> {
+        Some(self.entry(&toc_id(ordinal))?.title.as_str())
     }
 
     fn entry(&self, id: &str) -> Option<&BookTocEntry> {
@@ -154,6 +157,8 @@ mod tests {
         }
         assert!(toc.entry("pdf-toc-4").is_none());
         assert!(toc.entry("epub-toc-0").is_none());
+        assert_eq!(toc.title_at_ordinal(2), Some("Sampling"));
+        assert_eq!(toc.title_at_ordinal(4), None);
     }
 
     #[test]

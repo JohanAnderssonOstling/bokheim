@@ -30,17 +30,21 @@ use gpui_component::{Theme, ThemeTokens};
 
 /// One theme at one appearance.
 ///
-/// There is one surface. `card_bg` and `white_surface` were once two tokens
-/// 1.027:1 apart, became a single `raised_bg` beside the page, and are now
-/// gone entirely: a card, a popover and the page share a fill and differ by
-/// their edge. `hover_overlay` carries alpha (`0xRRGGBBAA`) so one value reads
-/// correctly wherever it lands.
+/// Most surfaces share `surface_bg` and are told apart by their edge.
+/// `raised_bg` is the one deliberate second fill: a browse-page section that
+/// wants to read as raised off the page without floating. `hover_overlay`
+/// carries alpha (`0xRRGGBBAA`) so one value reads correctly wherever it
+/// lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ApplicationPalette {
     pub surface_bg: u32,
+    pub raised_bg: u32,
     pub ink_text: u32,
     pub subtle_text: u32,
     pub accent: u32,
+    /// Highlighted text and icons on a neutral surface. Gold in both light
+    /// themes and in the shared dark palette.
+    pub text_accent: u32,
     /// The accent under the pointer and while pressed. Held as palette values
     /// rather than derived at paint time because the direction differs by
     /// appearance — light darkens, dark lightens — and because the previous
@@ -81,9 +85,8 @@ pub struct ApplicationPalette {
 mod kobo;
 mod palettes;
 
-/// The palette table itself is generated — see `tools/palette-generator`, which
-/// holds the Oklch seeds and writes `theme/palettes.rs`. The application never
-/// does colour arithmetic; it reads literals.
+/// The palette table lives in `theme/palettes.rs`. The application reads its
+/// literals without doing colour arithmetic at paint time.
 pub use palettes::palette;
 
 /// The selected square shown by both Browse and Reader settings.
@@ -125,15 +128,13 @@ fn platform_palette(theme: ApplicationTheme, appearance: ResolvedAppearance) -> 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BrowserTheme {
     /// The surface. Every region — the page, a card, a popover, a panel — is
-    /// this colour, and is told apart by its `rule` edge and, if it floats, by
-    /// `overlay_shadow`.
-    ///
-    /// There were once four names for it: `page_bg`, `surface`, `surface_alt`
-    /// and (nearly) `raised_bg`. Large fills competing with one another is what
-    /// made the interface look unsettled, and a second fill was never what
-    /// defined a region anyway — `modal_surface` has always drawn floating
-    /// panels on the page with a border.
+    /// this colour by default, and is told apart by its `rule` edge and, if it
+    /// floats, by `overlay_shadow`.
     pub page_bg: Hsla,
+    /// A second fill, lighter than `page_bg` in both appearances, for a region
+    /// that wants to read as raised off the page without floating — see
+    /// `paginator::element`'s group panels.
+    pub raised_bg: Hsla,
     pub border: Hsla,
     /// The quiet boundary: dividers, card edges, a region's edge against
     /// content. `border` is the interactive tier and is where hover travels to;
@@ -142,6 +143,8 @@ pub struct BrowserTheme {
     pub text: Hsla,
     pub text_muted: Hsla,
     pub accent: Hsla,
+    /// Highlighted text and icons on a neutral surface.
+    pub text_accent: Hsla,
     /// Foreground for anything sitting *on* `accent`. Needed the moment a
     /// surface inverts to the accent instead of merely bordering with it —
     /// `text` is unreadable there, and `page_bg` only happens to work in light.
@@ -207,11 +210,13 @@ impl BrowserTheme {
         overlay_scrim.a = 0.5;
         Self {
             page_bg: colour(palette.surface_bg),
+            raised_bg: colour(palette.raised_bg),
             border: colour(palette.border),
             rule: colour(palette.rule),
             text: colour(palette.ink_text),
             text_muted: colour(palette.subtle_text),
             accent: colour(palette.accent),
+            text_accent: colour(palette.text_accent),
             accent_text: colour(palette.accent_text),
             accent_wash: colour(palette.active_highlight),
             accent_wash_hover: colour(palette.active_highlight_hover),
@@ -344,7 +349,7 @@ fn apply_widget_colours(theme: BrowserTheme, application: &mut Theme) {
     colors.selection = theme.accent_wash;
     colors.sidebar = theme.page_bg;
     colors.sidebar_accent = theme.accent_wash;
-    colors.sidebar_accent_foreground = theme.accent;
+    colors.sidebar_accent_foreground = theme.text_accent;
     colors.sidebar_border = theme.rule;
     colors.sidebar_foreground = theme.text;
     colors.sidebar_primary = theme.accent;
@@ -494,7 +499,7 @@ mod palette_tests {
     #[test]
     fn borders_separate_from_every_surface_they_touch() {
         for (name, palette) in palettes() {
-            for (surface, label) in [(palette.surface_bg, "surface_bg")] {
+            for (surface, label) in [(palette.surface_bg, "surface_bg"), (palette.raised_bg, "raised_bg")] {
                 let ratio = contrast(palette.border, surface);
                 assert!(ratio >= 3.0, "{name}: border against {label} is {ratio:.2}:1, under the 3:1 floor for UI boundaries");
             }
@@ -504,7 +509,7 @@ mod palette_tests {
     #[test]
     fn body_text_and_muted_text_pass_wcag_aa() {
         for (name, palette) in palettes() {
-            for (surface, label) in [(palette.surface_bg, "surface_bg")] {
+            for (surface, label) in [(palette.surface_bg, "surface_bg"), (palette.raised_bg, "raised_bg")] {
                 let ink = contrast(palette.ink_text, surface);
                 assert!(ink >= 7.0, "{name}: body text on {label} is {ink:.2}:1");
                 let muted = contrast(palette.subtle_text, surface);

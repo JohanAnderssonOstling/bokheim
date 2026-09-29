@@ -82,6 +82,7 @@ impl<F: Fn() + crate::executor::BackendSend> asset_transfer::thumbnail_jobs::Thu
     }
     fn completed(&mut self) {
         self.library.complete_thumbnail_batch_item();
+        self.library.sync_wake.wake();
         (self.cover_inspected)();
     }
     fn ready(&mut self, content_hash: ContentHash) {

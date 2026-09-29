@@ -57,6 +57,7 @@ impl LibrarySession {
             thumbnail_work_running: self.thumbnail_work_running(),
             thumbnail_progress: self.thumbnail_batch_progress(),
             thumbnail_waiting: self.thumbnail_batch_waiting(),
+            thumbnail_download_coverage: self.db.thumbnail_download_coverage().map_err(BackendError::operation)?,
             metadata_sync_running: sync.metadata_sync_running(),
             preparing_transfers: sync.preparing_transfers(),
             total_books,

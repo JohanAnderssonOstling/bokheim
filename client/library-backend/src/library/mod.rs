@@ -6,10 +6,10 @@ pub(crate) use library_runtime::events;
 mod annotations;
 mod browse;
 pub mod commands;
-pub mod subscriptions;
 mod directory;
 mod open;
 mod session;
+pub mod subscriptions;
 mod thumbnails;
 mod workers;
 pub use open::LibraryOpenConfig;
@@ -39,7 +39,6 @@ mod transfer_status;
 
 use library_replica::filenames;
 
-pub(crate) use self::session::LibraryActivity;
 pub use book::{AudiobookBook, DocumentBook, ResolvedBook};
 #[cfg(target_arch = "wasm32")]
 pub use browser_audiobook::{BrowserAudiobook, PlaybackLease};
@@ -59,6 +58,8 @@ pub use resources::LibraryRuntimeSpec;
 mod import_native;
 #[cfg(target_arch = "wasm32")]
 mod import_web;
+#[cfg(target_arch = "wasm32")]
+pub mod web_import;
 
 #[cfg(target_arch = "wasm32")]
 pub use book::web_reader;

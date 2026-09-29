@@ -1,7 +1,6 @@
-//! Conversion from adapter results to paginator groups.
+//! Conversion from a listing to paginator groups.
 
-use std::cell::Cell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
 use gpui::prelude::*;
@@ -10,23 +9,30 @@ use library_model::BrowseRow;
 use sync_common::DirId;
 use ui_components as components;
 
-use super::adapter::BrowseAdapter;
-use super::folder_actions::FolderTargets;
-use super::page::{BrowsePage, BrowseSelectionState, BrowseSplitSide};
-use crate::library::widgets::{Paginator, PaginatorChild, PaginatorGroup, PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy, book_card_policy};
+use super::folder_actions::{FolderTargets, describe};
+use super::listing::shows_download_mark;
+use super::page::{BrowsePage, BrowseSplitSide, OpenTrash};
+use super::section_card::SectionCard;
+use crate::library::widgets::{BookCardView, PaginatorChild, PaginatorGroup, PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy, book_card_policy, browse_section_card_policy};
 
-/// What dragging the child at `index` carries: the whole selection when that
-/// child is part of one, and otherwise just that child.
+/// What a drag or a menu on the child at `index` acts on: the whole selection
+/// when that child is part of one, and otherwise just that child.
+pub(super) fn acted_on(index: usize, selection: &BTreeSet<usize>) -> Vec<usize> {
+    if selection.contains(&index) { selection.iter().copied().collect() } else { vec![index] }
+}
+
+/// The folders and books at `indices`, for the folder commands. Books are
+/// declared after chips, so an index past the last chip is a book.
 ///
-/// Built from the shared lists rather than read back off the page — these
-/// closures run inside the paginator's own render, where the page is already
-/// borrowed.
-fn drag_targets<A: BrowseAdapter>(index: usize, chips: &[BrowseRow], chip_groups: &[library_model::BrowseChipGroup], books: &[Entity<A::Book>], selected: &BTreeSet<usize>, source: DirId, cx: &App) -> Option<FolderTargets> {
-    let indices: Vec<usize> = if selected.contains(&index) { selected.iter().copied().collect() } else { vec![index] };
+/// Built from the shared lists rather than read back off the page, which is
+/// already borrowed while the listing is being drawn.
+pub(super) fn folder_targets(indices: &[usize], chips: &[BrowseRow], chip_groups: &[library_model::BrowseChipGroup], books: &[Entity<BookCardView>], source: DirId, cx: &App) -> Option<FolderTargets> {
     let mut targets = FolderTargets { folders: Vec::new(), folder_parents: Default::default(), books: Vec::new(), source };
-    for index in indices {
+    for &index in indices {
         match chips.get(index) {
             Some(chip) => {
+                // A chip that is not a directory — a subject, an author — has
+                // no placement to change, so it is quietly left out.
                 if let Ok(id) = DirId::parse_str(&chip.id) {
                     targets.folders.push(id);
                     if let Some(parent) = chip_groups.iter().find(|group| (group.start..group.end).contains(&index)).and_then(|group| DirId::parse_str(&group.parent.id).ok()) {
@@ -36,22 +42,77 @@ fn drag_targets<A: BrowseAdapter>(index: usize, chips: &[BrowseRow], chip_groups
             }
             None => {
                 let Some(book) = books.get(index - chips.len()) else { continue };
-                if let Some(hash) = A::book_content_hash(book, cx) {
-                    targets.books.push(hash);
-                }
+                targets.books.push(book.read(cx).content_hash());
             }
         }
     }
     (!targets.is_empty()).then_some(targets)
 }
 
+/// Makes `element` a place to put things down in the folder `destination`:
+/// files from the desktop are imported into it, and folders and books dragged
+/// from the listing are moved or copied into it. Chips, breadcrumb segments and
+/// the open space of the folder being browsed all take drops alike.
+pub(super) fn folder_drop_target<E: ParentElement + InteractiveElement + Styled>(element: E, destination: DirId, name: SharedString, highlight: bool, page: WeakEntity<BrowsePage>, theme: components::BrowserTheme) -> E {
+    let import_page = page.clone();
+    let files_name = name.clone();
+    let element = element
+        // Says where the drag would land. Nested targets are drawn after the
+        // one they sit in, so the innermost, which takes the drop, has the
+        // last word.
+        .drag_over::<FolderTargets>(move |style, targets, _, cx| {
+            cx.set_global(DropHint(Some(Hint { destination, name: name.clone(), valid: targets.accepts(destination) })));
+            style
+        })
+        .drag_over::<gpui::ExternalPaths>(move |style, _, _, cx| {
+            cx.set_global(DropHint(Some(Hint { destination, name: files_name.clone(), valid: true })));
+            style
+        })
+        .on_drop::<gpui::ExternalPaths>(move |paths, _, cx| {
+            let paths = paths.paths().to_vec();
+            let _ = import_page.update(cx, |page, cx| page.import_dropped_paths(Some(destination), paths, cx));
+        })
+        .on_drop::<FolderTargets>(move |targets, window, cx| {
+            let targets = targets.clone();
+            let _ = page.update(cx, |page, cx| page.drop_onto_folder(destination, targets, window, cx));
+        })
+        // Refusing a drop that cannot happen keeps the cursor from promising
+        // one.
+        .can_drop(move |dragged, _, _| dragged.is::<gpui::ExternalPaths>() || dragged.downcast_ref::<FolderTargets>().is_some_and(|targets| targets.accepts(destination)));
+    // The outline is the target's last child, drawn after everything inside
+    // it, so by then the innermost target under the pointer has said where the
+    // drop goes, and only that one lights up.
+    if highlight { element.relative().child(components::drop_highlight::<FolderTargets>(move |cx| lands_in(destination, cx), theme)) } else { element }
+}
+
+/// Whether the drag under way would land in `destination`, and be taken.
+fn lands_in(destination: DirId, cx: &App) -> bool {
+    cx.try_global::<DropHint>().and_then(|hint| hint.0.as_ref()).is_some_and(|hint| hint.destination == destination && hint.valid)
+}
+
+/// Where the drag under way would land, as the innermost folder under the
+/// pointer reported it, and whether it would take the drop there. Targets set
+/// it while they are drawn with the drag over them; the drag preview takes it
+/// as it draws itself, so it names nothing once the pointer leaves every
+/// folder.
+struct DropHint(Option<Hint>);
+
+#[derive(Clone)]
+struct Hint {
+    destination: DirId,
+    name: SharedString,
+    valid: bool,
+}
+
+impl gpui::Global for DropHint {}
+
 /// The preview that follows the pointer during a drag.
 ///
 /// A single item keeps its shape so it is immediately clear what is being
 /// moved. Rectangular and multi-item drags use a compact icon grid so the
 /// whole selection remains visible without obscuring the pointer.
-struct DragPreview<B: gpui::Render + 'static> {
-    items: Vec<DragPreviewItem<B>>,
+struct DragPreview {
+    items: Vec<DragPreviewItem>,
     label: SharedString,
     /// Where inside the dragged element the drag began. GPUI paints this view
     /// at `pointer - cursor_offset`; the small nudge keeps the ghost clear of
@@ -60,21 +121,13 @@ struct DragPreview<B: gpui::Render + 'static> {
     detailed_books: bool,
 }
 
-enum DragPreviewItem<B: gpui::Render + 'static> {
-    Book(Entity<B>),
+#[derive(Clone)]
+pub(super) enum DragPreviewItem {
+    Book(Entity<BookCardView>),
     Folder { icon: components::NavigationIcon, label: SharedString, path: Option<SharedString> },
 }
 
-impl<B: gpui::Render + 'static> Clone for DragPreviewItem<B> {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Book(book) => Self::Book(book.clone()),
-            Self::Folder { icon, label, path } => Self::Folder { icon: *icon, label: label.clone(), path: path.clone() },
-        }
-    }
-}
-
-impl<B: gpui::Render + 'static> gpui::Render for DragPreview<B> {
+impl gpui::Render for DragPreview {
     fn render(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
         let preview = if self.items.is_empty() {
@@ -112,22 +165,39 @@ impl<B: gpui::Render + 'static> gpui::Render for DragPreview<B> {
                 }))
                 .into_any_element()
         };
+        let hint = cx.try_global::<DropHint>().and_then(|hint| hint.0.clone());
+        cx.set_global(DropHint(None));
+        // Says where the drop would go, or that it would go nowhere; a drop it
+        // cannot make also fades what is being carried.
+        let caption = hint.as_ref().map(|hint| components::drag_preview(SharedString::from(if hint.valid { format!("{} → {}", self.label, hint.name) } else { format!("Can't drop in {}", hint.name) }), theme));
+        let refused = hint.is_some_and(|hint| !hint.valid);
         // Keep the preview visible against the page while making it clear that
         // it is a transient copy rather than the original card.
-        div().opacity(0.58).pl(self.grab.x + px(DRAG_PREVIEW_NUDGE)).pt(self.grab.y + px(DRAG_PREVIEW_NUDGE)).child(preview)
+        div()
+            .pl(self.grab.x + px(DRAG_PREVIEW_NUDGE))
+            .pt(self.grab.y + px(DRAG_PREVIEW_NUDGE))
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap(px(components::SPACE_XS))
+            .child(div().opacity(if refused { 0.3 } else { 0.58 }).child(preview))
+            .children(caption)
     }
 }
 
-fn drag_preview_items<A: BrowseAdapter>(index: usize, chips: &[BrowseRow], books: &[Entity<A::Book>], selected: &BTreeSet<usize>, chip_icon: components::NavigationIcon, cx: &App) -> Vec<DragPreviewItem<A::Book>> {
-    let indices: Vec<usize> = if selected.contains(&index) { selected.iter().copied().collect() } else { vec![index] };
+/// Lets `element` be picked up, carrying `targets`, with a preview of `items`
+/// following the pointer.
+pub(super) fn folder_drag_source<E: StatefulInteractiveElement>(element: E, targets: FolderTargets, items: Vec<DragPreviewItem>, detailed_books: bool) -> E {
+    let label = SharedString::from(describe(&targets));
+    element.on_drag(targets, move |_, grab, _, cx| cx.new(|_| DragPreview { items: items.clone(), label: label.clone(), grab, detailed_books }))
+}
+
+fn drag_preview_items(indices: &[usize], chips: &[BrowseRow], books: &[Entity<BookCardView>], chip_icon: components::NavigationIcon) -> Vec<DragPreviewItem> {
     indices
-        .into_iter()
-        .filter_map(|index| match chips.get(index) {
+        .iter()
+        .filter_map(|&index| match chips.get(index) {
             Some(chip) => DirId::parse_str(&chip.id).ok().map(|_| DragPreviewItem::Folder { icon: chip_icon, label: SharedString::from(chip.name.clone()), path: chip.path.clone().map(SharedString::from) }),
-            None => {
-                let book = books.get(index.checked_sub(chips.len())?)?;
-                A::book_content_hash(book, cx).map(|_| DragPreviewItem::Book(book.clone()))
-            }
+            None => books.get(index.checked_sub(chips.len())?).cloned().map(DragPreviewItem::Book),
         })
         .collect()
 }
@@ -135,82 +205,55 @@ fn drag_preview_items<A: BrowseAdapter>(index: usize, chips: &[BrowseRow], books
 /// Distance from the pointer to the pill's corner.
 const DRAG_PREVIEW_NUDGE: f32 = 12.0;
 
-fn drag_label(targets: &FolderTargets) -> String {
-    match (targets.folders.len(), targets.books.len()) {
-        (1, 0) => "1 folder".to_owned(),
-        (0, 1) => "1 book".to_owned(),
-        (folders, 0) => format!("{folders} folders"),
-        (0, books) => format!("{books} books"),
-        (folders, books) => format!("{folders} folders, {books} books"),
-    }
-}
-
-/// `cursor` carries the paginator's keyboard cursor to the chips, which are
-/// closures rather than entities and so cannot be pushed into the way book
-/// cards are. A shared cell rather than a read of either entity: these closures
-/// run inside the paginator's own render, where reading it back would be a
-/// borrow of something already borrowed.
-pub(super) fn paginator_groups<A: BrowseAdapter>(
-    page: WeakEntity<BrowsePage<A>>,
+/// Chips draw the cursor, the selection and a drag's target from the state the
+/// paginator hands each child as it draws it.
+pub(super) fn paginator_groups(
+    page: WeakEntity<BrowsePage>,
     chips: Rc<Vec<BrowseRow>>,
     chip_groups: &[library_model::BrowseChipGroup],
     chip_icon: components::NavigationIcon,
-    books: Rc<Vec<Entity<A::Book>>>,
+    books: Rc<Vec<Entity<BookCardView>>>,
     detailed_books: bool,
     cover_text: app_preferences::CoverText,
-    cursor: Rc<Cell<Option<usize>>>,
-    selected: Entity<BrowseSelectionState>,
-    // The chip a drag is currently over, which is drawn as the drop it would be.
-    drop_target: Rc<Cell<Option<usize>>>,
-    // Whether a rubber band is sweeping, which suppresses every child's hover.
-    marquee: Rc<Cell<bool>>,
     // The folder being browsed. Present only for listings whose children are
     // real directories, which are the only ones that can be dragged.
     source: Option<DirId>,
-    paginator: WeakEntity<Paginator>,
+    section_cards: &HashMap<String, Entity<SectionCard>>,
+    show_trash: bool,
+    open_trash: OpenTrash,
 ) -> Vec<PaginatorGroup> {
     let mut chip_children = Vec::with_capacity(chips.len());
     let mut book_children = Vec::with_capacity(books.len());
 
     for (chip_index, chip) in chips.iter().enumerate() {
         let width_label = SharedString::from(chip.name.clone());
-        let width_count = A::child_count(chip);
-        let show_download = A::can_download_child(chip);
+        let child_count = Some(chip.book_count);
+        let show_download = shows_download_mark(chip);
         let chip = chip.clone();
         let page = page.clone();
-        let cursor = cursor.clone();
-        let selected = selected.clone();
         let drag_chips = chips.clone();
         let drag_groups = chip_groups.to_vec();
         let drag_books = books.clone();
-        let drop_target = drop_target.clone();
-        let marquee = marquee.clone();
+        let section_card = section_cards.get(&chip.id).cloned();
         // Chips previously carried a click handler only, so the paginator had
         // nothing to invoke for them. Enter and a click now share one path.
         let activate_page = page.clone();
         let activate_location = chip.id.clone();
         chip_children.push(
-            PaginatorChild::new(move |window, cx| {
+            PaginatorChild::new(move |state, window, cx| {
                 let location = chip.id.clone();
                 let split_location = location.clone();
                 let open_page = page.clone();
                 let split_page = page.clone();
                 let menu_page = page.clone();
-                let menu_selected = selected.clone();
+                let in_selection = state.selection.contains(&chip_index);
                 let height = rems(components::COMPACT_HIERARCHY_ITEM_HEIGHT_REM).to_pixels(window.rem_size());
                 // Chips are declared first, so a chip's flat child index is its
                 // position in this list.
                 //
                 // A chip the band picked up is drawn like the cursor's chip: the
                 // two never coexist, because moving the cursor drops the selection.
-                let selected_now = selected.read(cx).indices.clone();
-                let focused = cursor.get() == Some(chip_index) || selected_now.contains(&chip_index);
-                // A folder about to receive a drop answers with the wash a hover
-                // uses — only a folder, since only a folder can take one. It cannot
-                // be a `drag_over` style on this frame: the chip's own button paints
-                // an opaque background over it.
-                let drop_hovered = source.is_some() && drop_target.get() == Some(chip_index) && DirId::parse_str(&chip.id).is_ok();
-                let count = A::child_count(&chip);
+                let focused = state.cursor == Some(chip_index) || in_selection;
                 let theme = components::browser_theme(cx);
                 let download = show_download.then(|| {
                     let target = page.clone();
@@ -226,31 +269,58 @@ pub(super) fn paginator_groups<A: BrowseAdapter>(
                             cx.stop_propagation();
                             let _ = target.update(cx, |page, cx| page.download_child(location.clone(), cx));
                         })
-                        .children(components::book_download_indicator(false, false, theme))
+                        .child(components::download_glyph().text_color(theme.text))
                         .into_any_element()
                 });
-                let item = components::compact_hierarchy_item(format!("browse-chip-{location}"), chip_icon, chip.name.clone(), chip.path.clone().map(SharedString::from), count, download, focused, marquee.get(), theme)
-                    .debug_selector(|| format!("browse-chip-{}", chip.id))
-                    .when(drop_hovered && !focused, |item| item.bg(theme.hover))
-                    .on_click(move |event, window, cx| {
-                        if event.modifiers().control && split_page.upgrade().is_some_and(|page| page.read(cx).can_split(window)) {
-                            let _ = split_page.update(cx, |page, cx| page.request_split_child(location.clone(), BrowseSplitSide::Left, cx));
-                            cx.stop_propagation();
-                        } else {
-                            let _ = open_page.update(cx, |page, cx| page.open_child(location.clone(), window, cx));
-                        }
-                    });
+                let item = match &section_card {
+                    None => {
+                        let location = chip.id.clone();
+                        components::compact_hierarchy_item(format!("browse-chip-{location}"), chip_icon, chip.name.clone(), chip.path.clone().map(SharedString::from), child_count, download, focused, state.marquee, theme)
+                            .debug_selector(|| format!("browse-chip-{}", chip.id))
+                            .on_click(move |event, window, cx| {
+                                if event.modifiers().control && split_page.upgrade().is_some_and(|page| page.read(cx).can_split(window)) {
+                                    let _ = split_page.update(cx, |page, cx| page.request_split_child(location.clone(), BrowseSplitSide::Left, cx));
+                                    cx.stop_propagation();
+                                } else {
+                                    let _ = open_page.update(cx, |page, cx| page.open_child(location.clone(), window, cx));
+                                }
+                            }).into_any_element()
+                    }
+                    Some(card) => {
+                        let title_location = chip.id.clone();
+                        let title_split_location = title_location.clone();
+                        let title_page = page.clone();
+                        let title_split_page = page.clone();
+                        let pager = card.read(cx).pager();
+                        let band_index = card.read(cx).band_index();
+                        let direct_book_count = card.read(cx).direct_book_count();
+                        let title = components::section_card_heading(format!("browse-card-title-{location}"), chip.name.clone(), direct_book_count, pager.into_any_element(), focused, state.marquee)
+                            .debug_selector(|| format!("browse-card-title-{}", chip.id))
+                            .on_click(move |event, window, cx| {
+                                if event.modifiers().control && title_split_page.upgrade().is_some_and(|page| page.read(cx).can_split(window)) {
+                                    let _ = title_split_page.update(cx, |page, cx| page.request_split_child(title_split_location.clone(), BrowseSplitSide::Left, cx));
+                                    cx.stop_propagation();
+                                } else {
+                                    let _ = title_page.update(cx, |page, cx| page.open_child(title_location.clone(), window, cx));
+                                }
+                            });
+                        components::section_card_frame(theme).child(components::section_card_band(band_index, title)).child(card.clone()).into_any_element()
+                    }
+                };
                 // A chip inside a selection leaves its secondary click to the
                 // paginator, which opens one menu over everything selected. On its
                 // own, a chip opens its own menu here: the chip's element is a
                 // button, so the click is taken on this wrapper.
-                let mut frame = div().id(SharedString::from(format!("browse-chip-frame-{}", chip.id))).w_full().h(height).child(item).on_aux_click(move |event, window, cx| {
+                // A section card fills the cell its policy sized; a chip is its
+                // own height.
+                let frame = div().id(SharedString::from(format!("browse-chip-frame-{}", chip.id))).w_full();
+                let mut frame = if section_card.is_some() { frame.relative().h_full() } else { frame.h(height) }.child(item).on_aux_click(move |event, window, cx| {
                     if event.modifiers().control && event.is_secondary() && menu_page.upgrade().is_some_and(|page| page.read(cx).can_split(window)) {
                         let _ = menu_page.update(cx, |page, cx| page.request_split_child(split_location.clone(), BrowseSplitSide::Right, cx));
                         cx.stop_propagation();
                         return;
                     }
-                    if !event.is_secondary() || menu_selected.read(cx).indices.contains(&chip_index) {
+                    if !event.is_secondary() || in_selection {
                         return;
                     }
                     let _ = menu_page.update(cx, |page, cx| page.open_items_menu(chip_index, event.position(), window, cx));
@@ -260,31 +330,16 @@ pub(super) fn paginator_groups<A: BrowseAdapter>(
                 // chip is where anything picked up can be put down.
                 if let Some(source) = source {
                     if let Ok(destination) = DirId::parse_str(&chip.id) {
-                        let drop_page = page.clone();
-                        let import_page = page.clone();
-                        frame = frame
-                            .on_drop::<gpui::ExternalPaths>(move |paths, _, cx| {
-                                let paths = paths.paths().to_vec();
-                                let _ = import_page.update(cx, |page, cx| page.import_dropped_paths(Some(destination), paths, cx));
-                            })
-                            .on_drop::<FolderTargets>(move |targets, window, cx| {
-                                let targets = targets.clone();
-                                let _ = drop_page.update(cx, |page, cx| page.drop_onto_folder(destination, targets, window, cx));
-                            })
-                            // Dropping a folder on itself is the one case the
-                            // backend would reject; catching it here keeps the
-                            // cursor from promising a drop that cannot happen.
-                            .can_drop(move |dragged, _, _| dragged.is::<gpui::ExternalPaths>() || dragged.downcast_ref::<FolderTargets>().is_some_and(|targets| !targets.folders.contains(&destination)));
+                        frame = folder_drop_target(frame, destination, SharedString::from(chip.name.clone()), true, page.clone(), theme);
                     }
-                    if let Some(targets) = drag_targets::<A>(chip_index, &drag_chips, &drag_groups, &drag_books, &selected_now, source, cx) {
-                        let label = SharedString::from(drag_label(&targets));
-                        let preview_items = drag_preview_items::<A>(chip_index, &drag_chips, &drag_books, &selected_now, chip_icon, cx);
-                        frame = frame.on_drag(targets, move |_, grab, _, cx| cx.new(|_| DragPreview { items: preview_items.clone(), label: label.clone(), grab, detailed_books }));
+                    let indices = acted_on(chip_index, &state.selection);
+                    if let Some(targets) = folder_targets(&indices, &drag_chips, &drag_groups, &drag_books, source, cx) {
+                        frame = folder_drag_source(frame, targets, drag_preview_items(&indices, &drag_chips, &drag_books, chip_icon), detailed_books);
                     }
                 }
                 frame.into_any_element()
             })
-            .with_intrinsic_width(move |window, cx| components::compact_hierarchy_item_width(chip_icon, width_label.clone(), width_count, show_download, window, cx))
+            .with_intrinsic_width(move |window, cx| components::compact_hierarchy_item_width(chip_icon, width_label.clone(), child_count, show_download, window, cx))
             .with_activate(move |window, cx| {
                 let _ = activate_page.update(cx, |page, cx| page.open_child(activate_location.clone(), window, cx));
             }),
@@ -292,43 +347,43 @@ pub(super) fn paginator_groups<A: BrowseAdapter>(
     }
 
     for (book_index, book) in books.iter().enumerate() {
-        let prepared_book = book.clone();
+        let prefetched_book = book.clone();
         let rendered_book = book.clone();
         let activated_book = book.clone();
         let drag_chips = chips.clone();
         let drag_groups = chip_groups.to_vec();
         let drag_books = books.clone();
-        let selected = selected.clone();
         // Books are declared after chips, so a book's flat child index is its
         // position plus the chip count.
         let child_index = chips.len() + book_index;
-        let child = PaginatorChild::new(move |_, cx| {
+        let child = PaginatorChild::new(move |state, _, cx| {
             // Identified because a drag source has to be a stateful element.
             let mut frame = div().id(SharedString::from(format!("browse-book-frame-{child_index}"))).w_full().h_full().min_w_0().child(rendered_book.clone());
-            let selected_now = selected.read(cx).indices.clone();
+            let indices = acted_on(child_index, &state.selection);
             if let Some(source) = source
-                && let Some(targets) = drag_targets::<A>(child_index, &drag_chips, &drag_groups, &drag_books, &selected_now, source, cx)
+                && let Some(targets) = folder_targets(&indices, &drag_chips, &drag_groups, &drag_books, source, cx)
             {
-                let label = SharedString::from(drag_label(&targets));
-                let preview_items = drag_preview_items::<A>(child_index, &drag_chips, &drag_books, &selected_now, chip_icon, cx);
-                frame = frame.on_drag(targets, move |_, grab, _, cx| cx.new(|_| DragPreview { items: preview_items.clone(), label: label.clone(), grab, detailed_books }));
+                frame = folder_drag_source(frame, targets, drag_preview_items(&indices, &drag_chips, &drag_books, chip_icon), detailed_books);
             }
             frame.into_any_element()
         })
-        .with_activate(move |window, cx| A::activate_book(&activated_book, window, cx))
-        .with_prepare(move |window, cx| A::prepare_book(&prepared_book, window, cx));
+        .with_activate(move |window, cx| BookCardView::activate(&activated_book, window, cx))
+        .with_prepare(move |window, cx| BookCardView::prefetch_for_window(&prefetched_book, window, cx));
         book_children.push(child);
     }
 
     let chip_width = PaginatorWidthPolicy::pixels(px(1.0));
     let mut groups = Vec::with_capacity(2);
     if !chip_children.is_empty() {
-        let policy =
+        let policy = if section_cards.is_empty() {
             PaginatorGroupPolicy::new(chip_width, PaginatorSizing::rems(rems(components::COMPACT_HIERARCHY_ITEM_HEIGHT_REM)), px(components::COMPACT_HIERARCHY_ITEM_ROW_GAP))
-                .with_gap(px(components::COMPACT_HIERARCHY_ITEM_ROW_GAP))
-                .intrinsic()
-                .flush_edges()
-                .with_edge_inset(px(components::BOOK_CARD_PADDING));
+            .with_gap(px(components::COMPACT_HIERARCHY_ITEM_ROW_GAP))
+            .intrinsic()
+            .flush_edges()
+            .with_edge_inset(px(components::BOOK_CARD_PADDING))
+        } else {
+            browse_section_card_policy()
+        };
         let mut children = chip_children.into_iter();
         let mut offset = 0;
         for section in chip_groups {
@@ -337,10 +392,8 @@ pub(super) fn paginator_groups<A: BrowseAdapter>(
             }
             let label = section.parent.name.clone();
             let location = section.parent.id.clone();
-            let header_page = page.clone();
             groups.push(PaginatorGroup::new(policy, children.by_ref().take(section.end - section.start)).with_header(PaginatorSizing::rems(rems(1.5)).with_pixels(px(components::SPACE_SM * 2.0)), move |_, cx| {
                 let theme = components::browser_theme(cx);
-                let page = header_page.clone();
                 let location = location.clone();
                 let selector = format!("browse-group-{}", location);
                 div()
@@ -364,6 +417,71 @@ pub(super) fn paginator_groups<A: BrowseAdapter>(
     }
     if !book_children.is_empty() {
         groups.push(PaginatorGroup::new(book_card_policy(detailed_books, cover_text), book_children));
+    }
+    if show_trash {
+        let trash_index = chips.len() + books.len();
+        let open_from_click = open_trash.clone();
+        let open_from_keyboard = open_trash;
+        let card_policy = !section_cards.is_empty();
+        let item = PaginatorChild::new(move |state, window, cx| {
+            let theme = components::browser_theme(cx);
+            let height = rems(components::COMPACT_HIERARCHY_ITEM_HEIGHT_REM).to_pixels(window.rem_size());
+            let open = open_from_click.clone();
+            if card_policy {
+                let focused = state.cursor == Some(trash_index);
+                div()
+                    .id("browse-virtual-trash-card")
+                    .relative()
+                    .w_full()
+                    .h_full()
+                    .cursor_pointer()
+                    .on_click(move |_, window, cx| open(window, cx))
+                    .child(
+                        components::section_card_frame(theme)
+                            .child(div().h(rems(components::SECTION_CARD_HEADING_HEIGHT_REM)).flex().items_center().text_size(rems(components::TEXT_LG)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(if focused { theme.text_accent } else { theme.text }).child("Trash"))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap(px(components::SPACE_SM))
+                                    .child(div().size(px(48.0)).rounded(px(components::RADIUS_MD)).flex().items_center().justify_center().bg(theme.accent_wash).text_color(theme.text_accent).child(components::navigation_icon(components::NavigationIcon::Trash2)))
+                                    .child(div().text_size(rems(components::TEXT_SM)).text_color(theme.text_muted).child("Deleted books and folders")),
+                            ),
+                    )
+                    .into_any_element()
+            } else {
+                let button = components::compact_hierarchy_item(
+                    "browse-virtual-trash",
+                    components::NavigationIcon::Trash2,
+                    "Trash",
+                    None,
+                    None,
+                    None,
+                    state.cursor == Some(trash_index),
+                    state.marquee,
+                    theme,
+                )
+                .on_click(move |_, window, cx| open(window, cx));
+                div().id("browse-virtual-trash-row").w_full().h(height).child(button).into_any_element()
+            }
+        })
+        .with_activate(move |window, cx| {
+            open_from_keyboard(window, cx);
+        });
+        let policy = if card_policy {
+            browse_section_card_policy()
+        } else {
+            PaginatorGroupPolicy::new(PaginatorWidthPolicy::pixels(px(1.0)), PaginatorSizing::rems(rems(components::COMPACT_HIERARCHY_ITEM_HEIGHT_REM)), px(components::COMPACT_HIERARCHY_ITEM_ROW_GAP))
+                .with_gap(px(components::COMPACT_HIERARCHY_ITEM_ROW_GAP))
+                .intrinsic()
+                .flush_edges()
+                .with_edge_inset(px(components::BOOK_CARD_PADDING))
+        };
+        groups.push(PaginatorGroup::new(policy, [item]));
     }
     groups
 }

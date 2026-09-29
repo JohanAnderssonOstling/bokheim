@@ -7,13 +7,13 @@ mod search;
 use std::{rc::Rc, sync::Arc};
 use web_time::Instant;
 
-use library_backend::LibraryClient;
 use gpui::prelude::*;
 use gpui::{App, Context, Window};
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::tree::TreeState;
 use html_view_core::{RendererCommand, RendererEvent, RendererInitialConfig};
-use html_view_gpui::HtmlView;
+use html_view_gpui::{DocumentTap, HtmlView};
+use library_backend::LibraryClient;
 use library_model::BookLocator;
 
 use crate::epub::toc::TocState;
@@ -46,7 +46,8 @@ pub(crate) fn renderer_initial_config(cx: &App) -> RendererInitialConfig {
 
 impl ReaderView {
     pub(crate) fn new(
-        locator: BookLocator, title: String, _app: app::AppClient, library: Rc<LibraryClient>, book: Arc<crate::book::NativeBook>, preparation: html_view_core::RendererPreparation, close_reader: crate::CloseReader, window: &mut Window, cx: &mut Context<Self>,
+        locator: BookLocator, title: String, _app: app::AppClient, library: Rc<LibraryClient>, book: Arc<crate::book::NativeBook>, preparation: html_view_core::RendererPreparation, close_reader: crate::CloseReader, window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Self {
         let reader_started = Instant::now();
         startup_phase!("phase=reader_view_begin");
@@ -84,6 +85,7 @@ impl ReaderView {
             chrome: crate::shell::chrome::ChromeState::new(Component::ReaderShell),
             wheel_delta: 0.0,
             wheel_debounce: None,
+            touch_swipe_active: false,
             search_input,
             search: SearchState::default(),
             book,
@@ -95,8 +97,10 @@ impl ReaderView {
             annotation_popup_anchor: None,
             footnote: None,
             image_preview: None,
+            context_sheet: None,
             focus,
             renderer_subscription: None,
+            document_tap_subscription: None,
             reading_positions,
             close_reader,
             _search_subscription: search_subscription,
@@ -129,17 +133,9 @@ impl ReaderView {
         self.renderer_subscription = Some(cx.subscribe_in(&renderer, window, |this, _, event: &RendererEvent, window, cx| {
             this.handle_renderer_event(event, window, cx);
         }));
-        let toc_started = Instant::now();
-        let toc = renderer.read(cx).toc().unwrap_or_default();
-        let resolutions = {
-            let renderer = renderer.read(cx);
-            TocState::resolve(&toc, |href| renderer.resolve_href(href))
-        };
-        let toc_anchors = TocState::anchor_strings_by_doc(&resolutions, self.book.document_uris.len());
-        self.set_toc(toc, resolutions, cx);
-        renderer.update(cx, |renderer, cx| renderer.set_toc_anchor_strings_by_doc(toc_anchors, cx));
-        startup_phase!("phase=toc_ready elapsed_ms={} phase_ms={}", finish_started.elapsed().as_millis(), toc_started.elapsed().as_millis());
-
+        self.document_tap_subscription = Some(cx.subscribe_in(&renderer, window, |this, _, _: &DocumentTap, window, cx| {
+            this.toggle_mobile_controls(window, cx);
+        }));
         startup_phase!("phase=initial_preferences_embedded elapsed_ms={}", finish_started.elapsed().as_millis());
         self.load_state = LoadState::Ready(renderer);
         self.install_document_progress_weights(cx);
@@ -148,6 +144,7 @@ impl ReaderView {
         // paging works without clicking the text first.
         self.focus_document(window, cx);
         self.load_reader_state(cx);
+        self.load_database_toc(cx);
         startup_phase!("phase=reader_state_requested elapsed_ms={}", finish_started.elapsed().as_millis());
         crate::invalidation::notify(cx, Component::ReaderShell, "reader_ready");
         startup_phase!("phase=finish_load_complete elapsed_ms={}", finish_started.elapsed().as_millis());

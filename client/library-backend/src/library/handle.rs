@@ -67,6 +67,9 @@ async fn publish_scan_batches(session: std::rc::Rc<LibrarySession>, mut snapshot
         tokio::task::yield_now().await;
     }
     let result = session.db.apply_filesystem_scan_batch(&mut snapshot, &discovery, &library_database::InspectedFilesystemScan { failures: vec![], readable, books: vec![] }, true).map_err(crate::BackendError::operation)?;
+    if result == library_database::ScanApplyResult::Applied && !discovery.readable {
+        return Err(crate::BackendError::message("filesystem scan was incomplete"));
+    }
     Ok(Some(result))
 }
 
@@ -82,6 +85,49 @@ enum OperationCompletion {
 #[cfg(target_arch = "wasm32")]
 type ScanResult = Result<(), BackendError>;
 
+#[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
+fn filesystem_event_needs_scan(event: &notify::Event, root: &std::path::Path) -> bool {
+    if event.kind.is_access() {
+        return false;
+    }
+    if event.need_rescan() || event.paths.is_empty() {
+        return true;
+    }
+    event.paths.iter().any(|path| {
+        path.strip_prefix(root).ok().is_some_and(|relative| {
+            relative.components().all(|component| !component.as_os_str().to_string_lossy().starts_with('.'))
+        })
+    })
+}
+
+#[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
+fn start_filesystem_watcher(root: &str, sender: async_channel::Sender<()>) -> Option<notify::RecommendedWatcher> {
+    use notify::Watcher as _;
+    let root = std::path::PathBuf::from(root);
+    let watched_root = root.clone();
+    let mut watcher = match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        match event {
+            Ok(event) if filesystem_event_needs_scan(&event, &watched_root) => { let _ = sender.try_send(()); }
+            Err(error) => {
+                log::warn!("library filesystem watcher error: {error}");
+                let _ = sender.try_send(());
+            }
+            _ => {}
+        }
+    }) {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            log::warn!("could not start library filesystem watcher: {error}");
+            return None;
+        }
+    };
+    if let Err(error) = watcher.watch(&root, notify::RecursiveMode::Recursive) {
+        log::warn!("could not watch library folder {}: {error}", root.display());
+        return None;
+    }
+    Some(watcher)
+}
+
 struct LibraryActor {
     operations: PendingOperations<OperationCompletion>,
     session: std::rc::Rc<LibrarySession>,
@@ -92,13 +138,16 @@ struct LibraryActor {
     local_retry: BackgroundJob<()>,
     enrichment_retry: BackgroundJob<()>,
     scan_job: BackgroundJob<ScanResult>,
+    watch_debounce: BackgroundJob<()>,
+    watch_events: async_channel::Receiver<()>,
+    _watch_events_sender: async_channel::Sender<()>,
+    #[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
+    _watcher: Option<notify::RecommendedWatcher>,
     /// Browser book readers and Blob URLs are thread-local resources.
     /// The actor retains them for the lifetime of the page subscription; only
     /// a Send cancellation guard leaves the actor.
     #[cfg(target_arch = "wasm32")]
-    books: std::collections::HashMap<u64, super::book::browser::BookLease>,
-    #[cfg(target_arch = "wasm32")]
-    next_book: u64,
+    books: super::book::browser::BookResources,
 }
 
 impl Drop for LibraryActor {
@@ -109,18 +158,28 @@ impl Drop for LibraryActor {
 
 impl LibraryActor {
     fn new(session: LibrarySession) -> Self {
+        let (watch_events_sender, watch_events) = async_channel::bounded(1);
+        #[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
+        let watcher = if session.assets.local_access_enabled() {
+            start_filesystem_watcher(session._scanner.root(), watch_events_sender.clone())
+        } else {
+            None
+        };
         Self {
             session: std::rc::Rc::new(session),
             operations: Default::default(),
             scan_job: Default::default(),
+            watch_debounce: Default::default(),
+            watch_events,
+            _watch_events_sender: watch_events_sender,
+            #[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
+            _watcher: watcher,
             enrichment_job: Default::default(),
             file_job: Default::default(),
             local_retry: Default::default(),
             enrichment_retry: Default::default(),
             #[cfg(target_arch = "wasm32")]
             books: Default::default(),
-            #[cfg(target_arch = "wasm32")]
-            next_book: 1,
         }
     }
 
@@ -137,6 +196,14 @@ impl LibraryActor {
                 break;
             }
             tokio::select! {
+                event = self.watch_events.recv() => if event.is_ok() {
+                    // Reset the quiet period while a file manager is still copying.
+                    self.watch_debounce.task = Some(Box::pin(crate::executor::sleep(std::time::Duration::from_millis(500))));
+                },
+                _ = self.watch_debounce.next() => {
+                    self.watch_debounce.finish();
+                    self.begin_scan();
+                },
                 Some(completion) = self.operations.next(), if !self.operations.is_empty() => self.complete_operation(completion),
                 _ = self.local_retry.next() => { self.local_retry.finish(); self.begin_file_work(); },
                 _ = self.enrichment_retry.next() => { self.enrichment_retry.finish(); self.begin_enrichment(); },
@@ -185,11 +252,9 @@ impl LibraryActor {
                 }
                 match result {
                     Ok((book, lease)) => {
-                        let id = self.next_book;
-                        self.next_book = self.next_book.wrapping_add(1);
                         // Both registration and reply occur synchronously on the
                         // browser thread, so cancellation cannot interleave.
-                        self.books.insert(id, lease);
+                        let id = self.books.retain(lease);
                         reply.finish(Ok((client_runtime::reply::Reply::new(book), id)));
                     }
                     Err(error) => reply.finish(Err(error)),
@@ -201,6 +266,7 @@ impl LibraryActor {
     #[cfg(target_arch = "wasm32")]
     fn begin_scan(&mut self) {
         if self.scan_job.task.is_some() {
+            self.scan_job.pending = true;
             return;
         }
         self.session.filesystem_scanning.set(true);
@@ -311,6 +377,7 @@ impl LibraryActor {
     #[cfg(not(target_arch = "wasm32"))]
     fn begin_scan(&mut self) {
         if self.scan_job.task.is_some() {
+            self.scan_job.pending = true;
             return;
         }
         if !self.session.assets.local_access_enabled() || !self.session._scanner.enabled() {
@@ -355,7 +422,7 @@ impl LibraryActor {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn finish_scan(&mut self, result: ScanResult) {
-        self.scan_job.finish();
+        let pending = self.scan_job.finish();
         let result = match result {
             Ok(None) => {
                 self.begin_scan();
@@ -369,6 +436,16 @@ impl LibraryActor {
                 self.session.filesystem_scanning.set(false);
                 self.session.emit(LibraryEvent::ContentsChanged);
                 self.session.emit(LibraryEvent::ScanComplete);
+                let mut next_scan = pending.then_some(std::time::Duration::from_millis(250));
+                #[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
+                if self._watcher.is_none() && self.session.assets.local_access_enabled() {
+                    self._watcher = start_filesystem_watcher(self.session._scanner.root(), self._watch_events_sender.clone());
+                    // Recheck files that may have arrived before registration.
+                    next_scan = Some(if self._watcher.is_some() { std::time::Duration::from_millis(250) } else { std::time::Duration::from_secs(30) });
+                }
+                if let Some(delay) = next_scan {
+                    self.retry_scan(delay);
+                }
             }
             Ok(library_database::ScanApplyResult::Stale) => {
                 // Coalesce changes while allowing the actor to serve requests.
@@ -376,6 +453,10 @@ impl LibraryActor {
             }
             Err(error) => {
                 log::warn!("filesystem scan failed; retrying in 30 seconds: {error}");
+                #[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
+                if !std::path::Path::new(self.session._scanner.root()).is_dir() {
+                    self._watcher = None;
+                }
                 self.retry_scan(std::time::Duration::from_secs(30));
             }
         }
@@ -419,12 +500,17 @@ impl LibraryActor {
             }
             #[cfg(target_arch = "wasm32")]
             LibraryActorCommand::ReleaseBook { id } => {
-                self.books.remove(&id);
+                self.books.release(id);
             }
             #[cfg(not(target_arch = "wasm32"))]
             LibraryActorCommand::ResolveBook { content_hash, reply } => {
                 let session = self.session.clone();
                 self.submit(OperationKind::Read, PendingReply::new(reply), async move { session.prepare_book_for_reader(content_hash).await });
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            LibraryActorCommand::ResolveAudiobookTrack { content_hash, index, reply } => {
+                let session = self.session.clone();
+                self.submit(OperationKind::Read, PendingReply::new(reply), async move { session.prepare_audiobook_track(content_hash, index).await });
             }
             #[cfg(not(target_arch = "wasm32"))]
             LibraryActorCommand::ImportDirectory { parent_id, directory, create_root, activity, reply } => {
@@ -534,6 +620,12 @@ enum LibraryActorCommand {
     #[cfg(not(target_arch = "wasm32"))]
     ResolveBook {
         content_hash: ContentHash,
+        reply: async_channel::Sender<Result<crate::library::ResolvedBook, BackendError>>,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
+    ResolveAudiobookTrack {
+        content_hash: ContentHash,
+        index: usize,
         reply: async_channel::Sender<Result<crate::library::ResolvedBook, BackendError>>,
     },
     #[cfg(not(target_arch = "wasm32"))]
@@ -695,6 +787,13 @@ impl LibraryHandle {
     pub async fn resolve_book(&self, content_hash: ContentHash) -> Result<crate::library::ResolvedBook, BackendError> {
         let (reply, result) = async_channel::bounded(1);
         self.commands.send(LibraryActorCommand::ResolveBook { content_hash, reply }).await.map_err(|_| BackendError::message("library actor is no longer running"))?;
+        result.recv().await.map_err(|_| BackendError::message("library actor stopped before replying"))?
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn resolve_audiobook_track(&self, content_hash: ContentHash, index: usize) -> Result<crate::library::ResolvedBook, BackendError> {
+        let (reply, result) = async_channel::bounded(1);
+        self.commands.send(LibraryActorCommand::ResolveAudiobookTrack { content_hash, index, reply }).await.map_err(|_| BackendError::message("library actor is no longer running"))?;
         result.recv().await.map_err(|_| BackendError::message("library actor stopped before replying"))?
     }
 
@@ -1301,9 +1400,10 @@ mod background_scan_tests {
         let mut actor = actor(root.path());
         actor.begin_scan();
         assert!(actor.session.scanner_running());
-        let scan_id: i64 = actor.session.db.query_row("SELECT scan_seq FROM sync_metadata", [], |row| row.get(0)).unwrap();
+        let scan_id: i64 = crate::test_database::raw(&actor.session.db).query_row("SELECT scan_seq FROM sync_metadata", [], |row| row.get(0)).unwrap();
         actor.begin_scan();
-        assert_eq!(actor.session.db.query_row("SELECT scan_seq FROM sync_metadata", [], |row| row.get::<_, i64>(0)).unwrap(), scan_id, "duplicate start must not take another snapshot");
+        assert_eq!(crate::test_database::raw(&actor.session.db).query_row("SELECT scan_seq FROM sync_metadata", [], |row| row.get::<_, i64>(0)).unwrap(), scan_id, "duplicate start must not take another snapshot");
+        assert!(actor.scan_job.pending, "a change during a scan needs another pass");
         let (reply, result) = async_channel::bounded(1);
         let sync = actor.session.sync_wake.clone();
         let assets = actor.session.asset_wake.clone();
@@ -1313,7 +1413,17 @@ mod background_scan_tests {
         let output = actor.scan_job.task.as_mut().unwrap().await;
         actor.finish_scan(output);
         assert!(!actor.session.scanner_running());
-        assert!(actor.scan_job.task.is_none());
+        assert!(actor.scan_job.task.is_some(), "a follow-up scan is queued");
+    }
+
+    #[cfg(feature = "watcher")]
+    #[tokio::test]
+    async fn external_folder_creation_wakes_library_watcher() {
+        let root = tempfile::tempdir().unwrap();
+        let actor = actor(root.path());
+        assert!(actor._watcher.is_some());
+        std::fs::create_dir(root.path().join("Added externally")).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), actor.watch_events.recv()).await.unwrap().unwrap();
     }
 
     #[tokio::test]
@@ -1421,8 +1531,8 @@ mod background_scan_tests {
     async fn existing_books_remain_queryable_during_scan_and_preparation() {
         let root = tempfile::tempdir().unwrap();
         let mut actor = actor(root.path());
-        actor.session.db.execute("INSERT INTO book(content_hash,title,added_at,format) VALUES (?1,'Existing book',1,'epub')", ["a".repeat(64)]).unwrap();
-        actor.session.db.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,is_downloaded,local_hash,last_scan) SELECT ?1,row_id,'existing.epub',1,'',0 FROM book", [sync_common::ROOT_DIR_ID.to_string()]).unwrap();
+        crate::test_database::raw(&actor.session.db).execute("INSERT INTO book(content_hash,title,added_at,format) VALUES (?1,'Existing book',1,'epub')", ["a".repeat(64)]).unwrap();
+        crate::test_database::raw(&actor.session.db).execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,is_downloaded,local_hash,last_scan) SELECT ?1,row_id,'existing.epub',1,'',0 FROM book", [sync_common::ROOT_DIR_ID.to_string()]).unwrap();
         actor.begin_scan();
         actor.enrichment_job.task = Some(Box::pin(std::future::pending()));
         let sync = actor.session.sync_wake.clone();
@@ -1477,10 +1587,9 @@ mod background_scan_tests {
             let reply = crate::library::commands::dispatch_library_request_in_session(library.clone(), command).await.unwrap();
             client_runtime::wire::decode_worker_payload(reply.into_wire().unwrap()).unwrap()
         }
-        library
-            .db
-            .execute_batch(
-                "DETACH curated; ATTACH ':memory:' AS curated;
+        library_database::execute_owner_fixture_sql(
+            &library.db,
+            "DETACH curated; ATTACH ':memory:' AS curated;
          CREATE TABLE curated.concept(concept_id INTEGER PRIMARY KEY,preferred_label TEXT NOT NULL);
          INSERT INTO curated.concept VALUES(920001,'History'),(920002,'U.S.'),(920003,'Period');
          CREATE TABLE curated.unified_concept_route(route_id INTEGER PRIMARY KEY,concept_id INTEGER NOT NULL,parent_route_id INTEGER NOT NULL);
@@ -1492,10 +1601,10 @@ mod background_scan_tests {
             SELECT '00000000-0000-0000-0000-000000000000',row_id,title,title,1 FROM book;
          INSERT INTO book_unified_concept(book_row_id,concept_id,mapper_version)
             SELECT row_id,CASE title WHEN 'General history' THEN 920002 ELSE 920003 END,1 FROM book;",
-            )
-            .unwrap();
+        )
+        .unwrap();
         let mut query = LibraryBrowseQuery {
-            location: "History / U.S.".into(),
+            location: String::new(),
             search: String::new(),
             file_types: vec![LibraryFileTypeFilter::All],
             chip_sort: Default::default(),
@@ -1513,6 +1622,9 @@ mod background_scan_tests {
         assert_eq!(filtered.contents.books[0].title, "Specific history", "the finished filter hides only the completed book");
         assert_eq!(filtered.format_counts, unfiltered.format_counts, "facets still describe all books in the location");
         assert_eq!(library.subject_contents(&query, true).unwrap(), filtered.contents);
+        query.location = "History / U.S.".into();
+        let collapsed: LibraryBrowseData = wire_value(library, LibraryCommand::SubjectContents { query: query.clone() }).await;
+        assert!(collapsed.contents.children.is_empty() && collapsed.contents.books.is_empty(), "the original narrow route is no longer browsable");
         query.location.clear();
         let grouped: LibraryBrowseData = wire_value(library, LibraryCommand::SubjectContents { query: query.clone() }).await;
         assert!(grouped.chip_groups.is_empty());
@@ -1548,5 +1660,20 @@ mod activity_subscription_tests {
         assert!(matches!(changes.try_recv(), Ok(LibraryEvent::TransferStatusChanged)));
         assert_eq!(runtime.thumbnail_generations_running(), 0);
         assert!(changes.try_recv().is_err());
+    }
+}
+
+#[cfg(all(test, feature = "watcher", not(target_arch = "wasm32")))]
+mod watcher_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn watcher_can_register_after_library_folder_appears() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("library");
+        let (sender, _receiver) = async_channel::bounded(1);
+        assert!(start_filesystem_watcher(root.to_str().unwrap(), sender.clone()).is_none());
+        std::fs::create_dir(&root).unwrap();
+        assert!(start_filesystem_watcher(root.to_str().unwrap(), sender).is_some());
     }
 }

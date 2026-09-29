@@ -48,14 +48,15 @@ const MAX_CONTROLS: usize = 128;
 /// to act on. The libraries come last: that block grows with every library on
 /// the device and with whatever is syncing, and the settings people open this
 /// page to change should not sit underneath it.
-const ACCOUNT_SECTION: usize = 0;
+const UPDATES_SECTION: usize = 0;
+const ACCOUNT_SECTION: usize = 1;
 #[cfg(not(feature = "kobo"))]
-const APPEARANCE_SECTION: usize = 1;
-const FONT_SIZE_SECTION: usize = 2;
+const APPEARANCE_SECTION: usize = 2;
+const FONT_SIZE_SECTION: usize = 3;
 #[cfg(target_os = "android")]
-const LIBRARY_STORAGE_SECTION: usize = 3;
-const LIBRARIES_SECTION: usize = 4;
-const SECTION_COUNT: usize = 5;
+const LIBRARY_STORAGE_SECTION: usize = 4;
+const LIBRARIES_SECTION: usize = 5;
+const SECTION_COUNT: usize = 6;
 
 /// Where a section can be found: which focus it contains, and where it was last
 /// laid out.
@@ -65,6 +66,8 @@ struct SettingsSection {
 }
 
 pub(crate) struct SettingsPage {
+    updates: Option<Entity<crate::services::UpdateControls>>,
+    _update_changes: Option<gpui::Subscription>,
     _library_changes: gpui::Subscription,
     preferences: Entity<Preferences>,
     account: Entity<SyncPage>,
@@ -80,7 +83,8 @@ pub(crate) struct SettingsPage {
 }
 
 impl SettingsPage {
-    pub(crate) fn new(account: Entity<SyncPage>, preferences: Entity<Preferences>, active_library: Entity<Libraries>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(updates: Option<Entity<crate::services::UpdateControls>>, account: Entity<SyncPage>, preferences: Entity<Preferences>, active_library: Entity<Libraries>, cx: &mut Context<Self>) -> Self {
+        let update_changes = updates.as_ref().map(|updates| cx.observe(updates, |_, _, cx| cx.notify()));
         let libraries = cx.new(|cx| crate::universal::sync::LibrariesView::new(account.clone(), cx));
         let mut selected = active_library.read(cx).selected_id();
         let library_changes = cx.observe(&active_library, move |_page, libraries, cx| {
@@ -93,7 +97,32 @@ impl SettingsPage {
         // Every section keeps its slot whether or not this build draws it, so a
         // section's identity does not depend on which features are compiled in.
         let sections = (0..SECTION_COUNT).map(|_| SettingsSection { focus: cx.focus_handle(), bounds: Rc::new(Cell::new(Bounds::default())) }).collect();
-        Self { _library_changes: library_changes, preferences, account, libraries, error: None, focus: cx.focus_handle(), scroll: ScrollHandle::default(), sections }
+        Self { updates, _update_changes: update_changes, _library_changes: library_changes, preferences, account, libraries, error: None, focus: cx.focus_handle(), scroll: ScrollHandle::default(), sections }
+    }
+
+    /// One conditional row above the existing settings groups. The backend
+    /// decides which state needs attention; recoverable errors are never dialogs.
+    fn update_row(&self, cx: &Context<Self>) -> Option<gpui::Div> {
+        use crate::services::{UpdateAction, UpdateView};
+        use gpui_component::Disableable;
+        let controls = self.updates.as_ref()?.read(cx);
+        let (message, button) = match &controls.view {
+            UpdateView::Hidden => return None,
+            UpdateView::Available => ("Update available".to_owned(), Some(("Update", UpdateAction::Update, false))),
+            UpdateView::Preparing => ("Preparing update…".into(), Some(("Update", UpdateAction::Update, true))),
+            UpdateView::WaitingForConnection => ("Waiting for connection…".into(), None),
+            UpdateView::Ready { action } => ("Update ready".into(), Some((if *action == UpdateAction::Install { "Install" } else { "Restart" }, action.clone(), false))),
+            UpdateView::NeedsSpace { additional_bytes } => (format!("Free up {} to continue", crate::services::updates::needed_space(*additional_bytes)), None),
+            UpdateView::NeedsPermission => ("Permission needed".into(), Some(("Continue", UpdateAction::GrantPermission, false))),
+            UpdateView::Activating => ("Updating your library…".into(), None),
+        };
+        let theme = components::browser_theme(cx);
+        let mut row = gpui::div().w_full().px(px(components::SPACE_MD)).py(px(components::SPACE_SM)).min_h(px(56.0)).flex().flex_wrap().items_center().justify_between().gap(px(components::SPACE_SM)).child(message);
+        if let Some((label, action, disabled)) = button {
+            let handler = controls.action.clone();
+            row = row.child(components::browser_settings_header_button("apply-update", label, true, theme).disabled(disabled).on_click(move |_, _, cx| handler(action.clone(), cx)));
+        }
+        Some(self.section(UPDATES_SECTION, components::browser_settings_group(theme).child(row)))
     }
 
     /// Applies a preference, and on failure says which setting did not take and
@@ -111,7 +140,7 @@ impl SettingsPage {
             BrowsingPreferencePatch::Theme(_) => showing.theme().label().to_owned(),
             BrowsingPreferencePatch::Palette(_, _) => {
                 let appearance = showing.appearance_override().unwrap_or_else(|| components::theme::resolved_appearance(cx));
-                format!("{} {}", showing.theme().label(), if appearance == app_preferences::ResolvedAppearance::Light { "light" } else { "dark" })
+                if appearance == app_preferences::ResolvedAppearance::Dark { "Dark".to_owned() } else { format!("{} light", showing.theme().label()) }
             }
             BrowsingPreferencePatch::LibraryView(_) => showing.library_view().label().to_owned(),
             BrowsingPreferencePatch::UiFontSizePx(_) => format!("{}px", showing.ui_font_size_px()),
@@ -215,9 +244,10 @@ impl Render for SettingsPage {
             let mut application_themes = components::theme_picker_group();
             for (index, (value, appearance)) in components::THEME_CHOICES.into_iter().enumerate() {
                 let entity = entity.clone();
-                application_themes = application_themes.child(components::theme_picker_swatch(format!("application-theme-{index}"), value, appearance, selected == Some((value, appearance))).on_click(move |_, _, cx| {
-                    entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::Palette(value, appearance), cx));
-                }));
+                application_themes =
+                    application_themes.child(components::theme_picker_swatch(format!("application-theme-{index}"), value, appearance, components::theme_choice_selected(selected, value, appearance)).on_click(move |_, _, cx| {
+                        entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::Palette(value, appearance), cx));
+                    }));
             }
 
             application_themes
@@ -262,9 +292,7 @@ impl Render for SettingsPage {
         let appearance_settings = components::browser_settings_fieldset("Appearance", theme);
         #[cfg(not(feature = "kobo"))]
         let appearance_settings = appearance_settings.child(self.section(APPEARANCE_SECTION, components::browser_settings_compact_row("Application theme", application_themes, theme)));
-        let appearance_settings = appearance_settings
-            .child(components::browser_settings_compact_row("Book card style", library_views, theme))
-            .child(components::browser_settings_compact_row("Cover text", cover_texts, theme));
+        let appearance_settings = appearance_settings.child(components::browser_settings_compact_row("Book card style", library_views, theme)).child(components::browser_settings_compact_row("Cover text", cover_texts, theme));
         let appearance_settings = appearance_settings.child(self.section(FONT_SIZE_SECTION, components::browser_settings_compact_row("UI font size", font_size, theme)));
         // Every preference on this page lives in this group, so this is where a
         // preference that would not save reports.
@@ -289,6 +317,6 @@ impl Render for SettingsPage {
             .tab_group()
             .on_action(cx.listener(Self::focus_next))
             .on_action(cx.listener(Self::focus_previous))
-            .child(components::browser_settings_content().child(self.section(ACCOUNT_SECTION, self.account.clone())).child(sections))
+            .child(components::browser_settings_content().children(self.update_row(cx)).child(self.section(ACCOUNT_SECTION, self.account.clone())).child(sections))
     }
 }

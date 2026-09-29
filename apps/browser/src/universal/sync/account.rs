@@ -1,4 +1,4 @@
-//! Loads and applies the combined account, library, transfer, and session snapshot.
+//! Loads account and library state; local sizes and transfers arrive separately.
 
 use gpui::Context;
 
@@ -62,6 +62,9 @@ impl SyncPage {
     }
 
     pub(super) fn refresh_with_feedback(&mut self, show_feedback: bool, cx: &mut Context<Self>) {
+        if show_feedback {
+            self.local_usage_due = true;
+        }
         if self.is_busy() {
             if !show_feedback {
                 self.refresh_pending = true;
@@ -70,8 +73,8 @@ impl SyncPage {
         }
         self.activity = super::AccountActivity::Refreshing;
         self.error = None;
-        // Signed out, this reloads the local library list and storage usage,
-        // not anything account-related; showing "Refreshing…" would imply
+        // Signed out, this reloads the local library list, not anything
+        // account-related; showing "Refreshing…" would imply
         // account/network activity that isn't happening.
         if show_feedback && self.state.read(cx).account_status.signed_in() {
             self.message = Some("Refreshing…".into());
@@ -117,9 +120,36 @@ impl SyncPage {
         let refresh_again = self.refresh_pending;
         self.refresh_pending = false;
         cx.notify();
+        if std::mem::take(&mut self.local_usage_due) {
+            #[cfg(target_arch = "wasm32")]
+            let _ = self.events.try_send(super::SyncEvent::LocalStorageUsageRequested);
+            #[cfg(not(target_arch = "wasm32"))]
+            self.request_local_storage_usage(cx);
+        }
         if refresh_again {
             self.schedule_refresh(cx);
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn request_local_storage_usage(&mut self, cx: &mut Context<Self>) {
+        self.local_usage_generation = self.local_usage_generation.wrapping_add(1);
+        let generation = self.local_usage_generation;
+        let backend = self.services.backend.clone();
+        cx.spawn(async move |page, cx| {
+            let result = backend.local_storage_usage().await;
+            super::after_browser_callback(cx).await;
+            let _ = page.update(cx, |page, cx| {
+                if generation != page.local_usage_generation {
+                    return;
+                }
+                match result {
+                    Ok(usage) => page.state.update(cx, |state, cx| state.apply_local_storage_usage(usage, cx)),
+                    Err(error) => log::warn!("could not read local storage usage: {error}"),
+                }
+            });
+        })
+        .detach();
     }
 
     pub(super) fn apply_error(&mut self, error: String, cx: &mut Context<Self>) {

@@ -299,6 +299,7 @@ pub struct HtmlView {
     prepared_paint: Option<PreparedPaint>,
     display_dirty: bool,
     pointer_active: bool,
+    pointer_tap_start: Option<(GpuiPoint<Pixels>, Instant, bool)>,
     wheel_scroll_enabled: bool,
 }
 
@@ -477,7 +478,12 @@ impl Element for HtmlDocumentElement {
     }
 }
 
+/// A short tap on ordinary document text that activated no link or image.
+#[derive(Clone, Copy, Debug)]
+pub struct DocumentTap;
+
 impl EventEmitter<RendererEvent> for HtmlView {}
+impl EventEmitter<DocumentTap> for HtmlView {}
 
 impl HtmlView {
     pub fn from_provider(
@@ -542,6 +548,7 @@ impl HtmlView {
             prepared_paint: None,
             display_dirty: true,
             pointer_active: false,
+            pointer_tap_start: None,
             wheel_scroll_enabled: true,
         };
         println!("HTML_VIEW_STARTUP phase=view_ready elapsed_ms={}", startup_started.elapsed().as_millis());
@@ -944,8 +951,10 @@ impl HtmlView {
         // for, so the keyboard keeps working after a click on a margin.
         window.prevent_default();
         let position = self.layout_point(event.position);
+        let image_hit = self.renderer.image_at(position);
         let options = PointerDownOptions { selection_mode: selection_mode(event.modifiers.control), copy_image: false };
         self.pointer_active = self.renderer.pointer_down(position, options);
+        self.pointer_tap_start = self.pointer_active.then_some((event.position, Instant::now(), image_hit));
         if self.pointer_active {
             Self::stop_event(cx);
         }
@@ -962,12 +971,18 @@ impl HtmlView {
         }
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         if !self.pointer_active {
             return;
         }
         self.pointer_active = false;
-        self.renderer.pointer_up();
+        let handled = self.renderer.pointer_up();
+        if let Some((start, started_at, image_hit)) = self.pointer_tap_start.take() {
+            let moved = f32::from(event.position.x - start.x).abs() > 8.0 || f32::from(event.position.y - start.y).abs() > 8.0;
+            if !handled && !image_hit && !moved && event.click_count == 1 && started_at.elapsed() < Duration::from_millis(600) {
+                cx.emit(DocumentTap);
+            }
+        }
         Self::stop_event(cx);
     }
 

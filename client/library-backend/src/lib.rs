@@ -12,16 +12,19 @@ pub mod asset_store;
 mod asset_workflow;
 pub mod book;
 pub mod client;
-pub use client::LibraryClient;
 pub use book_model::{AgentId, AnnotationAnchor, AnnotationStyle, AuthorId, BookFormat, EpubCfi, ReadProgress, ReaderAnnotation};
+pub use client::LibraryClient;
 pub use library::{AudiobookBook, DocumentBook, ResolvedBook};
-pub mod library;
 pub mod integration;
+pub mod updates;
+pub mod library;
 pub mod sync;
 #[cfg(test)]
 mod test_database;
 
 pub use account_client::ServerUrl;
+pub use asset_transfer::{LibraryTransfers, TransferOrigin, TransferState, TransferStatus};
+pub use client_runtime::BackendError;
 pub use import_pipeline::{ImportFailure, ImportFailureKind, ImportProgress, ImportState};
 pub use library::{
     BookDownloadStatus, BookReader, BoxedBookReader, DirectoryImport, DirectoryImportFile, DirectoryImportReader, DirectoryImportReaderFuture, DownloadProgress, DownloadProgressError, DownloadState, ImportSource, LibraryBrowseData,
@@ -30,8 +33,6 @@ pub use library::{
 pub use library_database::{BookPlacement, RelativeBookPath, RelativeBookPathError, RelativeDirPath, RelativeDirPathError};
 pub use library_model::{LibraryBrowseQuery, LibraryHomeView, LibraryUpdate};
 pub use library_replica::{BlobKey, BlobKind, FolderDestinationPolicy, LibraryOperation, LibraryOperationKind, LibraryOperationState, ScanProgress, TransferJobKind};
-pub use client_runtime::BackendError;
-pub use asset_transfer::{LibraryTransfers, TransferOrigin, TransferState, TransferStatus};
 pub use sync_common::{ContentHash, DirId, LibraryId, ROOT_DIR_ID};
 /// The database belongs to a concrete library session, not the filesystem adapter.
 pub(crate) const APP_HIDDEN_DIR: &str = ".bokheim";

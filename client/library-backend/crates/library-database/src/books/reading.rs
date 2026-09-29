@@ -46,7 +46,7 @@ impl Database {
         if let Some(entry) = entry.map(str::trim).filter(|entry| !entry.is_empty()) {
             transaction.reading_upsert_toc_entry(hash.as_str(), entry)?;
         }
-        transaction.commit()?;
+        crate::sync::apply::commit(transaction)?;
         Ok(())
     }
 }

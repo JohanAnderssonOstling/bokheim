@@ -9,6 +9,33 @@ use crate::epub::{LoadState, ReaderView};
 use crate::invalidation::Component;
 
 impl ReaderView {
+    pub(super) fn load_database_toc(&self, cx: &mut Context<Self>) {
+        let library = self.library.clone();
+        let content_hash = self.locator.content_hash();
+        cx.spawn(async move |this, cx| {
+            match library.book_detail(content_hash).await {
+                Ok(detail) => {
+                    let _ = this.update(cx, |this, cx| {
+                        let renderer = match &this.load_state {
+                            LoadState::Ready(renderer) => renderer.clone(),
+                            LoadState::Loading | LoadState::Error(_) => return,
+                        };
+                        let toc = to_epub_entries(&detail.toc);
+                        let resolutions = {
+                            let renderer = renderer.read(cx);
+                            crate::epub::toc::TocState::resolve(&toc, |href| renderer.resolve_href(href))
+                        };
+                        let anchors = crate::epub::toc::TocState::anchor_strings_by_doc(&resolutions, this.book.document_uris.len());
+                        this.set_toc(toc, resolutions, cx);
+                        renderer.update(cx, |renderer, cx| renderer.set_toc_anchor_strings_by_doc(anchors, cx));
+                    });
+                }
+                Err(error) => log::warn!("could not load EPUB table of contents from library database: {error}"),
+            }
+        })
+        .detach();
+    }
+
     pub(super) fn set_toc(&mut self, entries: Vec<TocEntry>, resolutions: Vec<crate::epub::toc::ResolvedTocEntry>, cx: &mut Context<Self>) {
         let tree_items = Self::toc_tree_items(&entries);
         self.toc_tree.update(cx, |tree, cx| tree.set_items(tree_items, cx));
@@ -67,4 +94,11 @@ impl ReaderView {
     pub(in crate::epub) fn spine_title(&self) -> String {
         self.toc.active_title().or_else(|| (self.title != self.book_title).then(|| self.title.clone())).unwrap_or_default()
     }
+}
+
+fn to_epub_entries(entries: &[book_model::BookTocEntry]) -> Vec<TocEntry> {
+    entries
+        .iter()
+        .map(|entry| TocEntry { title: entry.title.clone(), link: entry.target.clone(), children: to_epub_entries(&entry.children) })
+        .collect()
 }

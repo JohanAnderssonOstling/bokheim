@@ -1,6 +1,5 @@
 use super::core::*;
 use crate::library::LibraryRuntimeSpec;
-#[cfg(target_arch = "wasm32")]
 use std::sync::Arc;
 
 impl AppBackend {
@@ -98,8 +97,10 @@ impl AppBackend {
     pub fn ensure_import_library(&self) -> Result<LibraryEntry, BackendError> {
         let entry = {
             let _guard = self.state.library_directory.lock_lifecycle()?;
-            if let Some(entry) = self.state.registry.entries().map_err(BackendError::operation)?.into_iter().next() {
-                return Ok(entry);
+            for entry in self.state.registry.entries().map_err(BackendError::operation)? {
+                if self.state.library_directory.try_get(entry.library_id())?.is_some() || self.open_registered_library(entry.library_id()).is_ok() {
+                    return Ok(entry);
+                }
             }
             self.state.registry.create("Library", None).map_err(BackendError::operation)?
         };
@@ -115,25 +116,23 @@ impl AppBackend {
     pub(crate) async fn remove_library_from_device(&self, library_id: &LibraryId) -> Result<(), BackendError> {
         {
             let _guard = self.state.library_directory.lock_lifecycle()?;
-            self.state.library_directory.retire(library_id)?;
-            #[cfg(target_arch = "wasm32")]
             self.state.registry.begin_local_removal(library_id).map_err(BackendError::operation)?;
-            #[cfg(not(target_arch = "wasm32"))]
-            self.state.registry.remove(library_id).map_err(BackendError::operation)?;
+            self.state.library_directory.retire(library_id)?;
         }
         self.send_library_list_changed();
-        #[cfg(target_arch = "wasm32")]
         self.finish_local_purge(*library_id).await?;
         Ok(())
     }
 
-    #[cfg(target_arch = "wasm32")]
     async fn finish_local_purge(&self, library_id: LibraryId) -> Result<(), BackendError> {
+        if self.state.library_directory.try_get(&library_id)?.is_some() {
+            return Err(BackendError::message("library is still open during local cleanup"));
+        }
+        #[cfg(target_arch = "wasm32")]
         crate::platform::web_storage::purge_library(library_id).await.map_err(BackendError::message)?;
         self.state.registry.complete_local_purge(&library_id).map_err(BackendError::operation)
     }
 
-    #[cfg(target_arch = "wasm32")]
     pub(super) fn start_pending_local_purges(&self) {
         let weak = Arc::downgrade(&self.state);
         self.state.executor.spawn_detached(async move {

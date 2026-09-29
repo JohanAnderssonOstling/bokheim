@@ -34,8 +34,10 @@ fn column_count_for_gap(viewport_width: f64, column_width: f64, minimum_gap: f64
 /// column when the final GPUI document area is fractionally narrower.
 fn fitted_columns_and_width(viewport_width: f64, minimum_gap: f64, desired: u8, minimum_width: f64, maximum_width: f64) -> (u8, f64) {
     let count = column_count_for_gap(viewport_width, minimum_width, minimum_gap, desired);
-    let width = ((viewport_width - f64::from(count.saturating_sub(1)) * minimum_gap) / f64::from(count)).floor();
-    (count, width.clamp(minimum_width, maximum_width))
+    let fit = ((viewport_width - f64::from(count.saturating_sub(1)) * minimum_gap) / f64::from(count) - 1.0).floor().max(1.0);
+    // The preferred minimum cannot make a column wider than its actual slot.
+    // Otherwise a narrow reader clips the ends of lines at the viewport edge.
+    (count, fit.min(maximum_width))
 }
 
 impl ReaderView {
@@ -232,5 +234,11 @@ mod tests {
 
         let (count, fitted) = fitted_columns_and_width(1940.0, 80.0, 2, 450.0, 650.0);
         assert_eq!((count, fitted), (2, 650.0));
+    }
+
+    #[test]
+    fn narrow_viewport_fits_even_when_below_preferred_line_width() {
+        let (count, fitted) = fitted_columns_and_width(390.0, 0.0, 2, 450.0, 650.0);
+        assert_eq!((count, fitted), (1, 389.0));
     }
 }

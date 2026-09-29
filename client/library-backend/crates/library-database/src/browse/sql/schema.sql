@@ -22,7 +22,7 @@ CREATE TRIGGER trig_book_browse_format_insert
 AFTER INSERT ON book
 BEGIN
     INSERT INTO book_browse_format(book_row_id,format_category)
-    VALUES(NEW.row_id,CASE lower(NEW.format) WHEN 'pdf' THEN 2 WHEN 'm4b' THEN 4 ELSE 1 END)
+    VALUES(NEW.row_id,CASE lower(NEW.format) WHEN 'pdf' THEN 2 WHEN 'm4b' THEN 4 WHEN 'mp3folder' THEN 4 ELSE 1 END)
     ON CONFLICT(book_row_id) DO UPDATE SET format_category=excluded.format_category;
 END;
 
@@ -30,7 +30,7 @@ CREATE TRIGGER trig_book_browse_format_update
 AFTER UPDATE OF format ON book
 BEGIN
     INSERT INTO book_browse_format(book_row_id,format_category)
-    VALUES(NEW.row_id,CASE lower(NEW.format) WHEN 'pdf' THEN 2 WHEN 'm4b' THEN 4 ELSE 1 END)
+    VALUES(NEW.row_id,CASE lower(NEW.format) WHEN 'pdf' THEN 2 WHEN 'm4b' THEN 4 WHEN 'mp3folder' THEN 4 ELSE 1 END)
     ON CONFLICT(book_row_id) DO UPDATE SET format_category=excluded.format_category;
 END;
 
@@ -160,15 +160,15 @@ CREATE TABLE IF NOT EXISTS book_browse_progress(
 );
 CREATE TRIGGER IF NOT EXISTS browse_progress_insert AFTER INSERT ON book
 BEGIN
-    INSERT INTO book_browse_progress VALUES(NEW.row_id,browse_reading_progress(NEW.read_progress,CAST(NEW.read_pos AS REAL)))
+    INSERT INTO book_browse_progress VALUES(NEW.row_id,browse_reading_progress(NEW.read_progress))
     ON CONFLICT(book_row_id) DO UPDATE SET progress=excluded.progress;
 END;
 CREATE TRIGGER IF NOT EXISTS browse_progress_update AFTER UPDATE OF read_pos,read_progress ON book
 BEGIN
-    INSERT INTO book_browse_progress VALUES(NEW.row_id,browse_reading_progress(NEW.read_progress,CAST(NEW.read_pos AS REAL)))
+    INSERT INTO book_browse_progress VALUES(NEW.row_id,browse_reading_progress(NEW.read_progress))
     ON CONFLICT(book_row_id) DO UPDATE SET progress=excluded.progress;
 END;
-INSERT INTO book_browse_progress SELECT row_id,browse_reading_progress(read_progress,CAST(read_pos AS REAL)) FROM book WHERE true
+INSERT INTO book_browse_progress SELECT row_id,browse_reading_progress(read_progress) FROM book WHERE true
 ON CONFLICT(book_row_id) DO UPDATE SET progress=excluded.progress;
 
 -- name: schema_browse_text &

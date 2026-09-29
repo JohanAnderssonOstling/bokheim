@@ -78,13 +78,20 @@ impl AssetApplication {
         Self { pool: database.pool().clone(), store }
     }
 
-    pub async fn thumbnail_presence(&self, user_id: &str, library_id: &sync_common::LibraryId, hashes: &[ContentHash]) -> Result<Vec<ContentHash>, AssetError> {
+    pub async fn thumbnail_presence(&self, user_id: &str, library_id: &sync_common::LibraryId, hashes: &[ContentHash]) -> Result<Vec<sync_common::api::assets::ThumbnailRevision>, AssetError> {
         self.require_library(user_id, library_id).await?;
         let mut present = Vec::new();
         for hash in hashes {
-            if self.store.size(user_id, AssetKind::Thumbnail, hash).await?.is_some() { present.push(*hash); }
+            if let Some(revision) = self.store.thumbnail_revision(user_id, hash).await? {
+                present.push(sync_common::api::assets::ThumbnailRevision { content_hash: *hash, revision });
+            }
         }
         Ok(present)
+    }
+
+    pub async fn remove_thumbnail(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &ContentHash) -> Result<(), AssetError> {
+        assets::validate_thumbnail(&self.pool, user_id, library_id, hash, 0).await?;
+        self.store.remove_thumbnail(user_id, hash).await
     }
 
     async fn require_library(&self, user_id: &str, library_id: &sync_common::LibraryId) -> Result<(), AssetError> {
@@ -191,6 +198,12 @@ impl AssetApplication {
         self.store.open_from(user_id, kind, &resolved_hash, offset).await
     }
 
+    pub async fn audiobook_track(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &ContentHash, index: usize) -> Result<Option<(StoredAsset, audiobook_folder::ArchivedTrack)>, AssetError> {
+        let Some(asset) = self.open_from(user_id, library_id, AssetKind::Book, hash, 0).await? else { return Ok(None) };
+        let track = self.store.book_tracks(&asset.checksum).await?.into_iter().nth(index);
+        Ok(track.map(|track| (asset, track)))
+    }
+
     pub async fn put_book_revision(&self, user_id: &str, library_id: &sync_common::LibraryId, identity: &ContentHash, checksum: &ContentHash, length: u64, reader: AssetReader) -> Result<(), AssetError> {
         self.require_library(user_id, library_id).await?;
         // Reserve and verify actual bytes even when an object is already owned.
@@ -225,6 +238,12 @@ impl AssetApplication {
         let expected_len = expected_len.ok_or(AssetError::LengthRequired)?;
         if kind.max_bytes().is_some_and(|limit| expected_len > limit) {
             return Err(AssetError::TooLarge { limit: kind.max_bytes().unwrap_or(u64::MAX) });
+        }
+        if kind == AssetKind::ThumbnailBrowse {
+            let master_size = self.store.size(user_id, AssetKind::Thumbnail, hash).await?.ok_or_else(|| AssetError::InvalidInput("browse thumbnail requires a stored source".into()))?;
+            assets::validate_thumbnail(&self.pool, user_id, library_id, hash, master_size).await?;
+            self.store.put(user_id, kind, hash, Some(expected_len), reader).await?;
+            return Ok(());
         }
         if kind == AssetKind::Thumbnail {
             assets::validate_thumbnail_upload(&self.pool, user_id, library_id, hash, expected_len).await?;
@@ -334,20 +353,6 @@ mod tests {
         assert!(application.open_from(other_user, other_library, AssetKind::Book, &identity, 0).await.unwrap().is_some());
     }
 
-    #[tokio::test]
-    #[ignore = "requires SYNC_E2E_DATABASE_URL"]
-    async fn revision_migration_adds_the_table_and_leaves_pre_revision_books_resolvable() {
-        let Some(pool) = crate::test_support::isolated_pool("book_revision_migration", 2).await else { return };
-        // A database created before revisions existed has no such table.
-        sqlx::query("DROP TABLE user_book_revision").execute(&pool).await.unwrap();
-        let database = PostgresDatabase::from_pool(pool.clone());
-        crate::upgrade_existing(&database).await.unwrap();
-        crate::upgrade_existing(&database).await.unwrap();
-        // Books uploaded before the migration need no backfill: their identity
-        // is still the address of their bytes, so it resolves to itself.
-        let existing = ContentHash::new(&"a".repeat(64));
-        assert_eq!(assets::book_revision(&pool, &uuid::Uuid::new_v4().to_string(), &existing).await.unwrap(), existing);
-    }
 
     #[tokio::test]
     async fn deduplicated_uploads_are_consumed_and_length_checked() {

@@ -1,7 +1,7 @@
 //! Native filesystem and device integration used by client services.
 #![cfg(not(target_arch = "wasm32"))]
-mod database_diagnostics;
 pub mod cpu_host;
+mod database_diagnostics;
 pub mod discovery;
 pub mod file_fingerprint;
 pub mod sqlite;

@@ -118,7 +118,8 @@ pub fn select(request: &LookupRequest, candidates: &[Candidate]) -> Selection {
         if !close && !(equal && (author || narrator || embedded)) && !super::chapters::recording_alignment(request, candidate) {
             continue;
         }
-        let date = request.recording.recording_release_date.as_ref().zip(candidate.release_date.as_ref()).is_some_and(|(l, r)| l == r);
+        let date = request.recording.recording_release_date.as_ref().zip(candidate.release_date.as_ref()).is_some_and(|(l, r)| l == r)
+            || request.recording.recording_release_year.zip(candidate.release_date.as_deref().and_then(|date| date.get(..4).and_then(|year| year.parse::<i32>().ok()))).is_some_and(|(local, remote)| local == remote);
         let distance = request.duration_ms.abs_diff(duration);
         ranked.push((index, embedded, close, distance, title, author, narrator, date));
     }

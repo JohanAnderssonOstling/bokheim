@@ -140,11 +140,75 @@ DELETE FROM remote_asset WHERE kind = 'thumbnail' AND hash = :content_hash;
 -- param: content_hash: &str
 SELECT EXISTS(SELECT 1 FROM remote_asset WHERE kind = 'thumbnail' AND hash = :content_hash);
 
+-- name: thumbnail_download_coverage ->
+-- Count known cloud thumbnails for visible books and those already ready here.
+SELECT COUNT(CASE WHEN work.state = 'ready' THEN 1 END), COUNT(*)
+FROM remote_asset remote
+JOIN book ON book.content_hash = remote.hash
+LEFT JOIN local_thumbnail_work work ON work.content_hash = remote.hash
+WHERE remote.kind = 'thumbnail' AND book.deleted_at IS NULL AND book.hidden_at IS NULL;
+
 -- name: thumbnail_confirm_source!
 -- param: content_hash: &str
 -- param: origin: &str
 INSERT INTO local_thumbnail_source(content_hash, origin) VALUES (:content_hash, :origin)
 ON CONFLICT(content_hash) DO UPDATE SET origin = excluded.origin;
+
+-- name: thumbnail_sidecar_exists?
+-- param: content_hash: &str
+SELECT EXISTS(SELECT 1 FROM local_thumbnail_sidecar WHERE content_hash = :content_hash);
+
+-- name: thumbnail_sidecar_mark!
+-- param: content_hash: &str
+INSERT OR IGNORE INTO local_thumbnail_sidecar(content_hash) VALUES (:content_hash);
+
+-- name: thumbnail_sidecar_clear!
+-- param: content_hash: &str
+DELETE FROM local_thumbnail_sidecar WHERE content_hash = :content_hash;
+
+-- name: thumbnail_sync_pending_set!
+-- param: content_hash: &str
+-- param: action: &str
+INSERT INTO local_thumbnail_sync_pending(content_hash, action) VALUES (:content_hash, :action)
+ON CONFLICT(content_hash) DO UPDATE SET action = excluded.action, generation = local_thumbnail_sync_pending.generation + 1;
+
+-- name: thumbnail_sync_pending_page?
+-- param: after: &str
+SELECT pending.content_hash, pending.action, pending.generation FROM local_thumbnail_sync_pending pending
+JOIN book b ON b.content_hash = pending.content_hash
+WHERE pending.content_hash > :after AND b.deleted_at IS NULL
+ORDER BY pending.content_hash LIMIT 64;
+
+-- name: thumbnail_sync_pending_clear!
+-- param: content_hash: &str
+-- param: generation: i64
+DELETE FROM local_thumbnail_sync_pending WHERE content_hash = :content_hash AND generation = :generation;
+
+-- name: thumbnail_remote_revision?
+-- param: content_hash: &str
+SELECT revision FROM remote_thumbnail_revision WHERE content_hash = :content_hash;
+
+-- name: thumbnail_remote_revision_set!
+-- param: content_hash: &str
+-- param: revision: &str
+INSERT INTO remote_thumbnail_revision(content_hash, revision) VALUES (:content_hash, :revision)
+ON CONFLICT(content_hash) DO UPDATE SET revision = excluded.revision;
+
+-- name: thumbnail_remote_revision_clear!
+-- param: content_hash: &str
+DELETE FROM remote_thumbnail_revision WHERE content_hash = :content_hash;
+
+-- name: thumbnail_source_origin?
+-- param: content_hash: &str
+SELECT origin FROM local_thumbnail_source WHERE content_hash = :content_hash;
+
+-- name: thumbnail_remote_presence_candidates?
+-- param: after: &str
+SELECT DISTINCT b.content_hash FROM book b
+JOIN book_dir bd ON bd.book_row_id = b.row_id AND bd.deleted_at IS NULL
+JOIN dir d ON d.id = bd.dir_id AND d.deleted_at IS NULL
+WHERE b.content_hash > :after AND b.deleted_at IS NULL AND b.hidden_at IS NULL
+ORDER BY b.content_hash LIMIT 512;
 
 -- name: thumbnail_set_result!
 -- param: content_hash: &str
@@ -196,11 +260,11 @@ WHERE book.content_hash = :content_hash AND book.deleted_at IS NULL;
 -- param: after: &str
 -- param: scope: &str
 -- param: revision: i64
-SELECT b.content_hash,COALESCE(b.title,''),b.format,b.book_metadata,CASE WHEN s.metadata=b.book_metadata AND s.title=COALESCE(b.title,'') AND COALESCE(json_extract(s.state,'$.inspection_revision'),0)=:revision AND (s.complete=0 OR s.retry_at=0) THEN s.state ELSE NULL END
+SELECT b.content_hash,COALESCE(b.title,''),b.format,b.book_metadata,CASE WHEN s.metadata=b.book_metadata AND s.title=COALESCE(b.title,'') AND s.revision=:revision AND (s.complete=0 OR s.retry_at=0) THEN s.phase ELSE NULL END
 FROM book b LEFT JOIN local_subject_pipeline s USING(content_hash)
 WHERE b.content_hash>:after AND b.deleted_at IS NULL AND b.hidden_at IS NULL AND b.content_hash IN (SELECT value FROM json_each(:scope))
 AND NOT EXISTS(SELECT 1 FROM pending_audible_enrichment a WHERE a.content_hash=b.content_hash)
-AND (s.content_hash IS NULL OR s.metadata<>b.book_metadata OR s.title<>COALESCE(b.title,'') OR COALESCE(json_extract(s.state,'$.inspection_revision'),0)<>:revision OR ((s.complete=0 OR s.retry_at>0) AND s.retry_at<=unixepoch()))
+AND (s.content_hash IS NULL OR s.metadata<>b.book_metadata OR s.title<>COALESCE(b.title,'') OR s.revision<>:revision OR ((s.complete=0 OR s.retry_at>0) AND s.retry_at<=unixepoch()))
 ORDER BY b.content_hash LIMIT 32;
 
 -- name: enrichment_book?
@@ -386,19 +450,20 @@ SELECT EXISTS(SELECT 1 FROM external_metadata_attempt a JOIN book b ON b.row_id=
 
 -- name: save_subject_pipeline_checkpoint!
 -- param: content_hash: &str
--- param: state: &str
+-- param: phase: i64
+-- param: revision: i64
 -- param: complete: bool
 -- param: retry_seconds: i64
 -- param: expected: &[u8]
 -- param: title: &str
 -- param: empty_metadata: bool
-INSERT INTO local_subject_pipeline(content_hash, state, metadata, title, complete, retry_at)
-SELECT content_hash, :state, book_metadata, COALESCE(title, ''), :complete,
+INSERT INTO local_subject_pipeline(content_hash, phase, revision, metadata, title, complete, retry_at)
+SELECT content_hash, :phase, :revision, book_metadata, COALESCE(title, ''), :complete,
        CASE WHEN :complete = 1 AND :retry_seconds = 0 THEN 0 ELSE CAST(strftime('%s', 'now') AS INTEGER) + :retry_seconds END
 FROM book WHERE content_hash = :content_hash AND deleted_at IS NULL
   AND (book_metadata = :expected OR (:empty_metadata AND length(book_metadata) = 0))
   AND COALESCE(title, '') = :title
-ON CONFLICT(content_hash) DO UPDATE SET state = excluded.state, metadata = excluded.metadata,
+ON CONFLICT(content_hash) DO UPDATE SET phase = excluded.phase, revision = excluded.revision, metadata = excluded.metadata,
     title = excluded.title, complete = excluded.complete, retry_at = excluded.retry_at;
 
 -- name: cache_isbn_response!
@@ -438,7 +503,7 @@ AND content_hash IN (SELECT content_hash FROM book WHERE deleted_at IS NULL AND 
 -- param: hash: &str
 SELECT json_extract(response_json,'$.selected_asin'),json_extract(response_json,'$.selected_region')
 FROM audible_enrichment_jobs j JOIN book b USING(content_hash)
-WHERE content_hash=:hash AND j.status='applied' AND b.hidden_at IS NULL AND b.deleted_at IS NULL AND lower(b.format)='m4b'
+WHERE content_hash=:hash AND j.status='applied' AND b.hidden_at IS NULL AND b.deleted_at IS NULL AND lower(b.format) IN ('m4b','mp3folder')
 AND json_extract(response_json,'$.status')='supported'
 AND EXISTS(SELECT 1 FROM json_each(response_json,'$.candidates') c WHERE json_extract(c.value,'$.asin')=json_extract(response_json,'$.selected_asin') AND json_extract(c.value,'$.region')=json_extract(response_json,'$.selected_region'));
 
@@ -450,7 +515,7 @@ SELECT b.content_hash,json_extract(j.response_json,'$.selected_asin'),json_extra
 FROM book b JOIN local_thumbnail_work w USING(content_hash) JOIN audible_enrichment_jobs j USING(content_hash)
 LEFT JOIN external_metadata_attempt a ON a.book_row_id=b.row_id AND a.provider_id=:provider
 WHERE b.content_hash>:after AND b.content_hash IN (SELECT value FROM json_each(:scope))
-AND b.hidden_at IS NULL AND b.deleted_at IS NULL AND lower(b.format)='m4b' AND w.state='no_cover'
+AND b.hidden_at IS NULL AND b.deleted_at IS NULL AND lower(b.format) IN ('m4b','mp3folder') AND w.state='no_cover'
 AND j.status='applied' AND json_extract(j.response_json,'$.status')='supported'
 AND json_extract(j.response_json,'$.selected_asin') IS NOT NULL AND json_extract(j.response_json,'$.selected_region') IS NOT NULL
 AND (a.book_row_id IS NULL OR a.identifier<>json_extract(j.response_json,'$.selected_region')||':'||json_extract(j.response_json,'$.selected_asin') OR a.status='updated' OR (a.status='failed' AND a.attempted_at<=unixepoch()*1000-30000))

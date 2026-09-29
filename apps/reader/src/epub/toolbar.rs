@@ -19,8 +19,14 @@ impl SidebarTarget for ReaderView {
         (self.close_reader)(window, cx);
     }
 
-    fn hide_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.chrome.hide(cx);
+    fn hide_sidebar(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if components::uses_mobile_navigation(window) {
+            if self.sidebar.close() {
+                crate::invalidation::notify(cx, crate::invalidation::Component::ReaderShell, "sidebar_closed");
+            }
+        } else {
+            self.chrome.hide(cx);
+        }
     }
 
     fn search_is_open(&self) -> bool {
@@ -46,7 +52,8 @@ impl ReaderView {
                             [
                                 components::reader_choice_button("reader-font-publisher", "Book", current.font_family == ReaderFontFamily::Publisher, theme)
                                     .on_click(cx.listener(|this, _, _, cx| this.set_reader_font_family(ReaderFontFamily::Publisher, cx))),
-                                components::reader_choice_button("reader-font-serif", "Serif", current.font_family == ReaderFontFamily::Serif, theme).on_click(cx.listener(|this, _, _, cx| this.set_reader_font_family(ReaderFontFamily::Serif, cx))),
+                                components::reader_choice_button("reader-font-serif", "Serif", current.font_family == ReaderFontFamily::Serif, theme)
+                                    .on_click(cx.listener(|this, _, _, cx| this.set_reader_font_family(ReaderFontFamily::Serif, cx))),
                             ],
                         )),
                     )
@@ -62,7 +69,7 @@ impl ReaderView {
                                     .on_click(cx.listener(|this, _, _, cx| this.set_reader_text_alignment(ReaderTextAlignment::Justify, cx))),
                             ],
                         )),
-                    )
+                    ),
             )
             .child(
                 components::reader_settings_group(theme)
@@ -93,31 +100,30 @@ impl ReaderView {
                         components::settings_stepper_button("vertical-margins-larger", "+", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_vertical_margin(8.0, cx))),
                         theme,
                     )))
-                    .when(!cfg!(feature = "kobo"), |section| section.child(components::reader_setting_row("Column gap").child(components::settings_stepper(
-                        components::settings_stepper_button("column-gap-smaller", "−", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_min_column_gap(-8.0, cx))),
-                        format!("{:.0}px", current.min_column_gap_px),
-                        components::settings_stepper_button("column-gap-larger", "+", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_min_column_gap(8.0, cx))),
-                        theme,
-                    )))),
-            )
-            .child(
-                components::reader_settings_group(theme)
                     .when(!cfg!(feature = "kobo"), |section| {
-                        section
-                            .child(components::reader_setting_row("Line width min").child(components::settings_stepper(
-                                components::settings_stepper_button("line-width-min-smaller", "−", false, theme).on_click(cx.listener(|this, _, window, cx| this.adjust_min_line_width_ch(-5.0, window, cx))),
-                                format!("{:.0}ch", current.min_line_width_ch),
-                                components::settings_stepper_button("line-width-min-larger", "+", false, theme).on_click(cx.listener(|this, _, window, cx| this.adjust_min_line_width_ch(5.0, window, cx))),
-                                theme,
-                            )))
-                            .child(components::reader_setting_row("Line width max").child(components::settings_stepper(
-                                components::settings_stepper_button("line-width-max-smaller", "−", false, theme).on_click(cx.listener(|this, _, window, cx| this.adjust_max_line_width_ch(-5.0, window, cx))),
-                                format!("{:.0}ch", current.max_line_width_ch),
-                                components::settings_stepper_button("line-width-max-larger", "+", false, theme).on_click(cx.listener(|this, _, window, cx| this.adjust_max_line_width_ch(5.0, window, cx))),
-                                theme,
-                            )))
+                        section.child(components::reader_setting_row("Column gap").child(components::settings_stepper(
+                            components::settings_stepper_button("column-gap-smaller", "−", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_min_column_gap(-8.0, cx))),
+                            format!("{:.0}px", current.min_column_gap_px),
+                            components::settings_stepper_button("column-gap-larger", "+", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_min_column_gap(8.0, cx))),
+                            theme,
+                        )))
                     }),
             )
+            .child(components::reader_settings_group(theme).when(!cfg!(feature = "kobo"), |section| {
+                section
+                    .child(components::reader_setting_row("Line width min").child(components::settings_stepper(
+                        components::settings_stepper_button("line-width-min-smaller", "−", false, theme).on_click(cx.listener(|this, _, window, cx| this.adjust_min_line_width_ch(-5.0, window, cx))),
+                        format!("{:.0}ch", current.min_line_width_ch),
+                        components::settings_stepper_button("line-width-min-larger", "+", false, theme).on_click(cx.listener(|this, _, window, cx| this.adjust_min_line_width_ch(5.0, window, cx))),
+                        theme,
+                    )))
+                    .child(components::reader_setting_row("Line width max").child(components::settings_stepper(
+                        components::settings_stepper_button("line-width-max-smaller", "−", false, theme).on_click(cx.listener(|this, _, window, cx| this.adjust_max_line_width_ch(-5.0, window, cx))),
+                        format!("{:.0}ch", current.max_line_width_ch),
+                        components::settings_stepper_button("line-width-max-larger", "+", false, theme).on_click(cx.listener(|this, _, window, cx| this.adjust_max_line_width_ch(5.0, window, cx))),
+                        theme,
+                    )))
+            }))
             .into_any_element()
     }
 }

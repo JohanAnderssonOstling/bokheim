@@ -1,6 +1,6 @@
 //! PDF reader action dispatch and chrome/sidebar transitions.
 
-use gpui::{Context, Focusable, Window};
+use gpui::{Context, Window};
 
 use crate::invalidation::Component;
 use crate::shell::state_panel::{self, SidebarTab};
@@ -9,12 +9,11 @@ use crate::shell::toolbar::SidebarTarget;
 use super::PdfReaderView;
 
 impl PdfReaderView {
-    pub(super) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_search(&mut self, cx: &mut Context<Self>) {
         if self.search_match.is_none() {
             self.search_match = Some((0, 0));
             crate::invalidation::notify(cx, Component::PdfShell, "search_opened");
         }
-        self.search_input.read(cx).focus_handle(cx).focus(window, cx);
     }
 
     /// The contents/annotations/settings tab strip shared with the EPUB reader.
@@ -36,8 +35,14 @@ impl SidebarTarget for PdfReaderView {
         (self.close_reader)(window, cx);
     }
 
-    fn hide_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.chrome.hide(cx);
+    fn hide_sidebar(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if ui_components::uses_mobile_navigation(window) {
+            if self.sidebar.close() {
+                crate::invalidation::notify(cx, Component::PdfShell, "sidebar_closed");
+            }
+        } else {
+            self.chrome.hide(cx);
+        }
     }
 
     fn search_is_open(&self) -> bool {

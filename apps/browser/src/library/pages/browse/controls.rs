@@ -176,8 +176,9 @@ impl SearchField {
 /// Sort and filter choices use the same popup-menu surface as the Add action
 /// on wide windows. On a compact window the popup menu widget has no bottom
 /// sheet mode, so the trigger instead toggles `browse_options_sheet` below.
+/// `menu_anchor` is the menu's corner at the trigger.
 pub(crate) fn browse_options_control<P, SelectOption, OnToggleSheet>(
-    page: Entity<P>, controls: BrowseControls, selection: BrowseOptionsSelection, select_option: SelectOption, compact: bool, on_toggle_sheet: OnToggleSheet, theme: components::BrowserTheme,
+    page: Entity<P>, controls: BrowseControls, selection: BrowseOptionsSelection, select_option: SelectOption, compact: bool, on_toggle_sheet: OnToggleSheet, menu_anchor: Anchor, theme: components::BrowserTheme,
 ) -> AnyElement
 where
     P: 'static,
@@ -194,14 +195,14 @@ where
         // `active` means filters are applied — a status on the control, not a state
         // the control is in. An accent edge marks it without claiming to be the
         // chosen thing in the toolbar.
-        .when(active, |button| button.border_color(theme.accent).text_color(theme.accent));
+        .when(active, |button| button.border_color(theme.text_accent).text_color(theme.text_accent));
 
     if compact {
         return trigger.on_click(move |_, _, cx| page.update(cx, |page, cx| on_toggle_sheet(page, cx))).into_any_element();
     }
 
     trigger
-        .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+        .dropdown_menu_with_anchor(menu_anchor, move |menu, _, _| {
             let mut menu = menu.scrollable(true);
 
             if !controls.book_sorts.is_empty() {
@@ -309,11 +310,12 @@ fn sheet_row(id: String, label: String, checked: bool, theme: components::Browse
         .flex_none()
         .min_w_0()
         .cursor_pointer()
+        .min_h(px(48.0))
         .flex()
         .items_center()
         .justify_between()
         .gap(px(components::SPACE_SM))
-        .px(px(components::SPACE_SM))
+        .px(px(components::SPACE_MD))
         .py(px(components::SPACE_SM))
         .text_size(gpui::rems(components::TEXT_MD))
         .hover(move |style| style.bg(theme.hover))

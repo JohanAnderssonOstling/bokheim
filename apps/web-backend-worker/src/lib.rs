@@ -14,6 +14,7 @@ use web_sys::{DedicatedWorkerGlobalScope, MessagePort};
 mod transport;
 
 thread_local! {
+    static STARTUP_PERMIT: RefCell<Option<client_platform_runtime::executor::StartupPermit>> = const { RefCell::new(None) };
     static BACKEND: RefCell<Option<BackendWorkerHost>> = const { RefCell::new(None) };
     static STARTUP: RefCell<StartupState> = const { RefCell::new(StartupState::Initializing) };
     static PENDING_CONNECTIONS: RefCell<Vec<MessagePort>> = const { RefCell::new(Vec::new()) };
@@ -32,6 +33,7 @@ fn worker_scope() -> DedicatedWorkerGlobalScope {
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
 pub fn start() -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
+    STARTUP_PERMIT.with(|permit| *permit.borrow_mut() = Some(app::host::defer_background_work()));
     app::host::web::network_client::install()?;
     transport::install()?;
     wasm_bindgen_futures::spawn_local(async {
@@ -53,6 +55,7 @@ fn finish_initialize(result: Result<(BackendWorkerHost, AppStartupState), app::B
             STARTUP.with(|state| *state.borrow_mut() = StartupState::Ready);
             connect_pending_ports();
             post_control("backend_ready", None);
+            STARTUP_PERMIT.with(|slot| { if let Some(permit) = slot.borrow_mut().take() { permit.release(); } });
         }
         Err(error) => {
             STARTUP.with(|state| *state.borrow_mut() = StartupState::Failed(error.clone()));

@@ -89,7 +89,7 @@ impl WebConnection {
         let id = uuid::Uuid::new_v4().to_string();
         let name = directory.name.clone();
         let result = async {
-            let (manifest, files) = super::import_workflow::submission(&id, library_id, parent_id, directory, create_root)?;
+            let (manifest, files) = crate::library::web_import::submission(&id, library_id, parent_id, directory, create_root)?;
             self.import_directory(&manifest, files).await
         }
         .await;

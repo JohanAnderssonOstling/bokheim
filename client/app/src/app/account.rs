@@ -1,3 +1,4 @@
+use futures_util::{stream, StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::LibraryId;
@@ -140,7 +141,20 @@ impl AppBackend {
     /// Fetches account facts only for an explicit caller. Nothing from this
     /// result is retained in AppState; the UI owns any presentation cache.
     async fn refresh_remote_account_details(&self) -> Result<RemoteAccountDetails, BackendError> {
-        let snapshot = self.state.account.request(|session| Box::pin(account_client::account_snapshot(session))).await.map_err(BackendError::operation)?;
+        let (snapshot, policies) = tokio::try_join!(
+            async {
+                let started = web_time::Instant::now();
+                let result = self.state.account.request(|session| Box::pin(account_client::account_snapshot(session))).await.map_err(BackendError::operation);
+                log::debug!("account snapshot request took {:?}", started.elapsed());
+                result
+            },
+            async {
+                let started = web_time::Instant::now();
+                let result = self.state.account.request(|session| Box::pin(account_client::cloud_storage(session))).await.map_err(BackendError::operation);
+                log::debug!("account cloud storage request took {:?}", started.elapsed());
+                result
+            },
+        )?;
         self.apply_remote_library_deletions(&snapshot.deleted_library_ids).await?;
         let session = self.require_account()?;
         // Settings is read-only and must not flush queued deletions. Keep those
@@ -162,7 +176,6 @@ impl AppBackend {
         // Publish remote knowledge before discovery emits library-list events.
         let remote_ids = self.attach_remote_libraries(&libraries)?;
         let account = self.account_identity()?;
-        let policies = self.state.account.request(|session| Box::pin(account_client::cloud_storage(session))).await.map_err(BackendError::operation)?;
         self.check_account_identity(&account)?;
         self.apply_cloud_storage(&policies)?;
         Ok(RemoteAccountDetails { state: self.library_list_state(Some(&session), Some(&remote_ids)).await?, storage_usage, server_storage_usage: library_storage_usage })
@@ -244,10 +257,12 @@ impl AppBackend {
 
     pub(super) async fn library_list_state(&self, session: Option<&account_client::Session>, remote: Option<&std::collections::HashSet<LibraryId>>) -> Result<LibraryListState, BackendError> {
         let libraries = self.libraries()?;
-        let mut sync_statuses = Vec::with_capacity(libraries.len());
-        for library in &libraries {
-            sync_statuses.push(self.library_sync_status(library, session, remote).await?);
-        }
+        let started = web_time::Instant::now();
+        let sync_statuses = stream::iter(libraries.iter().cloned().map(|library| async move { self.library_sync_status(&library, session, remote).await }))
+            .buffered(4)
+            .try_collect()
+            .await?;
+        log::debug!("account library statuses took {:?}", started.elapsed());
         Ok(LibraryListState { libraries, sync_statuses })
     }
 
@@ -266,6 +281,7 @@ impl AppBackend {
     /// Direct account-and-library snapshot for a foreground view. Expensive
     /// account discovery happens only because that view asked for it.
     pub(crate) async fn account_snapshot(&self) -> Result<crate::AccountSnapshot, BackendError> {
+        let started = web_time::Instant::now();
         let account = self.account_status()?;
         let (state, storage_usage, server_storage_usage) = if self.current_account()?.is_some() {
             let remote = self.refresh_remote_account_details().await?;
@@ -273,21 +289,29 @@ impl AppBackend {
         } else {
             (self.library_list_state(None, None).await?, None, None)
         };
-        let local_storage_usage = self.local_storage_usage(&state.libraries).await?;
-        Ok(crate::AccountSnapshot { account, storage_usage, sync_statuses: state.sync_statuses, local_storage_usage, server_storage_usage, transfers: self.state.library_directory.transfer_snapshots().await? })
+        log::debug!("account snapshot took {:?}", started.elapsed());
+        Ok(crate::AccountSnapshot { account, storage_usage, sync_statuses: state.sync_statuses, server_storage_usage })
     }
 
-    async fn local_storage_usage(&self, libraries: &[LibraryEntry]) -> Result<Vec<LocalLibraryStorageUsage>, BackendError> {
-        let mut usage = Vec::new();
-        for entry in libraries {
+    pub(crate) async fn local_storage_usage(&self) -> Result<Vec<LocalLibraryStorageUsage>, BackendError> {
+        let libraries = self.libraries()?;
+        let started = web_time::Instant::now();
+        let entries: Vec<Option<LocalLibraryStorageUsage>> = stream::iter(libraries.iter().map(|entry| async move {
             let Ok(library) = self.state.library_directory.get(entry.library_id()) else {
-                continue;
+                return Ok::<_, BackendError>(None);
             };
-            if let Some(used_bytes) = library.local_storage_usage().await? {
-                usage.push(LocalLibraryStorageUsage { library_id: *entry.library_id(), library_name: entry.library_name().to_owned(), used_bytes });
-            }
-        }
+            Ok(library.local_storage_usage().await?.map(|used_bytes| LocalLibraryStorageUsage {
+                library_id: *entry.library_id(),
+                library_name: entry.library_name().to_owned(),
+                used_bytes,
+            }))
+        }))
+        .buffered(4)
+        .try_collect()
+        .await?;
+        let mut usage: Vec<_> = entries.into_iter().flatten().collect();
         usage.sort_by(|left, right| left.library_name.cmp(&right.library_name));
+        log::debug!("account local storage usage took {:?}", started.elapsed());
         Ok(usage)
     }
 
@@ -316,7 +340,7 @@ mod unavailable_library_tests {
         let status = snapshot.sync_statuses.iter().find(|status| status.library_id == id).unwrap();
         assert_eq!(status.state, LibrarySyncState::Unavailable);
         assert!(!status.asset_storage_enabled);
-        assert!(snapshot.local_storage_usage.iter().all(|usage| usage.library_id != id));
+        assert!(backend.local_storage_usage().await.unwrap().iter().all(|usage| usage.library_id != id));
     }
 
     #[tokio::test]

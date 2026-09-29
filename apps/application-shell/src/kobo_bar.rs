@@ -17,11 +17,14 @@ use ui_components as components;
 
 // `.top()` is relative to the trigger's top edge. The shared Popover adds a
 // 4px top inset for top anchors, so subtract that inset when placing the
-// intrinsic panel at the bottom edge of the top bar.
-const POPUP_TOP: f32 = components::TOPBAR_HEIGHT - (components::TOPBAR_HEIGHT - components::TOPBAR_ACTION_HEIGHT) / 2.0 - 2.0 * components::SPACE_XS;
+// intrinsic panel at the bottom edge of the top bar. The bar and its buttons
+// are rems, so the offset is worked out at the window's rem size.
+fn popup_top(rem_size: gpui::Pixels) -> gpui::Pixels {
+    rem_size * (components::TOPBAR_HEIGHT_REM - (components::TOPBAR_HEIGHT_REM - components::TOPBAR_ACTION_HEIGHT_REM) / 2.0) - px(2.0 * components::SPACE_XS)
+}
 
 fn device_button(id: &'static str, label: impl Into<gpui::SharedString>, icon: impl Into<Icon>) -> Button {
-    components::base_button(id).icon(icon).tooltip(label).ghost().border_0().size(px(components::TOPBAR_ACTION_HEIGHT)).px_0()
+    components::base_button(id).icon(icon).tooltip(label).ghost().border_0().size(gpui::rems(components::TOPBAR_ACTION_HEIGHT_REM)).px_0()
 }
 
 pub(super) struct KoboDeviceBar {
@@ -77,6 +80,7 @@ impl KoboDeviceBar {
 impl Render for KoboDeviceBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
+        let popup_top = popup_top(window.rem_size());
         let state = self.panel.read(cx);
         let label = state.label();
         let icon = state.icon();
@@ -90,7 +94,7 @@ impl Render for KoboDeviceBar {
         let bluetooth_label = if bluetooth_state.available { if bluetooth_state.powered { "Bluetooth on" } else { "Bluetooth off" } } else { "Bluetooth unavailable" };
         gpui::div()
             .id("kobo-device-topbar")
-            .h(px(components::TOPBAR_HEIGHT))
+            .h(gpui::rems(components::TOPBAR_HEIGHT_REM))
             .flex_none()
             .w_full()
             .flex()
@@ -101,7 +105,7 @@ impl Render for KoboDeviceBar {
             .child(
                 Popover::new("kobo-power-menu")
                     .anchor(gpui::Anchor::TopLeft)
-                    .top(px(POPUP_TOP))
+                    .top(popup_top)
                     .open(self.power_menu_open)
                     .on_open_change(cx.listener(|bar, open, _, cx| {
                         bar.power_menu_open = *open;
@@ -126,19 +130,19 @@ impl Render for KoboDeviceBar {
                     ),
             )
             .child(gpui::div().flex_1())
-            .child(reader_ui::brightness_popover(self.brightness.clone(), None, theme).top(px(POPUP_TOP)).trigger(device_button("kobo-brightness-button", "Brightness", gpui_component::IconName::Sun)))
+            .child(reader_ui::brightness_popover(self.brightness.clone(), None, theme).top(popup_top).trigger(device_button("kobo-brightness-button", "Brightness", gpui_component::IconName::Sun)))
             .child(device_button("kobo-auto-rotate-button", rotate_label, Icon::empty().path(rotate_icon)).on_click(cx.listener(move |bar, _, _, cx| {
                 bar.auto_rotate = !bar.auto_rotate;
                 rotate_services.save_kobo_auto_rotate(bar.auto_rotate, cx);
                 cx.notify();
             })))
-            .child(Popover::new("kobo-bluetooth-popup").anchor(gpui::Anchor::TopRight).top(px(POPUP_TOP)).p_0().trigger(device_button("kobo-bluetooth-button", bluetooth_label, Icon::empty().path(bluetooth_icon))).child(bluetooth))
-            .child(battery::popover(&self.battery, cx))
+            .child(Popover::new("kobo-bluetooth-popup").anchor(gpui::Anchor::TopRight).top(popup_top).p_0().trigger(device_button("kobo-bluetooth-button", bluetooth_label, Icon::empty().path(bluetooth_icon))).child(bluetooth))
+            .child(battery::popover(&self.battery, popup_top, cx))
             .child(
                 Popover::new("kobo-wifi-popup")
                     .anchor(gpui::Anchor::TopRight)
                     // Offset from the centered square trigger to the bar's bottom.
-                    .top(px(POPUP_TOP))
+                    .top(popup_top)
                     .p_0()
                     .trigger(device_button("kobo-wifi-button", label, Icon::empty().path(icon)))
                     .on_open_change(move |open, window, cx| {

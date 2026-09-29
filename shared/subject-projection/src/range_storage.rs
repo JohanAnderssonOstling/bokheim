@@ -1,4 +1,4 @@
-//! Version 9 range storage. Full boundary strings exist only at the API/editor boundary.
+//! Structured range storage. Full boundary strings exist only at the API/editor boundary.
 use super::lcc::lcc_endpoint;
 use super::runtime::cutter_components;
 use rusqlite::{params, Connection};
@@ -41,17 +41,7 @@ pub(super) fn insert_range(connection: &Connection, concept_id: i64, start: &str
     Ok(())
 }
 
-pub(super) fn read_ranges(connection: &Connection, version: &str) -> Result<Vec<(i64, String, String)>, String> {
-    if !matches!(version, "9" | "10" | "11") {
-        let query = if version == "7" {
-            "SELECT concept_id,class_letters || start_value,class_letters || end_value FROM lcc_range ORDER BY concept_id,class_letters,start_value,end_value"
-        } else {
-            "SELECT concept_id,start_code,end_code FROM lcc_range ORDER BY concept_id,start_code,end_code"
-        };
-        let mut statement = connection.prepare(query).map_err(|e| e.to_string())?;
-        let rows = statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(|e| e.to_string())?;
-        return rows.collect::<Result<_, _>>().map_err(|e| e.to_string());
-    }
+pub(super) fn read_ranges(connection: &Connection) -> Result<Vec<(i64, String, String)>, String> {
     let mut statement = connection
         .prepare("SELECT concept_id,start_letters,start_number,start_cutters,end_letters,end_number,end_cutters FROM lcc_range ORDER BY concept_id,start_letters,start_number,start_cutters,end_letters,end_number,end_cutters")
         .map_err(|e| e.to_string())?;
@@ -76,39 +66,9 @@ pub(super) fn read_ranges(connection: &Connection, version: &str) -> Result<Vec<
     Ok(result)
 }
 
-pub(super) fn upgrade(connection: &Connection) -> Result<(), String> {
-    let version: String = connection.query_row("SELECT value FROM taxonomy_meta WHERE key='format_version'", [], |r| r.get(0)).map_err(|e| e.to_string())?;
-    if matches!(version.as_str(), "9" | "10" | "11") {
-        return Ok(());
-    }
-    if version != "8" {
-        return Err(format!("cannot migrate LCC ranges from format {version}"));
-    }
-    let tx = connection.unchecked_transaction().map_err(|e| e.to_string())?;
-    tx.execute_batch(include_str!("../data/migrations/20260920_correct_legacy_range_endpoints.sql")).map_err(|e| e.to_string())?;
-    let rows = read_ranges(&tx, "8")?;
-    tx.execute_batch("DROP TABLE lcc_range;").map_err(|e| e.to_string())?;
-    tx.execute_batch(include_str!("range_storage.sql")).map_err(|e| e.to_string())?;
-    for (id, start, end) in rows {
-        insert_range(&tx, id, &start, &end)?;
-    }
-    tx.execute("UPDATE taxonomy_meta SET value='9' WHERE key='format_version'", []).map_err(|e| e.to_string())?;
-    tx.commit().map_err(|e| e.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn invalid_boundary_rolls_back_the_entire_migration() {
-        let connection = Connection::open_in_memory().unwrap();
-        connection.execute_batch("CREATE TABLE taxonomy_meta(key TEXT PRIMARY KEY,value TEXT); INSERT INTO taxonomy_meta VALUES('format_version','8'); CREATE TABLE concept(concept_id INTEGER PRIMARY KEY); INSERT INTO concept VALUES(1); CREATE TABLE lcc_range(start_code TEXT,end_code TEXT,concept_id INTEGER); INSERT INTO lcc_range VALUES('QA1','QA2',1),('QA3','QA4.2.9',1);").unwrap();
-        assert!(upgrade(&connection).is_err());
-        assert_eq!(connection.query_row("SELECT value FROM taxonomy_meta", [], |r| r.get::<_, String>(0)).unwrap(), "8");
-        assert_eq!(connection.query_row("SELECT count(*) FROM lcc_range WHERE end_code='QA4.2.9'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-        assert_eq!(connection.query_row("SELECT count(*) FROM lcc_range", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
-    }
 
     #[test]
     fn structured_storage_distinguishes_class_bounds_and_keeps_multiple_cutters() {
@@ -118,7 +78,7 @@ mod tests {
         for (start, end) in [("T", "TX"), ("T0", "T0"), ("DA890.E3.A2", "DA890.E3.Z"), ("QA1.2.A01", "QA1.2.A019")] {
             insert_range(&connection, 1, start, end).unwrap();
         }
-        let rows = read_ranges(&connection, "9").unwrap();
+        let rows = read_ranges(&connection).unwrap();
         assert!(rows.contains(&(1, "T".into(), "TX".into())));
         assert!(rows.contains(&(1, "T0".into(), "T0".into())));
         assert!(rows.contains(&(1, "DA890.E3.A2".into(), "DA890.E3.Z".into())));

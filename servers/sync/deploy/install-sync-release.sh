@@ -54,9 +54,8 @@ trap cleanup EXIT
 cp -a -- /usr/local/bin/sync-server "${rollback}/sync-server"
 cp -a -- /etc/systemd/system/bokheim-sync.service "${rollback}/bokheim-sync.service"
 
-# Migrations are additive and transactional. Never recreate the production
-# database as part of a code deployment.
-runuser -u bokheim -- env DATABASE_URL="${database_url}" "${incoming}/sync-server" upgrade
+# Refuse activation until the initial schema has been provisioned separately.
+runuser -u bokheim -- env DATABASE_URL="${database_url}" "${incoming}/sync-server" verify-schema
 
 activation_started=true
 systemctl stop bokheim-sync.service
@@ -83,4 +82,4 @@ admin_status=$(curl --silent --output /dev/null --write-out '%{http_code}' --max
 deployment_succeeded=true
 unset database_url
 rm -rf -- "${incoming}"
-echo "Bokheim sync server deployed without resetting PostgreSQL; administrator API verified."
+echo "Bokheim sync server deployed; administrator API verified."

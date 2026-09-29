@@ -550,6 +550,7 @@ version = "0.1.0"
 dependencies = [
  "account-client",
  "async-channel",
+ "audiobook-folder",
  "axum",
  "blake3",
  "book-access",
@@ -807,10 +808,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "audiobook-library"
+name = "audiobook-folder"
 version = "0.1.0"
 dependencies = [
- "serde",
+ "blake3",
+ "encoding_rs",
+ "symphonia",
+ "tempfile",
+ "zip",
 ]
 
 [[package]]
@@ -820,7 +825,6 @@ dependencies = [
  "app",
  "async-channel",
  "async-io",
- "audiobook-library",
  "book-model",
  "crossbeam-channel",
  "gpui",
@@ -1211,6 +1215,7 @@ dependencies = [
  "tempfile",
  "test-support",
  "tokio",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
  "zip",
 ]
@@ -1266,10 +1271,14 @@ dependencies = [
 name = "book-metadata"
 version = "0.1.0"
 dependencies = [
- "audiobook-library",
+ "audiobook-folder",
+ "blake3",
  "book-inspection",
  "book-model",
+ "content-address",
+ "encoding_rs",
  "library-model",
+ "log",
  "metadata-contract",
  "mobi",
  "mp4ameta",
@@ -1278,6 +1287,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "zip",
 ]
 
 [[package]]
@@ -1317,10 +1327,10 @@ dependencies = [
  "futures-util",
  "gpui",
  "gpui-component",
- "gpui_android",
+ "gpui_android 0.1.0",
  "gpui_kobo",
  "gpui_platform",
- "html-engine",
+ "html-engine 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
  "html-view-core",
  "html-view-gpui",
  "image 0.25.10",
@@ -1333,6 +1343,7 @@ dependencies = [
  "subject-projection",
  "sync-common",
  "ui-components",
+ "update-client",
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -1663,6 +1674,7 @@ name = "client-platform-web"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "book-model",
  "client-platform-runtime",
  "cpu-host",
  "futures-channel",
@@ -1671,6 +1683,8 @@ dependencies = [
  "log",
  "rmp-serde",
  "rusqlite",
+ "serde",
+ "serde_json",
  "sqlite-wasm-vfs",
  "sync-common",
  "tokio",
@@ -1765,7 +1779,17 @@ dependencies = [
 name = "collections"
 version = "0.1.0"
 dependencies = [
- "gpui_util",
+ "gpui_util 0.1.0",
+ "indexmap 2.14.0",
+ "rustc-hash 2.1.3",
+]
+
+[[package]]
+name = "collections"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
+dependencies = [
+ "gpui_util 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "indexmap 2.14.0",
  "rustc-hash 2.1.3",
 ]
@@ -2124,6 +2148,7 @@ dependencies = [
  "book-model",
  "client-platform-runtime",
  "client-runtime",
+ "content-address",
  "image 0.24.9",
  "rmp-serde",
  "serde",
@@ -2405,7 +2430,7 @@ dependencies = [
 
 [[package]]
 name = "desktop-gpui"
-version = "0.1.6"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "app",
@@ -2416,23 +2441,22 @@ dependencies = [
  "fs2",
  "gpui",
  "gpui-component",
- "gpui_android",
+ "gpui_android 0.1.0",
  "gpui_kobo",
  "gpui_platform",
  "image 0.25.10",
  "jni 0.22.4",
  "kobo-device",
+ "linux-update-host",
  "log",
  "reader-ui",
- "reqwest",
  "rustls 0.23.38",
- "semver",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tempfile",
  "tokio",
  "ui-components",
+ "update-client",
  "uuid",
 ]
 
@@ -3026,9 +3050,11 @@ dependencies = [
 name = "filesystem-scanner"
 version = "0.1.0"
 dependencies = [
+ "audiobook-folder",
  "blake3",
  "book-identity",
  "book-inspection",
+ "book-metadata",
  "book-model",
  "client-platform-runtime",
  "client-runtime",
@@ -3588,7 +3614,7 @@ dependencies = [
  "bindgen",
  "bitflags 2.13.1",
  "chrono",
- "collections",
+ "collections 0.1.0",
  "core-video",
  "ctor",
  "derive_more",
@@ -3599,9 +3625,9 @@ dependencies = [
  "getrandom 0.3.4",
  "gpui_macros",
  "gpui_shared_string",
- "gpui_util",
+ "gpui_util 0.1.0",
  "heapless",
- "http_client",
+ "http_client 0.1.0",
  "image 0.25.10",
  "inventory",
  "itertools 0.14.0",
@@ -3620,7 +3646,7 @@ dependencies = [
  "refineable",
  "regex",
  "resvg 0.46.0",
- "scheduler",
+ "scheduler 0.1.0",
  "schemars",
  "seahash",
  "serde",
@@ -3726,7 +3752,27 @@ dependencies = [
  "anyhow",
  "futures",
  "gpui",
- "gpui_wgpu",
+ "gpui_wgpu 0.1.0",
+ "jni 0.22.4",
+ "libc",
+ "log",
+ "parking_lot",
+ "raw-window-handle",
+ "uuid",
+ "wgpu",
+]
+
+[[package]]
+name = "gpui_android"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
+dependencies = [
+ "android-activity",
+ "android_logger",
+ "anyhow",
+ "futures",
+ "gpui",
+ "gpui_wgpu 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "jni 0.22.4",
  "libc",
  "log",
@@ -3739,12 +3785,13 @@ dependencies = [
 [[package]]
 name = "gpui_apple"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
 dependencies = [
  "anyhow",
  "block",
  "cbindgen",
  "cocoa 0.26.0",
- "collections",
+ "collections 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "core-foundation 0.10.1",
  "core-video",
  "derive_more",
@@ -3765,7 +3812,7 @@ dependencies = [
  "anyhow",
  "futures",
  "gpui",
- "gpui_wgpu",
+ "gpui_wgpu 0.1.0",
  "image 0.25.10",
  "libc",
  "parking_lot",
@@ -3776,6 +3823,7 @@ dependencies = [
 [[package]]
 name = "gpui_linux"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -3786,13 +3834,13 @@ dependencies = [
  "bytemuck",
  "calloop",
  "calloop-wayland-source",
- "collections",
+ "collections 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "filedescriptor",
  "futures",
  "gpui",
- "gpui_util",
- "gpui_wgpu",
- "http_client",
+ "gpui_util 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
+ "gpui_wgpu 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
+ "http_client 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "libc",
  "log",
  "notify-rust",
@@ -3821,6 +3869,7 @@ dependencies = [
 [[package]]
 name = "gpui_macos"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -3829,7 +3878,7 @@ dependencies = [
  "block",
  "block2 0.6.2",
  "cocoa 0.26.0",
- "collections",
+ "collections 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "core-foundation 0.10.1",
  "core-foundation-sys",
  "core-graphics 0.24.0",
@@ -3840,7 +3889,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_apple",
- "gpui_util",
+ "gpui_util 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "image 0.25.10",
  "itertools 0.14.0",
  "libc",
@@ -3875,14 +3924,15 @@ dependencies = [
 [[package]]
 name = "gpui_platform"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
 dependencies = [
  "console_error_panic_hook",
  "gpui",
- "gpui_android",
+ "gpui_android 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui_linux",
  "gpui_macos",
  "gpui_web",
- "gpui_wgpu",
+ "gpui_wgpu 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui_windows",
  "log",
 ]
@@ -3906,20 +3956,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui_util"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
+dependencies = [
+ "anyhow",
+ "log",
+ "which",
+]
+
+[[package]]
 name = "gpui_web"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
  "futures",
  "gpui",
- "gpui_wgpu",
- "http_client",
+ "gpui_wgpu 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
+ "http_client 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "js-sys",
  "log",
  "parking_lot",
  "raw-window-handle",
- "scheduler",
+ "scheduler 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -3934,11 +3995,38 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytemuck",
- "collections",
+ "collections 0.1.0",
  "cosmic-text",
  "etagere",
  "gpui",
- "gpui_util",
+ "gpui_util 0.1.0",
+ "image 0.25.10",
+ "itertools 0.14.0",
+ "log",
+ "parking_lot",
+ "profiling",
+ "raw-window-handle",
+ "smallvec",
+ "swash",
+ "unicode-bidi",
+ "unicode-segmentation",
+ "web-sys",
+ "wgpu",
+ "zed-font-kit",
+]
+
+[[package]]
+name = "gpui_wgpu"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "collections 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
+ "cosmic-text",
+ "etagere",
+ "gpui",
+ "gpui_util 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "image 0.25.10",
  "itertools 0.14.0",
  "log",
@@ -3957,16 +4045,17 @@ dependencies = [
 [[package]]
 name = "gpui_windows"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
 dependencies = [
  "accesskit",
  "accesskit_windows",
  "anyhow",
- "collections",
+ "collections 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "dunce",
  "etagere",
  "futures",
  "gpui",
- "gpui_util",
+ "gpui_util 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "image 0.25.10",
  "itertools 0.14.0",
  "log",
@@ -4211,7 +4300,7 @@ version = "0.1.0"
 dependencies = [
  "encoding_rs",
  "epub_provider",
- "html-engine",
+ "html-engine 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
  "mobi",
  "regex",
  "zip",
@@ -4220,6 +4309,16 @@ dependencies = [
 [[package]]
 name = "html-dom"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520#91766fb2db8d56b38dc0336ddf74972da9872520"
+dependencies = [
+ "kurbo 0.11.3",
+ "rustc_data_structures",
+]
+
+[[package]]
+name = "html-dom"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine#91766fb2db8d56b38dc0336ddf74972da9872520"
 dependencies = [
  "kurbo 0.11.3",
  "rustc_data_structures",
@@ -4228,25 +4327,60 @@ dependencies = [
 [[package]]
 name = "html-engine"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520#91766fb2db8d56b38dc0336ddf74972da9872520"
 dependencies = [
- "html-dom",
- "html-layout",
- "html-parse",
- "html-pipeline",
- "html-render-core",
- "html-resources",
- "html-source",
- "html-style",
- "html-style-model",
+ "html-dom 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "html-layout 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "html-parse 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "html-pipeline 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "html-render-core 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "html-resources 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "html-source 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "html-style 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "html-style-model 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
  "html-wpt-test-support",
+]
+
+[[package]]
+name = "html-engine"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine#91766fb2db8d56b38dc0336ddf74972da9872520"
+dependencies = [
+ "html-dom 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
+ "html-layout 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
+ "html-parse 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
+ "html-pipeline 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
+ "html-render-core 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
+ "html-resources 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
+ "html-source 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
+ "html-style 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
+ "html-style-model 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
 ]
 
 [[package]]
 name = "html-layout"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520#91766fb2db8d56b38dc0336ddf74972da9872520"
 dependencies = [
- "html-dom",
- "html-style-model",
+ "html-dom 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "html-style-model 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "hypher",
+ "kurbo 0.11.3",
+ "rayon",
+ "rustc_data_structures",
+ "taffy",
+ "unicode-segmentation",
+ "unicode_categories",
+ "web-time",
+]
+
+[[package]]
+name = "html-layout"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine#91766fb2db8d56b38dc0336ddf74972da9872520"
+dependencies = [
+ "html-dom 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
+ "html-style-model 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
  "hypher",
  "kurbo 0.11.3",
  "rayon",
@@ -4260,10 +4394,24 @@ dependencies = [
 [[package]]
 name = "html-parse"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520#91766fb2db8d56b38dc0336ddf74972da9872520"
 dependencies = [
  "ego-tree",
  "encoding_rs",
- "html-dom",
+ "html-dom 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "html5ever 0.39.0",
+ "quick-xml 0.41.0",
+ "scraper",
+]
+
+[[package]]
+name = "html-parse"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine#91766fb2db8d56b38dc0336ddf74972da9872520"
+dependencies = [
+ "ego-tree",
+ "encoding_rs",
+ "html-dom 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
  "html5ever 0.39.0",
  "quick-xml 0.41.0",
  "scraper",
@@ -4272,23 +4420,49 @@ dependencies = [
 [[package]]
 name = "html-pipeline"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520#91766fb2db8d56b38dc0336ddf74972da9872520"
 dependencies = [
  "encoding_rs",
- "html-dom",
- "html-layout",
- "html-parse",
- "html-resources",
- "html-style",
- "web-time",
+ "html-dom 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "html-layout 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "html-parse 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "html-resources 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "html-style 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+]
+
+[[package]]
+name = "html-pipeline"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine#91766fb2db8d56b38dc0336ddf74972da9872520"
+dependencies = [
+ "encoding_rs",
+ "html-dom 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
+ "html-layout 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
+ "html-parse 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
+ "html-resources 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
+ "html-style 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
 ]
 
 [[package]]
 name = "html-render-core"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520#91766fb2db8d56b38dc0336ddf74972da9872520"
 dependencies = [
- "html-layout",
- "html-pipeline",
- "html-resources",
+ "html-layout 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "html-pipeline 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "html-resources 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "kurbo 0.11.3",
+ "peniko",
+]
+
+[[package]]
+name = "html-render-core"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine#91766fb2db8d56b38dc0336ddf74972da9872520"
+dependencies = [
+ "html-layout 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
+ "html-pipeline 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
+ "html-resources 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
  "kurbo 0.11.3",
  "peniko",
 ]
@@ -4296,10 +4470,25 @@ dependencies = [
 [[package]]
 name = "html-resources"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520#91766fb2db8d56b38dc0336ddf74972da9872520"
 dependencies = [
  "base64 0.22.1",
- "html-dom",
- "html-source",
+ "html-dom 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "html-source 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "image 0.25.10",
+ "peniko",
+ "quick-xml 0.38.4",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "html-resources"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine#91766fb2db8d56b38dc0336ddf74972da9872520"
+dependencies = [
+ "base64 0.22.1",
+ "html-dom 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
+ "html-source 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
  "image 0.25.10",
  "peniko",
  "quick-xml 0.38.4",
@@ -4309,13 +4498,34 @@ dependencies = [
 [[package]]
 name = "html-source"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520#91766fb2db8d56b38dc0336ddf74972da9872520"
+
+[[package]]
+name = "html-source"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine#91766fb2db8d56b38dc0336ddf74972da9872520"
 
 [[package]]
 name = "html-style"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520#91766fb2db8d56b38dc0336ddf74972da9872520"
 dependencies = [
- "html-dom",
- "html-style-model",
+ "html-dom 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "html-style-model 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "lightningcss",
+ "parcel_selectors",
+ "rustc_data_structures",
+ "static-self",
+ "web-time",
+]
+
+[[package]]
+name = "html-style"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine#91766fb2db8d56b38dc0336ddf74972da9872520"
+dependencies = [
+ "html-dom 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
+ "html-style-model 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
  "lightningcss",
  "parcel_selectors",
  "rustc_data_structures",
@@ -4326,8 +4536,19 @@ dependencies = [
 [[package]]
 name = "html-style-model"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520#91766fb2db8d56b38dc0336ddf74972da9872520"
 dependencies = [
- "html-dom",
+ "html-dom 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
+ "kurbo 0.11.3",
+ "rustc_data_structures",
+]
+
+[[package]]
+name = "html-style-model"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine#91766fb2db8d56b38dc0336ddf74972da9872520"
+dependencies = [
+ "html-dom 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
  "kurbo 0.11.3",
  "rustc_data_structures",
 ]
@@ -4335,15 +4556,17 @@ dependencies = [
 [[package]]
 name = "html-view-cfi"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlViewCore?rev=0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7#0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7"
 dependencies = [
- "html-engine",
+ "html-engine 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
 ]
 
 [[package]]
 name = "html-view-core"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlViewCore?rev=0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7#0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7"
 dependencies = [
- "html-engine",
+ "html-engine 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
  "html-view-cfi",
  "html-view-doc",
  "html-view-load",
@@ -4362,8 +4585,9 @@ dependencies = [
 [[package]]
 name = "html-view-doc"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlViewCore?rev=0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7#0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7"
 dependencies = [
- "html-engine",
+ "html-engine 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
  "html-view-cfi",
  "html-view-types",
  "kurbo 0.11.3",
@@ -4379,8 +4603,8 @@ dependencies = [
  "epub_provider",
  "gpui",
  "gpui_platform",
- "gpui_wgpu",
- "html-engine",
+ "gpui_wgpu 0.1.0",
+ "html-engine 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
  "html-view-core",
  "image 0.25.10",
  "kurbo 0.11.3",
@@ -4393,8 +4617,9 @@ dependencies = [
 [[package]]
 name = "html-view-load"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlViewCore?rev=0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7#0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7"
 dependencies = [
- "html-engine",
+ "html-engine 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
  "html-view-types",
  "web-time",
 ]
@@ -4402,8 +4627,9 @@ dependencies = [
 [[package]]
 name = "html-view-navigate"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlViewCore?rev=0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7#0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7"
 dependencies = [
- "html-engine",
+ "html-engine 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
  "html-view-cfi",
  "html-view-doc",
  "html-view-types",
@@ -4412,8 +4638,9 @@ dependencies = [
 [[package]]
 name = "html-view-paginate"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlViewCore?rev=0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7#0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7"
 dependencies = [
- "html-engine",
+ "html-engine 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
  "html-view-doc",
  "html-view-types",
  "kurbo 0.11.3",
@@ -4422,8 +4649,9 @@ dependencies = [
 [[package]]
 name = "html-view-paint"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlViewCore?rev=0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7#0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7"
 dependencies = [
- "html-engine",
+ "html-engine 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
  "html-view-cfi",
  "html-view-doc",
  "html-view-paginate",
@@ -4436,8 +4664,9 @@ dependencies = [
 [[package]]
 name = "html-view-select"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlViewCore?rev=0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7#0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7"
 dependencies = [
- "html-engine",
+ "html-engine 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
  "html-view-doc",
  "html-view-types",
  "kurbo 0.11.3",
@@ -4447,8 +4676,9 @@ dependencies = [
 [[package]]
 name = "html-view-types"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlViewCore?rev=0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7#0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7"
 dependencies = [
- "html-engine",
+ "html-engine 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine)",
  "kurbo 0.11.3",
  "peniko",
 ]
@@ -4456,6 +4686,7 @@ dependencies = [
 [[package]]
 name = "html-wpt-test-support"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520#91766fb2db8d56b38dc0336ddf74972da9872520"
 
 [[package]]
 name = "html5ever"
@@ -4539,6 +4770,26 @@ dependencies = [
 [[package]]
 name = "http_client"
 version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-compression",
+ "bytes",
+ "derive_more",
+ "futures",
+ "http 1.4.0",
+ "http-body 1.0.1",
+ "log",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "url",
+]
+
+[[package]]
+name = "http_client"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -5523,6 +5774,7 @@ dependencies = [
  "device-sqlite",
  "include-sqlite-sql",
  "library-model",
+ "library-registry",
  "library-replica",
  "log",
  "metadata-contract",
@@ -5533,6 +5785,8 @@ dependencies = [
  "subject-projection",
  "sync-common",
  "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-time",
 ]
 
@@ -5541,6 +5795,7 @@ name = "library-files"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "audiobook-folder",
  "blake3",
  "book-access",
  "book-identity",
@@ -5559,7 +5814,6 @@ dependencies = [
  "metadata-contract",
  "pdf-view-common",
  "reqwest",
- "rusqlite",
  "serde_json",
  "sync-common",
  "tempfile",
@@ -5732,6 +5986,25 @@ name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+
+[[package]]
+name = "linux-update-host"
+version = "0.1.0"
+dependencies = [
+ "book-model",
+ "fs2",
+ "library-database",
+ "log",
+ "ring",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "subject-projection",
+ "sync-common",
+ "tempfile",
+ "update-client",
+ "zip",
+]
 
 [[package]]
 name = "litemap"
@@ -6110,6 +6383,7 @@ dependencies = [
 [[package]]
 name = "media"
 version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -7288,13 +7562,14 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui_platform",
- "gpui_wgpu",
+ "gpui_wgpu 0.1.0",
  "image 0.25.10",
  "log",
  "lopdf",
  "pdf-reader-core",
  "smallvec",
  "ui-components",
+ "web-time",
 ]
 
 [[package]]
@@ -7340,7 +7615,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 name = "perf"
 version = "0.1.0"
 dependencies = [
- "collections",
+ "collections 0.1.0",
  "serde",
  "serde_json",
 ]
@@ -8190,7 +8465,7 @@ dependencies = [
  "gpui-component",
  "gpui_kobo",
  "html-book",
- "html-engine",
+ "html-engine 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
  "html-view-core",
  "html-view-gpui",
  "library-backend",
@@ -8885,6 +9160,21 @@ dependencies = [
 [[package]]
 name = "scheduler"
 version = "0.1.0"
+dependencies = [
+ "async-task",
+ "backtrace",
+ "chrono",
+ "flume",
+ "futures",
+ "parking_lot",
+ "rand 0.9.4",
+ "web-time",
+]
+
+[[package]]
+name = "scheduler"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
 dependencies = [
  "async-task",
  "backtrace",
@@ -10411,6 +10701,7 @@ dependencies = [
 name = "thumbnail"
 version = "0.1.0"
 dependencies = [
+ "audiobook-folder",
  "epub_provider",
  "fast_image_resize",
  "hayro-jpeg2000",
@@ -10897,6 +11188,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -11009,6 +11301,36 @@ name = "unty"
 version = "0.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
+
+[[package]]
+name = "update-client"
+version = "0.1.0"
+dependencies = [
+ "fs2",
+ "reqwest",
+ "ring",
+ "rusqlite",
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "url",
+ "zip",
+]
+
+[[package]]
+name = "update-publisher"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fs2",
+ "ring",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "update-client",
+ "url",
+]
 
 [[package]]
 name = "url"
@@ -13216,7 +13538,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "collections",
+ "collections 0.1.0",
  "log",
 ]
 
@@ -13332,3 +13654,18 @@ dependencies = [
  "syn 3.0.3",
  "winnow 1.0.4",
 ]
+
+[[patch.unused]]
+name = "gpui"
+version = "0.2.2"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
+
+[[patch.unused]]
+name = "gpui"
+version = "0.2.2"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
+
+[[patch.unused]]
+name = "gpui_macros"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"

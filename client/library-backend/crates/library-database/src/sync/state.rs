@@ -12,10 +12,6 @@ use crate::{Database, DatabaseError};
 
 use sync_common::{StateCell, SyncCursor};
 
-fn unix_millis_saturating() -> Result<i64, DatabaseError> {
-    u64::try_from(web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_err(DatabaseError::operation)?.as_millis()).map(|value| value.min(i64::MAX as u64) as i64).map_err(DatabaseError::operation)
-}
-
 fn read_cell(row: &rusqlite::Row<'_>) -> rusqlite::Result<StateCell> {
     Ok(StateCell { kind: row.get(0)?, entity_key: row.get(1)?, entity_subkey: row.get(2)? })
 }
@@ -154,34 +150,13 @@ impl Database {
         if cells.is_empty() {
             return Ok(0);
         }
-        let changed_at = unix_millis_saturating()?;
-        let mut pending = Vec::new();
-        for cell in cells {
-            if self.outbox_identity_exists(cell)? {
-                continue;
+        self.with_write_transaction(|tx| {
+            let mut inserted = 0;
+            for cell in cells {
+                inserted += usize::from(crate::sync::apply::registers::recover(tx, cell)?);
             }
-            let Some((body, conflict_rank)) = self.read_current_state_body(cell)? else { continue };
-            pending.push((cell, body, conflict_rank));
-        }
-        if pending.is_empty() {
-            return Ok(0);
-        }
-        let transaction = self.connection.unchecked_transaction()?;
-        let mut inserted = 0;
-        for (cell, body, conflict_rank) in &pending {
-            inserted += transaction.sync_enqueue_outbox_cell(&cell.kind, &cell.entity_key, &cell.entity_subkey, body, changed_at, *conflict_rank)?;
-        }
-        transaction.commit()?;
-        Ok(inserted as usize)
-    }
-
-    fn outbox_identity_exists(&self, cell: &StateCell) -> Result<bool, DatabaseError> {
-        let mut exists = false;
-        self.connection.sync_outbox_identity_exists(&cell.kind, &cell.entity_key, &cell.entity_subkey, |row| {
-            exists = row.get(0)?;
-            Ok(())
-        })?;
-        Ok(exists)
+            Ok(crate::transactions::WriteOutcome::Commit(inserted))
+        })
     }
 
     /// Recovery commits one page at a time while retaining its durable
@@ -194,70 +169,11 @@ impl Database {
             self.clear_cursor_recovery()?;
             return Ok((None, 0));
         }
-        let changed_at = unix_millis_saturating()?;
-        let mut pending = Vec::new();
-        for cell in &cells {
-            if self.outbox_identity_exists(cell)? {
-                continue;
-            }
-            let Some((body, conflict_rank)) = self.read_current_state_body(cell)? else { continue };
-            pending.push((cell, body, conflict_rank));
-        }
-        if !pending.is_empty() {
-            let transaction = self.connection.unchecked_transaction()?;
-            for (cell, body, conflict_rank) in &pending {
-                transaction.sync_enqueue_outbox_cell(&cell.kind, &cell.entity_key, &cell.entity_subkey, body, changed_at, *conflict_rank)?;
-            }
-            transaction.commit()?;
-        }
-        let inserted = pending.len();
+        let inserted = self.sync_enqueue_missing_state_cells(&cells)?;
         Ok((cells.last().cloned(), inserted))
     }
 
     fn clear_cursor_recovery(&self) -> Result<(), DatabaseError> {
         self.connection.sync_clear_cursor_recovery().map(|_| ()).map_err(Into::into)
-    }
-
-    fn read_current_state_body(&self, cell: &StateCell) -> Result<Option<(Vec<u8>, i64)>, DatabaseError> {
-        use rusqlite::OptionalExtension as _;
-        fn single_pair(query: impl FnOnce(&mut dyn FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<()>) -> rusqlite::Result<()>) -> Result<Option<(Vec<u8>, i64)>, DatabaseError> {
-            let mut found = None;
-            query(&mut |row| {
-                found = Some((row.get(0)?, row.get(1)?));
-                Ok(())
-            })
-            .optional()?;
-            Ok(found)
-        }
-        let key = cell.entity_key.as_str();
-        let subkey = cell.entity_subkey.as_str();
-        match cell.kind.as_str() {
-            "directory_name" => single_pair(|read| self.connection.sync_current_directory_name(key, read)),
-            "directory_parent" => single_pair(|read| self.connection.sync_current_directory_parent(key, read)),
-            "directory_lifecycle" => single_pair(|read| self.connection.sync_current_directory_lifecycle(key, read)),
-            "book_lifecycle" => {
-                let mut lifecycle: Option<i64> = None;
-                self.connection
-                    .sync_current_book_lifecycle_state(key, |row| {
-                        lifecycle = row.get(0)?;
-                        Ok(())
-                    })
-                    .optional()?;
-                match lifecycle {
-                    Some(2) => single_pair(|read| self.connection.sync_current_book_purged(key, read)),
-                    Some(1) => single_pair(|read| self.connection.sync_current_book_deleted(key, read)),
-                    Some(0) => single_pair(|read| self.connection.sync_current_book_added(key, read)),
-                    Some(_) | None => Ok(None),
-                }
-            }
-            "placement" => single_pair(|read| self.connection.sync_current_placement(key, subkey, read)),
-            "reading_position" => single_pair(|read| self.connection.sync_current_reading_position(key, read)),
-            "description" => single_pair(|read| self.connection.sync_current_description(key, read)),
-            "metadata" => single_pair(|read| self.connection.sync_current_metadata(key, read)),
-            "annotation" => single_pair(|read| self.connection.sync_current_annotation(key, read)),
-            "book_toc" => single_pair(|read| self.connection.sync_current_book_toc(key, read)),
-            "pdf_reader_metadata" => single_pair(|read| self.connection.sync_current_pdf_reader_metadata(key, subkey, read)),
-            _ => Ok(None),
-        }
     }
 }

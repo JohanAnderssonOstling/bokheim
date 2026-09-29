@@ -32,6 +32,7 @@ pub trait FileAccess {
 }
 pub trait Storage {
     type File: FileAccess;
+    fn staged_path(&self, manifest: &Manifest, index: usize) -> String;
     async fn open_file(&self, name: &str) -> Result<Self::File, Error>;
     fn source_metadata(&self, index: u32) -> Result<(u64, f64), Error>;
     async fn read_source(&self, index: u32, start: u64, end: u64) -> Result<Vec<u8>, Error>;
@@ -108,6 +109,10 @@ pub struct File {
 }
 
 impl<S: Storage> ImportIo<S> {
+    fn staged_path(&self, manifest: &Manifest, index: usize) -> String {
+        self.0.staged_path(manifest, index)
+    }
+
     async fn manifest(&self, job: Manifest) -> Result<Manifest, Error> {
         let file = self.open_file("manifest").await?;
         let bytes = file.read()?;
@@ -158,7 +163,7 @@ impl<S: Storage> ImportIo<S> {
     }
 }
 
-pub async fn run(job: Manifest, io: impl Storage, client: &impl Library, staged_path: impl Fn(&Manifest, usize) -> String, progress: impl Fn(Update) -> Result<(), Error>) -> Result<Vec<crate::ImportFailure>, Error> {
+pub async fn run<S: Storage>(job: Manifest, io: S, client: &impl Library, progress: impl Fn(Update) -> Result<(), Error>) -> Result<Vec<crate::ImportFailure>, Error> {
     let io = ImportIo(io);
     let manifest = io.manifest(job).await?;
     let journal = io.open_file("journal").await?;
@@ -186,7 +191,7 @@ pub async fn run(job: Manifest, io: impl Storage, client: &impl Library, staged_
     let prepared: PreparedImport = client.prepare(activity, &manifest).await?;
     state.prepare_directories(prepared.directories);
     let mut failures = prepared.failures;
-    let mut batch = Adding { state: &mut state, journal: &journal, client, manifest: &manifest, staged_path: &staged_path, reporter: &reporter, activity, failures: &mut failures };
+    let mut batch = Adding { state: &mut state, journal: &journal, client, storage: &io, manifest: &manifest, reporter: &reporter, activity, failures: &mut failures };
     crate::import_workflow::run(&mut batch).await?;
     client.cleanup(manifest.id, manifest.files.len() as u32).await?;
     let checkpoint = state.record_complete(failures.clone()).map_err(error)?;
@@ -199,13 +204,13 @@ struct Adding<'a, L, F, S, P> {
     state: &'a mut Journal,
     journal: &'a F,
     client: &'a L,
+    storage: &'a ImportIo<S>,
     manifest: &'a Manifest,
-    staged_path: &'a S,
     reporter: &'a Reporter<P>,
     activity: uuid::Uuid,
     failures: &'a mut Vec<crate::ImportFailure>,
 }
-impl<L: Library, F: FileAccess, S: Fn(&Manifest, usize) -> String, P: Fn(Update) -> Result<(), Error>> crate::import_workflow::Batch for Adding<'_, L, F, S, P> {
+impl<L: Library, F: FileAccess, S: Storage, P: Fn(Update) -> Result<(), Error>> crate::import_workflow::Batch for Adding<'_, L, F, S, P> {
     type Error = Error;
     fn len(&self) -> usize {
         self.manifest.files.len()
@@ -214,7 +219,7 @@ impl<L: Library, F: FileAccess, S: Fn(&Manifest, usize) -> String, P: Fn(Update)
         let file = &self.manifest.files[index];
         if !self.state.has_added(index) {
             let result = async {
-                let command = self.state.import_command((self.staged_path)(self.manifest, index), index, &file.path).map_err(error)?;
+                let command = self.state.import_command(self.storage.staged_path(self.manifest, index), index, &file.path).map_err(error)?;
                 self.client.import(command).await?;
                 Ok::<_, Error>(())
             }
@@ -280,6 +285,9 @@ mod tests {
     }
     impl Storage for Memory {
         type File = Handle;
+        fn staged_path(&self, manifest: &Manifest, index: usize) -> String {
+            format!("staged/{}/{index}", manifest.id)
+        }
         async fn open_file(&self, name: &str) -> Result<Handle, Error> {
             Ok(Handle(self.clone(), name.into()))
         }
@@ -296,6 +304,7 @@ mod tests {
         interrupted: Cell<bool>,
         storage_full: Cell<bool>,
         imported: RefCell<Vec<String>>,
+        physical: RefCell<Vec<String>>,
         finished: Cell<usize>,
         cleaned: Cell<bool>,
     }
@@ -314,6 +323,7 @@ mod tests {
                 return Err(Error { source: "browser storage is full".into(), transport: false, storage_full: true });
             }
             self.imported.borrow_mut().push(book.file_name);
+            self.physical.borrow_mut().push(book.physical);
             Ok(())
         }
         async fn advance(&self, _: AdvanceProgress) -> Result<(), Error> {
@@ -339,23 +349,21 @@ mod tests {
             files: ["first.epub", "second.epub"].into_iter().map(|name| File { path: vec![name.into()], size: 0, modified: 0. }).collect(),
         }
     }
-    fn staged_path(manifest: &Manifest, index: usize) -> String {
-        format!("staged/{}/{index}", manifest.id)
-    }
     #[tokio::test]
     async fn interruption_preserves_checkpoints_and_resumes_without_recopying_or_readding() {
         let storage = Memory::default();
-        let backend = Backend { storage: storage.clone(), interrupted: Cell::new(true), storage_full: Cell::new(false), imported: RefCell::new(vec![]), finished: Cell::new(0), cleaned: Cell::new(false) };
-        assert!(run(manifest(), storage.clone(), &backend, staged_path, |_| Ok(())).await.unwrap_err().transport);
+        let backend = Backend { storage: storage.clone(), interrupted: Cell::new(true), storage_full: Cell::new(false), imported: RefCell::new(vec![]), physical: RefCell::new(vec![]), finished: Cell::new(0), cleaned: Cell::new(false) };
+        assert!(run(manifest(), storage.clone(), &backend, |_| Ok(())).await.unwrap_err().transport);
         assert_eq!(&*backend.imported.borrow(), &["first.epub"]);
+        assert_eq!(&*backend.physical.borrow(), &["staged/import/0"]);
         assert!(!backend.cleaned.get());
         assert_eq!(backend.finished.get(), 1);
-        assert!(run(manifest(), storage.clone(), &backend, staged_path, |_| Ok(())).await.unwrap().is_empty());
+        assert!(run(manifest(), storage.clone(), &backend, |_| Ok(())).await.unwrap().is_empty());
         assert_eq!(storage.1.get(), 2, "checkpointed source bytes must not be read again");
         assert_eq!(&*backend.imported.borrow(), &["first.epub", "second.epub"]);
         assert!(backend.cleaned.get());
         assert_eq!(backend.finished.get(), 2);
-        assert!(run(manifest(), storage, &backend, staged_path, |update| {
+        assert!(run(manifest(), storage, &backend, |update| {
             assert!(matches!(update.phase, Phase::Complete));
             assert_eq!(update.counts.processed, 2);
             assert_eq!(update.counts.failed, 0);
@@ -369,11 +377,11 @@ mod tests {
     #[tokio::test]
     async fn full_storage_pauses_instead_of_recording_failed_books() {
         let storage = Memory::default();
-        let backend = Backend { storage: storage.clone(), interrupted: Cell::new(false), storage_full: Cell::new(true), imported: RefCell::new(vec![]), finished: Cell::new(0), cleaned: Cell::new(false) };
-        assert!(run(manifest(), storage.clone(), &backend, staged_path, |_| Ok(())).await.unwrap_err().storage_full);
+        let backend = Backend { storage: storage.clone(), interrupted: Cell::new(false), storage_full: Cell::new(true), imported: RefCell::new(vec![]), physical: RefCell::new(vec![]), finished: Cell::new(0), cleaned: Cell::new(false) };
+        assert!(run(manifest(), storage.clone(), &backend, |_| Ok(())).await.unwrap_err().storage_full);
         assert_eq!(&*backend.imported.borrow(), &["first.epub"]);
         assert!(!backend.cleaned.get());
-        assert!(run(manifest(), storage, &backend, staged_path, |_| Ok(())).await.unwrap().is_empty());
+        assert!(run(manifest(), storage, &backend, |_| Ok(())).await.unwrap().is_empty());
         assert_eq!(&*backend.imported.borrow(), &["first.epub", "second.epub"]);
     }
 }

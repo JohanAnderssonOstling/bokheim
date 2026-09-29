@@ -329,7 +329,7 @@ mod audiobook_http_tests {
             client.request(reqwest::Method::OPTIONS, &url).header("Origin", "https://app.bokheim.se").header("Access-Control-Request-Method", "POST").header("Access-Control-Request-Headers", "content-type").send().await.unwrap();
         assert!(preflight.status().is_success());
         assert_eq!(preflight.headers()["access-control-allow-origin"], "*");
-        assert_eq!(preflight.headers()["access-control-allow-methods"], "POST");
+        assert_eq!(preflight.headers()["access-control-allow-methods"], "POST,GET");
         let invalid = client.post(&url).header("Origin", "https://app.bokheim.se").header("Content-Type", "application/json").body("{}").send().await.unwrap();
         assert_eq!(invalid.status().as_u16(), 422);
         assert_eq!(invalid.headers()["access-control-allow-origin"], "*");

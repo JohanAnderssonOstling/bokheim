@@ -22,6 +22,8 @@ UPDATE subject_browse_state SET built_revision=tree_revision WHERE id=1;
 INSERT OR IGNORE INTO subject_browse_dirty_book SELECT row_id FROM book;
 DELETE FROM library_subject;
 DELETE FROM subject_browse_member;
+DELETE FROM subject_browse_visible_route;
+DELETE FROM subject_browse_placement;
 
 -- name: subject_cache_insert_route!
 -- param: route_id: i64

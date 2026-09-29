@@ -1,6 +1,7 @@
 //! Bibliographic values shared by local-library metadata.
 
 mod annotations;
+mod audiobook;
 mod author_name;
 mod book_format;
 mod canonical;
@@ -14,11 +15,12 @@ mod titles;
 mod toc_target;
 
 pub use annotations::{annotation_progress, AnnotationAnchor, AnnotationState, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, StoredAnnotationDetail};
+pub use audiobook::{AudiobookChapter, ChapterOrigin};
 pub use author_name::{AuthorName, AuthorNameError, AuthorNameMatchKey};
 pub use book_format::BookFormat;
 pub use canonical::{canonical_doi, canonical_isbn, canonical_uuid, from_content_candidate, from_text};
 pub use content_address::ContentHash;
-pub use credits::{agent_id_from_migration_seed, AgentId, AuthorId, BookMetadata, BookMetadataError, BookRecord, BookTocDocument, BookTocEntry, Contributor, ContributorId, PublisherCredit, PublisherId, PublisherMatchKey, PublisherName};
+pub use credits::{agent_id_from_migration_seed, tracks_match_archive, AgentId, AudiobookTrack, AuthorId, BookMetadata, BookMetadataError, BookRecord, BookTocDocument, BookTocEntry, Contributor, ContributorId, PublisherCredit, PublisherId, PublisherMatchKey, PublisherName};
 pub use marc::{marc_relator_code_from_metadata_role, MarcRelatorCode, AUTHOR_MARC_RELATOR_CODE, CONTRIBUTOR_MARC_RELATOR_CODE, NARRATOR_MARC_RELATOR_CODE, TRANSLATOR_MARC_RELATOR_CODE};
 pub use names::{comparison_key, given_name_first, looks_like_organization, recognized_suffix};
 pub use reader_annotation::{ReaderAnnotation, EXTERNAL_PDF_ANNOTATION_ID_PREFIX};

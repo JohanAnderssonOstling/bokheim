@@ -92,7 +92,7 @@ impl LibraryFileTypeFilter {
         match self {
             Self::All => true,
             Self::Pdf => extension.eq_ignore_ascii_case("pdf"),
-            Self::Audiobook => extension.eq_ignore_ascii_case("m4b"),
+            Self::Audiobook => extension.eq_ignore_ascii_case("m4b") || extension.eq_ignore_ascii_case("mp3folder"),
             Self::Book => matches!(extension.to_ascii_lowercase().as_str(), "epub" | "mobi" | "azw" | "azw3"),
         }
     }
@@ -167,6 +167,17 @@ pub struct BrowsePathSegment {
 /// Direct contents for one hierarchy location.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct BrowseContents {
+    pub children: Vec<BrowseRow>,
+    pub books: Vec<BookCardRow>,
+}
+
+/// One panel in the shared folder and subject browse presentation.
+///
+/// `parent` is the folder or subject represented by the panel; its immediate
+/// children and directly assigned books are rendered inside it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BrowseSection {
+    pub parent: BrowseRow,
     pub children: Vec<BrowseRow>,
     pub books: Vec<BookCardRow>,
 }

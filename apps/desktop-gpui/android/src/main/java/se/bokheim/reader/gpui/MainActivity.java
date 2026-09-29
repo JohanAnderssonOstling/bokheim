@@ -87,10 +87,55 @@ public final class MainActivity extends GameActivity {
 
     private final ExecutorService fileExecutor = Executors.newSingleThreadExecutor();
     private ActivityResultLauncher<Intent> pathPromptLauncher;
+    private ActivityResultLauncher<Intent> updateInstallerLauncher;
+
+    /** Called on the native update worker. Every UI command originates from an
+     * explicit Settings action; installer return codes never prove activation.
+     */
+    public static String updateCommand(android.content.Context context, String encoded) throws Exception {
+        org.json.JSONObject request = new org.json.JSONObject(encoded);
+        String action = request.getString("action");
+        if (action.equals("prepare")) {
+            UpdateMigrationService.prepare(context, request.getString("path"));
+            return "";
+        }
+        if (action.equals("permission")) return Boolean.toString(ApkInstaller.permissionGranted(context));
+        MainActivity activity = accountActivity.get();
+        if (activity == null || activity.isFinishing() || activity.isDestroyed()) throw new IllegalStateException("No active update window");
+        if (action.equals("install")) {
+            if (!ApkInstaller.permissionGranted(context)) return "permission";
+            final File apk;
+            try {
+                apk = ApkInstaller.verify(context, new File(request.getString("path")), request.getString("version"), request.getLong("bytes"), request.getString("sha256"));
+            } catch (ApkInstaller.InvalidPackageException invalid) {
+                Log.w(LOG_TAG, "Quarantining invalid update package", invalid);
+                return "invalidPackage";
+            }
+            activity.runUpdateAction(() -> activity.updateInstallerLauncher.launch(ApkInstaller.installIntent(activity, apk)));
+        } else if (action.equals("grantPermission")) {
+            activity.runUpdateAction(() -> activity.startActivity(ApkInstaller.permissionIntent(activity)));
+        } else if (action.equals("restart")) {
+            activity.runUpdateAction(() -> activity.startActivity(new Intent(activity, UpdateRestartActivity.class)
+                .putExtra("old_pid", android.os.Process.myPid()).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)));
+        } else throw new IllegalArgumentException("Unknown update action");
+        return "";
+    }
+    private void runUpdateAction(Runnable action) {
+        runOnUiThread(() -> {
+            if (isFinishing() || isDestroyed()) return;
+            try { action.run(); }
+            catch (RuntimeException error) {
+                // The approved package remains available; an unavailable Android
+                // installer/settings activity must not crash the running reader.
+                Log.w(LOG_TAG, "Could not open Android update action", error);
+            }
+        });
+    }
     private PathPrompt pendingPathPrompt;
     private volatile boolean captureVolumeButtons;
     private boolean systemBarsVisible = true;
     private boolean immersiveBarsHidden;
+    private long suppressReaderChromeRevealUntil;
     private boolean keepScreenAwake;
     private Insets lastSafeAreaInsets;
     private Insets lastImeInsets;
@@ -149,6 +194,11 @@ public final class MainActivity extends GameActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         accountActivity = new java.lang.ref.WeakReference<>(this);
+        updateInstallerLauncher = registerForActivityResult(
+            new ActivityResultContracts.StartActivityForResult(), result -> {
+                // Keep the approved package on cancellation/failure. The next
+                // native poll reads permission; next launch reads installed code.
+            });
         pathPromptLauncher = registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(),
             result -> handlePathPromptResult(result.getResultCode(), result.getData())
@@ -268,6 +318,13 @@ public final class MainActivity extends GameActivity {
     }
 
     public void setSystemBarsVisible(boolean visible) {
+        if (systemBarsVisible != visible) {
+            // A visibility transition requested by the reader can itself
+            // produce a system-bar animation. Do not interpret that animation
+            // (or an immediate follow-up) as the user's edge-swipe reveal.
+            suppressReaderChromeRevealUntil = android.os.SystemClock.uptimeMillis() + 400;
+            immersiveBarsHidden = false;
+        }
         systemBarsVisible = visible;
         applySystemBarsVisibility();
     }
@@ -378,6 +435,7 @@ public final class MainActivity extends GameActivity {
                     // even on devices where transient bars do not relayout.
                     if (!systemBarsVisible
                         && immersiveBarsHidden
+                        && android.os.SystemClock.uptimeMillis() >= suppressReaderChromeRevealUntil
                         && (animation.getTypeMask() & WindowInsetsCompat.Type.systemBars()) != 0) {
                         immersiveBarsHidden = false;
                         nativeReaderChromeRevealed();

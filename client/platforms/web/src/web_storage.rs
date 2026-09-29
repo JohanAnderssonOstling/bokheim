@@ -74,7 +74,7 @@ pub async fn initialize() -> Result<(), String> {
     super::asset_index::initialize(&index).map_err(|error| error.to_string())?;
     ASSET_INDEX.with(|slot| *slot.borrow_mut() = Some(index));
     // Initialization must not wait for a library-wide object sweep.
-    wasm_bindgen_futures::spawn_local(async {
+    client_platform_runtime::executor::spawn_detached(async {
         client_platform_runtime::executor::sleep(std::time::Duration::ZERO).await;
         if let Err(error) = reclaim_unreferenced_objects().await {
             log::warn!("Object reclamation will retry on next startup: {error}");
@@ -218,6 +218,11 @@ pub struct FileReader {
 }
 
 impl FileReader {
+    /// Opens another cursor over the same pinned storage generation.
+    pub fn fork(&self) -> Self {
+        Self::new(self.physical.clone(), self.length)
+    }
+
     pub fn checksum(&self) -> Result<Option<sync_common::ContentHash>, String> {
         use rusqlite::OptionalExtension;
         let value: Option<String> = with_index(|index| index.query_row(include_str!("sql/web_storage/checksum_select.sql"), [&self.physical], |row| row.get(0)).optional())?;

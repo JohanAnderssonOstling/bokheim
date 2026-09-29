@@ -39,7 +39,7 @@ impl SyncPage {
             let c = color.to_rgb();
             format!("rgba({},{},{},{})", (c.r * 255.0).round(), (c.g * 255.0).round(), (c.b * 255.0).round(), c.a)
         };
-        let theme = serde_json::json!({"background": css(theme.page_bg), "text": css(theme.text), "muted": css(theme.text_muted), "border": css(theme.border), "accent": css(theme.accent), "accentText": css(theme.accent_text)});
+        let theme = serde_json::json!({"background": css(theme.page_bg), "text": css(theme.text), "muted": css(theme.text_muted), "border": css(theme.border), "accent": css(theme.accent), "accentText": css(theme.accent_text), "textAccent": css(theme.text_accent)});
         // Dispose an earlier panel before opening another modal; never leave
         // duplicate credential forms for password managers to discover.
         self.web_authentication = None;

@@ -1,10 +1,10 @@
 use crate::sync::LibraryNameOutcome;
-use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
+use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
-use sync_common::api::libraries::{LibrarySummary, LibraryNameRequest};
 use sync_common::StateCell;
-use sync_common::{ContentHash, LibraryId, LibraryRevision, MutationId, MutationRejection, MutationRejectionReason, ReplicaId, ReplicaSeq, ServerMutation, SyncCursor, UnixMillis, VersionKey, WireMutation, MAX_PULL_CHANGES};
+use sync_common::api::libraries::{LibraryNameRequest, LibrarySummary};
+use sync_common::{ContentHash, LibraryId, LibraryRevision, MAX_PULL_CHANGES, MutationId, MutationRejection, MutationRejectionReason, ReplicaId, ReplicaSeq, ServerMutation, SyncCursor, UnixMillis, VersionKey, WireMutation};
 
 const FETCH_PAGE_SQL: &str = include_str!("sql/sync/fetch_page.sql");
 const FETCH_READING_POSITION_PAGE_SQL: &str = include_str!("sql/sync/fetch_reading_position_page.sql");
@@ -89,10 +89,6 @@ pub(super) fn storage_rejection(change: &WireMutation, server_now_ms: u64) -> Op
     None
 }
 
-pub(super) fn supports_atomic_singleton(change: &WireMutation) -> bool {
-    change.kind == sync_common::mutation_kind::READING_POSITION
-}
-
 #[derive(Debug)]
 struct StoredLifecycleReference {
     /// `None` is an undeclared presence, not corruption: rows written before a
@@ -120,26 +116,94 @@ fn decode_lifecycle_reference(row: PgRow) -> Result<StoredLifecycleReference, sq
     })
 }
 
+/// All writes share the library lock held by the caller. Resolve lifecycle
+/// first, remove retired fields, then admit ordinary updates against that final
+/// existence state. Ignored updates are acknowledged so offline clients drain.
+pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: &str, library_id: &LibraryId, replica_id: &ReplicaId, changes: &[WireMutation]) -> Result<InsertChangesResult, sqlx::Error> {
+    let lifecycles = changes.iter().filter(|c| c.kind == sync_common::mutation_kind::BOOK_LIFECYCLE).cloned().collect::<Vec<_>>();
+    let mut result = insert_admitted_changes(tx, user_id, library_id, replica_id, &lifecycles).await?;
+    // Purge owns both the cold fields and the independent reading channel.
+    // A stale purge does nothing because these queries inspect the LWW winner.
+    for table in ["sync_state", "sync_reading_state"] {
+        sqlx::query(&format!(
+            "DELETE FROM {table} field USING sync_state lifecycle
+             WHERE lifecycle.library_id=$1 AND lifecycle.kind='book_lifecycle'
+               AND lifecycle.entity_key=ANY($2) AND lifecycle.present IS FALSE
+               AND field.library_id=lifecycle.library_id
+               AND (CASE WHEN field.kind='annotation' THEN field.content_hash
+                         WHEN field.kind IN ('book_facts','placement','reading_position','metadata','description','pdf_reader_metadata','book_toc') THEN field.entity_key END)=lifecycle.entity_key"))
+            .bind(library_id.to_string()).bind(lifecycles.iter().map(|c| c.entity_key.clone()).collect::<Vec<_>>())
+            .execute(&mut **tx).await?;
+    }
+    let mut fields = Vec::new();
+    let owners = changes.iter().filter_map(|c| field_owner(c).ok().flatten().map(str::to_owned)).collect::<Vec<_>>();
+    let existing: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
+        "SELECT entity_key FROM sync_state WHERE library_id=$1 AND kind='book_lifecycle' AND entity_subkey='' AND present IS TRUE AND entity_key=ANY($2)")
+        .bind(library_id.to_string()).bind(owners).fetch_all(&mut **tx).await?.into_iter().collect();
+    for change in changes.iter().filter(|c| c.kind != sync_common::mutation_kind::BOOK_LIFECYCLE) {
+        let owner = match field_owner(change) {
+            Ok(owner) => owner,
+            Err(reason) => {
+                result.rejected.push(MutationRejection { mutation_id: change.mutation_id, reason });
+                continue;
+            }
+        };
+        if owner.is_some_and(|hash| !existing.contains(hash)) {
+            let failed_creation = lifecycles.iter().filter(|c| Some(c.entity_key.as_str()) == owner)
+                .find_map(|c| result.rejected.iter().find(|r| r.mutation_id == c.mutation_id).map(|r| r.reason.clone()));
+            if let Some(reason) = failed_creation {
+                result.rejected.push(MutationRejection { mutation_id: change.mutation_id, reason });
+            } else {
+                result.accepted.push(change.mutation_id);
+            }
+        } else {
+            fields.push(change.clone());
+        }
+    }
+    let inserted = insert_admitted_changes(tx, user_id, library_id, replica_id, &fields).await?;
+    result.accepted.extend(inserted.accepted);
+    result.rejected.extend(inserted.rejected);
+    let accepted = result.accepted.into_iter().collect::<std::collections::HashSet<_>>();
+    result.accepted = changes.iter().filter(|c| accepted.contains(&c.mutation_id)).map(|c| c.mutation_id).collect();
+    Ok(result)
+}
+
+/// Annotation identity is independent of its book hash, including on deletion.
+fn field_owner(change: &WireMutation) -> Result<Option<&str>, MutationRejectionReason> {
+    use sync_common::mutation_kind as kind;
+    match change.kind.as_str() {
+        kind::ANNOTATION => change.blob_reference.as_ref().and_then(|r| r.content_hash.as_ref()).map(|h| Some(h.as_str())).ok_or(MutationRejectionReason::InvalidPayload),
+        kind::BOOK_FACTS | kind::PLACEMENT | kind::READING_POSITION | kind::METADATA | kind::DESCRIPTION | kind::PDF_READER_METADATA | kind::BOOK_TOC => Ok(Some(&change.entity_key)),
+        _ => Ok(None),
+    }
+}
+
 /// Stores opaque wire rows. The only routing knowledge is that reading state
 /// belongs to the hot table; cold kinds need no server-side enum arm.
-pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: &str, library_id: &LibraryId, replica_id: &ReplicaId, changes: &[WireMutation]) -> Result<InsertChangesResult, sqlx::Error> {
+async fn insert_admitted_changes(tx: &mut Transaction<'_, Postgres>, user_id: &str, library_id: &LibraryId, replica_id: &ReplicaId, changes: &[WireMutation]) -> Result<InsertChangesResult, sqlx::Error> {
     let now = server_now_ms();
     let (accepted, rejected): (Vec<_>, Vec<_>) = changes.iter().partition(|change| storage_rejection(change, now).is_none());
     let mut rejected = rejected.into_iter().map(|change| MutationRejection { mutation_id: change.mutation_id, reason: storage_rejection(change, now).expect("partitioned rejection") }).collect::<Vec<_>>();
     let dependencies = accepted.iter().map(|change| crate::book_admission::dependency(change)).collect::<Vec<_>>();
     let hashes = dependencies.iter().filter_map(|d| d.as_ref().ok().and_then(|h| h.as_ref()).map(ToString::to_string)).collect::<Vec<_>>();
     let available = crate::book_admission::available(tx, user_id, library_id, &hashes).await?;
-    let accepted = accepted.into_iter().zip(dependencies).filter_map(|(change, dependency)| {
-        let reason = match dependency {
-            Err(reason) => Some(reason),
-            Ok(Some(hash)) if !available.contains(hash.as_str()) => Some(MutationRejectionReason::MissingDependency),
-            _ => None,
-        };
-        if let Some(reason) = reason {
-            rejected.push(MutationRejection { mutation_id: change.mutation_id, reason });
-            None
-        } else { Some(change) }
-    }).collect::<Vec<_>>();
+    let accepted = accepted
+        .into_iter()
+        .zip(dependencies)
+        .filter_map(|(change, dependency)| {
+            let reason = match dependency {
+                Err(reason) => Some(reason),
+                Ok(Some(hash)) if !available.contains(hash.as_str()) => Some(MutationRejectionReason::MissingDependency),
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                rejected.push(MutationRejection { mutation_id: change.mutation_id, reason });
+                None
+            } else {
+                Some(change)
+            }
+        })
+        .collect::<Vec<_>>();
 
     // The server reads only declared lifecycle facts. It never decodes the
     // opaque value to maintain quota references.
@@ -191,7 +255,9 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: 
         }
     }
     let cloud_enabled: bool = sqlx::query_scalar(include_str!("sql/cloud_storage/enabled.sql")).bind(library_id.to_string()).fetch_one(&mut **tx).await?;
-    if cloud_enabled { crate::assets::apply_lifecycle_reference_deltas(tx, user_id, lifecycle_deltas).await?; }
+    if cloud_enabled {
+        crate::assets::apply_lifecycle_reference_deltas(tx, user_id, lifecycle_deltas).await?;
+    }
 
     for (table, rows) in [
         ("sync_state", accepted.iter().copied().filter(|change| change.kind != sync_common::mutation_kind::READING_POSITION).collect::<Vec<_>>()),
@@ -207,25 +273,13 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: 
         let present = rows.iter().map(|change| change.blob_reference.as_ref().map(|reference| reference.present)).collect::<Vec<_>>();
         let hashes = rows.iter().map(|change| change.blob_reference.as_ref().and_then(|reference| reference.content_hash.as_ref()).map(|hash| hash.as_str().to_owned())).collect::<Vec<_>>();
         let changed = rows.iter().map(|change| i64::try_from(change.changed_at)).collect::<Result<Vec<_>, _>>().map_err(decode_err)?;
-        let sequences = rows.iter().map(|change| change.replica_seq.get() as i64).collect::<Vec<_>>();
+        let versions = rows.iter().map(|change| VersionKey::from_wire(change, *replica_id)).collect::<Vec<_>>();
+        let sequences = versions.iter().map(|version| i64::try_from(version.replica_seq)).collect::<Result<Vec<_>, _>>().map_err(decode_err)?;
         let ranks = rows.iter().map(|change| change.conflict_rank as i16).collect::<Vec<_>>();
-        let events = rows.iter().map(|change| change.mutation_id.to_string()).collect::<Vec<_>>();
+        let events = versions.iter().map(|version| version.mutation_id.to_string()).collect::<Vec<_>>();
+        let replicas = versions.iter().map(|version| version.replica_id.to_string()).collect::<Vec<_>>();
         let statement = include_str!("sql/sync/upsert_state_batch.sql").replace("{{TABLE}}", table);
-        sqlx::query(&statement)
-            .bind(library_id.to_string())
-            .bind(kinds)
-            .bind(keys)
-            .bind(subkeys)
-            .bind(values)
-            .bind(present)
-            .bind(hashes)
-            .bind(changed)
-            .bind(sequences)
-            .bind(ranks)
-            .bind(events)
-            .bind(replica_id.to_string())
-            .execute(&mut **tx)
-            .await?;
+        sqlx::query(&statement).bind(library_id.to_string()).bind(kinds).bind(keys).bind(subkeys).bind(values).bind(present).bind(hashes).bind(changed).bind(sequences).bind(ranks).bind(events).bind(replicas).execute(&mut **tx).await?;
     }
     Ok(InsertChangesResult { accepted: accepted.into_iter().map(|change| change.mutation_id).collect(), rejected })
 }
@@ -240,6 +294,7 @@ pub(super) enum FetchChangesError {
     CorruptStoredEvent { revision: i64, reason: &'static str },
 }
 pub(super) struct FetchChangesPage {
+    pub book_creations: Vec<ServerMutation>,
     pub changes: Vec<ServerMutation>,
     pub next_cursor: SyncCursor,
     pub has_more: bool,
@@ -285,40 +340,52 @@ fn head_cursor(heads: PullHeads) -> Result<SyncCursor, FetchChangesError> {
     Ok(SyncCursor { state_revision: protocol_revision(heads.state)?, reading_revision: protocol_revision(heads.reading)? })
 }
 
+fn decode_change(row: &PgRow, prefix: &str) -> Result<ServerMutation, FetchChangesError> {
+    let raw: i64 = row.try_get(format!("{prefix}server_seq").as_str())?;
+    let corrupt = |reason| FetchChangesError::CorruptStoredEvent { revision: raw, reason };
+    let changed_at = millis(row.try_get::<i64, _>(format!("{prefix}changed_at").as_str())?).map_err(|_| corrupt("invalid timestamp"))?;
+    let replica_id = ReplicaId::parse_str(&row.try_get::<String, _>(format!("{prefix}replica_id").as_str())?).map_err(|_| corrupt("invalid replica identity"))?;
+    let replica_seq = ReplicaSeq::new(u64::try_from(row.try_get::<i64, _>(format!("{prefix}replica_seq").as_str())?).map_err(|_| corrupt("negative replica sequence"))?).map_err(|_| corrupt("invalid replica sequence"))?;
+    let revision = LibraryRevision::new(u64::try_from(raw).map_err(|_| corrupt("negative library revision"))?).map_err(|_| corrupt("invalid library revision"))?;
+    let mutation_id = MutationId::parse(&row.try_get::<String, _>(format!("{prefix}event_id").as_str())?).map_err(|_| corrupt("invalid mutation identity"))?;
+    let present: Option<bool> = row.try_get(format!("{prefix}present").as_str())?;
+    let content_hash: Option<String> = row.try_get(format!("{prefix}content_hash").as_str())?;
+    let blob_reference = match (present, content_hash) {
+        (Some(present), content_hash) => Some(sync_common::DeclaredBlobReference { present, content_hash: content_hash.map(|hash| ContentHash::new(&hash)) }),
+        (None, None) => None,
+        (None, Some(_)) => return Err(corrupt("hash declaration without presence")),
+    };
+    let mutation = WireMutation {
+        origin: None,
+        mutation_id,
+        kind: row.try_get(format!("{prefix}kind").as_str())?,
+        entity_key: row.try_get(format!("{prefix}entity_key").as_str())?,
+        entity_subkey: row.try_get(format!("{prefix}entity_subkey").as_str())?,
+        value: row.try_get(format!("{prefix}value").as_str())?,
+        conflict_rank: u8::try_from(row.try_get::<i16, _>(format!("{prefix}version_rank").as_str())?).map_err(|_| corrupt("invalid conflict rank"))?,
+        blob_reference,
+        changed_at,
+        replica_seq,
+    };
+    Ok(ServerMutation { mutation, replica_id, revision })
+}
+
 async fn fetch_projected_page<'e, E: sqlx::Executor<'e, Database = Postgres>>(executor: E, statement: &str, library: &LibraryId, since: SyncCursor, heads: PullHeads) -> Result<FetchChangesPage, FetchChangesError> {
     let rows =
         sqlx::query(statement).bind(library.to_string()).bind(revision(since.state_revision)).bind(revision(since.reading_revision)).bind(heads.state).bind(heads.reading).bind((MAX_PULL_CHANGES + 1) as i64).fetch_all(executor).await?;
-    let mut changes = Vec::with_capacity(rows.len());
-    for row in rows {
-        let raw: i64 = row.try_get("server_seq")?;
-        let corrupt = |reason| FetchChangesError::CorruptStoredEvent { revision: raw, reason };
-        let changed_at = millis(row.try_get::<i64, _>("changed_at")?).map_err(|_| corrupt("invalid timestamp"))?;
-        let replica_id = ReplicaId::parse_str(&row.try_get::<String, _>("replica_id")?).map_err(|_| corrupt("invalid replica identity"))?;
-        let replica_seq = ReplicaSeq::new(u64::try_from(row.try_get::<i64, _>("replica_seq")?).map_err(|_| corrupt("negative replica sequence"))?).map_err(|_| corrupt("invalid replica sequence"))?;
-        let revision = LibraryRevision::new(u64::try_from(raw).map_err(|_| corrupt("negative library revision"))?).map_err(|_| corrupt("invalid library revision"))?;
-        let mutation_id = MutationId::parse(&row.try_get::<String, _>("event_id")?).map_err(|_| corrupt("invalid mutation identity"))?;
-        let present: Option<bool> = row.try_get("present")?;
-        let content_hash: Option<String> = row.try_get("content_hash")?;
-        let blob_reference = match (present, content_hash) {
-            (Some(present), content_hash) => Some(sync_common::DeclaredBlobReference { present, content_hash: content_hash.map(|hash| ContentHash::new(&hash)) }),
-            (None, None) => None,
-            (None, Some(_)) => return Err(corrupt("hash declaration without presence")),
-        };
-        let mutation = WireMutation {
-            mutation_id,
-            kind: row.try_get("kind")?,
-            entity_key: row.try_get("entity_key")?,
-            entity_subkey: row.try_get("entity_subkey")?,
-            value: row.try_get("value")?,
-            conflict_rank: u8::try_from(row.try_get::<i16, _>("version_rank")?).map_err(|_| corrupt("invalid conflict rank"))?,
-            blob_reference,
-            changed_at,
-            replica_seq,
-        };
-        changes.push(ServerMutation { mutation, replica_id, revision });
+    let has_more = rows.len() > MAX_PULL_CHANGES;
+    let mut changes = Vec::new();
+    let mut book_creations = Vec::new();
+    let mut created = std::collections::HashSet::new();
+    for row in rows.into_iter().take(MAX_PULL_CHANGES) {
+        if row.try_get::<Option<i64>, _>("creation_server_seq")?.is_some() {
+            let creation = decode_change(&row, "creation_")?;
+            if created.insert(creation.mutation.entity_key.clone()) {
+                book_creations.push(creation);
+            }
+        }
+        changes.push(decode_change(&row, "")?);
     }
-    let has_more = changes.len() > MAX_PULL_CHANGES;
-    changes.truncate(MAX_PULL_CHANGES);
     let mut next_cursor = since;
     for change in &changes {
         if change.mutation.kind == sync_common::mutation_kind::READING_POSITION {
@@ -330,7 +397,7 @@ async fn fetch_projected_page<'e, E: sqlx::Executor<'e, Database = Postgres>>(ex
     if !has_more {
         next_cursor = head_cursor(heads)?;
     }
-    Ok(FetchChangesPage { changes, next_cursor, has_more })
+    Ok(FetchChangesPage { book_creations, changes, next_cursor, has_more })
 }
 
 async fn fetch_page<'e, E: sqlx::Executor<'e, Database = Postgres>>(executor: E, library: &LibraryId, since: SyncCursor, heads: PullHeads) -> Result<FetchChangesPage, FetchChangesError> {
@@ -369,7 +436,7 @@ pub(super) async fn fetch_changes(pool: &PgPool, user: &str, library: &LibraryId
         return Err(FetchChangesError::CursorAhead);
     }
     let page = match pull_route(since, heads) {
-        PullRoute::Empty => FetchChangesPage { changes: Vec::new(), next_cursor: head_cursor(heads)?, has_more: false },
+        PullRoute::Empty => FetchChangesPage { book_creations: Vec::new(), changes: Vec::new(), next_cursor: head_cursor(heads)?, has_more: false },
         PullRoute::ReadingOnly => fetch_reading_position_page(pool, library, since, heads).await?,
         PullRoute::Full => fetch_page(pool, library, since, heads).await?,
     };
@@ -389,81 +456,16 @@ pub(super) async fn fetch_owned_changes(tx: &mut Transaction<'_, Postgres>, libr
     let (reading, state) = sqlx::query_as(include_str!("sql/sync/validate_owned_cursor.sql")).bind(library.to_string()).fetch_one(&mut **tx).await?;
     let heads = PullHeads { reading, state };
     match pull_route(since, heads) {
-        PullRoute::Empty => Ok(FetchChangesPage { changes: Vec::new(), next_cursor: head_cursor(heads)?, has_more: false }),
+        PullRoute::Empty => Ok(FetchChangesPage { book_creations: Vec::new(), changes: Vec::new(), next_cursor: head_cursor(heads)?, has_more: false }),
         PullRoute::ReadingOnly => fetch_reading_position_page(&mut **tx, library, since, heads).await,
         PullRoute::Full => fetch_page(&mut **tx, library, since, heads).await,
     }
 }
 
-pub(super) enum AtomicSingletonExchange {
-    Unauthorized,
-    CursorAhead,
-    Handled(FetchChangesPage),
-}
-pub(super) async fn exchange_authorized_singleton(
-    tx: &mut Transaction<'_, Postgres>, user_id: &str, library: &LibraryId, replica_id: &ReplicaId, change: &WireMutation, since: SyncCursor,
-) -> Result<AtomicSingletonExchange, FetchChangesError> {
-    if change.kind != sync_common::mutation_kind::READING_POSITION {
-        unreachable!()
-    }
-    let library_str = library.to_string();
-    let row = sqlx::query(include_str!("sql/sync/exchange_authorized_reading_position.sql"))
-        .bind(library_str)
-        .bind(user_id)
-        .bind(&change.kind)
-        .bind(&change.entity_key)
-        .bind(&change.entity_subkey)
-        .bind(&change.value)
-        .bind(change.blob_reference.as_ref().map(|reference| reference.present))
-        .bind(change.blob_reference.as_ref().and_then(|reference| reference.content_hash.as_ref()).map(|hash| hash.as_str()))
-        .bind(i64::try_from(change.changed_at).map_err(decode_err)?)
-        .bind(replica_id.to_string())
-        .bind(change.replica_seq.get() as i64)
-        .bind(change.conflict_rank as i16)
-        .bind(change.mutation_id.to_string())
-        .bind(revision(since.state_revision))
-        .bind(revision(since.reading_revision))
-        .fetch_one(&mut **tx)
-        .await?;
-    if !row.try_get::<Option<bool>, _>("authorized")?.unwrap_or(false) {
-        return Ok(AtomicSingletonExchange::Unauthorized);
-    }
-    if row.try_get::<Option<bool>, _>("cursor_ahead")?.unwrap_or(false) {
-        return Ok(AtomicSingletonExchange::CursorAhead);
-    }
-
-    let changed_revision = row.try_get::<Option<i64>, _>("server_seq")?;
-    let prior_reading = row.try_get::<Option<i64>, _>("reading_revision")?.unwrap_or(0);
-    let prior_other = row.try_get::<Option<i64>, _>("other_revision")?.unwrap_or(0);
-    // The row that now owns the cell is this mutation only when it beat the
-    // stored version. Otherwise `lww_guard` republished the stored winner under
-    // the allocated sequence, and echoing the submitted change would hand the
-    // caller its own discarded value as though the server had accepted it.
-    let applied = row.try_get::<Option<String>, _>("event_id")?.is_some_and(|event_id| event_id == change.mutation_id.to_string());
-    if applied && row.try_get::<Option<bool>, _>("caught_up")?.unwrap_or(false) {
-        let changes = if let Some(raw) = changed_revision {
-            vec![ServerMutation { mutation: change.clone(), replica_id: replica_id.clone(), revision: LibraryRevision::new(raw as u64).map_err(|_| FetchChangesError::CorruptStoredEvent { revision: raw, reason: "invalid revision" })? }]
-        } else {
-            Vec::new()
-        };
-        let heads = PullHeads { reading: changed_revision.map_or(prior_reading, |revision| std::cmp::max(prior_reading, revision)), state: prior_other };
-        return Ok(AtomicSingletonExchange::Handled(FetchChangesPage { changes, next_cursor: head_cursor(heads)?, has_more: false }));
-    }
-
-    let reading_after_write = changed_revision.map_or(prior_reading, |revision| std::cmp::max(prior_reading, revision));
-    let heads = PullHeads { reading: reading_after_write, state: prior_other };
-    let page = match pull_route(since, heads) {
-        PullRoute::Empty => FetchChangesPage { changes: Vec::new(), next_cursor: head_cursor(heads)?, has_more: false },
-        PullRoute::ReadingOnly => fetch_reading_position_page(&mut **tx, library, since, heads).await?,
-        PullRoute::Full => fetch_page(&mut **tx, library, since, heads).await?,
-    };
-    Ok(AtomicSingletonExchange::Handled(page))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{cursor_is_ahead, decode_lifecycle_reference, missing_state_cells, pull_route, storage_rejection, PullHeads, PullRoute};
-    use sync_common::{LibraryRevision, MutationId, MutationRejectionReason, ReplicaSeq, StateCell, SyncCursor, WireMutation, MAX_LWW_FUTURE_SKEW_MS};
+    use super::{PullHeads, PullRoute, cursor_is_ahead, decode_lifecycle_reference, missing_state_cells, pull_route, storage_rejection};
+    use sync_common::{LibraryRevision, MAX_LWW_FUTURE_SKEW_MS, MutationId, MutationRejectionReason, ReplicaSeq, StateCell, SyncCursor, WireMutation};
 
     fn cursor(state: u64, reading: u64) -> SyncCursor {
         SyncCursor { state_revision: LibraryRevision::new(state).ok(), reading_revision: LibraryRevision::new(reading).ok() }
@@ -475,6 +477,7 @@ mod tests {
 
     fn reading_mutation(changed_at: u64) -> WireMutation {
         WireMutation {
+            origin: None,
             mutation_id: MutationId::new(),
             kind: "reading_position".to_owned(),
             entity_key: "1".to_owned(),
@@ -534,7 +537,6 @@ mod tests {
     }
 
     const LWW_TRIGGER_SQL: &str = include_str!("../schema/03_sync.sql");
-    const LWW_MIGRATION_SQL: &str = include_str!("../schema/migrations/15_lww_loser_republish.sql");
 
     #[test]
     fn postgres_winner_order_matches_the_shared_version_key() {
@@ -544,24 +546,6 @@ mod tests {
         assert!(!LWW_TRIGGER_SQL.contains("hlc_"));
     }
 
-    /// A fresh install gets the merge guard from the v14 baseline while an
-    /// already-deployed database gets it from the migration, so the two bodies
-    /// must not drift: a server left on the older one silently discards losing
-    /// pushes and strands their author on a value nothing will ever correct.
-    #[test]
-    fn the_upgrade_path_installs_the_same_merge_guard_as_the_baseline() {
-        fn guard_body(sql: &str) -> &str {
-            let start = sql.find("FUNCTION enforce_lww_order()").expect("merge guard definition");
-            let body = &sql[start..];
-            &body[..body.find("\n$$;").expect("merge guard terminator")]
-        }
-
-        assert_eq!(guard_body(LWW_MIGRATION_SQL), guard_body(LWW_TRIGGER_SQL));
-        assert!(LWW_MIGRATION_SQL.contains("CREATE OR REPLACE FUNCTION enforce_lww_order()"), "an already-deployed database must replace its installed guard");
-        // The runner wraps every migration in one transaction and takes the
-        // schema advisory lock itself.
-        assert!(!LWW_MIGRATION_SQL.contains("BEGIN;") && !LWW_MIGRATION_SQL.contains("COMMIT;"), "a migration must not manage its own transaction");
-    }
 
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]

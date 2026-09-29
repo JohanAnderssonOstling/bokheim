@@ -21,6 +21,8 @@ impl Database {
         timing.mark("body");
         match outcome? {
             WriteOutcome::Commit(value) => {
+                crate::sync::apply::project_dirty(&tx)?;
+                self.refresh_subject_cache_in_transaction(&tx)?;
                 tx.commit()?;
                 timing.mark("commit");
                 Ok(value)
@@ -108,12 +110,12 @@ mod tests {
     fn database() -> Database {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
-        db.execute_batch("CREATE TABLE transaction_probe(value INTEGER);").unwrap();
+        db.connection.execute_batch("CREATE TABLE transaction_probe(value INTEGER);").unwrap();
         db
     }
 
     fn origin(db: &Database) -> String {
-        db.query_row("SELECT change_origin FROM sync_metadata WHERE singleton=1", [], |row| row.get(0)).unwrap()
+        db.connection.query_row("SELECT change_origin FROM sync_metadata WHERE singleton=1", [], |row| row.get(0)).unwrap()
     }
 
     #[test]
@@ -136,8 +138,8 @@ mod tests {
             Err(DatabaseError::message("injected error"))
         });
         assert!(failed.is_err());
-        assert_eq!(db.query_row("SELECT SUM(value) FROM transaction_probe", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-        assert!(db.is_autocommit());
+        assert_eq!(db.connection.query_row("SELECT SUM(value) FROM transaction_probe", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        assert!(db.connection.is_autocommit());
     }
 
     #[test]
@@ -158,8 +160,8 @@ mod tests {
         assert!(panic.is_err());
         assert_eq!(origin(&db), before);
         assert!(!db.metadata_batch_flag.load(Ordering::Relaxed));
-        assert_eq!(db.query_row("SELECT COUNT(*) FROM transaction_probe", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-        assert!(db.is_autocommit());
+        assert_eq!(db.connection.query_row("SELECT COUNT(*) FROM transaction_probe", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert!(db.connection.is_autocommit());
     }
 
     #[test]
@@ -184,7 +186,7 @@ mod tests {
     }
 
     fn seed_book(db: &Database) {
-        db.execute("INSERT INTO book(content_hash,title,added_at,format) VALUES (?1,'Before',1,'epub')", ["a".repeat(64)]).unwrap();
+        db.connection.execute("INSERT INTO book(content_hash,title,added_at,format) VALUES (?1,'Before',1,'epub')", ["a".repeat(64)]).unwrap();
         db.with_write_transaction(|tx| {
             let credit = book_model::Contributor::new("Before", book_model::MarcRelatorCode(*b"aut")).unwrap();
             let credits = crate::contributors::resolve_credits(tx, &[credit])?;
@@ -192,7 +194,7 @@ mod tests {
             Ok(WriteOutcome::Commit(()))
         })
         .unwrap();
-        db.execute("DELETE FROM sync_outbox", []).unwrap();
+        db.connection.execute("DELETE FROM sync_outbox", []).unwrap();
     }
 
     #[test]
@@ -233,7 +235,7 @@ mod tests {
     fn failed_metadata_flush_restores_flag_and_rolls_back_pending_rows() {
         let db = database();
         seed_book(&db);
-        db.execute_batch("CREATE TEMP TRIGGER reject_flush BEFORE INSERT ON sync_outbox BEGIN SELECT RAISE(ABORT,'injected flush failure'); END;").unwrap();
+        db.connection.execute_batch("CREATE TEMP TRIGGER reject_flush BEFORE INSERT ON sync_outbox BEGIN SELECT RAISE(ABORT,'injected flush failure'); END;").unwrap();
         let result = db.with_write_transaction(|tx| {
             with_metadata_batch(tx, &db.metadata_batch_flag, || {
                 tx.execute("UPDATE book_contributor SET name='Must roll back'", [])?;
@@ -243,8 +245,8 @@ mod tests {
         });
         assert!(result.is_err());
         assert!(!db.metadata_batch_flag.load(Ordering::Relaxed));
-        assert_eq!(db.query_row("SELECT name FROM book_contributor", [], |r| r.get::<_, String>(0)).unwrap(), "Before");
-        assert_eq!(db.query_row("SELECT COUNT(*) FROM pending_metadata_payload", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(db.connection.query_row("SELECT name FROM book_contributor", [], |r| r.get::<_, String>(0)).unwrap(), "Before");
+        assert_eq!(db.connection.query_row("SELECT COUNT(*) FROM pending_metadata_payload", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
     }
 
     #[test]
@@ -252,7 +254,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("library-writer-{}.sqlite3", uuid::Uuid::new_v4()));
         let db = Database::open(&path).unwrap();
         db.initialize_library().unwrap();
-        db.execute_batch("CREATE TABLE transaction_probe(value INTEGER);").unwrap();
+        db.connection.execute_batch("CREATE TABLE transaction_probe(value INTEGER);").unwrap();
         let other = rusqlite::Connection::open(&path).unwrap();
         other.busy_timeout(std::time::Duration::ZERO).unwrap();
         db.with_write_transaction(|_| {

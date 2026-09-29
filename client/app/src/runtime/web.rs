@@ -150,16 +150,14 @@ impl Transport {
             }
         };
         let session = Session::new(port.clone(), on_message, move |error| fail(error.into()));
-        // Cold WASM downloads/compilation and storage-owner handover can exceed 15 seconds.
-        let startup = match crate::executor::timeout(std::time::Duration::from_secs(60), startup_receiver).await {
-            Err(_) => {
-                return Err("backend worker did not respond within 60 seconds".into());
-            }
-            Ok(Ok(Ok(startup))) => startup,
-            Ok(Ok(Err(error))) => {
+        // Readiness includes migrations over the user's entire library. Wait
+        // for their result; transport/worker failures still resolve this channel.
+        let startup = match startup_receiver.await {
+            Ok(Ok(startup)) => startup,
+            Ok(Err(error)) => {
                 return Err(error);
             }
-            Ok(Err(_)) => {
+            Err(_) => {
                 return Err("backend worker stopped during startup".into());
             }
         };
@@ -343,5 +341,4 @@ impl Transport {
     pub(crate) async fn import_selected_directory(&self, library_id: crate::LibraryId, parent_id: crate::DirId, directory: crate::DirectoryImport, create_root: bool) -> Result<Vec<crate::ImportFailure>, crate::BackendError> {
         self.remote._connection.import_selected_directory(library_id, parent_id, directory, create_root).await.map_err(crate::BackendError::operation)
     }
-
 }

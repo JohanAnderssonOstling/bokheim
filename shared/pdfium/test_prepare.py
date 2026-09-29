@@ -69,6 +69,18 @@ sha256 = "{prepare.digest(self.archive)}"
                 self.run_prepare()
             download.assert_not_called()
 
+    def test_local_notices_are_verified_before_preparation(self):
+        notices = self.root / "NOTICES.txt"
+        notices.write_text("Pinned notices")
+        self.manifest.write_text(self.manifest.read_text().replace(
+            "[targets.test.files]",
+            f'notices_file = "NOTICES.txt"\nnotices_sha256 = "{prepare.digest(notices)}"\n[targets.test.files]'))
+        self.run_prepare(archive=self.archive)
+        self.assertEqual((self.destination / "LICENSE").read_text(), "Pinned notices")
+        notices.write_text("modified")
+        with self.assertRaisesRegex(RuntimeError, "notices checksum mismatch"):
+            self.run_prepare()
+
     def test_rejects_output_path_traversal(self):
         self.manifest.write_text(self.manifest.read_text().replace('= "libpdfium.so"', '= "../escape.so"'))
         with self.assertRaisesRegex(RuntimeError, "Invalid PDFium artifact"):

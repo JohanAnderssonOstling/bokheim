@@ -12,36 +12,23 @@ pub(crate) trait SearchBarTarget: Sized + 'static {
     fn search_close(&mut self, window: &mut Window, cx: &mut Context<Self>);
 }
 
-/// Both rows on compact screens retain the reader's control size and inset.
-pub(crate) fn bar_height(window: &Window) -> f32 {
-    let control_height = components::reader_toolbar_size_px(window);
-    if components::WindowWidthClass::for_window(window).is_compact() { 2.0 * control_height + 3.0 * components::CONTENT_INSET } else { control_height }
-}
-
-/// The input stays wide on desktop and gets its own row on compact screens.
-pub(crate) fn search_bar<C: SearchBarTarget>(target: &Entity<C>, input: &Entity<InputState>, position: (usize, usize), window: &Window, theme: components::BrowserTheme) -> AnyElement {
+/// Search, match count, and navigation share one row at every width.
+pub(crate) fn search_bar<C: SearchBarTarget>(target: &Entity<C>, input: &Entity<InputState>, position: (usize, usize), theme: components::BrowserTheme) -> AnyElement {
     let previous_target = target.clone();
     let next_target = target.clone();
     let (current, total) = position;
-    let compact = components::WindowWidthClass::for_window(window).is_compact();
-    let query = components::reader_search_box(theme).when(compact, |field| field.flex_none().w_full()).key_context("ReaderSearch").child(Input::new(input).appearance(false).cleanable(false).size_full());
+    let query = components::reader_search_box(theme).key_context("ReaderSearch").child(Input::new(input).appearance(false).cleanable(false).size_full());
     let controls = div()
         .flex_none()
         .flex()
         .items_center()
         .gap(px(components::SPACE_SM))
-        .when(compact, |row| row.w_full())
-        .child(components::reader_match_count(format!("{current} of {total}"), theme).when(compact, |count| count.flex_1().text_left()))
+        .child(components::reader_match_count(format!("{current} of {total}"), theme))
         .child(components::outlined_icon_button("reader-search-previous", "Previous match", IconName::ChevronLeft, theme).disabled(total == 0).tooltip("Previous match (Shift+Enter)").on_click(move |_, _, cx| {
             previous_target.update(cx, |this, cx| this.search_navigate(-1, cx));
         }))
         .child(components::outlined_icon_button("reader-search-next", "Next match", IconName::ChevronRight, theme).disabled(total == 0).tooltip("Next match (Enter)").on_click(move |_, _, cx| {
             next_target.update(cx, |this, cx| this.search_navigate(1, cx));
         }));
-    let bar = components::reader_search_bar(theme).h(px(bar_height(window)));
-    if compact {
-        bar.flex_col().items_stretch().py(px(components::CONTENT_INSET)).child(query).child(controls).into_any_element()
-    } else {
-        bar.items_center().child(query).child(controls).into_any_element()
-    }
+    components::reader_search_bar(theme).child(query).child(controls).into_any_element()
 }

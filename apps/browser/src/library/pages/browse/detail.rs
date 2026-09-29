@@ -23,11 +23,14 @@ use ui_components as components;
 use ui_components::ScrollableElement as _;
 
 use crate::library::services::{LatestRequest, LibraryContext, LibraryDownloadChanged};
-use crate::library::widgets::{LoadedCover, loaded_cover_from_jpeg};
+use crate::library::widgets::{LoadedCover, cover_aspect_ratio, loaded_cover_from_jpeg};
 
 /// Leaves a discarded book's page for the folder it was opened from. Owned by
 /// the browse page, which is what knows how to leave the detail location.
 pub(crate) type CloseBookDetail = std::rc::Rc<dyn Fn(&mut gpui::App)>;
+
+const BOOK_DETAIL_SIDEBAR_BREAKPOINT: f32 = 760.0;
+const BOOK_DETAIL_THREE_COLUMN_BREAKPOINT: f32 = 1200.0;
 
 pub(crate) struct BookDetailPage {
     ui: LibraryContext,
@@ -178,16 +181,8 @@ impl BookDetailPage {
     /// discarded page closes onto its folder, while a book that stays in the
     /// library reloads the detail instead.
     fn confirm_page_action(
-        target: Entity<Self>,
-        title: String,
-        detail: String,
-        choices: [&str; 2],
-        error_id: &'static str,
-        error_prefix: String,
-        close: CloseBookDetail,
-        operation: impl std::future::Future<Output = Result<bool, String>> + 'static,
-        window: &mut Window,
-        cx: &mut App,
+        target: Entity<Self>, title: String, detail: String, choices: [&str; 2], error_id: &'static str, error_prefix: String, close: CloseBookDetail, operation: impl std::future::Future<Output = Result<bool, String>> + 'static,
+        window: &mut Window, cx: &mut App,
     ) {
         let answer = window.prompt(PromptLevel::Warning, &title, Some(&detail), &choices, cx);
         target.update(cx, |_, cx| {
@@ -284,6 +279,8 @@ impl Render for BookDetailPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
         let page = cx.entity();
+        let viewport_width = f32::from(window.viewport_size().width);
+        let desktop_layout = viewport_width >= BOOK_DETAIL_SIDEBAR_BREAKPOINT;
 
         // The card's row until the request lands, then the request's own. There
         // is no frame in which the page has nothing to say about the book.
@@ -292,16 +289,16 @@ impl Render for BookDetailPage {
 
         let audiobook = book.format_category == LibraryFileTypeFilter::Audiobook;
 
-        let cover = components::book_detail_cover_slot()
+        let cover = (if desktop_layout { components::book_detail_sidebar_cover_slot() } else { components::book_detail_cover_slot() })
             .child(match self.cover.clone() {
-                Some(cover) => components::book_cover(theme, components::BOOK_COVER_ASPECT_RATIO).child(components::book_cover_image(format!("book-detail-cover-{}", self.content_hash), cover.image, 1.0, false, theme)),
+                Some(cover) => components::book_cover(theme, cover_aspect_ratio(&cover.image)).child(components::book_cover_image(format!("book-detail-cover-{}", self.content_hash), cover.image, 1.0, false, theme)),
                 None => components::missing_book_cover(if audiobook { "Audiobook" } else { "No cover" }, theme),
             })
             // Nothing under an unopened book: the line beside it already says
             // "Not started", and an empty track says it again at length.
             .children(components::book_cover_progress(book.progress, theme));
 
-        let mut headline = components::book_detail_headline().child(components::book_detail_title(book.title.clone(), book.subtitle.as_deref(), theme));
+        let mut headline = components::book_detail_headline().child(components::book_detail_title(book.title.clone(), book.subtitle.as_deref(), desktop_layout, theme));
 
         // The card knows one author line; the request knows who each of them is
         // and where their page lives. Until it lands the line is stated rather
@@ -358,13 +355,14 @@ impl Render for BookDetailPage {
         let downloaded = matches!(download_state, app::DownloadState::Downloaded);
         let downloading = matches!(download_state, app::DownloadState::Queued | app::DownloadState::Downloading(_));
         let open_icon: gpui_component::Icon = if audiobook { components::Headphones.into() } else { IconName::BookOpen.into() };
-        let mut actions = components::book_detail_actions().child(components::primary_action_button("book-detail-open", if audiobook { "Listen" } else { "Read" }, open_icon, false).on_click({
+        let action_padding = if desktop_layout { components::SPACE_SM } else { components::SPACE_MD };
+        let mut actions = components::book_detail_actions().child(components::primary_action_button("book-detail-open", if audiobook { "Listen" } else { "Read" }, open_icon, false).px(gpui::px(action_padding)).on_click({
             let page = page.clone();
             move |_, window, cx| page.update(cx, |page, cx| page.open(None, window, cx))
         }));
         if !downloaded {
             let label = download_action_label(&download_state);
-            actions = actions.child(components::secondary_action_button("book-detail-download", label, IconName::ArrowDown, downloading).on_click({
+            actions = actions.child(components::secondary_action_button("book-detail-download", label, IconName::ArrowDown, downloading).px(gpui::px(action_padding)).on_click({
                 let page = page.clone();
                 move |_, _, cx| page.update(cx, |page, cx| page.download(cx))
             }));
@@ -411,7 +409,18 @@ impl Render for BookDetailPage {
                     menu = menu.item(components::menu_item_with_icon("Remove from folder", components::navigation_icon(components::NavigationIcon::Folder), move |_, window, cx| {
                         let library = library.clone();
                         let operation = async move { library.remove_book_from_directory(content_hash, source_id).await };
-                        Self::confirm_page_action(remove_page.clone(), "Remove this book from the folder?".to_owned(), remove_detail.clone(), ["Remove", "Cancel"], "book-remove-error", "Could not remove book from folder".to_owned(), remove_close.clone(), operation, window, cx);
+                        Self::confirm_page_action(
+                            remove_page.clone(),
+                            "Remove this book from the folder?".to_owned(),
+                            remove_detail.clone(),
+                            ["Remove", "Cancel"],
+                            "book-remove-error",
+                            "Could not remove book from folder".to_owned(),
+                            remove_close.clone(),
+                            operation,
+                            window,
+                            cx,
+                        );
                     }));
                 }
                 let library = backend.clone();
@@ -421,7 +430,18 @@ impl Render for BookDetailPage {
                 menu = menu.item(components::menu_item_with_icon("Move to Trash", components::navigation_icon(components::NavigationIcon::Trash2), move |_, window, cx| {
                     let library = library.clone();
                     let operation = async move { library.move_book_to_trash(content_hash).await.map(|_| true) };
-                    Self::confirm_page_action(trash_page.clone(), "Move this book to Trash?".to_owned(), trash_detail.clone(), ["Move to Trash", "Cancel"], "book-trash-error", "Could not move book to Trash".to_owned(), trash_close.clone(), operation, window, cx);
+                    Self::confirm_page_action(
+                        trash_page.clone(),
+                        "Move this book to Trash?".to_owned(),
+                        trash_detail.clone(),
+                        ["Move to Trash", "Cancel"],
+                        "book-trash-error",
+                        "Could not move book to Trash".to_owned(),
+                        trash_close.clone(),
+                        operation,
+                        window,
+                        cx,
+                    );
                 }));
                 menu
             }));
@@ -436,7 +456,7 @@ impl Render for BookDetailPage {
         // The chips close the block: they are where the reader goes *next*, not
         // what they came here to do.
         let subject_paths = detail.as_ref().map(|detail| detail.subject_paths.as_slice()).unwrap_or_default();
-        if !subject_paths.is_empty() {
+        let subjects = if !subject_paths.is_empty() {
             let mut subjects = components::book_detail_subjects();
             for path in subject_paths {
                 let mut segments = path.rsplit(" / ");
@@ -444,25 +464,53 @@ impl Render for BookDetailPage {
                 let parent = segments.next().map(|parent| SharedString::from(parent.to_owned()));
                 subjects = subjects.child(components::subject_chip(parent, SharedString::from(leaf.to_owned()), theme));
             }
-            headline = headline.child(subjects);
-        }
+            Some(subjects)
+        } else {
+            None
+        };
 
         // What is in the book before what the book is: a reader who has opened
         // this page has already decided to read it. A section with nothing in it
         // is left out rather than headed and empty — an absent blurb is the
         // publisher's silence, and saying so takes more room than it is worth.
-        let contents =
-            detail.as_ref().filter(|detail| !detail.toc.is_empty()).map(|detail| components::book_detail_section().child(components::book_detail_heading("Contents", theme)).child(self.render_contents(detail, audiobook, theme, cx)));
+        let contents = detail.as_ref().filter(|detail| !detail.toc.is_empty()).map(|detail| {
+            components::book_detail_section()
+                .max_w(gpui::rems(components::BOOK_DETAIL_CONTENTS_WIDTH_REM))
+                .child(components::book_detail_heading("Contents", theme))
+                .child(self.render_contents(detail, audiobook, theme, cx))
+        });
         // Asked of the words rather than of the markup: a description that is
         // only tags has nothing to head.
-        let description = components::book_detail_description(&book.description, theme).map(|description| components::book_detail_section().child(components::book_detail_heading("Description", theme)).child(description));
+        let description = components::book_detail_description(&book.description, theme).map(|description| {
+            components::book_detail_section()
+                .max_w(gpui::rems(components::BOOK_DETAIL_DESCRIPTION_WIDTH_REM))
+                .child(components::book_detail_heading("Description", theme))
+                .child(description)
+        });
 
-        let hero = components::book_detail_hero().child(cover).child(headline);
-        let wide = matches!(components::WindowWidthClass::for_window(window), components::WindowWidthClass::Expanded) && description.is_some();
-        let content = if wide {
-            let description = description.expect("a wide detail layout requires a description");
-            components::book_detail_wide_measure().child(components::book_detail_columns().child(components::book_detail_column().child(hero).children(contents)).child(components::book_detail_column().child(description))).into_any_element()
+        let content = if desktop_layout && (contents.is_some() || description.is_some()) {
+            let sidebar = components::book_detail_sidebar().child(cover).child(headline.flex_none()).children(subjects);
+            if viewport_width >= BOOK_DETAIL_THREE_COLUMN_BREAKPOINT && contents.is_some() && description.is_some() {
+                components::book_detail_wide_measure()
+                    .child(
+                        components::book_detail_columns()
+                            .child(sidebar)
+                            .child(components::book_detail_contents_column().child(contents.expect("three columns require contents")))
+                            .child(components::book_detail_description_column().child(description.expect("three columns require description"))),
+                    )
+                    .into_any_element()
+            } else {
+                let mut reading = components::book_detail_description_column();
+                if let Some(contents) = contents {
+                    reading = reading.child(contents);
+                }
+                if let Some(description) = description {
+                    reading = reading.child(description);
+                }
+                components::book_detail_medium_measure().child(components::book_detail_columns().child(sidebar).child(reading)).into_any_element()
+            }
         } else {
+            let hero = components::book_detail_hero().child(cover).child(headline);
             let mut sections = components::book_detail_sections();
             if let Some(contents) = contents {
                 sections = sections.child(contents);
@@ -470,7 +518,8 @@ impl Render for BookDetailPage {
             if let Some(description) = description {
                 sections = sections.child(description);
             }
-            components::book_detail_measure().child(hero).child(sections).into_any_element()
+            let introduction = div().w_full().min_w_0().flex().flex_col().gap(gpui::px(components::SPACE_SM)).child(hero).children(subjects);
+            components::book_detail_measure().child(introduction).child(sections).into_any_element()
         };
         let body = components::book_detail_page().track_focus(&self.focus).child(content).overflow_y_scrollbar().into_any_element();
 
@@ -504,11 +553,26 @@ impl BookDetailPage {
         let durations = if audiobook { chapter_durations(&detail.toc, detail.book.audiobook_duration_ms) } else { HashMap::new() };
         let mut drawn = Vec::new();
         drawn_entries(&detail.toc, &self.expanded, 0, &mut drawn);
+        // Use the full TOC order, including entries hidden under collapsed
+        // parents, to decide which visible leaves precede the current entry.
+        let mut ordered = Vec::new();
+        fn visit<'a>(entries: &'a [BookTocEntry], ordered: &mut Vec<&'a BookTocEntry>) {
+            for entry in entries {
+                ordered.push(entry);
+                visit(&entry.children, ordered);
+            }
+        }
+        visit(&detail.toc, &mut ordered);
+        let read_targets: HashSet<&str> = ordered
+            .iter()
+            .position(|entry| marked == Some(entry.target.as_str()))
+            .map(|current| ordered[..current].iter().filter(|entry| entry.children.is_empty()).map(|entry| entry.target.as_str()).collect())
+            .unwrap_or_default();
 
         let page = cx.entity();
         let mut panel = components::contents_panel(theme);
         for (index, DrawnEntry { entry, depth }) in drawn.into_iter().enumerate() {
-            let row = components::ContentsRow { depth, has_children: !entry.children.is_empty(), expanded: self.expanded.contains(&entry.target), marked: marked == Some(entry.target.as_str()), focused: false };
+            let row = components::ContentsRow { depth, has_children: !entry.children.is_empty(), expanded: self.expanded.contains(&entry.target), marked: marked == Some(entry.target.as_str()), read: read_targets.contains(entry.target.as_str()), focused: false };
             // The chevron opens the entry and the row goes to it, so the two
             // clicks have to be separable — which is why the toggle is handed to
             // the disclosure rather than wrapped around it.

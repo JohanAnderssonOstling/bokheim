@@ -1,8 +1,10 @@
--- Paths exist only while assigning deterministic IDs to route occurrences.
+-- Route occurrences are identified by the chain of concept ids that reaches
+-- them, not by displayed labels: two different concepts can carry the same
+-- preferred_label, and a label-keyed chain collided under that condition.
 DROP TABLE IF EXISTS unified_concept_route;
 CREATE TEMP TABLE compiled_routes AS
-WITH RECURSIVE routes(path,concept_id,parent_path) AS (
-    SELECT c.preferred_label,c.concept_id,'Subject' FROM concept c
+WITH RECURSIVE routes(key,concept_id,parent_key) AS (
+    SELECT '/' || c.concept_id,c.concept_id,'' FROM concept c
     WHERE NOT EXISTS(SELECT 1 FROM concept_parent p WHERE p.concept_id=c.concept_id)
       AND (EXISTS(SELECT 1 FROM concept_parent p WHERE p.parent_concept_id=c.concept_id)
         OR EXISTS(SELECT 1 FROM lcc_selector s WHERE s.concept_id=c.concept_id)
@@ -10,12 +12,12 @@ WITH RECURSIVE routes(path,concept_id,parent_path) AS (
         OR EXISTS(SELECT 1 FROM bisac_selector s WHERE s.concept_id=c.concept_id)
         OR EXISTS(SELECT 1 FROM ddc_selector s WHERE s.concept_id=c.concept_id))
     UNION
-    SELECT r.path || ' / ' || c.preferred_label,c.concept_id,r.path
+    SELECT r.key || '/' || c.concept_id,c.concept_id,r.key
     FROM routes r JOIN concept_parent p ON p.parent_concept_id=r.concept_id
     JOIN concept c ON c.concept_id=p.concept_id
 )
-SELECT row_number() OVER (ORDER BY path) AS route_id,* FROM routes;
-CREATE UNIQUE INDEX temp.compiled_route_path ON compiled_routes(path);
+SELECT row_number() OVER (ORDER BY key) AS route_id,* FROM routes;
+CREATE UNIQUE INDEX temp.compiled_route_key ON compiled_routes(key);
 CREATE TABLE unified_concept_route(
     route_id INTEGER PRIMARY KEY CHECK(route_id>0),
     concept_id INTEGER NOT NULL REFERENCES concept(concept_id),
@@ -23,7 +25,7 @@ CREATE TABLE unified_concept_route(
 ) STRICT;
 INSERT INTO unified_concept_route
 SELECT child.route_id,child.concept_id,COALESCE(parent.route_id,0)
-FROM compiled_routes child LEFT JOIN compiled_routes parent ON parent.path=child.parent_path;
+FROM compiled_routes child LEFT JOIN compiled_routes parent ON parent.key=child.parent_key;
 DROP TABLE compiled_routes;
 CREATE INDEX idx_unified_concept_route_parent ON unified_concept_route(parent_route_id,concept_id);
 CREATE INDEX idx_unified_concept_route_concept ON unified_concept_route(concept_id);

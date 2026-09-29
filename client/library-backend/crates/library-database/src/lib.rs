@@ -19,6 +19,9 @@ mod purge;
 mod shared_sql;
 mod timing;
 mod transactions;
+mod taxonomy_update;
+
+pub const LIBRARY_SCHEMA_VERSION: i64 = 1;
 
 pub use client_platform_runtime::executor;
 pub use client_platform_runtime::storage_queue;
@@ -139,6 +142,13 @@ fn attach_curated_taxonomy_to(connection: &rusqlite::Connection) -> Result<(), D
         connection.execute_batch(include_str!("browse/sql/subjects/paths.sql"))?;
         return Ok(());
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(path) = subject_projection::installed::active_path() {
+        let uri = format!("{}?mode=ro&immutable=1", url_for_taxonomy(path)?);
+        connection.taxonomy_attach(&uri)?;
+        connection.execute_batch(include_str!("browse/sql/subjects/paths.sql"))?;
+        return Ok(());
+    }
     connection.taxonomy_attach(":memory:")?;
     // SAFETY: this non-owning wrapper is confined to connection
     // configuration; no statement is active and it cannot outlive or
@@ -148,6 +158,12 @@ fn attach_curated_taxonomy_to(connection: &rusqlite::Connection) -> Result<(), D
     borrowed.deserialize_bytes("curated", subject_projection::DEFAULT_UNIFIED_TAXONOMY_SQLITE)?;
     connection.execute_batch(include_str!("browse/sql/subjects/paths.sql"))?;
     Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn url_for_taxonomy(path: &Path) -> Result<String, DatabaseError> {
+    let path = path.to_str().ok_or_else(|| DatabaseError::message("taxonomy path is not UTF-8"))?;
+    Ok(format!("file:{}", path.bytes().map(|b| if b.is_ascii_alphanumeric() || b"/-_.".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect::<String>()))
 }
 
 pub struct Database {
@@ -162,81 +178,15 @@ impl fmt::Debug for Database {
     }
 }
 
-impl std::ops::Deref for Database {
-    type Target = rusqlite::Connection;
-
-    fn deref(&self) -> &Self::Target {
-        &self.connection
-    }
-}
-
 impl Database {
     pub fn initialize_library(&self) -> Result<sync_common::ReplicaId, DatabaseError> {
         configure_library_connection(&self.connection)?;
         // Connection pragmas and the taxonomy attachment must be configured
-        // before the transaction. Schema, replica identity, and version then
-        // become visible together, or all roll back on failure.
+        // before the transaction. Each committed schema and replica identity
+        // becomes visible with its matching version; failed transactions roll back.
         let transaction = self.connection.unchecked_transaction()?;
-        const VERSION: i64 = 68;
-        let mut version: i64 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version == 59 {
-            transaction.execute_batch(include_str!("browse/sql/subjects/migrate_route_ids.sql"))?;
-            version = 60;
-        }
-        if version == 60 {
-            transaction.execute_batch(include_str!("browse/sql/migrate_browse.sql"))?;
-            transaction.schema_folder_cache()?;
-            transaction.schema_browse_progress()?;
-            transaction.schema_views()?;
-            transaction.schema_browse_text()?;
-            version = 61;
-        }
-        if version == 61 {
-            transaction.execute_batch(include_str!("browse/sql/migrate_folder_invalidation.sql"))?;
-            version = 62;
-        }
-        if version == 62 {
-            transaction.execute_batch(include_str!("browse/sql/migrate_folder_rename.sql"))?;
-            version = 63;
-        }
-        if version == 63 {
-            transaction.execute_batch(include_str!("browse/sql/subjects/migrate_ownership.sql"))?;
-            version = 64;
-        }
-        if version == 64 {
-            transaction.schema_activity()?;
-            version = 65;
-        }
-        if version == 65 {
-            // Older projections inferred ISBNs only in the identifier table.
-            // Persist them in the canonical metadata read by enrichment too.
-            let books = transaction.prepare("SELECT content_hash,book_metadata FROM book")?.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
-            for (hash, raw) in books {
-                let mut metadata = crate::sync::decode_book_metadata(&raw)?;
-                let before = metadata.identifiers.len();
-                metadata.infer_embedded_subject_isbns().map_err(DatabaseError::operation)?;
-                if metadata.identifiers.len() != before {
-                    let encoded = sync_common::wire::encode(&metadata).map_err(DatabaseError::operation)?;
-                    transaction.shared_update_canonical_metadata(&hash, &encoded)?;
-                }
-            }
-            version = 66;
-        }
-        if version == 66 {
-            // Navigation sync now carries an audiobook's total duration, which
-            // playback requires alongside the chapters.
-            transaction.execute_batch(include_str!("sync/sql/migrate_book_toc_duration.sql"))?;
-            version = 67;
-        }
-        if version == 67 {
-            // Rebuild old suppressed cycles without publishing synthetic moves.
-            crate::transactions::with_remote_origin(&transaction, |origin| {
-                origin.mark(&transaction)?;
-                crate::sync::apply::rebuild_remote_directories(&transaction)
-            })?;
-            transaction.pragma_update(None, "user_version", VERSION)?;
-            version = VERSION;
-        }
+        const VERSION: i64 = LIBRARY_SCHEMA_VERSION;
+        let version: i64 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version == VERSION {
             let mut raw: Option<String> = None;
             transaction.shared_owner_replica_id(|row| {
@@ -245,10 +195,11 @@ impl Database {
             })?;
             let replica_id = raw.ok_or_else(|| DatabaseError::message("library has no replica id"))?.parse().map_err(DatabaseError::operation)?;
             transaction.commit()?;
+            self.refresh_taxonomy_assignments()?;
             return Ok(replica_id);
         }
         if version != 0 {
-            return Err(DatabaseError::message(format!("unsupported library schema version {version}; expected {VERSION}")));
+            return Err(DatabaseError::message(format!("unsupported library schema version {version}; expected a new library or version {VERSION}")));
         }
         transaction.schema_authors()?;
         transaction.schema_books()?;
@@ -277,6 +228,7 @@ impl Database {
         transaction.owner_set_replica_id(&replica_id.to_string())?;
         transaction.pragma_update(None, "user_version", VERSION)?;
         transaction.commit()?;
+        self.refresh_taxonomy_assignments()?;
         Ok(replica_id)
     }
 
@@ -403,6 +355,38 @@ impl Database {
     }
 }
 
+/// Opens a configured, independent connection for external test fixtures.
+/// This feature is enabled only by test dependencies; production callers use
+/// typed database operations through `Database`.
+#[cfg(feature = "fixture-sql")]
+pub fn open_fixture_connection(path: impl AsRef<Path>) -> Result<rusqlite::Connection, DatabaseError> {
+    let database = Database::open(path)?;
+    Ok(database.connection)
+}
+
+/// Connection-local fixture setup for tests that exercise an attached schema.
+#[cfg(feature = "fixture-sql")]
+pub fn execute_owner_fixture_sql(database: &Database, sql: &str) -> Result<(), DatabaseError> {
+    database.connection.execute_batch(sql)?;
+    Ok(())
+}
+
+/// Install connection-local functions and hooks for interruption fixtures.
+#[cfg(feature = "fixture-sql")]
+pub fn configure_fixture_connection(database: &Database, configure: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<()>) -> Result<(), DatabaseError> {
+    configure(&database.connection)?;
+    Ok(())
+}
+
+/// Bounds a fixture query so a broken recursive projection fails promptly.
+#[cfg(feature = "fixture-sql")]
+pub fn set_fixture_progress_limit(database: &Database, limit: usize) -> Result<(), DatabaseError> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let steps = AtomicUsize::new(0);
+    database.connection.progress_handler(1000, Some(move || steps.fetch_add(1, Ordering::Relaxed) > limit))?;
+    Ok(())
+}
+
 include_sql!("src/sql/owner.sql");
 
 mod annotations;
@@ -446,3 +430,20 @@ mod runtime_error_tests {
         assert!(remote.report().causes.contains(&ErrorCause::Sqlite { extended_code: 2067 }));
     }
 }
+
+#[cfg(test)]
+extern crate self as library_database;
+
+// These files need the owner's configured connection for in-memory fixtures.
+#[cfg(test)]
+#[path = "../tests/folder_facets_validation.rs"]
+mod folder_facets_validation_tests;
+#[cfg(test)]
+#[path = "../tests/local_evict_guard.rs"]
+mod local_evict_guard_tests;
+#[cfg(test)]
+#[path = "../tests/regressions.rs"]
+mod regression_tests;
+#[cfg(test)]
+#[path = "../tests/subject_ownership_validation.rs"]
+mod subject_ownership_validation_tests;

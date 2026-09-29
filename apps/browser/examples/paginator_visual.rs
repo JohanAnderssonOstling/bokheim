@@ -46,7 +46,7 @@ fn visual_group(policy: PaginatorGroupPolicy, group_index: usize, intrinsic_heig
         policy,
         indices.into_iter().map(|index| {
             let intrinsic_height = intrinsic_heights[index % intrinsic_heights.len()];
-            PaginatorChild::new(move |_, _| {
+            PaginatorChild::new(move |_, _, _| {
                 div()
                     .w_full()
                     .h(px(intrinsic_height))

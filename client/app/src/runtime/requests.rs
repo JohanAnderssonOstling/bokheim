@@ -75,6 +75,7 @@ pub enum AppCommand {
         password: String,
     },
     AccountSnapshot,
+    LocalStorageUsage,
     Transfers,
     Login {
         email: String,
@@ -158,6 +159,7 @@ pub(super) fn dispatch_request(backend: AppBackend, command: AppCommand) -> Requ
             AppCommand::ResetPassword { token, password } => reply(account_client::reset_password(&crate::api_server_url(), &token, &password).await.map_err(message)?)?,
 
             AppCommand::AccountSnapshot => reply(backend.account_snapshot().await.map_err(message)?)?,
+            AppCommand::LocalStorageUsage => reply(backend.local_storage_usage().await.map_err(message)?)?,
             AppCommand::Transfers => reply(backend.library_directory().transfer_snapshots().await.map_err(message)?)?,
             AppCommand::Login { email, password } => {
                 backend.login(&email, &password).await.map_err(message)?;

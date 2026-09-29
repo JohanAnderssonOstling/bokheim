@@ -21,6 +21,9 @@ pub struct RecordingEvidence {
     pub date: Option<String>,
     #[serde(default)]
     pub recording_release_date: Option<String>,
+    /// Four-digit recording release year, when the source supplies only a year.
+    #[serde(default)]
+    pub recording_release_year: Option<i32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

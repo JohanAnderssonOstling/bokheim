@@ -7,7 +7,7 @@ use book_model::BookFormat;
 use book_model::BookRecord;
 use sync_common::{ContentHash, FileName};
 
-const MAX_FILE_NAME_BYTES: usize = 240;
+pub(crate) const MAX_FILE_NAME_BYTES: usize = 240;
 const COMPACT_HASH_HEX_LEN: usize = 12;
 
 pub fn materialize(content_hash: ContentHash, metadata: &BookRecord, format: BookFormat, mut occupied: impl FnMut(&FileName) -> bool) -> FileName {
@@ -63,16 +63,13 @@ fn sanitize_stem(value: &str) -> String {
         }
     }
     let output = output.trim().trim_end_matches('.').trim().to_owned();
-    if is_reserved(&output) {
-        String::new()
-    } else {
-        output
-    }
+    if is_reserved(&output) { String::new() } else { output }
 }
 
-fn is_reserved(value: &str) -> bool {
-    let value = value.to_ascii_uppercase();
-    matches!(value.as_str(), "CON" | "PRN" | "AUX" | "NUL") || (value.len() == 4 && (value.starts_with("COM") || value.starts_with("LPT")) && matches!(value.as_bytes()[3], b'1'..=b'9'))
+pub(crate) fn is_reserved(value: &str) -> bool {
+    // Windows reserves these device stems even when followed by an extension.
+    let stem = value.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || stem.strip_prefix("COM").or_else(|| stem.strip_prefix("LPT")).is_some_and(|number| matches!(number, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"))
 }
 
 pub fn validate_component(value: &str) -> Result<String, String> {
@@ -99,7 +96,7 @@ fn cap_with_suffix(stem: &str, suffix: &str, extension: &str) -> String {
     let title = stem.strip_suffix(suffix).unwrap_or(stem);
     format!("{}{}", truncate_utf8(title, MAX_FILE_NAME_BYTES.saturating_sub(extension.len() + 1 + suffix.len())), suffix)
 }
-fn truncate_utf8(value: &str, max: usize) -> String {
+pub(crate) fn truncate_utf8(value: &str, max: usize) -> String {
     if value.len() <= max {
         return value.to_owned();
     }

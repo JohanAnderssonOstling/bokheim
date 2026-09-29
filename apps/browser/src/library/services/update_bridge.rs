@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use library_backend::LibraryClient;
 use gpui::{AppContext, Context, Entity, EventEmitter, Task};
+use library_backend::LibraryClient;
 use library_model::LibraryUpdate;
 use sync_common::{ContentHash, LibraryId};
 
@@ -154,9 +154,7 @@ impl LibraryUpdateBridge {
     }
 
     fn set_download_state(&mut self, content_hash: ContentHash, state: app::DownloadState, cx: &mut Context<Self>) {
-        if matches!(self.downloads.get(&content_hash), Some(app::DownloadState::Downloaded))
-            && matches!(state, app::DownloadState::Queued | app::DownloadState::Downloading(_))
-        {
+        if matches!(self.downloads.get(&content_hash), Some(app::DownloadState::Downloaded)) && matches!(state, app::DownloadState::Queued | app::DownloadState::Downloading(_)) {
             return;
         }
         if self.downloads.get(&content_hash) == Some(&state) {

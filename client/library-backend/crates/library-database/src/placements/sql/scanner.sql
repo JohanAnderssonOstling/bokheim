@@ -67,8 +67,8 @@ WHERE removed.deleted_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM book_dir live 
 -- param: id: &str
 -- param: parent_id: &str
 -- param: name: &str
-INSERT INTO dir(id,parent_id,name,deleted_at) VALUES(:id,:parent_id,:name,NULL)
-ON CONFLICT(id) DO UPDATE SET parent_id=excluded.parent_id,name=excluded.name,deleted_at=NULL;
+INSERT INTO dir(id,parent_id,name,intent_parent_id,intent_name,intent_lifecycle,deleted_at) VALUES(:id,:parent_id,:name,:parent_id,:name,0,NULL)
+ON CONFLICT(id) DO UPDATE SET parent_id=excluded.parent_id,name=excluded.name,intent_parent_id=excluded.parent_id,intent_name=excluded.name,intent_lifecycle=0,deleted_at=NULL;
 
 -- name: scanner_insert_book!
 -- param: content_hash: &str

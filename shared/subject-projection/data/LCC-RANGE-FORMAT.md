@@ -82,17 +82,10 @@ the complete incoming interval; matching the two ends independently or
 bridging gaps between disjoint selectors is not sufficient. Equally specific
 unrelated matches remain unresolved.
 
-The Rust reader accepts formats 7 and 8. Writable format-7 device caches upgrade
-before merging server data. Bundled databases and client seeds use format 8.
-The migration preserves all existing endpoint text and ownership; historical
-malformed stored endpoints retain their previous interpretation. Newly written
-ranges use strict endpoint validation. Historical SQL migrations targeting the
-old columns must run before the format-8 migration.
+The Rust reader accepts the current structured taxonomy format. Bundled
+databases and client seeds use the same range columns and strict endpoint
+validation.
 
-Migrations:
-- `migrations/20260907_lcc_range_endpoints_v8.sql`
-- `migrations/20260907_lcc_broad_cross_subclass_ranges.sql`
-
-The latter adds reviewed broad History (`D1..DX301`) and Medicine (`R..RZ`)
+The taxonomy includes reviewed broad History (`D1..DX301`) and Medicine (`R..RZ`)
 coverage. Existing narrower subjects retain precedence. Other unsupported
 codes, missing selectors and holdings markers are separate curation issues.

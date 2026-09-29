@@ -31,51 +31,24 @@ INSERT INTO source_concept_mapping(source_system_id,source_version,source_code,c
 INSERT INTO subject_code_mapping(source_system_id,source_code,unified_path,mapper_version) VALUES(:system_id,:code,:unified_path,:mapper_version)
             ON CONFLICT(source_system_id,source_code,unified_path) DO UPDATE SET mapper_version=excluded.mapper_version WHERE mapper_version IS NOT excluded.mapper_version;
 
--- name: apply_remote_book_added!
--- param: content_hash: &str
--- param: title: &str
--- param: subtitle: Option<&str>
--- param: added_at: i64
--- param: format: &str
-INSERT INTO book (content_hash, title, subtitle, read_pos, read_progress, added_at, format, deleted_at, purged_at)
-VALUES (:content_hash, :title, :subtitle, NULL, 0, :added_at, :format, NULL, NULL)
-ON CONFLICT(content_hash) DO UPDATE SET
-    title = COALESCE(book.title, excluded.title),
-    subtitle = COALESCE(book.subtitle, excluded.subtitle),
-    added_at = excluded.added_at,
-    format = excluded.format,
-    deleted_at = NULL,
-    purged_at = NULL,
-    trash_origin_dir_id = NULL;
-
--- name: apply_remote_book_deleted!
--- param: content_hash: &str
--- param: changed_at: i64
--- param: origin_folder_id: Option<&str>
-INSERT INTO book (content_hash, added_at, deleted_at, trash_origin_dir_id)
-VALUES (:content_hash, :changed_at, :changed_at, :origin_folder_id)
-ON CONFLICT(content_hash) DO UPDATE SET
-    deleted_at = excluded.deleted_at,
-    purged_at = NULL,
-    trash_origin_dir_id = :origin_folder_id;
-
 -- name: apply_remote_book_dir_added!
 -- param: dir_id: &str
 -- param: content_hash: &str
+-- param: file_name: &str
 INSERT INTO book_dir (dir_id, book_row_id, file_name, local_hash, last_scan, is_downloaded, deleted_at)
 VALUES (
     :dir_id,
     (SELECT row_id FROM book WHERE content_hash=:content_hash),
-    COALESCE((SELECT file_name FROM book_dir WHERE dir_id=:dir_id AND book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash)), :content_hash),
+    :file_name,
     '',
     0,
     0,
     NULL
 )
 ON CONFLICT(dir_id, book_row_id) DO UPDATE SET
+    file_name = excluded.file_name,
     deleted_at = NULL,
     trash_origin_dir_id = NULL,
-    local_hash = excluded.local_hash,
     is_downloaded = max(book_dir.is_downloaded, excluded.is_downloaded);
 
 -- name: apply_remote_book_dir_removed!
@@ -97,81 +70,17 @@ ON CONFLICT(dir_id, book_row_id) DO UPDATE SET
     deleted_at = 1,
     trash_origin_dir_id = excluded.trash_origin_dir_id;
 
--- name: apply_remote_book_purged!
--- param: content_hash: &str
--- param: changed_at: i64
-INSERT INTO book (content_hash, added_at, deleted_at, purged_at)
-VALUES (:content_hash, :changed_at, :changed_at, :changed_at)
-ON CONFLICT(content_hash) DO UPDATE SET
-    deleted_at = excluded.deleted_at,
-    purged_at = excluded.purged_at,
-    trash_origin_dir_id = NULL;
-
--- name: apply_remote_book_purged_update!
--- param: book_row_id: i64
-UPDATE book SET title=NULL,description_scanned=0,book_metadata=X'',format='',hidden_at=NULL,read_pos=NULL,read_progress=0,added_at=NULL,trash_origin_dir_id=NULL WHERE row_id=:book_row_id;
-
--- name: apply_remote_books_added_batch!
--- param: books_json: &str
-INSERT INTO book (content_hash, title, subtitle, read_pos, read_progress, added_at, format, deleted_at, purged_at)
-SELECT json_extract(value,'$[0]'), json_extract(value,'$[1]'), json_extract(value,'$[4]'), NULL, 0,
-       json_extract(value,'$[2]'), json_extract(value,'$[3]'), NULL, NULL
-FROM json_each(:books_json) WHERE true ORDER BY CAST(key AS INTEGER)
-ON CONFLICT(content_hash) DO UPDATE SET
-    title = COALESCE(book.title, excluded.title),
-    subtitle = COALESCE(book.subtitle, excluded.subtitle),
-    added_at = excluded.added_at,
-    format = excluded.format,
-    deleted_at = NULL,
-    purged_at = NULL,
-    trash_origin_dir_id = NULL;
-
 -- name: author_identity_by_stable_id?
 -- param: stable_id: &str
 SELECT id, stable_id FROM author_identity WHERE stable_id=:stable_id;
 
--- name: book_addition_snapshots?
--- param: keys_json: &str
-SELECT b.title IS NOT NULL,
-       v.changed_at,v.conflict_rank,v.replica_id,v.replica_seq,v.mutation_id,
-       COALESCE(b.purged_at IS NOT NULL,0), b.row_id IS NOT NULL
-FROM json_each(:keys_json) requested
-LEFT JOIN book b ON b.content_hash=json_extract(requested.value,'$[1]')
-LEFT JOIN sync_state_version v
-  ON v.state_kind=json_extract(requested.value,'$[0]')
- AND v.state_key=json_extract(requested.value,'$[1]')
- AND v.state_subkey=json_extract(requested.value,'$[2]')
-ORDER BY CAST(requested.key AS INTEGER);
-
--- name: book_is_purged_select?
--- param: content_hash: &str
-SELECT COALESCE((SELECT purged_at IS NOT NULL FROM book WHERE content_hash=:content_hash),0);
-
 -- name: directory_projection_rows_select?
 SELECT id,parent_id,name,deleted_at IS NOT NULL FROM dir;
-
--- name: ensure_remote_books_batch!
--- param: missing_json: &str
-INSERT OR IGNORE INTO book(content_hash,added_at)
-SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]')
-FROM json_each(:missing_json) ORDER BY CAST(key AS INTEGER);
 
 -- name: ensure_remote_directory_placeholder!
 -- param: dir_id: &str
 INSERT OR IGNORE INTO dir(id,parent_id,name,intent_parent_id,intent_name,intent_lifecycle,deleted_at,purged_at)
 VALUES(:dir_id,'00000000-0000-0000-0000-000000000000','Pending','00000000-0000-0000-0000-000000000000','Pending',1,1,NULL);
-
--- name: first_book_insert!
--- param: content_hash: &str
--- param: added_at: i64
-INSERT OR IGNORE INTO book    (content_hash, added_at)
-VALUES              (:content_hash, :added_at);
-
--- name: get_remote_directory_intents?
-SELECT id, COALESCE(intent_parent_id, parent_id), COALESCE(intent_name, name),
-       COALESCE(intent_lifecycle, CASE WHEN purged_at IS NOT NULL THEN 2 WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END)
-FROM dir
-WHERE id != '00000000-0000-0000-0000-000000000000';
 
 -- name: hide_remote_directories!
 UPDATE dir SET deleted_at=1, purged_at=NULL WHERE id != '00000000-0000-0000-0000-000000000000';
@@ -277,34 +186,6 @@ INSERT OR REPLACE INTO local_book_work(content_hash) VALUES(:content_hash);
 -- param: state_subkey: &str
 SELECT changed_at,conflict_rank,replica_id,replica_seq,mutation_id FROM sync_state_version
         WHERE state_kind=:state_kind AND state_key=:state_key AND state_subkey=:state_subkey;
-
--- name: record_sync_state_version_insert!
--- param: state_kind: &str
--- param: state_key: &str
--- param: state_subkey: &str
--- param: changed_at: i64
--- param: conflict_rank: i64
--- param: replica_id: &str
--- param: replica_seq: i64
--- param: mutation_id: &str
-INSERT INTO sync_state_version(state_kind,state_key,state_subkey,changed_at,conflict_rank,replica_id,replica_seq,mutation_id)
-        VALUES(:state_kind,:state_key,:state_subkey,:changed_at,:conflict_rank,:replica_id,:replica_seq,:mutation_id)
-        ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET changed_at=excluded.changed_at,
-          conflict_rank=excluded.conflict_rank,replica_id=excluded.replica_id,replica_seq=excluded.replica_seq,mutation_id=excluded.mutation_id;
-
--- name: record_versions_batch!
--- param: versions_json: &str
-INSERT INTO sync_state_version(state_kind,state_key,state_subkey,changed_at,conflict_rank,replica_id,replica_seq,mutation_id)
-        SELECT json_extract(value,'$[0]'),json_extract(value,'$[1]'),json_extract(value,'$[2]'),
-               json_extract(value,'$[3]'),json_extract(value,'$[4]'),json_extract(value,'$[5]'),
-               json_extract(value,'$[6]'),json_extract(value,'$[7]')
-        FROM json_each(:versions_json) WHERE true ORDER BY CAST(key AS INTEGER)
-        ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET changed_at=excluded.changed_at,
-          conflict_rank=excluded.conflict_rank,replica_id=excluded.replica_id,replica_seq=excluded.replica_seq,mutation_id=excluded.mutation_id;
-
--- name: remote_book_has_metadata?
--- param: content_hash: &str
-SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=:content_hash AND title IS NOT NULL);
 
 -- name: set_remote_directory_lifecycle!
 -- param: dir_id: &str

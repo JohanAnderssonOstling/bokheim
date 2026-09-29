@@ -87,14 +87,18 @@ ORDER BY book.content_hash;
 WITH RECURSIVE routes(route_id,parent_route_id,label) AS (
     SELECT 0,0,'Subject' WHERE :route_id=0
     UNION ALL
-    SELECT route.route_id,route.parent_route_id,concept.preferred_label
-    FROM curated.unified_concept_route route JOIN curated.concept concept USING(concept_id)
+    SELECT route.route_id,visible.parent_route_id,concept.preferred_label
+    FROM subject_browse_visible_route visible
+    JOIN curated.unified_concept_route route USING(route_id)
+    JOIN curated.concept concept USING(concept_id)
     WHERE route.route_id=:route_id
     UNION ALL
     SELECT child.route_id,child.parent_route_id,concept.preferred_label
-    FROM routes parent JOIN curated.unified_concept_route child ON child.parent_route_id=parent.route_id
-    JOIN library_subject used ON used.route_id=child.route_id
-    JOIN curated.concept concept ON concept.concept_id=child.concept_id
+    FROM routes parent JOIN subject_browse_visible_route child ON child.parent_route_id=parent.route_id
+    JOIN curated.unified_concept_route route ON route.route_id=child.route_id
+    JOIN curated.concept concept ON concept.concept_id=route.concept_id
 )
-SELECT route.route_id,route.parent_route_id,route.label,member.book_row_id,member.direct
+SELECT route.route_id,route.parent_route_id,route.label,member.book_row_id,
+       EXISTS(SELECT 1 FROM subject_browse_placement placement
+              WHERE placement.route_id=route.route_id AND placement.book_row_id=member.book_row_id)
 FROM routes route JOIN subject_browse_member member ON member.route_id=route.route_id;

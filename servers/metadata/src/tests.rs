@@ -174,14 +174,13 @@ fn description_capability_follows_the_snapshot_table() {
 
     let connection = Connection::open(&database).unwrap();
     connection.execute("DROP TABLE work_description", ()).unwrap();
-    connection.execute("UPDATE snapshot SET schema_version=?1", [LEGACY_QUERY_SCHEMA_VERSION]).unwrap();
     drop(connection);
 
     assert!(!MetadataService::open(&database).unwrap().state.descriptions_available);
 }
 
 #[test]
-fn description_sidecar_enriches_a_legacy_core_without_changing_it() {
+fn description_sidecar_enriches_a_core_without_embedded_descriptions() {
     let temporary = tempfile::tempdir().unwrap();
     let database = snapshot_from(
         temporary.path(),
@@ -198,7 +197,6 @@ fn description_sidecar_enriches_a_legacy_core_without_changing_it() {
     );
     let connection = Connection::open(&database).unwrap();
     connection.execute("DROP TABLE work_description", ()).unwrap();
-    connection.execute("UPDATE snapshot SET schema_version=?1", [LEGACY_QUERY_SCHEMA_VERSION]).unwrap();
     drop(connection);
 
     let sidecar = temporary.path().join("descriptions.sqlite");
@@ -938,15 +936,15 @@ fn serving_rejects_a_snapshot_outside_the_supported_schema_set() {
     let temporary = tempfile::tempdir().unwrap();
     let database = snapshot_from(temporary.path(), &[], &[], &[]);
     let connection = Connection::open(&database).unwrap();
-    connection.execute("UPDATE snapshot SET schema_version=?1 WHERE singleton=1", [LEGACY_QUERY_SCHEMA_VERSION - 1]).unwrap();
+    connection.execute("UPDATE snapshot SET schema_version=?1 WHERE singleton=1", [SCHEMA_VERSION + 1]).unwrap();
     drop(connection);
 
     let failure = match MetadataService::open(&database) {
         Ok(_) => panic!("an unsupported snapshot must not be served"),
         Err(failure) => failure,
     };
-    assert!(failure.to_string().contains(&format!("schema {}", LEGACY_QUERY_SCHEMA_VERSION - 1)), "unexpected rejection: {failure}");
-    assert!(failure.to_string().contains(&format!("expected {LEGACY_QUERY_SCHEMA_VERSION}, {SCHEMA_VERSION}, or {WIKIDATA_SCHEMA_VERSION}")), "unexpected rejection: {failure}");
+    assert!(failure.to_string().contains(&format!("schema {}", SCHEMA_VERSION + 1)), "unexpected rejection: {failure}");
+    assert!(failure.to_string().contains(&format!("expected {SCHEMA_VERSION}")), "unexpected rejection: {failure}");
 }
 
 /// Only the current builder version is supported, so an unfinished build

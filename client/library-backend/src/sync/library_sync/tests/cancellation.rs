@@ -35,7 +35,7 @@ async fn stalled_inventory_and_asset_planning_do_not_hold_the_metadata_gate() {
                 let request = decode_sync_exchange(&headers, &body);
                 binary_sync_response(&SyncExchangeResponse {
                     push: PushMutationsResponse { accepted: request.mutations.iter().map(|m| m.mutation_id).collect(), rejected: Vec::new() },
-                    pull: PullStateResponse { mutations: Vec::new(), next_cursor: request.cursor, has_more: false },
+                    pull: PullStateResponse { book_creations: Vec::new(), mutations: Vec::new(), next_cursor: request.cursor, has_more: false },
                 })
                 .into_response()
             }),
@@ -90,7 +90,7 @@ async fn a_second_client_applies_moves_while_thumbnail_http_is_blocked() {
         let mutations = changes.iter().filter(|change| Some(change.revision) > request.cursor.state_revision).cloned().collect();
         binary_sync_response(&SyncExchangeResponse {
             push: PushMutationsResponse { accepted, rejected: Vec::new() },
-            pull: PullStateResponse { mutations, next_cursor: SyncCursor { state_revision: changes.last().map(|change| change.revision), reading_revision: request.cursor.reading_revision }, has_more: false },
+            pull: PullStateResponse { book_creations: Vec::new(), mutations, next_cursor: SyncCursor { state_revision: changes.last().map(|change| change.revision), reading_revision: request.cursor.reading_revision }, has_more: false },
         })
     }
     let started = Arc::new(tokio::sync::Notify::new());
@@ -167,7 +167,7 @@ async fn state_checkpoint_does_not_wait_for_asset_reconciliation() {
         let request = decode_sync_exchange(&headers, &body);
         binary_sync_response(&SyncExchangeResponse {
             push: PushMutationsResponse { accepted: request.mutations.iter().map(|mutation| mutation.mutation_id).collect(), rejected: Vec::new() },
-            pull: PullStateResponse { mutations: Vec::new(), next_cursor: request.cursor, has_more: false },
+            pull: PullStateResponse { book_creations: Vec::new(), mutations: Vec::new(), next_cursor: request.cursor, has_more: false },
         })
     }
 
@@ -175,7 +175,7 @@ async fn state_checkpoint_does_not_wait_for_asset_reconciliation() {
     let release = Arc::new(tokio::sync::Notify::new());
     let route_started = started.clone();
     let route_release = release.clone();
-    let app = axum::Router::new().route("/api/sync/exchange", axum::routing::post(exchange)).route(
+    let app = axum::Router::new().route("/api/libraries/:library_id/thumbnails/presence", axum::routing::post(empty_thumbnail_presence)).route("/api/sync/exchange", axum::routing::post(exchange)).route(
         "/api/libraries/:library_id/blobs/negotiate",
         axum::routing::post(move || {
             let started = route_started.clone();
@@ -199,7 +199,7 @@ async fn state_checkpoint_does_not_wait_for_asset_reconciliation() {
     manager.inventory_checked.store(true, Ordering::Release);
 
     let book_bytes = test_epub(b"asset failure must not erase state success");
-    let content_hash = ContentHash::new(&blake3::hash(&book_bytes).to_hex().to_string());
+    let content_hash = ContentHash::new(blake3::hash(&book_bytes).to_hex().as_ref());
     {
         let conn = &manager.database;
         conn.seed_book(&content_hash, Some("Checkpointed"), 1, "epub");

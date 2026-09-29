@@ -1,4 +1,4 @@
-//! Shared PostgreSQL connection capability and schema migration boundary.
+//! Shared PostgreSQL connection and initial schema setup.
 
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
@@ -73,7 +73,7 @@ pub async fn connect_configured(database_url: &str, config: DatabasePoolConfig) 
         .map(PostgresDatabase::from_pool)
 }
 
-/// Applies the complete v14 baseline schema to an empty database. Files are
+/// Applies the initial schema to an empty database. Files are
 /// applied in filename order -- `01_core.sql` before the domain files that
 /// reference it.
 pub async fn migrate(database: &PostgresDatabase) -> Result<(), sqlx::Error> {
@@ -84,34 +84,12 @@ pub async fn migrate(database: &PostgresDatabase) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-/// Immutable migrations introduced after the v14 baseline. Append entries;
-/// never edit or reorder a migration after release.
-const POST_V14_MIGRATIONS: &[(&str, &str)] = &[
-    ("15-lww-loser-republish", include_str!("../schema/migrations/15_lww_loser_republish.sql")),
-    ("16-explicit-library-names", include_str!("../schema/migrations/16_explicit_library_names.sql")),
-    ("17-user-book-revision", include_str!("../schema/migrations/17_user_book_revision.sql")),
-    ("18-free-thumbnails", include_str!("../schema/migrations/18_free_thumbnails.sql")),
-    ("19-cloud-storage", include_str!("../schema/migrations/19_cloud_storage.sql")),
-];
-
-/// Upgrades an existing v14-or-newer database without recreating or deleting
-/// user data. Pre-v14 databases are deliberately rejected.
-pub async fn upgrade_existing(database: &PostgresDatabase) -> Result<(), sqlx::Error> {
-    let mut transaction = database.pool().begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('bokheim-schema-upgrade'))").execute(&mut *transaction).await?;
-    let is_v14: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bokheim_schema_migration WHERE version='14-baseline')").fetch_one(&mut *transaction).await?;
-    if !is_v14 {
-        return Err(sqlx::Error::Protocol("database predates the v14 migration baseline".to_owned()));
+/// Reject databases created with earlier development schemas before activating a release.
+pub async fn verify_schema(database: &PostgresDatabase) -> Result<(), sqlx::Error> {
+    let version: i32 = sqlx::query_scalar("SELECT version FROM bokheim_schema_version").fetch_one(database.pool()).await?;
+    if version != 1 {
+        return Err(sqlx::Error::Protocol(format!("unsupported sync schema version {version}; expected 1")));
     }
-    for &(version, sql) in POST_V14_MIGRATIONS {
-        let applied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM bokheim_schema_migration WHERE version=$1)").bind(version).fetch_one(&mut *transaction).await?;
-        if applied {
-            continue;
-        }
-        sqlx::raw_sql(sql).execute(&mut *transaction).await?;
-        sqlx::query("INSERT INTO bokheim_schema_migration(version) VALUES($1)").bind(version).execute(&mut *transaction).await?;
-    }
-    transaction.commit().await?;
     Ok(())
 }
 

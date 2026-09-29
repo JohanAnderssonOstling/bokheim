@@ -15,7 +15,7 @@ pub use wire;
 pub mod mutation_ids;
 pub use mutation_ids::{MutationId, MutationIdError};
 mod protocol;
-pub use protocol::{validate_pull_batch, validate_push_response, MutationIssue, PullBatchError, PushBatcher, PushResponseError, ValidatedPushResponse};
+pub use protocol::{MutationIssue, PullBatchError, PushBatcher, PushResponseError, ValidatedPushResponse, validate_pull_batch, validate_push_response};
 
 pub use content_address::ContentHash;
 
@@ -33,6 +33,7 @@ pub type UnixMillis = u64;
 pub mod mutation_kind {
     pub const ANNOTATION: &str = "annotation";
     pub const BOOK_LIFECYCLE: &str = "book_lifecycle";
+    pub const BOOK_FACTS: &str = "book_facts";
     pub const BOOK_TOC: &str = "book_toc";
     pub const DIRECTORY_LIFECYCLE: &str = "directory_lifecycle";
     pub const DIRECTORY_NAME: &str = "directory_name";
@@ -134,6 +135,9 @@ impl VersionKey {
     }
 
     pub fn from_wire(mutation: &WireMutation, replica_id: ReplicaId) -> Self {
+        if let Some(origin) = &mutation.origin {
+            return Self::new(mutation.changed_at, mutation.conflict_rank, origin.replica_id, origin.replica_seq.get(), origin.mutation_id);
+        }
         Self::new(mutation.changed_at, mutation.conflict_rank, replica_id, mutation.replica_seq.get(), mutation.mutation_id)
     }
 }
@@ -173,6 +177,16 @@ pub struct WireMutation {
     pub blob_reference: Option<DeclaredBlobReference>,
     pub changed_at: UnixMillis,
     pub replica_seq: ReplicaSeq,
+    /// Original winner identity when forwarding retained state. Transport IDs
+    /// above remain local to the publisher and are used only for acknowledgements.
+    pub origin: Option<MutationOrigin>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MutationOrigin {
+    pub replica_id: ReplicaId,
+    pub replica_seq: ReplicaSeq,
+    pub mutation_id: MutationId,
 }
 
 /// Server-visible book prerequisite. Lifecycle declarations also own the
@@ -227,6 +241,11 @@ impl MutationRejectionReason {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PullStateResponse {
+    /// Explicit creation prerequisites, applied before mutations. These may be
+    /// behind the pull cursor and never advance it. Only live/Trash lifecycle
+    /// records are allowed; ordinary field values cannot create a book.
+    #[serde(default)]
+    pub book_creations: Vec<ServerMutation>,
     pub mutations: Vec<ServerMutation>,
     pub next_cursor: SyncCursor,
     pub has_more: bool,
@@ -341,8 +360,29 @@ mod tests {
     }
 
     #[test]
+    fn recovery_origin_survives_transport_without_promoting_the_version() {
+        let original = MutationOrigin { replica_id: uuid::Uuid::from_u128(1), replica_seq: ReplicaSeq::new(2).unwrap(), mutation_id: MutationId::new() };
+        let mutation = WireMutation {
+            mutation_id: MutationId::new(),
+            kind: "directory_name".into(),
+            entity_key: "shelf".into(),
+            entity_subkey: String::new(),
+            value: vec![],
+            conflict_rank: 0,
+            blob_reference: None,
+            changed_at: 10,
+            replica_seq: ReplicaSeq::new(500).unwrap(),
+            origin: Some(original.clone()),
+        };
+        let decoded: WireMutation = transport::decode(&transport::encode(&mutation).unwrap(), transport::MAX_DECODED_REQUEST_BYTES).unwrap();
+        assert_eq!(decoded, mutation);
+        assert_eq!(VersionKey::from_wire(&decoded, uuid::Uuid::from_u128(999)), VersionKey::new(10, 0, original.replica_id, 2, original.mutation_id));
+    }
+
+    #[test]
     fn wire_mutation_preserves_an_absent_blob_reference_in_binary_encoding() {
         let mutation = WireMutation {
+            origin: None,
             mutation_id: MutationId::new(),
             kind: "directory_name".to_owned(),
             entity_key: "shelf".to_owned(),

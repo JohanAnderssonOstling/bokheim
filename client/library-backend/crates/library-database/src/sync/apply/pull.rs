@@ -3,34 +3,6 @@ use super::*;
 use crate::books::audiobook::AudiobookSql;
 use crate::shared_sql::SharedSql;
 
-type PendingMetadata<'a> = (&'a sync_common::ContentHash, &'a library_replica::SyncBookMetadata);
-const BATCH_SIZE: usize = 100;
-
-struct ApplyState<'a, 'scope> {
-    origin: &'scope mut crate::transactions::RemoteOrigin,
-    reproject: bool,
-    pending: Vec<PendingMetadata<'a>>,
-}
-
-enum ApplyPlan {
-    Additions(Vec<String>),
-    Metadata(Vec<String>),
-    Ordered,
-}
-
-impl ApplyPlan {
-    // Only page contents are inspected here. Version and lifecycle snapshots must
-    // still be read after reserving the writer, immediately before each chunk.
-    fn prepare(prepared: &PreparedRemoteChanges<'_>) -> Result<Self, DatabaseError> {
-        let additions = independent_additions(prepared);
-        if !additions && !independent_metadata(prepared) {
-            return Ok(Self::Ordered);
-        }
-        let keys = prepared.changes.chunks(BATCH_SIZE).map(|chunk| serde_json::to_string(&chunk.iter().map(|(_, _, identity)| identity).collect::<Vec<_>>()).map_err(DatabaseError::operation)).collect::<Result<Vec<_>, _>>()?;
-        Ok(if additions { Self::Additions(keys) } else { Self::Metadata(keys) })
-    }
-}
-
 fn read_cursor(conn: &rusqlite::Connection) -> Result<sync_common::SyncCursor, DatabaseError> {
     Ok(sync_common::SyncCursor { state_revision: parse_revision(read_cursor_revision(conn, PullCursorKey::State)?)?, reading_revision: parse_revision(read_cursor_revision(conn, PullCursorKey::Reading)?)? })
 }
@@ -40,136 +12,205 @@ impl Database {
     /// batch planning and input-only serialization run before reserving the writer.
     /// Returns whether the page carried remote changes, including stale changes.
     pub fn sync_commit_pull_response(&self, ids: &[MutationId], page: &PullStateResponse) -> Result<bool, DatabaseError> {
-        if page.mutations.is_empty() && ids.is_empty() && read_cursor(&self.connection)? == page.next_cursor {
+        if page.book_creations.is_empty() && page.mutations.is_empty() && ids.is_empty() && read_cursor(&self.connection)? == page.next_cursor {
             return Ok(false);
         }
+        let mut creations = Vec::new();
+        for declaration in &page.book_creations {
+            let body = MutationBody::from_wire(&declaration.mutation).map_err(DatabaseError::operation)?;
+            match body {
+                Some(body @ MutationBody::BookLifecycle { value: library_replica::BookLifecycleState::Present | library_replica::BookLifecycleState::Deleted { .. }, .. }) => creations.push((declaration, body)),
+                _ => return Err(DatabaseError::message("invalid explicit book creation")),
+            }
+        }
         let prepared = prepare_remote_changes(&page.mutations).map_err(DatabaseError::operation)?;
-        let plan = ApplyPlan::prepare(&prepared)?;
         let acknowledgements = if ids.is_empty() { None } else { Some(serde_json::to_string(&ids.iter().map(ToString::to_string).collect::<Vec<_>>()).map_err(DatabaseError::operation)?) };
         self.with_write_transaction(|tx| {
             tx.pragma_update(None, "defer_foreign_keys", "ON").map_err(DatabaseError::operation)?;
             if let Some(payload) = acknowledgements {
                 tx.outbox_delete_for_ids(&payload).map_err(DatabaseError::operation)?;
             }
-            if page.mutations.is_empty() && read_cursor(tx)? == page.next_cursor {
+            if creations.is_empty() && page.mutations.is_empty() && read_cursor(tx)? == page.next_cursor {
                 return Ok(crate::transactions::WriteOutcome::Commit(false));
             }
-            crate::transactions::with_remote_origin(tx, |origin| {
-                let mut state = ApplyState { origin, reproject: false, pending: Vec::new() };
-                match plan {
-                    ApplyPlan::Additions(keys) => apply_additions(tx, &prepared, &keys, &mut state)?,
-                    ApplyPlan::Metadata(keys) => apply_metadata_batch(tx, &prepared, &keys, &mut state)?,
-                    ApplyPlan::Ordered => apply_ordered_changes(tx, &prepared, &mut state)?,
+            {
+                for (change, body) in &creations {
+                    registers::merge(tx, body, &library_replica::VersionKey::from_wire(&change.mutation, change.replica_id))?;
                 }
-                for (hash, metadata) in state.pending {
-                    project_remote_metadata(tx, hash, metadata)?;
+                for (change, body) in prepared.changes.iter().filter(|(_, body)| matches!(body, MutationBody::BookLifecycle { .. })) {
+                    let version = library_replica::VersionKey::from_wire(&change.mutation, change.replica_id);
+                    registers::merge(tx, body, &version)?;
                 }
-                if state.reproject {
-                    rebuild_remote_directories(tx)?;
+                // Apply final lifecycle winners before admitting dependent fields.
+                project_dirty(tx)?;
+                crate::transactions::with_remote_origin(tx, |origin| {
+                    for (_, body) in &creations {
+                        let MutationBody::BookLifecycle { content_hash, .. } = body else { unreachable!() };
+                        let Some((bytes, _)) = registers::canonical_body(tx, "book_lifecycle", content_hash.as_str(), "")? else { continue };
+                        let winner: MutationBody = sync_common::wire::decode(&bytes, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)?;
+                        if matches!(winner, MutationBody::BookLifecycle { value: library_replica::BookLifecycleState::Purged, .. }) {
+                            continue;
+                        }
+                        origin.mark(tx)?;
+                        if tx.execute("INSERT OR IGNORE INTO book(content_hash) VALUES(?1)", [content_hash.as_str()])? != 0 {
+                            tx.execute("INSERT OR IGNORE INTO sync_projection_dirty VALUES('book_projection',?1,'')", [content_hash.as_str()])?;
+                        }
+                    }
+                    Ok(())
+                })?;
+                for (change, body) in prepared.changes.iter().filter(|(_, body)| !matches!(body, MutationBody::BookLifecycle { .. })) {
+                    registers::merge(tx, body, &library_replica::VersionKey::from_wire(&change.mutation, change.replica_id))?;
                 }
+                project_dirty(tx)?;
                 write_cursor_revision(tx, PullCursorKey::State, page.next_cursor.state_revision)?;
                 write_cursor_revision(tx, PullCursorKey::Reading, page.next_cursor.reading_revision)?;
-                Ok(())
-            })?;
-            Ok(crate::transactions::WriteOutcome::Commit(!page.mutations.is_empty()))
+            }
+            Ok(crate::transactions::WriteOutcome::Commit(!page.mutations.is_empty() || !creations.is_empty()))
         })
     }
 }
 
-fn apply_additions<'a>(tx: &rusqlite::Transaction<'_>, prepared: &'a PreparedRemoteChanges<'_>, keys: &[String], state: &mut ApplyState<'a, '_>) -> Result<(), DatabaseError> {
-    for (chunk, keys) in prepared.changes.chunks(BATCH_SIZE).zip(keys) {
-        let snapshots = read_book_snapshots(tx, keys)?;
-        let mut books: Vec<(&str, &str, i64, &str, Option<&str>)> = Vec::new();
-        let mut versions: Vec<VersionRow<'_>> = Vec::new();
-        let mut accepted: Vec<(&sync_common::ContentHash, &library_replica::SyncBookMetadata, bool)> = Vec::new();
-        let mut queue: Vec<&str> = Vec::new();
-        for ((change, body, identity), snapshot) in chunk.iter().zip(&snapshots) {
-            if snapshot.version.as_ref().is_some_and(|stored| incoming_version(change) <= *stored) {
-                continue;
-            }
-            let MutationBody::BookLifecycle { content_hash, value: library_replica::BookLifecycleState::Present { metadata, added_at, format } } = body else { unreachable!("independent additions checked by caller") };
-            state.origin.mark(tx)?;
-            books.push((content_hash.as_str(), metadata.title.as_str(), storage_i64(*added_at, "book addition timestamp").map_err(DatabaseError::operation)?, format.canonical_extension(), metadata.subtitle.as_deref()));
-            versions.push(version_row(change, identity)?);
-            accepted.push((content_hash, metadata, snapshot.has_metadata));
-            queue.push(content_hash.as_str());
-        }
-        if accepted.is_empty() {
-            continue;
-        }
-        tx.apply_remote_books_added_batch(&serde_json::to_string(&books).map_err(DatabaseError::operation)?).map_err(DatabaseError::operation)?;
-        let projecting = accepted.iter().filter(|(_, _, has_metadata)| !has_metadata).map(|(hash, metadata, _)| (*hash, *metadata)).collect::<Vec<_>>();
-        state.pending.extend(projecting);
-        tx.record_versions_batch(&serde_json::to_string(&versions).map_err(DatabaseError::operation)?).map_err(DatabaseError::operation)?;
-        tx.queue_book_work_batch(&serde_json::to_string(&queue).map_err(DatabaseError::operation)?).map_err(DatabaseError::operation)?;
+/// Project canonical winners inside the same transaction as their admission.
+pub(crate) fn project_dirty(tx: &rusqlite::Transaction<'_>) -> Result<(), DatabaseError> {
+    let dirty = tx.prepare("SELECT state_kind,state_key,state_subkey FROM sync_projection_dirty")?.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
+    if dirty.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    let books = tx
+        .prepare(
+            "SELECT DISTINCT COALESCE(v.book_key,CASE WHEN d.state_kind='book_projection' THEN d.state_key END)
+        FROM sync_projection_dirty d LEFT JOIN sync_state_version v USING(state_kind,state_key,state_subkey)
+        WHERE v.book_key IS NOT NULL OR d.state_kind='book_projection' ORDER BY 1",
+        )?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let directories = dirty.iter().any(|(kind, _, _)| kind.starts_with("directory_"));
+    crate::transactions::with_remote_origin(tx, |origin| {
+        origin.mark(tx)?;
+        for hash in books {
+            let rows = tx
+                .prepare("SELECT body,changed_at FROM sync_state_version WHERE book_key=?1 AND body IS NOT NULL ORDER BY state_kind,state_key,state_subkey")?
+                .query_map([&hash], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let values = rows
+                .into_iter()
+                .map(|(bytes, time)| Ok((sync_common::wire::decode::<MutationBody>(&bytes, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)?, nonnegative_u64(time, 1, "register timestamp")?)))
+                .collect::<Result<Vec<_>, DatabaseError>>()?;
+            project_book(tx, &hash, &values)?;
+            if dirty.iter().any(|(kind, key, _)| key == &hash && matches!(kind.as_str(), "book_facts" | "book_lifecycle" | "placement" | "metadata")) {
+                tx.queue_book_work_insert(&hash)?;
+            }
+        }
+        if directories {
+            // Refresh the command-input cache from the same canonical source.
+            let rows = tx
+                .prepare("SELECT body FROM sync_state_version WHERE state_kind IN ('directory_name','directory_parent','directory_lifecycle') AND body IS NOT NULL ORDER BY state_kind,state_key")?
+                .query_map([], |r| r.get::<_, Vec<u8>>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            for bytes in rows {
+                let body = sync_common::wire::decode::<MutationBody>(&bytes, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)?;
+                project_value(tx, 0, &body)?;
+            }
+            rebuild_remote_directories(tx)?;
+        }
+        tx.execute("DELETE FROM sync_projection_dirty", [])?;
+        Ok(())
+    })
 }
 
-fn apply_metadata_batch<'a>(tx: &rusqlite::Transaction<'_>, prepared: &'a PreparedRemoteChanges<'_>, keys: &[String], state: &mut ApplyState<'a, '_>) -> Result<(), DatabaseError> {
-    for (chunk, keys) in prepared.changes.chunks(BATCH_SIZE).zip(keys) {
-        let snapshots = read_book_snapshots(tx, keys)?;
-        let mut missing: Vec<(&str, i64)> = Vec::new();
-        let mut metadata: Vec<(&sync_common::ContentHash, &library_replica::SyncBookMetadata)> = Vec::new();
-        let mut versions: Vec<VersionRow<'_>> = Vec::new();
-        for ((change, body, identity), snapshot) in chunk.iter().zip(&snapshots) {
-            if snapshot.version.as_ref().is_some_and(|stored| incoming_version(change) <= *stored) {
-                continue;
-            }
-            let MutationBody::Metadata { content_hash, value } = body else { unreachable!("independent metadata checked by caller") };
-            state.origin.mark(tx)?;
-            versions.push(version_row(change, identity)?);
-            if !snapshot.is_purged {
-                if !snapshot.exists {
-                    missing.push((content_hash.as_str(), storage_i64(change.mutation.changed_at, "change timestamp").map_err(DatabaseError::operation)?));
-                }
-                metadata.push((content_hash, value));
-            }
-        }
-        if versions.is_empty() {
-            continue;
-        }
-        tx.ensure_remote_books_batch(&serde_json::to_string(&missing).map_err(DatabaseError::operation)?).map_err(DatabaseError::operation)?;
-        state.pending.extend(metadata.drain(..));
-        tx.record_versions_batch(&serde_json::to_string(&versions).map_err(DatabaseError::operation)?).map_err(DatabaseError::operation)?;
+/// Desired synchronized scalars are derived before touching the display row.
+/// Missing registers have explicit defaults, never the previous display value.
+fn project_book(tx: &rusqlite::Transaction<'_>, hash: &str, values: &[(MutationBody, u64)]) -> Result<(), DatabaseError> {
+    if values.iter().any(|(body, _)| matches!(body, MutationBody::BookLifecycle { value: library_replica::BookLifecycleState::Purged, .. })) {
+        return crate::purge::remove_book(tx, hash);
     }
-    Ok(())
-}
+    // Only the explicit creation prelude (or a local import) inserts books.
+    if !tx.query_row("SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=?1)", [hash], |row| row.get::<_, bool>(0))? {
+        return Ok(());
+    }
+    let mut format = "";
+    let mut added_at = None;
+    let mut deleted_at = None; // Deterministic placeholder until lifecycle arrives.
 
-fn apply_ordered_changes<'a>(tx: &rusqlite::Transaction<'_>, prepared: &'a PreparedRemoteChanges<'_>, state: &mut ApplyState<'a, '_>) -> Result<(), DatabaseError> {
-    for (change, body, identity) in &prepared.changes {
-        let incoming = incoming_version(change);
-        let stored = read_version(tx, identity.0, &identity.1, &identity.2)?;
-        if stored.is_some_and(|stored| incoming <= stored) {
-            continue;
-        }
-        state.origin.mark(tx)?;
-        apply_mutation(tx, change, body, state)?;
-        let (kind, key, subkey, changed_at, rank, actor, sequence, mutation_id) = version_row(change, identity)?;
-        tx.record_sync_state_version_insert(kind, key, subkey, changed_at, rank, &actor, sequence, &mutation_id)?;
-        #[cfg(not(target_arch = "wasm32"))]
+    let mut origin = None;
+    let mut reading = None;
+    let mut progress = 0f32;
+    let mut kinds = std::collections::HashSet::new();
+    for (body, time) in values {
+        kinds.insert(body.kind());
         match body {
-            MutationBody::Placement { content_hash, .. } | MutationBody::BookLifecycle { content_hash, .. } => {
-                tx.queue_book_work_insert(content_hash.as_str()).map_err(DatabaseError::operation)?;
+            MutationBody::BookFacts { value, .. } => {
+                format = value.format.canonical_extension();
+                added_at = Some(storage_i64(value.added_at, "book addition timestamp")?);
+            }
+            MutationBody::BookLifecycle { value, .. } => match value {
+                library_replica::BookLifecycleState::Present => deleted_at = None,
+                library_replica::BookLifecycleState::Deleted { origin_folder_id } => {
+                    deleted_at = Some(storage_i64(*time, "deletion timestamp")?);
+                    origin = origin_folder_id.as_deref();
+                }
+                library_replica::BookLifecycleState::Purged => {
+                    return crate::purge::remove_book(tx, hash);
+                }
+            },
+            MutationBody::ReadingPosition { value, .. } => {
+                reading = Some(value.location.as_str());
+                progress = value.progress;
             }
             _ => {}
         }
-        if matches!(body, MutationBody::DirectoryName { .. } | MutationBody::DirectoryParent { .. } | MutationBody::DirectoryLifecycle { .. }) {
-            state.reproject = true;
+    }
+    tx.execute(
+        "UPDATE book SET format=?2,added_at=?3,deleted_at=?4,trash_origin_dir_id=?5,read_pos=?6,read_progress=?7
+        WHERE content_hash=?1 AND (format,added_at,deleted_at,trash_origin_dir_id,read_pos,read_progress) IS NOT (?2,?3,?4,?5,?6,?7)",
+        rusqlite::params![hash, format, added_at, deleted_at, origin, reading, progress],
+    )?;
+    if !kinds.contains("metadata") {
+        let mut empty = library_replica::SyncBookMetadata::default();
+        empty.title = String::new();
+        project_remote_metadata(tx, &sync_common::ContentHash::new(hash), &empty)?;
+        tx.execute("UPDATE book SET title=NULL,subtitle=NULL,book_metadata=X'' WHERE content_hash=?1", [hash])?;
+    }
+    if !kinds.contains("description") {
+        tx.execute("DELETE FROM book_description WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1)", [hash])?;
+        tx.execute("UPDATE book SET description_scanned=0 WHERE content_hash=?1", [hash])?;
+    }
+    if !kinds.contains("book_toc") {
+        for table in ["book_toc", "audiobook_metadata", "audiobook_track_index"] {
+            tx.execute(&format!("DELETE FROM {table} WHERE content_hash=?1"), [hash])?;
+        }
+    }
+    // Values whose identities disappeared must not linger in projections.
+    tx.execute(
+        "DELETE FROM pdf_reader_metadata WHERE content_hash=?1 AND checksum NOT IN
+       (SELECT state_subkey FROM sync_state_version WHERE state_kind='pdf_reader_metadata' AND state_key=?1 AND body IS NOT NULL)",
+        [hash],
+    )?;
+    tx.execute(
+        "DELETE FROM annotation WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND id NOT IN
+       (SELECT state_key FROM sync_state_version WHERE state_kind='annotation' AND book_key=?1 AND body IS NOT NULL)",
+        [hash],
+    )?;
+    tx.execute(
+        "DELETE FROM book_dir WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND dir_id NOT IN
+       (SELECT state_subkey FROM sync_state_version WHERE state_kind='placement' AND state_key=?1 AND body IS NOT NULL)",
+        [hash],
+    )?;
+    for (body, time) in values {
+        if !matches!(body, MutationBody::BookLifecycle { .. } | MutationBody::BookFacts { .. } | MutationBody::ReadingPosition { .. }) {
+            project_value(tx, *time, body)?;
         }
     }
     Ok(())
 }
 
-fn apply_mutation<'a>(tx: &rusqlite::Transaction<'_>, change: &sync_common::ServerMutation, body: &'a MutationBody, state: &mut ApplyState<'a, '_>) -> Result<(), DatabaseError> {
-    let mut pending_metadata = None;
+fn project_value(tx: &rusqlite::Transaction<'_>, _changed_at: u64, body: &MutationBody) -> Result<(), DatabaseError> {
     match body {
         MutationBody::DirectoryName { dir_id, name } => {
             if *dir_id != sync_common::ROOT_DIR_ID {
                 tx.ensure_remote_directory_placeholder(&dir_id.to_string()).map_err(DatabaseError::operation)?;
             }
             tx.set_remote_directory_name(&dir_id.to_string(), name.as_str()).map_err(DatabaseError::operation)?;
-            state.reproject = true;
         }
         MutationBody::DirectoryParent { dir_id, parent_id } => {
             if *parent_id != sync_common::ROOT_DIR_ID {
@@ -179,7 +220,6 @@ fn apply_mutation<'a>(tx: &rusqlite::Transaction<'_>, change: &sync_common::Serv
                 tx.ensure_remote_directory_placeholder(&dir_id.to_string()).map_err(DatabaseError::operation)?;
             }
             tx.set_remote_directory_parent(&dir_id.to_string(), &parent_id.to_string()).map_err(DatabaseError::operation)?;
-            state.reproject = true;
         }
         MutationBody::DirectoryLifecycle { dir_id, value } => {
             if *dir_id != sync_common::ROOT_DIR_ID {
@@ -191,147 +231,92 @@ fn apply_mutation<'a>(tx: &rusqlite::Transaction<'_>, change: &sync_common::Serv
                 DirectoryLifecycleState::Purged => 2,
             };
             tx.set_remote_directory_lifecycle(&dir_id.to_string(), value).map_err(DatabaseError::operation)?;
-            state.reproject = true;
         }
-        MutationBody::BookLifecycle { content_hash, value } => {
-            pending_metadata = apply_book_lifecycle(tx, change, content_hash, value)?;
+        MutationBody::BookFacts { .. } | MutationBody::BookLifecycle { .. } | MutationBody::ReadingPosition { .. } => {
+            unreachable!("book scalar registers are projected together")
         }
         MutationBody::Placement { dir_id, content_hash, present, origin_folder_id } => {
-            if !book_is_purged(tx, content_hash.as_str())? {
-                if *dir_id != sync_common::ROOT_DIR_ID {
-                    tx.ensure_remote_directory_placeholder(&dir_id.to_string()).map_err(DatabaseError::operation)?;
-                }
-                tx.first_book_insert(content_hash.as_str(), storage_i64(change.mutation.changed_at, "placement timestamp").map_err(DatabaseError::operation)?).map_err(DatabaseError::operation)?;
-                if *present {
-                    tx.apply_remote_book_dir_added(&dir_id.to_string(), content_hash.as_str()).map_err(DatabaseError::operation)?;
-                } else {
-                    tx.apply_remote_book_dir_removed(&dir_id.to_string(), content_hash.as_str(), origin_folder_id.as_deref()).map_err(DatabaseError::operation)?;
-                }
+            if *dir_id != sync_common::ROOT_DIR_ID {
+                tx.ensure_remote_directory_placeholder(&dir_id.to_string()).map_err(DatabaseError::operation)?;
             }
-        }
-        MutationBody::ReadingPosition { content_hash, value } => {
-            if !book_is_purged(tx, content_hash.as_str())? {
-                let progress = book_model::ReadProgress::new(value.progress).map_err(|error| DatabaseError::operation(error.to_string()))?;
-                tx.first_book_insert(content_hash.as_str(), storage_i64(change.mutation.changed_at, "change timestamp").map_err(DatabaseError::operation)?).map_err(DatabaseError::operation)?;
-                tx.read_position_update(&value.location.as_str(), progress.value(), content_hash.as_str()).map_err(DatabaseError::operation)?;
+            if *present {
+                // Filenames are a local projection. A tombstoned placement's
+                // old name may have been reused since it was removed.
+                let directory = dir_id.to_string();
+                let requested: String =
+                    tx.query_row("SELECT COALESCE((SELECT file_name FROM book_dir WHERE dir_id=?1 AND book_row_id=(SELECT row_id FROM book WHERE content_hash=?2)),?2)", rusqlite::params![directory, content_hash.as_str()], |row| {
+                        row.get(0)
+                    })?;
+                let key = library_replica::portable_name_key(&requested);
+                let conflict: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM book_dir WHERE dir_id=?1 AND deleted_at IS NULL AND portable_name_key(file_name)=?3 AND book_row_id!=(SELECT row_id FROM book WHERE content_hash=?2))",
+                    rusqlite::params![directory, content_hash.as_str(), key],
+                    |row| row.get(0),
+                )?;
+                let chosen = if conflict {
+                    let occupied = tx
+                        .prepare_cached("SELECT file_name FROM book_dir WHERE dir_id=?1 AND deleted_at IS NULL AND book_row_id!=(SELECT row_id FROM book WHERE content_hash=?2)")?
+                        .query_map(rusqlite::params![directory, content_hash.as_str()], |row| row.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    // A hash is a bounded fallback even when the old filename
+                    // already fills the filesystem's component byte limit.
+                    library_replica::unique_file_name(content_hash.as_str(), occupied.iter().map(String::as_str))
+                } else {
+                    requested
+                };
+                tx.apply_remote_book_dir_added(&directory, content_hash.as_str(), &chosen).map_err(DatabaseError::operation)?;
+            } else {
+                tx.apply_remote_book_dir_removed(&dir_id.to_string(), content_hash.as_str(), origin_folder_id.as_deref()).map_err(DatabaseError::operation)?;
             }
         }
         MutationBody::Annotation { annotation_id, value } => {
-            if !book_is_purged(tx, value.content_hash.as_str())? {
-                tx.first_book_insert(value.content_hash.as_str(), storage_i64(change.mutation.changed_at, "change timestamp").map_err(DatabaseError::operation)?).map_err(DatabaseError::operation)?;
-                let modified_at = storage_i64(value.modified_at, "annotation modification timestamp").map_err(DatabaseError::operation)?;
-                let detail = value.detail_json().map_err(DatabaseError::operation)?;
-                tx.upsert_annotation(annotation_id.as_str(), value.content_hash.as_str(), value.toc_ordinal, value.progress, detail.as_slice(), modified_at, value.deleted.then_some(modified_at)).map_err(DatabaseError::operation)?;
-            }
+            let modified_at = storage_i64(value.modified_at, "annotation modification timestamp").map_err(DatabaseError::operation)?;
+            let detail = value.detail_json().map_err(DatabaseError::operation)?;
+            tx.upsert_annotation(annotation_id.as_str(), value.content_hash.as_str(), value.toc_ordinal, value.progress, detail.as_slice(), modified_at, value.deleted.then_some(modified_at)).map_err(DatabaseError::operation)?;
         }
         MutationBody::PdfReaderMetadata { content_hash, value } => {
-            if !book_is_purged(tx, content_hash.as_str())? {
-                tx.first_book_insert(content_hash.as_str(), storage_i64(change.mutation.changed_at, "change timestamp").map_err(DatabaseError::operation)?).map_err(DatabaseError::operation)?;
-                let checksum = sync_common::ContentHash::new(&value.checksum);
-                if !value.valid_for(checksum.as_str()) {
-                    return Err(DatabaseError::message("PDF ingestion checksum or metadata is invalid"));
-                }
-                let bytes = serde_json::to_vec(&value).map_err(DatabaseError::operation)?;
-                tx.pdf_reader_metadata_upsert(content_hash.as_str(), checksum.as_str(), &bytes).map_err(DatabaseError::operation)?;
+            let checksum = sync_common::ContentHash::new(&value.checksum);
+            if !value.valid_for(checksum.as_str()) {
+                return Err(DatabaseError::message("PDF ingestion checksum or metadata is invalid"));
             }
+            let bytes = serde_json::to_vec(&value).map_err(DatabaseError::operation)?;
+            tx.pdf_reader_metadata_upsert(content_hash.as_str(), checksum.as_str(), &bytes).map_err(DatabaseError::operation)?;
         }
         MutationBody::BookToc { content_hash, value } => {
-            if !book_is_purged(tx, content_hash.as_str())? {
-                tx.first_book_insert(content_hash.as_str(), storage_i64(change.mutation.changed_at, "change timestamp").map_err(DatabaseError::operation)?).map_err(DatabaseError::operation)?;
-                // Duration first, mirroring the local write order: it is what
-                // turns the last chapter's start into its end.
-                if let Some(duration_ms) = value.duration_ms {
-                    let duration_ms = i64::try_from(duration_ms).map_err(|_| DatabaseError::message("audiobook duration exceeds SQLite integer range"))?;
-                    tx.audiobook_upsert_metadata(content_hash.as_str(), duration_ms).map_err(DatabaseError::operation)?;
-                }
-                let entry_count = i64::try_from(toc_entry_count(&value.entries)).map_err(|_| DatabaseError::message("table of contents entry count exceeds SQLite integer range"))?;
-                let toc_json = serde_json::to_string(&value.entries).map_err(DatabaseError::operation)?;
-                tx.shared_audiobook_upsert_toc(content_hash.as_str(), entry_count, &toc_json).map_err(DatabaseError::operation)?;
+            // This register is a complete document: absent optional fields
+            // remove prior projections within the same pull transaction.
+            if let Some(tracks) = &value.tracks {
+                let json = serde_json::to_string(tracks).map_err(DatabaseError::operation)?;
+                tx.audiobook_upsert_tracks(content_hash.as_str(), &json).map_err(DatabaseError::operation)?;
+            } else {
+                tx.execute("DELETE FROM audiobook_track_index WHERE content_hash=?1", [content_hash.as_str()])?;
             }
+            // Duration first, mirroring the local write order: it is what
+            // turns the last chapter's start into its end.
+            if let Some(duration_ms) = value.duration_ms {
+                let duration_ms = i64::try_from(duration_ms).map_err(|_| DatabaseError::message("audiobook duration exceeds SQLite integer range"))?;
+                tx.audiobook_upsert_metadata(content_hash.as_str(), duration_ms).map_err(DatabaseError::operation)?;
+            } else {
+                tx.execute("DELETE FROM audiobook_metadata WHERE content_hash=?1", [content_hash.as_str()])?;
+            }
+            let entry_count = i64::try_from(toc_entry_count(&value.entries)).map_err(|_| DatabaseError::message("table of contents entry count exceeds SQLite integer range"))?;
+            let toc_json = serde_json::to_string(&value.entries).map_err(DatabaseError::operation)?;
+            tx.shared_audiobook_upsert_toc(content_hash.as_str(), entry_count, &toc_json).map_err(DatabaseError::operation)?;
         }
         MutationBody::Description { content_hash, value } => {
-            if !book_is_purged(tx, content_hash.as_str())? {
-                tx.first_book_insert(content_hash.as_str(), storage_i64(change.mutation.changed_at, "change timestamp").map_err(DatabaseError::operation)?).map_err(DatabaseError::operation)?;
-                let normalized = normalized_description(value);
-                tx.set_description(content_hash.as_str(), &normalized).map_err(DatabaseError::operation)?;
-                tx.shared_enrichment_mark_description_scanned(content_hash.as_str()).map_err(DatabaseError::operation)?;
-            }
+            let normalized = normalized_description(value);
+            tx.set_description(content_hash.as_str(), &normalized).map_err(DatabaseError::operation)?;
+            tx.shared_enrichment_mark_description_scanned(content_hash.as_str()).map_err(DatabaseError::operation)?;
         }
         MutationBody::Metadata { content_hash, value } => {
-            if !book_is_purged(tx, content_hash.as_str())? {
-                tx.first_book_insert(content_hash.as_str(), storage_i64(change.mutation.changed_at, "change timestamp").map_err(DatabaseError::operation)?).map_err(DatabaseError::operation)?;
-                pending_metadata = Some((content_hash, value));
-            }
+            project_remote_metadata(tx, content_hash, value)?;
         }
-    }
-    if let Some(metadata) = pending_metadata {
-        state.pending.push(metadata);
     }
     Ok(())
 }
 
-fn book_is_purged(tx: &rusqlite::Transaction<'_>, hash: &str) -> Result<bool, DatabaseError> {
-    let mut purged = false;
-    tx.book_is_purged_select(hash, |row| {
-        purged = row.get(0)?;
-        Ok(())
-    })
-    .map_err(DatabaseError::operation)?;
-    Ok(purged)
-}
-
-fn apply_book_lifecycle<'a>(
-    tx: &rusqlite::Transaction<'_>, change: &sync_common::ServerMutation, content_hash: &'a sync_common::ContentHash, value: &'a library_replica::BookLifecycleState,
-) -> Result<Option<PendingMetadata<'a>>, DatabaseError> {
-    let mut pending_metadata = None;
-    match value {
-        library_replica::BookLifecycleState::Present { metadata, added_at, format } => {
-            let mut has_metadata = false;
-            tx.remote_book_has_metadata(content_hash.as_str(), |row| {
-                has_metadata = row.get(0)?;
-                Ok(())
-            })
-            .map_err(DatabaseError::operation)?;
-            tx.apply_remote_book_added(content_hash.as_str(), metadata.title.as_str(), metadata.subtitle.as_deref(), storage_i64(*added_at, "book addition timestamp").map_err(DatabaseError::operation)?, format.canonical_extension())
-                .map_err(DatabaseError::operation)?;
-            if !has_metadata {
-                pending_metadata = Some((content_hash, metadata));
-            }
-        }
-        library_replica::BookLifecycleState::Deleted { origin_folder_id } => {
-            tx.apply_remote_book_deleted(content_hash.as_str(), storage_i64(change.mutation.changed_at, "book deletion timestamp").map_err(DatabaseError::operation)?, origin_folder_id.as_deref()).map_err(DatabaseError::operation)?;
-        }
-        library_replica::BookLifecycleState::Purged => {
-            tx.apply_remote_book_purged(content_hash.as_str(), storage_i64(change.mutation.changed_at, "book purge timestamp").map_err(DatabaseError::operation)?).map_err(DatabaseError::operation)?;
-            let mut row_id: Option<i64> = None;
-            tx.shared_apply_remote_book_purged_select(content_hash.as_str(), |row| {
-                row_id = row.get(0)?;
-                Ok(())
-            })
-            .map_err(DatabaseError::operation)?;
-            let row_id = row_id.ok_or(rusqlite::Error::QueryReturnedNoRows).map_err(DatabaseError::operation)?;
-            crate::purge::clear_book_metadata(tx, row_id)?;
-            tx.shared_purge_book_record_delete_3(row_id).map_err(DatabaseError::operation)?;
-            tx.shared_purge_book_record_delete_4(content_hash.as_str()).map_err(DatabaseError::operation)?;
-            tx.apply_remote_book_purged_update(row_id).map_err(DatabaseError::operation)?;
-            tx.shared_purge_book_record_delete_7(row_id).map_err(DatabaseError::operation)?;
-            tx.shared_purge_book_record_insert(content_hash.as_str()).map_err(DatabaseError::operation)?;
-        }
-    }
-    Ok(pending_metadata)
-}
-
-// Recheck lifecycle after the whole page so queued metadata cannot revive a purge.
+// Called only after lifecycle winners are projected.
 fn project_remote_metadata(tx: &rusqlite::Transaction<'_>, meta_hash: &sync_common::ContentHash, meta: &library_replica::SyncBookMetadata) -> Result<(), DatabaseError> {
-    let mut purged = false;
-    tx.book_is_purged_select(meta_hash.as_str(), |row| {
-        purged = row.get(0)?;
-        Ok(())
-    })
-    .map_err(DatabaseError::operation)?;
-    if purged {
-        return Ok(());
-    }
     // Every book always gets a full, unconditional re-resolve and
     // re-projection: idempotent regardless of whether this exact
     // metadata was already stored, so no prior-state read or diff
@@ -350,16 +335,34 @@ fn project_remote_metadata(tx: &rusqlite::Transaction<'_>, meta_hash: &sync_comm
 pub(crate) fn rebuild_remote_directories(tx: &rusqlite::Transaction<'_>) -> Result<(), DatabaseError> {
     // Directory writes invalidate folder membership; the next browse refreshes
     // it once from the final tree, just as for local directory batches.
-    #[cfg(not(target_arch = "wasm32"))]
-    let mut before: std::collections::HashMap<String, (String, String, bool)> = std::collections::HashMap::new();
-    #[cfg(not(target_arch = "wasm32"))]
-    tx.directory_projection_rows_select(|row| {
-        before.insert(row.get(0)?, (row.get(1)?, row.get(2)?, row.get(3)?));
-        Ok(())
-    })
-    .map_err(DatabaseError::operation)?;
+    let before = tx
+        .prepare_cached("SELECT id,parent_id,name,deleted_at IS NOT NULL,purged_at IS NOT NULL FROM dir")?
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, (r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?, r.get::<_, bool>(4)?))))?
+        .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
     let intents = read_directory_intents(tx)?;
     let projection = library_replica::project_directories(&intents);
+    // Local commands may already have installed the final display. In
+    // particular, creating an empty folder must not invalidate every placement.
+    let unchanged = before.iter().all(|(id, actual)| {
+        if id == &sync_common::ROOT_DIR_ID.to_string() {
+            return true;
+        }
+        let Ok(id) = sync_common::DirId::parse_str(id) else {
+            return false;
+        };
+        match intents.get(&id) {
+            Some(intent) => {
+                let suppressed = projection.suppressed.contains(&id);
+                let parent = if suppressed { sync_common::ROOT_DIR_ID } else { projection.parents[&id] };
+                let name = projection.names.get(&id).unwrap_or(&intent.name);
+                actual == &(parent.to_string(), name.clone(), suppressed, intent.lifecycle == DirectoryLifecycleState::Purged)
+            }
+            None => actual.2,
+        }
+    });
+    if unchanged {
+        return Ok(());
+    }
     tx.hide_remote_directories().map_err(DatabaseError::operation)?;
     let mut ids: Vec<_> = intents.keys().copied().collect();
     ids.sort();
@@ -388,7 +391,7 @@ pub(crate) fn rebuild_remote_directories(tx: &rusqlite::Transaction<'_>) -> Resu
     .map_err(DatabaseError::operation)?;
     #[cfg(not(target_arch = "wasm32"))]
     for (id, state) in after {
-        if before.get(&id) != Some(&state) {
+        if before.get(&id).map(|old| (&old.0, &old.1, old.2)) != Some((&state.0, &state.1, state.2)) {
             let dir = sync_common::DirId::parse_str(&id).map_err(DatabaseError::operation)?;
             tx.shared_placements_queue_directory_work(&dir.to_string()).map_err(DatabaseError::operation)?;
         }
@@ -397,28 +400,25 @@ pub(crate) fn rebuild_remote_directories(tx: &rusqlite::Transaction<'_>) -> Resu
 }
 
 fn read_directory_intents(tx: &rusqlite::Transaction<'_>) -> Result<std::collections::HashMap<sync_common::DirId, DirectoryIntent>, DatabaseError> {
-    let mut intents: std::collections::HashMap<sync_common::DirId, library_replica::DirectoryIntent> = std::collections::HashMap::new();
-    let mut rows: Vec<(String, String, String, i64)> = Vec::new();
-    tx.get_remote_directory_intents(|row| {
-        rows.push((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?));
-        Ok(())
-    })
-    .map_err(DatabaseError::operation)?;
-    for (id_text, parent_text, name, lifecycle) in rows {
-        let id = parse_uuid_column(id_text.clone(), 0).map_err(DatabaseError::operation)?;
-        let parent_id = parse_uuid_column(parent_text, 1).map_err(DatabaseError::operation)?;
-        let lifecycle = match lifecycle {
-            0 => DirectoryLifecycleState::Present,
-            1 => DirectoryLifecycleState::Deleted,
-            2 => DirectoryLifecycleState::Purged,
-            _ => return Err(DatabaseError::message("invalid directory lifecycle state")),
+    // Read only canonical winners. The intent_* columns are local command
+    // inputs/cache, never a second source of truth for the projected tree.
+    let rows = tx
+        .prepare_cached(
+            "SELECT n.body,p.body,l.body FROM sync_state_version n
+        JOIN sync_state_version p ON p.state_kind='directory_parent' AND p.state_key=n.state_key AND p.state_subkey=''
+        JOIN sync_state_version l ON l.state_kind='directory_lifecycle' AND l.state_key=n.state_key AND l.state_subkey=''
+        WHERE n.state_kind='directory_name' AND n.state_subkey='' AND n.body IS NOT NULL AND p.body IS NOT NULL AND l.body IS NOT NULL",
+        )?
+        .query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, Vec<u8>>(2)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut intents = std::collections::HashMap::new();
+    let decode = |bytes: &[u8]| sync_common::wire::decode::<MutationBody>(bytes, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation);
+    for (name, parent, lifecycle) in rows {
+        let (MutationBody::DirectoryName { dir_id: id, name }, MutationBody::DirectoryParent { parent_id, .. }, MutationBody::DirectoryLifecycle { value: lifecycle, .. }) = (decode(&name)?, decode(&parent)?, decode(&lifecycle)?) else {
+            return Err(DatabaseError::message("invalid canonical directory registers"));
         };
-        let name_version = read_version(tx, "directory_name", &id_text, "")?;
-        let parent_version = read_version(tx, "directory_parent", &id_text, "")?;
-        let lifecycle_version = read_version(tx, "directory_lifecycle", &id_text, "")?;
-        if let (Some(name_version), Some(parent_version), Some(_)) = (name_version, parent_version, lifecycle_version) {
-            let version = name_version.max(parent_version);
-            intents.insert(id, DirectoryIntent { id, parent_id, name, lifecycle, version });
+        if id != sync_common::ROOT_DIR_ID {
+            intents.insert(id, DirectoryIntent { id, parent_id, name, lifecycle });
         }
     }
     Ok(intents)

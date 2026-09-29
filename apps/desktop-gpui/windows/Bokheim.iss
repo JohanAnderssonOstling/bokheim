@@ -33,7 +33,6 @@ CloseApplications=yes
 RestartApplications=no
 
 [Files]
-Source: "{#ExtractFileDir(SourceExe)}\pdfium\*"; DestDir: "{app}\pdfium"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "Bokheim.exe"; Flags: ignoreversion
 Source: "{#IconFile}"; DestDir: "{app}"; DestName: "Bokheim.ico"; Flags: ignoreversion
 

@@ -480,6 +480,5 @@
         "QA76.76.S58": []
       }
     }
-  ],
-  "migration": "shared/subject-projection/data/migrations/20260905_add_computing_2025_subjects.sql"
+  ]
 }

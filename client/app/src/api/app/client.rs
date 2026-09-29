@@ -1,8 +1,8 @@
-use library_backend::LibraryClient;
 use crate::{
     runtime::{AppCommand, LibraryReply, Transport},
     LibraryId,
 };
+use library_backend::LibraryClient;
 
 /// The frontend entry point for running backend operations.
 /// Backend implementation objects are deliberately not part of this API.

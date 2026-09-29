@@ -55,6 +55,7 @@ pub mod assets {
     pub const MAX_THUMBNAIL_PRESENCE_ENTRIES: usize = MAX_BLOB_MANIFEST_ENTRIES;
     pub const MAX_THUMBNAIL_BATCH_ENTRIES: usize = 16;
     pub const MAX_THUMBNAIL_BATCH_BYTES: usize = MAX_THUMBNAIL_BATCH_ENTRIES * crate::MAX_THUMBNAIL_BYTES as usize;
+    pub const MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES: usize = 2 * MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024;
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct ThumbnailPresenceRequest {
@@ -63,6 +64,14 @@ pub mod assets {
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct ThumbnailPresenceResponse {
         pub present: Vec<ContentHash>,
+        #[serde(default)]
+        pub revisions: Vec<ThumbnailRevision>,
+    }
+
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct ThumbnailRevision {
+        pub content_hash: ContentHash,
+        pub revision: ContentHash,
     }
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -162,8 +171,16 @@ pub mod assets {
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct ThumbnailBatchDownloadResponse {
-        pub thumbnails: Vec<ThumbnailBatchEntry>,
+        pub thumbnails: Vec<ThumbnailBatchDownloadEntry>,
         pub missing: Vec<ContentHash>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct ThumbnailBatchDownloadEntry {
+        pub content_hash: ContentHash,
+        pub bytes: Vec<u8>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub browse_bytes: Option<Vec<u8>>,
     }
 }
 
@@ -267,9 +284,21 @@ mod tests {
         let thumbnail = assets::ThumbnailBatchEntry { content_hash: hash('d'), bytes: vec![0xff, 0xd8, 0xff] };
         let request = assets::ThumbnailBatchUploadRequest { thumbnails: vec![thumbnail.clone()] };
         assert_eq!(round_trip(&request), request);
-        let response = assets::ThumbnailBatchDownloadResponse { thumbnails: vec![thumbnail], missing: vec![hash('e')] };
+        let response = assets::ThumbnailBatchDownloadResponse { thumbnails: vec![assets::ThumbnailBatchDownloadEntry { content_hash: thumbnail.content_hash, bytes: thumbnail.bytes, browse_bytes: Some(vec![0xff, 0xd8, 0xff]) }], missing: vec![hash('e')] };
         let encoded = crate::transport::encode(&response).unwrap();
-        assert_eq!(crate::transport::decode::<assets::ThumbnailBatchDownloadResponse>(&encoded, assets::MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024).unwrap(), response);
+        assert_eq!(crate::transport::decode::<assets::ThumbnailBatchDownloadResponse>(&encoded, assets::MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES).unwrap(), response);
+        // Old servers omit the browse bytes; old clients ignore the new field.
+        let old_response = assets::ThumbnailBatchDownloadResponse { thumbnails: vec![assets::ThumbnailBatchDownloadEntry { content_hash: hash('f'), bytes: vec![0xff, 0xd8, 0xff], browse_bytes: None }], missing: vec![] };
+        let encoded_old = crate::transport::encode(&old_response).unwrap();
+        assert_eq!(crate::transport::decode::<assets::ThumbnailBatchDownloadResponse>(&encoded_old, assets::MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES).unwrap(), old_response);
+        #[derive(serde::Deserialize)]
+        struct OldEntry { content_hash: crate::ContentHash, bytes: Vec<u8> }
+        #[derive(serde::Deserialize)]
+        struct OldResponse { thumbnails: Vec<OldEntry>, missing: Vec<crate::ContentHash> }
+        let old_client: OldResponse = crate::transport::decode(&encoded, assets::MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES).unwrap();
+        assert_eq!(old_client.thumbnails[0].content_hash, hash('d'));
+        assert_eq!(old_client.thumbnails[0].bytes, vec![0xff, 0xd8, 0xff]);
+        assert_eq!(old_client.missing, vec![hash('e')]);
     }
 
     #[test]

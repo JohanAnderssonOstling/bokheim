@@ -8,8 +8,8 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
 
-use library_backend::LibraryClient;
 use gpui::{App, Context};
+use library_backend::LibraryClient;
 
 pub(crate) type PersistenceFuture<T> = Pin<Box<dyn Future<Output = Result<T, String>> + 'static>>;
 type Mutation = Box<dyn FnOnce(&LibraryClient) -> PersistenceFuture<()> + 'static>;

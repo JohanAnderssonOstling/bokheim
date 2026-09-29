@@ -100,24 +100,10 @@ DELETE FROM local_file_work WHERE content_hash=:content_hash AND operation='rest
 DELETE FROM book_identifier WHERE book_row_id=:book_row_id;
 
 
--- name: shared_purge_book_record_delete_3!
--- param: book_row_id: i64
-DELETE FROM book_dir WHERE book_row_id=:book_row_id;
-
-
--- name: shared_purge_book_record_delete_4!
--- param: content_hash: &str
-DELETE FROM audiobook_metadata WHERE content_hash=:content_hash;
-
-
--- name: shared_purge_book_record_delete_7!
--- param: book_row_id: i64
-DELETE FROM book_description WHERE book_row_id=:book_row_id;
-
-
 -- name: shared_purge_book_record_insert!
 -- param: content_hash: &str
-INSERT OR IGNORE INTO local_purge_work(content_hash) VALUES(:content_hash);
+INSERT INTO local_purge_work(content_hash) VALUES(:content_hash)
+ON CONFLICT(content_hash) DO UPDATE SET id=excluded.id;
 
 
 -- name: shared_cursor_state_select?

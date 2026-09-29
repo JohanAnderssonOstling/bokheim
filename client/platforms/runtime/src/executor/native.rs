@@ -3,6 +3,39 @@ use super::{BackendExecutorError, BackendFuture, BackendOutput, BackendSend, Bac
 use std::future::Future;
 use std::sync::Arc;
 
+// Startup trials may inspect local state, but background sync/import must not
+// publish side effects before the host commits the new generation.
+static STARTUP_GATE: std::sync::Mutex<Option<tokio::sync::watch::Receiver<bool>>> = std::sync::Mutex::new(None);
+
+pub struct StartupPermit(tokio::sync::watch::Sender<bool>);
+impl StartupPermit {
+    pub fn release(self) {
+        *STARTUP_GATE.lock().expect("startup gate poisoned") = None;
+        self.0.send_replace(true);
+    }
+}
+pub fn defer_background_work() -> StartupPermit {
+    let (sender, receiver) = tokio::sync::watch::channel(false);
+    let mut gate = STARTUP_GATE.lock().expect("startup gate poisoned");
+    assert!(gate.is_none(), "startup work is already deferred");
+    *gate = Some(receiver);
+    StartupPermit(sender)
+}
+async fn startup_ready() {
+    let receiver = STARTUP_GATE.lock().expect("startup gate poisoned").clone();
+    if let Some(mut receiver) = receiver {
+        loop {
+            let ready = *receiver.borrow_and_update();
+            if ready {
+                break;
+            }
+            if receiver.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+}
+
 /// Native async-I/O execution boundary owned by the backend.
 #[derive(Clone)]
 pub struct BackendExecutor {
@@ -31,12 +64,18 @@ impl BackendExecutor {
 
     pub fn spawn<T: BackendOutput>(&self, future: impl BackendFuture<T>) -> BackendTask<T> {
         let (task, runner) = owned_task(future);
-        self.inner.handle.spawn(runner);
+        self.inner.handle.spawn(async move {
+            startup_ready().await;
+            runner.await
+        });
         task
     }
 
     pub fn spawn_detached(&self, future: impl BackendFuture<()>) {
-        self.inner.handle.spawn(future);
+        self.inner.handle.spawn(async move {
+            startup_ready().await;
+            future.await
+        });
     }
 
     pub fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
@@ -111,14 +150,20 @@ impl LibraryExecutor {
     /// to [`Self::run`] or [`Self::run_blocking`]) — it does not hop threads.
     pub fn spawn_local<T: 'static>(future: impl Future<Output = T> + 'static) -> BackendTask<T> {
         let (task, runner) = owned_local_task(future);
-        tokio::task::spawn_local(runner);
+        tokio::task::spawn_local(async move {
+            startup_ready().await;
+            runner.await
+        });
         task
     }
 
     /// Same as [`Self::spawn_local`], but fire-and-forget: dropping the
     /// caller's side does not cancel it.
     pub fn spawn_local_detached(future: impl Future<Output = ()> + 'static) {
-        tokio::task::spawn_local(future);
+        tokio::task::spawn_local(async move {
+            startup_ready().await;
+            future.await
+        });
     }
 }
 
@@ -127,7 +172,10 @@ pub async fn run_blocking<T: BackendOutput>(operation: impl FnOnce() -> T + Back
 }
 
 pub fn spawn_detached(future: impl BackendFuture<()>) {
-    tokio::spawn(future);
+    tokio::spawn(async move {
+        startup_ready().await;
+        future.await
+    });
 }
 
 pub async fn sleep(duration: std::time::Duration) {
@@ -143,6 +191,19 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+
+    #[test]
+    fn startup_gate_prevents_background_side_effects_until_commit() {
+        let permit = defer_background_work();
+        let executor = BackendExecutor::new().unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        executor.spawn_detached(async move {
+            sent.send(()).unwrap();
+        });
+        assert!(received.recv_timeout(Duration::from_millis(30)).is_err());
+        permit.release();
+        received.recv_timeout(Duration::from_secs(2)).expect("background work resumes after commit");
+    }
 
     fn assert_send<T: Send>() {}
 

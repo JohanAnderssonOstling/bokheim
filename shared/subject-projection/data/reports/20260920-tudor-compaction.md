@@ -12,4 +12,4 @@ The full observed comparison checked 11,977,153 code strings: 1,727 changed dest
 
 Release test compilation was initially blocked by concurrent routing changes in `src/fast.rs`. After that code was updated, a retry passed all 13 curated scope tests. The library suite has 253 passes and the same four previously known failures; four tests were added by the concurrent source changes. No Rust implementation files were changed for this compaction. Final results and viewer verification are recorded in the [validation report](20260920-tudor-validation.json).
 
-Artifacts: [migration](../migrations/20260920_tudor_compaction.sql), [six-merge manifest](20260920-tudor-compaction.json), [observed classification changes](20260920-tudor-classification-changes.tsv). Usage counts and the viewer are refreshed against the final taxonomy.
+Artifacts: migration, [six-merge manifest](20260920-tudor-compaction.json), [observed classification changes](20260920-tudor-classification-changes.tsv). Usage counts and the viewer are refreshed against the final taxonomy.

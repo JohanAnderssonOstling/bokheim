@@ -22,8 +22,8 @@ fn query<'a>(source: &'a str, name: &str) -> &'a str {
 fn fixture(books: usize) -> Database {
     let db = Database::open(":memory:").unwrap();
     db.initialize_library().unwrap();
-    db.execute("UPDATE sync_metadata SET change_origin='remote'", []).unwrap();
-    let tx = db.unchecked_transaction().unwrap();
+    db.connection.execute("UPDATE sync_metadata SET change_origin='remote'", []).unwrap();
+    let tx = db.connection.unchecked_transaction().unwrap();
     for (id, parent, name) in [(TARGET, ROOT, "Target"), (CHILD, TARGET, "Nested"), (HIDDEN, TARGET, ".Hidden"), (OTHER, ROOT, "Targetish")] {
         tx.execute("INSERT INTO dir(id,parent_id,name) VALUES(?1,?2,?3)", [id, parent, name]).unwrap();
     }
@@ -47,7 +47,7 @@ fn refresh(db: &Database) {
 }
 type Rows = Vec<(i64, String, i64)>;
 fn combined(db: &Database, folder: &str, search: &str, formats: i32, languages: &str, downloaded: bool) -> Rows {
-    db.prepare_cached(query(SOURCE, "get_folder_facets"))
+    db.connection.prepare_cached(query(SOURCE, "get_folder_facets"))
         .unwrap()
         .query_map(named_params! {":dir_id":folder,":normalized_query":search,":file_types":formats,":languages":languages,":downloaded_only":downloaded}, |r| {
             let kind = r.get::<_, i64>(0)?;
@@ -61,7 +61,7 @@ fn combined(db: &Database, folder: &str, search: &str, formats: i32, languages: 
 fn split(db: &Database, folder: &str, search: &str, formats: i32, languages: &str, downloaded: bool) -> Rows {
     let mut result = Vec::new();
     for (kind, name) in [(0, "get_folder_format_facets"), (1, "get_folder_language_facets")] {
-        let mut stmt = db.prepare_cached(query(PREVIOUS, name)).unwrap();
+        let mut stmt = db.connection.prepare_cached(query(PREVIOUS, name)).unwrap();
         for (key, value) in [(":dir_id", folder), (":normalized_query", search), (":languages", languages)] {
             if let Some(i) = stmt.parameter_index(key).unwrap() {
                 stmt.raw_bind_parameter(i, value).unwrap();
@@ -90,7 +90,7 @@ fn folder_facets_preserve_counts_across_filters_and_hierarchy_changes() {
         "UPDATE dir SET deleted_at=NULL; UPDATE book SET hidden_at=NULL,deleted_at=NULL; UPDATE book_dir SET deleted_at=NULL",
         "UPDATE dir SET name='Visible' WHERE name='.Hidden'; UPDATE dir SET parent_id='00000000-0000-0000-0000-000000000004' WHERE name='Nested'",
     ] {
-        db.execute_batch(mutation).unwrap();
+        db.connection.execute_batch(mutation).unwrap();
         refresh(&db);
         for folder in [ROOT, TARGET, CHILD, "00000000-0000-0000-0000-000000000099"] {
             for search in ["", "book 1", "nested", "hidden", "targetish", "qzx-no-match"] {
@@ -116,7 +116,7 @@ fn folder_facets_preserve_counts_across_filters_and_hierarchy_changes() {
     assert_eq!(formats.len(), 1);
     assert_eq!(formats[0].format, library_model::LibraryFileTypeFilter::Pdf);
     assert_eq!(formats[0].book_count, 0);
-    let mut stmt = db.prepare(&format!("EXPLAIN QUERY PLAN {}", query(SOURCE, "get_folder_facets"))).unwrap();
+    let mut stmt = db.connection.prepare(&format!("EXPLAIN QUERY PLAN {}", query(SOURCE, "get_folder_facets"))).unwrap();
     let plan = stmt.query_map(named_params! {":dir_id":ROOT,":normalized_query":"nested",":file_types":0,":languages":"",":downloaded_only":false}, |r| r.get::<_, String>(3)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
     assert_eq!(plan.iter().filter(|s| s.as_str() == "MATERIALIZE search_matches").count(), 1, "{plan:?}");
 }
@@ -161,16 +161,16 @@ fn folder_facet_combination_performance() {
 fn folder_name_search_uses_parent_identity_even_in_detached_subtrees() {
     let db = fixture(16);
     // A slash in a sibling name must not make it a descendant of Target.
-    db.execute("UPDATE dir SET name='Target/Nested' WHERE id=?1", [OTHER]).unwrap();
+    db.connection.execute("UPDATE dir SET name='Target/Nested' WHERE id=?1", [OTHER]).unwrap();
     let foreign = "00000000-0000-0000-0000-000000000005";
-    db.execute("INSERT INTO dir(id,parent_id,name) VALUES(?1,?2,'Foreign')", [foreign, OTHER]).unwrap();
-    db.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash) VALUES(?1,1,'copy.epub','')", [foreign]).unwrap();
+    db.connection.execute("INSERT INTO dir(id,parent_id,name) VALUES(?1,?2,'Foreign')", [foreign, OTHER]).unwrap();
+    db.connection.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash) VALUES(?1,1,'copy.epub','')", [foreign]).unwrap();
     assert!(db.browse_folder_facet_counts(TARGET, "foreign", &[], &[], false).unwrap().1.is_empty());
     // A live subtree remains searchable when an ancestor is deleted.
     let ancestor = "00000000-0000-0000-0000-000000000006";
-    db.execute("INSERT INTO dir(id,parent_id,name) VALUES(?1,?2,'Ancestor')", [ancestor, ROOT]).unwrap();
-    db.execute("UPDATE dir SET parent_id=?1 WHERE id=?2", [ancestor, TARGET]).unwrap();
-    db.execute("UPDATE dir SET deleted_at=1 WHERE id=?1", [ancestor]).unwrap();
+    db.connection.execute("INSERT INTO dir(id,parent_id,name) VALUES(?1,?2,'Ancestor')", [ancestor, ROOT]).unwrap();
+    db.connection.execute("UPDATE dir SET parent_id=?1 WHERE id=?2", [ancestor, TARGET]).unwrap();
+    db.connection.execute("UPDATE dir SET deleted_at=1 WHERE id=?1", [ancestor]).unwrap();
     let counts = db.browse_folder_facet_counts(TARGET, "nested", &[], &[], false).unwrap().1;
     assert_eq!(counts.iter().map(|c| c.book_count).sum::<u32>(), 4);
 }
@@ -187,15 +187,15 @@ fn cached_descendants_and_format_projection_follow_mutations() {
         "UPDATE dir SET deleted_at=1 WHERE name='Target'",
         "UPDATE dir SET deleted_at=NULL; UPDATE book SET format='M4B' WHERE row_id%2=0",
     ] {
-        db.execute_batch(mutation).unwrap();
+        db.connection.execute_batch(mutation).unwrap();
         // No manual refresh: the public search must refresh dirty membership.
         let actual = db.browse_library_search_folder(&folder, "book", library_model::LibraryFileTypeFilter::All, false).unwrap();
         let mut hashes = actual.title_matches.iter().map(|b| b.content_hash.to_string()).collect::<Vec<_>>();
         hashes.sort();
-        let mut stmt = db.prepare("WITH RECURSIVE subtree(id) AS (SELECT id FROM dir WHERE id=?1 AND deleted_at IS NULL UNION SELECT d.id FROM dir d JOIN subtree s ON d.parent_id=s.id WHERE d.id!=d.parent_id AND d.deleted_at IS NULL) SELECT DISTINCT b.content_hash FROM book b JOIN book_dir p ON p.book_row_id=b.row_id JOIN subtree s ON s.id=p.dir_id WHERE b.deleted_at IS NULL AND b.hidden_at IS NULL AND p.deleted_at IS NULL ORDER BY b.content_hash").unwrap();
+        let mut stmt = db.connection.prepare("WITH RECURSIVE subtree(id) AS (SELECT id FROM dir WHERE id=?1 AND deleted_at IS NULL UNION SELECT d.id FROM dir d JOIN subtree s ON d.parent_id=s.id WHERE d.id!=d.parent_id AND d.deleted_at IS NULL) SELECT DISTINCT b.content_hash FROM book b JOIN book_dir p ON p.book_row_id=b.row_id JOIN subtree s ON s.id=p.dir_id WHERE b.deleted_at IS NULL AND b.hidden_at IS NULL AND p.deleted_at IS NULL ORDER BY b.content_hash").unwrap();
         let expected = stmt.query_map([TARGET], |r| r.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(hashes, expected, "{mutation}");
-        let read_counts = |sql: &str| db.prepare(sql).unwrap().query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        let read_counts = |sql: &str| db.connection.prepare(sql).unwrap().query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(
             read_counts(query(SOURCE, "library_format_counts_select")),
             read_counts(
@@ -223,7 +223,7 @@ fn membership_and_format_performance() {
         ),
     ] {
         let read = |sql: &str| {
-            let mut stmt = db.prepare_cached(sql).unwrap();
+            let mut stmt = db.connection.prepare_cached(sql).unwrap();
             if let Some(index) = stmt.parameter_index(":dir_id").unwrap() {
                 stmt.raw_bind_parameter(index, TARGET).unwrap();
             }

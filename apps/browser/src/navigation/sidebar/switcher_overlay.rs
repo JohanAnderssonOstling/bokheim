@@ -351,8 +351,8 @@ impl Sidebar {
         cx.notify();
     }
 
-    pub(crate) fn library_switcher_overlay(&self, emitter: Entity<Self>, cx: &gpui::App) -> Option<gpui::AnyElement> {
-        if self.switcher_open { Some(self.render_library_switcher_overlay(emitter, cx)) } else { self.render_library_name_dialog(emitter, cx) }
+    pub(crate) fn library_switcher_overlay(&self, emitter: Entity<Self>, window: &gpui::Window, cx: &gpui::App) -> Option<gpui::AnyElement> {
+        if self.switcher_open { Some(self.render_library_switcher_overlay(emitter, window, cx)) } else { self.render_library_name_dialog(emitter, cx) }
     }
 
     pub(crate) fn choose_library_folders(&mut self, cx: &mut Context<Self>) {
@@ -417,7 +417,7 @@ impl Sidebar {
         libraries.entries().iter().find(|library| Some(*library.library_id()) == libraries.selected_id()).map(|library| library.library_name().to_owned().into()).unwrap_or_else(|| "Libraries".into())
     }
 
-    fn render_library_switcher_overlay(&self, emitter: Entity<Self>, cx: &gpui::App) -> gpui::AnyElement {
+    fn render_library_switcher_overlay(&self, emitter: Entity<Self>, window: &gpui::Window, cx: &gpui::App) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
         let active_library_id = self.libraries.read(cx).selected_id();
         let libraries = self.libraries(cx);
@@ -491,7 +491,7 @@ impl Sidebar {
                             dismiss.update(cx, |navigation, cx| navigation.close_library_switcher(window, cx));
                         }))
                         .child(
-                            components::navigation_modal_list(library_count, theme)
+                            components::navigation_modal_list(library_count, window.rem_size(), theme)
                                 .pt(gpui::px(components::SPACE_MD))
                                 .pr(gpui::px(components::SPACE_MD))
                                 .pb(gpui::px(components::SPACE_MD))

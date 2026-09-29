@@ -14,7 +14,7 @@ use interval_index::IntervalIndex;
 
 pub const LCC_SYSTEM_ID: &str = "lcc";
 pub const ROOT_SUBJECT_PATH: &str = "Subject";
-pub const UNIFIED_VERSION: &str = "9";
+pub const UNIFIED_VERSION: &str = "1";
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub(super) struct UnifiedTaxonomyRuntime {
@@ -145,7 +145,7 @@ pub struct UnifiedConceptDefinition {
 }
 
 impl UnifiedConceptDefinition {
-    pub fn new(concept_id: i64, preferred_label: String, parent_ids: Vec<i64>, mut source_selectors: BTreeMap<String, Vec<String>>, _legacy_source_labels: Vec<String>) -> Self {
+    pub fn new(concept_id: i64, preferred_label: String, parent_ids: Vec<i64>, mut source_selectors: BTreeMap<String, Vec<String>>) -> Self {
         for (system, selectors) in &mut source_selectors {
             if system == LCC_SYSTEM_ID {
                 for selector in selectors.iter_mut() {
@@ -171,10 +171,6 @@ impl UnifiedConceptDefinition {
 
     pub fn source_selectors(&self, system_id: &str) -> &[String] {
         self.source_selectors.get(system_id).map(Vec::as_slice).unwrap_or_default()
-    }
-    /// Compatibility with older publishers: aliases are no longer retained or emitted.
-    pub fn source_labels(&self) -> &[String] {
-        &[]
     }
 }
 

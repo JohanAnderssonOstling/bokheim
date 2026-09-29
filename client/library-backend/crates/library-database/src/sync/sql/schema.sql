@@ -22,9 +22,7 @@ create table if not exists book(
     read_progress   REAL                DEFAULT 0,
     added_at        INTEGER,
     deleted_at      INTEGER,
-    purged_at       INTEGER,
-    trash_origin_dir_id TEXT,
-    CHECK (purged_at IS NULL OR deleted_at IS NOT NULL)
+    trash_origin_dir_id TEXT
 );
 
 
@@ -206,40 +204,22 @@ CREATE TRIGGER book_description_insert AFTER INSERT ON book_description
 
 BEGIN
     UPDATE subject_browse_state SET revision=revision+1 WHERE id=1;
-    INSERT INTO sync_outbox(state_kind,state_key,body,changed_at,conflict_rank)
-    SELECT 'description',b.content_hash,bokheim_mutation('description',b.content_hash,NEW.description),
-      CAST((julianday('now')-2440587.5)*86400000 AS INTEGER),0
-    FROM book b WHERE b.row_id=NEW.book_row_id
-      AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1),'local')='local'
-    ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET
-      replica_seq=excluded.replica_seq,mutation_id=excluded.mutation_id,
-      body=excluded.body,changed_at=excluded.changed_at,conflict_rank=excluded.conflict_rank;
+    SELECT bokheim_accept_local(bokheim_mutation('description',b.content_hash,NEW.description), CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)) FROM book b WHERE b.row_id=NEW.book_row_id
+      AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1),'local')='local';
 END;
 CREATE TRIGGER book_description_update AFTER UPDATE OF description ON book_description
 WHEN OLD.description IS NOT NEW.description
 BEGIN
     UPDATE subject_browse_state SET revision=revision+1 WHERE id=1;
-    INSERT INTO sync_outbox(state_kind,state_key,body,changed_at,conflict_rank)
-    SELECT 'description',b.content_hash,bokheim_mutation('description',b.content_hash,NEW.description),
-      CAST((julianday('now')-2440587.5)*86400000 AS INTEGER),0
-    FROM book b WHERE b.row_id=NEW.book_row_id
-      AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1),'local')='local'
-    ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET
-      replica_seq=excluded.replica_seq,mutation_id=excluded.mutation_id,
-      body=excluded.body,changed_at=excluded.changed_at,conflict_rank=excluded.conflict_rank;
+    SELECT bokheim_accept_local(bokheim_mutation('description',b.content_hash,NEW.description), CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)) FROM book b WHERE b.row_id=NEW.book_row_id
+      AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1),'local')='local';
 END;
 CREATE TRIGGER book_description_delete AFTER DELETE ON book_description
 
 BEGIN
     UPDATE subject_browse_state SET revision=revision+1 WHERE id=1;
-    INSERT INTO sync_outbox(state_kind,state_key,body,changed_at,conflict_rank)
-    SELECT 'description',b.content_hash,bokheim_mutation('description',b.content_hash,''),
-      CAST((julianday('now')-2440587.5)*86400000 AS INTEGER),0
-    FROM book b WHERE b.row_id=OLD.book_row_id
-      AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1),'local')='local'
-    ON CONFLICT(state_kind,state_key,state_subkey) DO UPDATE SET
-      replica_seq=excluded.replica_seq,mutation_id=excluded.mutation_id,
-      body=excluded.body,changed_at=excluded.changed_at,conflict_rank=excluded.conflict_rank;
+    SELECT bokheim_accept_local(bokheim_mutation('description',b.content_hash,''), CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)) FROM book b WHERE b.row_id=OLD.book_row_id
+      AND COALESCE((SELECT change_origin FROM sync_metadata WHERE singleton = 1),'local')='local';
 END;
 
 -- name: schema_contents &
@@ -280,32 +260,31 @@ create table if not exists audiobook_metadata(
     duration_ms     INTEGER not null check(duration_ms >= 0)
 );
 
--- name: schema_sync &
--- Durable synchronization outbox, winning versions, and replica metadata.
-create table if not exists sync_outbox(
-    replica_seq     INTEGER PRIMARY KEY AUTOINCREMENT,
-    mutation_id     TEXT not null default (
-        lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-' ||
-        lower(hex(randomblob(2))) || '-' || lower(hex(randomblob(2))) || '-' ||
-        lower(hex(randomblob(6)))
-    ) unique,
-    state_kind      TEXT not null check(state_kind in (
-        'directory_name', 'directory_parent', 'directory_lifecycle',
-        'book_lifecycle', 'placement', 'reading_position',
-        'annotation', 'metadata', 'description', 'pdf_reader_metadata',
-        'book_toc'
-    )),
-    state_key       TEXT not null,
-    state_subkey    TEXT not null default '',
-    body            BLOB not null,
-    changed_at      INTEGER not null check(changed_at >= 0),
-    conflict_rank   INTEGER not null default 0 check(conflict_rank in (0, 1, 2)),
-    check(state_subkey is not null),
-    unique(state_kind, state_key, state_subkey)
+create table if not exists audiobook_track_index(
+    content_hash TEXT primary key not null,
+    tracks_json TEXT not null
 );
 
--- One durable winning version per independently merged state cell. Domain
--- tables contain materialized values only; all merge ordering lives here.
+-- name: schema_sync &
+-- Durable synchronization outbox, winning versions, and replica metadata.
+-- A pending row identifies a register. Payload columns are NULL until a
+-- publication snapshot is prepared, then immutable until superseded/acknowledged.
+create table if not exists sync_outbox(
+    replica_seq INTEGER PRIMARY KEY,
+    mutation_id TEXT NOT NULL UNIQUE,
+    state_kind TEXT NOT NULL,
+    state_key TEXT NOT NULL,
+    state_subkey TEXT NOT NULL DEFAULT '',
+    body BLOB,
+    changed_at INTEGER,
+    origin BLOB,
+    UNIQUE(state_kind,state_key,state_subkey),
+    CHECK ((body IS NULL) = (changed_at IS NULL))
+);
+CREATE TABLE IF NOT EXISTS sync_clock(singleton INTEGER PRIMARY KEY CHECK(singleton=1), sequence INTEGER NOT NULL);
+INSERT OR IGNORE INTO sync_clock VALUES(1,0);
+
+-- Canonical winning registers. Domain tables are disposable projections.
 create table if not exists sync_state_version(
     state_kind      TEXT not null,
     state_key       TEXT not null,
@@ -315,7 +294,14 @@ create table if not exists sync_state_version(
     replica_id      TEXT not null,
     replica_seq     INTEGER not null,
     mutation_id     TEXT not null,
+    body BLOB,
+    book_key TEXT,
     primary key(state_kind, state_key, state_subkey)
+);
+CREATE INDEX IF NOT EXISTS sync_state_book ON sync_state_version(book_key);
+CREATE TABLE IF NOT EXISTS sync_projection_dirty(
+    state_kind TEXT NOT NULL, state_key TEXT NOT NULL, state_subkey TEXT NOT NULL,
+    PRIMARY KEY(state_kind,state_key,state_subkey)
 );
 
 -- Replica metadata lives in one singleton row with one explicit column per

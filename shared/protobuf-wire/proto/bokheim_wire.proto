@@ -56,6 +56,7 @@ message MutationValue {
     BookRecord metadata = 11;
     string description = 12;
     bytes pdf_reader_metadata = 13; // Versioned JSON geometry, keyed by exact checksum.
+    BookFacts book_facts = 15;
     bytes book_toc = 14; // JSON navigation tree, keyed by the book's identity.
   }
 }
@@ -76,9 +77,12 @@ message BookLifecycle {
 }
 
 message PresentBook {
-  BookRecord metadata = 1;
-  uint64 added_at = 2;
-  BookFormat format = 3;
+  reserved 1; // Metadata is owned exclusively by the metadata register.
+  reserved 2, 3; // Book facts have their own register.
+}
+message BookFacts {
+  uint64 added_at = 1;
+  BookFormat format = 2;
 }
 message DeletedBook { optional string origin_folder_id = 1; }
 message PurgedBook {}
@@ -93,6 +97,7 @@ enum BookFormat {
   BOOK_FORMAT_HTML = 6;
   BOOK_FORMAT_WEBPUB = 7;
   BOOK_FORMAT_M4B = 8;
+  BOOK_FORMAT_MP3_FOLDER = 9;
 }
 
 message Placement {

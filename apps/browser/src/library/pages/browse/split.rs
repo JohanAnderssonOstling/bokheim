@@ -1,41 +1,30 @@
-use super::adapter::BrowseAdapter;
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, FocusHandle, Focusable, IntoElement, Render, Subscription, Window, div};
-use std::rc::Rc;
 use ui_components as components;
 
-use super::library::LibraryBrowseAdapter;
-use super::library::{folder, subject};
-use super::page::{BrowsePage, BrowseSplitClose, BrowseSplitRequest, BrowseSplitSide};
+use super::listing::{BrowseCrumb, BrowseKind};
+use super::page::{BrowsePage, BrowseSplitClose, BrowseSplitRequest, BrowseSplitSide, OpenTrash};
 use crate::library::services::LibraryContext;
-
-#[cfg(test)]
-#[path = "split_tests.rs"]
-mod tests;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BrowsePlaneKind {
-    Folder,
-    Subject,
-}
 
 /// Owns independent browse pages and gives each page an equal share of the
 /// available width. Query and navigation state remain inside each child page.
-pub(crate) struct BrowseSplitPlane<A: BrowseAdapter = LibraryBrowseAdapter> {
-    factory: Rc<dyn Fn(&mut Context<BrowsePage<A>>) -> BrowsePage<A>>,
-    panes: Vec<BrowsePane<A>>,
+pub(crate) struct BrowseSplitPlane {
+    kind: BrowseKind,
+    library: LibraryContext,
+    open_trash: OpenTrash,
+    panes: Vec<BrowsePane>,
     focus: FocusHandle,
     restore_focus: bool,
 }
 
-struct BrowsePane<A: BrowseAdapter> {
-    page: Entity<BrowsePage<A>>,
+struct BrowsePane {
+    page: Entity<BrowsePage>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl BrowseSplitPlane {
     pub(crate) fn open_folder(&mut self, directory_id: sync_common::DirId, title: String, cx: &mut Context<Self>) {
-        let path = if directory_id == sync_common::ROOT_DIR_ID { Vec::new() } else { vec![super::adapter::BrowseCrumb { location: directory_id.to_string(), label: title }] };
+        let path = if directory_id == sync_common::ROOT_DIR_ID { Vec::new() } else { vec![BrowseCrumb { location: directory_id.to_string(), label: title }] };
         self.panes[0].page.update(cx, |page, cx| page.open_split_path(path, cx));
     }
 
@@ -43,10 +32,10 @@ impl BrowseSplitPlane {
     /// a subject has no directory, just the path segments joined by `" / "`
     /// that the subject adapter already reads back out of `chip.id`.
     pub(crate) fn open_subject(&mut self, location: String, label: String, cx: &mut Context<Self>) {
-        self.panes[0].page.update(cx, |page, cx| page.open_split_path(vec![super::adapter::BrowseCrumb { location, label }], cx));
+        self.panes[0].page.update(cx, |page, cx| page.open_split_path(vec![BrowseCrumb { location, label }], cx));
     }
 
-    pub(crate) fn open_book_detail(&mut self, book: library_model::BookCardRow, path: Vec<super::adapter::BrowseCrumb>, cx: &mut Context<Self>) {
+    pub(crate) fn open_book_detail(&mut self, book: library_model::BookCardRow, path: Vec<BrowseCrumb>, cx: &mut Context<Self>) {
         self.panes[0].page.update(cx, |page, cx| page.open_book_detail(book, path, cx));
     }
 
@@ -56,30 +45,14 @@ impl BrowseSplitPlane {
         }
     }
 
-    pub(crate) fn new(kind: BrowsePlaneKind, library: LibraryContext, cx: &mut Context<Self>) -> Self {
-        Self::from_factory(
-            Rc::new(move |cx| match kind {
-                BrowsePlaneKind::Folder => folder(library.clone(), cx),
-                BrowsePlaneKind::Subject => subject(library.clone(), cx),
-            }),
-            cx,
-        )
-    }
-}
-
-impl<A: BrowseAdapter> BrowseSplitPlane<A> {
-    pub(crate) fn from_factory(factory: Rc<dyn Fn(&mut Context<BrowsePage<A>>) -> BrowsePage<A>>, cx: &mut Context<Self>) -> Self {
-        let mut plane = Self { factory, panes: Vec::new(), focus: cx.focus_handle(), restore_focus: false };
+    pub(crate) fn new(kind: BrowseKind, library: LibraryContext, open_trash: OpenTrash, cx: &mut Context<Self>) -> Self {
+        let mut plane = Self { kind, library, open_trash, panes: Vec::new(), focus: cx.focus_handle(), restore_focus: false };
         plane.add_page_at(0, Vec::new(), cx);
         plane.focus = plane.panes[0].page.read(cx).focus_handle(cx);
         plane
     }
 
-    fn create_page(&self, cx: &mut Context<Self>) -> Entity<BrowsePage<A>> {
-        cx.new(|cx| (self.factory)(cx))
-    }
-
-    pub(crate) fn update_pages(&mut self, mut update: impl FnMut(&mut BrowsePage<A>, &mut Context<BrowsePage<A>>), cx: &mut Context<Self>) {
+    pub(crate) fn update_pages(&mut self, mut update: impl FnMut(&mut BrowsePage, &mut Context<BrowsePage>), cx: &mut Context<Self>) {
         for pane in &self.panes {
             pane.page.update(cx, |page, cx| update(page, cx));
         }
@@ -89,8 +62,9 @@ impl<A: BrowseAdapter> BrowseSplitPlane<A> {
         self.update_pages(|page, cx| page.set_library_view(detailed, cx), cx);
     }
 
-    fn add_page_at(&mut self, index: usize, path: Vec<super::adapter::BrowseCrumb>, cx: &mut Context<Self>) {
-        let page = self.create_page(cx);
+    fn add_page_at(&mut self, index: usize, path: Vec<BrowseCrumb>, cx: &mut Context<Self>) {
+        let (kind, library, open_trash) = (self.kind, self.library.clone(), self.open_trash.clone());
+        let page = cx.new(|cx| BrowsePage::new(kind, library, open_trash, cx));
         let subscription = cx.subscribe(&page, |plane, source, request: &BrowseSplitRequest, cx| {
             plane.add_page(source, request.side, request.path.clone(), cx);
         });
@@ -106,7 +80,7 @@ impl<A: BrowseAdapter> BrowseSplitPlane<A> {
         cx.notify();
     }
 
-    fn add_page(&mut self, source: Entity<BrowsePage<A>>, side: BrowseSplitSide, path: Vec<super::adapter::BrowseCrumb>, cx: &mut Context<Self>) {
+    fn add_page(&mut self, source: Entity<BrowsePage>, side: BrowseSplitSide, path: Vec<BrowseCrumb>, cx: &mut Context<Self>) {
         let Some(source_index) = self.panes.iter().position(|pane| pane.page == source) else { return };
         // The adjacent pane on the requested side, if one is already open,
         // is navigated in place — "open left/right" means "show it over
@@ -126,7 +100,7 @@ impl<A: BrowseAdapter> BrowseSplitPlane<A> {
         self.add_page_at(index, path, cx);
     }
 
-    fn close_page(&mut self, page: Entity<BrowsePage<A>>, cx: &mut Context<Self>) {
+    fn close_page(&mut self, page: Entity<BrowsePage>, cx: &mut Context<Self>) {
         if self.panes.len() <= 1 {
             return;
         }
@@ -148,7 +122,7 @@ impl<A: BrowseAdapter> BrowseSplitPlane<A> {
     }
 }
 
-impl<A: BrowseAdapter> Render for BrowseSplitPlane<A> {
+impl Render for BrowseSplitPlane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.restore_focus {
             self.restore_focus = false;
@@ -177,7 +151,7 @@ impl<A: BrowseAdapter> Render for BrowseSplitPlane<A> {
     }
 }
 
-impl<A: BrowseAdapter> gpui::Focusable for BrowseSplitPlane<A> {
+impl gpui::Focusable for BrowseSplitPlane {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus.clone()
     }

@@ -6,7 +6,7 @@ use crate::BlobKind;
 pub(crate) type Opened = ResolvedBook;
 
 pub(super) fn supports_streaming(format: BookFormat) -> bool {
-    matches!(format, BookFormat::Epub | BookFormat::Pdf | BookFormat::M4b | BookFormat::Mobi)
+    matches!(format, BookFormat::Epub | BookFormat::Pdf | BookFormat::M4b | BookFormat::Mp3Folder | BookFormat::Mobi)
 }
 pub(super) async fn local(library: &LibrarySession, hash: ContentHash, info: &BookInfo) -> Result<Option<Opened>, BackendError> {
     if !matches!(library.download_state(hash)?, DownloadState::Downloaded) {
@@ -28,6 +28,9 @@ async fn refresh_local_path(library: &LibrarySession, content_hash: ContentHash)
 }
 
 async fn resolve_local(library: &LibrarySession, content_hash: ContentHash, info: &BookInfo) -> Result<Opened, BackendError> {
+    if info.format == BookFormat::Mp3Folder {
+        return library.prepare_audiobook_track(content_hash, 0).await;
+    }
     let mut path = info.path.clone().ok_or_else(|| BackendError::message(format!("book placement not found: {content_hash}")))?;
     let format = info.format;
     if !matches!(format, BookFormat::Epub | BookFormat::Pdf | BookFormat::Mobi | BookFormat::M4b) {
@@ -63,6 +66,7 @@ async fn resolve_local(library: &LibrarySession, content_hash: ContentHash, info
     let reader = reader.ok_or_else(|| format!("book content is not downloaded: {content_hash}"))?;
     if format == BookFormat::M4b {
         Ok(ResolvedBook::Audiobook(crate::library::AudiobookBook {
+            format,
             path,
             reader,
             stream_control: None,
@@ -75,6 +79,9 @@ async fn resolve_local(library: &LibrarySession, content_hash: ContentHash, info
 }
 
 pub(super) async fn remote(library: &LibrarySession, hash: ContentHash, info: &BookInfo) -> Result<Opened, BackendError> {
+    if info.format == BookFormat::Mp3Folder {
+        return library.prepare_audiobook_track(hash, 0).await;
+    }
     let path = info.path.clone().ok_or_else(|| BackendError::message(format!("book placement not found: {hash}")))?;
     let RemoteDocument { source, prefix, pdf_metadata } = remote_document(library, hash).await?;
     let length = source.length;
@@ -89,6 +96,7 @@ pub(super) async fn remote(library: &LibrarySession, hash: ContentHash, info: &B
         };
         let (reader, stream_control) = book_access::remote_file::native_audio_reader(length, prefix, fetch).map_err(BackendError::operation)?;
         return Ok(ResolvedBook::Audiobook(AudiobookBook {
+            format: info.format,
             path,
             reader,
             stream_control: Some(stream_control),
@@ -110,7 +118,66 @@ pub(super) async fn remote(library: &LibrarySession, hash: ContentHash, info: &B
     Ok(document)
 }
 
+impl LibrarySession {
+    pub(crate) async fn prepare_audiobook_track(&self, hash: ContentHash, index: usize) -> Result<ResolvedBook, BackendError> {
+        let info = book_info(self, hash).await?;
+        if info.format != BookFormat::Mp3Folder { return Err(BackendError::message("book is not an MP3 folder")); }
+        let track = self.db.audiobook_tracks(&hash)?.into_iter().nth(index).ok_or_else(|| BackendError::message("audiobook track is unavailable"))?;
+        if !track.valid() { return Err(BackendError::message("audiobook track index is invalid")); }
+        let mut path = info.path.ok_or_else(|| BackendError::message("audiobook placement is unavailable"))?;
+        if matches!(self.download_state(hash)?, DownloadState::Downloaded) {
+            let relative = format!("{path}/{}", track.name);
+            let mut reader = self.assets.prepare_book_at_path(relative).await.map_err(BackendError::operation)?;
+            if reader.is_none() {
+                if let Some(fresh) = refresh_local_path(self, hash).await? {
+                    path = fresh;
+                    reader = self.assets.prepare_book_at_path(format!("{path}/{}", track.name)).await.map_err(BackendError::operation)?;
+                }
+            }
+            if let Some(reader) = reader {
+                return Ok(ResolvedBook::Audiobook(AudiobookBook {
+                    format: BookFormat::Mp3Folder, path, reader, stream_control: None,
+                    #[cfg(target_os = "android")]
+                    playback_file: None,
+                }));
+            }
+        }
+        let (source, _) = self.describe_remote_file(hash).await.map_err(BackendError::message)?;
+        if track.archive_checksum != Some(source.checksum) {
+            return Err(BackendError::message("audiobook track index does not match the remote archive; sync the book metadata and retry"));
+        }
+        if track.offset.checked_add(track.length).is_none_or(|end| end > source.length) {
+            return Err(BackendError::message("audiobook track exceeds remote archive"));
+        }
+        let account = self.sync().and_then(|sync| sync.account()).ok_or_else(|| BackendError::message("library account access is unavailable"))?;
+        let library_id = *self.id();
+        let client = reqwest::Client::new();
+        let prefix = crate::library::remote_access::read_remote_file_typed(&client, &account, library_id, &source, track.offset, track.length.min(64 * 1024) as usize)
+            .await.map_err(|error| BackendError::message(error.to_string()))?;
+        let base = track.offset;
+        let length = track.length;
+        let fetch = move |offset: u64, count: usize| {
+            let account = account.clone();
+            let source = source.clone();
+            let client = client.clone();
+            Box::pin(async move {
+                if offset.checked_add(count as u64).is_none_or(|end| end > length) {
+                    return Err(book_access::remote_file::RemoteFileError::Failed("audiobook track range is invalid".into()));
+                }
+                crate::library::remote_access::read_remote_file_typed(&client, &account, library_id, &source, base + offset, count).await
+            }) as book_access::FetchFuture<'static, Result<Vec<u8>, book_access::remote_file::RemoteFileError>>
+        };
+        let (reader, stream_control) = book_access::remote_file::native_audio_reader(length, prefix, fetch).map_err(BackendError::operation)?;
+        Ok(ResolvedBook::Audiobook(AudiobookBook {
+            format: BookFormat::Mp3Folder, path, reader, stream_control: Some(stream_control),
+            #[cfg(target_os = "android")]
+            playback_file: None,
+        }))
+    }
+}
+
 pub struct AudiobookBook {
+    pub format: BookFormat,
     pub path: String,
     pub reader: crate::library::BoxedBookReader,
     pub stream_control: Option<crate::library::AudioStreamControl>,

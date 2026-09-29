@@ -24,6 +24,7 @@ fn required<T>(value: Option<T>, field: &str) -> Result<T, transport::WireError>
 pub(super) fn encode(body: &MutationBody) -> Result<Vec<u8>, transport::WireError> {
     use pb::mutation_value::Kind;
     let kind = match body {
+        MutationBody::BookFacts { value, .. } => Kind::BookFacts(pb::BookFacts { added_at: value.added_at, format: encode_book_format(value.format) as i32 }),
         MutationBody::DirectoryName { name, .. } => Kind::DirectoryName(name.clone()),
         MutationBody::DirectoryParent { parent_id, .. } => Kind::DirectoryParent(parent_id.to_string()),
         MutationBody::DirectoryLifecycle { value, .. } => Kind::DirectoryLifecycle(encode_directory_lifecycle(*value) as i32),
@@ -64,12 +65,21 @@ pub(super) fn decode(wire: &WireMutation) -> Result<MutationBody, transport::Wir
         (sync_common::mutation_kind::DIRECTORY_NAME, Kind::DirectoryName(name)) => Ok(MutationBody::DirectoryName { dir_id: parse_uuid(key, "directory id")?, name }),
         (sync_common::mutation_kind::DIRECTORY_PARENT, Kind::DirectoryParent(parent_id)) => Ok(MutationBody::DirectoryParent { dir_id: parse_uuid(key, "directory id")?, parent_id: parse_uuid(&parent_id, "parent directory id")? }),
         (sync_common::mutation_kind::DIRECTORY_LIFECYCLE, Kind::DirectoryLifecycle(value)) => Ok(MutationBody::DirectoryLifecycle { dir_id: parse_uuid(key, "directory id")?, value: decode_directory_lifecycle(value)? }),
+        (sync_common::mutation_kind::BOOK_FACTS, Kind::BookFacts(value)) => {
+            Ok(MutationBody::BookFacts { content_hash: ContentHash::new(key), value: crate::BookFacts { added_at: value.added_at, format: decode_book_format(value.format)? } })
+        }
         (sync_common::mutation_kind::BOOK_LIFECYCLE, Kind::BookLifecycle(value)) => Ok(MutationBody::BookLifecycle { content_hash: ContentHash::new(key), value: decode_book_lifecycle(value)? }),
         (sync_common::mutation_kind::PLACEMENT, Kind::Placement(value)) => {
             Ok(MutationBody::Placement { dir_id: parse_uuid(&wire.entity_subkey, "placement directory id")?, content_hash: ContentHash::new(key), present: value.present, origin_folder_id: value.origin_folder_id })
         }
         (sync_common::mutation_kind::READING_POSITION, Kind::ReadingPosition(value)) => Ok(MutationBody::ReadingPosition { content_hash: ContentHash::new(key), value: decode_reading_position(value)? }),
-        (sync_common::mutation_kind::ANNOTATION, Kind::Annotation(value)) => Ok(MutationBody::Annotation { annotation_id: key.to_owned(), value: decode_annotation(value)? }),
+        (sync_common::mutation_kind::ANNOTATION, Kind::Annotation(value)) => {
+            let value = decode_annotation(value)?;
+            if !wire.blob_reference.as_ref().is_some_and(|r| r.content_hash == Some(value.content_hash) && r.present == !value.deleted) {
+                return Err(decode_error("annotation owner declaration does not match its value"));
+            }
+            Ok(MutationBody::Annotation { annotation_id: key.to_owned(), value })
+        },
         (sync_common::mutation_kind::PDF_READER_METADATA, Kind::PdfReaderMetadata(bytes)) => {
             let value: pdf_view_common::PdfReaderMetadata = serde_json::from_slice(&bytes).map_err(|e| decode_error(e.to_string()))?;
             if !value.valid_for(&wire.entity_subkey) {
@@ -114,7 +124,7 @@ fn decode_directory_lifecycle(value: i32) -> Result<DirectoryLifecycleState, tra
 fn encode_book_lifecycle(value: &BookLifecycleState) -> pb::BookLifecycle {
     use pb::book_lifecycle::State;
     let state = match value {
-        BookLifecycleState::Present { metadata, added_at, format } => State::Present(pb::PresentBook { metadata: Some(encode_book_record(metadata)), added_at: *added_at, format: encode_book_format(*format) as i32 }),
+        BookLifecycleState::Present => State::Present(pb::PresentBook {}),
         BookLifecycleState::Deleted { origin_folder_id } => State::Deleted(pb::DeletedBook { origin_folder_id: origin_folder_id.clone() }),
         BookLifecycleState::Purged => State::Purged(pb::PurgedBook {}),
     };
@@ -124,7 +134,7 @@ fn encode_book_lifecycle(value: &BookLifecycleState) -> pb::BookLifecycle {
 fn decode_book_lifecycle(value: pb::BookLifecycle) -> Result<BookLifecycleState, transport::WireError> {
     use pb::book_lifecycle::State;
     match required(value.state, "book lifecycle state")? {
-        State::Present(value) => Ok(BookLifecycleState::Present { metadata: decode_book_record(required(value.metadata, "present-book metadata")?)?, added_at: value.added_at, format: decode_book_format(value.format)? }),
+        State::Present(_) => Ok(BookLifecycleState::Present),
         State::Deleted(value) => Ok(BookLifecycleState::Deleted { origin_folder_id: value.origin_folder_id }),
         State::Purged(_) => Ok(BookLifecycleState::Purged),
     }
@@ -136,6 +146,7 @@ fn encode_book_format(value: BookFormat) -> pb::BookFormat {
         BookFormat::Pdf => pb::BookFormat::Pdf,
         BookFormat::Mobi => pb::BookFormat::Mobi,
         BookFormat::M4b => pb::BookFormat::M4b,
+        BookFormat::Mp3Folder => pb::BookFormat::Mp3Folder,
     }
 }
 
@@ -145,6 +156,7 @@ fn decode_book_format(value: i32) -> Result<BookFormat, transport::WireError> {
         pb::BookFormat::Pdf => Ok(BookFormat::Pdf),
         pb::BookFormat::Mobi => Ok(BookFormat::Mobi),
         pb::BookFormat::M4b => Ok(BookFormat::M4b),
+        pb::BookFormat::Mp3Folder => Ok(BookFormat::Mp3Folder),
         pb::BookFormat::Fb2 | pb::BookFormat::Cbz | pb::BookFormat::Html | pb::BookFormat::Webpub | pb::BookFormat::Unspecified => Err(decode_error("unsupported book format")),
     }
 }

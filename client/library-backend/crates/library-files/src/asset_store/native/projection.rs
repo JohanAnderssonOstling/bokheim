@@ -6,23 +6,13 @@ pub(super) fn projection_error(error: impl Into<Box<dyn std::error::Error + Send
     AssetStoreError::operation(error)
 }
 
-// Include the last materialized paths so a pending rename can still read its
-// source before the destination has been published.
-pub(super) fn book_paths(handle: &Handle, conn: &rusqlite::Connection, hash: &ContentHash) -> Result<Vec<PathBuf>, AssetStoreError> {
-    let paths = conn.prepare(include_str!("../sql/native_projection/book_paths_select.sql"))?.query_map([hash.as_str()], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
-    paths.into_iter().map(|relative| placement_path(handle, &relative)).collect()
-}
-
 pub(in super::super) fn readable_book_paths(handle: &Handle, hash: &ContentHash) -> Result<Vec<PathBuf>, AssetStoreError> {
-    let Some(database) = handle.3.as_ref() else {
+    let Some(lookup) = handle.3.as_ref() else {
         return Ok(Vec::new());
     };
-    if !database.is_file() {
-        return Ok(Vec::new());
-    }
-    // No schema setup or taxonomy initialization is needed to locate a file.
-    let conn = rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let mut paths = book_paths(handle, &conn, hash)?;
+    // Include remembered source paths while a move is pending. The caller's
+    // database adapter supplies the snapshot; this module only resolves files.
+    let mut paths = lookup.paths(hash)?.into_iter().map(|relative| placement_path(handle, &relative)).collect::<Result<Vec<_>, _>>()?;
     let mut seen = HashSet::new();
     paths.retain(|path| seen.insert(path.clone()));
     Ok(paths)
@@ -47,8 +37,18 @@ pub(super) fn readable_path(handle: &Handle, name: String) -> Result<Option<Path
 pub(in super::super) fn evict_book_files(handle: &Handle, relative_paths: &[String], hash: &ContentHash) -> Result<(), AssetStoreError> {
     for relative in relative_paths {
         let path = placement_path(handle, relative)?;
-        if path.is_file() && content_matches(&path, hash)? {
-            std::fs::remove_file(&path)?;
+        if (path.is_file() || path.is_dir()) && content_matches(&path, hash)? {
+            if path.is_dir() {
+                for track in audiobook_folder::discover(&path)? {
+                    std::fs::remove_file(&track.path)?;
+                    if let Some(parent) = track.path.parent().filter(|parent| *parent != path.as_path()) {
+                        let _ = std::fs::remove_dir(parent);
+                    }
+                }
+                let _ = std::fs::remove_dir(&path);
+            } else {
+                std::fs::remove_file(&path)?;
+            }
             sync_parent(&path)?;
         }
     }
@@ -240,7 +240,7 @@ mod prepared_directory_tests {
         database.move_directory(&id, None, Some("Destination")).unwrap();
         prepare_directory_with_database(&handle, &database, id).await.unwrap();
         assert_eq!(std::fs::read(root.path().join("Destination/notes.txt")).unwrap(), b"preserved");
-        assert_eq!(database.directory_relative_path_string(&id).unwrap(), Some("/Destination".to_owned()));
+        assert_eq!(database.directory_relative_path_string(&id).unwrap(), Some("Destination".to_owned()));
     }
 }
 

@@ -47,10 +47,10 @@ use android::AudioEngine;
 use audio_engine::AudioEngine;
 #[cfg(target_arch = "wasm32")]
 mod web_audio;
-use audiobook_library::AudiobookChapter;
+use book_model::AudiobookChapter;
+use gpui_component::{ElementExt, Icon, IconName};
 use library_backend::LibraryClient;
 use library_backend::ResolvedBook;
-use gpui_component::{ElementExt, Icon, IconName};
 use library_model::BookLocator;
 #[cfg(target_arch = "wasm32")]
 use web_audio::AudioEngine;
@@ -166,6 +166,7 @@ impl<T: Read + Seek + Send + Sync> ReadSeek for T {}
 struct AudiobookSource {
     stream_control: Option<app::AudioStreamControl>,
     cached_metadata: Option<app::PlaybackMetadata>,
+    track: Option<book_model::AudiobookTrack>,
     display_path: PathBuf,
     #[cfg(target_os = "android")]
     playback_file: Option<std::fs::File>,
@@ -178,6 +179,7 @@ impl AudiobookSource {
         Self {
             stream_control: None,
             cached_metadata: None,
+            track: None,
             display_path,
             reader: Box::new(reader),
             #[cfg(target_os = "android")]
@@ -357,6 +359,7 @@ impl AudiobookReader {
     fn seek_by(&mut self, seconds: f64, cx: &mut App) {
         self.playback.update(cx, |session, cx| {
             session.seek_by(seconds);
+            session.ensure_source(cx);
             cx.notify();
         });
     }
@@ -364,6 +367,7 @@ impl AudiobookReader {
     fn seek_to(&mut self, position: Duration, cx: &mut App) {
         self.playback.update(cx, |session, cx| {
             session.seek_to(position);
+            session.ensure_source(cx);
             cx.notify();
         });
     }
@@ -371,6 +375,7 @@ impl AudiobookReader {
     fn previous_chapter(&mut self, cx: &mut App) {
         self.playback.update(cx, |session, cx| {
             session.previous_chapter();
+            session.ensure_source(cx);
             cx.notify();
         });
     }
@@ -378,6 +383,7 @@ impl AudiobookReader {
     fn next_chapter(&mut self, cx: &mut App) {
         self.playback.update(cx, |session, cx| {
             session.next_chapter();
+            session.ensure_source(cx);
             cx.notify();
         });
     }
@@ -546,6 +552,7 @@ impl AudiobookReader {
             None => self.playback.read(cx).position.min(book.duration),
         };
         let progress_row = chapter_progress_row(target.clone(), self.progress_bounds.clone(), chapter.start, chapter.end, position, self.progress_hover, theme);
+        let book_progress_row = book_progress_row(&book, position, theme);
         let controls = playback_transport(target.clone(), self.is_playing(cx), self.playback.read(cx).rate, self.speed_menu_open, self.sleep_label(cx), self.sleep_menu_open, MenuLayout::for_window(window), theme);
 
         let cover_art = if let Some(cover) = book.cover.clone() {
@@ -586,7 +593,7 @@ impl AudiobookReader {
                     let start = chapter.start;
                     let duration = chapter.end.saturating_sub(chapter.start);
                     let target = chapter_target.clone();
-                    let row = ui_components::ContentsRow { marked: index == active_chapter, ..Default::default() };
+                    let row = ui_components::ContentsRow { marked: index == active_chapter, read: index < active_chapter, ..Default::default() };
                     ui_components::contents_row(
                         ("chapter", index),
                         row,
@@ -608,7 +615,9 @@ impl AudiobookReader {
         })
         .track_scroll(&self.chapter_scroll)
         .flex_1()
-        .min_h_0();
+        .min_h_0()
+        .border_t_1()
+        .border_color(theme.rule);
 
         div()
             .size_full()
@@ -648,6 +657,7 @@ impl AudiobookReader {
                     .border_t_1()
                     .border_color(theme.rule)
                     .child(progress_row)
+                    .child(book_progress_row)
                     .child(controls),
             )
             .when(self.playback.read(cx).is_buffering(), |column| column.child(div().text_color(theme.text_muted).child("Buffering…")))
@@ -935,6 +945,30 @@ fn chapter_progress_row(
         .child(progress_track)
 }
 
+/// Whole-book progress is a readout; chapter seeking stays on the larger track above it.
+fn book_progress_row(book: &AudiobookBook, position: Duration, theme: ui_components::BrowserTheme) -> gpui::Div {
+    let position = position.min(book.duration);
+    let progress = playback_progress(position, book.duration) / 100.0;
+    let ticks = book.chapters.iter().filter(|chapter| chapter.start > Duration::ZERO && chapter.start < book.duration).map(|chapter| {
+        let fraction = playback_progress(chapter.start, book.duration) / 100.0;
+        div().absolute().left(relative(fraction)).top(px(-2.0)).w(px(1.0)).h(px(6.0)).bg(theme.rule)
+    });
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .text_size(gpui::rems(ui_components::TEXT_XS))
+        .text_color(theme.text_muted)
+        .child(div().relative().w_full().h(px(2.0)).bg(theme.rule)
+            .child(div().absolute().left_0().top_0().h_full().w(relative(progress)).bg(theme.text_muted))
+            .children(ticks))
+        .child(div().w_full().flex().justify_between()
+            .child(format!("{} listened", format_duration_short(position)))
+            .child(format_time_left(book.duration.saturating_sub(position))))
+}
+
 /// The button that opens one of the transport's two menus. Lit while its menu
 /// is open, and — for the sleep timer — while it has something to report.
 fn menu_trigger(id: &'static str, label: impl IntoElement, active: bool, theme: ui_components::BrowserTheme) -> gpui::Stateful<gpui::Div> {
@@ -1006,10 +1040,11 @@ fn menu_option(id: String, label: String, selected: bool, theme: ui_components::
         .flex_none()
         .min_w_0()
         .cursor_pointer()
+        .min_h(px(48.0))
         .flex()
         .items_center()
         .justify_between()
-        .px(px(ui_components::SPACE_SM))
+        .px(px(ui_components::SPACE_MD))
         .py(px(ui_components::SPACE_SM))
         .text_size(gpui::rems(ui_components::TEXT_MD))
         .hover(move |style| style.bg(hovered))
@@ -1032,7 +1067,7 @@ fn playback_speed_menu<T: PlaybackTarget>(target: gpui::WeakEntity<T>, current_r
             }));
         }
         let dismiss_target = target;
-        let sheet = ui_components::bottom_sheet_surface(theme).id("playback-speed-sheet").child(ui_components::bottom_sheet_header("Playback speed", theme)).child(rows);
+        let sheet = ui_components::bottom_sheet_surface(theme).id("playback-speed-sheet").debug_selector(|| "playback-speed-sheet".into()).child(ui_components::bottom_sheet_header("Playback speed", theme)).child(rows);
         return ui_components::bottom_sheet_overlay()
             .child(ui_components::modal_scrim("playback-speed-scrim", theme).on_click(move |_, _, cx| {
                 let _ = dismiss_target.update(cx, |dock, cx| {
@@ -1094,7 +1129,7 @@ fn sleep_menu<T: PlaybackTarget>(target: gpui::WeakEntity<T>, remaining: Option<
             }));
         }
         let dismiss_target = target;
-        let sheet = ui_components::bottom_sheet_surface(theme).id("sleep-sheet").child(ui_components::bottom_sheet_header("Sleep timer", theme)).child(rows);
+        let sheet = ui_components::bottom_sheet_surface(theme).id("sleep-sheet").debug_selector(|| "sleep-sheet".into()).child(ui_components::bottom_sheet_header("Sleep timer", theme)).child(rows);
         return ui_components::bottom_sheet_overlay()
             .child(ui_components::modal_scrim("sleep-scrim", theme).on_click(move |_, _, cx| {
                 let _ = dismiss_target.update(cx, |dock, cx| {
@@ -1288,6 +1323,20 @@ fn format_time(duration: Duration) -> String {
     if hours > 0 { format!("{hours}:{minutes:02}:{seconds:02}") } else { format!("{minutes}:{seconds:02}") }
 }
 
+fn format_duration_short(duration: Duration) -> String {
+    format_minutes_short(duration.as_secs() / 60)
+}
+
+fn format_minutes_short(total_minutes: u64) -> String {
+    let hours = total_minutes / 60;
+    let minutes = total_minutes % 60;
+    if hours > 0 { format!("{hours} h {minutes} m") } else { format!("{minutes} m") }
+}
+
+fn format_time_left(duration: Duration) -> String {
+    format!("{} left", format_minutes_short(duration.as_secs().div_ceil(60)))
+}
+
 fn chapter_display_title(title: &str) -> String {
     let title = title.trim();
     for separator in [" - ", " – ", " — "] {
@@ -1435,6 +1484,13 @@ mod tests {
     fn time_format_covers_minute_and_hour_forms() {
         assert_eq!(format_time(Duration::from_secs(9)), "0:09");
         assert_eq!(format_time(Duration::from_secs(3_725)), "1:02:05");
+    }
+
+    #[test]
+    fn book_time_left_rounds_up_until_playback_finishes() {
+        assert_eq!(format_time_left(Duration::from_secs(1)), "1 m left");
+        assert_eq!(format_time_left(Duration::from_secs(3_601)), "1 h 1 m left");
+        assert_eq!(format_time_left(Duration::ZERO), "0 m left");
     }
 
     #[test]

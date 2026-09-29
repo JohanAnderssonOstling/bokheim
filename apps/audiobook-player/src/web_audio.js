@@ -8,6 +8,15 @@ export class BrowserAudio {
         this.audio = new Audio();
         this.direct = direct;
         this.renew = renew;
+        this.tracks = metadata.tracks || [];
+        this.localTrackUrls = metadata.localTrackUrls || [];
+        this.bookDuration = metadata.bookDuration || 0;
+        delete metadata.tracks;
+        delete metadata.localTrackUrls;
+        delete metadata.bookDuration;
+        this.trackIndex = this.trackFor(initial);
+        this.switching = false;
+        this.saveOnLoad = false;
         this.wantsPlay = false;
         this.playGeneration = 0;
         this.recovery = null;
@@ -16,7 +25,7 @@ export class BrowserAudio {
         if (direct) this.audio.crossOrigin = 'anonymous';
         // The source owner retains the file or remote range session.
         this.url = url;
-        this.audio.src = this.url;
+        this.audio.src = this.mediaUrl(this.url);
         this.artworkUrl = artwork.length ? URL.createObjectURL(new Blob([new Uint8Array(artwork)])) : null;
         if (this.artworkUrl) metadata.artwork = [{src: this.artworkUrl}];
         this.audio.preload = 'metadata';
@@ -34,14 +43,17 @@ export class BrowserAudio {
         this.listen('loadedmetadata', () => {
             if (this.disposed) return;
             this.seekPending = true;
-            this.audio.currentTime = this.clamp(this.initial);
+            this.audio.currentTime = this.clamp(this.initial - this.trackStart());
             this.ready = true;
+            this.switching = false;
             // A no-op seek need not produce a seeked event.
-            if (!this.audio.seeking) { this.seekPending = false; this.update(false); }
+            if (!this.audio.seeking) { this.seekPending = false; this.update(this.saveOnLoad); this.saveOnLoad = false; }
         });
         this.listen('waiting', () => { this.waiting = true; });
         this.listen('pause', () => {
-            if (!this.recovery) this.wantsPlay = false;
+            // Reaching the end fires pause before ended. Keep the play request
+            // until ended has had a chance to advance to the next track.
+            if (!this.recovery && !this.switching && !this.audio.ended) this.wantsPlay = false;
         });
         this.listen('playing', () => { this.waiting = false; this.recoveryAttempts = 0; });
         this.listen('seeked', () => {
@@ -49,9 +61,16 @@ export class BrowserAudio {
             this.seekPending = false;
             this.waiting = false;
             this.update(true);
+            this.saveOnLoad = false;
         });
         for (const event of ['timeupdate', 'playing', 'ratechange']) this.listen(event, () => this.update(false));
         for (const event of ['pause', 'ended']) this.listen(event, () => this.update(true));
+        this.listen('ended', () => {
+            if (!this.wantsPlay) return;
+            if (this.trackIndex + 1 >= this.tracks.length) { this.wantsPlay = false; return; }
+            const next = this.trackIndex + 1;
+            this.switchTrack(next, this.tracks[next].start_ms / 1000);
+        });
         this.listen('error', () => {
             if (this.direct && this.wantsPlay && !this.disposed && this.recoveryAttempts < 8) {
                 this.recoverDirect();
@@ -88,14 +107,35 @@ export class BrowserAudio {
         }
     }
     listen(event, handler) { this.audio.addEventListener(event, handler); }
+    trackFor(position) {
+        if (!this.tracks.length) return 0;
+        const millis = Math.max(0, position * 1000);
+        return Math.max(0, this.tracks.findIndex(track => millis >= track.start_ms && millis < track.end_ms) >= 0
+            ? this.tracks.findIndex(track => millis >= track.start_ms && millis < track.end_ms)
+            : this.tracks.length - 1);
+    }
+    trackStart() { return this.tracks.length ? this.tracks[this.trackIndex].start_ms / 1000 : 0; }
+    mediaUrl(base) { return this.localTrackUrls.length ? this.localTrackUrls[this.trackIndex] : this.tracks.length ? `${base}/tracks/${this.trackIndex}` : base; }
+    switchTrack(index, position) {
+        this.trackIndex = index;
+        this.initial = position;
+        this.ready = false;
+        this.seekPending = true;
+        this.switching = true;
+        this.saveOnLoad = true;
+        this.audio.src = this.mediaUrl(this.url);
+        this.audio.load();
+        if (this.wantsPlay) this.startMedia();
+    }
     clamp(position) {
         return Math.max(0, Math.min(Number.isFinite(this.audio.duration) ? this.audio.duration : Infinity, position));
     }
+    clampGlobal(position) { return Math.max(0, Math.min(this.bookDuration || Infinity, position)); }
     setVolume(volume) { this.audio.volume = volume; }
-    position() { return this.waiting ? this.lastConfirmed : this.ready ? this.audio.currentTime : this.initial; }
+    position() { return this.waiting ? this.lastConfirmed : this.ready ? this.trackStart() + this.audio.currentTime : this.initial; }
     confirmedPosition() {
         if (!this.ready || this.seekPending || this.audio.seeking) return undefined;
-        const position = this.waiting ? this.lastConfirmed : this.audio.currentTime;
+        const position = this.waiting ? this.lastConfirmed : this.trackStart() + this.audio.currentTime;
         return Number.isFinite(position) && position >= 0 ? position : undefined;
     }
     lastConfirmedPosition() { return this.lastConfirmed; }
@@ -163,7 +203,7 @@ export class BrowserAudio {
                 this.initial = position;
                 this.ready = false;
                 this.seekPending = true;
-                this.audio.src = this.url;
+                this.audio.src = this.mediaUrl(this.url);
                 this.audio.load();
                 this.recovery = null;
                 this.revokeDirect(previous);
@@ -179,7 +219,7 @@ export class BrowserAudio {
     pause() { if (!this.disposed) { ++this.playGeneration; this.wantsPlay = false; this.cancelRecovery(); this.audio.pause(); } }
     seek(position) {
         if (!Number.isFinite(position) || this.disposed) return;
-        this.initial = this.clamp(position);
+        this.initial = this.clampGlobal(position);
         if (this.direct && (this.recovery || Date.now() >= this.validUntil)) {
             this.cancelRecovery();
             this.seekPending = true;
@@ -187,8 +227,10 @@ export class BrowserAudio {
             return;
         }
         if (this.ready) {
+            const index = this.trackFor(this.initial);
+            if (index !== this.trackIndex) { this.switchTrack(index, this.initial); return; }
             this.seekPending = true;
-            this.audio.currentTime = this.initial;
+            this.audio.currentTime = this.clamp(this.initial - this.trackStart());
             if (!this.audio.seeking) { this.seekPending = false; this.update(true); }
         }
     }
@@ -200,7 +242,7 @@ export class BrowserAudio {
         const position = this.confirmedPosition();
         if (position === undefined) return;
         this.lastConfirmed = position;
-        const duration = this.audio.duration;
+        const duration = this.bookDuration || this.audio.duration;
         if (force || this.lastSaved === null || Math.abs(position - this.lastSaved) >= 5) {
             this.lastSaved = position;
             this.save(position, Number.isFinite(duration) && duration > 0 ? position / duration : 0);
@@ -208,7 +250,7 @@ export class BrowserAudio {
         if (active === this && this.media) {
             this.media.playbackState = this.playing() ? 'playing' : 'paused';
             if (this.media.setPositionState && Number.isFinite(duration) && duration > 0) {
-                try { this.media.setPositionState({duration, playbackRate: this.rate(), position: this.clamp(position)}); }
+                try { this.media.setPositionState({duration, playbackRate: this.rate(), position: this.clampGlobal(position)}); }
                 catch { /* Playback continues if the browser rejects position reporting. */ }
             }
         }

@@ -3,15 +3,15 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use app_preferences::LibraryView;
 use app::AppClient;
+use app_preferences::LibraryView;
 use gpui::prelude::*;
 use gpui::{AnyView, App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, Render, Subscription, Window, div, px};
 use sync_common::{LibraryId, ROOT_DIR_ID};
 
 use super::LibraryRoute;
 use crate::library::BrowseCrumb;
-use crate::library::{AuthorsPage, BookDetailClosed, BrowsePlaneKind, BrowseSplitPlane, HomePage, LibraryContext, LibraryUpdateBridge, OpenBook, TrashPage, folder_browse_page, subject_browse_page};
+use crate::library::{AuthorsPage, BookDetailClosed, BrowseKind, BrowsePage, BrowseSplitPlane, HomePage, LibraryContext, LibraryUpdateBridge, OpenBook, OpenTrash, TrashPage};
 
 struct CachedPage {
     view: AnyView,
@@ -59,11 +59,15 @@ impl LibrarySession {
 
     fn create_route_page(&self, route: LibraryRoute, cx: &mut Context<Self>) -> CachedPage {
         let library = self.library.clone();
+        let session = cx.entity().downgrade();
+        let open_trash: OpenTrash = Rc::new(move |_, cx| {
+            let _ = session.update_in(cx, |session, window, cx| session.navigate(LibraryRoute::Trash, window, cx));
+        });
         match route {
             LibraryRoute::Home => create_page(|cx| HomePage::new(library, cx), cx),
             LibraryRoute::Authors => create_page(|cx| AuthorsPage::new(library, cx), cx),
-            LibraryRoute::Folders => create_page(|cx| folder_browse_page(library, cx), cx),
-            LibraryRoute::Subjects => create_page(|cx| subject_browse_page(library, cx), cx),
+            LibraryRoute::Folders => create_page(|cx| BrowsePage::new(BrowseKind::Folder, library, open_trash, cx), cx),
+            LibraryRoute::Subjects => create_page(|cx| BrowsePage::new(BrowseKind::Subject, library, open_trash, cx), cx),
             LibraryRoute::Trash => create_page(|cx| TrashPage::new(library, cx), cx),
         }
     }
@@ -81,12 +85,16 @@ impl LibrarySession {
             return plane.clone();
         }
         let kind = match route {
-            LibraryRoute::Folders => BrowsePlaneKind::Folder,
-            LibraryRoute::Subjects => BrowsePlaneKind::Subject,
+            LibraryRoute::Folders => BrowseKind::Folder,
+            LibraryRoute::Subjects => BrowseKind::Subject,
             _ => unreachable!("only browse routes have browse planes"),
         };
         let library = self.library.clone();
-        let plane = cx.new(|cx| BrowseSplitPlane::new(kind, library, cx));
+        let session = cx.entity().downgrade();
+        let open_trash: OpenTrash = Rc::new(move |_, cx| {
+            let _ = session.update_in(cx, |session, window, cx| session.navigate(LibraryRoute::Trash, window, cx));
+        });
+        let plane = cx.new(|cx| BrowseSplitPlane::new(kind, library, open_trash.clone(), cx));
         self.browse_planes.insert(route, plane.clone());
         plane
     }
@@ -159,7 +167,7 @@ impl Render for LibrarySession {
         let updates = self.library.updates();
         let updates = updates.read(cx);
         let uses_contents = matches!(self.route, LibraryRoute::Home | LibraryRoute::Authors | LibraryRoute::Folders | LibraryRoute::Subjects);
-        if !(uses_contents && !updates.loading() && updates.book_count() == Some(0) && !updates.scanning()) {
+        if !(uses_contents && self.route != LibraryRoute::Folders && !updates.loading() && updates.book_count() == Some(0) && !updates.scanning()) {
             let view = if Self::is_browse_route(self.route) { self.browse_planes.get(&self.route).expect("browse plane must exist before render").clone().into_any_element() } else { self.page().view.clone().into_any_element() };
             return ui_components::library_section_content().child(view).into_any_element();
         }

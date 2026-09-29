@@ -42,17 +42,21 @@ impl Database {
     /// download request. A stale upload intent (superseded since the job was
     /// planned) is left alone rather than recording a rejection for it.
     pub fn settle_rejected_asset(&self, hash: &ContentHash, asset: RejectedAsset<'_>, reason: &str) -> Result<(), DatabaseError> {
+        Self::settle_rejected_asset_on(&self.connection, hash, asset, reason)
+    }
+
+    pub(super) fn settle_rejected_asset_on(connection: &rusqlite::Connection, hash: &ContentHash, asset: RejectedAsset<'_>, reason: &str) -> Result<(), DatabaseError> {
         match asset {
             RejectedAsset::BookDownload => {
-                self.connection.shared_transfer_complete_download(hash.as_str())?;
+                connection.shared_transfer_complete_download(hash.as_str())?;
             }
             RejectedAsset::BookUpload { intent } => {
-                if intent.is_none() || self.book_upload_intent(hash)?.as_ref() == intent {
-                    self.connection.transfer_record_book_rejection(hash.as_str(), reason)?;
+                if intent.is_none() || Self::upload_intent_of(connection, hash)?.as_ref() == intent {
+                    connection.transfer_record_book_rejection(hash.as_str(), reason)?;
                 }
             }
             RejectedAsset::ThumbnailUpload => {
-                self.connection.transfer_record_thumbnail_rejection(hash.as_str(), reason)?;
+                connection.transfer_record_thumbnail_rejection(hash.as_str(), reason)?;
             }
         }
         Ok(())

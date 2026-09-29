@@ -71,7 +71,7 @@ pub(super) fn group_geometry(policy: PaginatorGroupPolicy, group_index: usize, a
     let fitted_width = ((available - column_gap * gap_count as f32) / columns as f32).max(1.0);
     let maximum_width = policy.maximum_width.map(|width| f32::from(width.width(rem_size)).max(base_width));
     let child_width = maximum_width.map_or(fitted_width, |maximum| maximum.min(fitted_width));
-    let column_gap = if policy.maximum_width.is_some() && gap_count > 0 { ((available - child_width * columns as f32) / gap_count as f32).max(column_gap) } else { column_gap };
+    let column_gap = if policy.maximum_width.is_some() && gap_count > 0 && !policy.pack_start { ((available - child_width * columns as f32) / gap_count as f32).max(column_gap) } else { column_gap };
     let occupied = columns as f32 * child_width + (columns.saturating_sub(1)) as f32 * column_gap;
     let leading = if policy.inset_edges { ((available - occupied) / 2.0).max(column_gap) } else { 0.0 };
     GroupGeometry { group_index, columns, child_width: px(child_width), column_gap: px(column_gap), leading: px(leading + inset) }
@@ -279,7 +279,7 @@ mod tests {
         use crate::library::widgets::{PaginatorChild, PaginatorGroup};
         use gpui::{IntoElement, div};
         let policy = PaginatorGroupPolicy::new(PaginatorWidthPolicy::pixels(px(100.0)), PaginatorSizing::pixels(px(40.0)), px(8.0)).flush_edges();
-        let children = |count| (0..count).map(|_| PaginatorChild::new(|_, _| div().into_any_element())).collect::<Vec<_>>();
+        let children = |count| (0..count).map(|_| PaginatorChild::new(|_, _, _| div().into_any_element())).collect::<Vec<_>>();
         PaginatorData::new([
             PaginatorGroup::new(policy, children(8)).with_header(PaginatorSizing::pixels(px(30.0)), |_, _| div().into_any_element()),
             PaginatorGroup::new(policy, children(6)).with_header(PaginatorSizing::pixels(px(30.0)), |_, _| div().into_any_element()),
@@ -293,7 +293,7 @@ mod tests {
         use gpui::{IntoElement, div};
         let policy = PaginatorGroupPolicy::new(PaginatorWidthPolicy::pixels(px(1.0)), PaginatorSizing::pixels(px(40.0)), px(8.0)).intrinsic().with_gap(px(8.0)).with_edge_inset(px(8.0));
         let children = [60.0, 80.0, 120.0, 40.0, 900.0, 70.0, 60.0].map(|width| {
-            let child = PaginatorChild::new(|_, _| div().into_any_element());
+            let child = PaginatorChild::new(|_, _, _| div().into_any_element());
             child.measured_width.set(px(width));
             child
         });
@@ -344,7 +344,7 @@ mod tests {
         let policy = PaginatorGroupPolicy::new(PaginatorWidthPolicy::pixels(px(100.0)), PaginatorSizing::pixels(px(40.0)), px(8.0));
         let groups = [
             PaginatorGroup::new(policy, []).with_header(PaginatorSizing::pixels(px(30.0)), |_, _| div().into_any_element()),
-            PaginatorGroup::new(policy, [PaginatorChild::new(|_, _| div().into_any_element())]).with_header(PaginatorSizing::pixels(px(30.0)), |_, _| div().into_any_element()),
+            PaginatorGroup::new(policy, [PaginatorChild::new(|_, _, _| div().into_any_element())]).with_header(PaginatorSizing::pixels(px(30.0)), |_, _| div().into_any_element()),
         ];
         let paginator = Paginator::new("clone-headers", groups);
         let data = PaginatorData::new(paginator.cloned_groups());
@@ -455,18 +455,16 @@ mod tests {
         let rem_size = px(16.0);
         for cover_text in [app_preferences::CoverText::Always, app_preferences::CoverText::CoverOnly] {
             let cards = crate::library::widgets::shelf_card_policy(cover_text);
-            for subject_rows in [0, 2] {
-                let row = crate::library::widgets::shelf_rows_policy(cover_text, subject_rows);
-                let heading = px(16.0 * ui_components::shelf_heading_height_rem(subject_rows) + ui_components::CAROUSEL_CONTENT_GAP);
-                // Nominal, stretched, and capped: the three widths a card resolves to.
-                let nominal = px(ui_components::BOOK_CARD_WIDTH) * 4.0 + cards.column_gap * 3.0;
-                for width in [nominal, nominal + px(120.0), px(4000.0)] {
-                    let card = cards.sizing.height(group_geometry(cards, 0, width, rem_size).child_width, rem_size);
-                    assert_eq!(row.sizing.height(width, rem_size), heading + card, "a {width:?} row must be its heading over a {card:?} card");
-                }
-                let stretched = row.sizing.height(nominal + px(120.0), rem_size);
-                assert!(stretched > row.sizing.height(nominal, rem_size), "a row whose cards stretched must grow with them");
+            let row = crate::library::widgets::shelf_rows_policy(cover_text);
+            let heading = px(16.0 * ui_components::SHELF_HEADING_HEIGHT_REM + ui_components::CAROUSEL_CONTENT_GAP);
+            // Nominal, stretched, and capped: the three widths a card resolves to.
+            let nominal = px(ui_components::BOOK_CARD_WIDTH) * 4.0 + cards.column_gap * 3.0;
+            for width in [nominal, nominal + px(120.0), px(4000.0)] {
+                let card = cards.sizing.height(group_geometry(cards, 0, width, rem_size).child_width, rem_size);
+                assert_eq!(row.sizing.height(width, rem_size), heading + card, "a {width:?} row must be its heading over a {card:?} card");
             }
+            let stretched = row.sizing.height(nominal + px(120.0), rem_size);
+            assert!(stretched > row.sizing.height(nominal, rem_size), "a row whose cards stretched must grow with them");
         }
     }
 
@@ -508,19 +506,17 @@ mod tests {
         }
     }
 
-    /// The point of the detailed card: it is twice as wide, the cover it draws
-    /// is the one the ordinary card draws, and the words under that cover are
-    /// the ordinary card's words — so the gained half goes to the blurb and to
-    /// nothing else.
+    /// The detailed card keeps the ordinary cover and its text block while
+    /// giving the blurb a separate column.
     #[test]
-    fn detailed_cards_double_the_width_and_keep_the_ordinary_card() {
+    fn detailed_cards_keep_the_ordinary_cover_size() {
         let rem_size = px(16.0);
         let container = px(1600.0);
         let compact = crate::library::widgets::book_card_policy(false, app_preferences::CoverText::Always);
         let detailed = crate::library::widgets::book_card_policy(true, app_preferences::CoverText::Always);
         let compact_geometry = group_geometry(compact, 0, container, rem_size);
         let detailed_geometry = group_geometry(detailed, 0, container, rem_size);
-        assert_eq!(detailed_geometry.columns * 2, compact_geometry.columns);
+        assert!(detailed_geometry.columns < compact_geometry.columns);
 
         // What each card holds back for the words under its cover, which is the
         // same block in both modes. Only the detailed policy caps its content

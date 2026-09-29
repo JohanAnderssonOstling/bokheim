@@ -7,7 +7,7 @@ use std::path::Path;
 use crate::library_state::portable_name_key;
 
 pub fn numbered_folder_name(base: &str, number: usize) -> String {
-    format!("{base} {number}")
+    crate::folder_names::numbered(base, number)
 }
 
 pub fn numbered_file_name(base: &str, number: usize) -> String {
@@ -33,7 +33,7 @@ fn unique_name<'a>(requested: &str, occupied: impl IntoIterator<Item = &'a str>,
 }
 
 pub fn unique_folder_name<'a>(requested: &str, occupied: impl IntoIterator<Item = &'a str>) -> String {
-    unique_name(requested, occupied, numbered_folder_name)
+    unique_name(&crate::project_folder_name(requested), occupied, numbered_folder_name)
 }
 
 pub fn unique_file_name<'a>(requested: &str, occupied: impl IntoIterator<Item = &'a str>) -> String {

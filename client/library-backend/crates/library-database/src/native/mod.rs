@@ -1,6 +1,7 @@
 //! Native (on-device) filesystem state: work, directories, staged books.
 
 use crate::shared_sql::SharedSql;
+use rusqlite::OptionalExtension;
 // ---- native ----
 // Native staged-book snapshots and conditional projection commits.
 
@@ -75,7 +76,7 @@ impl Database {
             let fingerprint = completion.fingerprint.ok_or_else(|| DatabaseError::message("published native file has no fingerprint"))?;
             transaction.native_set_book_fingerprint(&directory.to_string(), completion.snapshot.content_hash.as_str(), &fingerprint)?;
         }
-        transaction.commit().map_err(DatabaseError::operation)?;
+        crate::sync::apply::commit(transaction)?;
         Ok(NativeBookAcknowledgement::Applied)
     }
 
@@ -84,32 +85,37 @@ impl Database {
     /// transaction and never exposes SQLite to the transfer executor.
     pub fn complete_downloaded_book(&self, completion: NativeBookCompletion, thumbnail_set_exists: bool) -> Result<NativeBookAcknowledgement, DatabaseError> {
         let transaction = self.connection.unchecked_transaction()?;
-        let current = Self::native_book_entry(&transaction, &completion.snapshot.relative_path)?;
+        let acknowledgement = Self::complete_downloaded_book_in_transaction(&transaction, &completion, thumbnail_set_exists)?;
+        crate::sync::apply::commit(transaction)?;
+        Ok(acknowledgement)
+    }
+
+    pub(crate) fn complete_downloaded_book_in_transaction(connection: &rusqlite::Connection, completion: &NativeBookCompletion, thumbnail_set_exists: bool) -> Result<NativeBookAcknowledgement, DatabaseError> {
+        let current = Self::native_book_entry(connection, &completion.snapshot.relative_path)?;
         let Some((hash, directory, name)) = current else { return Ok(NativeBookAcknowledgement::Obsolete) };
         if hash != completion.snapshot.content_hash || directory != completion.snapshot.directory || name != completion.snapshot.name {
             return Ok(NativeBookAcknowledgement::Obsolete);
         }
         let mut conflict = false;
-        transaction.native_book_name_conflict(&directory.to_string(), &library_replica::portable_name_key(&completion.name), completion.snapshot.content_hash.as_str(), |row| {
+        connection.native_book_name_conflict(&directory.to_string(), &library_replica::portable_name_key(&completion.name), completion.snapshot.content_hash.as_str(), |row| {
             conflict = row.get(0)?;
             Ok(())
         })?;
         if conflict {
             return Ok(NativeBookAcknowledgement::Obsolete);
         }
-        transaction.native_rename_book(&directory.to_string(), completion.snapshot.content_hash.as_str(), &completion.name)?;
-        transaction.shared_scanner_publish_projection(completion.snapshot.content_hash.as_str(), &directory.to_string(), &completion.relative_path)?;
+        connection.native_rename_book(&directory.to_string(), completion.snapshot.content_hash.as_str(), &completion.name)?;
+        connection.shared_scanner_publish_projection(completion.snapshot.content_hash.as_str(), &directory.to_string(), &completion.relative_path)?;
         if completion.published {
-            transaction.native_set_book_fingerprint(&directory.to_string(), completion.snapshot.content_hash.as_str(), &completion.fingerprint.ok_or_else(|| DatabaseError::message("published native file has no fingerprint"))?)?;
+            connection.native_set_book_fingerprint(&directory.to_string(), completion.snapshot.content_hash.as_str(), completion.fingerprint.as_deref().ok_or_else(|| DatabaseError::message("published native file has no fingerprint"))?)?;
         }
-        transaction.native_record_remote_book(completion.snapshot.content_hash.as_str())?;
-        transaction.native_mark_hash_downloaded(completion.snapshot.content_hash.as_str())?;
-        transaction.shared_transfer_complete_download(completion.snapshot.content_hash.as_str())?;
-        transaction.native_queue_book_work(completion.snapshot.content_hash.as_str())?;
+        connection.native_record_remote_book(completion.snapshot.content_hash.as_str())?;
+        connection.native_mark_hash_downloaded(completion.snapshot.content_hash.as_str())?;
+        connection.shared_transfer_complete_download(completion.snapshot.content_hash.as_str())?;
+        connection.native_queue_book_work(completion.snapshot.content_hash.as_str())?;
         if !thumbnail_set_exists {
-            transaction.native_request_thumbnail(completion.snapshot.content_hash.as_str())?;
+            connection.native_request_thumbnail(completion.snapshot.content_hash.as_str())?;
         }
-        transaction.commit()?;
         Ok(NativeBookAcknowledgement::Applied)
     }
 
@@ -167,6 +173,7 @@ pub struct NativeFileWorkCompletion {
 
 #[derive(Clone, Debug)]
 pub struct PurgeBookSnapshot {
+    work_id: i64,
     pub content_hash: ContentHash,
     pub remove_bytes: bool,
 }
@@ -271,15 +278,19 @@ impl Database {
     }
 
     pub fn purge_book_snapshot(&self, hash: &ContentHash) -> Result<Option<PurgeBookSnapshot>, DatabaseError> {
-        if !self.connection.native_purge_requested(hash.as_str(), |row| row.get(0))? {
+        let work_id: Option<i64> = self.connection.query_row("SELECT id FROM local_purge_work WHERE content_hash=?1", [hash.as_str()], |r| r.get(0)).optional()?;
+        let Some(work_id) = work_id else { return Ok(None) };
+        let retired = self.connection.purge_book_is_retired(hash.as_str(), |row| row.get::<_, bool>(0)).map_err(DatabaseError::operation)?;
+        // Failed or interrupted placement cleanup must complete before deleting
+        // the trash container; otherwise a retry would strand bytes there.
+        if retired && self.connection.query_row("SELECT EXISTS(SELECT 1 FROM local_file_work WHERE content_hash=?1)", [hash.as_str()], |r| r.get::<_, bool>(0))? {
             return Ok(None);
         }
-        let retired = self.connection.purge_book_is_retired(hash.as_str(), |row| row.get::<_, bool>(0)).map_err(DatabaseError::operation)?;
-        Ok(Some(PurgeBookSnapshot { content_hash: *hash, remove_bytes: !retired }))
+        Ok(Some(PurgeBookSnapshot { work_id, content_hash: *hash, remove_bytes: retired }))
     }
 
     pub fn acknowledge_purge_book(&self, snapshot: PurgeBookSnapshot) -> Result<(), DatabaseError> {
-        self.connection.acknowledge_purge_book(snapshot.content_hash.as_str())?;
+        self.connection.acknowledge_purge_book(snapshot.content_hash.as_str(), snapshot.work_id)?;
         Ok(())
     }
 
@@ -423,10 +434,7 @@ impl Database {
     /// Physical locations remain recoverable after a directory is hidden or trashed.
     pub fn native_directory_projected_path(&self, id: &DirId) -> Result<Option<String>, DatabaseError> {
         use rusqlite::OptionalExtension;
-        Ok(self.connection.query_row(
-            "SELECT '/' || ltrim(relative_path,'/') FROM local_directory_projection WHERE dir_id=?1",
-            [id.to_string()], |row| row.get(0),
-        ).optional()?)
+        Ok(self.connection.query_row("SELECT '/' || ltrim(relative_path,'/') FROM local_directory_projection WHERE dir_id=?1", [id.to_string()], |row| row.get(0)).optional()?)
     }
 
     /// Remember an intermediate physical location independently of logical lifecycle.

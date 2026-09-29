@@ -5,12 +5,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use web_time::Instant;
 
-use library_backend::BoxedBookReader;
-use library_backend::LibraryClient;
-use library_backend::BookFormat;
 use gpui::prelude::*;
 use gpui::{AnimationExt, AnyView, App, AppContext, Context, EventEmitter, IntoElement, Render, SharedString, Task, Window};
 use html_book::BookSourceFormat;
+use library_backend::BookFormat;
+use library_backend::BoxedBookReader;
+use library_backend::LibraryClient;
 use library_model::BookLocator;
 
 use crate::epub::ReaderView as EpubReaderView;
@@ -191,9 +191,9 @@ async fn load_book(
     let prepared = match format {
         BookFormat::Pdf => prepare_pdf(&prepare_locator, content, &library, initial_target, startup_started, &updates).await?,
         #[cfg(feature = "audiobooks")]
-        BookFormat::M4b => PreparedBook::Audiobook { resolved: content, initial_target },
+        BookFormat::M4b | BookFormat::Mp3Folder => PreparedBook::Audiobook { resolved: content, initial_target },
         #[cfg(not(feature = "audiobooks"))]
-        BookFormat::M4b => return Err("stage=prepare: audiobook support is disabled".to_owned()),
+        BookFormat::M4b | BookFormat::Mp3Folder => return Err("stage=prepare: audiobook support is disabled".to_owned()),
         BookFormat::Epub | BookFormat::Mobi => prepare_book(&prepare_locator, content, format, &library, &executor, renderer_config, initial_target, startup_started, &updates).await?,
     };
     Ok(prepared)
@@ -230,7 +230,9 @@ impl ReaderView {
         reader
     }
 
-    fn start_load(&mut self, locator: BookLocator, title: String, initial_target: Option<String>, app: app::AppClient, library: Rc<LibraryClient>, close_reader: CloseReader, startup_started: Instant, _window: &mut Window, cx: &mut Context<Self>) {
+    fn start_load(
+        &mut self, locator: BookLocator, title: String, initial_target: Option<String>, app: app::AppClient, library: Rc<LibraryClient>, close_reader: CloseReader, startup_started: Instant, _window: &mut Window, cx: &mut Context<Self>,
+    ) {
         let load_locator = locator.clone();
         let executor = cx.background_executor().clone();
         let renderer_config = crate::epub::state::renderer_initial_config(cx);

@@ -322,8 +322,9 @@ downloading them. Covers are private account data rather than globally shared
 blobs: storage paths include the authenticated user. The server streams the
 client's original bytes without image decoding or
 re-encoding or format inspection, while enforcing a 4 MiB transfer limit.
-Responses use `image/png`, `X-Content-Type-Options: nosniff`, and private
-immutable caching. Clients validate and decode within bounded image limits
+Responses use `image/jpeg`, `X-Content-Type-Options: nosniff`, and
+`Cache-Control: private, no-store` because cover bytes can change under a book
+identity. Clients validate and decode within bounded image limits
 before display. Covers from the former global layouts remain readable and are
 copied unchanged into each user's scope on first access, so an upgrade does not
 blank existing cloud covers.

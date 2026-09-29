@@ -1,9 +1,9 @@
 //! Worker connections and replies for the library-owned import queue.
 use super::{field, object, Port};
+use crate::library::web_import::queue::ImportJobs;
 use js_sys::Array;
 #[cfg(feature = "web-runtime-tests")]
 use js_sys::{Object, Reflect};
-use super::import_workflow::queue::ImportJobs;
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::MessagePort;

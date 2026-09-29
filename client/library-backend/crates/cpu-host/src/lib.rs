@@ -51,7 +51,7 @@ impl InspectionCapabilities {
 /// Metadata and cover parsers request ranges from the storage owner.
 #[derive(Serialize, Deserialize)]
 pub enum BookTask {
-    Inspect { source_name: String, format: book_model::BookFormat },
+    Inspect { source_name: String, format: book_model::BookFormat, checksum: Option<content_address::ContentHash> },
     SubjectPages { source_name: String, format: book_model::BookFormat },
     Thumbnail { extension: String },
 }
@@ -140,7 +140,7 @@ pub fn local_mobi_pages<R: std::io::Read>(path: &std::path::Path, reader: R) -> 
 
 pub fn execute_book_with_mobi<R: std::io::Read + std::io::Seek + Send + Sync + 'static>(task: BookTask, reader: R, mobi_pages: fn(&std::path::Path, R) -> Result<book_model::BookMetadata, BackendError>) -> Result<CpuResponse, BackendError> {
     match task {
-        BookTask::Inspect { source_name, format } => book_metadata::inspect_book_reader(std::path::Path::new(&source_name), format, reader).map(CpuResponse::Inspection).map_err(BackendError::operation),
+        BookTask::Inspect { source_name, format, checksum } => book_metadata::inspect_book_reader_with_checksum(std::path::Path::new(&source_name), format, reader, checksum).map(CpuResponse::Inspection).map_err(BackendError::operation),
         BookTask::SubjectPages { source_name, format } => {
             let path = std::path::Path::new(&source_name);
             let book = match format {
@@ -207,7 +207,7 @@ macro_rules! book_operations {
 }
 book_operations! {
     SubjectPages { source_name: String, format: book_model::BookFormat } => book_model::BookMetadata, CpuResponse::SubjectEvidence(evidence) => evidence;
-    Inspect { source_name: String, format: book_model::BookFormat } => book_metadata::InspectedBook, CpuResponse::Inspection(inspection) => inspection;
+    Inspect { source_name: String, format: book_model::BookFormat, checksum: Option<content_address::ContentHash> } => book_metadata::InspectedBook, CpuResponse::Inspection(inspection) => inspection;
     Thumbnail { extension: String } => Option<ThumbnailBytes>, CpuResponse::Thumbnail(versions) => versions;
 }
 
@@ -333,7 +333,7 @@ mod tests {
     #[test]
     fn seekable_book_inspection_matches_direct_inspection() {
         let bytes = include_bytes!("../../../../app/tests/fixtures/storage-contract.epub").to_vec();
-        let actual = execute_book(BookTask::Inspect { source_name: "fixture.epub".into(), format: book_model::BookFormat::Epub }, std::io::Cursor::new(bytes.clone())).unwrap();
+        let actual = execute_book(BookTask::Inspect { source_name: "fixture.epub".into(), format: book_model::BookFormat::Epub, checksum: None }, std::io::Cursor::new(bytes.clone())).unwrap();
         let expected = CpuResponse::Inspection(book_metadata::inspect_book_bytes("fixture.epub", book_model::BookFormat::Epub, bytes).unwrap());
         assert_eq!(rmp_serde::to_vec_named(&actual).unwrap(), rmp_serde::to_vec_named(&expected).unwrap());
     }
