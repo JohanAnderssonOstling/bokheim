@@ -434,7 +434,7 @@ dependencies = [
  "book-model",
  "browser-ui",
  "futures-util",
- "gpui",
+ "gpui 0.2.2 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui-component",
  "gpui_kobo",
  "library-model",
@@ -827,7 +827,7 @@ dependencies = [
  "async-io",
  "book-model",
  "crossbeam-channel",
- "gpui",
+ "gpui 0.2.2 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui-component",
  "js-sys",
  "library-backend",
@@ -1325,7 +1325,7 @@ dependencies = [
  "book-model",
  "chrono",
  "futures-util",
- "gpui",
+ "gpui 0.2.2 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui-component",
  "gpui_android 0.1.0",
  "gpui_kobo",
@@ -2429,6 +2429,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "derive_refineable"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "desktop-gpui"
 version = "0.1.0"
 dependencies = [
@@ -2439,7 +2449,7 @@ dependencies = [
  "audiobook-player",
  "browser-ui",
  "fs2",
- "gpui",
+ "gpui 0.2.2 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui-component",
  "gpui_android 0.1.0",
  "gpui_kobo",
@@ -3623,8 +3633,8 @@ dependencies = [
  "futures",
  "futures-concurrency",
  "getrandom 0.3.4",
- "gpui_macros",
- "gpui_shared_string",
+ "gpui_macros 0.1.0",
+ "gpui_shared_string 0.1.0",
  "gpui_util 0.1.0",
  "heapless",
  "http_client 0.1.0",
@@ -3643,7 +3653,7 @@ dependencies = [
  "proptest",
  "rand 0.9.4",
  "raw-window-handle",
- "refineable",
+ "refineable 0.1.0",
  "regex",
  "resvg 0.46.0",
  "scheduler 0.1.0",
@@ -3656,14 +3666,14 @@ dependencies = [
  "spin 0.10.1",
  "stacksafe",
  "strum",
- "sum_tree",
+ "sum_tree 0.1.0",
  "taffy",
  "thiserror 2.0.18",
  "tracing",
  "ttf-parser",
  "url",
  "usvg 0.46.0",
- "util_macros",
+ "util_macros 0.1.0",
  "uuid",
  "waker-fn",
  "wasm-bindgen",
@@ -3671,7 +3681,80 @@ dependencies = [
  "windows 0.61.3",
  "zed-font-kit",
  "zed-scap",
- "ztracing",
+ "ztracing 0.1.0",
+]
+
+[[package]]
+name = "gpui"
+version = "0.2.2"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
+dependencies = [
+ "accesskit",
+ "anyhow",
+ "async-channel",
+ "async-task",
+ "backtrace",
+ "bindgen",
+ "bitflags 2.13.1",
+ "chrono",
+ "collections 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
+ "core-video",
+ "ctor",
+ "derive_more",
+ "embed-resource",
+ "etagere",
+ "futures",
+ "futures-concurrency",
+ "getrandom 0.3.4",
+ "gpui_macros 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
+ "gpui_shared_string 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
+ "gpui_util 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
+ "heapless",
+ "http_client 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
+ "image 0.25.10",
+ "inventory",
+ "itertools 0.14.0",
+ "log",
+ "lyon",
+ "num_cpus",
+ "parking",
+ "parking_lot",
+ "pin-project",
+ "pollster 0.4.0",
+ "postage",
+ "profiling",
+ "proptest",
+ "rand 0.9.4",
+ "raw-window-handle",
+ "refineable 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
+ "regex",
+ "resvg 0.46.0",
+ "scheduler 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
+ "schemars",
+ "seahash",
+ "serde",
+ "serde_json",
+ "slotmap",
+ "smallvec",
+ "spin 0.10.1",
+ "stacksafe",
+ "strum",
+ "sum_tree 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
+ "taffy",
+ "thiserror 2.0.18",
+ "tracing",
+ "ttf-parser",
+ "url",
+ "usvg 0.46.0",
+ "util_macros 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
+ "uuid",
+ "waker-fn",
+ "wasm-bindgen",
+ "web-time",
+ "windows 0.61.3",
+ "zed-font-kit",
+ "zed-scap",
+ "ztracing 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
 ]
 
 [[package]]
@@ -3685,10 +3768,10 @@ dependencies = [
  "core-text",
  "enum-iterator",
  "futures",
- "gpui",
+ "gpui 0.2.2",
  "gpui-component-assets",
  "gpui-component-macros",
- "gpui_macros",
+ "gpui_macros 0.1.0",
  "html5ever 0.27.0",
  "instant",
  "itertools 0.13.0",
@@ -3726,7 +3809,7 @@ name = "gpui-component-assets"
 version = "0.5.1"
 dependencies = [
  "anyhow",
- "gpui",
+ "gpui 0.2.2",
  "log",
  "rust-embed",
  "wasm-bindgen",
@@ -3751,7 +3834,7 @@ dependencies = [
  "android_logger",
  "anyhow",
  "futures",
- "gpui",
+ "gpui 0.2.2",
  "gpui_wgpu 0.1.0",
  "jni 0.22.4",
  "libc",
@@ -3771,7 +3854,7 @@ dependencies = [
  "android_logger",
  "anyhow",
  "futures",
- "gpui",
+ "gpui 0.2.2 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui_wgpu 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "jni 0.22.4",
  "libc",
@@ -3797,7 +3880,7 @@ dependencies = [
  "derive_more",
  "etagere",
  "foreign-types",
- "gpui",
+ "gpui 0.2.2 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "image 0.25.10",
  "log",
  "metal",
@@ -3811,7 +3894,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures",
- "gpui",
+ "gpui 0.2.2",
  "gpui_wgpu 0.1.0",
  "image 0.25.10",
  "libc",
@@ -3837,7 +3920,7 @@ dependencies = [
  "collections 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "filedescriptor",
  "futures",
- "gpui",
+ "gpui 0.2.2 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui_util 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui_wgpu 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "http_client 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
@@ -3887,7 +3970,7 @@ dependencies = [
  "dispatch2",
  "foreign-types",
  "futures",
- "gpui",
+ "gpui 0.2.2 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui_apple",
  "gpui_util 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "image 0.25.10",
@@ -3922,12 +4005,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui_macros"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
+dependencies = [
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "gpui_platform"
 version = "0.1.0"
 source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
 dependencies = [
  "console_error_panic_hook",
- "gpui",
+ "gpui 0.2.2 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui_android 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui_linux",
  "gpui_macos",
@@ -3940,6 +4034,16 @@ dependencies = [
 [[package]]
 name = "gpui_shared_string"
 version = "0.1.0"
+dependencies = [
+ "schemars",
+ "serde",
+ "smol_str",
+]
+
+[[package]]
+name = "gpui_shared_string"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
 dependencies = [
  "schemars",
  "serde",
@@ -3973,7 +4077,7 @@ dependencies = [
  "anyhow",
  "console_error_panic_hook",
  "futures",
- "gpui",
+ "gpui 0.2.2 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui_wgpu 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "http_client 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "js-sys",
@@ -3998,7 +4102,7 @@ dependencies = [
  "collections 0.1.0",
  "cosmic-text",
  "etagere",
- "gpui",
+ "gpui 0.2.2",
  "gpui_util 0.1.0",
  "image 0.25.10",
  "itertools 0.14.0",
@@ -4025,7 +4129,7 @@ dependencies = [
  "collections 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "cosmic-text",
  "etagere",
- "gpui",
+ "gpui 0.2.2 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui_util 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "image 0.25.10",
  "itertools 0.14.0",
@@ -4054,7 +4158,7 @@ dependencies = [
  "dunce",
  "etagere",
  "futures",
- "gpui",
+ "gpui 0.2.2 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui_util 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "image 0.25.10",
  "itertools 0.14.0",
@@ -4601,7 +4705,7 @@ dependencies = [
  "async-channel",
  "base64 0.22.1",
  "epub_provider",
- "gpui",
+ "gpui 0.2.2 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui_platform",
  "gpui_wgpu 0.1.0",
  "html-engine 0.1.0 (git+https://github.com/JohanAnderssonOstling/HtmlEngine?rev=91766fb2db8d56b38dc0336ddf74972da9872520)",
@@ -7559,7 +7663,7 @@ dependencies = [
 name = "pdf-view-gpui"
 version = "0.1.0"
 dependencies = [
- "gpui",
+ "gpui 0.2.2 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui-component",
  "gpui_platform",
  "gpui_wgpu 0.1.0",
@@ -7616,6 +7720,16 @@ name = "perf"
 version = "0.1.0"
 dependencies = [
  "collections 0.1.0",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "perf"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
+dependencies = [
+ "collections 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "serde",
  "serde_json",
 ]
@@ -8461,7 +8575,7 @@ dependencies = [
  "book-model",
  "content-address",
  "futures-util",
- "gpui",
+ "gpui 0.2.2 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui-component",
  "gpui_kobo",
  "html-book",
@@ -8540,7 +8654,15 @@ dependencies = [
 name = "refineable"
 version = "0.1.0"
 dependencies = [
- "derive_refineable",
+ "derive_refineable 0.1.0",
+]
+
+[[package]]
+name = "refineable"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
+dependencies = [
+ "derive_refineable 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
 ]
 
 [[package]]
@@ -10140,7 +10262,19 @@ dependencies = [
  "log",
  "rayon",
  "tracing",
- "ztracing",
+ "ztracing 0.1.0",
+]
+
+[[package]]
+name = "sum_tree"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
+dependencies = [
+ "heapless",
+ "log",
+ "rayon",
+ "tracing",
+ "ztracing 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
 ]
 
 [[package]]
@@ -11185,7 +11319,7 @@ name = "ui-components"
 version = "0.1.0"
 dependencies = [
  "app-preferences",
- "gpui",
+ "gpui 0.2.2 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui-component",
  "gpui-component-assets",
  "unicode-normalization",
@@ -11435,7 +11569,17 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 name = "util_macros"
 version = "0.1.0"
 dependencies = [
- "perf",
+ "perf 0.1.0",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "util_macros"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
+dependencies = [
+ "perf 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "quote",
  "syn 2.0.117",
 ]
@@ -11865,7 +12009,7 @@ dependencies = [
  "application-shell",
  "browser-ui",
  "console_error_panic_hook",
- "gpui",
+ "gpui 0.2.2 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
  "gpui-component",
  "gpui_platform",
  "js-sys",
@@ -13543,6 +13687,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zlog"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "collections 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
+ "log",
+]
+
+[[package]]
 name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13566,13 +13721,29 @@ version = "0.1.0"
 dependencies = [
  "tracing",
  "tracing-subscriber",
- "zlog",
- "ztracing_macro",
+ "zlog 0.1.0",
+ "ztracing_macro 0.1.0",
+]
+
+[[package]]
+name = "ztracing"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
+dependencies = [
+ "tracing",
+ "tracing-subscriber",
+ "zlog 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
+ "ztracing_macro 0.1.0 (git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd)",
 ]
 
 [[package]]
 name = "ztracing_macro"
 version = "0.1.0"
+
+[[package]]
+name = "ztracing_macro"
+version = "0.1.0"
+source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
 
 [[package]]
 name = "zune-core"
@@ -13654,18 +13825,3 @@ dependencies = [
  "syn 3.0.3",
  "winnow 1.0.4",
 ]
-
-[[patch.unused]]
-name = "gpui"
-version = "0.2.2"
-source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
-
-[[patch.unused]]
-name = "gpui"
-version = "0.2.2"
-source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
-
-[[patch.unused]]
-name = "gpui_macros"
-version = "0.1.0"
-source = "git+https://github.com/JohanAnderssonOstling/GPUI-Fork?rev=cb2f5b981889d421153d5804526929e32c0788fd#cb2f5b981889d421153d5804526929e32c0788fd"
