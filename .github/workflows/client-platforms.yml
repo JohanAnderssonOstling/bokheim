@@ -54,17 +54,17 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: JohanAnderssonOstling/GPUI-Fork
-          ref: 68b0a5ba82860ac222c18acd9036b3838a43a08b
+          ref: cb2f5b981889d421153d5804526929e32c0788fd
           path: GPUI-Fork
       - uses: actions/checkout@v6
         with:
           repository: JohanAnderssonOstling/HtmlEngine
-          ref: 30b27e095b038a1a690b3e80c1e1501f3145281e
+          ref: 91766fb2db8d56b38dc0336ddf74972da9872520
           path: HtmlEngine
       - uses: actions/checkout@v6
         with:
           repository: JohanAnderssonOstling/HtmlViewCore
-          ref: 61a4667f6d47bc1de47e5437ec40f55f70d41fdc
+          ref: 0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7
           path: HtmlViewCore
       - name: Install Rust and build dependencies
         run: |
