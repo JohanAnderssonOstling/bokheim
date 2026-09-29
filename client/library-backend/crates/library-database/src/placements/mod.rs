@@ -383,44 +383,17 @@ impl Database {
 
     /// Display title of one book.
     pub fn book_title(&self, hash: &ContentHash) -> String {
-        {
-            let mut title = None;
-            self.connection
-                .book_title(hash.as_str(), |row| {
-                    title = Some(row.get::<_, String>(0)?);
-                    Ok(())
-                })
-                .expect("read book title");
-            title.expect("read book title")
-        }
+        crate::query_methods::first_column(|read| self.connection.book_title(hash.as_str(), read)).expect("read book title").expect("read book title")
     }
 
     /// Number of book rows with one content hash.
     pub fn book_count(&self, hash: &ContentHash) -> i64 {
-        {
-            let mut count = None;
-            self.connection
-                .book_count(hash.as_str(), |row| {
-                    count = Some(row.get::<_, i64>(0)?);
-                    Ok(())
-                })
-                .expect("count books");
-            count.expect("count books")
-        }
+        crate::query_methods::first_column(|read| self.connection.book_count(hash.as_str(), read)).expect("count books").expect("count books")
     }
 
     /// Number of book rows with one title.
     pub fn book_count_with_title(&self, title: &str) -> i64 {
-        {
-            let mut count = None;
-            self.connection
-                .book_count_with_title(title, |row| {
-                    count = Some(row.get::<_, i64>(0)?);
-                    Ok(())
-                })
-                .expect("count books by title");
-            count.expect("count books by title")
-        }
+        crate::query_methods::first_column(|read| self.connection.book_count_with_title(title, read)).expect("count books by title").expect("count books by title")
     }
 
     /// Number of book rows matching any of these hashes.
@@ -428,38 +401,18 @@ impl Database {
         if hashes.is_empty() {
             return 0;
         }
-        let placeholders = hashes.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!("SELECT COUNT(*) FROM book WHERE content_hash IN ({placeholders})");
-        let params: Vec<&str> = hashes.iter().map(ContentHash::as_str).collect();
-        self.connection.query_row(&sql, rusqlite::params_from_iter(params), |row| row.get(0)).expect("count books by hashes")
+        let hashes_json = serde_json::to_string(hashes).expect("encode book hashes");
+        crate::query_methods::first_column(|read| self.connection.count_books(&hashes_json, read)).expect("count books by hashes").expect("count books by hashes")
     }
 
     /// Total downloaded placement flags; empty libraries read as zero.
     pub fn downloaded_placement_total(&self) -> i64 {
-        {
-            let mut total = None;
-            self.connection
-                .downloaded_placement_total(|row| {
-                    total = row.get::<_, Option<i64>>(0)?;
-                    Ok(())
-                })
-                .expect("sum downloaded placements");
-            total.unwrap_or(0)
-        }
+        crate::query_methods::first_column(|read| self.connection.downloaded_placement_total(read)).expect("sum downloaded placements").flatten().unwrap_or(0)
     }
 
     /// Name of one directory.
     pub fn dir_name(&self, id: &DirId) -> String {
-        {
-            let mut name = None;
-            self.connection
-                .dir_name(&id.to_string(), |row| {
-                    name = Some(row.get::<_, String>(0)?);
-                    Ok(())
-                })
-                .expect("read directory name");
-            name.expect("read directory name")
-        }
+        crate::query_methods::first_column(|read| self.connection.dir_name(&id.to_string(), read)).expect("read directory name").expect("read directory name")
     }
 
     /// Creates and validates a synchronized directory with a fresh id in one
@@ -1532,24 +1485,10 @@ mod scan_tests {
         assert!(!scan_path_excluded(&snapshot, "Other Story"));
     }
 
-    struct TestDatabase {
-        database: Database,
-        path: std::path::PathBuf,
-    }
-
-    impl Drop for TestDatabase {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
+    use crate::test_support::TestDatabase;
 
     fn open_test_database() -> TestDatabase {
-        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("library-database-scan-{}-{id}", std::process::id()));
-        let database = Database::open(&path).expect("open test database");
-        database.initialize_library().expect("initialize test library");
-        TestDatabase { database, path }
+        TestDatabase::new("scan")
     }
 
     /// Regression test: `scanner_known_books` referenced a `description_missing`

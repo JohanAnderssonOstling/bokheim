@@ -20,6 +20,8 @@ mod shared_sql;
 mod timing;
 mod transactions;
 mod taxonomy_update;
+#[cfg(test)]
+mod test_support;
 
 pub const LIBRARY_SCHEMA_VERSION: i64 = 1;
 

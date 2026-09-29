@@ -10,3 +10,14 @@ macro_rules! impl_sql {
         }
     };
 }
+
+pub(crate) fn first_column<T: rusqlite::types::FromSql>(
+    query: impl FnOnce(&mut dyn FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<()>) -> rusqlite::Result<()>,
+) -> rusqlite::Result<Option<T>> {
+    let mut value = None;
+    query(&mut |row| {
+        value = Some(row.get(0)?);
+        Ok(())
+    })?;
+    Ok(value)
+}

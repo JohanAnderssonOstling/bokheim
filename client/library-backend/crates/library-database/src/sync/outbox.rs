@@ -24,6 +24,10 @@ struct OutboxRow {
     origin: Option<Vec<u8>>,
 }
 
+fn read_outbox_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxRow> {
+    Ok(OutboxRow { mutation_id: row.get(0)?, state_kind: row.get(1)?, state_key: row.get(2)?, body: row.get(3)?, changed_at: row.get(4)?, replica_seq: row.get(5)?, state_subkey: row.get(6)?, origin: row.get(7)? })
+}
+
 fn decode_outbox_row(row: OutboxRow) -> Result<StateMutation, DatabaseError> {
     let corrupt = |reason: &'static str| DatabaseError::message(format!("corrupt local sync mutation at replica sequence {}: {reason}", row.replica_seq));
     let mutation_id = MutationId::parse(&row.mutation_id).map_err(|_| corrupt("invalid mutation id"))?;
@@ -80,7 +84,7 @@ impl Database {
             let pending = outbox_pending_uploads(connection)?;
             let mut rows = Vec::new();
             connection.sync_outbox_rows(|row| {
-                rows.push(OutboxRow { mutation_id: row.get(0)?, state_kind: row.get(1)?, state_key: row.get(2)?, body: row.get(3)?, changed_at: row.get(4)?, replica_seq: row.get(5)?, state_subkey: row.get(6)?, origin: row.get(7)? });
+                rows.push(read_outbox_row(row)?);
                 Ok(())
             })?;
             let mut mutations = Vec::with_capacity(rows.len());
@@ -115,7 +119,7 @@ impl Database {
             let pending = outbox_pending_uploads(connection)?;
             let mut rows = Vec::new();
             connection.sync_outbox_rows_page(after, through, |row| {
-                rows.push(OutboxRow { mutation_id: row.get(0)?, state_kind: row.get(1)?, state_key: row.get(2)?, body: row.get(3)?, changed_at: row.get(4)?, replica_seq: row.get(5)?, state_subkey: row.get(6)?, origin: row.get(7)? });
+                rows.push(read_outbox_row(row)?);
                 Ok(())
             })?;
             let mut mutations = Vec::new();

@@ -384,24 +384,10 @@ pub(crate) fn commit_one(tx: &rusqlite::Transaction<'_>, batch_flag: &std::sync:
 mod commit_tests {
     use crate::*;
 
-    struct TestDatabase {
-        database: Database,
-        path: std::path::PathBuf,
-    }
-
-    impl Drop for TestDatabase {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
+    use crate::test_support::TestDatabase;
 
     fn open_test_database() -> TestDatabase {
-        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("library-database-import-commit-{}-{id}", std::process::id()));
-        let database = Database::open(&path).expect("open test database");
-        database.initialize_library().expect("initialize test library");
-        TestDatabase { database, path }
+        TestDatabase::new("import-commit")
     }
 
     fn inspected(title: &str, author: &str) -> book_metadata::InspectedBook {

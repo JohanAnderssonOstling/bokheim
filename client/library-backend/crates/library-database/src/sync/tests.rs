@@ -6,24 +6,10 @@ mod apply_tests {
     use library_replica::{MutationBody, ReadingPositionState, StateMutation, SyncBookMetadata};
     use sync_common::{LibraryRevision, MutationId, PullStateResponse, ReplicaSeq, StateCell, SyncCursor};
 
-    struct TestDatabase {
-        database: Database,
-        path: std::path::PathBuf,
-    }
-
-    impl Drop for TestDatabase {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
+    use crate::test_support::TestDatabase;
 
     fn open_test_database() -> TestDatabase {
-        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("library-database-sync-apply-{}-{id}", std::process::id()));
-        let database = Database::open(&path).expect("open test database");
-        database.initialize_library().expect("initialize test library");
-        TestDatabase { database, path }
+        TestDatabase::new("sync-apply")
     }
 
     fn mutation_id(tag: &str) -> MutationId {
@@ -648,27 +634,12 @@ mod apply_tests {
 
 #[cfg(test)]
 mod state_tests {
-    use crate::*;
     use sync_common::{StateCell, SyncCursor};
 
-    struct TestDatabase {
-        database: Database,
-        path: std::path::PathBuf,
-    }
-
-    impl Drop for TestDatabase {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
+    use crate::test_support::TestDatabase;
 
     fn open_test_database() -> TestDatabase {
-        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("library-database-sync-state-{}-{id}", std::process::id()));
-        let database = Database::open(&path).expect("open test database");
-        database.initialize_library().expect("initialize test library");
-        TestDatabase { database, path }
+        TestDatabase::new("sync-state")
     }
 
     #[test]
@@ -720,27 +691,12 @@ mod state_tests {
 
 #[cfg(test)]
 mod outbox_tests {
-    use crate::*;
     use sync_common::MutationId;
 
-    struct TestDatabase {
-        database: Database,
-        path: std::path::PathBuf,
-    }
-
-    impl Drop for TestDatabase {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
+    use crate::test_support::TestDatabase;
 
     fn open_test_database() -> TestDatabase {
-        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("library-database-sync-outbox-{}-{id}", std::process::id()));
-        let database = Database::open(&path).expect("open test database");
-        database.initialize_library().expect("initialize test library");
-        TestDatabase { database, path }
+        TestDatabase::new("sync-outbox")
     }
 
     #[test]
@@ -779,24 +735,10 @@ mod annotation_tests {
     use library_replica::{MutationBody, StateMutation};
     use sync_common::{LibraryRevision, ReplicaSeq, SyncCursor};
 
-    struct TestDatabase {
-        database: Database,
-        path: std::path::PathBuf,
-    }
-
-    impl Drop for TestDatabase {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
+    use crate::test_support::TestDatabase;
 
     fn open_test_database() -> TestDatabase {
-        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("library-database-annotations-{id}"));
-        let database = Database::open(&path).expect("open test database");
-        database.initialize_library().expect("initialize test library");
-        TestDatabase { database, path }
+        TestDatabase::new("annotations")
     }
 
     fn seed_book(database: &Database, hash: sync_common::ContentHash) {

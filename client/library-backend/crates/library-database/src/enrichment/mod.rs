@@ -65,7 +65,6 @@ impl Database {
     }
 
     pub fn defer_thumbnail_to_download(&self, hash: &ContentHash) -> Result<(), DatabaseError> {
-        let connection = &self.connection;
         let transaction = self.connection.unchecked_transaction()?;
         transaction.thumbnail_discard(hash.as_str())?;
         transaction.thumbnail_enqueue_asset_work(hash.as_str())?;
@@ -84,14 +83,7 @@ impl Database {
     }
 
     pub fn complete_thumbnail_work(&self, hash: &ContentHash, has_cover: bool) -> Result<(), DatabaseError> {
-        let connection = &self.connection;
-        let transaction = self.connection.unchecked_transaction()?;
-        transaction.thumbnail_confirm_source(hash.as_str(), "local")?;
-        transaction.thumbnail_sidecar_clear(hash.as_str())?;
-        transaction.thumbnail_set_result(hash.as_str(), if has_cover { "ready" } else { "no_cover" })?;
-        if has_cover { transaction.thumbnail_sync_pending_set(hash.as_str(), "put")?; }
-        crate::sync::apply::commit(transaction)?;
-        Ok(())
+        self.complete_local_thumbnail(hash, has_cover, false, has_cover.then_some("put"))
     }
 
     pub fn has_sidecar_thumbnail(&self, hash: &ContentHash) -> Result<bool, DatabaseError> {
@@ -101,21 +93,21 @@ impl Database {
     }
 
     pub fn complete_sidecar_thumbnail_work(&self, hash: &ContentHash) -> Result<(), DatabaseError> {
-        let transaction = self.connection.unchecked_transaction()?;
-        transaction.thumbnail_confirm_source(hash.as_str(), "local")?;
-        transaction.thumbnail_sidecar_mark(hash.as_str())?;
-        transaction.thumbnail_set_result(hash.as_str(), "ready")?;
-        transaction.thumbnail_sync_pending_set(hash.as_str(), "put")?;
-        crate::sync::apply::commit(transaction)?;
-        Ok(())
+        self.complete_local_thumbnail(hash, true, true, Some("put"))
     }
 
     pub fn complete_replaced_sidecar_thumbnail_work(&self, hash: &ContentHash, has_cover: bool) -> Result<(), DatabaseError> {
+        self.complete_local_thumbnail(hash, has_cover, false, Some(if has_cover { "put" } else { "delete" }))
+    }
+
+    fn complete_local_thumbnail(&self, hash: &ContentHash, has_cover: bool, sidecar: bool, sync_action: Option<&str>) -> Result<(), DatabaseError> {
         let transaction = self.connection.unchecked_transaction()?;
         transaction.thumbnail_confirm_source(hash.as_str(), "local")?;
-        transaction.thumbnail_sidecar_clear(hash.as_str())?;
+        if sidecar { transaction.thumbnail_sidecar_mark(hash.as_str())?; } else { transaction.thumbnail_sidecar_clear(hash.as_str())?; }
         transaction.thumbnail_set_result(hash.as_str(), if has_cover { "ready" } else { "no_cover" })?;
-        transaction.thumbnail_sync_pending_set(hash.as_str(), if has_cover { "put" } else { "delete" })?;
+        if let Some(action) = sync_action {
+            transaction.thumbnail_sync_pending_set(hash.as_str(), action)?;
+        }
         crate::sync::apply::commit(transaction)?;
         Ok(())
     }

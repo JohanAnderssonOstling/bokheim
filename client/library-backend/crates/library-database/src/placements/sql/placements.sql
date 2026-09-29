@@ -350,6 +350,10 @@ SELECT count(*) FROM book WHERE content_hash=:content_hash;
 -- param: title: &str
 SELECT count(*) FROM book WHERE title=:title;
 
+-- name: count_books?
+-- param: hashes_json: &str
+SELECT count(*) FROM book WHERE content_hash IN (SELECT value FROM json_each(:hashes_json));
+
 -- name: downloaded_placement_total?
 SELECT SUM(is_downloaded) FROM book_dir;
 

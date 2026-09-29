@@ -98,18 +98,9 @@ impl Database {
         let mut children = Vec::new();
         for &route in &root.children {
             let node = &nodes[&route];
-            let book_count = node.members.intersection(&matching.books).count();
-            if book_count == 0 {
-                continue;
+            if let Some(row) = self.subject_child_row(route, node, &matching, || None)? {
+                children.push(row);
             }
-            let id = self.subject_route_path(route)?.ok_or_else(|| DatabaseError::message("missing subject route"))?;
-            children.push(BrowseRow {
-                id,
-                name: node.label.clone(),
-                path: None,
-                book_count,
-                downloaded_book_count: node.members.intersection(&matching.downloaded).count(),
-            });
         }
         sort_subject_rows(&mut children, options.chip_sort);
         let books = self.subject_cards(&selected_books, options)?;
@@ -125,24 +116,24 @@ impl Database {
             if route == location || !book_model::normalize_search_text(&node.label).contains(&options.search) {
                 continue;
             }
-            let book_count = node.members.intersection(&matching.books).count();
-            if book_count == 0 {
-                continue;
+            if let Some(row) = self.subject_child_row(route, node, matching, || subject_path_below(location, route, nodes))? {
+                children.push(row);
             }
-            let id = self.subject_route_path(route)?.ok_or_else(|| DatabaseError::message("missing subject route"))?;
-            children.push(BrowseRow {
-                id,
-                name: node.label.clone(),
-                path: subject_path_below(location, route, nodes),
-                book_count,
-                downloaded_book_count: node.members.intersection(&matching.downloaded).count(),
-            });
         }
         sort_subject_rows(&mut children, options.chip_sort);
         let root = &nodes[&location];
         let selected_books = root.members.iter().copied().filter(|book| matching.books.contains(book) && matching.text_matches.contains(book)).collect::<BTreeSet<_>>();
         let books = self.subject_cards(&selected_books, options)?;
         Ok(library_model::BrowseContents { children, books })
+    }
+
+    fn subject_child_row(&self, route: i64, node: &SubjectNode, matching: &MatchingSubjectBooks, path: impl FnOnce() -> Option<String>) -> Result<Option<BrowseRow>, DatabaseError> {
+        let book_count = node.members.intersection(&matching.books).count();
+        if book_count == 0 {
+            return Ok(None);
+        }
+        let id = self.subject_route_path(route)?.ok_or_else(|| DatabaseError::message("missing subject route"))?;
+        Ok(Some(BrowseRow { id, name: node.label.clone(), path: path(), book_count, downloaded_book_count: node.members.intersection(&matching.downloaded).count() }))
     }
 
     fn subject_cards(&self, selected_books: &BTreeSet<i64>, options: &super::BrowseOptions) -> Result<Vec<BookCardRow>, DatabaseError> {

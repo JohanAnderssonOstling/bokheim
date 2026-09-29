@@ -65,51 +65,21 @@ impl Database {
     /// Reads one explicit sync_metadata column as text. Unknown keys read as
     /// `None`; absent rows and null columns both read as `None`.
     pub fn sync_metadata(&self, key: &str) -> Result<Option<String>, DatabaseError> {
-        let mut value = None;
-        match key {
-            "replica_id" => self.connection.shared_owner_replica_id(|row| {
-                value = row.get::<_, Option<String>>(0)?;
-                Ok(())
-            })?,
-            "change_origin" => self.connection.change_origin_select(|row| {
-                value = row.get::<_, Option<String>>(0)?;
-                Ok(())
-            })?,
-            "last_successful_sync_at" => self.connection.shared_owner_last_successful_sync_at(|row| {
-                value = row.get::<_, Option<String>>(0)?;
-                Ok(())
-            })?,
-            "last_pull_state_seq" => self.connection.shared_cursor_state_select(|row| {
-                value = row.get::<_, Option<String>>(0)?;
-                Ok(())
-            })?,
-            "last_pull_reading_seq" => self.connection.shared_cursor_reading_select(|row| {
-                value = row.get::<_, Option<String>>(0)?;
-                Ok(())
-            })?,
-            "cursor_recovery_pending" => self.connection.syncmeta_cursor_recovery_pending(|row| {
-                value = row.get::<_, Option<String>>(0)?;
-                Ok(())
-            })?,
-            "scan_seq" => self.connection.shared_scanner_sequence(|row| {
-                value = row.get::<_, Option<String>>(0)?;
-                Ok(())
-            })?,
-            "cloud_storage_enabled" => self.connection.syncmeta_cloud_storage_enabled(|row| {
-                value = row.get::<_, Option<String>>(0)?;
-                Ok(())
-            })?,
-            "remote_library_name" => self.connection.shared_owner_remote_library_name(|row| {
-                value = row.get::<_, Option<String>>(0)?;
-                Ok(())
-            })?,
-            "server_library_created" => self.connection.shared_owner_server_library_created(|row| {
-                value = row.get::<_, Option<String>>(0)?;
-                Ok(())
-            })?,
+        use crate::query_methods::first_column;
+        let value: Option<Option<String>> = match key {
+            "replica_id" => first_column(|read| self.connection.shared_owner_replica_id(read))?,
+            "change_origin" => first_column(|read| self.connection.change_origin_select(read))?,
+            "last_successful_sync_at" => first_column(|read| self.connection.shared_owner_last_successful_sync_at(read))?,
+            "last_pull_state_seq" => first_column(|read| self.connection.shared_cursor_state_select(read))?,
+            "last_pull_reading_seq" => first_column(|read| self.connection.shared_cursor_reading_select(read))?,
+            "cursor_recovery_pending" => first_column(|read| self.connection.syncmeta_cursor_recovery_pending(read))?,
+            "scan_seq" => first_column(|read| self.connection.shared_scanner_sequence(read))?,
+            "cloud_storage_enabled" => first_column(|read| self.connection.syncmeta_cloud_storage_enabled(read))?,
+            "remote_library_name" => first_column(|read| self.connection.shared_owner_remote_library_name(read))?,
+            "server_library_created" => first_column(|read| self.connection.shared_owner_server_library_created(read))?,
             _ => return Ok(None),
         };
-        Ok(value)
+        Ok(value.flatten())
     }
 
     /// Read only the next bounded set of register identities. Local changes
