@@ -96,7 +96,7 @@ impl Database {
     pub fn thumbnail_upload_allowed(&self, hash: &ContentHash) -> Result<bool, DatabaseError> {
         let connection = &self.connection;
         let mut allowed = false;
-        connection.thumbnail_upload_allowed(hash.as_str(), |row| {
+        connection.thumbnail_upload_allowed(hash.as_str(), crate::assets::rejection_cutoff()?, |row| {
             allowed = row.get(0)?;
             Ok(())
         })?;
@@ -170,7 +170,7 @@ impl Database {
             use rusqlite::OptionalExtension as _;
             let mut allowed = false;
             connection
-                .thumbnail_upload_allowed(hash.as_str(), |row| {
+                .thumbnail_upload_allowed(hash.as_str(), crate::assets::rejection_cutoff()?, |row| {
                     allowed = row.get(0)?;
                     Ok(())
                 })

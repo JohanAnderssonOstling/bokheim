@@ -49,11 +49,9 @@ impl Database {
             .collect()
     }
 
-    /// Hashes with a live upload rejection. Expired rejections are deleted first.
+    /// Hashes whose upload was rejected recently enough to still hold it back.
     pub fn rejected_asset_upload_hashes(&self, kind: BlobKind) -> Result<HashSet<ContentHash>, DatabaseError> {
-        const REJECTION_BACKOFF_SECONDS: i64 = 5 * 60;
-        let retry_cutoff = super::unix_secs()?.saturating_sub(REJECTION_BACKOFF_SECONDS);
-        self.connection.rejected_uploads_prune(retry_cutoff)?;
+        let retry_cutoff = super::rejection_cutoff()?;
         let mut hashes = HashSet::new();
         self.connection.rejected_upload_hashes(kind.storage(), retry_cutoff, |row| {
             hashes.insert(ContentHash::new(&row.get::<_, String>(0)?));

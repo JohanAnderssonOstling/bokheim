@@ -28,6 +28,7 @@ ON CONFLICT(singleton) DO UPDATE SET
     operation_sync_unfinished=excluded.operation_sync_unfinished;
 
 -- name: operation_progress ->
+-- param: rejected_after: i64
 SELECT
  (SELECT count(*) FROM book WHERE deleted_at IS NULL),
  (SELECT count(*) FROM book_transfer t JOIN book b ON b.content_hash=t.content_hash WHERE t.server_has_book AND b.deleted_at IS NULL),
@@ -35,8 +36,8 @@ SELECT
  (SELECT count(*) FROM sync_outbox),
  (SELECT count(*) FROM book_transfer t JOIN book b ON b.content_hash=t.content_hash WHERE t.cover_state='pending' AND b.deleted_at IS NULL),
  (SELECT count(*) FROM book_transfer WHERE cover_state='ready' AND NOT server_has_cover),
- (SELECT count(*) FROM book_transfer WHERE upload_id IS NOT NULL AND upload_rejected_at>unixepoch()-300)
-  + (SELECT count(*) FROM book_transfer WHERE cover_rejected_at>unixepoch()-300 AND cover_state='ready' AND NOT server_has_cover),
+ (SELECT count(*) FROM book_transfer WHERE upload_id IS NOT NULL AND upload_rejected_at>:rejected_after)
+  + (SELECT count(*) FROM book_transfer WHERE cover_rejected_at>:rejected_after AND cover_state='ready' AND NOT server_has_cover),
  EXISTS(SELECT 1 FROM sync_metadata WHERE singleton = 1 AND last_successful_sync_at IS NOT NULL);
 
 -- name: operations_set_last_successful_sync_at!

@@ -123,7 +123,7 @@ impl Database {
             }
             Ok(())
         })?;
-        transaction.transfer_snapshot_thumbnail_allowed(&requested, |row| {
+        transaction.transfer_snapshot_thumbnail_allowed(&requested, super::rejection_cutoff()?, |row| {
             let hash = ContentHash::new(&row.get::<_, String>(0)?);
             if let Some(asset) = assets.get_mut(&hash) {
                 asset.thumbnail_allowed = row.get(1)?;

@@ -194,7 +194,7 @@ impl Database {
     pub fn operation_status(&self, activity: OperationActivity<'_>) -> Result<OperationStatus, DatabaseError> {
         let transaction = self.connection.unchecked_transaction()?;
         let mut progress = None;
-        transaction.operation_progress(|row| {
+        transaction.operation_progress(super::rejection_cutoff()?, |row| {
             progress = Some((
                 row.get::<_, i64>(0)?.max(0) as u64,
                 row.get::<_, i64>(1)?.max(0) as u64,

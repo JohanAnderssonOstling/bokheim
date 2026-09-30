@@ -186,10 +186,11 @@ SELECT cover_state, cover_retry_after FROM book_transfer WHERE content_hash = :c
 
 -- name: thumbnail_upload_allowed ->
 -- param: content_hash: &str
+-- param: rejected_after: i64
 SELECT COALESCE(transfer.upload_id IS NOT NULL
    AND NOT transfer.server_has_cover
    AND transfer.cover_state = 'ready'
-   AND NOT COALESCE(transfer.cover_rejected_at > unixepoch() - 300, 0), 0)
+   AND NOT COALESCE(transfer.cover_rejected_at > :rejected_after, 0), 0)
 FROM book
 LEFT JOIN book_transfer transfer ON transfer.content_hash = book.content_hash
 WHERE book.content_hash = :content_hash AND book.deleted_at IS NULL;

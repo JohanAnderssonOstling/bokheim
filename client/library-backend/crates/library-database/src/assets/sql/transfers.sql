@@ -1,5 +1,6 @@
 -- Asset transfer planning and settlement. Per-book state is one
--- `book_transfer` row; a rejection is recent for five minutes.
+-- `book_transfer` row. A rejection recorded after `rejected_after` still
+-- holds its upload back.
 
 -- name: transfer_ready_uploads?
 -- param: hashes: &str
@@ -47,6 +48,7 @@ ORDER BY requested.value;
 
 -- name: transfer_snapshot_thumbnail_allowed?
 -- param: hashes: &str
+-- param: rejected_after: i64
 -- A cover is set once and any device holding it may upload it, but only
 -- for a book the server already holds whose lifecycle has been published.
 -- The pending upload is not required: it is removed once the book's bytes
@@ -54,7 +56,7 @@ ORDER BY requested.value;
 SELECT requested.value,
        COALESCE(transfer.server_has_book AND NOT transfer.server_has_cover
            AND transfer.cover_state = 'ready'
-           AND NOT COALESCE(transfer.cover_rejected_at > unixepoch() - 300, 0), 0)
+           AND NOT COALESCE(transfer.cover_rejected_at > :rejected_after, 0), 0)
        AND NOT EXISTS(SELECT 1 FROM sync_outbox lifecycle
                       WHERE lifecycle.state_kind = 'book_lifecycle'
                         AND lifecycle.state_key = book.content_hash)
@@ -65,12 +67,13 @@ LEFT JOIN book_transfer transfer ON transfer.content_hash = book.content_hash;
 -- name: transfer_pending_book_uploads?
 -- param: after: i64
 -- param: limit: i64
+-- param: rejected_after: i64
 SELECT transfer.upload_id, transfer.content_hash, transfer.upload_checksum, transfer.upload_size
 FROM book_transfer transfer
 JOIN book b ON b.content_hash = transfer.content_hash AND b.deleted_at IS NULL
 WHERE transfer.upload_id > :after AND transfer.upload_prepared = transfer.upload_id
   AND EXISTS(SELECT 1 FROM book_dir bd WHERE bd.book_row_id = b.row_id AND bd.deleted_at IS NULL)
-  AND NOT COALESCE(transfer.upload_rejected_at > unixepoch() - 300, 0)
+  AND NOT COALESCE(transfer.upload_rejected_at > :rejected_after, 0)
 ORDER BY transfer.upload_id LIMIT :limit;
 
 -- Covers are derived work, not an intent queue: select them directly from
@@ -78,13 +81,14 @@ ORDER BY transfer.upload_id LIMIT :limit;
 -- last-moment safety check before bytes are sent.
 -- name: transfer_pending_cover_uploads?
 -- param: limit: i64
+-- param: rejected_after: i64
 SELECT book.content_hash
 FROM book
 JOIN book_transfer transfer ON transfer.content_hash = book.content_hash
 WHERE book.deleted_at IS NULL
   AND transfer.cover_state = 'ready'
   AND transfer.server_has_book AND NOT transfer.server_has_cover
-  AND NOT COALESCE(transfer.cover_rejected_at > unixepoch() - 300, 0)
+  AND NOT COALESCE(transfer.cover_rejected_at > :rejected_after, 0)
   AND NOT EXISTS(
       SELECT 1 FROM sync_outbox lifecycle
       WHERE lifecycle.state_kind = 'book_lifecycle'
@@ -174,11 +178,12 @@ SELECT
     );
 
 -- name: transfer_uploads_waiting_for_storage ->
+-- param: rejected_after: i64
 SELECT EXISTS (
     SELECT 1 FROM book_transfer
     WHERE upload_id IS NOT NULL
       AND upload_rejected_reason = 'server rejected upload admission: QuotaExceeded'
-      AND upload_rejected_at > unixepoch() - 300
+      AND upload_rejected_at > :rejected_after
 );
 
 -- name: transfer_first_file_names?
@@ -188,11 +193,13 @@ FROM json_each(:hashes) requested;
 
 -- name: transfer_book_upload_rejection_reason?
 -- param: content_hash: &str
+-- param: rejected_after: i64
 SELECT upload_rejected_reason FROM book_transfer
-WHERE content_hash = :content_hash AND upload_id IS NOT NULL AND upload_rejected_at > unixepoch() - 300;
+WHERE content_hash = :content_hash AND upload_id IS NOT NULL AND upload_rejected_at > :rejected_after;
 
 -- name: transfer_has_pending_asset_work?
 -- param: live_dirs: &str
+-- param: rejected_after: i64
 -- `live_dirs`: every live folder, from Rust.
 WITH live_dirs(id) AS (SELECT value FROM json_each(:live_dirs)), live_books AS (
     SELECT b.content_hash,
@@ -206,8 +213,8 @@ SELECT EXISTS(SELECT 1 FROM book_transfer WHERE book_download='user_initiated')
 OR EXISTS(
     SELECT 1 FROM live_books b
     LEFT JOIN book_transfer t ON t.content_hash=b.content_hash
-    WHERE (b.local AND t.upload_id IS NOT NULL AND NOT COALESCE(t.upload_rejected_at>unixepoch()-300, 0))
-        OR (t.cover_state='ready' AND NOT t.server_has_cover AND NOT COALESCE(t.cover_rejected_at>unixepoch()-300, 0))
+    WHERE (b.local AND t.upload_id IS NOT NULL AND NOT COALESCE(t.upload_rejected_at>:rejected_after, 0))
+        OR (t.cover_state='ready' AND NOT t.server_has_cover AND NOT COALESCE(t.cover_rejected_at>:rejected_after, 0))
         OR (COALESCE(t.cover_state NOT IN ('ready','pending'), 1) AND (NOT b.local OR COALESCE(t.server_has_cover, 0)))
 );
 
@@ -231,14 +238,6 @@ WHERE content_hash = :content_hash;
 -- name: remote_asset_hashes?
 -- param: kind: &str
 SELECT content_hash FROM book_transfer WHERE CASE :kind WHEN 'book' THEN server_has_book ELSE server_has_cover END;
-
--- name: rejected_uploads_prune!
--- param: cutoff: i64
-UPDATE book_transfer SET
-    upload_rejected_reason = CASE WHEN upload_rejected_at <= :cutoff THEN NULL ELSE upload_rejected_reason END,
-    upload_rejected_at = CASE WHEN upload_rejected_at <= :cutoff THEN NULL ELSE upload_rejected_at END,
-    cover_rejected_at = CASE WHEN cover_rejected_at <= :cutoff THEN NULL ELSE cover_rejected_at END
-WHERE upload_rejected_at <= :cutoff OR cover_rejected_at <= :cutoff;
 
 -- name: rejected_upload_hashes?
 -- param: kind: &str

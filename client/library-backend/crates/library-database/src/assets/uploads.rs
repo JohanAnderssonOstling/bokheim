@@ -48,7 +48,7 @@ impl Database {
 
     pub fn pending_book_uploads(&self, after: i64, limit: i64) -> Result<Vec<BookUploadIntent>, DatabaseError> {
         let mut intents = Vec::new();
-        self.connection.transfer_pending_book_uploads(after, limit, |row| {
+        self.connection.transfer_pending_book_uploads(after, limit, super::rejection_cutoff()?, |row| {
             intents.push(BookUploadIntent { id: row.get(0)?, content_hash: ContentHash::new(&row.get::<_, String>(1)?), checksum: ContentHash::new(&row.get::<_, String>(2)?), size_bytes: row.get::<_, i64>(3)? as u64 });
             Ok(())
         })?;
@@ -59,7 +59,7 @@ impl Database {
     /// presence, rather than being represented by a second durable queue.
     pub fn pending_cover_uploads(&self, limit: i64) -> Result<Vec<ContentHash>, DatabaseError> {
         let mut hashes = Vec::new();
-        self.connection.transfer_pending_cover_uploads(limit, |row| {
+        self.connection.transfer_pending_cover_uploads(limit, super::rejection_cutoff()?, |row| {
             hashes.push(ContentHash::new(&row.get::<_, String>(0)?));
             Ok(())
         })?;
@@ -126,12 +126,12 @@ impl Database {
     }
 
     pub fn book_uploads_waiting_for_storage(&self) -> Result<bool, DatabaseError> {
-        self.connection.transfer_uploads_waiting_for_storage(|row| row.get(0)).map_err(Into::into)
+        self.connection.transfer_uploads_waiting_for_storage(super::rejection_cutoff()?, |row| row.get(0)).map_err(Into::into)
     }
 
     pub fn book_upload_rejection_reason(&self, hash: &ContentHash) -> Result<Option<String>, DatabaseError> {
         let mut reason = None;
-        self.connection.transfer_book_upload_rejection_reason(hash.as_str(), |row| {
+        self.connection.transfer_book_upload_rejection_reason(hash.as_str(), super::rejection_cutoff()?, |row| {
             reason = row.get(0)?;
             Ok(())
         })?;

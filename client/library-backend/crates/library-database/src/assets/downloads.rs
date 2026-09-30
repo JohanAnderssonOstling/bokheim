@@ -62,7 +62,7 @@ impl Database {
     pub fn has_pending_asset_work(&self) -> Result<bool, DatabaseError> {
         let mut pending = false;
         let live_dirs = serde_json::to_string(&crate::placements::live_directories(&self.connection)?).map_err(DatabaseError::operation)?;
-        self.connection.transfer_has_pending_asset_work(&live_dirs, |row| {
+        self.connection.transfer_has_pending_asset_work(&live_dirs, super::rejection_cutoff()?, |row| {
             pending = row.get(0)?;
             Ok(())
         })?;
