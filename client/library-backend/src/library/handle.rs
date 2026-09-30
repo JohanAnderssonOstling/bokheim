@@ -1367,8 +1367,6 @@ impl LibrarySession {
     }
 }
 
-pub use library_database::{LibraryAuthorsView, LibraryFolderEntry, LibraryFolderView, LibraryHierarchyEntry, LibraryHierarchyView, LibrarySubjectEntry, LibrarySubjectView};
-
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[path = "concurrency_tests.rs"]
 mod concurrency_tests;
@@ -1532,7 +1530,7 @@ mod background_scan_tests {
     async fn existing_books_remain_queryable_during_scan_and_preparation() {
         let root = tempfile::tempdir().unwrap();
         let mut actor = actor(root.path());
-        crate::test_database::raw(&actor.session.db).execute("INSERT INTO book(content_hash,title,added_at,format) VALUES (?1,'Existing book',1,'epub')", ["a".repeat(64)]).unwrap();
+        crate::test_database::raw(&actor.session.db).execute("INSERT INTO book(content_hash,title,added_at,format) VALUES (?1,'Existing book',1,1)", ["a".repeat(64)]).unwrap();
         crate::test_database::raw(&actor.session.db).execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,is_downloaded,local_hash,last_scan) SELECT ?1,row_id,'existing.epub',1,'',0 FROM book", [sync_common::ROOT_DIR_ID.to_string()]).unwrap();
         actor.begin_scan();
         actor.enrichment_job.task = Some(Box::pin(std::future::pending()));
@@ -1598,8 +1596,8 @@ mod background_scan_tests {
          CREATE TABLE curated.unified_concept_route(route_id INTEGER PRIMARY KEY,concept_id INTEGER NOT NULL,parent_route_id INTEGER NOT NULL);
          INSERT INTO curated.unified_concept_route VALUES(1,920001,0),(2,920002,1),(3,920003,2);
          INSERT INTO book(content_hash,title,format,read_progress) VALUES
-            (printf('%064x',911),'General history','epub',100),
-            (printf('%064x',912),'Specific history','epub',0);
+            (printf('%064x',911),'General history',1,100),
+            (printf('%064x',912),'Specific history',1,0);
          INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded)
             SELECT '00000000-0000-0000-0000-000000000000',row_id,title,title,1 FROM book;
          INSERT INTO book_unified_concept(book_row_id,concept_id,mapper_version)
@@ -1608,7 +1606,7 @@ mod background_scan_tests {
         )
         .unwrap();
         let mut query = LibraryBrowseQuery {
-            location: String::new(),
+            location: library_model::ROOT_SUBJECT_ROUTE_ID.to_string(),
             search: String::new(),
             file_types: vec![LibraryFileTypeFilter::All],
             chip_sort: Default::default(),
@@ -1626,12 +1624,11 @@ mod background_scan_tests {
         assert_eq!(filtered.contents.books[0].title, "Specific history", "the finished filter hides only the completed book");
         assert_eq!(filtered.format_counts, unfiltered.format_counts, "facets still describe all books in the location");
         assert_eq!(library.subject_contents(&query, true).unwrap(), filtered.contents);
-        query.location = "History / U.S.".into();
+        query.location = "2".into();
         let collapsed: LibraryBrowseData = wire_value(library, LibraryCommand::SubjectContents { query: query.clone() }).await;
         assert!(collapsed.contents.children.is_empty() && collapsed.contents.books.is_empty(), "the original narrow route is no longer browsable");
-        query.location.clear();
+        query.location = library_model::ROOT_SUBJECT_ROUTE_ID.to_string();
         let grouped: LibraryBrowseData = wire_value(library, LibraryCommand::SubjectContents { query: query.clone() }).await;
-        assert!(grouped.chip_groups.is_empty());
         assert!(grouped.contents.children.is_empty());
         assert_eq!(grouped.contents.books.iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), ["Specific history"], "small subtrees also compact at the root");
         query.location = sync_common::ROOT_DIR_ID.to_string();

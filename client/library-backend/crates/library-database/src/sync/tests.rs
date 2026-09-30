@@ -4,7 +4,7 @@
 mod apply_tests {
     use crate::*;
     use library_replica::{MutationBody, ReadingPositionState, StateMutation, SyncBookMetadata};
-    use sync_common::{LibraryRevision, MutationId, PullStateResponse, ReplicaSeq, StateCell, SyncCursor};
+    use sync_common::{LibraryRevision, MutationId, PullStateResponse, ReplicaSeq, SyncCursor};
 
     use crate::test_support::TestDatabase;
 
@@ -580,7 +580,6 @@ mod apply_tests {
 
     #[test]
     fn languages_project_the_complete_winning_value() {
-        use crate::sync::SyncApplySql;
         use crate::sync::apply::project_prepared_book;
         use book_model::LanguageTag;
 
@@ -588,9 +587,9 @@ mod apply_tests {
         let database = &holder.database;
         let hash = "e".repeat(64);
         let tx = database.connection.unchecked_transaction().expect("open tx");
-        tx.execute("INSERT INTO book(content_hash, added_at, format) VALUES(?1, 1, 'epub')", [hash.as_str()]).expect("seed book");
+        tx.execute("INSERT INTO book(content_hash, added_at, format) VALUES(?1, 1, 1)", [hash.as_str()]).expect("seed book");
         let read_languages = |tx: &rusqlite::Transaction| -> Vec<String> {
-            tx.prepare("SELECT language_tag FROM book_language WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) ORDER BY position")
+            tx.prepare("SELECT language FROM book_language WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) ORDER BY language")
                 .expect("prepare")
                 .query_map([hash.as_str()], |row| row.get(0))
                 .expect("query")
@@ -622,7 +621,7 @@ mod apply_tests {
         let database = &holder.database;
         let hash = "f".repeat(64);
         let tx = database.connection.unchecked_transaction().expect("open tx");
-        tx.execute("INSERT INTO book(content_hash, added_at, format) VALUES(?1, 1, 'epub')", [hash.as_str()]).expect("seed book");
+        tx.execute("INSERT INTO book(content_hash, added_at, format) VALUES(?1, 1, 1)", [hash.as_str()]).expect("seed book");
         let mut book = book_model::BookMetadata::default();
         book.publishers = vec![book_model::PublisherCredit::with_id(book_model::agent_id_from_migration_seed(b"test-publisher"), "Acme Press").expect("credit")];
         let encoded = sync_common::wire::encode(&book).expect("encode");

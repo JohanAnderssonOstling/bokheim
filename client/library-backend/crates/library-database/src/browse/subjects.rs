@@ -1,13 +1,12 @@
 //! Subject browsing: taxonomy.
 
-use crate::browse::{BrowseRow, LibraryFormatCount, LibraryLanguageCount, LibrarySubjectEntry, LibrarySubjectView, SubjectCacheSql, SubjectsSql, book_sort_query_value, read_book_card_row, read_facet_rows, retain_selected_facet_choices};
+use crate::browse::books::MatchingBooks;
+use crate::browse::{BrowseOptions, BrowseRow, SubjectsSql};
 use crate::{Database, DatabaseError};
-use library_model::{BookCardRow, BrowseBookSort, BrowseChipSort, LibraryFileTypeFilter, SubjectPath};
-use subject_projection::ROOT_SUBJECT_PATH;
+use library_model::{BookCardRow, BrowseChipSort};
 use std::collections::{BTreeMap, BTreeSet};
 
-mod cache;
-mod navigation;
+mod tree;
 
 #[derive(Default)]
 struct SubjectNode {
@@ -18,194 +17,89 @@ struct SubjectNode {
     direct: BTreeSet<i64>,
 }
 
-/// The books under a subject that pass the page's filters. The search is not
-/// one of them: it picks subjects by label and books by `text_matches`, and a
-/// subject's count is of every book it holds that passes the filters.
-struct MatchingSubjectBooks {
-    books: BTreeSet<i64>,
-    downloaded: BTreeSet<i64>,
-    /// Books whose own title or author contains the search. Empty when there
-    /// is no search.
-    text_matches: BTreeSet<i64>,
-}
-
 impl Database {
-    pub fn browse_library_subjects(&self, subject_path: Option<&str>, file_type: LibraryFileTypeFilter, downloaded_only: bool) -> Result<LibrarySubjectView, DatabaseError> {
-        let query = library_model::LibraryBrowseQuery {
-            location: subject_path.unwrap_or(ROOT_SUBJECT_PATH).to_owned(),
-            search: String::new(),
-            file_types: vec![file_type],
-            languages: vec![],
-            chip_sort: BrowseChipSort::Alphabetical,
-            book_sort: BrowseBookSort::Alphabetical,
-            hide_finished: false,
-            include_direct_child_books: false,
-        };
-        let contents = self.browse_subject_contents(&query, downloaded_only)?;
-        let children = contents.children.into_iter().map(|row| LibrarySubjectEntry { id: SubjectPath::new(row.id), name: row.name, book_count: row.book_count, downloaded_book_count: row.downloaded_book_count }).collect();
-        Ok(LibrarySubjectView { children, books: contents.books })
-    }
-
-    /// Complete subject page from one cache-validated snapshot.
+    /// Complete subject page from one read snapshot.
     pub fn browse_subject(&self, query: &library_model::LibraryBrowseQuery, downloaded_only: bool) -> Result<super::LibraryBrowseData, DatabaseError> {
-        let options = super::BrowseOptions::from_query(query, downloaded_only);
-        self.with_subject_cache(|| {
-            let route = self.subject_route_id(&query.location)?.unwrap_or(-1);
-            let contents = self.subject_contents(route, &options)?;
+        self.with_subject_browse(query, downloaded_only, |route, nodes, matching, options| {
+            let contents = self.subject_contents(route, nodes, matching, options)?;
             let mut sections = Vec::new();
             if options.search.is_empty() {
                 for parent in &contents.children {
-                    let child_route = self.subject_route_id(&parent.id)?.unwrap_or(-1);
-                    let child_contents = self.subject_contents(child_route, &options)?;
+                    let child_route = parent.id.parse::<i64>().map_err(DatabaseError::operation)?;
+                    let child_contents = self.subject_contents(child_route, nodes, matching, options)?;
                     if child_contents.books.is_empty() && child_contents.children.is_empty() {
                         continue;
                     }
                     sections.push(library_model::BrowseSection { parent: parent.clone(), children: child_contents.children, books: child_contents.books });
                 }
             }
-            let (language_counts, format_counts) = self.subject_facets(route, &options)?;
-            Ok(super::LibraryBrowseData { contents, chip_groups: Vec::new(), sections, path: Vec::new(), language_counts, format_counts })
+            let (language_counts, format_counts) = self.library_facets(options)?;
+            let path = subject_browse_path(route, nodes);
+            Ok(super::LibraryBrowseData { contents, sections, path, language_counts, format_counts })
         })
     }
 
     /// Show immediate subject routes and books assigned directly to this route.
     pub fn browse_subject_contents(&self, query: &library_model::LibraryBrowseQuery, downloaded_only: bool) -> Result<library_model::BrowseContents, DatabaseError> {
-        let options = super::BrowseOptions::from_query(query, downloaded_only);
-        self.with_subject_cache(|| {
-            let route = self.subject_route_id(&query.location)?.unwrap_or(-1);
-            self.subject_contents(route, &options)
+        self.with_subject_browse(query, downloaded_only, |route, nodes, matching, options| self.subject_contents(route, nodes, matching, options))
+    }
+
+    /// One tree and filtering result serve the selected node and its sections.
+    fn with_subject_browse<T>(
+        &self,
+        query: &library_model::LibraryBrowseQuery,
+        downloaded_only: bool,
+        read: impl FnOnce(i64, &BTreeMap<i64, SubjectNode>, &MatchingBooks, &BrowseOptions) -> Result<T, DatabaseError>,
+    ) -> Result<T, DatabaseError> {
+        let route = query.location.parse::<i64>().map_err(DatabaseError::operation)?;
+        let options = BrowseOptions::from_query(query, downloaded_only);
+        self.with_browse_snapshot(|| {
+            let nodes = self.load_subject_tree()?;
+            let candidates = nodes.get(&route).map(|node| &node.members);
+            let matching = self.matching_books(candidates.unwrap_or(&BTreeSet::new()), &options)?;
+            read(route, &nodes, &matching, &options)
         })
     }
 
-    fn subject_contents(&self, location: i64, options: &super::BrowseOptions) -> Result<library_model::BrowseContents, DatabaseError> {
-        let nodes = self.load_subject_tree(location)?;
-        let matching = self.matching_subject_books(location, options)?;
-        let Some(root) = nodes.get(&location) else {
-            return Ok(library_model::BrowseContents { children: Vec::new(), books: Vec::new() });
-        };
-        if !options.search.is_empty() {
-            return self.searched_subject_contents(location, &nodes, &matching, options);
-        }
-
-        let mut selected_books = root.direct.clone();
-        if options.include_direct_child_books {
+    /// Node contents shared by graph expansion, downloads, and card sections.
+    fn subject_contents(&self, location: i64, nodes: &BTreeMap<i64, SubjectNode>, matching: &MatchingBooks, options: &BrowseOptions) -> Result<library_model::BrowseContents, DatabaseError> {
+        let Some(root) = nodes.get(&location) else { return Ok(library_model::BrowseContents::default()) };
+        let searched = !options.search.is_empty();
+        let mut selected_books = if searched { root.members.intersection(&matching.text_matches).copied().collect() } else { root.direct.clone() };
+        if !searched && options.include_direct_child_books {
             for child in &root.children {
                 selected_books.extend(&nodes[child].direct);
             }
         }
         selected_books.retain(|book| matching.books.contains(book));
 
+        let routes = if searched { tree::subtree_routes(nodes, location) } else { root.children.clone() };
         let mut children = Vec::new();
-        for &route in &root.children {
+        for route in routes {
             let node = &nodes[&route];
-            if let Some(row) = self.subject_child_row(route, node, &matching, || None)? {
-                children.push(row);
-            }
-        }
-        sort_subject_rows(&mut children, options.chip_sort);
-        let books = self.subject_cards(&selected_books, options)?;
-        Ok(library_model::BrowseContents { children, books })
-    }
-
-    /// A search from a subject reaches the subject itself and everything below
-    /// it, at any depth: every subject whose label matches, with the path that
-    /// places it under this one, and every book whose title or author matches.
-    fn searched_subject_contents(&self, location: i64, nodes: &BTreeMap<i64, SubjectNode>, matching: &MatchingSubjectBooks, options: &super::BrowseOptions) -> Result<library_model::BrowseContents, DatabaseError> {
-        let mut children = Vec::new();
-        for (&route, node) in nodes {
-            if route == location || !book_model::normalize_search_text(&node.label).contains(&options.search) {
+            if searched && (route == location || !book_model::normalize_search_text(&node.label).contains(&options.search)) {
                 continue;
             }
-            if let Some(row) = self.subject_child_row(route, node, matching, || subject_path_below(location, route, nodes))? {
+            if let Some(row) = Self::subject_child_row(route, node, matching, || if searched { subject_path_below(location, route, nodes) } else { None }) {
                 children.push(row);
             }
         }
         sort_subject_rows(&mut children, options.chip_sort);
-        let root = &nodes[&location];
-        let selected_books = root.members.iter().copied().filter(|book| matching.books.contains(book) && matching.text_matches.contains(book)).collect::<BTreeSet<_>>();
         let books = self.subject_cards(&selected_books, options)?;
         Ok(library_model::BrowseContents { children, books })
     }
 
-    fn subject_child_row(&self, route: i64, node: &SubjectNode, matching: &MatchingSubjectBooks, path: impl FnOnce() -> Option<String>) -> Result<Option<BrowseRow>, DatabaseError> {
+    fn subject_child_row(route: i64, node: &SubjectNode, matching: &MatchingBooks, path: impl FnOnce() -> Option<String>) -> Option<BrowseRow> {
         let book_count = node.members.intersection(&matching.books).count();
         if book_count == 0 {
-            return Ok(None);
+            return None;
         }
-        let id = self.subject_route_path(route)?.ok_or_else(|| DatabaseError::message("missing subject route"))?;
-        Ok(Some(BrowseRow { id, name: node.label.clone(), path: path(), book_count, downloaded_book_count: node.members.intersection(&matching.downloaded).count() }))
+        let id = route.to_string();
+        Some(BrowseRow { id, name: node.label.clone(), path: path(), book_count, downloaded_book_count: node.members.intersection(&matching.downloaded).count() })
     }
 
     fn subject_cards(&self, selected_books: &BTreeSet<i64>, options: &super::BrowseOptions) -> Result<Vec<BookCardRow>, DatabaseError> {
-        let mut books = Vec::new();
-        if !selected_books.is_empty() {
-            let ids = serde_json::to_string(selected_books).map_err(DatabaseError::operation)?;
-            self.connection.subject_displayed_cards(&ids, book_sort_query_value(options.book_sort), |row| {
-                books.push(read_book_card_row(row)?);
-                Ok(())
-            })?;
-        }
-        Ok(books)
-    }
-
-    fn load_subject_tree(&self, location: i64) -> Result<BTreeMap<i64, SubjectNode>, DatabaseError> {
-        let mut nodes = BTreeMap::<i64, SubjectNode>::new();
-        self.connection.subject_cached_members(location, |row| {
-            let route = row.get(0)?;
-            let node = nodes.entry(route).or_default();
-            node.parent = row.get(1)?;
-            node.label = row.get(2)?;
-            let book = row.get(3)?;
-            node.members.insert(book);
-            if row.get::<_, bool>(4)? {
-                node.direct.insert(book);
-            }
-            Ok(())
-        })?;
-        let edges = nodes.iter().map(|(route, node)| (*route, node.parent)).collect::<Vec<_>>();
-        for (route, parent) in edges {
-            if route != parent {
-                if let Some(node) = nodes.get_mut(&parent) {
-                    node.children.insert(route);
-                }
-            }
-        }
-        Ok(nodes)
-    }
-
-    fn matching_subject_books(&self, location: i64, options: &super::BrowseOptions) -> Result<MatchingSubjectBooks, DatabaseError> {
-        let mut matching = BTreeSet::new();
-        let mut downloaded = BTreeSet::new();
-        let mut text_matches = BTreeSet::new();
-        self.connection.subject_matching_books(location, i32::from(options.downloaded_only), options.file_types, &options.languages, &options.search, |row| {
-            if options.hide_finished && row.get::<_, f32>(3)? >= library_model::FINISHED_PROGRESS_THRESHOLD {
-                return Ok(());
-            }
-            let book = row.get(0)?;
-            matching.insert(book);
-            if row.get::<_, bool>(1)? {
-                downloaded.insert(book);
-            }
-            if !options.search.is_empty() && row.get::<_, bool>(2)? {
-                text_matches.insert(book);
-            }
-            Ok(())
-        })?;
-        Ok(MatchingSubjectBooks { books: matching, downloaded, text_matches })
-    }
-
-    pub fn browse_subject_facet_counts(&self, subject_path: &str, query: &str, file_types: &[LibraryFileTypeFilter], languages: &[&str], downloaded_only: bool) -> Result<(Vec<LibraryLanguageCount>, Vec<LibraryFormatCount>), DatabaseError> {
-        let options = super::BrowseOptions::new(query, file_types, languages, downloaded_only);
-        self.with_subject_cache(|| {
-            let route = self.subject_route_id(subject_path)?.unwrap_or(-1);
-            self.subject_facets(route, &options)
-        })
-    }
-
-    fn subject_facets(&self, route: i64, options: &super::BrowseOptions) -> Result<(Vec<LibraryLanguageCount>, Vec<LibraryFormatCount>), DatabaseError> {
-        let (mut language_counts, mut format_counts) = read_facet_rows(|rows| self.connection.get_subject_facets(route, &options.search, options.file_types, &options.languages, i32::from(options.downloaded_only), rows))?;
-        retain_selected_facet_choices(&mut language_counts, &mut format_counts, &options.languages, options.file_types);
-        Ok((language_counts, format_counts))
+        self.load_cards(&self.ordered_books(selected_books, options)?)
     }
 }
 
@@ -232,4 +126,77 @@ fn subject_path_below(location: i64, route: i64, nodes: &BTreeMap<i64, SubjectNo
     }
     labels.reverse();
     (!labels.is_empty()).then(|| labels.join(" \u{203a} "))
+}
+
+/// Breadcrumbs use displayed parents, while every location remains a route ID.
+fn subject_browse_path(mut route: i64, nodes: &BTreeMap<i64, SubjectNode>) -> Vec<library_model::BrowsePathSegment> {
+    let mut path = Vec::new();
+    while route != library_model::ROOT_SUBJECT_ROUTE_ID {
+        let Some(node) = nodes.get(&route) else { return Vec::new() };
+        path.push(library_model::BrowsePathSegment { id: route.to_string(), name: node.label.clone() });
+        route = node.parent;
+    }
+    path.reverse();
+    path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subject_cards_navigate_by_id_and_breadcrumbs_follow_compacted_parents() {
+        let db = Database::open(":memory:").unwrap();
+        db.initialize_library().unwrap();
+        db.connection
+            .execute_batch(
+                "UPDATE sync_metadata SET change_origin='remote';
+            DETACH curated; ATTACH ':memory:' AS curated;
+            CREATE TABLE curated.concept(concept_id INTEGER PRIMARY KEY,preferred_label TEXT NOT NULL);
+            INSERT INTO curated.concept VALUES(1,'Science'),(2,'Physics'),(3,'Quantum'),(4,'Optics');
+            CREATE TABLE curated.unified_concept_route(route_id INTEGER PRIMARY KEY,concept_id INTEGER NOT NULL,parent_route_id INTEGER NOT NULL);
+            INSERT INTO curated.unified_concept_route VALUES(1,1,0),(2,2,1),(3,3,2),(4,4,2);",
+            )
+            .unwrap();
+        for id in 1..=6 {
+            db.connection.execute("INSERT INTO book(row_id,content_hash,title,search_title,format) VALUES(?1,printf('%064x',?1),printf('Book %d',?1),printf('book %d',?1),1)", [id]).unwrap();
+            db.connection.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) VALUES(?1,?2,?3,'',1)", rusqlite::params![sync_common::ROOT_DIR_ID.to_string(), id, format!("book{id}.epub")]).unwrap();
+            db.connection.execute("INSERT INTO book_unified_concept VALUES(?1,?2,1)", [id, if id <= 3 { 3 } else { 4 }]).unwrap();
+        }
+        let mut query = library_model::LibraryBrowseQuery {
+            location: library_model::ROOT_SUBJECT_ROUTE_ID.to_string(),
+            search: String::new(),
+            file_types: vec![],
+            languages: vec![],
+            chip_sort: Default::default(),
+            book_sort: Default::default(),
+            hide_finished: false,
+            include_direct_child_books: false,
+        };
+        let root = db.browse_subject(&query, false).unwrap();
+        assert!(root.path.is_empty());
+        assert_eq!(root.contents.children[0].id, "1");
+        let science = &root.sections[0];
+        assert_eq!(science.parent.id, "1");
+        assert_eq!(science.children.iter().map(|child| (child.id.as_str(), child.name.as_str())).collect::<Vec<_>>(), [("4", "Optics"), ("3", "Quantum")]);
+        query.location = science.children[1].id.clone();
+        let quantum = db.browse_subject(&query, false).unwrap();
+        assert_eq!(quantum.contents.books.len(), 3);
+        assert_eq!(quantum.path.iter().map(|segment| (segment.id.as_str(), segment.name.as_str())).collect::<Vec<_>>(), [("1", "Science"), ("3", "Quantum")]);
+        db.connection
+            .execute_batch(
+                "UPDATE curated.concept SET preferred_label='1 / science' WHERE concept_id=1;
+            UPDATE curated.concept SET preferred_label='Quantum / fields' WHERE concept_id=3;",
+            )
+            .unwrap();
+        let renamed = db.browse_subject(&query, false).unwrap();
+        assert_eq!(renamed.contents.books.len(), 3);
+        assert_eq!(renamed.path.iter().map(|segment| (segment.id.as_str(), segment.name.as_str())).collect::<Vec<_>>(), [("1", "1 / science"), ("3", "Quantum / fields")]);
+        query.location = "0".into();
+        query.search = "fields".into();
+        assert_eq!(db.browse_subject(&query, false).unwrap().contents.children[0].id, "3");
+        query.location = "Science / Physics / Quantum".into();
+        assert!(db.browse_subject(&query, false).is_err(), "labels are no longer interpreted as navigation IDs");
+        assert!(db.connection.is_autocommit());
+    }
 }

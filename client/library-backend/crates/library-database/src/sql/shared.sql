@@ -37,8 +37,9 @@ WHERE content_hash = :content_hash AND description_scanned IS NOT 1;
 
 -- name: shared_request_thumbnail!
 -- param: content_hash: &str
-INSERT INTO local_thumbnail_work(content_hash, state) VALUES (:content_hash, 'pending')
-ON CONFLICT(content_hash) DO UPDATE SET state = 'pending', retry_after = 0;
+INSERT INTO book_transfer(content_hash, cover_state)
+SELECT content_hash, 'pending' FROM book WHERE content_hash = :content_hash AND deleted_at IS NULL
+ON CONFLICT(content_hash) DO UPDATE SET cover_state = 'pending', cover_retry_after = 0;
 
 
 -- name: shared_scanner_sequence?
@@ -49,12 +50,13 @@ SELECT CAST(scan_seq AS TEXT) FROM sync_metadata WHERE singleton = 1;
 -- param: content_hash: &str
 -- param: checksum: &str
 -- param: size_bytes: i64
-INSERT INTO local_book_upload(content_hash,checksum,size_bytes) VALUES(:content_hash,:checksum,:size_bytes) ON CONFLICT(content_hash) DO UPDATE SET id=excluded.id,checksum=excluded.checksum,size_bytes=excluded.size_bytes;
+-- Queues the bytes under a new upload id: one past any id still stored, so
+-- an earlier upload's preparation never matches it.
+INSERT INTO book_transfer(content_hash, upload_id, upload_checksum, upload_size)
+SELECT content_hash, (SELECT COALESCE(MAX(MAX(COALESCE(upload_id, 0), COALESCE(upload_prepared, 0))), 0) + 1 FROM book_transfer), :checksum, :size_bytes
+FROM book WHERE content_hash = :content_hash
+ON CONFLICT(content_hash) DO UPDATE SET upload_id = excluded.upload_id, upload_checksum = excluded.upload_checksum, upload_size = excluded.upload_size;
 
-
--- name: shared_scanner_enqueue_asset_work!
--- param: content_hash: &str
-INSERT INTO asset_work(content_hash) VALUES(:content_hash) ON CONFLICT(content_hash) DO UPDATE SET id=excluded.id;
 
 
 -- name: shared_scanner_publish_projection!
@@ -130,41 +132,33 @@ VALUES(:stable_id, :preferred_name, :normalized_name, 1, :created_at);
 
 -- name: shared_transfer_complete_download!
 -- param: content_hash: &str
-DELETE FROM download_requests WHERE target_kind='book' AND target_key=:content_hash;
+UPDATE book_transfer SET book_download = NULL, book_download_at = NULL WHERE content_hash = :content_hash;
 
 
--- name: shared_observe_local_book_insert!
+-- name: shared_checksum_seen?
 -- param: content_hash: &str
 -- param: checksum: &str
--- param: size_bytes: i64
--- param: origin: &str
-INSERT INTO local_book_versions(content_hash,checksum,size_bytes,origin) VALUES(:content_hash,:checksum,:size_bytes,:origin) ON CONFLICT(content_hash,checksum) DO NOTHING;
-
+-- Whether some placement of the book already records these bytes.
+SELECT EXISTS(SELECT 1 FROM book_dir bd JOIN book b ON b.row_id = bd.book_row_id
+              WHERE b.content_hash = :content_hash AND bd.checksum = :checksum);
 
 -- name: shared_current_checksum_select?
 -- param: dir_id: &str
 -- param: content_hash: &str
-SELECT checksum FROM local_book_current WHERE dir_id=:dir_id AND content_hash=:content_hash;
+SELECT bd.checksum FROM book_dir bd JOIN book b ON b.row_id = bd.book_row_id
+WHERE bd.dir_id = :dir_id AND b.content_hash = :content_hash AND bd.checksum IS NOT NULL;
 
-
--- name: shared_version_origin_select?
--- param: content_hash: &str
--- param: checksum: &str
-SELECT origin FROM local_book_versions WHERE content_hash=:content_hash AND checksum=:checksum;
-
-
--- name: shared_current_replace!
+-- name: shared_record_checksum!
 -- param: dir_id: &str
 -- param: content_hash: &str
 -- param: checksum: &str
--- param: origin: &str
-INSERT INTO local_book_current(dir_id,content_hash,checksum,origin) VALUES(:dir_id,:content_hash,:checksum,:origin)
-        ON CONFLICT(dir_id,content_hash) DO UPDATE SET id=excluded.id,checksum=excluded.checksum,origin=excluded.origin;
-
+-- param: size_bytes: i64
+UPDATE book_dir SET checksum = :checksum, size_bytes = :size_bytes, checksum_seq = (SELECT COALESCE(MAX(checksum_seq), 0) + 1 FROM book_dir)
+WHERE dir_id = :dir_id AND book_row_id = (SELECT row_id FROM book WHERE content_hash = :content_hash);
 
 -- name: shared_rejected_book_cleanup!
 -- param: content_hash: &str
-DELETE FROM rejected_asset_upload WHERE kind='book' AND hash=:content_hash;
+UPDATE book_transfer SET upload_rejected_reason = NULL, upload_rejected_at = NULL WHERE content_hash = :content_hash;
 
 
 -- name: shared_update_canonical_metadata!
@@ -179,3 +173,14 @@ SELECT book_metadata FROM book WHERE content_hash=:content_hash;
 -- name: shared_book_subjects?
 -- param: content_hash: &str
 SELECT name,source,authority,code FROM book_subject WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash) ORDER BY position;
+
+-- name: shared_request_book_download!
+-- param: content_hash: &str
+-- param: origin: &str
+-- param: requested_at: i64
+-- A user's request outranks a background one; the first request's time is kept.
+INSERT INTO book_transfer(content_hash, book_download, book_download_at)
+SELECT content_hash, :origin, :requested_at FROM book WHERE content_hash = :content_hash
+ON CONFLICT(content_hash) DO UPDATE SET
+    book_download = CASE WHEN excluded.book_download = 'user_initiated' OR book_download IS NULL THEN excluded.book_download ELSE book_download END,
+    book_download_at = COALESCE(book_download_at, excluded.book_download_at);

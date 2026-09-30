@@ -9,7 +9,7 @@ fn raw(db: &Database) -> library_database::rusqlite::Connection {
 }
 
 fn add(db: &Database, hash: &ContentHash) {
-    raw(db).execute("INSERT INTO book(content_hash,title,format,added_at) VALUES(?1,'book.epub','epub',1)", [hash.as_str()]).unwrap();
+    raw(db).execute("INSERT INTO book(content_hash,title,format,added_at) VALUES(?1,'book.epub',1,1)", [hash.as_str()]).unwrap();
     db.restore_book_placement(hash, &ROOT_DIR_ID).unwrap();
     db.seed_file_projection(hash, &ROOT_DIR_ID, "/book.epub");
 }

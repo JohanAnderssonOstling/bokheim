@@ -37,103 +37,29 @@ fn only_new_path_changes_request_file_reconciliation() {
     assert_eq!(database.native_directory_work_ids().unwrap().len(), 0, "a root placement must not reconcile the whole library");
 }
 
-#[test]
-fn local_coverless_books_do_not_probe_remote_thumbnails() {
-    assert!(!should_download_thumbnail(true, false, false, false));
-    assert!(should_download_thumbnail(true, false, true, false));
-    assert!(should_download_thumbnail(false, false, false, false));
-    assert!(!should_download_thumbnail(false, true, true, false));
-    assert!(!should_download_thumbnail(false, false, true, true));
-}
-
 #[tokio::test]
-async fn changed_and_removed_sidecar_covers_reach_another_replica() {
-    use axum::{extract::State, http::StatusCode, routing::{delete, post, put}, Router};
-    use std::sync::{Arc, Mutex};
-    use sync_common::api::assets::{ThumbnailBatchDownloadEntry, ThumbnailBatchDownloadRequest, ThumbnailBatchDownloadResponse, ThumbnailBatchUploadRequest, ThumbnailPresenceRequest, ThumbnailPresenceResponse, ThumbnailRevision};
-
-    type Cover = Arc<Mutex<Option<Vec<u8>>>>;
-    async fn upload(State(cover): State<Cover>, body: axum::body::Bytes) -> StatusCode {
-        let request: ThumbnailBatchUploadRequest = sync_common::transport::decode(&body, sync_common::api::assets::MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024).unwrap();
-        *cover.lock().unwrap() = Some(request.thumbnails.into_iter().next().unwrap().bytes);
-        StatusCode::OK
+async fn local_coverless_books_do_not_probe_remote_thumbnails() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(crate::APP_HIDDEN_DIR)).unwrap();
+    let manager = test_manager(temp.path());
+    let database = &manager.database;
+    // (book bytes here, cover on the server, thumbnail ready, generation pending) -> download
+    let cases = [(true, false, false, false, false), (true, true, false, false, true), (false, false, false, false, true), (false, true, true, false, false), (false, true, false, true, false)];
+    for (index, (downloaded, remote, ready, pending, expected)) in cases.into_iter().enumerate() {
+        let hash = fixture_content_hash(200 + index as u64);
+        database.seed_book(&hash, None, 1, book_model::BookFormat::Epub);
+        database.add_book_placement(&crate::ROOT_DIR_ID, &hash, &format!("{index}.epub"), "fp", downloaded);
+        if remote {
+            database.record_remote_asset(BlobKind::Thumbnail, &hash).unwrap();
+        }
+        if ready {
+            database.confirm_thumbnail_available(&hash).unwrap();
+        }
+        if pending {
+            database.shared_request_thumbnail(&hash).unwrap();
+        }
+        assert_eq!(database.pending_thumbnail_downloads(Some(&[hash])).unwrap() == vec![hash], expected, "case {index}");
     }
-    async fn remove(State(cover): State<Cover>) -> StatusCode {
-        *cover.lock().unwrap() = None;
-        StatusCode::NO_CONTENT
-    }
-    async fn download(State(cover): State<Cover>, body: axum::body::Bytes) -> axum::response::Response {
-        let request: ThumbnailBatchDownloadRequest = sync_common::transport::decode(&body, sync_common::transport::MAX_DECODED_REQUEST_BYTES).unwrap();
-        let cover = cover.lock().unwrap();
-        let thumbnails = cover.as_ref().map(|bytes| request.content_hashes.iter().map(|hash| ThumbnailBatchDownloadEntry {
-            content_hash: *hash, bytes: bytes.clone(), browse_bytes: Some(bytes.clone()),
-        }).collect::<Vec<_>>()).unwrap_or_default();
-        let missing = if cover.is_none() { request.content_hashes } else { Vec::new() };
-        binary_sync_response(&ThumbnailBatchDownloadResponse { thumbnails, missing })
-    }
-    async fn presence(State(cover): State<Cover>, body: axum::body::Bytes) -> axum::response::Response {
-        let request: ThumbnailPresenceRequest = sync_common::transport::decode(&body, sync_common::transport::MAX_DECODED_REQUEST_BYTES).unwrap();
-        let cover = cover.lock().unwrap();
-        let revisions = cover.as_ref().map(|bytes| request.content_hashes.iter().map(|hash| ThumbnailRevision {
-            content_hash: *hash, revision: ContentHash::new(blake3::hash(bytes).to_hex().as_str()),
-        }).collect::<Vec<_>>()).unwrap_or_default();
-        binary_sync_response(&ThumbnailPresenceResponse { present: revisions.iter().map(|entry| entry.content_hash).collect(), revisions })
-    }
-
-    let cover: Cover = Arc::new(Mutex::new(None));
-    let service = Router::new()
-        .route("/api/libraries/:library_id/thumbnail-batch", put(upload).post(download))
-        .route("/api/libraries/:library_id/thumbnails/:content_hash", delete(remove))
-        .route("/api/libraries/:library_id/thumbnails/presence", post(presence))
-        .with_state(cover.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = ServerUrl::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
-    let server = tokio::spawn(async move { axum::serve(listener, service).await.unwrap() });
-
-    let first = tempfile::tempdir().unwrap();
-    let mut source = test_manager(first.path());
-    source.server_url = url.clone();
-    source.credentials = test_shared_credentials(&url);
-    let hash = fixture_content_hash(701);
-    source.database.seed_book(&hash, None, 1, "m4b");
-    source.database.add_book_placement(&crate::ROOT_DIR_ID, &hash, "Story.m4b", "fp", true);
-    let original = vec![0xff, 0xd8, 0xff, 1];
-    source.assets.write(BlobKind::Thumbnail, &hash, &original).await.unwrap();
-    source.database.complete_sidecar_thumbnail_work(&hash).unwrap();
-    source.sync_pending_cover_changes().await.unwrap();
-    assert_eq!(*cover.lock().unwrap(), Some(original.clone()));
-    assert!(source.database.pending_thumbnail_sync_page("").unwrap().is_empty());
-
-    let second = tempfile::tempdir().unwrap();
-    let mut replica = test_manager(second.path());
-    replica.server_url = url.clone();
-    replica.credentials = test_shared_credentials(&url);
-    replica.database.seed_book(&hash, None, 1, "m4b");
-    replica.database.add_book_placement(&crate::ROOT_DIR_ID, &hash, "Story.m4b", "fp", true);
-    replica.assets.write(BlobKind::Thumbnail, &hash, &original).await.unwrap();
-    replica.database.complete_downloaded_thumbnail(&hash).unwrap();
-    replica.refresh_remote_cover_revisions().await.unwrap();
-    assert!(replica.assets.exists(BlobKind::Thumbnail, &hash).unwrap());
-
-    let replacement = vec![0xff, 0xd8, 0xff, 2];
-    source.assets.write(BlobKind::Thumbnail, &hash, &replacement).await.unwrap();
-    source.database.complete_sidecar_thumbnail_work(&hash).unwrap();
-    source.sync_pending_cover_changes().await.unwrap();
-    replica.refresh_remote_cover_revisions().await.unwrap();
-    assert!(!replica.assets.exists(BlobKind::Thumbnail, &hash).unwrap());
-    assert!(replica.database.has_remote_thumbnail(&hash).unwrap());
-
-    replica.sync_assets(Vec::new()).await.unwrap();
-    assert_eq!(replica.assets.read_bytes(BlobKind::Thumbnail, &hash).await.unwrap(), Some(replacement.clone()));
-
-    source.assets.remove(BlobKind::Thumbnail, &hash).unwrap();
-    source.database.complete_replaced_sidecar_thumbnail_work(&hash, false).unwrap();
-    source.sync_pending_cover_changes().await.unwrap();
-    replica.refresh_remote_cover_revisions().await.unwrap();
-    assert!(!replica.assets.exists(BlobKind::Thumbnail, &hash).unwrap());
-    assert!(!replica.database.has_remote_thumbnail(&hash).unwrap());
-    assert!(cover.lock().unwrap().is_none());
-    server.abort();
 }
 
 #[tokio::test]
@@ -147,7 +73,7 @@ async fn asset_planning_leaves_moves_and_purges_to_local_jobs() {
     std::fs::write(temp.path().join("original.epub"), bytes).unwrap();
     {
         let conn = &manager.database;
-        conn.seed_book(&hash, None, 1, "epub");
+        conn.seed_book(&hash, None, 1, book_model::BookFormat::Epub);
         conn.add_book_placement(&crate::ROOT_DIR_ID, &hash, "renamed.epub", "fp", true);
         conn.seed_file_projection(&hash, &crate::ROOT_DIR_ID, "/original.epub");
         // The live placement (book_dir, above) already disagrees with this
@@ -198,7 +124,7 @@ async fn download_request_pages_complete_existing_files_without_transfers() {
         let name = format!("{index}.epub");
         std::fs::write(temp.path().join(&name), bytes).unwrap();
         let conn = &manager.database;
-        conn.seed_book(&hash, None, 1, "epub");
+        conn.seed_book(&hash, None, 1, book_model::BookFormat::Epub);
         conn.add_book_placement(&crate::ROOT_DIR_ID, &hash, &name, "fp", false);
         conn.record_remote_asset(BlobKind::Book, &hash).unwrap();
         conn.complete_thumbnail_work(&hash, false).unwrap();
@@ -207,7 +133,7 @@ async fn download_request_pages_complete_existing_files_without_transfers() {
     manager.request_downloads(&hashes).unwrap();
     manager.reconcile_assets(Vec::new()).await.unwrap();
     let conn = &manager.database;
-    assert!(conn.asset_requests(BlobKind::Book).unwrap().is_empty());
+    assert!(conn.book_download_requests().unwrap().is_empty());
     for hash in hashes {
         assert!(conn.is_book_downloaded(&hash).unwrap());
     }
@@ -223,7 +149,7 @@ async fn scheduled_download_completes_local_requests_without_book_transfers() {
     let hash = test_content_hash();
     {
         let conn = &manager.database;
-        conn.seed_book(&hash, None, 1, "epub");
+        conn.seed_book(&hash, None, 1, book_model::BookFormat::Epub);
         conn.add_book_placement(&crate::ROOT_DIR_ID, &hash, "book.epub", "fp", false);
         conn.record_remote_asset(BlobKind::Book, &hash).unwrap();
         conn.shared_request_thumbnail(&hash).unwrap();
@@ -246,7 +172,7 @@ fn requested_download_uses_content_hash_identity() {
     let conn = &manager.database;
     let dir_id = fixture_dir_id("d1");
     conn.seed_dir(&dir_id, &crate::ROOT_DIR_ID, "Shelf");
-    conn.seed_book(&test_content_hash(), None, 1, "epub");
+    conn.seed_book(&test_content_hash(), None, 1, book_model::BookFormat::Epub);
     conn.add_book_placement(&dir_id, &test_content_hash(), "book.epub", "fp", false);
 
     let job = manager.prepare_requested_download(&test_content_hash()).unwrap().expect("live placement should produce a download job");
@@ -260,7 +186,7 @@ fn download_request_requires_and_resolves_a_live_placement() {
     let manager = test_manager(temp.path());
     {
         let conn = &manager.database;
-        conn.seed_book(&test_content_hash(), None, 1, "epub");
+        conn.seed_book(&test_content_hash(), None, 1, book_model::BookFormat::Epub);
     }
 
     assert!(manager.request_download(test_content_hash()).is_err());
@@ -272,7 +198,7 @@ fn download_request_requires_and_resolves_a_live_placement() {
     manager.request_download(test_content_hash()).unwrap();
 
     let conn = &manager.database;
-    assert_eq!(conn.asset_requests(BlobKind::Book).unwrap(), vec![(test_content_hash(), TransferOrigin::UserInitiated)]);
+    assert_eq!(conn.book_download_requests().unwrap(), vec![(test_content_hash(), TransferOrigin::UserInitiated)]);
 }
 
 #[test]
@@ -282,7 +208,7 @@ fn durable_download_intent_rederives_work_after_queue_recreation() {
     let manager = test_manager(temp.path());
     {
         let conn = &manager.database;
-        conn.seed_book(&test_content_hash(), None, 1, "epub");
+        conn.seed_book(&test_content_hash(), None, 1, book_model::BookFormat::Epub);
         conn.add_book_placement(&crate::ROOT_DIR_ID, &test_content_hash(), "book.epub", "fp", false);
     }
     manager.request_download(test_content_hash()).unwrap();
@@ -291,7 +217,7 @@ fn durable_download_intent_rederives_work_after_queue_recreation() {
 
     let restored = test_manager(temp.path());
     let conn = &restored.database;
-    assert_eq!(conn.asset_requests(BlobKind::Book).unwrap(), vec![(test_content_hash(), TransferOrigin::UserInitiated)]);
+    assert_eq!(conn.book_download_requests().unwrap(), vec![(test_content_hash(), TransferOrigin::UserInitiated)]);
     assert!(restored.prepare_requested_download(&test_content_hash()).unwrap().is_some());
     assert!(restored.transfer_queue.statuses().is_empty());
 }

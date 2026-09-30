@@ -68,7 +68,7 @@ async fn stalled_http_does_not_block_queries_mutations_events_scans_or_retiremen
         let _entered = local.enter();
         std::rc::Rc::get_mut(&mut actor.session).unwrap().start_assets();
         let hash = ContentHash::new(&format!("{:064x}", 1));
-        crate::test_database::raw(&actor.session.db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'Remote','epub')", [hash.as_str()]).unwrap();
+        crate::test_database::raw(&actor.session.db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'Remote',1)", [hash.as_str()]).unwrap();
         crate::test_database::raw(&actor.session.db).execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT ?1,row_id,'remote.epub','',0 FROM book", [sync_common::ROOT_DIR_ID.to_string()]).unwrap();
         let (release_scan, scan) = async_channel::bounded::<()>(1);
         actor.session.filesystem_scanning.set(true);
@@ -254,8 +254,8 @@ async fn deferred_thumbnail_work_schedules_retry_after_a_successful_pass() {
     let root = tempfile::tempdir().unwrap();
     let (mut actor, _, _, _, _) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
     let hash = ContentHash::new(&"b".repeat(64));
-    crate::test_database::raw(&actor.session.db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'Deferred','epub')", [hash.as_str()]).unwrap();
-    crate::test_database::raw(&actor.session.db).execute("INSERT INTO local_thumbnail_work(content_hash,state,retry_after) VALUES(?1,'pending',unixepoch()+300)", [hash.as_str()]).unwrap();
+    crate::test_database::raw(&actor.session.db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'Deferred',1)", [hash.as_str()]).unwrap();
+    crate::test_database::raw(&actor.session.db).execute("INSERT INTO book_transfer(content_hash,cover_state,cover_retry_after) VALUES(?1,'pending',unixepoch()+300)", [hash.as_str()]).unwrap();
     actor.finish_enrichment(Ok(()));
     assert!(actor.enrichment_retry.task.is_some(), "a pass can succeed while thumbnails await their retry deadline");
 }
@@ -320,7 +320,7 @@ async fn reader_waits_for_scheduler_and_cancellation_keeps_the_request() {
     let root = tempfile::tempdir().unwrap();
     let (actor, _, _, _, _) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
     let hash = ContentHash::new(&"e".repeat(64));
-    crate::test_database::raw(&actor.session.db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'Remote','epub')", [hash.as_str()]).unwrap();
+    crate::test_database::raw(&actor.session.db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'Remote',1)", [hash.as_str()]).unwrap();
     crate::test_database::raw(&actor.session.db).execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT ?1,row_id,'remote.epub','',0 FROM book", [sync_common::ROOT_DIR_ID.to_string()]).unwrap();
     let mut reader = Box::pin(actor.session.request_download(hash));
     assert!(futures_util::poll!(reader.as_mut()).is_pending(), "reader must wait, not make its own HTTP request");
@@ -343,9 +343,9 @@ async fn stalled_enrichment_does_not_hold_new_upload_admission() {
     let (mut actor, _, _, _, _) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
     actor.enrichment_job.task = Some(Box::pin(std::future::pending()));
     let hash = ContentHash::new(&"f".repeat(64));
-    crate::test_database::raw(&actor.session.db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'New book','epub')", [hash.as_str()]).unwrap();
+    crate::test_database::raw(&actor.session.db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'New book',1)", [hash.as_str()]).unwrap();
     actor.admit_and_enrich();
-    assert_eq!(crate::test_database::raw(&actor.session.db).query_row("SELECT COUNT(*) FROM local_upload_preparation WHERE content_hash=?1", [hash.as_str()], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(crate::test_database::raw(&actor.session.db).query_row("SELECT COUNT(*) FROM book_transfer WHERE content_hash=?1 AND upload_prepared IS NOT NULL", [hash.as_str()], |row| row.get::<_, i64>(0)).unwrap(), 1);
     assert!(actor.enrichment_job.task.is_some());
     assert!(actor.enrichment_job.pending);
 }

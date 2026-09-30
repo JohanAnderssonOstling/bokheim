@@ -147,9 +147,9 @@ pub(crate) fn prepare_inspection(connection: &rusqlite::Connection, hash: &Conte
 impl Database {
     /// Whether a book already has an inspection projection at this exact
     /// format and inspection version, so the caller can skip re-inspecting it.
-    pub fn has_import_inspection(&self, hash: &ContentHash, extension: &str, inspection_version: i64) -> Result<bool, DatabaseError> {
+    pub fn has_import_inspection(&self, hash: &ContentHash, format: book_model::BookFormat, inspection_version: i64) -> Result<bool, DatabaseError> {
         let mut inspected = false;
-        self.connection.has_import_inspection_select(hash.as_str(), extension, inspection_version, |row| {
+        self.connection.has_import_inspection_select(hash.as_str(), format as i64, inspection_version, |row| {
             inspected = row.get(0)?;
             Ok(())
         })?;
@@ -192,13 +192,7 @@ impl Database {
             let scan_id = current.checked_add(1).ok_or_else(|| DatabaseError::message("scan sequence overflow"))?;
             tx.scan_seq_update(scan_id).map_err(DatabaseError::operation)?;
             for (import, prepared) in prepared_imports {
-                let mut live = false;
-                tx.live_destination_select(&import.parent_id.to_string(), |row| {
-                    live = row.get(0)?;
-                    Ok(())
-                })
-                .map_err(DatabaseError::operation)?;
-                if !live {
+                if crate::placements::directory_relative_path(tx, &import.parent_id)?.is_none() {
                     return Err(DatabaseError::message(format!("library folder does not exist: {}", import.parent_id)));
                 }
                 commit_one(tx, &self.metadata_batch_flag, scan_id, import, prepared)?;
@@ -211,13 +205,20 @@ impl Database {
     /// The orchestrator filters these against the filesystem (without holding
     /// the writer) and hands the restore set back to the commit.
     pub fn import_restore_candidates(&self, hash: &ContentHash) -> Result<Vec<(String, Option<String>)>, DatabaseError> {
-        let mut candidates = Vec::new();
+        let mut rows = Vec::new();
         self.connection
             .restore_candidates_select(hash.as_str(), |row| {
-                candidates.push((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?));
+                rows.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?));
                 Ok(())
             })
             .map_err(DatabaseError::operation)?;
+        let mut folders = crate::placements::FolderPaths::new(&self.connection);
+        let mut candidates = Vec::new();
+        for (dir_id, file_name, projected) in rows {
+            if let Some(path) = folders.placement(&dir_id, &file_name)? {
+                candidates.push((path, projected));
+            }
+        }
         Ok(candidates)
     }
 }
@@ -230,19 +231,12 @@ pub(crate) fn commit_one(tx: &rusqlite::Transaction<'_>, batch_flag: &std::sync:
     let mut timing = crate::timing::PhaseTimer::new("import_book");
     let ImportCommit { parent_id, file_name: _file_name, format, content_hash, checksum, size_bytes, inspection_version, inspection: _inspection, published, request_thumbnail, restore_paths } = import;
     let hash = content_hash.as_str();
-    let mut live: Option<bool> = None;
-    tx.live_destination_select(&parent_id.to_string(), |row| {
-        live = row.get(0)?;
-        Ok(())
-    })
-    .map_err(DatabaseError::operation)?;
-    let live = live.ok_or(rusqlite::Error::QueryReturnedNoRows).map_err(DatabaseError::operation)?;
-    if !live {
+    if crate::placements::directory_relative_path(tx, &parent_id)?.is_none() {
         return Err(DatabaseError::message(format!("library folder does not exist: {parent_id}")));
     }
     if prepared.is_none() {
         let mut inspected: Option<bool> = None;
-        tx.has_import_inspection_select(hash, format.canonical_extension(), inspection_version, |row| {
+        tx.has_import_inspection_select(hash, format as i64, inspection_version, |row| {
             inspected = row.get(0)?;
             Ok(())
         })
@@ -257,7 +251,7 @@ pub(crate) fn commit_one(tx: &rusqlite::Transaction<'_>, batch_flag: &std::sync:
         // Fresh inspection projects exactly like a rescan: normalize the
         // title identity, resolve contributor and publisher agents with
         // provisional-name reuse, then replace every projection row.
-        let PreparedInspection { mut metadata, projection, description, toc, audiobook, pdf_bytes } = prepared;
+        let PreparedInspection { metadata, projection, description, toc, audiobook, pdf_bytes } = prepared;
         let stored_contributors = crate::contributors::resolve_import_credits(tx, hash, &metadata.contributors)?;
         let prepared_publishers = crate::contributors::resolve_publishers(tx, &metadata.book.publishers, crate::contributors::IdentityPolicy::ReuseProvisional)?;
         let mut prepared_book = metadata.book.clone();
@@ -270,7 +264,8 @@ pub(crate) fn commit_one(tx: &rusqlite::Transaction<'_>, batch_flag: &std::sync:
         // the content-hash boundary row before projecting contributors into it.
         tx.prepare_cached(include_str!("sql/upsert_scanned_book.sql"))?.execute(rusqlite::named_params! {
             ":content_hash": hash, ":title": &metadata.title, ":subtitle": metadata.subtitle.as_deref(),
-            ":book_metadata": &encoded, ":added_at": added_at, ":format": format.canonical_extension(),
+            ":search_title": crate::browse::text::search_title(hash, Some(&metadata.title), metadata.subtitle.as_deref()),
+            ":book_metadata": &encoded, ":added_at": added_at, ":format": format as i64,
         })?;
         timing.mark("write_book_row");
         tx.set_description(hash, &description).map_err(DatabaseError::operation)?;
@@ -305,7 +300,7 @@ pub(crate) fn commit_one(tx: &rusqlite::Transaction<'_>, batch_flag: &std::sync:
         if let Some(pdf_bytes) = pdf_bytes {
             tx.pdf_reader_metadata_upsert(hash, checksum.as_str(), &pdf_bytes).map_err(DatabaseError::operation)?;
         }
-        tx.record_import_inspection(hash, format.canonical_extension(), inspection_version).map_err(DatabaseError::operation)?;
+        tx.record_import_inspection(hash, format as i64, inspection_version).map_err(DatabaseError::operation)?;
         timing.mark("reader_metadata_and_inspection");
     }
     // The published file name is authoritative: connection-free book
@@ -344,33 +339,7 @@ pub(crate) fn commit_one(tx: &rusqlite::Transaction<'_>, batch_flag: &std::sync:
     timing.mark("queue_thumbnail");
     if published.published {
         let size = i64::try_from(size_bytes).map_err(|_| DatabaseError::message("book size exceeds SQLite range"))?;
-        let mut previous: Option<String> = None;
-        tx.shared_current_checksum_select(&parent_id.to_string(), hash, |row| {
-            previous = row.get(0)?;
-            Ok(())
-        })
-        .map_err(DatabaseError::operation)?;
-        if previous.as_deref() != Some(checksum.as_str()) {
-            let unseen = tx.shared_observe_local_book_insert(hash, checksum.as_str(), size, "local").map_err(DatabaseError::operation)? != 0;
-            let changed = previous.is_some();
-            if unseen || changed {
-                tx.shared_scanner_enqueue_upload(hash, checksum.as_str(), size).map_err(DatabaseError::operation)?;
-                tx.shared_rejected_book_cleanup(hash).map_err(DatabaseError::operation)?;
-                tx.shared_scanner_enqueue_asset_work(hash).map_err(DatabaseError::operation)?;
-            }
-            let origin: String = if changed {
-                "local".to_owned()
-            } else {
-                let mut origin: Option<String> = None;
-                tx.shared_version_origin_select(hash, checksum.as_str(), |row| {
-                    origin = row.get(0)?;
-                    Ok(())
-                })
-                .map_err(DatabaseError::operation)?;
-                origin.ok_or(rusqlite::Error::QueryReturnedNoRows).map_err(DatabaseError::operation)?
-            };
-            tx.shared_current_replace(&parent_id.to_string(), hash, checksum.as_str(), &origin).map_err(DatabaseError::operation)?;
-        }
+        crate::assets::record_local_version(tx, &parent_id.to_string(), &ContentHash::new(hash), &checksum, size)?;
     }
     timing.mark("version_and_upload_work");
     for path in &restore_paths {

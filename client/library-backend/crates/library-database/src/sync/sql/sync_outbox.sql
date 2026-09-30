@@ -24,7 +24,7 @@ WHERE body IS NOT NULL AND replica_seq > :after AND replica_seq <= :through
 ORDER BY replica_seq ASC;
 
 -- name: sync_pending_uploads?
-SELECT content_hash FROM local_book_upload;
+SELECT content_hash FROM book_transfer WHERE upload_id IS NOT NULL;
 
 -- name: sync_cloud_storage_enabled ->
 SELECT cloud_storage_enabled FROM sync_metadata WHERE singleton = 1;

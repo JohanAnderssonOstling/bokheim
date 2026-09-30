@@ -39,7 +39,7 @@ fn book_snapshot(db: &Database) -> (Option<String>, Option<String>, Vec<String>,
         assert!(matches!(body, MutationBody::BookLifecycle { value: BookLifecycleState::Purged, .. }));
         return (None, None, vec![], true);
     };
-    let languages = db.connection.prepare("SELECT language_tag FROM book_language ORDER BY position").unwrap().query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+    let languages = db.connection.prepare("SELECT language FROM book_language ORDER BY language").unwrap().query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
     (title, pos, languages, false)
 }
 #[test]
@@ -262,10 +262,10 @@ fn moving_a_collision_numbered_folder_returns_its_final_name() {
 fn local_purge_removes_metadata_and_reimport_starts_without_it() {
     let replica = db();
     pull(&replica, &[present(10, 1), metadata("fr", 11, 2)]);
-    replica.connection.execute("INSERT INTO remote_asset(kind,hash) VALUES('book',?1)", [hash().as_str()]).unwrap();
+    replica.connection.execute("INSERT INTO book_transfer(content_hash,server_has_book) VALUES(?1,1)", [hash().as_str()]).unwrap();
     replica.trash_book(&hash()).unwrap();
     replica.purge_book(&hash()).unwrap();
-    assert_eq!(replica.connection.query_row("SELECT COUNT(*) FROM remote_asset WHERE hash=?1", [hash().as_str()], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(replica.connection.query_row("SELECT COUNT(*) FROM book_transfer WHERE content_hash=?1", [hash().as_str()], |r| r.get::<_, i64>(0)).unwrap(), 0);
     assert!(book_snapshot(&replica).3);
     assert!(apply::registers::canonical_body(&replica.connection, "metadata", hash().as_str(), "").unwrap().is_none());
     assert!(replica.sync_publishable_mutations().unwrap().iter().all(|m| matches!(m.body, MutationBody::BookLifecycle { .. })));
@@ -337,8 +337,8 @@ fn independent_facts_allow_fresh_device_to_restore_deleted_book() {
     pull(&old, &[deleted.clone(), placement.clone()]);
     pull(&fresh, &[deleted, placement, facts(10, 1)]);
     for replica in [&old, &fresh] {
-        let actual = replica.connection.query_row("SELECT format,added_at FROM book", [], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).unwrap();
-        assert_eq!(actual, ("epub".into(), 10));
+        let actual = replica.connection.query_row("SELECT format,added_at FROM book", [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))).unwrap();
+        assert_eq!(actual, (book_model::BookFormat::Epub as i64, 10));
         replica.restore_book_commit(&hash(), &[(ROOT_DIR_ID, ROOT_DIR_ID)]).unwrap();
         assert!(replica.sync_publishable_mutations().unwrap().iter().any(|m| matches!(m.body, MutationBody::BookLifecycle { value: BookLifecycleState::Present, .. })));
     }
@@ -390,9 +390,9 @@ fn complete_book_projection_does_not_inherit_previous_display_fields() {
     let snapshot = |replica: &Database| {
         replica
             .connection
-            .query_row("SELECT format,added_at,title,subtitle,read_pos,read_progress,deleted_at,trash_origin_dir_id,book_metadata FROM book", [], |r| {
+            .query_row("SELECT format,added_at,title,subtitle,read_pos,read_progress,deleted_at,trash_origin_dir_id,book_metadata,read_at FROM book", [], |r| {
                 Ok((
-                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<i64>>(0)?,
                     r.get::<_, Option<i64>>(1)?,
                     r.get::<_, Option<String>>(2)?,
                     r.get::<_, Option<String>>(3)?,
@@ -401,6 +401,7 @@ fn complete_book_projection_does_not_inherit_previous_display_fields() {
                     r.get::<_, Option<i64>>(6)?,
                     r.get::<_, Option<String>>(7)?,
                     r.get::<_, Vec<u8>>(8)?,
+                    r.get::<_, Option<i64>>(9)?,
                 ))
             })
             .unwrap()

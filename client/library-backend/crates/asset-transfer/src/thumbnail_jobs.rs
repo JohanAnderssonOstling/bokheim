@@ -127,10 +127,31 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
 
     pub async fn recover(&self, hash: ContentHash, observer: &mut impl ThumbnailObserver) -> Result<bool, BackendError> {
         let outcome = async {
-            let _lease = self.assets.lease_book(&hash).await.map_err(BackendError::operation)?;
-            let book = self.db.thumbnail_book_format(hash)?;
-            let Some(format) = book else { return Ok(false) };
-            let was_sidecar = self.db.has_sidecar_thumbnail(&hash)?;
+            let lease = self.assets.lease_book(&hash).await.map_err(BackendError::operation)?;
+            let Some(format) = self.db.thumbnail_book_format(hash)? else { return Ok(false) };
+            // A book's cover is set once, so a stored cover is kept. A pending
+            // job may have left incomplete bytes behind: decode the cached
+            // master before confirming it, and rebuild its browse variant.
+            let (_lease, cached) = if let Some(bytes) = self.assets.read_bytes(BlobKind::Thumbnail, &hash).await.map_err(BackendError::operation)? {
+                drop(lease);
+                let cached = self.processor.decode(bytes).await.ok();
+                let lease = self.assets.lease_book(&hash).await.map_err(BackendError::operation)?;
+                if cached.is_none() {
+                    self.assets.remove(BlobKind::Thumbnail, &hash).map_err(BackendError::operation)?;
+                }
+                (lease, cached)
+            } else {
+                (lease, None)
+            };
+            if let Some(versions) = cached {
+                self.store(hash, &versions, observer).await?;
+                self.db.confirm_thumbnail_available(&hash)?;
+                return Ok(true);
+            }
+            if self.db.has_remote_thumbnail(&hash)? {
+                self.db.defer_thumbnail_to_download(&hash)?;
+                return Ok(true);
+            }
             let mut local_reader = match format {
                 book_model::BookFormat::Mp3Folder => self.assets.local_mp3_folder_archive(&hash).await.map_err(BackendError::operation)?,
                 book_model::BookFormat::M4b => self.assets.local_m4b_reader(&hash).await.map_err(BackendError::operation)?,
@@ -140,15 +161,13 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
             if matches!(format, book_model::BookFormat::Mp3Folder | book_model::BookFormat::M4b) && local_reader.is_none() {
                 local_reader = self.assets.prepare_reader(BlobKind::Book, &hash).await.map_err(BackendError::operation)?;
             }
-            let local_book_available = local_reader.is_some();
-            // Explicit local artwork takes priority over a previously cached
-            // embedded or remotely enriched cover when a scan queues work.
+            // Artwork shipped with an audiobook becomes its cover.
             if format == book_model::BookFormat::M4b && local_source_available {
                 if let Some(bytes) = self.assets.m4b_sidecar_cover(&hash).await.map_err(BackendError::operation)? {
                     match self.processor.decode(bytes).await {
                         Ok(versions) => {
                             self.store(hash, &versions, observer).await?;
-                            self.db.complete_sidecar_thumbnail_work(&hash)?;
+                            self.db.complete_thumbnail_work(&hash, true)?;
                             return Ok(true);
                         }
                         Err(error) => log::warn!("ignoring invalid M4B sidecar cover for {hash}: {error}"),
@@ -161,7 +180,7 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
                         match self.processor.decode(bytes).await {
                             Ok(versions) => {
                                 self.store(hash, &versions, observer).await?;
-                                self.db.complete_sidecar_thumbnail_work(&hash)?;
+                                self.db.complete_thumbnail_work(&hash, true)?;
                                 return Ok(true);
                             }
                             Err(error) => log::warn!("ignoring invalid MP3 folder cover for {hash}: {error}"),
@@ -169,32 +188,6 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
                     }
                     reader.seek(std::io::SeekFrom::Start(0))?;
                 }
-            }
-            if was_sidecar && (local_book_available || self.assets.prepare_reader(BlobKind::Book, &hash).await.map_err(BackendError::operation)?.is_some()) {
-                self.assets.remove(BlobKind::Thumbnail, &hash).map_err(BackendError::operation)?;
-            }
-            // A pending job may have left incomplete bytes behind. Decode the
-            // cached master before confirming it, and rebuild its browse variant.
-            let (_lease, cached) = if let Some(bytes) = self.assets.read_bytes(BlobKind::Thumbnail, &hash).await.map_err(BackendError::operation)? {
-                drop(_lease);
-                let cached = self.processor.decode(bytes).await.ok();
-                let lease = self.assets.lease_book(&hash).await.map_err(BackendError::operation)?;
-                if cached.is_none() {
-                    self.assets.remove(BlobKind::Thumbnail, &hash).map_err(BackendError::operation)?;
-                }
-                (lease, cached)
-            } else {
-                (_lease, None)
-            };
-            if let Some(versions) = cached {
-                self.store(hash, &versions, observer).await?;
-                self.db.confirm_thumbnail_available(&hash)?;
-                return Ok(true);
-            }
-            let remote = !was_sidecar && self.db.has_remote_thumbnail(&hash)?;
-            if remote {
-                self.db.defer_thumbnail_to_download(&hash)?;
-                return Ok(true);
             }
             let Some(mut reader) = (if matches!(format, book_model::BookFormat::Mp3Folder | book_model::BookFormat::M4b) {
                 local_reader
@@ -220,11 +213,7 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
             if let Some(versions) = versions {
                 self.store(hash, &versions, observer).await?;
             }
-            if was_sidecar {
-                self.db.complete_replaced_sidecar_thumbnail_work(&hash, has_cover)?;
-            } else {
-                self.db.complete_thumbnail_work(&hash, has_cover)?;
-            }
+            self.db.complete_thumbnail_work(&hash, has_cover)?;
             // Both ready and no_cover make external cover enrichment eligible.
             Ok(true)
         }

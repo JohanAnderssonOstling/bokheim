@@ -535,7 +535,7 @@ mod tests {
     fn large_jpeg_is_extracted_without_a_scaled_dimension_mismatch() {
         let mut document = fixture("q 800 0 0 1200 0 0 cm /Cover Do Q", 0);
         let mut encoded = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new(&mut encoded).encode(&vec![100; 800 * 1200 * 3], 800, 1200, image::ColorType::Rgb8).unwrap();
+        image::codecs::jpeg::JpegEncoder::new(&mut encoded).encode(&vec![100; 800 * 1200 * 3], 800, 1200, image::ColorType::Rgb8.into()).unwrap();
         let image = image_mut(&mut document);
         image.dict.set("Width", 800);
         image.dict.set("Height", 1200);
@@ -588,7 +588,7 @@ mod tests {
     fn chained_filters_keep_individual_decode_parameters() {
         let mut document = fixture("q 800 0 0 1200 0 0 cm /Cover Do Q", 0);
         let mut encoded = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new(&mut encoded).encode(&vec![100; 800 * 1200 * 3], 800, 1200, image::ColorType::Rgb8).unwrap();
+        image::codecs::jpeg::JpegEncoder::new(&mut encoded).encode(&vec![100; 800 * 1200 * 3], 800, 1200, image::ColorType::Rgb8.into()).unwrap();
         let mut compressed = Stream::new(Dictionary::new(), encoded);
         compressed.compress().unwrap();
         let stream = image_mut(&mut document);

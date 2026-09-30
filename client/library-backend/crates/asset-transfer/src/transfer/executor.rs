@@ -234,7 +234,8 @@ impl TransferWorker {
     }
 
     /// Single-book upload outside the queue, committing its outcome before
-    /// returning. Test and explicit-request flows use this directly.
+    /// returning.
+    #[cfg(test)]
     pub(super) async fn upload_blob(&self, content_hash: &ContentHash) -> Result<(), TransferError> {
         if !self.asset_storage_enabled() {
             return Ok(());

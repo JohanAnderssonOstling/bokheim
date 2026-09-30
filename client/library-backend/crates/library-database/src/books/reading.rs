@@ -42,7 +42,7 @@ impl Database {
         let position = ReadingPosition::parse(position).map_err(DatabaseError::operation)?.as_str();
         let progress = progress.map(ReadProgress::new).transpose().map_err(DatabaseError::operation)?;
         let transaction = self.connection.unchecked_transaction()?;
-        transaction.reading_set_position(hash.as_str(), &position, progress.map(ReadProgress::value))?;
+        transaction.reading_set_position(hash.as_str(), &position, progress.map(ReadProgress::value), crate::sync::unix_millis()?)?;
         if let Some(entry) = entry.map(str::trim).filter(|entry| !entry.is_empty()) {
             transaction.reading_upsert_toc_entry(hash.as_str(), entry)?;
         }

@@ -45,7 +45,7 @@ pub fn classifications(query: &EditionIdentityQuery, resource_isbns: &[String], 
     let query = metadata_contract::identity_evidence::verified_author_prefix_query(query, result).unwrap_or_else(|| query.clone());
     let verified = crate::related_isbn::verified_isbns(&query, resource_isbns, result);
     let codes = crate::related_isbn::classifications(&verified, |isbn| {
-        result.matched.iter().chain(&result.candidates).filter(|m| &m.canonical_isbn13 == isbn).map(|m| crate::related_isbn::classification_record(m.classifications.clone())).collect()
+        result.matched.iter().chain(&result.candidates).filter(|m| m.canonical_isbn13 == isbn).map(|m| crate::related_isbn::classification_record(m.classifications.clone())).collect()
     });
     if !codes.is_empty() {
         return codes;

@@ -13,7 +13,7 @@ impl Database {
         self.connection.execute_batch("CREATE TABLE IF NOT EXISTS local_taxonomy_projection(id INTEGER PRIMARY KEY CHECK(id=1), revision TEXT NOT NULL)")?;
         let old: Option<String> = self.connection.query_row("SELECT revision FROM local_taxonomy_projection WHERE id=1", [], |r| r.get(0)).optional()?;
         if old.as_deref() == Some(&revision) {
-            return self.ensure_subject_cache();
+            return Ok(());
         }
         let tx = self.connection.unchecked_transaction()?;
         crate::transactions::with_remote_origin(&tx, |origin| {
@@ -33,9 +33,7 @@ impl Database {
                     cursor = id;
                 }
             }
-            tx.execute("UPDATE subject_browse_state SET built_revision=-1 WHERE id=1", [])?;
             tx.execute("INSERT INTO local_taxonomy_projection VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision", [&revision])?;
-            self.refresh_subject_cache_in_transaction(tx)?;
             Ok(())
         })?;
         tx.commit()?;

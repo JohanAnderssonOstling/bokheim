@@ -4,9 +4,9 @@
 use epub_provider::EpubProvider;
 use fast_image_resize::images::{Image, ImageRef};
 use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
-use image::codecs::jpeg::{JpegDecoder, JpegEncoder};
-use image::io::Reader as ImageReader;
-use image::{ColorType, DynamicImage, ImageDecoder, ImageEncoder, ImageFormat, RgbImage};
+use image::codecs::jpeg::JpegEncoder;
+use image::ImageReader;
+use image::{ColorType, DynamicImage, ImageEncoder, ImageFormat, RgbImage};
 #[cfg(feature = "book-memory")]
 use mobi::headers::ExthRecord;
 #[cfg(feature = "book-extractors")]
@@ -264,7 +264,7 @@ mod core_tests {
 
 fn encode_jpeg(rgb: &[u8], width: u32, height: u32) -> ThumbnailResult<Vec<u8>> {
     let mut encoded = BufWriter::new(Vec::new());
-    JpegEncoder::new(&mut encoded).write_image(rgb, width, height, ColorType::Rgb8)?;
+    JpegEncoder::new(&mut encoded).write_image(rgb, width, height, ColorType::Rgb8.into())?;
     Ok(encoded.into_inner().map_err(std::io::Error::other)?)
 }
 
@@ -272,17 +272,11 @@ fn decode_cover_image(bytes: &[u8], format: ImageFormat) -> ThumbnailResult<RgbI
     if bytes.len() > MAX_COVER_IMAGE_BYTES {
         return Err("cover image exceeds the encoded size limit".into());
     }
+    if format == ImageFormat::Jpeg {
+        return decode_scaled_jpeg(bytes);
+    }
     let (width, height) = ImageReader::with_format(Cursor::new(bytes), format).into_dimensions()?;
     validate_cover_image_dimensions(width, height)?;
-    if format == ImageFormat::Jpeg {
-        let mut decoder = JpegDecoder::new(Cursor::new(bytes))?;
-        let (source_width, source_height) = decoder.dimensions();
-        if source_width > THUMBNAIL_WIDTH {
-            let requested_height = ((u64::from(source_height) * u64::from(THUMBNAIL_WIDTH)).div_ceil(u64::from(source_width))).clamp(1, u64::from(u16::MAX)) as u16;
-            decoder.scale(THUMBNAIL_WIDTH as u16, requested_height)?;
-        }
-        return Ok(DynamicImage::from_decoder(decoder)?.into_rgb8());
-    }
     let decoded = ImageReader::with_format(Cursor::new(bytes), format).decode()?;
     // Reduce RGBA/16-bit images before RGB conversion: converting the full
     // source would retain a second book-sized pixel buffer.
@@ -293,6 +287,42 @@ fn decode_cover_image(bytes: &[u8], format: ImageFormat) -> ThumbnailResult<RgbI
         decoded
     };
     Ok(reduced.into_rgb8())
+}
+
+// image 0.25's JPEG decoder does not expose DCT scaling. Use the existing
+// jpeg-decoder dependency to retain bounded thumbnail decoding and the same
+// grayscale/CMYK conversion as our previous image 0.24 path.
+fn decode_scaled_jpeg(bytes: &[u8]) -> ThumbnailResult<RgbImage> {
+    use jpeg_decoder::PixelFormat;
+
+    let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(bytes));
+    decoder.read_info()?;
+    let info = decoder.info().ok_or("JPEG metadata missing after header parsing")?;
+    let (width, height) = (u32::from(info.width), u32::from(info.height));
+    validate_cover_image_dimensions(width, height)?;
+    if width > THUMBNAIL_WIDTH {
+        let requested_height = ((u64::from(height) * u64::from(THUMBNAIL_WIDTH)).div_ceil(u64::from(width))).clamp(1, u64::from(u16::MAX)) as u16;
+        decoder.scale(THUMBNAIL_WIDTH as u16, requested_height)?;
+    }
+    let samples = decoder.decode()?;
+    let info = decoder.info().ok_or("JPEG metadata missing after decoding")?;
+    let (width, height) = (u32::from(info.width), u32::from(info.height));
+    let rgb = match info.pixel_format {
+        PixelFormat::RGB24 => samples,
+        PixelFormat::L8 => samples.into_iter().flat_map(|value| [value; 3]).collect(),
+        PixelFormat::L16 => {
+            let samples = samples.chunks_exact(2).map(|bytes| u16::from_ne_bytes([bytes[0], bytes[1]])).collect();
+            return Ok(DynamicImage::ImageLuma16(image::ImageBuffer::from_raw(width, height, samples).ok_or("invalid JPEG grayscale buffer")?).into_rgb8());
+        }
+        PixelFormat::CMYK32 => samples
+            .chunks_exact(4)
+            .flat_map(|pixel| {
+                let black = 255 - u16::from(pixel[3]);
+                [0, 1, 2].map(|channel| ((255 - u16::from(pixel[channel])) * black / 255) as u8)
+            })
+            .collect(),
+    };
+    Ok(RgbImage::from_raw(width, height, rgb).ok_or("invalid JPEG pixel buffer")?)
 }
 
 fn validate_cover_image_dimensions(width: u32, height: u32) -> ThumbnailResult<()> {
@@ -356,6 +386,37 @@ mod book_extractor_tests {
     }
 
     #[test]
+    fn preserves_scaled_jpeg_decoding_for_rgb_and_grayscale_covers() {
+        for source in [DynamicImage::ImageRgb8(RgbImage::from_pixel(1200, 1800, image::Rgb([180, 40, 20]))), DynamicImage::ImageLuma8(image::GrayImage::from_pixel(1200, 1800, image::Luma([96])))] {
+            let mut encoded = Vec::new();
+            JpegEncoder::new(&mut encoded).encode_image(&source).unwrap();
+            let decoded = decode_cover_image(&encoded, ImageFormat::Jpeg).unwrap();
+            assert_eq!(decoded.dimensions(), (600, 900));
+            let expected = source.to_rgb8().get_pixel(0, 0).0;
+            for (actual, expected) in decoded.get_pixel(0, 0).0.into_iter().zip(expected) {
+                assert!(actual.abs_diff(expected) <= 3);
+            }
+            let versions = ThumbnailVersions::from_image(&decoded).unwrap();
+            assert_eq!(cover_image_dimensions(&versions.browse).unwrap(), (300, 450));
+            assert_eq!(cover_image_dimensions(&versions.high_density).unwrap(), (600, 900));
+        }
+    }
+
+    #[test]
+    fn decodes_supported_cover_formats_after_image_upgrade() {
+        let source = DynamicImage::ImageRgb8(RgbImage::from_pixel(400, 600, image::Rgb([180, 40, 20])));
+        for format in [ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::Gif, ImageFormat::WebP, ImageFormat::Bmp, ImageFormat::Tiff] {
+            let mut encoded = Cursor::new(Vec::new());
+            source.write_to(&mut encoded, format).unwrap();
+            let decoded = decode_cover_image(encoded.get_ref(), format).unwrap();
+            assert_eq!(decoded.dimensions(), (400, 600), "{format:?}");
+            for (actual, expected) in decoded.get_pixel(0, 0).0.into_iter().zip([180, 40, 20]) {
+                assert!(actual.abs_diff(expected) <= 3, "{format:?}");
+            }
+        }
+    }
+
+    #[test]
     fn reduces_large_png_before_rgb_conversion_and_preserves_both_cover_sizes() {
         for source in [
             DynamicImage::ImageRgb8(image::RgbImage::from_pixel(1200, 1800, image::Rgb([180, 40, 20]))),
@@ -363,7 +424,7 @@ mod book_extractor_tests {
             DynamicImage::ImageRgba16(image::ImageBuffer::from_pixel(1200, 1800, image::Rgba([46260_u16, 10280, 5140, 65535]))),
         ] {
             let mut png = Cursor::new(Vec::new());
-            source.write_to(&mut png, image::ImageOutputFormat::Png).unwrap();
+            source.write_to(&mut png, ImageFormat::Png).unwrap();
             let cover = decode_cover_image(png.get_ref(), ImageFormat::Png).unwrap();
             assert_eq!(cover.dimensions(), (600, 900));
             assert_eq!(cover.get_pixel(300, 450).0, [180, 40, 20]);
@@ -450,7 +511,9 @@ pub fn generate_thumbnail_versions_with_pdf_renderer<R: Read + Seek + Send + Syn
                 let mut entry = archive.by_index(index)?;
                 let name = entry.name().to_ascii_lowercase();
                 if ["cover.jpg", "cover.jpeg", "cover.png", "cover.webp", "folder.jpg", "folder.jpeg", "folder.png", "folder.webp"].contains(&name.as_str()) {
-                    if entry.size() > audiobook_folder::MAX_COVER_BYTES { return Err("audiobook cover exceeds the byte limit".into()); }
+                    if entry.size() > audiobook_folder::MAX_COVER_BYTES {
+                        return Err("audiobook cover exceeds the byte limit".into());
+                    }
                     let mut bytes = Vec::new();
                     entry.read_to_end(&mut bytes)?;
                     cover = image::guess_format(&bytes).ok().and_then(|format| decode_cover_image(&bytes, format).ok());

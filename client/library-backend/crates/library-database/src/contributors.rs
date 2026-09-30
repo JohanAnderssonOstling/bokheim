@@ -2,7 +2,7 @@
 use crate::shared_sql::SharedSql;
 use crate::sync::{parse_author_name_opt, unix_millis};
 use crate::{DatabaseError, import::ImportCommitSql, sync::SyncApplySql};
-use book_model::{AgentId, AuthorName, Contributor, PublisherCredit};
+use book_model::{AUTHOR_MARC_RELATOR_CODE, AgentId, AuthorName, Contributor, PublisherCredit, normalize_search_text};
 
 type Identity = (i64, AgentId);
 pub(crate) type StoredCredit = (i64, Contributor);
@@ -105,6 +105,8 @@ pub(crate) fn write_credits(tx: &rusqlite::Transaction<'_>, hash: &str, credits:
         ":content_hash": hash, ":position": i64::try_from(credits.len()).unwrap_or(i64::MAX),
     })?;
     timing.mark("trim_contributors");
+    let author = credits.iter().filter(|(_, credit)| credit.role_code() == AUTHOR_MARC_RELATOR_CODE).map(|(_, credit)| credit.name()).collect::<Vec<_>>().join(", ");
+    tx.execute("UPDATE book SET author=?2,search_author=?3 WHERE content_hash=?1", rusqlite::params![hash, author, normalize_search_text(&author)])?;
     Ok(())
 }
 
@@ -123,7 +125,7 @@ mod tests {
         let editor = Contributor::new("Second Author", book_model::MarcRelatorCode(*b"edt")).unwrap();
         db.with_write_transaction(|tx| {
             for hash in [&first, &second] {
-                tx.execute("INSERT INTO book(content_hash,title,added_at,format) VALUES (?1,'Book',1,'epub')", [hash])?;
+                tx.execute("INSERT INTO book(content_hash,title,added_at,format) VALUES (?1,'Book',1,1)", [hash])?;
             }
             let credits = resolve_credits(tx, &[author, editor])?;
             write_credits(tx, &first, &credits)?;
@@ -175,7 +177,7 @@ mod tests {
         db.initialize_library().unwrap();
         db.with_write_transaction(|tx| {
             let hash = "b".repeat(64);
-            tx.execute("INSERT INTO book(content_hash,title,added_at,format) VALUES (?1,'Book',1,'epub')", [&hash])?;
+            tx.execute("INSERT INTO book(content_hash,title,added_at,format) VALUES (?1,'Book',1,1)", [&hash])?;
             let first = Contributor::new("An Author", book_model::MarcRelatorCode(*b"aut")).unwrap();
             let stored = resolve_credits(tx, &[first.clone()])?;
             write_credits(tx, &hash, &stored)?;

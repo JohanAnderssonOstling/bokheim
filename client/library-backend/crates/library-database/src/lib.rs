@@ -3,27 +3,25 @@
 //! Other crates use typed database operations; they never own a SQLite
 //! connection or select a connection policy.
 
-use crate::annotations::SchemaSql as AnnotationsSchemaSql;
-use crate::assets::SchemaSql as AssetsSchemaSql;
-use crate::browse::{FolderSchemaSql, SchemaSql as BrowseSchemaSql, SubjectSchemaSql};
-use crate::enrichment::SchemaSql as EnrichmentSchemaSql;
-use crate::native::SchemaSql as NativeSchemaSql;
-use crate::placements::SchemaSql as PlacementsSchemaSql;
+use crate::annotations::{IndexSql as AnnotationsIndexSql, TablesSql as AnnotationsTablesSql};
+use crate::assets::TablesSql as AssetsTablesSql;
+use crate::enrichment::{IndexSql as EnrichmentIndexSql, TablesSql as EnrichmentTablesSql, TriggersSql as EnrichmentTriggersSql};
+use crate::native::{IndexSql as NativeIndexSql, TablesSql as NativeTablesSql, TriggersSql as NativeTriggersSql, ViewsSql as NativeViewsSql};
+use crate::placements::{IndexSql as PlacementsIndexSql, TablesSql as PlacementsTablesSql};
 use crate::shared_sql::SharedSql;
-use crate::sync::SchemaSql as SyncSchemaSql;
-use crate::sync::TriggersSql;
+use crate::sync::{IndexSql as SyncIndexSql, TablesSql as SyncTablesSql, TriggersSql as SyncTriggersSql};
 #[macro_use]
 mod query_methods;
 mod contributors;
 mod purge;
 mod shared_sql;
-mod timing;
-mod transactions;
 mod taxonomy_update;
 #[cfg(test)]
 mod test_support;
+mod timing;
+mod transactions;
 
-pub const LIBRARY_SCHEMA_VERSION: i64 = 1;
+pub const LIBRARY_SCHEMA_VERSION: i64 = 7;
 
 pub use client_platform_runtime::executor;
 pub use client_platform_runtime::storage_queue;
@@ -36,20 +34,6 @@ pub use client_platform_web::sqlite;
 
 pub use library_replica::{BookPlacement, BookUploadIntent, RelativeBookPath, RelativeBookPathError, RelativeDirPath, RelativeDirPathError};
 use sync_common::ContentHash;
-
-#[derive(Debug)]
-pub struct AssetCandidate {
-    pub work_id: i64,
-    pub content_hash: ContentHash,
-    pub live: bool,
-    pub path: Option<RelativeBookPath>,
-    pub thumbnail_upload_allowed: bool,
-    pub thumbnail_remote: bool,
-    pub thumbnail_pending: bool,
-    pub requested: bool,
-    pub rejected: bool,
-    pub file_work_pending: bool,
-}
 
 // Connection ownership for one concrete library session.
 use std::fmt;
@@ -116,7 +100,6 @@ fn configure_library_connection(connection: &rusqlite::Connection) -> rusqlite::
         connection.pragma_update(None, "journal_mode", "WAL")?;
     }
     crate::sync::functions::register_sync_functions(connection)?;
-    crate::browse::progress::register_progress_function(connection)?;
     attach_curated_taxonomy_to(connection).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
@@ -141,14 +124,12 @@ fn attach_curated_taxonomy_to(connection: &rusqlite::Connection) -> Result<(), D
         Ok(())
     })?;
     if attached {
-        connection.execute_batch(include_str!("browse/sql/subjects/paths.sql"))?;
         return Ok(());
     }
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(path) = subject_projection::installed::active_path() {
         let uri = format!("{}?mode=ro&immutable=1", url_for_taxonomy(path)?);
         connection.taxonomy_attach(&uri)?;
-        connection.execute_batch(include_str!("browse/sql/subjects/paths.sql"))?;
         return Ok(());
     }
     connection.taxonomy_attach(":memory:")?;
@@ -158,7 +139,6 @@ fn attach_curated_taxonomy_to(connection: &rusqlite::Connection) -> Result<(), D
     // directly without copying the tree.
     let mut borrowed = unsafe { rusqlite::Connection::from_handle(connection.handle())? };
     borrowed.deserialize_bytes("curated", subject_projection::DEFAULT_UNIFIED_TAXONOMY_SQLITE)?;
-    connection.execute_batch(include_str!("browse/sql/subjects/paths.sql"))?;
     Ok(())
 }
 
@@ -178,6 +158,24 @@ impl fmt::Debug for Database {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("Database").finish_non_exhaustive()
     }
+}
+
+/// Queues every book's newest local version in a live folder for upload.
+fn requeue_cloud_storage(transaction: &rusqlite::Transaction<'_>) -> Result<(), DatabaseError> {
+    let mut candidates = Vec::new();
+    transaction.owner_cloud_storage_candidates(|row| {
+        candidates.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?));
+        Ok(())
+    })?;
+    let mut folders = placements::FolderPaths::new(transaction);
+    let mut queued = std::collections::HashSet::new();
+    for (content_hash, dir_id, checksum, size_bytes) in candidates {
+        if !queued.contains(&content_hash) && folders.folder(&dir_id)?.is_some() {
+            transaction.owner_queue_book_upload(&content_hash, &checksum, size_bytes)?;
+            queued.insert(content_hash);
+        }
+    }
+    Ok(())
 }
 
 impl Database {
@@ -203,28 +201,31 @@ impl Database {
         if version != 0 {
             return Err(DatabaseError::message(format!("unsupported library schema version {version}; expected a new library or version {VERSION}")));
         }
-        transaction.schema_authors()?;
-        transaction.schema_books()?;
-        transaction.schema_descriptions()?;
-        transaction.schema_jobs()?;
-        transaction.schema_external_metadata()?;
-        transaction.schema_placements()?;
-        transaction.schema_browse()?;
-        transaction.schema_folder_cache()?;
-        transaction.schema_browse_progress()?;
-        transaction.schema_sync()?;
-        transaction.schema_marks()?;
-        transaction.schema_assets()?;
-        transaction.schema_contents()?;
-        transaction.schema_views()?;
-        transaction.schema_browse_text()?;
-        transaction.schema_subjects()?;
-        transaction.schema_browse_filters()?;
+        transaction.schema_sync_tables()?;
+        transaction.schema_native_tables()?;
+        transaction.schema_placements_tables()?;
+        transaction.schema_assets_tables()?;
+        transaction.schema_enrichment_tables()?;
+        transaction.schema_annotations_tables()?;
+
+        // Initial singleton rows and the root directory belong to a new library.
+        transaction.execute_batch(
+            "INSERT OR IGNORE INTO sync_clock VALUES(1,0);
+            INSERT OR IGNORE INTO sync_metadata(singleton) VALUES(1);
+            INSERT INTO dir(id,parent_id,name,intent_parent_id,intent_name,intent_lifecycle,deleted_at)
+            VALUES('00000000-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000000','','00000000-0000-0000-0000-000000000000','',0,NULL)
+            ON CONFLICT(id) DO UPDATE SET parent_id=excluded.parent_id,name=excluded.name,deleted_at=NULL;",
+        )?;
+
+        transaction.schema_sync_index()?;
+        transaction.schema_native_index()?;
+        transaction.schema_placements_index()?;
+        transaction.schema_enrichment_index()?;
+        transaction.schema_annotations_index()?;
+        transaction.schema_native_views()?;
         transaction.schema_sync_triggers()?;
-        transaction.schema_asset_triggers()?;
-        transaction.schema_metadata_batch()?;
-        transaction.schema_description_triggers()?;
-        transaction.schema_activity()?;
+        transaction.schema_native_triggers()?;
+        transaction.schema_enrichment_triggers()?;
         let replica_id = sync_common::ReplicaId::new_v4();
         transaction.owner_set_change_origin("local")?;
         transaction.owner_set_replica_id(&replica_id.to_string())?;
@@ -308,9 +309,8 @@ impl Database {
             let transaction = self.connection.unchecked_transaction()?;
             transaction.owner_reset_remote_books()?;
             transaction.owner_reset_rejected_book_uploads()?;
-            transaction.owner_requeue_cloud_storage()?;
+            requeue_cloud_storage(&transaction)?;
             transaction.owner_refresh_book_uploads()?;
-            transaction.owner_refresh_asset_work()?;
             transaction.owner_cloud_storage_policy(enabled)?;
             transaction.commit()?;
             return Ok(());
@@ -335,10 +335,10 @@ impl Database {
     pub fn book_format(&self, hash: &sync_common::ContentHash) -> Result<Option<book_model::BookFormat>, DatabaseError> {
         let mut format = None;
         self.connection.owner_book_format(hash.as_str(), |row| {
-            format = Some(row.get::<_, String>(0)?);
+            format = Some(row.get::<_, Option<i64>>(0)?);
             Ok(())
         })?;
-        format.map(|format| book_model::BookFormat::from_extension(&format).ok_or_else(|| DatabaseError::message(format!("book {hash} has no known format")))).transpose()
+        format.map(|format| format.and_then(book_model::BookFormat::from_code).ok_or_else(|| DatabaseError::message(format!("book {hash} has no known format")))).transpose()
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, DatabaseError> {
@@ -402,9 +402,8 @@ mod placements;
 mod sync;
 pub mod sync_status;
 
-pub use annotations::*;
+pub(crate) use annotations::*;
 pub use assets::*;
-pub use books::*;
 pub use browse::*;
 pub use enrichment::*;
 pub use import::*;
@@ -446,6 +445,3 @@ mod local_evict_guard_tests;
 #[cfg(test)]
 #[path = "../tests/regressions.rs"]
 mod regression_tests;
-#[cfg(test)]
-#[path = "../tests/subject_ownership_validation.rs"]
-mod subject_ownership_validation_tests;

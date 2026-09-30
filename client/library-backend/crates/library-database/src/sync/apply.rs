@@ -89,7 +89,6 @@ pub(crate) struct PreparedBook {
     pub(crate) encoded: Vec<u8>,
     pub(crate) subject_codes: Vec<subject_projection::ProjectedSubjectCode>,
     pub(crate) concepts: Vec<(usize, i64)>,
-    pub(crate) references: Vec<(String, Option<String>, Option<String>)>,
     pub(crate) classification_rows: Vec<ClassificationRows>,
 }
 
@@ -110,9 +109,7 @@ pub(crate) fn project_book(metadata: &book_model::BookMetadata, encoded: Vec<u8>
         }
     }
     timing.mark("unified_concepts");
-    let references = book_enrichment::related_isbn::lookup_candidates(&metadata.identifiers).into_iter().map(|isbn| (isbn, None, None)).collect();
-    timing.mark("isbn_references");
-    let mut prepared = PreparedBook { metadata, encoded, subject_codes, concepts, references, classification_rows: Vec::new() };
+    let mut prepared = PreparedBook { metadata, encoded, subject_codes, concepts, classification_rows: Vec::new() };
     prepared.classification_rows = prepare_classification_rows(&prepared);
     timing.mark("classification_rows");
     Ok(prepared)
@@ -164,12 +161,6 @@ pub(crate) struct ClassificationRows {
 
 pub(crate) fn prepare_classification_rows(prepared: &PreparedBook) -> Vec<ClassificationRows> {
     let subjects = prepared.metadata.subjects.iter().enumerate().map(|(i, s)| vec![(i as i64).into(), s.name().into(), s.source().into(), s.authority().into(), s.code().into()]).collect();
-    let mut codes = Vec::new();
-    for code in &prepared.subject_codes {
-        for pos in code.evidence_positions() {
-            codes.push(vec![(*pos as i64).into(), code.system_id().into(), code.code().into()]);
-        }
-    }
     let mut concepts = Vec::new();
     let mut unified_evidence = Vec::new();
     for (index, concept) in &prepared.concepts {
@@ -184,7 +175,6 @@ pub(crate) fn prepare_classification_rows(prepared: &PreparedBook) -> Vec<Classi
     }
     vec![
         rows("book_subject", 1, 5, subjects),
-        rows("book_subject_code", 3, 3, codes),
         rows("book_unified_concept", 1, 2, concepts),
         rows("book_unified_concept_evidence", 4, 4, unified_evidence),
     ]
@@ -222,17 +212,13 @@ pub(crate) fn write_book_projection(tx: &rusqlite::Transaction<'_>, hash: &str, 
     }
     // Languages are a projection of the complete winning metadata value.
     tx.execute("DELETE FROM book_language WHERE book_row_id=?1", [book_id])?;
-    for (position, language) in projected.metadata.languages.iter().enumerate() {
-        tx.insert_book_language(book_id, position as i64, language.as_str()).map_err(DatabaseError::operation)?;
-    }
-    write_subject_projection(tx, book_id, projected)?;
-    for (kind, values) in [("enrichment_isbn", projected.references.clone())] {
-        tx.meta_replace_prepared_projections_delete(book_id, kind).map_err(DatabaseError::operation)?;
-        for (position, (value, qualifier, secondary)) in values.iter().enumerate() {
-            tx.insert_book_value(book_id, kind, position as i64, value, qualifier.as_deref(), secondary.as_deref()).map_err(DatabaseError::operation)?;
+    for language in &projected.metadata.languages {
+        let language = crate::browse::options::base_language(language.as_str());
+        if !language.is_empty() {
+            tx.insert_book_language(book_id, &language).map_err(DatabaseError::operation)?;
         }
     }
-    Ok(())
+    write_subject_projection(tx, book_id, projected)
 }
 
 mod pull;
@@ -266,7 +252,6 @@ pub(crate) fn write_subject_projection(tx: &rusqlite::Transaction<'_>, book_id: 
         for rows in &projected.classification_rows {
             let (select_sql, delete_sql, insert_sql): (&str, &str, &str) = match rows.table {
                 "book_subject" => (include_str!("sql/reconcile/book_subject_select.sql"), include_str!("sql/reconcile/book_subject_delete.sql"), include_str!("sql/reconcile/book_subject_insert.sql")),
-                "book_subject_code" => (include_str!("sql/reconcile/book_subject_code_select.sql"), include_str!("sql/reconcile/book_subject_code_delete.sql"), include_str!("sql/reconcile/book_subject_code_insert.sql")),
                 "book_unified_concept" => (include_str!("sql/reconcile/book_unified_concept_select.sql"), include_str!("sql/reconcile/book_unified_concept_delete.sql"), include_str!("sql/reconcile/book_unified_concept_insert.sql")),
                 "book_unified_concept_evidence" => {
                     (include_str!("sql/reconcile/book_unified_concept_evidence_select.sql"), include_str!("sql/reconcile/book_unified_concept_evidence_delete.sql"), include_str!("sql/reconcile/book_unified_concept_evidence_insert.sql"))

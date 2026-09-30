@@ -169,7 +169,7 @@ pub fn prefer_filename(metadata: &book_model::BookRecord, filename: &str) -> boo
     }
     let filename_evidence = filename_evidence(metadata, &stem);
     let candidate = &filename_evidence.title;
-    if unusable_title(&candidate, &metadata.contributors) || super::filename_identity::identifier_shaped_title(&candidate) {
+    if unusable_title(candidate, &metadata.contributors) || super::filename_identity::identifier_shaped_title(candidate) {
         return false;
     }
     let current = full_title(&metadata.title, metadata.subtitle());
@@ -178,7 +178,7 @@ pub fn prefer_filename(metadata: &book_model::BookRecord, filename: &str) -> boo
     }
     let current = edition_identity_evidence(&current).title;
     let compact = |title: &str| metadata_contract::matching::bibliographic_match_key(title).replace(' ', "");
-    if compact(&candidate) == compact(&current) {
+    if compact(candidate) == compact(&current) {
         return false;
     }
     // Low-level readers may already have copied/cleaned the filename into the
@@ -187,7 +187,7 @@ pub fn prefer_filename(metadata: &book_model::BookRecord, filename: &str) -> boo
         return true;
     }
     let rank = |title: &str| (has_edition_note(title), title.contains(": "));
-    rank(&candidate) > rank(&current)
+    rank(candidate) > rank(&current)
 }
 
 /// Split only author credits; each person keeps their own display name.
@@ -230,7 +230,7 @@ fn split_corroborated_comma_authors(metadata: &mut book_model::BookRecord, filen
             credits.push(credit.clone());
             continue;
         }
-        let names = parts.chunks_exact(2).map(|pair| format!("{} {}", pair[1], pair[0])).collect::<Vec<_>>();
+        let names = parts.as_chunks::<2>().0.iter().map(|pair| format!("{} {}", pair[1], pair[0])).collect::<Vec<_>>();
         let keys = names.iter().map(|name| normalized_author_words(name)).collect::<Vec<_>>();
         let distinct = keys.iter().collect::<std::collections::BTreeSet<_>>().len() == keys.len();
         if !distinct || !keys.iter().all(|key| key.len() >= 2 && entries.contains(key)) {

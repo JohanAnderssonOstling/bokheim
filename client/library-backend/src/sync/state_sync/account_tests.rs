@@ -95,7 +95,7 @@ async fn combined_response_failure_retains_ack_but_rolls_back_pull_and_cursor() 
     let hash = format!("{:064x}", 1);
     {
         let conn = raw(&db_path);
-        conn.execute("INSERT INTO book(content_hash, title, format) VALUES (?1, 'Local', 'epub')", [hash.as_str()]).unwrap();
+        conn.execute("INSERT INTO book(content_hash, title, format) VALUES (?1, 'Local', 1)", [hash.as_str()]).unwrap();
         // Whatever the page would record first is gone, so the whole commit
         // fails and rolls back the acknowledgement with it.
         conn.execute_batch("DROP TABLE sync_state_version").unwrap();

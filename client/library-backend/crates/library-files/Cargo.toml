@@ -25,7 +25,7 @@ log = "0.4"
 audiobook-folder = { path = "../../../../shared/audiobook-folder" }
 client-platform-native = { path = "../../../platforms/native" }
 book-identity = { path = "../../../../shared/book-identity", features = ["native-write"] }
-reqwest = { version = "0.11", default-features = false, features = ["stream", "rustls-tls"] }
+reqwest = { workspace = true, default-features = false, features = ["stream", "rustls-tls"] }
 tempfile = "3"
 fs2 = "0.4"
 walkdir = "2.5"
@@ -35,9 +35,10 @@ uuid = { version = "1", features = ["v4"] }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 client-platform-web = { path = "../../../platforms/web" }
 web-sys = { version = "0.3", features = ["Blob"] }
-reqwest = { version = "0.11", default-features = false, features = ["stream"] }
+reqwest = { workspace = true, default-features = false, features = ["stream"] }
 
 [dev-dependencies]
+book-model = { path = "../../../../shared/book-model" }
 library-database = { path = "../library-database", features = ["fixture-sql"] }
 serde_json = "1"
 test-support = { path = "../../../test-support", features = ["pdf-fixtures"] }

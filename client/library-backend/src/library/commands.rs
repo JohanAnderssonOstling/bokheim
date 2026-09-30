@@ -176,9 +176,6 @@ pub enum LibraryCommand {
     SubjectContents {
         query: library_model::LibraryBrowseQuery,
     },
-    LibrarySearch {
-        query: String,
-    },
     BookDetail {
         content_hash: crate::ContentHash,
     },
@@ -315,7 +312,6 @@ pub(super) fn prepare_library_request(library: Rc<LibrarySession>, command: Libr
         }),
         LibraryCommand::FolderContents { query } => PreparedRequest::Ready(Reply::new(library.folder_browse_data(&query, library.downloaded_books_only()?)?)),
         LibraryCommand::SubjectContents { query } => PreparedRequest::Ready(Reply::new(library.subject_browse_data(&query, library.downloaded_books_only()?)?)),
-        LibraryCommand::LibrarySearch { query } => PreparedRequest::Ready(Reply::new(library.library_search(&query, library.downloaded_books_only()?)?)),
         LibraryCommand::BookDetail { content_hash } => PreparedRequest::Ready(Reply::new(library.book_detail(content_hash)?)),
         LibraryCommand::Authors { sort } => PreparedRequest::Ready(Reply::new(library.authors(sort, library.downloaded_books_only()?)?)),
         LibraryCommand::BookFormat { content_hash } => PreparedRequest::Ready(Reply::new(library.book_format(content_hash)?)),

@@ -76,7 +76,7 @@ impl Database {
                             continue;
                         }
                         origin.mark(tx)?;
-                        if tx.execute("INSERT OR IGNORE INTO book(content_hash) VALUES(?1)", [content_hash.as_str()])? != 0 {
+                        if tx.execute("INSERT OR IGNORE INTO book(content_hash,search_title) VALUES(?1,?2)", [content_hash.as_str(), &crate::browse::text::search_title(content_hash.as_str(), None, None)])? != 0 {
                             tx.execute("INSERT OR IGNORE INTO sync_projection_dirty VALUES('book_projection',?1,'')", [content_hash.as_str()])?;
                         }
                     }
@@ -135,7 +135,9 @@ pub(crate) fn project_dirty(tx: &rusqlite::Transaction<'_>) -> Result<(), Databa
     if dirty.is_empty() {
         return Ok(());
     }
-    let books = tx
+    let directories = dirty.iter().any(|(kind, _, _)| kind.starts_with("directory_"));
+    let purged = purged_directory_ids(tx)?;
+    let mut books = tx
         .prepare(
             "SELECT DISTINCT COALESCE(v.book_key,CASE WHEN d.state_kind='book_projection' THEN d.state_key END)
         FROM sync_projection_dirty d LEFT JOIN sync_state_version v USING(state_kind,state_key,state_subkey)
@@ -143,7 +145,17 @@ pub(crate) fn project_dirty(tx: &rusqlite::Transaction<'_>) -> Result<(), Databa
         )?
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    let directories = dirty.iter().any(|(kind, _, _)| kind.starts_with("directory_"));
+    if directories {
+        // Directory deletion cascades placements away. Reproject memberships
+        // when directory winners change, including a later explicit recreation.
+        books.extend(
+            tx.prepare("SELECT DISTINCT v.state_key FROM sync_state_version v LEFT JOIN dir d ON d.id=v.state_subkey WHERE v.state_kind='placement' AND v.body IS NOT NULL AND d.id IS NULL")?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        books.sort();
+        books.dedup();
+    }
     crate::transactions::with_remote_origin(tx, |origin| {
         origin.mark(tx)?;
         for hash in books {
@@ -155,7 +167,7 @@ pub(crate) fn project_dirty(tx: &rusqlite::Transaction<'_>) -> Result<(), Databa
                 .into_iter()
                 .map(|(bytes, time)| Ok((sync_common::wire::decode::<MutationBody>(&bytes, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)?, nonnegative_u64(time, 1, "register timestamp")?)))
                 .collect::<Result<Vec<_>, DatabaseError>>()?;
-            project_book(tx, &hash, &values)?;
+            project_book(tx, &hash, &values, &purged)?;
             if dirty.iter().any(|(kind, key, _)| key == &hash && matches!(kind.as_str(), "book_facts" | "book_lifecycle" | "placement" | "metadata")) {
                 tx.queue_book_work_insert(&hash)?;
             }
@@ -168,9 +180,9 @@ pub(crate) fn project_dirty(tx: &rusqlite::Transaction<'_>) -> Result<(), Databa
                 .collect::<Result<Vec<_>, _>>()?;
             for bytes in rows {
                 let body = sync_common::wire::decode::<MutationBody>(&bytes, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)?;
-                project_value(tx, 0, &body)?;
+                project_value(tx, 0, &body, &purged)?;
             }
-            rebuild_remote_directories(tx)?;
+            rebuild_directories(tx, &purged)?;
         }
         tx.execute("DELETE FROM sync_projection_dirty", [])?;
         Ok(())
@@ -179,7 +191,7 @@ pub(crate) fn project_dirty(tx: &rusqlite::Transaction<'_>) -> Result<(), Databa
 
 /// Desired synchronized scalars are derived before touching the display row.
 /// Missing registers have explicit defaults, never the previous display value.
-fn project_book(tx: &rusqlite::Transaction<'_>, hash: &str, values: &[(MutationBody, u64)]) -> Result<(), DatabaseError> {
+fn project_book(tx: &rusqlite::Transaction<'_>, hash: &str, values: &[(MutationBody, u64)], purged: &std::collections::HashSet<sync_common::DirId>) -> Result<(), DatabaseError> {
     if values.iter().any(|(body, _)| matches!(body, MutationBody::BookLifecycle { value: library_replica::BookLifecycleState::Purged, .. })) {
         return crate::purge::remove_book(tx, hash);
     }
@@ -187,19 +199,20 @@ fn project_book(tx: &rusqlite::Transaction<'_>, hash: &str, values: &[(MutationB
     if !tx.query_row("SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=?1)", [hash], |row| row.get::<_, bool>(0))? {
         return Ok(());
     }
-    let mut format = "";
+    let mut format = None;
     let mut added_at = None;
     let mut deleted_at = None; // Deterministic placeholder until lifecycle arrives.
 
     let mut origin = None;
     let mut reading = None;
     let mut progress = 0f32;
+    let mut read_at = None;
     let mut kinds = std::collections::HashSet::new();
     for (body, time) in values {
         kinds.insert(body.kind());
         match body {
             MutationBody::BookFacts { value, .. } => {
-                format = value.format.canonical_extension();
+                format = Some(value.format as i64);
                 added_at = Some(storage_i64(value.added_at, "book addition timestamp")?);
             }
             MutationBody::BookLifecycle { value, .. } => match value {
@@ -215,14 +228,15 @@ fn project_book(tx: &rusqlite::Transaction<'_>, hash: &str, values: &[(MutationB
             MutationBody::ReadingPosition { value, .. } => {
                 reading = Some(value.location.as_str());
                 progress = value.progress;
+                read_at = Some(storage_i64(*time, "reading timestamp")?);
             }
             _ => {}
         }
     }
     tx.execute(
-        "UPDATE book SET format=?2,added_at=?3,deleted_at=?4,trash_origin_dir_id=?5,read_pos=?6,read_progress=?7
-        WHERE content_hash=?1 AND (format,added_at,deleted_at,trash_origin_dir_id,read_pos,read_progress) IS NOT (?2,?3,?4,?5,?6,?7)",
-        rusqlite::params![hash, format, added_at, deleted_at, origin, reading, progress],
+        "UPDATE book SET format=?2,added_at=?3,deleted_at=?4,trash_origin_dir_id=?5,read_pos=?6,read_progress=?7,read_at=?8
+        WHERE content_hash=?1 AND (format,added_at,deleted_at,trash_origin_dir_id,read_pos,read_progress,read_at) IS NOT (?2,?3,?4,?5,?6,?7,?8)",
+        rusqlite::params![hash, format, added_at, deleted_at, origin, reading, progress, read_at],
     )?;
     if deleted_at.is_some() {
         // Membership survives Trash; downloaded flags describe only live files.
@@ -232,7 +246,7 @@ fn project_book(tx: &rusqlite::Transaction<'_>, hash: &str, values: &[(MutationB
         let mut empty = library_replica::SyncBookMetadata::default();
         empty.title = String::new();
         project_remote_metadata(tx, &sync_common::ContentHash::new(hash), &empty)?;
-        tx.execute("UPDATE book SET title=NULL,subtitle=NULL,book_metadata=X'' WHERE content_hash=?1", [hash])?;
+        tx.execute("UPDATE book SET title=NULL,subtitle=NULL,book_metadata=X'',search_title=?2 WHERE content_hash=?1", [hash, &crate::browse::text::search_title(hash, None, None)])?;
     }
     if !kinds.contains("description") {
         tx.execute("DELETE FROM book_description WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1)", [hash])?;
@@ -261,22 +275,28 @@ fn project_book(tx: &rusqlite::Transaction<'_>, hash: &str, values: &[(MutationB
     )?;
     for (body, time) in values {
         if !matches!(body, MutationBody::BookLifecycle { .. } | MutationBody::BookFacts { .. } | MutationBody::ReadingPosition { .. }) {
-            project_value(tx, *time, body)?;
+            project_value(tx, *time, body, purged)?;
         }
     }
     Ok(())
 }
 
-fn project_value(tx: &rusqlite::Transaction<'_>, _changed_at: u64, body: &MutationBody) -> Result<(), DatabaseError> {
+fn project_value(tx: &rusqlite::Transaction<'_>, _changed_at: u64, body: &MutationBody, purged: &std::collections::HashSet<sync_common::DirId>) -> Result<(), DatabaseError> {
     match body {
         MutationBody::DirectoryName { dir_id, name } => {
+            if purged.contains(dir_id) {
+                return Ok(());
+            }
             if *dir_id != sync_common::ROOT_DIR_ID {
                 tx.ensure_remote_directory_placeholder(&dir_id.to_string()).map_err(DatabaseError::operation)?;
             }
             tx.set_remote_directory_name(&dir_id.to_string(), name.as_str()).map_err(DatabaseError::operation)?;
         }
         MutationBody::DirectoryParent { dir_id, parent_id } => {
-            if *parent_id != sync_common::ROOT_DIR_ID {
+            if purged.contains(dir_id) {
+                return Ok(());
+            }
+            if *parent_id != sync_common::ROOT_DIR_ID && !purged.contains(parent_id) {
                 tx.ensure_remote_directory_placeholder(&parent_id.to_string()).map_err(DatabaseError::operation)?;
             }
             if *dir_id != sync_common::ROOT_DIR_ID {
@@ -285,6 +305,9 @@ fn project_value(tx: &rusqlite::Transaction<'_>, _changed_at: u64, body: &Mutati
             tx.set_remote_directory_parent(&dir_id.to_string(), &parent_id.to_string()).map_err(DatabaseError::operation)?;
         }
         MutationBody::DirectoryLifecycle { dir_id, value } => {
+            if purged.contains(dir_id) {
+                return Ok(());
+            }
             if *dir_id != sync_common::ROOT_DIR_ID {
                 tx.ensure_remote_directory_placeholder(&dir_id.to_string()).map_err(DatabaseError::operation)?;
             }
@@ -299,6 +322,9 @@ fn project_value(tx: &rusqlite::Transaction<'_>, _changed_at: u64, body: &Mutati
             unreachable!("book scalar registers are projected together")
         }
         MutationBody::Placement { dir_id, content_hash, present, origin_folder_id } => {
+            if purged.contains(dir_id) {
+                return Ok(());
+            }
             if *dir_id != sync_common::ROOT_DIR_ID {
                 tx.ensure_remote_directory_placeholder(&dir_id.to_string()).map_err(DatabaseError::operation)?;
             }
@@ -389,18 +415,23 @@ fn project_remote_metadata(tx: &rusqlite::Transaction<'_>, meta_hash: &sync_comm
     let mut prepared_book = meta.book.clone();
     prepared_book.publishers = prepared_publishers;
     let encoded = sync_common::wire::encode(&prepared_book).map_err(DatabaseError::operation)?;
-    tx.meta_update_book_metadata_state_preserving_ids_update_2(meta_hash.as_str(), &meta.title, meta.subtitle.as_deref(), &encoded).map_err(DatabaseError::operation)?;
+    let search_title = crate::browse::text::search_title(meta_hash.as_str(), Some(&meta.title), meta.subtitle.as_deref());
+    tx.meta_update_book_metadata_state_preserving_ids_update_2(meta_hash.as_str(), &meta.title, meta.subtitle.as_deref(), &encoded, &search_title).map_err(DatabaseError::operation)?;
     crate::contributors::write_credits(tx, meta_hash.as_str(), &stored_contributors)?;
     project_prepared_book(tx, meta_hash.as_str(), &prepared_book, encoded)?;
     Ok(())
 }
 
 pub(crate) fn rebuild_remote_directories(tx: &rusqlite::Transaction<'_>) -> Result<(), DatabaseError> {
+    rebuild_directories(tx, &purged_directory_ids(tx)?)
+}
+
+fn rebuild_directories(tx: &rusqlite::Transaction<'_>, purged: &std::collections::HashSet<sync_common::DirId>) -> Result<(), DatabaseError> {
     // Directory writes invalidate folder membership; the next browse refreshes
     // it once from the final tree, just as for local directory batches.
     let before = tx
-        .prepare_cached("SELECT id,parent_id,name,deleted_at IS NOT NULL,purged_at IS NOT NULL FROM dir")?
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, (r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?, r.get::<_, bool>(4)?))))?
+        .prepare_cached("SELECT id,parent_id,name,deleted_at IS NOT NULL FROM dir")?
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, (r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, bool>(3)?))))?
         .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
     let intents = read_directory_intents(tx)?;
     let projection = library_replica::project_directories(&intents);
@@ -413,16 +444,20 @@ pub(crate) fn rebuild_remote_directories(tx: &rusqlite::Transaction<'_>) -> Resu
         let Ok(id) = sync_common::DirId::parse_str(id) else {
             return false;
         };
+        if purged.contains(&id) {
+            return false;
+        }
         match intents.get(&id) {
             Some(intent) => {
                 let suppressed = projection.suppressed.contains(&id);
                 let parent = if suppressed { sync_common::ROOT_DIR_ID } else { projection.parents[&id] };
                 let name = projection.names.get(&id).unwrap_or(&intent.name);
-                actual == &(parent.to_string(), name.clone(), suppressed, intent.lifecycle == DirectoryLifecycleState::Purged)
+                actual == &(parent.to_string(), name.clone(), suppressed)
             }
             None => actual.2,
         }
     });
+    let unchanged = unchanged && intents.keys().filter(|id| !purged.contains(id)).all(|id| before.contains_key(&id.to_string()));
     if unchanged {
         return Ok(());
     }
@@ -432,14 +467,20 @@ pub(crate) fn rebuild_remote_directories(tx: &rusqlite::Transaction<'_>) -> Resu
     // Detach the old tree before installing new edges. Even hidden rows are
     // traversed by asset invalidation triggers, so intermediate cycles are unsafe.
     tx.execute("UPDATE dir SET parent_id='00000000-0000-0000-0000-000000000000' WHERE id!='00000000-0000-0000-0000-000000000000' AND parent_id!='00000000-0000-0000-0000-000000000000'", [])?;
+    for id in purged {
+        if before.contains_key(&id.to_string()) {
+            crate::purge::remove_directory(tx, &id.to_string())?;
+        }
+    }
     for id in &ids {
+        if purged.contains(id) {
+            continue;
+        }
+        tx.ensure_remote_directory_placeholder(&id.to_string())?;
         let intent = &intents[id];
         let projected_parent = if projection.suppressed.contains(id) { sync_common::ROOT_DIR_ID } else { projection.parents[id] };
         let projected_name = projection.names.get(id).unwrap_or(&intent.name);
         tx.project_remote_directory(&intent.id.to_string(), &projected_parent.to_string(), projected_name.as_str()).map_err(DatabaseError::operation)?;
-        if intent.lifecycle == DirectoryLifecycleState::Purged {
-            tx.mark_remote_directory_purged(&intent.id.to_string()).map_err(DatabaseError::operation)?;
-        }
     }
     for id in projection.ordered_active {
         tx.activate_remote_directory(&id.to_string()).map_err(DatabaseError::operation)?;
@@ -460,6 +501,32 @@ pub(crate) fn rebuild_remote_directories(tx: &rusqlite::Transaction<'_>) -> Resu
         }
     }
     Ok(())
+}
+
+/// Include incomplete directory state and retained parent edges: a lifecycle
+/// purge may arrive before a name, or before descendant lifecycle mutations.
+fn purged_directory_ids(tx: &rusqlite::Transaction<'_>) -> Result<std::collections::HashSet<sync_common::DirId>, DatabaseError> {
+    let mut purged = std::collections::HashSet::new();
+    let mut parents = std::collections::HashMap::new();
+    let mut statement = tx.prepare("SELECT body FROM sync_state_version WHERE state_kind IN ('directory_parent','directory_lifecycle') AND body IS NOT NULL")?;
+    for bytes in statement.query_map([], |row| row.get::<_, Vec<u8>>(0))? {
+        match sync_common::wire::decode::<MutationBody>(&bytes?, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)? {
+            MutationBody::DirectoryParent { dir_id, parent_id } => {
+                parents.insert(dir_id, parent_id);
+            }
+            MutationBody::DirectoryLifecycle { dir_id, value: DirectoryLifecycleState::Purged } if dir_id != sync_common::ROOT_DIR_ID => {
+                purged.insert(dir_id);
+            }
+            _ => {}
+        }
+    }
+    loop {
+        let descendants = parents.iter().filter(|(id, parent)| **id != sync_common::ROOT_DIR_ID && !purged.contains(*id) && purged.contains(*parent)).map(|(id, _)| *id).collect::<Vec<_>>();
+        if descendants.is_empty() {
+            return Ok(purged);
+        }
+        purged.extend(descendants);
+    }
 }
 
 fn read_directory_intents(tx: &rusqlite::Transaction<'_>) -> Result<std::collections::HashMap<sync_common::DirId, DirectoryIntent>, DatabaseError> {

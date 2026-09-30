@@ -35,7 +35,7 @@ async fn independent_repair_republishes_state_missing_from_the_server_inventory(
         let dir_id = fixture_dir_id("inventory/shelf");
         let hash = fixture_content_hash(7);
         conn.seed_shelf_dir(&dir_id);
-        conn.seed_book(&hash, Some("Inventory Book"), 1, "epub");
+        conn.seed_book(&hash, Some("Inventory Book"), 1, book_model::BookFormat::Epub);
         conn.add_book_placement(&dir_id, &hash, "inventory.epub", "fingerprint", true);
         assert!(!conn.sync_inventory_page(None).unwrap().is_empty());
         conn.clear_sync_outbox().unwrap();
@@ -232,7 +232,7 @@ async fn cursor_recovery_republishes_cells_that_still_exist_on_the_restored_serv
     {
         let conn = &manager.database;
         let hash = fixture_content_hash(77);
-        conn.seed_book(&hash, Some("Newer local value"), 10, "epub");
+        conn.seed_book(&hash, Some("Newer local value"), 10, book_model::BookFormat::Epub);
         assert!(!conn.sync_inventory_page(None).unwrap().is_empty());
         conn.clear_sync_outbox().unwrap();
         conn.set_sync_pull_cursor(&cursor(LibraryRevision::new(99).ok())).unwrap();

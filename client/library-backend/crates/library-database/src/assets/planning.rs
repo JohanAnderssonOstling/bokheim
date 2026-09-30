@@ -11,12 +11,6 @@ use crate::*;
 use super::TransfersSql;
 use sync_common::ContentHash;
 
-#[derive(Debug)]
-pub struct AssetPlanningPage {
-    pub rows: Vec<AssetCandidate>,
-    pub through: i64,
-}
-
 #[derive(Clone, Debug)]
 pub struct BookUploadSnapshot {
     pub local_versions: Vec<(String, String, String)>,
@@ -56,43 +50,33 @@ impl Database {
                 }
             }
             RejectedAsset::ThumbnailUpload => {
-                connection.transfer_record_thumbnail_rejection(hash.as_str(), reason)?;
+                connection.transfer_record_thumbnail_rejection(hash.as_str())?;
             }
         }
         Ok(())
     }
 
-    pub fn asset_planning_page(&self, after: i64, through: Option<i64>) -> Result<AssetPlanningPage, DatabaseError> {
-        let transaction = self.connection.unchecked_transaction()?;
-        let mut watermark = 0;
-        transaction.transfer_work_watermark(|row| {
-            watermark = row.get(0)?;
-            Ok(())
-        })?;
-        let through = through.unwrap_or(watermark);
-        let rows = self.candidate_page_of(after, through)?;
-        transaction.commit()?;
-        Ok(AssetPlanningPage { rows, through })
-    }
-
-    pub fn settle_asset_candidates(&self, settled: &[(i64, bool)]) -> Result<(), DatabaseError> {
-        let transaction = self.connection.unchecked_transaction()?;
-        if !settled.is_empty() {
-            transaction.transfer_settle_candidates(&serde_json::to_string(settled).map_err(DatabaseError::operation)?)?;
-        }
-        transaction.commit().map_err(Into::into)
-    }
-
-    /// Durable asset-work entries in one id window, oldest first.
-    pub fn asset_work_page(&self, after: i64, through: i64) -> Vec<(i64, ContentHash)> {
-        let mut page = Vec::new();
-        self.connection
-            .asset_work_page(after, through, |row| {
-                page.push((row.get::<_, i64>(0)?, ContentHash::new(&row.get::<_, String>(1)?)));
+    /// Books whose cover this device should download, limited to `scope`
+    /// when given. A book with no path on this device needs no cover here.
+    pub fn pending_thumbnail_downloads(&self, scope: Option<&[ContentHash]>) -> Result<Vec<ContentHash>, DatabaseError> {
+        let scope = scope.map(serde_json::to_string).transpose().map_err(DatabaseError::operation)?;
+        let mut after = String::new();
+        let mut hashes = Vec::new();
+        loop {
+            let mut page = Vec::new();
+            self.connection.pending_thumbnail_downloads(&after, scope.as_deref(), 512, |row| {
+                page.push(ContentHash::new(&row.get::<_, String>(0)?));
                 Ok(())
-            })
-            .expect("asset_work_page query");
-        page
+            })?;
+            let Some(last) = page.last() else { break };
+            after = last.as_str().to_owned();
+            for hash in page {
+                if !self.book_paths(&hash)?.is_empty() {
+                    hashes.push(hash);
+                }
+            }
+        }
+        Ok(hashes)
     }
 }
 

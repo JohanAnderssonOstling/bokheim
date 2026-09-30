@@ -12,7 +12,7 @@ WITH per_book AS (
                 ON a.book_row_id=b.row_id AND a.provider_id IN (?1,?2,?3,?4)
             LEFT JOIN audible_enrichment_jobs j ON j.content_hash=b.content_hash
             LEFT JOIN pending_audible_enrichment pending ON pending.content_hash=b.content_hash
-            WHERE b.deleted_at IS NULL AND b.hidden_at IS NULL
+            WHERE b.deleted_at IS NULL
             GROUP BY b.row_id
         ) SELECT COUNT(*), COALESCE(SUM(state='enriched'),0), COALESCE(SUM(state='pending'),0),
             COALESCE(SUM(state='no_match'),0), COALESCE(SUM(state='failed'),0)

@@ -44,7 +44,6 @@ pub use book::{AudiobookBook, DocumentBook, ResolvedBook};
 pub use browser_audiobook::{BrowserAudiobook, PlaybackLease};
 pub use commands::LibraryCommand;
 pub use directory::LibraryDirectory;
-pub use handle::{LibraryAuthorsView, LibraryFolderEntry, LibraryFolderView, LibraryHierarchyEntry, LibraryHierarchyView, LibrarySubjectEntry, LibrarySubjectView};
 pub use handle::{LibraryHandle, LibrarySession};
 pub use io::PreparedDirectoryImport;
 pub use io::{BookReader, BoxedBookReader, DirectoryImport, DirectoryImportFile, DirectoryImportReader, DirectoryImportReaderFuture, ImportSource};

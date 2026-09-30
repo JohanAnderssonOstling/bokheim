@@ -56,7 +56,7 @@ serde_bytes = "0.11"
 client-platform-web = { path = "../platforms/web" }
 futures-channel = "0.3"
 getrandom = { version = "0.3", features = ["wasm_js"] }
-reqwest = { version = "0.11", default-features = false, features = ["json", "stream"] }
+reqwest = { workspace = true, default-features = false, features = ["json", "stream"] }
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 wasm-bindgen = "0.2"
@@ -68,7 +68,7 @@ client-platform-native = { path = "../platforms/native", features = ["websocket"
 client-platform-kobo = { path = "../platforms/kobo" }
 book-identity = { path = "../../shared/book-identity", features = ["native-write"] }
 tempfile = "3"
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { workspace = true, default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio = { version = "1.0", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 notify = { version = "6.1", optional = true }
 walkdir = { version = "2.5", optional = true }
@@ -78,7 +78,7 @@ crossbeam-channel = { version = "0.5", optional = true }
 library-database = { path = "crates/library-database", features = ["fixture-sql"] }
 test-support = { path = "../test-support", features = ["pdf-fixtures"] }
 account-contract = { path = "../../shared/account-contract" }
-image = { version = "0.24.9", default-features = false, features = ["jpeg", "png", "webp"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 lopdf = { version = "0.44", default-features = false }
 tempfile = "3"
 zip.workspace = true

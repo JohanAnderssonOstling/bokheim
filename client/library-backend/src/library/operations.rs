@@ -150,7 +150,7 @@ impl LibrarySession {
         };
         report(ImportFileStage::ReadingMetadata);
         let started = web_time::Instant::now();
-        let reuse = import.format != BookFormat::Pdf && self.db.has_import_inspection(&staged.content_hash(), import.format.canonical_extension(), book_inspection::inspection_version(import.format)).map_err(BackendError::operation)?;
+        let reuse = import.format != BookFormat::Pdf && self.db.has_import_inspection(&staged.content_hash(), import.format, book_inspection::inspection_version(import.format)).map_err(BackendError::operation)?;
         let inspection = if reuse {
             None
         } else {

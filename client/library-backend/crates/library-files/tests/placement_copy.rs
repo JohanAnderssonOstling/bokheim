@@ -34,7 +34,7 @@ async fn replay_retires_completed_generations_but_keeps_newer_and_blocked_work()
     assert!(db.local_book_work_hashes().unwrap().is_empty());
 
     // Skipping a leased file is not successful book reconciliation.
-    raw(&db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'book','epub')", [hash.as_str()]).unwrap();
+    raw(&db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'book',1)", [hash.as_str()]).unwrap();
     // Finish the raw fixture's canonical writes before taking worker generations.
     db.update_reading_position(&hash, "epubcfi(/6/2)", None, None).unwrap();
     db.seed_file_work("trash", &hash, "/missing.epub");
@@ -78,7 +78,7 @@ async fn copy_then_remove_source_preserves_destination_bytes() {
     let bytes = b"book bytes for placement copy regression";
     let hash = book_identity::identify(&mut std::io::Cursor::new(bytes)).unwrap();
     std::fs::write(root.path().join("A/book.epub"), bytes).unwrap();
-    raw(&db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'book.epub','epub')", [hash.as_str()]).unwrap();
+    raw(&db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'book.epub',1)", [hash.as_str()]).unwrap();
     db.restore_book_placement(&hash, &source).unwrap();
     db.seed_file_projection(&hash, &source, "/A/book.epub");
     store.placement().reconcile_file_work(&db).await.unwrap();
@@ -111,7 +111,7 @@ async fn cycle_recovery_converges_from_opposite_physical_moves() {
         std::fs::write(root.path().join("B/book.epub"), b"B bytes").unwrap();
         for (dir, digit) in [(a, 'a'), (b, 'b')] {
             let hash = sync_common::ContentHash::new(&digit.to_string().repeat(64));
-            raw(&db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'book','epub')", [hash.as_str()]).unwrap();
+            raw(&db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'book',1)", [hash.as_str()]).unwrap();
             db.add_book_placement(&dir, &hash, "book.epub", "", true);
         }
         // Fail promptly if an intermediate cycle makes a recursive trigger loop.
@@ -273,7 +273,7 @@ async fn trash_after_interrupted_stage_preserves_bytes_in_trash() {
     let bytes = b"book";
     let hash = book_identity::identify(&mut std::io::Cursor::new(bytes)).unwrap();
     std::fs::write(root.path().join("Old/book.epub"), bytes).unwrap();
-    raw(&db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'book','epub')", [hash.as_str()]).unwrap();
+    raw(&db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'book',1)", [hash.as_str()]).unwrap();
     db.add_book_placement(&id, &hash, "book.epub", "", true);
     db.seed_file_projection(&hash, &id, "/Old/book.epub");
     db.move_directory(&id, None, Some("New")).unwrap();
@@ -350,7 +350,7 @@ async fn restoring_parent_recovers_nested_book_bytes_from_trash() {
     let hash = book_identity::identify(&mut std::io::Cursor::new(bytes)).unwrap();
     let path = root.path().join("Parent/Child/book.epub");
     std::fs::write(&path, bytes).unwrap();
-    raw(&db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'book','epub')", [hash.as_str()]).unwrap();
+    raw(&db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'book',1)", [hash.as_str()]).unwrap();
     db.add_book_placement(&child, &hash, "book.epub", "", true);
     db.seed_file_projection(&hash, &child, "/Parent/Child/book.epub");
     db.trash_directory(&parent).unwrap();
@@ -379,7 +379,7 @@ async fn review_copy_collision_keeps_a_maximum_length_filename_materializable() 
     let target_hash = book_identity::identify(&mut std::io::Cursor::new(target_bytes)).unwrap();
     for (dir, directory, hash, bytes) in [(source, "Source", source_hash, source_bytes.as_slice()), (target, "Target", target_hash, target_bytes.as_slice())] {
         std::fs::write(root.path().join(directory).join(&name), bytes).unwrap();
-        raw(&db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'book','epub')", [hash.as_str()]).unwrap();
+        raw(&db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'book',1)", [hash.as_str()]).unwrap();
         db.add_book_placement(&dir, &hash, &name, "", true);
         db.seed_file_projection(&hash, &dir, &format!("/{directory}/{name}"));
     }
@@ -399,7 +399,7 @@ async fn book_trash_preserves_membership_but_moves_bytes_until_restore() {
         let bytes = b"preserved placement";
         let hash = book_identity::identify(&mut std::io::Cursor::new(bytes)).unwrap();
         std::fs::write(root.path().join("book.epub"), bytes).unwrap();
-        db.seed_book(&hash, Some("book"), 1, "epub");
+        db.seed_book(&hash, Some("book"), 1, book_model::BookFormat::Epub);
         db.add_book_placement(&ROOT_DIR_ID, &hash, "book.epub", "", true);
         db.seed_file_projection(&hash, &ROOT_DIR_ID, "/book.epub");
         if remove_last_copy { assert!(db.remove_book_placement(&hash, &ROOT_DIR_ID).unwrap()); }
@@ -415,4 +415,163 @@ async fn book_trash_preserves_membership_but_moves_bytes_until_restore() {
         assert_eq!(std::fs::read(root.path().join("book.epub")).unwrap(), bytes);
         assert!(db.native_file_work().unwrap().is_empty());
     }
+}
+
+#[tokio::test]
+async fn stale_trash_work_preserves_a_different_book_reusing_its_path() {
+    for registered in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("library.db");
+        let db = Database::open(&path).unwrap();
+        db.initialize_library().unwrap();
+        let store = AssetStore::open(root.path().to_str().unwrap()).unwrap();
+        let old = book_identity::identify(&mut std::io::Cursor::new(b"old book")).unwrap();
+        let bytes = b"new book occupying the old path";
+        let new = book_identity::identify(&mut std::io::Cursor::new(bytes)).unwrap();
+        db.seed_book(&old, Some("old"), 1, book_model::BookFormat::Epub);
+        db.add_book_placement(&ROOT_DIR_ID, &old, "book.epub", "", true);
+        db.seed_file_projection(&old, &ROOT_DIR_ID, "/book.epub");
+        db.trash_book(&old).unwrap();
+        if registered { db.purge_book(&old).unwrap(); } // Frees the name; delayed work survives.
+        std::fs::write(root.path().join("book.epub"), bytes).unwrap();
+        if registered {
+            db.seed_book(&new, Some("new"), 1, book_model::BookFormat::Epub);
+            db.add_book_placement(&ROOT_DIR_ID, &new, "book.epub", "", true);
+            db.seed_file_projection(&new, &ROOT_DIR_ID, "/book.epub");
+        }
+        let jobs = db.native_file_work().unwrap();
+        assert!(jobs.iter().any(|job| job.operation == "trash" && job.content_hash == old));
+        // Confirmed identity mismatch retires old work without touching the
+        // replacement, even when it has not yet been registered by the scanner.
+        store.placement().reconcile_file_work(&db).await.unwrap();
+        assert!(db.native_file_work().unwrap().is_empty());
+        assert_eq!(raw(&db).query_row("SELECT count(*) FROM local_file_projection WHERE content_hash=?1", [old.as_str()], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        if registered {
+            assert_eq!(raw(&db).query_row("SELECT relative_path FROM local_file_projection WHERE content_hash=?1", [new.as_str()], |r| r.get::<_, String>(0)).unwrap(), "/book.epub");
+        }
+        assert_eq!(std::fs::read(root.path().join("book.epub")).unwrap(), bytes);
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        db.initialize_library().unwrap();
+        store.placement().reconcile_file_work(&db).await.unwrap();
+        assert_eq!(std::fs::read(root.path().join("book.epub")).unwrap(), bytes);
+        assert!(db.native_file_work().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn trash_and_restore_replay_after_file_publish_without_database_ack() {
+    for restoring in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("library.db");
+        let db = Database::open(&path).unwrap();
+        db.initialize_library().unwrap();
+        let store = AssetStore::open(root.path().to_str().unwrap()).unwrap();
+        let bytes = b"bytes survive a crash before acknowledgement";
+        let hash = book_identity::identify(&mut std::io::Cursor::new(bytes)).unwrap();
+        std::fs::write(root.path().join("book.epub"), bytes).unwrap();
+        db.seed_book(&hash, Some("book"), 1, book_model::BookFormat::Epub);
+        db.add_book_placement(&ROOT_DIR_ID, &hash, "book.epub", "", true);
+        db.seed_file_projection(&hash, &ROOT_DIR_ID, "/book.epub");
+        db.trash_book(&hash).unwrap();
+        if restoring {
+            store.run_file_jobs(&db).await.unwrap();
+            db.restore_book_commit(&hash, &[(ROOT_DIR_ID, ROOT_DIR_ID)]).unwrap();
+        }
+        // Run the real filesystem publication, then abort only the SQLite
+        // acknowledgement transaction. This leaves the same durable crash window.
+        raw(&db).execute_batch("CREATE TRIGGER fail_file_ack BEFORE DELETE ON local_file_work BEGIN SELECT RAISE(ABORT,'injected crash before acknowledgement'); END;").unwrap();
+        let error = store.placement().reconcile_file_work(&db).await.unwrap_err();
+        assert!(error.to_string().contains("injected crash"), "{error}");
+        assert_eq!(root.path().join("book.epub").exists(), restoring, "filesystem publication must precede the injected failure");
+        assert!(!db.native_file_work().unwrap().is_empty());
+        drop(db);
+        drop(store);
+        let db = Database::open(&path).unwrap();
+        db.initialize_library().unwrap();
+        raw(&db).execute_batch("DROP TRIGGER fail_file_ack;").unwrap();
+        let store = AssetStore::open(root.path().to_str().unwrap()).unwrap();
+        store.run_file_jobs(&db).await.unwrap();
+        store.run_file_jobs(&db).await.unwrap();
+        assert!(db.native_file_work().unwrap().is_empty());
+        assert_eq!(root.path().join("book.epub").exists(), restoring);
+        if !restoring {
+            db.restore_book_commit(&hash, &[(ROOT_DIR_ID, ROOT_DIR_ID)]).unwrap();
+            store.run_file_jobs(&db).await.unwrap();
+        }
+        assert_eq!(std::fs::read(root.path().join("book.epub")).unwrap(), bytes);
+        assert!(db.native_file_work().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn fallback_restore_recovers_bytes_without_reviving_removed_folders() {
+    for occupied_root_name in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let db = Database::open(root.path().join("library.db")).unwrap();
+        db.initialize_library().unwrap();
+        let store = AssetStore::open(root.path().to_str().unwrap()).unwrap();
+        let folder = db.create_directory(&ROOT_DIR_ID, &"Old".into()).unwrap().id;
+        store.run_directory_work(&db).await.unwrap();
+        let bytes = b"fallback restore original bytes";
+        let hash = book_identity::identify(&mut std::io::Cursor::new(bytes)).unwrap();
+        std::fs::write(root.path().join("Old/book.epub"), bytes).unwrap();
+        db.seed_book(&hash, Some("book"), 1, book_model::BookFormat::Epub);
+        db.add_book_placement(&folder, &hash, "book.epub", "", true);
+        db.seed_file_projection(&hash, &folder, "/Old/book.epub");
+        db.trash_book(&hash).unwrap();
+        store.run_file_jobs(&db).await.unwrap();
+        // Model a placement removal arriving after whole-book Trash.
+        raw(&db).execute("UPDATE book_dir SET deleted_at=1 WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1)", [hash.as_str()]).unwrap();
+        let other_bytes = b"different root book";
+        if occupied_root_name {
+            let other = book_identity::identify(&mut std::io::Cursor::new(other_bytes)).unwrap();
+            std::fs::write(root.path().join("book.epub"), other_bytes).unwrap();
+            db.seed_book(&other, Some("other"), 1, book_model::BookFormat::Epub);
+            db.add_book_placement(&ROOT_DIR_ID, &other, "book.epub", "", true);
+            db.seed_file_projection(&other, &ROOT_DIR_ID, "/book.epub");
+        }
+        assert_eq!(db.restore_book_plan(&hash).unwrap()[0].original, ROOT_DIR_ID);
+        db.restore_book_commit(&hash, &[(ROOT_DIR_ID, ROOT_DIR_ID)]).unwrap();
+        store.run_file_jobs(&db).await.unwrap();
+        store.run_file_jobs(&db).await.unwrap();
+        let name: String = raw(&db).query_row("SELECT file_name FROM book_dir WHERE dir_id=?1 AND book_row_id=(SELECT row_id FROM book WHERE content_hash=?2)", [ROOT_DIR_ID.to_string(), hash.to_string()], |r| r.get(0)).unwrap();
+        assert_eq!(std::fs::read(root.path().join(name)).unwrap(), bytes);
+        assert!(!root.path().join("Old/book.epub").exists());
+        if occupied_root_name { assert_eq!(std::fs::read(root.path().join("book.epub")).unwrap(), other_bytes); }
+        assert!(db.native_file_work().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn trash_io_failure_retains_work_until_storage_is_repaired() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Database::open(root.path().join("library.db")).unwrap();
+    db.initialize_library().unwrap();
+    let store = AssetStore::open(root.path().to_str().unwrap()).unwrap();
+    let bytes = b"expected book must remain retryable";
+    let hash = book_identity::identify(&mut std::io::Cursor::new(bytes)).unwrap();
+    std::fs::write(root.path().join("book.epub"), bytes).unwrap();
+    db.seed_book(&hash, Some("book"), 1, book_model::BookFormat::Epub);
+    db.add_book_placement(&ROOT_DIR_ID, &hash, "book.epub", "", true);
+    db.seed_file_projection(&hash, &ROOT_DIR_ID, "/book.epub");
+    db.trash_book(&hash).unwrap();
+    // A deterministic I/O failure even under root: a file blocks creation of
+    // the trash directory. This must not be classified as a different book.
+    let obstruction = root.path().join(".bokheim/trash");
+    std::fs::write(&obstruction, b"blocked storage").unwrap();
+    let before = db.native_file_work().unwrap();
+    for _ in 0..2 {
+        assert!(store.placement().reconcile_file_work(&db).await.is_err());
+        assert_eq!(db.native_file_work().unwrap().len(), before.len());
+        assert_eq!(std::fs::read(root.path().join("book.epub")).unwrap(), bytes);
+        assert_eq!(raw(&db).query_row("SELECT count(*) FROM local_file_projection WHERE content_hash=?1", [hash.as_str()], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
+    std::fs::remove_file(obstruction).unwrap();
+    store.run_file_jobs(&db).await.unwrap();
+    assert!(db.native_file_work().unwrap().is_empty());
+    assert!(!root.path().join("book.epub").exists());
+    db.restore_book_commit(&hash, &[(ROOT_DIR_ID, ROOT_DIR_ID)]).unwrap();
+    store.run_file_jobs(&db).await.unwrap();
+    assert_eq!(std::fs::read(root.path().join("book.epub")).unwrap(), bytes);
 }

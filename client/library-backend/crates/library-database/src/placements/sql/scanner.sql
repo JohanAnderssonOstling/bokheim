@@ -6,18 +6,12 @@ FROM sqlite_sequence
 WHERE name IN ('local_directory_work', 'local_book_work', 'local_file_work');
 
 -- name: scanner_pending_directories?
--- param: root_id: &str
-WITH RECURSIVE pending(id) AS (
-    SELECT dir_id FROM local_directory_work
-    UNION
-    SELECT d.id FROM dir d JOIN pending p ON d.parent_id = p.id WHERE d.id != d.parent_id
-)
-SELECT pending.id,
-       CASE WHEN pending.id = :root_id THEN '' ELSE paths.path END,
-       projection.relative_path
-FROM pending
-LEFT JOIN dir_paths paths ON paths.id = pending.id
-LEFT JOIN local_directory_projection projection ON projection.dir_id = pending.id;
+-- param: directories: &str
+-- Folders with queued work and everything below them, with where each was
+-- last materialized; Rust adds each folder's live path.
+SELECT pending.value, projection.relative_path
+FROM json_each(:directories) pending
+LEFT JOIN local_directory_projection projection ON projection.dir_id = pending.value;
 
 -- name: scanner_pending_files?
 WITH pending(content_hash) AS (
@@ -29,13 +23,19 @@ SELECT p.relative_path
 FROM local_file_projection p
 JOIN pending USING(content_hash)
 UNION ALL
-SELECT relative_path FROM local_file_work
-UNION ALL
-SELECT '/' || CASE WHEN dp.path = '' THEN bd.file_name ELSE dp.path || '/' || bd.file_name END
+SELECT relative_path FROM local_file_work;
+
+-- name: scanner_pending_placements?
+-- Live placements of books with queued work; Rust adds each one's path.
+WITH pending(content_hash) AS (
+    SELECT content_hash FROM local_book_work
+    UNION
+    SELECT content_hash FROM local_file_work
+)
+SELECT bd.dir_id, bd.file_name
 FROM pending
 JOIN book b USING(content_hash)
 JOIN book_dir bd ON bd.book_row_id = b.row_id
-JOIN dir_paths dp ON dp.id = bd.dir_id
 WHERE b.deleted_at IS NULL AND bd.deleted_at IS NULL;
 
 -- name: scanner_audible_current?
@@ -57,7 +57,7 @@ LEFT JOIN local_import_inspection i ON i.content_hash=b.content_hash AND i.forma
 WHERE bd.deleted_at IS NULL AND b.deleted_at IS NULL AND bd.local_hash!='';
 
 -- name: scanner_known_directories?
-SELECT d.id,d.parent_id,d.name,d.deleted_at IS NULL,paths.path FROM dir d LEFT JOIN dir_paths paths ON paths.id=d.id;
+SELECT id,parent_id,name,deleted_at IS NULL FROM dir;
 
 -- name: scanner_tombstoned_files?
 SELECT removed.dir_id,removed.file_name FROM book_dir removed JOIN book b ON b.row_id=removed.book_row_id
@@ -75,7 +75,7 @@ ON CONFLICT(id) DO UPDATE SET parent_id=excluded.parent_id,name=excluded.name,in
 -- name: scanner_insert_book!
 -- param: content_hash: &str
 -- param: created_at: i64
--- param: format: &str
+-- param: format: i64
 INSERT INTO book(content_hash,added_at,format) VALUES(:content_hash,:created_at,:format) ON CONFLICT(content_hash) DO NOTHING;
 
 -- name: scanner_insert_book_dir!
@@ -94,18 +94,6 @@ ON CONFLICT(dir_id,book_row_id) DO UPDATE SET file_name=excluded.file_name,local
 -- param: file_name: &str
 UPDATE book_dir SET deleted_at=unixepoch() WHERE dir_id=:dir_id AND book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash) AND file_name!=:file_name AND deleted_at IS NULL;
 
--- name: scanner_observe_local_version!
--- param: content_hash: &str
--- param: checksum: &str
--- param: size_bytes: i64
-INSERT INTO local_book_versions(content_hash,checksum,size_bytes,origin) VALUES(:content_hash,:checksum,:size_bytes,'local') ON CONFLICT(content_hash,checksum) DO NOTHING;
-
--- name: scanner_remember_placement!
--- param: dir_id: &str
--- param: content_hash: &str
--- param: checksum: &str
-INSERT INTO local_book_current(dir_id,content_hash,checksum,origin) VALUES(:dir_id,:content_hash,:checksum,'local') ON CONFLICT(dir_id,content_hash) DO UPDATE SET id=excluded.id,checksum=excluded.checksum,origin=excluded.origin;
-
 -- name: scanner_mark_seen!
 -- param: scan_id: i64
 -- param: placements: &str
@@ -113,10 +101,8 @@ UPDATE book_dir SET last_scan=:scan_id WHERE (dir_id,file_name,local_hash) IN (S
 
 -- name: scanner_placements?
 SELECT b.content_hash, bd.dir_id, bd.file_name,
-       CASE WHEN paths.path='' THEN bd.file_name ELSE paths.path || '/' || bd.file_name END,
        bd.local_hash, bd.is_downloaded, bd.last_scan, projection.relative_path
 FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id
-JOIN dir_paths paths ON paths.id=bd.dir_id
 LEFT JOIN local_file_projection projection ON projection.content_hash=b.content_hash AND projection.dir_id=bd.dir_id
 WHERE bd.deleted_at IS NULL AND b.deleted_at IS NULL
 ORDER BY bd.dir_id,b.content_hash;
@@ -142,4 +128,6 @@ DELETE FROM local_file_projection WHERE dir_id=:dir_id AND content_hash=:content
 -- name: scanner_forget_current_version!
 -- param: dir_id: &str
 -- param: content_hash: &str
-DELETE FROM local_book_current WHERE dir_id=:dir_id AND content_hash=:content_hash;
+UPDATE book_dir SET checksum = NULL, size_bytes = NULL, checksum_seq = NULL
+WHERE dir_id = :dir_id AND book_row_id = (SELECT row_id FROM book WHERE content_hash = :content_hash);
+

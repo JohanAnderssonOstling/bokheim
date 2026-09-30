@@ -486,7 +486,7 @@ fn book_trash_preserves_placement_versions_and_restore_moves_only_selected_origi
 #[test]
 fn scanner_excludes_retained_placements_of_trashed_books() {
     let replica = db();
-    replica.seed_book(&hash(), Some("book"), 1, "epub");
+    replica.seed_book(&hash(), Some("book"), 1, book_model::BookFormat::Epub);
     replica.add_book_placement(&ROOT_DIR_ID, &hash(), "book.epub", "123", true);
     assert_eq!(replica.scan_snapshot().unwrap().placements.len(), 1);
     assert_eq!(replica.transfer_snapshot(&[hash()]).unwrap().asset_for(&hash()).unwrap().upload.local_versions.len(), 1);
@@ -660,4 +660,155 @@ fn ordinary_restore_preserves_retained_local_file_metadata() {
     replica.restore_book_commit(&hash(), &[(source, source)]).unwrap();
     let retained: (String, i64) = replica.connection.query_row("SELECT local_hash,last_scan FROM book_dir", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
     assert_eq!(retained, ("retained-checksum".into(), 123));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn trash_book_with_suppressed_membership_cleans_only_materialized_paths() {
+    for remembered in [false, true] {
+        let replica = db();
+        pull(&replica, &membership_seed(true));
+        let hidden = uuid::Uuid::from_u128(501);
+        if remembered {
+            replica.connection.execute("INSERT INTO local_file_projection(content_hash,dir_id,relative_path) VALUES(?1,?2,'Before move/book.epub')", rusqlite::params![hash().as_str(), hidden.to_string()]).unwrap();
+        }
+        // Another device deletes the folder while our book remains present.
+        // Its retained membership is valid even though it has no visible path.
+        pull(&replica, &[change(MutationBody::DirectoryLifecycle { dir_id: hidden, value: DirectoryLifecycleState::Deleted }, 200, 9000)]);
+        let before = super::apply::registers::canonical_body(&replica.connection, "placement", hash().as_str(), &hidden.to_string()).unwrap();
+        replica.trash_book(&hash()).unwrap();
+        assert_eq!(super::apply::registers::canonical_body(&replica.connection, "placement", hash().as_str(), &hidden.to_string()).unwrap(), before);
+        assert!(replica.local_book_paths().unwrap().is_empty());
+        let paths: Vec<String> = replica.connection.prepare("SELECT relative_path FROM local_file_work WHERE operation='trash' ORDER BY relative_path").unwrap()
+            .query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+        assert_eq!(paths.len(), if remembered { 2 } else { 1 });
+        assert_eq!(paths.contains(&"Before move/book.epub".into()), remembered);
+        assert_eq!(replica.restore_book_plan(&hash()).unwrap().len(), 2);
+    }
+}
+
+#[test]
+fn concurrent_removal_of_all_placements_restores_with_explicit_root_intent() {
+    let a = db();
+    let b = db();
+    let c = db();
+    for replica in [&a, &b, &c] { pull(replica, &membership_seed(true)); take_publications(replica); }
+    a.trash_book(&hash()).unwrap();
+    // Each offline device believes the other copy will survive its removal.
+    assert!(!b.remove_book_placement(&hash(), &uuid::Uuid::from_u128(501)).unwrap());
+    assert!(!c.remove_book_placement(&hash(), &uuid::Uuid::from_u128(502)).unwrap());
+    pull(&a, &take_publications(&b));
+    pull(&a, &take_publications(&c));
+    let before = membership_snapshot(&a);
+    let plan = a.restore_book_plan(&hash()).unwrap();
+    assert_eq!(plan.iter().map(|p| p.original).collect::<Vec<_>>(), vec![ROOT_DIR_ID]);
+    assert_eq!(membership_snapshot(&a), before, "planning must not create membership");
+    a.restore_book_commit(&hash(), &[(ROOT_DIR_ID, ROOT_DIR_ID)]).unwrap();
+    assert_eq!(a.local_book_paths().unwrap().len(), 1);
+    let published = a.sync_publishable_mutations().unwrap();
+    assert!(published.iter().any(|m| matches!(m.body, MutationBody::Placement { dir_id, present: true, .. } if dir_id == ROOT_DIR_ID) && m.origin.is_none()));
+    for dir in [501, 502] {
+        assert!(a.connection.query_row("SELECT deleted_at IS NOT NULL FROM book_dir WHERE dir_id=?1", [uuid::Uuid::from_u128(dir).to_string()], |r| r.get::<_, bool>(0)).unwrap());
+    }
+}
+
+#[test]
+fn stale_restore_plan_after_purge_readd_respects_current_state_and_hash_identity() {
+    for new_book_trashed in [false, true] {
+        for same_placements in [false, true] {
+            let replica = db();
+            pull(&replica, &membership_seed(false));
+            replica.trash_book(&hash()).unwrap();
+            let choices = replica.restore_book_plan(&hash()).unwrap().iter().map(|p| (p.original, ROOT_DIR_ID)).collect::<Vec<_>>();
+            replica.purge_book(&hash()).unwrap();
+            replica.seed_book(&hash(), Some("Readded"), 1, book_model::BookFormat::Epub);
+            let destination = uuid::Uuid::from_u128(if same_placements { 501 } else { 502 });
+            replica.restore_book_placement(&hash(), &destination).unwrap();
+            if new_book_trashed { replica.trash_book(&hash()).unwrap(); }
+            let before = membership_snapshot(&replica);
+            let result = replica.restore_book_commit(&hash(), &choices);
+            if new_book_trashed && same_placements {
+                // Identity is the content hash; old intent may apply to a readd.
+                result.unwrap();
+                assert_eq!(replica.local_book_paths().unwrap().len(), 1);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(membership_snapshot(&replica), before, "stale restore must fail atomically");
+            }
+        }
+    }
+}
+
+#[test]
+fn purging_a_folder_deletes_its_placement_and_preserves_other_live_copies() {
+    let replica = db();
+    let fresh = db();
+    let seed = membership_seed(true);
+    let folder = uuid::Uuid::from_u128(501);
+    let deletion = change(MutationBody::DirectoryLifecycle { dir_id: folder, value: DirectoryLifecycleState::Deleted }, 200, 9001);
+    for device in [&replica, &fresh] { pull(device, &seed); pull(device, &[deletion.clone()]); take_publications(device); }
+    let before = super::apply::registers::canonical_body(&replica.connection, "placement", hash().as_str(), &folder.to_string()).unwrap();
+    replica.purge_directory(&folder).unwrap();
+    assert_eq!(replica.book_count(&hash()), 1);
+    assert_eq!(replica.local_book_paths().unwrap().len(), 1);
+    assert_eq!(super::apply::registers::canonical_body(&replica.connection, "placement", hash().as_str(), &folder.to_string()).unwrap(), before);
+    let events = take_publications(&replica);
+    pull(&fresh, &events);
+    pull(&fresh, &events);
+    assert_eq!(membership_snapshot(&fresh), membership_snapshot(&replica));
+    replica.trash_book(&hash()).unwrap();
+    let choices = replica.restore_book_plan(&hash()).unwrap().iter().map(|p| (p.original, if p.original == folder { ROOT_DIR_ID } else { p.original })).collect::<Vec<_>>();
+    replica.restore_book_commit(&hash(), &choices).unwrap();
+    assert_eq!(replica.local_book_paths().unwrap().len(), 1);
+    assert_eq!(replica.connection.query_row("SELECT count(*) FROM book_dir WHERE dir_id=?1", [folder.to_string()], |row| row.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[test]
+fn fallback_restore_converges_with_concurrent_restores_and_removals() {
+    for concurrent_removal in [false, true] {
+        let mut seed = membership_seed(true);
+        seed.push(change(MutationBody::BookLifecycle { content_hash: hash(), value: BookLifecycleState::Deleted { origin_folder_id: None } }, 200, 10000));
+        for id in [501, 502] {
+            seed.push(change(MutationBody::Placement { dir_id: uuid::Uuid::from_u128(id), content_hash: hash(), present: false, origin_folder_id: None }, 200, 10000 + id as u64));
+        }
+        let a = db();
+        let b = db();
+        for replica in [&a, &b] { pull(replica, &seed); take_publications(replica); }
+        a.restore_book_commit(&hash(), &[(ROOT_DIR_ID, ROOT_DIR_ID)]).unwrap();
+        b.restore_book_commit(&hash(), &[(ROOT_DIR_ID, ROOT_DIR_ID)]).unwrap();
+        if concurrent_removal {
+            b.transfer_book_placement(&hash(), &ROOT_DIR_ID, &uuid::Uuid::from_u128(502), true).unwrap();
+        }
+        let left = take_publications(&a);
+        let right = take_publications(&b);
+        pull(&a, &right);
+        pull(&b, &left);
+        assert_eq!(membership_snapshot(&a), membership_snapshot(&b));
+        for groups in [[&left, &right], [&right, &left]] {
+            let fresh = db();
+            pull(&fresh, &seed);
+            for group in groups { for event in group { pull(&fresh, std::slice::from_ref(event)); } }
+            assert_eq!(membership_snapshot(&fresh), membership_snapshot(&a));
+            for group in groups { pull(&fresh, group); }
+            assert_eq!(membership_snapshot(&fresh), membership_snapshot(&a));
+        }
+    }
+}
+
+#[test]
+fn fallback_restore_revalidates_membership_and_handles_a_book_with_no_placement_rows() {
+    let replica = db();
+    pull(&replica, &[present(100, 1)]);
+    replica.trash_book(&hash()).unwrap();
+    assert_eq!(replica.restore_book_plan(&hash()).unwrap()[0].original, ROOT_DIR_ID);
+    pull(&replica, &membership_seed(false)[..6]); // Known folders, no book edits.
+    pull(&replica, &[change(MutationBody::Placement { dir_id: uuid::Uuid::from_u128(501), content_hash: hash(), present: true, origin_folder_id: None }, 300, 30000)]);
+    let before = membership_snapshot(&replica);
+    assert!(replica.restore_book_commit(&hash(), &[(ROOT_DIR_ID, ROOT_DIR_ID)]).is_err());
+    assert_eq!(membership_snapshot(&replica), before);
+    let empty = db();
+    pull(&empty, &[present(100, 1)]);
+    empty.trash_book(&hash()).unwrap();
+    empty.restore_book_commit(&hash(), &[(ROOT_DIR_ID, ROOT_DIR_ID)]).unwrap();
+    assert_eq!(empty.local_book_paths().unwrap().len(), 1);
 }

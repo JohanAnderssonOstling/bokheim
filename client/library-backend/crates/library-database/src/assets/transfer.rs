@@ -97,11 +97,15 @@ impl Database {
         let mut assets: HashMap<ContentHash, AssetTransferState> =
             hashes.iter().map(|hash| (hash.clone(), AssetTransferState { upload: BookUploadSnapshot { local_versions: Vec::new(), intent: None }, upload_paths: Vec::new(), thumbnail_allowed: false })).collect();
 
+        // Each live placement, with the local fingerprint an upload records.
+        let mut placements = Vec::new();
         transaction.transfer_snapshot_versions(&requested, |row| {
             let hash = ContentHash::new(&row.get::<_, String>(0)?);
+            let (dir_id, file_name): (String, String) = (row.get(1)?, row.get(2)?);
             if let Some(asset) = assets.get_mut(&hash) {
-                asset.upload.local_versions.push((row.get(1)?, row.get(2)?, row.get(3)?));
+                asset.upload.local_versions.push((dir_id.clone(), file_name.clone(), row.get(3)?));
             }
+            placements.push((hash, dir_id, file_name));
             Ok(())
         })?;
         transaction.transfer_snapshot_intents(&requested, |row| {
@@ -111,7 +115,8 @@ impl Database {
             }
             Ok(())
         })?;
-        transaction.transfer_snapshot_paths(&requested, |row| {
+        // Materialized paths first, then the live placements read below.
+        transaction.transfer_snapshot_projection_paths(&requested, |row| {
             let hash = ContentHash::new(&row.get::<_, String>(0)?);
             if let Some(asset) = assets.get_mut(&hash) {
                 asset.upload_paths.push(row.get(1)?);
@@ -126,12 +131,15 @@ impl Database {
             Ok(())
         })?;
 
+        let mut folders = crate::placements::FolderPaths::new(&transaction);
         let mut placement_paths: HashMap<ContentHash, Vec<String>> = HashMap::new();
-        transaction.transfer_snapshot_placements(&requested, |row| {
-            let hash = ContentHash::new(&row.get::<_, String>(0)?);
-            placement_paths.entry(hash).or_default().push(row.get(1)?);
-            Ok(())
-        })?;
+        for (hash, dir_id, file_name) in placements {
+            let Some(path) = folders.placement(&dir_id, &file_name)? else { continue };
+            if let Some(asset) = assets.get_mut(&hash) {
+                asset.upload_paths.push(path.clone());
+            }
+            placement_paths.entry(hash).or_default().push(path);
+        }
         transaction.commit()?;
         Ok(DatabaseTransferSnapshot { assets, placement_paths })
     }
@@ -144,13 +152,25 @@ impl Database {
         let mut snapshot = TransferSnapshot { assets: database.assets, placements: Vec::new() };
         for hash in hashes {
             for rel_path in database.placement_paths.get(hash).into_iter().flatten() {
-                let placement = BookPlacement::new(hash.clone(), RelativeBookPath::parse(&rel_path).map_err(|error| DatabaseError::message(format!("stored placement path is not readable: {error:?}")))?);
+                RelativeBookPath::parse(rel_path).map_err(|error| DatabaseError::message(format!("stored placement path is not readable: {error:?}")))?;
+                // The path still holds this book, or the placement is stale.
+                let entry = crate::placements::book_at_path(&self.connection, rel_path)?.filter(|(current, _, _)| current == hash);
+                let book = match &entry {
+                    Some((_, directory, name)) => Some(NativeBookSnapshot {
+                        content_hash: *hash,
+                        directory: *directory,
+                        name: name.clone(),
+                        relative_path: rel_path.clone(),
+                        occupied_names: Self::native_occupied_names(&self.connection, directory)?,
+                    }),
+                    None => None,
+                };
                 snapshot.placements.push(PlacementTransferEntry {
                     content_hash: hash.clone(),
                     rel_path: rel_path.clone(),
-                    download_directory: self.native_download_directory(&placement, hash)?,
-                    placement_current: self.book_placement_is_current(&placement, hash)?,
-                    book: self.native_book_snapshot(&placement, hash)?,
+                    download_directory: entry.as_ref().map(|(_, directory, _)| *directory),
+                    placement_current: entry.is_some(),
+                    book,
                 });
             }
         }

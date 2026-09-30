@@ -4,7 +4,7 @@
 
 -- name: activate_remote_directory!
 -- param: dir_id: &str
-UPDATE dir SET deleted_at=NULL, purged_at=NULL WHERE id=:dir_id;
+UPDATE dir SET deleted_at=NULL WHERE id=:dir_id;
 
 -- name: apply_remote_book_dir_added!
 -- param: dir_id: &str
@@ -54,15 +54,11 @@ SELECT id,parent_id,name,deleted_at IS NOT NULL FROM dir;
 
 -- name: ensure_remote_directory_placeholder!
 -- param: dir_id: &str
-INSERT OR IGNORE INTO dir(id,parent_id,name,intent_parent_id,intent_name,intent_lifecycle,deleted_at,purged_at)
-VALUES(:dir_id,'00000000-0000-0000-0000-000000000000','Pending','00000000-0000-0000-0000-000000000000','Pending',1,1,NULL);
+INSERT OR IGNORE INTO dir(id,parent_id,name,intent_parent_id,intent_name,intent_lifecycle,deleted_at)
+VALUES(:dir_id,'00000000-0000-0000-0000-000000000000','Pending','00000000-0000-0000-0000-000000000000','Pending',1,1);
 
 -- name: hide_remote_directories!
-UPDATE dir SET deleted_at=1, purged_at=NULL WHERE id != '00000000-0000-0000-0000-000000000000';
-
--- name: mark_remote_directory_purged!
--- param: dir_id: &str
-UPDATE dir SET deleted_at=1, purged_at=1 WHERE id=:dir_id;
+UPDATE dir SET deleted_at=1 WHERE id != '00000000-0000-0000-0000-000000000000';
 
 -- name: insert_book_identifier!
 -- param: book_row_id: i64
@@ -76,31 +72,16 @@ VALUES(:book_row_id,:position,:scheme,:value,:canonical_value,:scope);
 
 -- name: insert_book_language!
 -- param: book_row_id: i64
--- param: position: i64
--- param: language_tag: &str
-INSERT OR IGNORE INTO book_language(book_row_id,position,language_tag) VALUES(:book_row_id,:position,:language_tag);
-
--- name: insert_book_value!
--- param: book_row_id: i64
--- param: kind: &str
--- param: position: i64
--- param: value: &str
--- param: qualifier: Option<&str>
--- param: secondary_value: Option<&str>
-INSERT INTO book_value(book_row_id,kind,position,value,qualifier,secondary_value)
-VALUES(:book_row_id,:kind,:position,:value,:qualifier,:secondary_value);
-
--- name: meta_replace_prepared_projections_delete!
--- param: book_row_id: i64
--- param: kind: &str
-DELETE FROM book_value WHERE book_row_id=:book_row_id AND kind=:kind;
+-- param: language: &str
+INSERT OR IGNORE INTO book_language(book_row_id,language) VALUES(:book_row_id,:language);
 
 -- name: meta_update_book_metadata_state_preserving_ids_update_2!
 -- param: content_hash: &str
 -- param: title: &str
 -- param: subtitle: Option<&str>
 -- param: book_metadata: &[u8]
-UPDATE book SET title=:title,subtitle=:subtitle,book_metadata=:book_metadata
+-- param: search_title: &str
+UPDATE book SET title=:title,subtitle=:subtitle,book_metadata=:book_metadata,search_title=:search_title
         WHERE content_hash=:content_hash AND (title IS NOT :title OR subtitle IS NOT :subtitle OR book_metadata IS NOT :book_metadata);
 
 -- name: pdf_reader_metadata_upsert!
@@ -162,9 +143,3 @@ INSERT INTO sync_metadata(singleton, change_origin) VALUES (1, 'remote') ON CONF
 -- name: restore_origin!
 -- param: origin: &str
 INSERT INTO sync_metadata(singleton, change_origin) VALUES (1, :origin) ON CONFLICT(singleton) DO UPDATE SET change_origin = excluded.change_origin;
-
--- name: read_position_update!
--- param: location: &str
--- param: progress: f32
--- param: content_hash: &str
-UPDATE book SET read_pos = :location, read_progress = COALESCE(:progress, read_progress) WHERE content_hash = :content_hash;

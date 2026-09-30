@@ -40,38 +40,33 @@ INSERT INTO sync_metadata(singleton, cloud_storage_enabled) VALUES (1, :enabled)
 ON CONFLICT(singleton) DO UPDATE SET cloud_storage_enabled = excluded.cloud_storage_enabled WHERE cloud_storage_enabled IS NOT excluded.cloud_storage_enabled;
 
 -- name: owner_reset_remote_books!
-DELETE FROM remote_asset WHERE kind = 'book';
+UPDATE book_transfer SET server_has_book = 0 WHERE server_has_book;
 
 -- name: owner_reset_rejected_book_uploads!
-DELETE FROM rejected_asset_upload WHERE kind = 'book';
+UPDATE book_transfer SET upload_rejected_reason = NULL, upload_rejected_at = NULL WHERE upload_rejected_at IS NOT NULL;
 
--- name: owner_requeue_cloud_storage!
-WITH RECURSIVE live_dirs(id) AS (
-    SELECT id FROM dir WHERE id = '00000000-0000-0000-0000-000000000000' AND deleted_at IS NULL
-    UNION ALL
-    SELECT d.id FROM dir d JOIN live_dirs p ON d.parent_id = p.id AND d.id != p.id WHERE d.deleted_at IS NULL
-), eligible AS (
-    SELECT current.content_hash, current.checksum, version.size_bytes,
-        row_number() OVER(PARTITION BY current.content_hash ORDER BY current.id DESC) AS priority
-    FROM local_book_current current
-    JOIN local_book_versions version USING(content_hash, checksum)
-    JOIN book b ON b.content_hash = current.content_hash AND b.deleted_at IS NULL
-    JOIN book_dir bd ON bd.book_row_id = b.row_id AND bd.dir_id = current.dir_id AND bd.deleted_at IS NULL
-    JOIN live_dirs d ON d.id = current.dir_id
-    WHERE version.size_bytes > 0
-)
-INSERT INTO local_book_upload(content_hash, checksum, size_bytes)
-SELECT content_hash, checksum, size_bytes FROM eligible WHERE priority = 1
-ON CONFLICT(content_hash) DO NOTHING;
+-- name: owner_cloud_storage_candidates?
+-- Each book's recorded local versions, newest first; Rust keeps the newest
+-- one in a live folder and queues it for upload.
+SELECT b.content_hash, bd.dir_id, bd.checksum, bd.size_bytes
+FROM book_dir bd
+JOIN book b ON b.row_id = bd.book_row_id AND b.deleted_at IS NULL
+WHERE bd.deleted_at IS NULL AND bd.checksum IS NOT NULL AND bd.size_bytes > 0
+ORDER BY bd.checksum_seq DESC;
+
+-- name: owner_queue_book_upload!
+-- param: content_hash: &str
+-- param: checksum: &str
+-- param: size_bytes: i64
+INSERT INTO book_transfer(content_hash, upload_id, upload_checksum, upload_size)
+SELECT content_hash, (SELECT COALESCE(MAX(MAX(COALESCE(upload_id, 0), COALESCE(upload_prepared, 0))), 0) + 1 FROM book_transfer), :checksum, :size_bytes FROM book WHERE content_hash = :content_hash
+ON CONFLICT(content_hash) DO UPDATE SET upload_id = excluded.upload_id, upload_checksum = excluded.upload_checksum, upload_size = excluded.upload_size
+WHERE upload_id IS NULL;
 
 -- name: owner_refresh_book_uploads!
-INSERT INTO local_book_upload(content_hash, checksum, size_bytes)
-SELECT content_hash, checksum, size_bytes FROM local_book_upload WHERE true
-ON CONFLICT(content_hash) DO UPDATE SET id = excluded.id;
-
--- name: owner_refresh_asset_work!
-INSERT INTO asset_work(content_hash) SELECT content_hash FROM local_book_upload WHERE true
-ON CONFLICT(content_hash) DO UPDATE SET id = excluded.id;
+-- Every queued upload gets a new id, past any stored one, so it is prepared again.
+UPDATE book_transfer SET upload_id = upload_id + (SELECT MAX(MAX(COALESCE(upload_id, 0), COALESCE(upload_prepared, 0))) FROM book_transfer)
+WHERE upload_id IS NOT NULL;
 
 -- name: owner_operation_record?
 SELECT operation_kind, operation_scan_complete, operation_completed FROM sync_metadata WHERE singleton = 1;

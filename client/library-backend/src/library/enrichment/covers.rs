@@ -150,7 +150,7 @@ mod tests {
         let db = library_database::Database::open(root.join("library.sqlite")).unwrap();
         db.initialize_library().unwrap();
         let hash = book_identity::identify(&mut std::io::Cursor::new(b"cover lease test")).unwrap();
-        crate::test_database::raw(&db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'Book','epub')", [hash.as_str()]).unwrap();
+        crate::test_database::raw(&db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'Book',1)", [hash.as_str()]).unwrap();
         crate::test_database::raw(&db).execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT ?1,row_id,'book.epub',content_hash,1 FROM book", [sync_common::ROOT_DIR_ID.to_string()]).unwrap();
         db.seed_file_projection(&hash, &sync_common::ROOT_DIR_ID, "/book.epub");
         db.complete_thumbnail_work(&hash, false).unwrap();
@@ -170,7 +170,7 @@ mod tests {
     }
 
     fn matched_recording(library: &LibrarySession, hash: ContentHash) {
-        crate::test_database::raw(&library.db).execute("UPDATE book SET format='m4b' WHERE content_hash=?1", [hash.as_str()]).unwrap();
+        crate::test_database::raw(&library.db).execute("UPDATE book SET format=8 WHERE content_hash=?1", [hash.as_str()]).unwrap();
         crate::test_database::raw(&library.db).execute("INSERT INTO audiobook_metadata(content_hash,duration_ms) VALUES(?1,600000)", [hash.as_str()]).unwrap();
         let response = serde_json::json!({"status":"supported", "selected_asin":"B000000001", "selected_region":"us", "candidates":[{"asin":"B000000001","region":"us"}]});
         crate::test_database::raw(&library.db)
@@ -202,12 +202,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (library, hash) = fixture(root.path(), "http://127.0.0.1:1");
         matched_recording(&library, hash);
-        crate::test_database::raw(&library.db).execute("UPDATE book SET format='mp3folder' WHERE content_hash=?1", [hash.as_str()]).unwrap();
+        crate::test_database::raw(&library.db).execute("UPDATE book SET format=16 WHERE content_hash=?1", [hash.as_str()]).unwrap();
         let scope = serde_json::to_string(&vec![hash]).unwrap();
         assert_eq!(library.db.audible_cover_identity(&hash).unwrap(), Some(("B000000001".into(), "us".into())));
         assert_eq!(library.db.audible_cover_candidates("audible_covers_v1", "", &scope).unwrap(), vec![(hash, "B000000001".into(), "us".into())]);
 
-        library.db.complete_sidecar_thumbnail_work(&hash).unwrap();
+        library.db.complete_thumbnail_work(&hash, true).unwrap();
         assert!(library.db.audible_cover_candidates("audible_covers_v1", "", &scope).unwrap().is_empty());
     }
 

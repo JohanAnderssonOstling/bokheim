@@ -2,7 +2,7 @@
 
 -- name: audiobook_playback_title_author?
 -- param: content_hash: &str
-SELECT COALESCE(title,'Untitled'), COALESCE(author,'') FROM book_cards WHERE content_hash = :content_hash;
+SELECT COALESCE(title,'Untitled'), author FROM book WHERE content_hash = :content_hash;
 
 -- name: audiobook_cached_metadata?
 -- param: content_hash: &str

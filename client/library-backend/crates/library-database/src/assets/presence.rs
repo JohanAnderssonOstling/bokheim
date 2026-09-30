@@ -1,4 +1,5 @@
 use super::TransfersSql;
+use crate::shared_sql::SharedSql;
 use crate::*;
 use library_replica::{BlobKind, TransferOrigin};
 use std::collections::HashSet;
@@ -27,16 +28,16 @@ impl Database {
         Ok(hashes)
     }
 
-    /// Queues a durable transfer request, preserving a user-initiated origin.
-    pub fn add_asset_request(&self, kind: BlobKind, hash: &ContentHash, origin: TransferOrigin) -> Result<(), DatabaseError> {
-        self.connection.add_asset_request(kind.storage(), hash.as_str(), origin.storage(), super::unix_secs()?)?;
+    /// Queues a durable download of a book's bytes, preserving a user-initiated origin.
+    pub fn request_book_download(&self, hash: &ContentHash, origin: TransferOrigin) -> Result<(), DatabaseError> {
+        self.connection.shared_request_book_download(hash.as_str(), origin.storage(), crate::sync::unix_millis()?)?;
         Ok(())
     }
 
-    /// Durable transfer requests for one asset kind, oldest first.
-    pub fn asset_requests(&self, kind: BlobKind) -> Result<Vec<(ContentHash, TransferOrigin)>, DatabaseError> {
+    /// Requested book downloads, oldest first.
+    pub fn book_download_requests(&self) -> Result<Vec<(ContentHash, TransferOrigin)>, DatabaseError> {
         let mut rows = Vec::new();
-        self.connection.asset_requests(kind.storage(), |row| {
+        self.connection.book_download_requests(|row| {
             rows.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
             Ok(())
         })?;

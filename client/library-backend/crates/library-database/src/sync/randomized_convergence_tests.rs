@@ -79,9 +79,9 @@ fn projection(db: &Database) -> Vec<Vec<Vec<Value>>> {
     // Compare synchronized semantics; row IDs, physical paths, queues and scan
     // timestamps belong to each device. Tombstone times are publication clocks.
     [
-        "SELECT id,parent_id,name,deleted_at IS NOT NULL,purged_at IS NOT NULL FROM dir WHERE id='00000000-0000-0000-0000-000000000000' OR EXISTS(SELECT 1 FROM sync_state_version v WHERE v.state_key=dir.id AND v.state_kind LIKE 'directory_%') ORDER BY id",
+        "SELECT id,parent_id,name,deleted_at IS NOT NULL FROM dir WHERE id='00000000-0000-0000-0000-000000000000' OR EXISTS(SELECT 1 FROM sync_state_version v WHERE v.state_key=dir.id AND v.state_kind LIKE 'directory_%') ORDER BY id",
         "SELECT content_hash,format,added_at,title,subtitle,read_pos,read_progress,deleted_at IS NOT NULL,trash_origin_dir_id,book_metadata FROM book ORDER BY content_hash",
-        "SELECT b.content_hash,l.language_tag,l.position FROM book_language l JOIN book b ON b.row_id=l.book_row_id ORDER BY b.content_hash,l.position",
+        "SELECT b.content_hash,l.language FROM book_language l JOIN book b ON b.row_id=l.book_row_id ORDER BY b.content_hash,l.language",
         "SELECT b.content_hash,p.dir_id,p.deleted_at IS NOT NULL,p.trash_origin_dir_id FROM book_dir p JOIN book b ON b.row_id=p.book_row_id ORDER BY b.content_hash,p.dir_id",
     ].map(|sql| rows(db, sql)).to_vec()
 }

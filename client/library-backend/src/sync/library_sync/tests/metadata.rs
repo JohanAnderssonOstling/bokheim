@@ -556,7 +556,7 @@ async fn rejected_creation_defers_its_later_fields_without_starving_other_books(
     manager.server_url = ServerUrl::parse(&format!("http://{address}")).unwrap();
     manager.credentials = test_shared_credentials(&manager.server_url);
     for index in 1..=sync_common::MAX_PUSH_MUTATIONS as u64 {
-        manager.database.seed_book(&fixture_content_hash(index), Some("Book"), 1, "epub");
+        manager.database.seed_book(&fixture_content_hash(index), Some("Book"), 1, book_model::BookFormat::Epub);
     }
     let outcome = manager.state_engine().unwrap().exchange_events_with_server(SyncCursor::default()).await.unwrap();
     assert_eq!(outcome.mutation_issues.len(), 1);

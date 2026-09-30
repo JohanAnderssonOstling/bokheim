@@ -14,7 +14,7 @@ authoritative-taxonomy = []
 [dependencies]
 serde_json = "1"
 serde = { version = "1", features = ["derive", "rc"] }
-bincode = { version = "2", features = ["serde"] }
+bincode = { version = "2", default-features = false, features = ["serde", "std"] }
 book-model = { path = "../book-model" }
 csv = "1.3.1"
 rusqlite = { version = "0.40.0", features = ["backup", "bundled", "serialize"] }
@@ -29,7 +29,7 @@ tempfile = "3"
 [build-dependencies]
 serde_json = "1"
 serde = { version = "1", features = ["derive", "rc"] }
-bincode = { version = "2", features = ["serde"] }
+bincode = { version = "2", default-features = false, features = ["serde", "std"] }
 csv = "1.3.1"
 rusqlite = { version = "0.40.0", features = ["bundled"] }
 uuid = { version = "1", features = ["v5"] }

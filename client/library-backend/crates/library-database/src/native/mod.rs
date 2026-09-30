@@ -120,14 +120,9 @@ impl Database {
     }
 
     fn native_book_entry(connection: &rusqlite::Connection, relative_path: &str) -> Result<Option<(ContentHash, DirId, String)>, DatabaseError> {
-        let mut entry = None;
-        connection.native_book_entry(relative_path, |row| {
-            entry = Some((ContentHash::new(&row.get::<_, String>(0)?), row.get::<_, String>(1)?, row.get::<_, String>(2)?));
-            Ok(())
-        })?;
-        entry.map(|(hash, directory, name)| DirId::parse_str(&directory).map(|directory| (hash, directory, name)).map_err(DatabaseError::operation)).transpose()
+        crate::placements::book_at_path(connection, relative_path)
     }
-    fn native_occupied_names(connection: &rusqlite::Connection, directory: &DirId) -> Result<Vec<String>, DatabaseError> {
+    pub(crate) fn native_occupied_names(connection: &rusqlite::Connection, directory: &DirId) -> Result<Vec<String>, DatabaseError> {
         let mut names = Vec::new();
         connection.native_occupied_file_names(&directory.to_string(), |row| {
             names.push(row.get(0)?);
@@ -137,7 +132,10 @@ impl Database {
     }
 }
 
-include_sql!("src/native/sql/schema.sql");
+include_sql!("src/native/sql/schema/tables.sql");
+include_sql!("src/native/sql/schema/views.sql");
+include_sql!("src/native/sql/schema/triggers.sql");
+include_sql!("src/native/sql/schema/index.sql");
 include_sql!("src/native/sql/native_file_work.sql");
 
 // ---- work ----
@@ -192,11 +190,19 @@ impl Database {
         if !self.connection.native_file_is_current(work.id, work.operation.as_str(), work.content_hash.as_str(), work.original_path.as_str(), |row| row.get(0))? {
             return Ok(None);
         }
-        let mut live_places = Vec::new();
+        let mut placements = Vec::new();
         self.connection.native_live_placement_paths(work.content_hash.as_str(), |row| {
-            live_places.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?));
+            placements.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
             Ok(())
         })?;
+        let mut folders = crate::placements::FolderPaths::new(&self.connection);
+        let mut live_places = Vec::new();
+        for (dir_id, file_name) in placements {
+            if let Some(path) = folders.placement(&dir_id, &file_name)? {
+                live_places.push((dir_id, file_name, path));
+            }
+        }
+        live_places.sort_by(|left, right| left.2.cmp(&right.2));
         let mut projections = Vec::new();
         self.connection.native_file_projection_paths(work.content_hash.as_str(), |row| {
             projections.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
@@ -217,10 +223,12 @@ impl Database {
             })?;
         }
         let mut expected_checksum = None;
-        self.connection.native_current_checksum(work.content_hash.as_str(), resolved_path.as_str(), |row| {
-            expected_checksum = row.get::<_, Option<String>>(0)?;
-            Ok(())
-        })?;
+        if let Some((dir_id, file_name)) = crate::placements::resolve_placement_path(&self.connection, &resolved_path)? {
+            self.connection.native_current_checksum(work.content_hash.as_str(), &dir_id, &file_name, |row| {
+                expected_checksum = row.get::<_, Option<String>>(0)?;
+                Ok(())
+            })?;
+        }
         Ok(Some(NativeFileWorkSnapshot { work, resolved_path, live, placement, occupied_names, expected_checksum, book_paths: projections.into_iter().map(|(_, relative)| relative).collect() }))
     }
 

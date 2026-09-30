@@ -19,7 +19,7 @@ SELECT bokheim_mutation('directory_parent',id,COALESCE(intent_parent_id,parent_i
 
 -- name: sync_current_directory_lifecycle?
 -- param: key: &str
-SELECT bokheim_mutation('directory_lifecycle',id,COALESCE(intent_lifecycle,CASE WHEN purged_at IS NOT NULL THEN 2 WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END)),COALESCE(intent_lifecycle,CASE WHEN purged_at IS NOT NULL THEN 2 WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END) FROM dir WHERE id=:key;
+SELECT bokheim_mutation('directory_lifecycle',id,COALESCE(intent_lifecycle,CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END)),COALESCE(intent_lifecycle,CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END) FROM dir WHERE id=:key;
 
 -- name: sync_cursor_recovery_pending ->
 SELECT cursor_recovery_pending FROM sync_metadata WHERE singleton = 1;

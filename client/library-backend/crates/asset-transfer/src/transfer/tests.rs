@@ -255,7 +255,7 @@ async fn batch_negotiation_completes_existing_revisions_without_local_file_reads
     std::fs::create_dir_all(root.path().join(APP_HIDDEN_DIR)).unwrap();
     let (worker, pool) = worker_with_placement(root.path(), url, &existing);
     let pending = {
-        pool.seed_book(&missing, None, 1, "epub");
+        pool.seed_book(&missing, None, 1, book_model::BookFormat::Epub);
         pool.observe_local_book(&existing, &checksum, 100).unwrap();
         pool.observe_local_book(&missing, &missing, 200).unwrap();
         let pending = pool.book_upload_intent(&missing).unwrap().unwrap();
@@ -313,7 +313,7 @@ fn worker_with_placement(root: &Path, server_url: ServerUrl, content_hash: &Cont
     {
         let dir_id = test_support::fixture_dir_id("d1");
         database.seed_dir(&dir_id, &ROOT_DIR_ID, "Shelf");
-        database.seed_book(content_hash, None, 1, "epub");
+        database.seed_book(content_hash, None, 1, book_model::BookFormat::Epub);
         database.add_book_placement(&dir_id, content_hash, "book.epub", "", false);
         database.queue_directory_work(&ROOT_DIR_ID).unwrap();
     }
@@ -489,7 +489,7 @@ async fn download_publishes_beside_an_unrelated_user_file() {
     let (worker, pool) = worker_with_placement(root.path(), ServerUrl::parse(&format!("http://{address}")).unwrap(), &content_hash);
     std::fs::write(root.path().join("Shelf/book.epub"), b"unrelated user file").unwrap();
     let placement = BookPlacement::new(content_hash, RelativeBookPath::parse("/Shelf/book.epub").unwrap());
-    pool.add_asset_request(BlobKind::Book, &content_hash, TransferOrigin::UserInitiated).unwrap();
+    pool.request_book_download(&content_hash, TransferOrigin::UserInitiated).unwrap();
 
     worker.download_blob(&content_hash, &db_placement(&placement)).await.unwrap();
 
@@ -498,7 +498,7 @@ async fn download_publishes_beside_an_unrelated_user_file() {
     assert!(!root.path().join(".bokheim/assets/book").exists());
     assert_eq!(worker.assets.read(BlobKind::Book, &content_hash).unwrap().unwrap(), bytes);
     assert!(pool.is_book_downloaded(&content_hash).unwrap());
-    assert!(pool.asset_requests(BlobKind::Book).unwrap().is_empty());
+    assert!(pool.book_download_requests().unwrap().is_empty());
     worker.assets.run_file_jobs(&pool).await.unwrap();
     assert_eq!(std::fs::read(root.path().join("Shelf/book.epub")).unwrap(), b"unrelated user file");
     server.abort();
@@ -517,13 +517,13 @@ async fn missing_remote_blob_resolves_durable_intent_instead_of_recreating_a_poi
     let (worker, pool) = worker_with_placement(root.path(), ServerUrl::parse(&format!("http://{address}")).unwrap(), &content_hash);
     let placement = BookPlacement::new(content_hash, RelativeBookPath::parse("/Shelf/book.epub").unwrap());
     {
-        pool.add_asset_request(BlobKind::Book, &content_hash, TransferOrigin::UserInitiated).unwrap();
+        pool.request_book_download(&content_hash, TransferOrigin::UserInitiated).unwrap();
         pool.record_remote_asset(BlobKind::Book, &content_hash).unwrap();
     }
 
     worker.download_blob(&content_hash, &db_placement(&placement)).await.unwrap();
 
-    assert!(pool.asset_requests(BlobKind::Book).unwrap().is_empty());
+    assert!(pool.book_download_requests().unwrap().is_empty());
     assert!(!pool.remote_asset_hashes(BlobKind::Book).unwrap().contains(&content_hash));
     server.abort();
 }
@@ -541,14 +541,14 @@ async fn corrupt_remote_blob_invalidates_remote_fact_and_resolves_request() {
     let (worker, pool) = worker_with_placement(root.path(), ServerUrl::parse(&format!("http://{address}")).unwrap(), &expected);
     let placement = BookPlacement::new(expected, RelativeBookPath::parse("/Shelf/book.epub").unwrap());
     {
-        pool.add_asset_request(BlobKind::Book, &expected, TransferOrigin::UserInitiated).unwrap();
+        pool.request_book_download(&expected, TransferOrigin::UserInitiated).unwrap();
         pool.record_remote_asset(BlobKind::Book, &expected).unwrap();
     }
 
     let error = worker.download_blob(&expected, &db_placement(&placement)).await.unwrap_err();
 
     assert!(matches!(error, TransferError::Rejected(_)));
-    assert!(pool.asset_requests(BlobKind::Book).unwrap().is_empty());
+    assert!(pool.book_download_requests().unwrap().is_empty());
     assert!(!pool.remote_asset_hashes(BlobKind::Book).unwrap().contains(&expected));
     server.abort();
 }
@@ -694,7 +694,7 @@ async fn thumbnail_batch_download_uses_one_request_for_multiple_hashes() {
     let second = fixture_content_hash(52);
     let local = fixture_content_hash(53);
     let mut jpeg = std::io::Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(2, 3, image::Rgb([24, 96, 192]))).write_to(&mut jpeg, image::ImageOutputFormat::Jpeg(85)).unwrap();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 85).encode_image(&image::RgbImage::from_pixel(2, 3, image::Rgb([24, 96, 192]))).unwrap();
     let jpeg = Arc::new(jpeg.into_inner());
     let request_count = Arc::new(AtomicUsize::new(0));
     let requested_hash_count = Arc::new(AtomicUsize::new(0));
@@ -728,9 +728,9 @@ async fn thumbnail_batch_download_uses_one_request_for_multiple_hashes() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(root.path().join(APP_HIDDEN_DIR)).unwrap();
     let (mut worker, pool) = worker_with_placement(root.path(), ServerUrl::parse(&format!("http://{address}")).unwrap(), &first);
-    pool.seed_book(&second, None, 1, "epub");
+    pool.seed_book(&second, None, 1, book_model::BookFormat::Epub);
 
-    pool.seed_book(&local, None, 1, "epub");
+    pool.seed_book(&local, None, 1, book_model::BookFormat::Epub);
     worker.assets.write(BlobKind::Thumbnail, &local, &jpeg).await.unwrap();
     worker.assets.write(BlobKind::Thumbnail, &first, &[0xff, 0xd8, 0xff, 0x00]).await.unwrap();
     let (event_tx, event_rx) = async_channel::unbounded();
@@ -964,12 +964,12 @@ async fn rejected_book_download_resolves_durable_request() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(root.path().join(APP_HIDDEN_DIR)).unwrap();
     let (worker, pool) = worker_with_placement(root.path(), ServerUrl::parse(&format!("http://{address}")).unwrap(), &content_hash);
-    pool.add_asset_request(BlobKind::Book, &content_hash, TransferOrigin::UserInitiated).unwrap();
+    pool.request_book_download(&content_hash, TransferOrigin::UserInitiated).unwrap();
     let placement = BookPlacement::new(content_hash, RelativeBookPath::parse("/Shelf/book.epub").unwrap());
 
     worker.clone().run(vec![TransferJob::download_blob(content_hash, db_placement(&placement), TransferOrigin::UserInitiated)]).await.unwrap();
 
-    assert!(pool.asset_requests(BlobKind::Book).unwrap().is_empty());
+    assert!(pool.book_download_requests().unwrap().is_empty());
     assert!(worker.queue.statuses().is_empty());
     assert!(matches!(worker.queue.history().first().map(|status| status.state), Some(TransferState::Failed)));
     server.abort();
@@ -1026,7 +1026,7 @@ async fn rejected_thumbnail_upload_does_not_suppress_its_peers() {
     std::fs::create_dir_all(root.path().join(APP_HIDDEN_DIR)).unwrap();
     let (worker, pool) = worker_with_placement(root.path(), ServerUrl::parse(&format!("http://{address}")).unwrap(), &accepted);
     {
-        pool.seed_book(&rejected, None, 1, "epub");
+        pool.seed_book(&rejected, None, 1, book_model::BookFormat::Epub);
         pool.complete_thumbnail_work(&rejected, true).unwrap();
         pool.complete_thumbnail_work(&accepted, true).unwrap();
     }
@@ -1154,7 +1154,7 @@ async fn missing_browse_thumbnail_is_repaired_without_credentials_or_network() {
     let no_credentials: library_runtime::account::SharedSyncCredentials = Arc::new(std::sync::RwLock::new(None));
     worker.credentials = no_credentials;
     let mut jpeg = std::io::Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(2, 3, image::Rgb([24, 96, 192]))).write_to(&mut jpeg, image::ImageOutputFormat::Jpeg(85)).unwrap();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 85).encode_image(&image::RgbImage::from_pixel(2, 3, image::Rgb([24, 96, 192]))).unwrap();
     let jpeg = jpeg.into_inner();
     worker.assets.write(BlobKind::Thumbnail, &hash, &jpeg).await.unwrap();
     worker.clone().run(vec![TransferJob::download_thumbnail(hash, TransferOrigin::Background)]).await.unwrap();
@@ -1319,7 +1319,7 @@ async fn book_batch_streams_multiple_files_and_preserves_per_book_outcomes() {
             std::fs::write(root.path().join("Shelf").join(name), bytes).unwrap();
         }
         {
-            pool.seed_book(&identities[1], None, 1, "epub");
+            pool.seed_book(&identities[1], None, 1, book_model::BookFormat::Epub);
             pool.add_book_placement(&test_support::fixture_dir_id("d1"), &identities[1], "second.epub", "", false);
         }
         let mut claimed = Vec::new();
@@ -1393,7 +1393,7 @@ async fn large_book_uploads_run_together_and_commit_without_waiting_for_drain() 
     for (name, bytes) in ["book.epub", "second.epub"].into_iter().zip(&payloads) {
         std::fs::write(root.path().join("Shelf").join(name), bytes).unwrap();
     }
-    pool.seed_book(&hashes[1], None, 1, "epub");
+    pool.seed_book(&hashes[1], None, 1, book_model::BookFormat::Epub);
     pool.add_book_placement(&test_support::fixture_dir_id("d1"), &hashes[1], "second.epub", "", false);
     let claimed = hashes
         .iter()

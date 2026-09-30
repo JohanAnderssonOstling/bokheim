@@ -15,9 +15,6 @@ impl LibraryClient {
     pub async fn subject_contents(&self, query: library_model::LibraryBrowseQuery) -> Result<LibraryBrowseData, String> {
         self.request(library_requests::SubjectContents { query }).await
     }
-    pub async fn library_search(&self, query: String) -> Result<library_model::LibrarySearchResult, String> {
-        self.request(library_requests::LibrarySearch { query }).await
-    }
     pub async fn book_detail(&self, content_hash: crate::ContentHash) -> Result<library_model::BookDetail, String> {
         self.request(library_requests::BookDetail { content_hash }).await
     }

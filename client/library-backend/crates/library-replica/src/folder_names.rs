@@ -27,7 +27,7 @@ fn candidate(requested: &str, suffix: &str) -> String {
     let sanitized = requested.trim_matches(whitespace).chars().map(|c| if forbidden(c) { '_' } else { c }).collect::<String>();
     let capped = truncate_utf8(trim(&sanitized), MAX_FILE_NAME_BYTES - suffix.len());
     // Truncation can expose trailing dots/spaces or a reserved name.
-    let base = trim(&capped);
+    let base = trim(&capped).trim_start_matches(|c| c == '.' || whitespace(c));
     let base = if base.is_empty() || is_reserved(base) { "Folder" } else { base };
     format!("{base}{suffix}")
 }

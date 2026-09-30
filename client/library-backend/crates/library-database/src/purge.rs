@@ -1,6 +1,19 @@
-//! Disposable book metadata shared by local and remote purge operations.
+//! Disposable directory and book projections shared by local and remote purges.
 use crate::DatabaseError;
 use crate::shared_sql::SharedSql;
+
+/// Directory state remains in canonical registers; materialized rows and their
+/// placements are disposable. Preserve cleanup paths before deleting them.
+pub(crate) fn remove_directory(tx: &rusqlite::Transaction<'_>, id: &str) -> Result<(), DatabaseError> {
+    tx.execute(
+        "INSERT OR IGNORE INTO local_file_work(operation,content_hash,relative_path)
+         SELECT 'trash',content_hash,relative_path FROM local_file_projection WHERE dir_id=?1",
+        [id],
+    )?;
+    tx.execute("DELETE FROM dir WHERE id=?1 AND id!='00000000-0000-0000-0000-000000000000'", [id])?;
+    tx.shared_placements_queue_directory_work(id)?;
+    Ok(())
+}
 
 /// Remove the disposable book row while keeping sync intent and retryable file
 /// cleanup independent of its lifetime. Caller uses remote origin.
@@ -8,18 +21,23 @@ pub(crate) fn remove_book(tx: &rusqlite::Transaction<'_>, hash: &str) -> Result<
     // Capture materialized and logical paths before cascading placements away.
     tx.execute(
         "INSERT OR IGNORE INTO local_file_work(operation,content_hash,relative_path)
-         SELECT 'trash',?1,relative_path FROM local_file_projection WHERE content_hash=?1
-         UNION SELECT 'trash',?1,'/' || CASE WHEN p.path='' THEN bd.file_name ELSE p.path || '/' || bd.file_name END
-         FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id JOIN dir_paths p ON p.id=bd.dir_id
-         WHERE b.content_hash=?1",
+         SELECT 'trash',?1,relative_path FROM local_file_projection WHERE content_hash=?1",
         [hash],
     )?;
+    let placements = tx
+        .prepare("SELECT bd.dir_id,bd.file_name FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id WHERE b.content_hash=?1")?
+        .query_map([hash], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut folders = crate::placements::FolderPaths::new(tx);
+    for (dir_id, file_name) in placements {
+        if let Some(path) = folders.placement(&dir_id, &file_name)? {
+            tx.execute("INSERT OR IGNORE INTO local_file_work(operation,content_hash,relative_path) VALUES('trash',?1,?2)", [hash, path.as_str()])?;
+        }
+    }
     tx.shared_cancel_book_restore(hash)?;
     for table in ["audiobook_metadata", "audiobook_track_index", "book_toc", "book_reading_entry"] {
         tx.execute(&format!("DELETE FROM {table} WHERE content_hash=?1"), [hash])?;
     }
-    tx.execute("DELETE FROM remote_asset WHERE hash=?1", [hash])?;
-    tx.execute("DELETE FROM download_requests WHERE target_key=?1", [hash])?;
     // Pending publications and canonical fields belong to this book too.
     // Keep only the lifecycle cell: it carries the purge to offline replicas.
     tx.execute("DELETE FROM sync_outbox WHERE (state_kind,state_key,state_subkey) IN (SELECT state_kind,state_key,state_subkey FROM sync_state_version WHERE book_key=?1 AND state_kind!='book_lifecycle')", [hash])?;
@@ -43,9 +61,9 @@ mod tests {
         // This fixture owns derived rows directly; do not enqueue canonical edits.
         db.connection.execute("UPDATE sync_metadata SET change_origin='remote'", []).unwrap();
         for hash in ["a".repeat(64), "b".repeat(64)] {
-            db.connection.execute("INSERT INTO book(content_hash,title,added_at,format) VALUES (?1,'Book',1,'epub')", [hash]).unwrap();
+            db.connection.execute("INSERT INTO book(content_hash,title,added_at,format) VALUES (?1,'Book',1,1)", [hash]).unwrap();
             let id = db.connection.last_insert_rowid();
-            db.connection.execute("INSERT INTO book_language(book_row_id,position,language_tag) VALUES (?1,0,'en')", [id]).unwrap();
+            db.connection.execute("INSERT INTO book_language(book_row_id,language) VALUES (?1,'en')", [id]).unwrap();
             db.connection.execute("INSERT INTO book_subject(book_row_id,position,name,source) VALUES (?1,0,'Subject','test')", [id]).unwrap();
         }
         let first: i64 = db.connection.query_row("SELECT row_id FROM book WHERE content_hash=?1", ["a".repeat(64)], |r| r.get(0)).unwrap();
@@ -107,7 +125,7 @@ mod tests {
     }
 
     fn add(db: &Database, hash: &str) {
-        db.connection.execute("INSERT INTO book(content_hash,title,format,added_at) VALUES(?1,'Book','epub',1)", [hash]).unwrap();
+        db.connection.execute("INSERT INTO book(content_hash,title,format,added_at) VALUES(?1,'Book',1,1)", [hash]).unwrap();
     }
 
     fn count(db: &Database) -> i64 {

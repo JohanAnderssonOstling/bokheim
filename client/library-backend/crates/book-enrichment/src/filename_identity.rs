@@ -11,7 +11,7 @@ pub fn unusable_identity(value: &str) -> bool {
 pub fn standard_title_placeholder(value: &str) -> bool {
     let lower = value.trim().to_ascii_lowercase();
     let label = lower.split_whitespace().collect::<Vec<_>>().join(" ");
-    let label = label.replace('-', " ").replace('_', " ");
+    let label = label.replace(['-', '_'], " ");
     let document_file = [".pdf", ".doc", ".docx", ".epub", ".mobi", ".azw", ".azw3", ".m4b", ".rtf", ".odt", ".indd", ".qxd", ".p65"]
         .iter()
         .any(|extension| lower.ends_with(extension) || lower.split_once(':').is_some_and(|(name, _)| name.ends_with(extension)));

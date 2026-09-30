@@ -28,18 +28,11 @@ impl LibrarySession {
     /// ordered. One query for the whole page rather than a shelf lookup per
     /// row, so the cost does not scale with the number of authors.
     pub fn authors(&self, sort: library_model::AuthorSort, downloaded_only: bool) -> Result<Vec<library_model::AuthorSummary>, BackendError> {
-        self.db.browse_authors(sort, downloaded_only).map(|view| view.authors).map_err(BackendError::operation)
+        self.db.browse_authors(sort, downloaded_only).map_err(BackendError::operation)
     }
 
     pub fn subject_contents(&self, query: &library_model::LibraryBrowseQuery, downloaded_only: bool) -> Result<BrowseContents, BackendError> {
         self.db.browse_subject_contents(query, downloaded_only).map_err(BackendError::operation)
-    }
-
-    /// Global title/author search. Unlike the scoped `search` filter on
-    /// folder and subject contents, this runs across the whole library and
-    /// keeps title matches ahead of distinct author-only matches.
-    pub fn library_search(&self, query: &str, downloaded_only: bool) -> Result<library_model::LibrarySearchResult, BackendError> {
-        self.db.browse_library_search(query, downloaded_only).map_err(BackendError::operation)
     }
 
     pub fn directory_path(&self, directory_id: &DirId) -> Result<Vec<library_model::BrowsePathSegment>, BackendError> {

@@ -138,46 +138,21 @@ impl Database {
         Ok(reason)
     }
 
+    /// Queues an upload of bytes no placement of the book has recorded.
     pub fn observe_local_book(&self, hash: &ContentHash, checksum: &ContentHash, size_bytes: u64) -> Result<(), DatabaseError> {
-        let transaction = self.connection.unchecked_transaction()?;
         let size = i64::try_from(size_bytes).map_err(DatabaseError::operation)?;
-        let inserted = transaction.shared_observe_local_book_insert(hash.as_str(), checksum.as_str(), size, "local")?;
-        if inserted == 0 {
-            transaction.commit()?;
-            return Ok(());
+        let transaction = self.connection.unchecked_transaction()?;
+        if !checksum_seen(&transaction, hash.as_str(), checksum.as_str())? {
+            Self::enqueue_version(&transaction, hash, checksum, size)?;
         }
-        Self::enqueue_version(&transaction, hash, checksum, size)?;
         transaction.commit()?;
         Ok(())
     }
 
     pub fn observe_local_placement_book(&self, dir: &sync_common::DirId, hash: &ContentHash, checksum: &ContentHash, size_bytes: u64) -> Result<(), DatabaseError> {
-        let transaction = self.connection.unchecked_transaction()?;
-        let mut previous = None;
-        transaction.shared_current_checksum_select(&dir.to_string(), hash.as_str(), |row| {
-            previous = Some(row.get::<_, String>(0)?);
-            Ok(())
-        })?;
-        if previous.as_deref() == Some(checksum.as_str()) {
-            return Ok(());
-        }
         let size = i64::try_from(size_bytes).map_err(DatabaseError::operation)?;
-        let unseen = transaction.shared_observe_local_book_insert(hash.as_str(), checksum.as_str(), size, "local")? != 0;
-        let changed = previous.is_some();
-        if unseen || changed {
-            Self::enqueue_version(&transaction, hash, checksum, size)?;
-        }
-        let origin = if changed {
-            "local".to_owned()
-        } else {
-            let mut stored_origin = None;
-            transaction.shared_version_origin_select(hash.as_str(), checksum.as_str(), |row| {
-                stored_origin = Some(row.get::<_, String>(0)?);
-                Ok(())
-            })?;
-            stored_origin.ok_or(rusqlite::Error::QueryReturnedNoRows)?
-        };
-        transaction.shared_current_replace(&dir.to_string(), hash.as_str(), checksum.as_str(), &origin)?;
+        let transaction = self.connection.unchecked_transaction()?;
+        record_local_version(&transaction, &dir.to_string(), hash, checksum, size)?;
         transaction.commit()?;
         Ok(())
     }
@@ -185,7 +160,6 @@ impl Database {
     fn enqueue_version(connection: &rusqlite::Connection, hash: &ContentHash, checksum: &ContentHash, size: i64) -> Result<(), DatabaseError> {
         connection.shared_scanner_enqueue_upload(hash.as_str(), checksum.as_str(), size)?;
         connection.shared_rejected_book_cleanup(hash.as_str())?;
-        connection.shared_scanner_enqueue_asset_work(hash.as_str())?;
         Ok(())
     }
 
@@ -198,4 +172,31 @@ impl Database {
         self.connection.shared_scanner_enqueue_upload(hash.as_str(), checksum.as_str(), size)?;
         Ok(())
     }
+}
+
+fn checksum_seen(connection: &rusqlite::Connection, hash: &str, checksum: &str) -> Result<bool, DatabaseError> {
+    let mut seen = false;
+    connection.shared_checksum_seen(hash, checksum, |row| {
+        seen = row.get(0)?;
+        Ok(())
+    })?;
+    Ok(seen)
+}
+
+/// Records the bytes now at a placement. New bytes, or bytes replacing a
+/// recorded version, are queued for upload.
+pub(crate) fn record_local_version(connection: &rusqlite::Connection, dir: &str, hash: &ContentHash, checksum: &ContentHash, size: i64) -> Result<(), DatabaseError> {
+    let mut previous = None;
+    connection.shared_current_checksum_select(dir, hash.as_str(), |row| {
+        previous = Some(row.get::<_, String>(0)?);
+        Ok(())
+    })?;
+    if previous.as_deref() == Some(checksum.as_str()) {
+        return Ok(());
+    }
+    if previous.is_some() || !checksum_seen(connection, hash.as_str(), checksum.as_str())? {
+        Database::enqueue_version(connection, hash, checksum, size)?;
+    }
+    connection.shared_record_checksum(dir, hash.as_str(), checksum.as_str(), size)?;
+    Ok(())
 }

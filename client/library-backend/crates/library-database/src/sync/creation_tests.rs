@@ -65,8 +65,8 @@ fn ordinary_fields_and_lifecycle_updates_never_create_a_missing_book() {
     creation.book_creations.push(present(100, 7));
     replica.sync_commit_pull_response(&[], &creation).unwrap();
     assert_eq!(rows(&replica), 1);
-    let state: (Option<String>, String, f64) = replica.connection.query_row("SELECT title,format,read_progress FROM book", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
-    assert_eq!(state, (None, "".into(), 0.0));
+    let state: (Option<String>, Option<i64>, f64) = replica.connection.query_row("SELECT title,format,read_progress FROM book", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+    assert_eq!(state, (None, None, 0.0));
     assert!(replica.sync_publishable_mutations().unwrap().is_empty());
 }
 

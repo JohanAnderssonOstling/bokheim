@@ -29,8 +29,8 @@ pub(crate) fn function_timestamp(context: &FunctionContext<'_>, index: usize) ->
 }
 
 pub(crate) fn function_book_format(context: &FunctionContext<'_>, index: usize) -> rusqlite::Result<BookFormat> {
-    let raw = context.get::<String>(index)?;
-    BookFormat::from_extension(&raw).ok_or_else(|| function_error(format!("book format '{raw}' is not a supported book format")))
+    let code = context.get::<i64>(index)?;
+    BookFormat::from_code(code).ok_or_else(|| function_error(format!("book format {code} is not a supported book format")))
 }
 
 pub(crate) fn function_content_hash(context: &FunctionContext<'_>, index: usize) -> rusqlite::Result<SyncContentHash> {

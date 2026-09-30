@@ -229,16 +229,22 @@ pub(super) struct VerifiedPath {
 
 impl VerifiedPath {
     fn new(path: PathBuf, hash: &ContentHash) -> Result<Self, AssetStoreError> {
+        Self::matching(path, hash)?.ok_or_else(|| AssetStoreError::operation("file contains different book bytes"))
+    }
+
+    /// A different identity is distinct from an unreadable/invalid placement.
+    /// Only cleanup may treat that identity mismatch as obsolete work.
+    fn matching(path: PathBuf, hash: &ContentHash) -> Result<Option<Self>, AssetStoreError> {
         let metadata = std::fs::symlink_metadata(&path)?;
         if metadata.file_type().is_symlink() || !(metadata.is_file() || metadata.is_dir()) {
             return Err(AssetStoreError::operation("unsupported book placement"));
         }
         let verified = Self { path, hash: *hash, directory: metadata.is_dir(), length: metadata.len(), modified: metadata.modified()? };
         if !content_matches(&verified.path, hash)? {
-            return Err(AssetStoreError::operation("file contains different book bytes"));
+            return Ok(None);
         }
         verified.check()?;
-        Ok(verified)
+        Ok(Some(verified))
     }
 
     fn check(&self) -> Result<(), AssetStoreError> {
@@ -251,6 +257,7 @@ impl VerifiedPath {
 }
 
 pub(super) enum PreparedPlacement {
+    /// Expected book is absent; the path may contain an unrelated replacement.
     Absent,
     Existing(VerifiedPath),
     Restore {
@@ -329,7 +336,9 @@ pub(super) fn prepare_trash(handle: &Handle, hash: &ContentHash, relative: &str)
         Err(error) => return Err(error.into()),
         Ok(_) => {}
     }
-    let source = VerifiedPath::new(source, hash)?;
+    // The expected book is no longer at this path. Acknowledge only this
+    // book's obsolete work/projection without touching the replacement bytes.
+    let Some(source) = VerifiedPath::matching(source, hash)? else { return Ok(PreparedPlacement::Absent) };
     let destination = trash_path(handle, hash, relative);
     std::fs::create_dir_all(destination.parent().unwrap())?;
     let existing = if destination.exists() { Some(VerifiedPath::new(destination.clone(), hash)?) } else { None };

@@ -22,7 +22,6 @@ impl Database {
         match outcome? {
             WriteOutcome::Commit(value) => {
                 crate::sync::apply::project_dirty(&tx)?;
-                self.refresh_subject_cache_in_transaction(&tx)?;
                 tx.commit()?;
                 timing.mark("commit");
                 Ok(value)
@@ -186,7 +185,7 @@ mod tests {
     }
 
     fn seed_book(db: &Database) {
-        db.connection.execute("INSERT INTO book(content_hash,title,added_at,format) VALUES (?1,'Before',1,'epub')", ["a".repeat(64)]).unwrap();
+        db.connection.execute("INSERT INTO book(content_hash,title,added_at,format) VALUES (?1,'Before',1,1)", ["a".repeat(64)]).unwrap();
         db.with_write_transaction(|tx| {
             let credit = book_model::Contributor::new("Before", book_model::MarcRelatorCode(*b"aut")).unwrap();
             let credits = crate::contributors::resolve_credits(tx, &[credit])?;

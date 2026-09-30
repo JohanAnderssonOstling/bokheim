@@ -4,38 +4,21 @@
 -- param: id: &str
 -- param: parent_id: &str
 -- param: name: &str
-INSERT INTO dir (id, parent_id, name, intent_parent_id, intent_name, intent_lifecycle, deleted_at, purged_at)
-VALUES (:id, :parent_id, :name, :parent_id, :name, 0, NULL, NULL)
+INSERT INTO dir (id, parent_id, name, intent_parent_id, intent_name, intent_lifecycle, deleted_at)
+VALUES (:id, :parent_id, :name, :parent_id, :name, 0, NULL)
 ON CONFLICT(id) DO UPDATE SET
     parent_id = excluded.parent_id,
     name = excluded.name,
     intent_parent_id = excluded.parent_id,
     intent_name = excluded.name,
     intent_lifecycle = 0,
-    deleted_at = NULL,
-    purged_at = NULL;
+    deleted_at = NULL;
 
 -- name: placements_live_directory_exists?
 -- param: directory_id: &str
 SELECT EXISTS(
     SELECT 1 FROM dir WHERE id=:directory_id AND deleted_at IS NULL
 );
-
--- name: placements_directory_move_closes_cycle?
--- param: parent_id: &str
--- param: directory_id: &str
-WITH RECURSIVE ancestors(id) AS (
-    SELECT :parent_id
-    UNION
-    SELECT d.parent_id
-    FROM dir d JOIN ancestors ON d.id=ancestors.id
-    WHERE d.id!='00000000-0000-0000-0000-000000000000'
-)
-SELECT EXISTS(SELECT 1 FROM ancestors WHERE id=:directory_id);
-
--- name: placements_is_live_destination?
--- param: directory_id: &str
-SELECT EXISTS(SELECT 1 FROM dir_paths WHERE id=:directory_id);
 
 -- name: placements_live_file_name?
 -- param: directory_id: &str
@@ -69,30 +52,15 @@ SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=:content_hash AND deleted_at
 -- param: source_dir_id: &str
 -- param: destination_dir_id: &str
 -- param: content_hash: &str
-INSERT INTO local_book_current(dir_id,content_hash,checksum,origin)
-SELECT :destination_dir_id,content_hash,checksum,origin FROM local_book_current WHERE dir_id=:source_dir_id AND content_hash=:content_hash
-ON CONFLICT(dir_id,content_hash) DO UPDATE SET checksum=excluded.checksum,origin=excluded.origin;
+UPDATE book_dir SET (checksum, size_bytes, checksum_seq) = (
+    SELECT source.checksum, source.size_bytes, source.checksum_seq FROM book_dir source
+    WHERE source.dir_id = :source_dir_id AND source.book_row_id = book_dir.book_row_id)
+WHERE dir_id = :destination_dir_id AND book_row_id = (SELECT row_id FROM book WHERE content_hash = :content_hash)
+  AND EXISTS(SELECT 1 FROM book_dir source
+             WHERE source.dir_id = :source_dir_id AND source.book_row_id = book_dir.book_row_id AND source.checksum IS NOT NULL);
 
--- name: placements_folder_destinations?
-WITH RECURSIVE tree(id,parent_id,label,path) AS (
-    SELECT id,NULL,'Library','' FROM dir WHERE id='00000000-0000-0000-0000-000000000000' AND deleted_at IS NULL
-    UNION ALL
-    SELECT child.id,child.parent_id,child.name,CASE WHEN tree.path='' THEN child.name ELSE tree.path||' / '||child.name END
-    FROM dir child JOIN tree ON child.parent_id=tree.id
-    WHERE child.id!=child.parent_id AND child.deleted_at IS NULL
-)
-SELECT id,parent_id,label,path FROM tree ORDER BY portable_name_key(path),id;
-
--- name: placements_add_download_request!
--- param: target_kind: &str
--- param: target_key: &str
--- param: origin: &str
--- param: created_at: i64
-INSERT INTO download_requests(target_kind, target_key, origin, created_at)
-VALUES (:target_kind, :target_key, :origin, :created_at)
-ON CONFLICT(target_kind, target_key) DO UPDATE SET
-    origin = CASE WHEN excluded.origin = 'user_initiated' THEN 'user_initiated' ELSE download_requests.origin END;
-
+-- name: placements_live_folders?
+SELECT id,parent_id,name FROM dir WHERE deleted_at IS NULL AND id!=parent_id;
 
 -- name: copy_directory_record_insert!
 -- param: dir_id: &str
@@ -124,19 +92,16 @@ SELECT id,name FROM dir WHERE parent_id=:parent_id AND id!=parent_id AND deleted
 -- param: projected_name: &str
 -- Reserve a free display name until deterministic repair assigns the final
 -- path. Publish the requested name, never this provisional display name.
-INSERT INTO dir(id,parent_id,name,intent_parent_id,intent_name,intent_lifecycle,deleted_at,purged_at)
-VALUES(:dir_id,:parent_id,:projected_name,:parent_id,:name,0,NULL,NULL);
+INSERT INTO dir(id,parent_id,name,intent_parent_id,intent_name,intent_lifecycle,deleted_at)
+VALUES(:dir_id,:parent_id,:projected_name,:parent_id,:name,0,NULL);
 
 -- name: empty_trash_records_select?
 SELECT content_hash FROM book WHERE deleted_at IS NOT NULL;
 
--- name: empty_trash_records_with!
--- param: now: i64
-WITH RECURSIVE subtree(id) AS (
-             SELECT id FROM dir WHERE deleted_at IS NOT NULL AND purged_at IS NULL AND intent_lifecycle=1
-AND EXISTS(SELECT 1 FROM sync_state_version v WHERE v.state_kind='directory_lifecycle' AND v.state_key=dir.id AND v.state_subkey='' AND v.body IS NOT NULL)
-             UNION SELECT child.id FROM dir child JOIN subtree ON COALESCE(child.intent_parent_id,child.parent_id)=subtree.id WHERE child.deleted_at IS NOT NULL
-         ) UPDATE dir SET deleted_at=:now,purged_at=:now,intent_lifecycle=2 WHERE id IN (SELECT id FROM subtree);
+-- name: empty_trash_roots?
+-- Folders the user put in Trash, as recorded by their synchronized lifecycle.
+SELECT id FROM dir WHERE deleted_at IS NOT NULL AND intent_lifecycle=1
+AND EXISTS(SELECT 1 FROM sync_state_version v WHERE v.state_kind='directory_lifecycle' AND v.state_key=dir.id AND v.state_subkey='' AND v.body IS NOT NULL);
 
 -- name: library_trash_select?
 SELECT content_hash,COALESCE(NULLIF(title,''),content_hash),format,deleted_at
@@ -144,7 +109,7 @@ SELECT content_hash,COALESCE(NULLIF(title,''),content_hash),format,deleted_at
          ORDER BY deleted_at DESC,portable_name_key(COALESCE(title,content_hash)),content_hash;
 
 -- name: library_trash_select_2?
-SELECT id,name,deleted_at FROM dir WHERE deleted_at IS NOT NULL AND purged_at IS NULL AND intent_lifecycle=1
+SELECT id,name,deleted_at FROM dir WHERE deleted_at IS NOT NULL AND intent_lifecycle=1
 AND EXISTS(SELECT 1 FROM sync_state_version v WHERE v.state_kind='directory_lifecycle' AND v.state_key=dir.id AND v.state_subkey='' AND v.body IS NOT NULL) ORDER BY deleted_at DESC,name_key,id;
 
 -- name: move_directory_record_select?
@@ -160,15 +125,10 @@ SELECT row_id FROM book WHERE content_hash=:content_hash AND deleted_at IS NOT N
 -- param: now: i64
 UPDATE book_dir SET deleted_at=:now,trash_origin_dir_id=NULL WHERE book_row_id=:book_row_id AND deleted_at IS NULL;
 
--- name: purge_directory_record_with!
--- param: dir_id: &str
+-- name: purge_directories!
+-- param: directories: &str
 -- param: now: i64
--- Hidden descendants are detached in the display tree. Follow retained intent
--- edges through suppressed folders. UNION terminates retained parent cycles.
-WITH RECURSIVE subtree(id) AS (
-    SELECT id FROM dir WHERE id=:dir_id AND deleted_at IS NOT NULL AND purged_at IS NULL
-    UNION SELECT child.id FROM dir child JOIN subtree ON COALESCE(child.intent_parent_id,child.parent_id)=subtree.id WHERE child.deleted_at IS NOT NULL
-) UPDATE dir SET deleted_at=:now,purged_at=:now,intent_lifecycle=2 WHERE id IN (SELECT id FROM subtree);
+UPDATE dir SET deleted_at=:now,intent_lifecycle=2 WHERE id IN (SELECT value FROM json_each(:directories)) AND deleted_at IS NOT NULL;
 
 -- name: remove_book_placement_record_select?
 -- param: dir_id: &str
@@ -226,7 +186,13 @@ WHERE b.content_hash=:content_hash AND bd.deleted_at IS NULL ORDER BY bd.dir_id;
 -- param: dir_id: &str
 -- Suppressed directories have a repaired display parent. Restore follows the
 -- retained parent intent while visibility still comes from the projection.
-SELECT COALESCE(intent_parent_id,parent_id),deleted_at IS NULL AND purged_at IS NULL FROM dir WHERE id=:dir_id;
+SELECT COALESCE(intent_parent_id,parent_id),deleted_at IS NULL FROM dir WHERE id=:dir_id;
+
+-- name: restore_book_fallback_name?
+-- param: content_hash: &str
+-- Reuse a local filename if available, without reviving its removed membership.
+SELECT COALESCE((SELECT file_name FROM book_dir WHERE book_row_id=book.row_id ORDER BY dir_id LIMIT 1),content_hash)
+FROM book WHERE content_hash=:content_hash;
 
 -- name: restore_book_record_with_parent_update!
 -- param: content_hash: &str
@@ -274,30 +240,38 @@ UPDATE book SET deleted_at=:deleted_at,trash_origin_dir_id=:trash_origin_dir_id 
 -- name: trash_directory_record_update_2!
 -- param: dir_id: &str
 -- param: deleted_at: i64
-UPDATE dir SET deleted_at=:deleted_at,purged_at=NULL,intent_lifecycle=1 WHERE id=:dir_id;
+UPDATE dir SET deleted_at=:deleted_at,intent_lifecycle=1 WHERE id=:dir_id;
 
--- name: trash_directory_record_with?
--- param: dir_id: &str
-WITH RECURSIVE subtree(id) AS (SELECT id FROM dir WHERE id=:dir_id UNION ALL SELECT d.id FROM dir d JOIN subtree s ON d.parent_id=s.id WHERE d.id!=d.parent_id) SELECT b.content_hash,bd.dir_id,bd.file_name FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id WHERE bd.dir_id IN (SELECT id FROM subtree) AND bd.deleted_at IS NULL AND b.deleted_at IS NULL;
+-- Trashing a folder: `subtree` is a JSON list of the folder and every folder
+-- below it, computed once in Rust.
 
--- name: trash_directory_record_with_2?
--- param: dir_id: &str
-WITH RECURSIVE subtree(id) AS (SELECT id FROM dir WHERE id=:dir_id UNION ALL SELECT child.id FROM dir child JOIN subtree ON child.parent_id=subtree.id WHERE child.id!=child.parent_id) SELECT DISTINCT book.content_hash FROM book_dir bd JOIN book ON book.row_id=bd.book_row_id WHERE bd.dir_id IN (SELECT id FROM subtree) AND bd.deleted_at IS NULL AND book.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM book_dir outside WHERE outside.book_row_id=book.row_id AND outside.deleted_at IS NULL AND outside.dir_id NOT IN (SELECT id FROM subtree));
+-- name: trash_subtree_placements?
+-- param: subtree: &str
+SELECT b.content_hash,bd.dir_id,bd.file_name FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id
+WHERE bd.dir_id IN (SELECT value FROM json_each(:subtree)) AND bd.deleted_at IS NULL AND b.deleted_at IS NULL;
 
--- name: trash_directory_record_with_3!
+-- name: trash_subtree_only_books?
+-- param: subtree: &str
+-- Books with no live placement outside the subtree; trashing the folder trashes them.
+SELECT DISTINCT book.content_hash FROM book_dir bd JOIN book ON book.row_id=bd.book_row_id
+WHERE bd.dir_id IN (SELECT value FROM json_each(:subtree)) AND bd.deleted_at IS NULL AND book.deleted_at IS NULL
+  AND NOT EXISTS(SELECT 1 FROM book_dir outside WHERE outside.book_row_id=book.row_id AND outside.deleted_at IS NULL
+                 AND outside.dir_id NOT IN (SELECT value FROM json_each(:subtree)));
+
+-- name: trash_subtree_placements_delete!
+-- param: subtree: &str
 -- param: dir_id: &str
 -- param: deleted_at: i64
-WITH RECURSIVE subtree(id) AS (SELECT id FROM dir WHERE id=:dir_id UNION ALL SELECT child.id FROM dir child JOIN subtree ON child.parent_id=subtree.id WHERE child.id!=child.parent_id) UPDATE book_dir SET deleted_at=:deleted_at,is_downloaded=0,trash_origin_dir_id=:dir_id WHERE dir_id IN (SELECT id FROM subtree) AND deleted_at IS NULL AND book_row_id IN (SELECT row_id FROM book WHERE deleted_at IS NULL);
+-- The remaining placements of books that live on elsewhere.
+UPDATE book_dir SET deleted_at=:deleted_at,is_downloaded=0,trash_origin_dir_id=:dir_id
+WHERE dir_id IN (SELECT value FROM json_each(:subtree)) AND deleted_at IS NULL
+  AND book_row_id IN (SELECT row_id FROM book WHERE deleted_at IS NULL);
 
 -- name: placement_expects_hash?
 -- param: dir_id: &str
 -- param: content_hash: &str
 -- param: file_name: &str
 SELECT EXISTS(SELECT 1 FROM book_dir JOIN book ON book.row_id = book_dir.book_row_id WHERE book_dir.dir_id = :dir_id AND book.content_hash = :content_hash AND book_dir.file_name = :file_name AND book_dir.deleted_at IS NULL AND book.deleted_at IS NULL);
-
--- name: dir_entry_by_path?
--- param: rel_path: &str
-WITH RECURSIVE dir_paths(id, parent_id, name, path) AS (SELECT id, parent_id, name, '/' AS path FROM dir WHERE id = '00000000-0000-0000-0000-000000000000' AND deleted_at IS NULL UNION ALL SELECT d.id, d.parent_id, d.name, CASE WHEN dir_paths.path = '/' THEN '/' || d.name ELSE dir_paths.path || '/' || d.name END FROM dir d JOIN dir_paths ON d.parent_id = dir_paths.id AND d.id != dir_paths.id WHERE d.deleted_at IS NULL) SELECT book.content_hash, bd.dir_id, bd.file_name FROM book_dir bd JOIN book ON book.row_id = bd.book_row_id JOIN dir_paths ON bd.dir_id = dir_paths.id WHERE CASE WHEN dir_paths.path = '/' THEN '/' || bd.file_name ELSE dir_paths.path || '/' || bd.file_name END = :rel_path AND bd.deleted_at IS NULL AND book.deleted_at IS NULL LIMIT 1;
 
 -- name: add_book_placement!
 -- param: dir_id: &str
@@ -311,8 +285,9 @@ INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) VALU
 -- param: content_hash: &str
 -- param: title: Option<&str>
 -- param: added_at: i64
--- param: format: &str
-INSERT INTO book(content_hash,title,added_at,format) VALUES(:content_hash,:title,:added_at,:format);
+-- param: format: i64
+-- param: search_title: &str
+INSERT INTO book(content_hash,title,added_at,format,search_title) VALUES(:content_hash,:title,:added_at,:format,:search_title);
 
 -- name: seed_dir!
 -- param: dir_id: &str
@@ -360,3 +335,10 @@ SELECT SUM(is_downloaded) FROM book_dir;
 -- name: dir_name?
 -- param: dir_id: &str
 SELECT name FROM dir WHERE id=:dir_id;
+
+-- name: book_at_placement?
+-- param: dir_id: &str
+-- param: file_name: &str
+SELECT book.content_hash FROM book_dir JOIN book ON book.row_id = book_dir.book_row_id
+WHERE book_dir.dir_id = :dir_id AND book_dir.file_name = :file_name
+  AND book_dir.deleted_at IS NULL AND book.deleted_at IS NULL LIMIT 1;

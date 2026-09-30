@@ -105,11 +105,6 @@ WHERE content_hash = :content_hash AND id = :work_id;
 
 -- Native book staging and conditional publish.
 
--- name: native_book_entry?
--- param: relative_path: &str
-SELECT book.content_hash,bd.dir_id,bd.file_name FROM book_dir bd JOIN book ON book.row_id=bd.book_row_id JOIN dir_paths paths ON paths.id=bd.dir_id
-WHERE ('/' || CASE WHEN paths.path='' THEN bd.file_name ELSE paths.path || '/' || bd.file_name END)=:relative_path AND bd.deleted_at IS NULL AND book.deleted_at IS NULL LIMIT 1;
-
 -- name: native_occupied_file_names?
 -- param: dir_id: &str
 SELECT file_name FROM book_dir WHERE dir_id=:dir_id AND deleted_at IS NULL;
@@ -139,12 +134,12 @@ SELECT EXISTS(SELECT 1 FROM local_purge_work WHERE content_hash=:content_hash);
 -- name: native_file_work_rows?
 SELECT id,operation,content_hash,relative_path FROM local_file_work ORDER BY id;
 
--- Lazy file-work resolution: current live placements for a hash, with
--- precomputed display paths. The queued path is only a hint; a directory
+-- Lazy file-work resolution: current live placements for a hash; Rust adds
+-- each one's path. The queued path is only a hint; a directory
 -- move after queueing must not strand the job.
 -- name: native_live_placement_paths?
 -- param: content_hash: &str
-SELECT bd.dir_id, bd.file_name, ('/' || CASE WHEN paths.path='' THEN bd.file_name ELSE paths.path || '/' || bd.file_name END) FROM book_dir bd JOIN book ON book.row_id=bd.book_row_id JOIN dir_paths paths ON paths.id=bd.dir_id WHERE book.content_hash=:content_hash AND bd.deleted_at IS NULL AND book.deleted_at IS NULL ORDER BY 3;
+SELECT bd.dir_id, bd.file_name FROM book_dir bd JOIN book ON book.row_id=bd.book_row_id WHERE book.content_hash=:content_hash AND bd.deleted_at IS NULL AND book.deleted_at IS NULL;
 
 -- Last materialized locations for a hash; trash work for a retired book
 -- resolves here instead of the stale queued path.
@@ -161,8 +156,10 @@ SELECT EXISTS(SELECT 1 FROM local_file_work WHERE id=:id AND operation=:operatio
 
 -- name: native_current_checksum?
 -- param: content_hash: &str
--- param: relative_path: &str
-SELECT max(current.checksum) FROM local_book_current current JOIN book b ON b.content_hash=current.content_hash JOIN book_dir bd ON bd.book_row_id=b.row_id AND bd.dir_id=current.dir_id AND bd.deleted_at IS NULL JOIN dir_paths paths ON paths.id=bd.dir_id WHERE current.content_hash=:content_hash AND b.deleted_at IS NULL AND ('/' || CASE WHEN paths.path='' THEN bd.file_name ELSE paths.path||'/'||bd.file_name END)=:relative_path;
+-- param: dir_id: &str
+-- param: file_name: &str
+SELECT max(bd.checksum) FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id
+WHERE b.content_hash=:content_hash AND b.deleted_at IS NULL AND bd.deleted_at IS NULL AND bd.dir_id=:dir_id AND bd.file_name=:file_name;
 
 -- name: native_delete_file_projection!
 -- param: content_hash: &str
@@ -175,7 +172,8 @@ UPDATE book_dir SET is_downloaded=1 WHERE book_row_id=(SELECT row_id FROM book W
 
 -- name: native_request_thumbnail!
 -- param: content_hash: &str
-INSERT INTO local_thumbnail_work(content_hash,state) VALUES(:content_hash,'pending') ON CONFLICT(content_hash) DO UPDATE SET state='pending',retry_after=0 WHERE local_thumbnail_work.state='ready';
+INSERT INTO book_transfer(content_hash,cover_state) SELECT content_hash,'pending' FROM book WHERE content_hash=:content_hash AND deleted_at IS NULL
+ON CONFLICT(content_hash) DO UPDATE SET cover_state='pending',cover_retry_after=0 WHERE cover_state IS NULL OR cover_state='ready';
 
 -- name: native_delete_file_work!
 -- param: id: i64
@@ -183,7 +181,8 @@ DELETE FROM local_file_work WHERE id=:id;
 
 -- name: native_record_remote_book!
 -- param: content_hash: &str
-INSERT INTO remote_asset(kind,hash) VALUES('book',:content_hash) ON CONFLICT(kind,hash) DO NOTHING;
+INSERT INTO book_transfer(content_hash,server_has_book) SELECT content_hash,1 FROM book WHERE content_hash=:content_hash
+ON CONFLICT(content_hash) DO UPDATE SET server_has_book=1;
 
 -- name: native_queue_book_work!
 -- param: content_hash: &str

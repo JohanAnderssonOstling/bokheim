@@ -36,11 +36,13 @@ fn purging_trashed_directory_purges_its_descendant_intents() {
         } else {
             replica.purge_directory(&parent).unwrap();
         }
-        let state: (i64, bool) = replica.connection.query_row("SELECT intent_lifecycle,purged_at IS NOT NULL FROM dir WHERE id=?1", [child.to_string()], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_directory_removed(&replica, parent);
+        assert_directory_removed(&replica, child);
+        assert!(replica.sync_publishable_mutations().unwrap().iter().any(|m| matches!(m.body, MutationBody::DirectoryLifecycle { dir_id, value: library_replica::DirectoryLifecycleState::Purged } if dir_id == child)));
         let later: i64 = replica.connection.query_row("SELECT MAX(changed_at)+1000 FROM sync_state_version", [], |row| row.get(0)).unwrap();
         pull(&replica, &[change(MutationBody::DirectoryParent { dir_id: child, parent_id: ROOT_DIR_ID }, later as u64, 100)]);
         let path = replica.directory_relative_path_string(&child).unwrap();
-        assert_eq!(state, (2, true), "purging a folder should reach its hidden descendants; a subsequent parent-only update exposes {path:?}");
+        assert_directory_removed(&replica, child);
         assert_eq!(path, None, "a parent-only update cannot undo the child's purge");
     }
 }
@@ -65,10 +67,8 @@ fn subtree_purge_terminates_for_retained_parent_cycles() {
         }
         assert_eq!(replica.directory_relative_path_string(&second).unwrap(), None);
         assert_eq!(replica.directory_relative_path_string(&unrelated).unwrap(), Some("Unrelated".into()));
-        let child_purged: bool = replica.connection.query_row("SELECT purged_at IS NOT NULL FROM dir WHERE id=?1", [second.to_string()], |row| row.get(0)).unwrap();
-        assert!(child_purged);
-        let purged: bool = replica.connection.query_row("SELECT purged_at IS NOT NULL FROM dir WHERE id=?1", [first.to_string()], |row| row.get(0)).unwrap();
-        assert!(purged);
+        assert_directory_removed(&replica, first);
+        assert_directory_removed(&replica, second);
     }
 }
 
@@ -88,11 +88,84 @@ fn subtree_purge_rolls_back_all_lifecycles_when_a_child_write_fails() {
         )
         .unwrap();
     assert!(replica.purge_directory(&parent).is_err());
-    let purged: i64 = replica.connection.query_row("SELECT count(*) FROM dir WHERE purged_at IS NOT NULL", [], |row| row.get(0)).unwrap();
-    assert_eq!(purged, 0);
+    let directories: i64 = replica.connection.query_row("SELECT count(*) FROM dir", [], |row| row.get(0)).unwrap();
+    assert_eq!(directories, 3);
     assert_eq!(replica.sync_publishable_mutations().unwrap(), before);
     replica.connection.execute_batch("DROP TRIGGER reject_child_purge;").unwrap();
     replica.purge_directory(&parent).unwrap();
-    let purged: i64 = replica.connection.query_row("SELECT count(*) FROM dir WHERE purged_at IS NOT NULL", [], |row| row.get(0)).unwrap();
-    assert_eq!(purged, 2);
+    assert_directory_removed(&replica, parent);
+    assert_directory_removed(&replica, child);
+}
+
+fn assert_directory_removed(replica: &crate::Database, id: sync_common::DirId) {
+    for table in ["dir", "book_dir"] {
+        let column = if table == "dir" { "id" } else { "dir_id" };
+        assert_eq!(replica.connection.query_row(&format!("SELECT count(*) FROM {table} WHERE {column}=?1"), [id.to_string()], |row| row.get::<_, i64>(0)).unwrap(), 0, "{table} retains purged directory {id}");
+    }
+    assert!(!replica.connection.prepare("PRAGMA foreign_key_check").unwrap().exists([]).unwrap());
+}
+
+#[test]
+fn directory_purge_deletes_subtree_placements_and_preserves_other_memberships() {
+    for empty_all in [false, true] {
+        let replica = db();
+        let parent = uuid::Uuid::from_u128(1);
+        let child = uuid::Uuid::from_u128(2);
+        replica.create_directory_with_id(&parent, &ROOT_DIR_ID, &"Parent".into()).unwrap();
+        replica.create_directory_with_id(&child, &parent, &"Child".into()).unwrap();
+        // One book has placements both inside and outside the purged subtree.
+        pull(
+            &replica,
+            &[
+                present(100, 1),
+                change(MutationBody::Placement { dir_id: child, content_hash: hash(), present: true, origin_folder_id: None }, 100, 2),
+                change(MutationBody::Placement { dir_id: ROOT_DIR_ID, content_hash: hash(), present: true, origin_folder_id: None }, 100, 3),
+            ],
+        );
+        replica.connection.execute("INSERT INTO local_file_projection VALUES(?1,?2,'/Parent/Child/book.epub')", rusqlite::params![hash().as_str(), child.to_string()]).unwrap();
+        replica.trash_directory(&parent).unwrap();
+        if empty_all {
+            replica.empty_trash().unwrap();
+        } else {
+            replica.purge_directory(&parent).unwrap();
+        }
+        assert_directory_removed(&replica, parent);
+        assert_directory_removed(&replica, child);
+        assert_eq!(replica.connection.query_row("SELECT count(*) FROM book_dir WHERE dir_id=?1 AND deleted_at IS NULL", [ROOT_DIR_ID.to_string()], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert!(replica.connection.query_row("SELECT EXISTS(SELECT 1 FROM local_file_work WHERE relative_path='/Parent/Child/book.epub' AND operation='trash')", [], |row| row.get::<_, bool>(0)).unwrap());
+        let remote = db();
+        let changes = replica.sync_publishable_mutations().unwrap().into_iter().map(|m| super::convergence_tests::change(m.body, m.changed_at, m.replica_seq.get())).collect::<Vec<_>>();
+        pull(&remote, &changes);
+        assert_directory_removed(&remote, parent);
+        assert_directory_removed(&remote, child);
+        // New placement and parent updates cannot revive a purged directory.
+        let later: i64 = replica.connection.query_row("SELECT MAX(changed_at)+1000 FROM sync_state_version", [], |row| row.get(0)).unwrap();
+        pull(
+            &replica,
+            &[
+                change(MutationBody::Placement { dir_id: child, content_hash: hash(), present: true, origin_folder_id: None }, later as u64, 100),
+                change(MutationBody::DirectoryParent { dir_id: child, parent_id: ROOT_DIR_ID }, later as u64, 101),
+            ],
+        );
+        assert_directory_removed(&replica, child);
+    }
+}
+
+#[test]
+fn remote_parent_purge_removes_descendants_before_their_lifecycles_arrive() {
+    let replica = db();
+    let parent = uuid::Uuid::from_u128(1);
+    let child = uuid::Uuid::from_u128(2);
+    replica.create_directory_with_id(&parent, &ROOT_DIR_ID, &"Parent".into()).unwrap();
+    replica.create_directory_with_id(&child, &parent, &"Child".into()).unwrap();
+    pull(&replica, &[present(100, 1), change(MutationBody::Placement { dir_id: child, content_hash: hash(), present: true, origin_folder_id: None }, 100, 2)]);
+    let later: i64 = replica.connection.query_row("SELECT MAX(changed_at)+1000 FROM sync_state_version", [], |row| row.get(0)).unwrap();
+    pull(&replica, &[change(MutationBody::DirectoryLifecycle { dir_id: parent, value: library_replica::DirectoryLifecycleState::Purged }, later as u64, 100)]);
+    assert_directory_removed(&replica, parent);
+    assert_directory_removed(&replica, child);
+    // A newer explicit existence winner can recreate the materialized tree
+    // and memberships from the retained canonical registers.
+    pull(&replica, &[change(MutationBody::DirectoryLifecycle { dir_id: parent, value: library_replica::DirectoryLifecycleState::Present }, later as u64 + 1, 101)]);
+    assert_eq!(replica.directory_relative_path_string(&child).unwrap(), Some("Parent/Child".into()));
+    assert_eq!(replica.connection.query_row("SELECT count(*) FROM book_dir WHERE dir_id=?1", [child.to_string()], |row| row.get::<_, i64>(0)).unwrap(), 1);
 }

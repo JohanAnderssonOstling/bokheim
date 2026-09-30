@@ -8,16 +8,6 @@ use crate::{Database, DatabaseError};
 use include_sqlite_sql::include_sql;
 use sync_common::ContentHash;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ThumbnailSyncAction { Put, Delete }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PendingThumbnailSync {
-    pub content_hash: ContentHash,
-    pub action: ThumbnailSyncAction,
-    pub generation: i64,
-}
-
 impl Database {
     pub fn pending_thumbnail_job_count(&self) -> Result<u64, DatabaseError> {
         let connection = &self.connection;
@@ -38,10 +28,10 @@ impl Database {
         let connection = &self.connection;
         let mut format = None;
         connection.thumbnail_local_format(hash.as_str(), |row| {
-            format = Some(row.get::<_, String>(0)?);
+            format = Some(row.get::<_, Option<i64>>(0)?);
             Ok(())
         })?;
-        format.map(|format| book_model::BookFormat::from_extension(&format).ok_or_else(|| DatabaseError::message("book format is missing"))).transpose()
+        format.map(|format| format.and_then(book_model::BookFormat::from_code).ok_or_else(|| DatabaseError::message("book format is missing"))).transpose()
     }
 
     pub fn confirm_thumbnail_available(&self, hash: &ContentHash) -> Result<(), DatabaseError> {
@@ -67,7 +57,6 @@ impl Database {
     pub fn defer_thumbnail_to_download(&self, hash: &ContentHash) -> Result<(), DatabaseError> {
         let transaction = self.connection.unchecked_transaction()?;
         transaction.thumbnail_discard(hash.as_str())?;
-        transaction.thumbnail_enqueue_asset_work(hash.as_str())?;
         crate::sync::apply::commit(transaction)?;
         Ok(())
     }
@@ -82,77 +71,10 @@ impl Database {
         Ok(self.thumbnail_book_format(hash)?.is_some())
     }
 
+    /// Records a cover made on this device, or that the book has none.
     pub fn complete_thumbnail_work(&self, hash: &ContentHash, has_cover: bool) -> Result<(), DatabaseError> {
-        self.complete_local_thumbnail(hash, has_cover, false, has_cover.then_some("put"))
-    }
-
-    pub fn has_sidecar_thumbnail(&self, hash: &ContentHash) -> Result<bool, DatabaseError> {
-        let mut exists = false;
-        self.connection.thumbnail_sidecar_exists(hash.as_str(), |row| { exists = row.get(0)?; Ok(()) })?;
-        Ok(exists)
-    }
-
-    pub fn complete_sidecar_thumbnail_work(&self, hash: &ContentHash) -> Result<(), DatabaseError> {
-        self.complete_local_thumbnail(hash, true, true, Some("put"))
-    }
-
-    pub fn complete_replaced_sidecar_thumbnail_work(&self, hash: &ContentHash, has_cover: bool) -> Result<(), DatabaseError> {
-        self.complete_local_thumbnail(hash, has_cover, false, Some(if has_cover { "put" } else { "delete" }))
-    }
-
-    fn complete_local_thumbnail(&self, hash: &ContentHash, has_cover: bool, sidecar: bool, sync_action: Option<&str>) -> Result<(), DatabaseError> {
-        let transaction = self.connection.unchecked_transaction()?;
-        transaction.thumbnail_confirm_source(hash.as_str(), "local")?;
-        if sidecar { transaction.thumbnail_sidecar_mark(hash.as_str())?; } else { transaction.thumbnail_sidecar_clear(hash.as_str())?; }
-        transaction.thumbnail_set_result(hash.as_str(), if has_cover { "ready" } else { "no_cover" })?;
-        if let Some(action) = sync_action {
-            transaction.thumbnail_sync_pending_set(hash.as_str(), action)?;
-        }
-        crate::sync::apply::commit(transaction)?;
+        self.connection.thumbnail_set_result(hash.as_str(), if has_cover { "ready" } else { "no_cover" })?;
         Ok(())
-    }
-
-    pub fn pending_thumbnail_sync_page(&self, after: &str) -> Result<Vec<PendingThumbnailSync>, DatabaseError> {
-        let mut pending = Vec::new();
-        self.connection.thumbnail_sync_pending_page(after, |row| {
-            let action: String = row.get(1)?;
-            let action = match action.as_str() {
-                "put" => ThumbnailSyncAction::Put,
-                "delete" => ThumbnailSyncAction::Delete,
-                _ => return Err(rusqlite::Error::InvalidQuery),
-            };
-            pending.push(PendingThumbnailSync { content_hash: ContentHash::new(&row.get::<_, String>(0)?), action, generation: row.get(2)? });
-            Ok(())
-        })?;
-        Ok(pending)
-    }
-
-    pub fn complete_thumbnail_sync(&self, pending: PendingThumbnailSync) -> Result<(), DatabaseError> {
-        self.connection.thumbnail_sync_pending_clear(pending.content_hash.as_str(), pending.generation)?;
-        Ok(())
-    }
-
-    pub fn remote_thumbnail_revision(&self, hash: &ContentHash) -> Result<Option<ContentHash>, DatabaseError> {
-        let mut revision = None;
-        self.connection.thumbnail_remote_revision(hash.as_str(), |row| { revision = Some(ContentHash::new(&row.get::<_, String>(0)?)); Ok(()) })?;
-        Ok(revision)
-    }
-
-    pub fn record_remote_thumbnail_revision(&self, hash: &ContentHash, revision: &ContentHash) -> Result<bool, DatabaseError> {
-        let changed = self.remote_thumbnail_revision(hash)? != Some(*revision);
-        if changed { self.connection.thumbnail_remote_revision_set(hash.as_str(), revision.as_str())?; }
-        Ok(changed)
-    }
-
-    pub fn forget_remote_thumbnail_revision(&self, hash: &ContentHash) -> Result<(), DatabaseError> {
-        self.connection.thumbnail_remote_revision_clear(hash.as_str())?;
-        Ok(())
-    }
-
-    pub fn thumbnail_source_origin(&self, hash: &ContentHash) -> Result<Option<String>, DatabaseError> {
-        let mut origin = None;
-        self.connection.thumbnail_source_origin(hash.as_str(), |row| { origin = Some(row.get(0)?); Ok(()) })?;
-        Ok(origin)
     }
 
     pub fn remote_thumbnail_presence_candidates_page(&self, after: &str) -> Result<Vec<ContentHash>, DatabaseError> {
@@ -196,7 +118,6 @@ impl Database {
 
     pub(crate) fn complete_downloaded_thumbnail_on(connection: &rusqlite::Connection, hash: &ContentHash) -> Result<(), DatabaseError> {
         connection.thumbnail_record_remote(hash.as_str())?;
-        connection.thumbnail_confirm_source(hash.as_str(), "remote")?;
         connection.thumbnail_set_result(hash.as_str(), "ready")?;
         Ok(())
     }
@@ -262,7 +183,9 @@ impl Database {
     }
 }
 
-include_sql!("src/enrichment/sql/schema.sql");
+include_sql!("src/enrichment/sql/schema/tables.sql");
+include_sql!("src/enrichment/sql/schema/triggers.sql");
+include_sql!("src/enrichment/sql/schema/index.sql");
 include_sql!("src/enrichment/sql/enrichment.sql");
 
 // ---- work ----
@@ -307,8 +230,9 @@ impl Database {
 
     pub fn prepared_upload_batch(&self, scope: &std::collections::HashSet<ContentHash>) -> Result<UploadPreparationBatch, DatabaseError> {
         let scope_json = serde_json::to_string(scope).map_err(DatabaseError::operation)?;
+        let affected_dirs = serde_json::to_string(&crate::placements::pending_work_directories(&self.connection)?).map_err(DatabaseError::operation)?;
         let mut members = Vec::new();
-        self.connection.prepared_upload_batch(scope_json.as_str(), |row| {
+        self.connection.prepared_upload_batch(scope_json.as_str(), &affected_dirs, |row| {
             members.push((ContentHash::new(&row.get::<_, String>(0)?), row.get::<_, Option<i64>>(1)?));
             Ok(())
         })?;
@@ -629,7 +553,7 @@ impl Database {
             let content_hash = ContentHash::new(&row.get::<_, String>(0)?);
             let isbns = split_isbns(&row.get::<_, String>(1)?);
             let mut authors = Vec::new();
-            self.connection.enrichment_author_credits(content_hash.as_str(), |credit| {
+            self.connection.enrichment_author_credits(content_hash.as_str(), book_model::AUTHOR_MARC_RELATOR_CODE.0.to_vec(), |credit| {
                 authors.push(AuthorCredit { position: credit.get(0)?, name: credit.get(1)? });
                 Ok(())
             })?;
@@ -677,7 +601,7 @@ impl Database {
             let Some((title, metadata)) = input else { continue };
             let metadata = crate::sync::decode_book_metadata(&metadata)?;
             let mut authors = Vec::new();
-            self.connection.enrichment_identity_authors(hash.as_str(), |row| {
+            self.connection.enrichment_identity_authors(hash.as_str(), book_model::AUTHOR_MARC_RELATOR_CODE.0.to_vec(), |row| {
                 authors.push(row.get::<_, String>(0)?);
                 Ok(())
             })?;
@@ -699,7 +623,7 @@ impl Database {
         self.connection.enrichment_subject_candidates(cursor, scope, book_enrichment::SUBJECT_PIPELINE_REVISION, |row| {
             let hash = ContentHash::new(&row.get::<_, String>(0)?);
             let title: String = row.get(1)?;
-            let Some(format) = row.get::<_, String>(2).ok().and_then(|format| book_model::BookFormat::from_extension(&format)) else {
+            let Some(format) = row.get::<_, Option<i64>>(2)?.and_then(book_model::BookFormat::from_code) else {
                 return Ok(());
             };
             let Ok(book) = crate::sync::decode_book_metadata(&row.get::<_, Vec<u8>>(3)?) else {
@@ -878,7 +802,7 @@ impl Database {
         for resolution in &outcome.resolutions {
             let position = i64::try_from(resolution.position).map_err(|error| DatabaseError::operation(error.to_string()))?;
             let mut current: Option<(i64, String, bool)> = None;
-            transaction.author_resolve_credit(outcome.content_hash.as_str(), position, |row| {
+            transaction.author_resolve_credit(outcome.content_hash.as_str(), position, book_model::AUTHOR_MARC_RELATOR_CODE.0.to_vec(), |row| {
                 current = Some((row.get(0)?, row.get(1)?, row.get(2)?));
                 Ok(())
             })?;
@@ -917,7 +841,7 @@ impl Database {
             // Update even when the local row is unchanged. The contributor trigger
             // refreshes the already-queued metadata mutation with the authority-derived
             // stable id before the first upload.
-            transaction.author_reidentify_credit(target_local_id, outcome.content_hash.as_str(), position)?;
+            transaction.author_reidentify_credit(target_local_id, outcome.content_hash.as_str(), position, book_model::AUTHOR_MARC_RELATOR_CODE.0.to_vec())?;
             if target_local_id != current_local_id {
                 transaction.author_delete_identity(current_local_id)?;
             }
@@ -936,7 +860,7 @@ impl Database {
         let mut credits: Vec<book_model::Contributor> =
             outcome.authors.iter().map(|author| book_model::Contributor::new(&author.preferred_name, book_model::MarcRelatorCode(*b"aut")).map_err(|error| DatabaseError::operation(error.to_string()))).collect::<Result<Vec<_>, _>>()?;
         let mut existing = Vec::new();
-        transaction.author_non_author_credits(outcome.content_hash.as_str(), |row| {
+        transaction.author_non_author_credits(outcome.content_hash.as_str(), book_model::AUTHOR_MARC_RELATOR_CODE.0.to_vec(), |row| {
             existing.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?));
             Ok(())
         })?;
@@ -1021,10 +945,10 @@ impl Database {
         })?;
         let mut format = None;
         self.connection.enrichment_book_format(hash.as_str(), |row| {
-            format = Some(row.get::<_, String>(0)?);
+            format = row.get::<_, Option<i64>>(0)?;
             Ok(())
         })?;
-        Ok((state, format.and_then(|format| book_model::BookFormat::from_extension(&format))))
+        Ok((state, format.and_then(book_model::BookFormat::from_code)))
     }
 }
 
@@ -1041,43 +965,11 @@ mod schema_tests {
     }
 
     #[test]
-    fn sidecar_cover_provenance_is_cleared_when_local_cover_changes_source() {
-        let (db, _path) = open_test_database();
-        let hash = ContentHash::new(&"d".repeat(64));
-        db.connection.execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'Audio','m4b')", [hash.as_str()]).unwrap();
-        db.complete_sidecar_thumbnail_work(&hash).unwrap();
-        assert!(db.has_sidecar_thumbnail(&hash).unwrap());
-        let first = db.pending_thumbnail_sync_page("").unwrap().pop().unwrap();
-        assert_eq!(first.action, ThumbnailSyncAction::Put);
-        db.complete_replaced_sidecar_thumbnail_work(&hash, false).unwrap();
-        assert!(!db.has_sidecar_thumbnail(&hash).unwrap());
-        let second = db.pending_thumbnail_sync_page("").unwrap().pop().unwrap();
-        assert_eq!(second.action, ThumbnailSyncAction::Delete);
-        assert!(second.generation > first.generation);
-        db.complete_thumbnail_sync(first).unwrap();
-        assert_eq!(db.pending_thumbnail_sync_page("").unwrap(), vec![second]);
-        db.complete_thumbnail_sync(second).unwrap();
-        assert!(db.pending_thumbnail_sync_page("").unwrap().is_empty());
-        db.complete_thumbnail_work(&hash, true).unwrap();
-        let embedded = db.pending_thumbnail_sync_page("").unwrap().pop().unwrap();
-        assert_eq!(embedded.action, ThumbnailSyncAction::Put);
-        db.complete_thumbnail_sync(embedded).unwrap();
-        let revision = ContentHash::new(&"e".repeat(64));
-        assert!(db.record_remote_thumbnail_revision(&hash, &revision).unwrap());
-        assert!(!db.record_remote_thumbnail_revision(&hash, &revision).unwrap());
-        assert_eq!(db.remote_thumbnail_revision(&hash).unwrap(), Some(revision));
-        db.forget_remote_thumbnail_revision(&hash).unwrap();
-        assert!(db.remote_thumbnail_revision(&hash).unwrap().is_none());
-    }
-
-
-    #[test]
     fn remote_thumbnail_presence_does_not_strand_pending_recovery() {
         let (db, _path) = open_test_database();
         let hash = ContentHash::new(&"a".repeat(64));
-        db.connection.execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'A book','epub')", [hash.as_str()]).unwrap();
-        db.connection.execute("INSERT INTO local_thumbnail_work(content_hash,state) VALUES(?1,'pending')", [hash.as_str()]).unwrap();
-        db.connection.execute("INSERT INTO remote_asset(kind,hash) VALUES('thumbnail',?1)", [hash.as_str()]).unwrap();
+        db.connection.execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'A book',1)", [hash.as_str()]).unwrap();
+        db.connection.execute("INSERT INTO book_transfer(content_hash,cover_state,server_has_cover) VALUES(?1,'pending',1)", [hash.as_str()]).unwrap();
 
         assert_eq!(db.upload_thumbnail_candidates(&std::collections::HashSet::from([hash]), 0).unwrap(), [hash]);
     }
@@ -1088,8 +980,8 @@ mod schema_tests {
         let first = ContentHash::new(&"a".repeat(64));
         let second = ContentHash::new(&"b".repeat(64));
         for hash in [first, second] {
-            db.connection.execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'A book','epub')", [hash.as_str()]).unwrap();
-            db.connection.execute("INSERT INTO remote_asset(kind,hash) VALUES('thumbnail',?1)", [hash.as_str()]).unwrap();
+            db.connection.execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'A book',1)", [hash.as_str()]).unwrap();
+            db.connection.execute("INSERT INTO book_transfer(content_hash,server_has_cover) VALUES(?1,1)", [hash.as_str()]).unwrap();
         }
         assert_eq!(db.thumbnail_download_coverage().unwrap(), (0, 2));
         db.complete_downloaded_thumbnail(&first).unwrap();
@@ -1109,7 +1001,7 @@ mod schema_tests {
         use metadata_contract::audible::*;
         let (db, path) = open_test_database();
         let hash = ContentHash::new(&"a".repeat(64));
-        db.connection.execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'A book','m4b')", [hash.as_str()]).unwrap();
+        db.connection.execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'A book',8)", [hash.as_str()]).unwrap();
         db.connection.execute("INSERT INTO audiobook_metadata VALUES(?1,600000)", [hash.as_str()]).unwrap();
         db.connection.execute("INSERT INTO book_toc VALUES(?1,0,'[]')",[hash.as_str()]).unwrap();
         let request = LookupRequest { title: "A book".into(), authors: vec![], duration_ms: 600000, recording: RecordingEvidence::default(), chapters: vec![] };
@@ -1117,7 +1009,7 @@ mod schema_tests {
             .execute("INSERT INTO audible_enrichment_jobs(content_hash,policy,request_json,status,updated_at) VALUES(?1,?2,?3,'pending',0)", rusqlite::params![hash.as_str(), POLICY_VERSION, serde_json::to_string(&request).unwrap()])
             .unwrap();
         db.finish_upload_preparation(&db.upload_preparation_snapshot().unwrap()).unwrap();
-        assert_eq!(db.connection.query_row("SELECT COUNT(*) FROM local_upload_preparation WHERE content_hash=?1", [hash.as_str()], |row| row.get::<_, i64>(0)).unwrap(), 1, "optional Audible lookup must not hold upload admission");
+        assert_eq!(db.connection.query_row("SELECT COUNT(*) FROM book_transfer WHERE content_hash=?1 AND upload_prepared IS NOT NULL", [hash.as_str()], |row| row.get::<_, i64>(0)).unwrap(), 1, "optional Audible lookup must not hold upload admission");
         let job = db.claim_audible_batch(100, hash).unwrap().unwrap();
         let mut response = LookupResponse { status: LookupStatus::Unavailable, candidates: vec![], selected_asin: None, selected_region: None, chapter_plan: None, used_website_fallback: false, detail: "HTTP 503".into() };
         assert!(db.resolve_audible_batch(&job, &response, 400, 100).unwrap());

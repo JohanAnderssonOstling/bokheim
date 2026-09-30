@@ -28,17 +28,13 @@ WHERE book_contributor.book_row_id=(SELECT row_id FROM book WHERE content_hash=:
 
 -- name: has_import_inspection_select?
 -- param: content_hash: &str
--- param: format: &str
+-- param: format: i64
 -- param: version: i64
 SELECT EXISTS(
     SELECT 1 FROM local_import_inspection i JOIN book b USING(content_hash)
     WHERE i.content_hash = :content_hash AND i.format = :format AND i.version = :version
       AND b.format = :format AND b.deleted_at IS NULL
 );
-
--- name: live_destination_select?
--- param: dir_id: &str
-SELECT EXISTS(SELECT 1 FROM dir_paths WHERE id=:dir_id);
 
 -- name: provisional_author_identity_by_name?
 -- param: normalized_name: &str
@@ -61,7 +57,7 @@ UPDATE book_dir SET local_hash=:local_hash WHERE dir_id=:dir_id AND book_row_id=
 
 -- name: record_import_inspection!
 -- param: content_hash: &str
--- param: format: &str
+-- param: format: i64
 -- param: version: i64
 INSERT INTO local_import_inspection(content_hash, format, version)
 VALUES (:content_hash, :format, :version)
@@ -69,9 +65,8 @@ ON CONFLICT(content_hash) DO UPDATE SET format = excluded.format, version = excl
 
 -- name: restore_candidates_select?
 -- param: content_hash: &str
-SELECT '/' || CASE WHEN dp.path='' THEN bd.file_name ELSE dp.path || '/' || bd.file_name END,p.relative_path
+SELECT bd.dir_id,bd.file_name,p.relative_path
              FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id
-             JOIN dir_paths dp ON dp.id=bd.dir_id
              LEFT JOIN local_file_projection p ON p.content_hash=b.content_hash AND p.dir_id=bd.dir_id
              WHERE b.content_hash=:content_hash AND b.deleted_at IS NULL AND bd.deleted_at IS NULL;
 

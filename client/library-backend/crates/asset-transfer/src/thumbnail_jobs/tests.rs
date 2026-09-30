@@ -137,7 +137,7 @@ impl ThumbnailProcessor for CoverProcessor {
 }
 
 #[tokio::test]
-async fn removing_an_mp3_sidecar_cover_clears_its_cached_thumbnail() {
+async fn a_cover_is_kept_when_its_sidecar_is_removed() {
     let root = tempfile::tempdir().unwrap();
     let folder = root.path().join("Story");
     std::fs::create_dir(&folder).unwrap();
@@ -163,7 +163,6 @@ async fn removing_an_mp3_sidecar_cover_clears_its_cached_thumbnail() {
     let mut observer = Observer::default();
     assert_eq!(db.thumbnail_book_format(hash).unwrap(), Some(book_model::BookFormat::Mp3Folder));
     assert!(jobs.recover(hash, &mut observer).await.unwrap());
-    assert!(db.has_sidecar_thumbnail(&hash).unwrap());
     assert!(assets.exists(BlobKind::Thumbnail, &hash).unwrap());
 
     std::fs::remove_file(folder.join("cover.jpg")).unwrap();
@@ -175,42 +174,10 @@ async fn removing_an_mp3_sidecar_cover_clears_its_cached_thumbnail() {
         published: library_database::PublishedImport { name: "Story".into(), relative_path: "Story".into(), published: true, fingerprint: None },
         request_thumbnail: true, restore_paths: Vec::new(),
     }).unwrap();
+    // Covers are set once: the rescan keeps the cover the sidecar gave it.
     assert!(jobs.recover(hash, &mut observer).await.unwrap());
-    assert!(!db.has_sidecar_thumbnail(&hash).unwrap());
-    assert!(!assets.exists(BlobKind::Thumbnail, &hash).unwrap());
-}
-
-#[tokio::test]
-async fn removing_an_m4b_sidecar_cover_uses_the_local_book_for_recovery() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("Story.m4b"), b"audio fixture").unwrap();
-    std::fs::write(root.path().join("Story.jpg"), b"cover").unwrap();
-    let hash = ContentHash::new(blake3::hash(b"audio fixture").to_hex().as_str());
-    let db_path = root.path().join(APP_HIDDEN_LIBRARY_DB_PATH);
-    let db = TestDatabase::open(&db_path).unwrap();
-    db.initialize_library().unwrap();
-    let imported = || library_database::ImportCommit {
-        parent_id: ROOT_DIR_ID, file_name: "Story.m4b".into(), format: book_model::BookFormat::M4b,
-        content_hash: hash, checksum: hash, size_bytes: b"audio fixture".len() as u64, inspection_version: 1,
-        inspection: Some(book_metadata::InspectedBook {
-            pdf: None, metadata: book_model::BookRecord { title: "Story".into(), subtitle: None, contributors: Vec::new(), description: String::new(), book: book_model::BookMetadata::default() },
-            audiobook: None, toc: Vec::new(),
-        }),
-        published: library_database::PublishedImport { name: "Story.m4b".into(), relative_path: "Story.m4b".into(), published: true, fingerprint: None },
-        request_thumbnail: true, restore_paths: Vec::new(),
-    };
-    db.commit_import(imported()).unwrap();
-    let assets = AssetStore::open(root.path().to_str().unwrap()).unwrap().with_book_paths(move |hash| TestDatabase::book_paths_at(&db_path, hash).map_err(library_files::AssetStoreError::operation));
-    let jobs = ThumbnailJobs::new(&db, &assets, &CoverProcessor);
-    let mut observer = Observer::default();
-    assert!(jobs.recover(hash, &mut observer).await.unwrap());
-    assert!(db.has_sidecar_thumbnail(&hash).unwrap());
-
-    std::fs::remove_file(root.path().join("Story.jpg")).unwrap();
-    db.commit_import(imported()).unwrap();
-    assert!(jobs.recover(hash, &mut observer).await.unwrap());
-    assert!(!db.has_sidecar_thumbnail(&hash).unwrap());
-    assert!(!assets.exists(BlobKind::Thumbnail, &hash).unwrap());
+    assert!(assets.exists(BlobKind::Thumbnail, &hash).unwrap());
+    assert_eq!(db.thumbnail_work_state(&hash).unwrap(), Some(("ready".into(), 0)));
 }
 
 struct FailingProcessor(AtomicUsize);

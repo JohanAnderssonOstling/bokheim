@@ -63,9 +63,11 @@ fn snapshot(device: &TestManager) -> Vec<Vec<Vec<Value>>> {
     [
         // Compare original winner identities, never publication IDs or row IDs.
         "SELECT state_kind,state_key,state_subkey,changed_at,conflict_rank,replica_id,replica_seq,mutation_id,body,book_key FROM sync_state_version ORDER BY state_kind,state_key,state_subkey",
-        "SELECT id,parent_id,name,intent_parent_id,intent_name,intent_lifecycle,deleted_at,purged_at FROM dir ORDER BY id",
-        "SELECT content_hash,title,subtitle,book_metadata,format,read_pos,read_progress,added_at,deleted_at,trash_origin_dir_id FROM book ORDER BY content_hash",
-        "SELECT b.content_hash,p.dir_id,p.deleted_at,p.trash_origin_dir_id FROM book_dir p JOIN book b ON b.row_id=p.book_row_id ORDER BY b.content_hash,p.dir_id",
+        // Local deletion timestamps and the remote sentinel 1 have the same
+        // meaning. Conflict timestamps are compared in canonical state above.
+        "SELECT id,parent_id,name,intent_parent_id,intent_name,intent_lifecycle,deleted_at IS NOT NULL FROM dir ORDER BY id",
+        "SELECT content_hash,title,subtitle,book_metadata,format,read_pos,read_progress,added_at,deleted_at IS NOT NULL,trash_origin_dir_id FROM book ORDER BY content_hash",
+        "SELECT b.content_hash,p.dir_id,p.deleted_at IS NOT NULL,p.trash_origin_dir_id FROM book_dir p JOIN book b ON b.row_id=p.book_row_id ORDER BY b.content_hash,p.dir_id",
         "SELECT a.id,b.content_hash,a.toc_ordinal,a.progress,a.detail,a.modified_at,a.deleted_at FROM annotation a JOIN book b ON b.row_id=a.book_row_id ORDER BY a.id",
     ]
     .iter()
@@ -81,7 +83,7 @@ async fn sync(device: &TestManager) {
 fn assert_rooted_tree(device: &TestManager) {
     let mut parents = std::collections::BTreeMap::<String, String>::new();
     library_database::configure_fixture_connection(&device.database, |conn| {
-        parents = conn.prepare("SELECT id,parent_id FROM dir WHERE deleted_at IS NULL AND purged_at IS NULL")?.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+        parents = conn.prepare("SELECT id,parent_id FROM dir WHERE deleted_at IS NULL")?.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
         Ok(())
     })
     .unwrap();
@@ -136,7 +138,7 @@ async fn settle(devices: &[&TestManager]) {
 }
 
 fn add(device: &TestManager) {
-    device.database.seed_book(&test_content_hash(), Some("Convergence"), 1, "epub");
+    device.database.seed_book(&test_content_hash(), Some("Convergence"), 1, book_model::BookFormat::Epub);
     device.database.restore_book_placement(&test_content_hash(), &crate::ROOT_DIR_ID).unwrap();
 }
 
@@ -341,4 +343,248 @@ async fn production_http_postgres_concurrent_purge_before_restore_converges() {
 #[ignore = "requires release HTTP server and PostgreSQL; run client/app/tests/run_sync_e2e.sh"]
 async fn production_http_postgres_concurrent_restore_before_losing_purge_converges() {
     concurrent_purge_restore(false).await;
+}
+
+// Stable PRNG: reported seeds reproduce scheduling without dependency changes.
+struct Schedule(u64);
+impl Schedule {
+    fn pick(&mut self, count: usize) -> usize {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((self.0 >> 32) % count as u64) as usize
+    }
+}
+
+fn text_column(device: &TestManager, sql: &str) -> Vec<String> {
+    rows(&device.database, sql)
+        .into_iter()
+        .map(|row| match &row[0] {
+            Value::Text(value) => value.clone(),
+            other => panic!("expected text, got {other:?}"),
+        })
+        .collect()
+}
+
+// Select only locally valid commands. A remote device may concurrently invalidate
+// their assumptions; acceptance, reconciliation and repair remain production code.
+fn scheduled_edit(device: &TestManager, random: &mut Schedule, step: usize) -> &'static str {
+    let hash = test_content_hash();
+    if device.database.book_count(&hash) == 0 {
+        add(device);
+        return "readd";
+    }
+    let trashed = !rows(&device.database, "SELECT 1 FROM book WHERE deleted_at IS NOT NULL").is_empty();
+    if trashed {
+        if random.pick(3) == 0 {
+            device.database.purge_book(&hash).unwrap();
+            return "purge";
+        }
+        let retained = text_column(device, "SELECT dir_id FROM book_dir WHERE deleted_at IS NULL ORDER BY dir_id");
+        if !retained.is_empty() && random.pick(2) == 0 {
+            let plan = device.database.restore_book_plan(&hash).unwrap();
+            let live = text_column(device, "SELECT id FROM dir WHERE deleted_at IS NULL ORDER BY id");
+            let choices = plan
+                .iter()
+                .map(|p| {
+                    let target = if live.contains(&p.original.to_string()) && random.pick(2) == 0 { p.original } else { crate::ROOT_DIR_ID };
+                    (p.original, target)
+                })
+                .collect::<Vec<_>>();
+            device.database.restore_book_commit(&hash, &choices).unwrap();
+            return "planned restore";
+        }
+        // Explicitly choosing root also permits restoring a book whose last
+        // retained placement was removed on another device while it was hidden.
+        device.database.restore_book_placement(&hash, &crate::ROOT_DIR_ID).unwrap();
+        return "restore";
+    }
+    let directories = text_column(device, "SELECT id FROM dir WHERE deleted_at IS NULL ORDER BY id");
+    let placements = text_column(
+        device,
+        "SELECT p.dir_id FROM book_dir p JOIN dir d ON d.id=p.dir_id WHERE p.deleted_at IS NULL AND d.deleted_at IS NULL ORDER BY p.dir_id",
+    );
+    match random.pick(9) {
+        0 => {
+            device.database.trash_book(&hash).unwrap();
+            "trash"
+        }
+        action @ (1 | 2) if !placements.is_empty() && directories.len() > 1 => {
+            let source = &placements[random.pick(placements.len())];
+            let targets = directories.iter().filter(|id| *id != source).collect::<Vec<_>>();
+            let target = targets[random.pick(targets.len())];
+            device
+                .database
+                .transfer_book_placement(&hash, &uuid::Uuid::parse_str(source).unwrap(), &uuid::Uuid::parse_str(target).unwrap(), action == 1)
+                .unwrap();
+            if action == 1 { "move" } else { "copy" }
+        }
+        3 if !placements.is_empty() => {
+            device.database.remove_book_placement(&hash, &uuid::Uuid::parse_str(&placements[random.pick(placements.len())]).unwrap()).unwrap();
+            "remove placement"
+        }
+        4 => {
+            annotate(device, &format!("edit-{step}"), 100 + step as i64);
+            "annotation"
+        }
+        5 if !device.database.annotations(hash.clone()).unwrap().is_empty() => {
+            device.database.delete_annotation("shared-note", 100 + step as i64).unwrap();
+            "delete annotation"
+        }
+        6 if directories.len() > 1 => {
+            let folders = directories.iter().filter(|id| *id != &crate::ROOT_DIR_ID.to_string()).collect::<Vec<_>>();
+            device.database.trash_directory(&uuid::Uuid::parse_str(folders[random.pick(folders.len())]).unwrap()).unwrap();
+            "trash folder"
+        }
+        7 => {
+            let deleted = text_column(device, "SELECT id FROM dir WHERE intent_lifecycle=1 ORDER BY id");
+            if let Some(id) = deleted.get(random.pick(deleted.len().max(1))) {
+                device.database.restore_directory(&uuid::Uuid::parse_str(id).unwrap(), Some(&crate::ROOT_DIR_ID)).unwrap();
+                "restore folder"
+            } else {
+                device.database.restore_book_placement(&hash, &crate::ROOT_DIR_ID).unwrap();
+                "place at root"
+            }
+        }
+        _ => {
+            device
+                .database
+                .update_reading_position(&hash, &format!("epubcfi(/6/{})", 2 + 2 * random.pick(20)), Some(random.pick(101) as f32 / 100.0), None)
+                .unwrap();
+            "reading"
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires release HTTP server and PostgreSQL; run client/app/tests/run_sync_e2e.sh"]
+async fn production_http_postgres_seeded_mixed_lifetimes_converge() {
+    let seeds = match std::env::var("BOKHEIM_CONVERGENCE_SEED") {
+        Ok(seed) => vec![seed.parse::<u64>().expect("seed must be a u64")],
+        Err(_) => (0..std::env::var("BOKHEIM_CONVERGENCE_CASES").map(|s| s.parse::<u64>().expect("cases must be a u64")).unwrap_or(8)).collect(),
+    };
+    assert!(!seeds.is_empty());
+    let check_coverage = seeds == (0..8).collect::<Vec<_>>();
+    let mut coverage = std::collections::BTreeMap::<&str, usize>::new();
+    for seed in seeds {
+        eprintln!("mixed convergence seed={seed}; reproduce with BOKHEIM_CONVERGENCE_SEED={seed} bash client/app/tests/run_sync_e2e.sh");
+        let cluster = Cluster::new().await;
+        let mut random = Schedule(seed);
+        let names = ["random-a", "random-b", "random-c"];
+        let mut devices = names.map(|name| Some(cluster.device(name)));
+        let a = devices[0].as_ref().unwrap();
+        add(a);
+        for index in 0..3 {
+            a.database
+                .create_directory_with_id(&fixture_dir_id(&format!("random-folder-{index}")), &crate::ROOT_DIR_ID, &format!("Folder {index}").into())
+                .unwrap();
+        }
+        settle(&devices.iter().map(|d| d.as_ref().unwrap()).collect::<Vec<_>>()).await;
+        for step in 0..64 {
+            let index = random.pick(devices.len());
+            let device = devices[index].as_ref().unwrap();
+            eprintln!("seed={seed} step={step} device={index}");
+            let action = scheduled_edit(device, &mut random, step);
+            *coverage.entry(action).or_default() += 1;
+            eprintln!("action={action}");
+            assert_rooted_tree(device);
+            match random.pick(5) {
+                0 => {
+                    // Accepted request, lost response: keep the original outbox
+                    // and cursor, then close/reopen before the eventual retry.
+                    let pending = device.database.sync_publishable_mutations().unwrap();
+                    let mut batch = prepare_push(pending.clone()).unwrap();
+                    let response = sync_transport::exchange_changes(
+                        &device.http_client,
+                        &session_credentials(&cluster.session),
+                        cluster.library,
+                        device.replica_id,
+                        batch.next_batch(),
+                        device.database.sync_pull_cursor().unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                    assert!(response.push.rejected.is_empty(), "seed={seed}, step={step}: {:?}", response.push.rejected);
+                    drop(devices[index].take());
+                    let reopened = cluster.device(names[index]);
+                    assert_eq!(reopened.database.sync_publishable_mutations().unwrap(), pending, "seed={seed}, step={step}: restart changed pending request");
+                    devices[index] = Some(reopened);
+                    *coverage.entry("lost response and restart").or_default() += 1;
+                }
+                1 | 2 => {
+                    sync(device).await;
+                    assert_rooted_tree(device);
+                }
+                3 => {
+                    drop(devices[index].take());
+                    devices[index] = Some(cluster.device(names[index]));
+                    *coverage.entry("offline restart").or_default() += 1;
+                }
+                _ => {} // Stay offline; accumulate conflicting commands.
+            }
+        }
+        let fresh = cluster.device("random-fresh");
+        let mut order = vec![&fresh];
+        let start = random.pick(devices.len());
+        for offset in 0..devices.len() {
+            order.push(devices[(start + offset) % devices.len()].as_ref().unwrap());
+        }
+        settle(&order).await;
+        cluster.close().await;
+    }
+    eprintln!("mixed convergence operation coverage: {coverage:?}");
+    if check_coverage {
+        for action in [
+            "trash",
+            "purge",
+            "readd",
+            "restore",
+            "planned restore",
+            "move",
+            "copy",
+            "remove placement",
+            "annotation",
+            "delete annotation",
+            "reading",
+            "trash folder",
+            "restore folder",
+            "lost response and restart",
+            "offline restart",
+        ] {
+            assert!(coverage.get(action).copied().unwrap_or(0) > 0, "default seeds did not exercise {action}: {coverage:?}");
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires release HTTP server and PostgreSQL; run client/app/tests/run_sync_e2e.sh"]
+async fn production_http_postgres_membershipless_restore_publishes_root_and_converges() {
+    let cluster = Cluster::new().await;
+    let a = cluster.device("fallback-a");
+    let b = cluster.device("fallback-b");
+    let c = cluster.device("fallback-c");
+    let x = fixture_dir_id("fallback-x");
+    let y = fixture_dir_id("fallback-y");
+    for (id, name) in [(x, "X"), (y, "Y")] { a.database.create_directory_with_id(&id, &crate::ROOT_DIR_ID, &name.into()).unwrap(); }
+    add(&a);
+    a.database.transfer_book_placement(&test_content_hash(), &crate::ROOT_DIR_ID, &x, true).unwrap();
+    a.database.transfer_book_placement(&test_content_hash(), &x, &y, false).unwrap();
+    settle(&[&a, &b, &c]).await;
+    a.database.trash_book(&test_content_hash()).unwrap();
+    assert!(!b.database.remove_book_placement(&test_content_hash(), &x).unwrap());
+    assert!(!c.database.remove_book_placement(&test_content_hash(), &y).unwrap());
+    settle(&[&c, &a, &b]).await;
+    for device in [&a, &b] {
+        let plan = device.database.restore_book_plan(&test_content_hash()).unwrap();
+        assert_eq!(plan.iter().map(|p| p.original).collect::<Vec<_>>(), vec![crate::ROOT_DIR_ID]);
+        device.database.restore_book_commit(&test_content_hash(), &[(crate::ROOT_DIR_ID, crate::ROOT_DIR_ID)]).unwrap();
+        assert!(device.database.sync_publishable_mutations().unwrap().iter().any(|m| matches!(m.body, MutationBody::Placement { dir_id, present: true, .. } if dir_id == crate::ROOT_DIR_ID) && m.origin.is_none()));
+    }
+    // Another restore followed by a move competes with A's new root placement.
+    b.database.transfer_book_placement(&test_content_hash(), &crate::ROOT_DIR_ID, &y, true).unwrap();
+    drop(a);
+    let a = cluster.device("fallback-a");
+    let fresh = cluster.device("fallback-fresh");
+    settle(&[&fresh, &b, &c, &a]).await;
+    assert_eq!(fresh.database.book_count(&test_content_hash()), 1);
+    assert!(!fresh.database.local_book_paths().unwrap().is_empty());
+    cluster.close().await;
 }

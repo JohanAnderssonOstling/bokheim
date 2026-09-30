@@ -202,7 +202,7 @@ async fn state_checkpoint_does_not_wait_for_asset_reconciliation() {
     let content_hash = ContentHash::new(blake3::hash(&book_bytes).to_hex().as_ref());
     {
         let conn = &manager.database;
-        conn.seed_book(&content_hash, Some("Checkpointed"), 1, "epub");
+        conn.seed_book(&content_hash, Some("Checkpointed"), 1, book_model::BookFormat::Epub);
         conn.add_book_placement(&crate::ROOT_DIR_ID, &content_hash, "checkpointed.epub", "fingerprint", true);
     }
     std::fs::write(temp.path().join("checkpointed.epub"), &book_bytes).unwrap();

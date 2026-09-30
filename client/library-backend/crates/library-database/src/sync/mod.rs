@@ -18,8 +18,9 @@ mod projection_repair_tests;
 use crate::DatabaseError;
 use include_sqlite_sql::include_sql;
 
-include_sql!("src/sync/sql/schema.sql");
-include_sql!("src/sync/sql/triggers.sql");
+include_sql!("src/sync/sql/schema/tables.sql");
+include_sql!("src/sync/sql/schema/triggers.sql");
+include_sql!("src/sync/sql/schema/index.sql");
 include_sql!("src/sync/sql/sync_apply.sql");
 
 include_sql!("src/sync/sql/sync_state.sql");

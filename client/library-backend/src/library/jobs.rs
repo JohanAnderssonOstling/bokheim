@@ -6,10 +6,6 @@ use crate::BackendError;
 use crate::ContentHash;
 
 impl LibrarySession {
-    pub(crate) fn pending_local_jobs(&self) -> Result<bool, BackendError> {
-        Ok(self.pending_file_jobs()? || self.pending_thumbnail_jobs()?)
-    }
-
     pub(crate) fn pending_thumbnail_jobs(&self) -> Result<bool, BackendError> {
         Ok(self.db.pending_thumbnail_job_count()? > 0)
     }
@@ -39,26 +35,11 @@ impl LibrarySession {
         result.map_err(BackendError::operation)
     }
 
-    pub(crate) async fn run_thumbnail_jobs(&self, cover_inspected: impl Fn() + crate::executor::BackendSend) -> Result<(), BackendError> {
-        self.run_thumbnail_batch(cover_inspected, &asset_transfer::thumbnail_jobs::ThumbnailExtractor::new(self.cpu.clone())).await
-    }
-
-    pub(crate) async fn run_thumbnail_batch(&self, cover_inspected: impl Fn() + crate::executor::BackendSend, extractor: &asset_transfer::thumbnail_jobs::ThumbnailExtractor) -> Result<(), BackendError> {
-        asset_transfer::thumbnail_jobs::ThumbnailJobs::new(&self.db, &self.assets, extractor).run_batch(&mut ThumbnailEvents { library: self, cover_inspected }).await.map_err(BackendError::operation)
-    }
-
     /// One activity spans the fixed preparation batch, including progress
     /// notifications. Failed members remain retryable without stopping peers.
     pub(crate) async fn run_thumbnail_members(&self, hashes: Vec<ContentHash>) -> Result<(), BackendError> {
         let extractor = asset_transfer::thumbnail_jobs::ThumbnailExtractor::new(self.cpu.clone());
         asset_transfer::thumbnail_jobs::ThumbnailJobs::new(&self.db, &self.assets, &extractor).run_members(hashes, &mut ThumbnailEvents { library: self, cover_inspected: || {} }).await.map_err(BackendError::operation)
-    }
-
-    pub(super) async fn recover_thumbnail(&self, hash: ContentHash) -> Result<bool, BackendError> {
-        asset_transfer::thumbnail_jobs::ThumbnailJobs::new(&self.db, &self.assets, &asset_transfer::thumbnail_jobs::ThumbnailExtractor::new(self.cpu.clone()))
-            .recover(hash, &mut ThumbnailEvents { library: self, cover_inspected: || {} })
-            .await
-            .map_err(BackendError::operation)
     }
 
     pub(crate) async fn store_thumbnail(&self, hash: ContentHash, versions: &cpu_host::ThumbnailBytes) -> Result<(), BackendError> {

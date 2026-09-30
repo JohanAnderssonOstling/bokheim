@@ -11,7 +11,6 @@ const TEST_CONTENT_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const TEST_AUTH_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 use crate::BlobKind;
 use asset_transfer::TransferJob;
-use asset_transfer::should_download_thumbnail;
 use library_database::CURSOR_RECOVERY_PENDING_KEY;
 use library_replica::coalesce_mutations_for_push;
 use library_replica::prepare_push;

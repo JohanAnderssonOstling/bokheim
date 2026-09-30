@@ -15,11 +15,6 @@ pub(super) async fn local(library: &LibrarySession, hash: ContentHash, info: &Bo
     resolve_local(library, hash, info).await.map(Some)
 }
 
-impl LibrarySession {
-    pub(crate) async fn resolve_book_for_reader(&self, hash: ContentHash) -> Result<Opened, BackendError> {
-        resolve_local(self, hash, &book_info(self, hash).await?).await
-    }
-}
 // A placement move can land between reading `info.path` and opening it.
 // Drain this hash's pending work and retry once against the fresh path.
 async fn refresh_local_path(library: &LibrarySession, content_hash: ContentHash) -> Result<Option<String>, BackendError> {

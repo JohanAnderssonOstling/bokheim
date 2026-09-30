@@ -129,7 +129,7 @@ fn local_operation_does_not_present_future_sync_work_as_pending_uploads() {
     let book = import();
     let hash = book.content_hash;
     db.commit_import(book).unwrap();
-    db.connection.execute("INSERT OR IGNORE INTO local_book_upload(content_hash,checksum,size_bytes) VALUES(?1,?1,10)", [hash.as_str()]).unwrap();
+    db.connection.execute("INSERT INTO book_transfer(content_hash,upload_id,upload_checksum,upload_size) VALUES(?1,1,?1,10) ON CONFLICT(content_hash) DO UPDATE SET upload_id=COALESCE(upload_id,1),upload_checksum=COALESCE(upload_checksum,excluded.upload_checksum),upload_size=COALESCE(upload_size,10)", [hash.as_str()]).unwrap();
     let pending_changes: i64 = db.connection.query_row("SELECT count(*) FROM sync_outbox", [], |row| row.get(0)).unwrap();
     assert!(pending_changes > 0);
 
@@ -145,7 +145,7 @@ fn local_operation_does_not_present_future_sync_work_as_pending_uploads() {
     let completed = db.operation_status(OperationActivity::default()).unwrap().operation.unwrap();
     assert_eq!(completed.state, LibraryOperationState::Completed);
     assert!(!completed.requires_sync);
-    assert_eq!(db.connection.query_row("SELECT count(*) FROM local_book_upload", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(db.connection.query_row("SELECT count(*) FROM book_transfer WHERE upload_id IS NOT NULL", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
     assert_eq!(db.connection.query_row("SELECT count(*) FROM sync_outbox", [], |row| row.get::<_, i64>(0)).unwrap(), pending_changes);
 
     let signed_in = db.operation_status(OperationActivity { signed_in: true, ..Default::default() }).unwrap().operation.unwrap();
@@ -395,7 +395,6 @@ fn stored_audiobook_navigation_syncs_with_its_duration() {
     db.connection.execute("INSERT INTO book_toc(content_hash,entry_count,toc_json) VALUES(?1,1,?2)", rusqlite::params![hash.to_string(), serde_json::to_string(&entries).unwrap()]).unwrap();
     assert!(db.sync_publishable_mutations().unwrap().iter().any(|mutation| matches!(&mutation.body, library_replica::MutationBody::BookToc { value, .. } if value.entries == entries && value.duration_ms == Some(1000))));
 }
-
 
 #[test]
 fn audible_toc_failure_preserves_claim_and_allows_retry() {
@@ -698,7 +697,7 @@ fn cloud_presence_reset_handles_empty_queues_and_persists_policy() {
 }
 
 #[test]
-fn cloud_presence_reset_requeues_books_and_refreshes_existing_work() {
+fn cloud_presence_reset_requeues_books() {
     use library_replica::BlobKind;
     let db = database();
     let mut book = import();
@@ -709,7 +708,6 @@ fn cloud_presence_reset_requeues_books_and_refreshes_existing_work() {
     db.record_remote_asset(BlobKind::Book, &hash).unwrap();
     db.settle_rejected_asset(&hash, library_database::RejectedAsset::BookUpload { intent: None }, "quota").unwrap();
     let before = db.book_upload_intent(&hash).unwrap().unwrap();
-    let work_before: i64 = db.connection.query_row("SELECT id FROM asset_work WHERE content_hash=?1", [hash.as_str()], |r| r.get(0)).unwrap();
 
     db.set_asset_storage_policy(true, true).unwrap();
     let after = db.book_upload_intent(&hash).unwrap().unwrap();
@@ -718,12 +716,10 @@ fn cloud_presence_reset_requeues_books_and_refreshes_existing_work() {
     assert_eq!(after.size_bytes, before.size_bytes);
     assert!(!db.remote_asset_hashes(BlobKind::Book).unwrap().contains(&hash));
     assert!(db.book_upload_rejection_reason(&hash).unwrap().is_none());
-    let work_after: i64 = db.connection.query_row("SELECT id FROM asset_work WHERE content_hash=?1", [hash.as_str()], |r| r.get(0)).unwrap();
-    assert!(work_after > work_before);
 
     // An already-uploaded book has no intent, but its local baseline must
     // recreate one when the cloud-presence cache is reset.
-    db.connection.execute("DELETE FROM local_book_upload WHERE content_hash=?1", [hash.as_str()]).unwrap();
+    db.connection.execute("UPDATE book_transfer SET upload_id=NULL,upload_checksum=NULL,upload_size=NULL WHERE content_hash=?1", [hash.as_str()]).unwrap();
     db.record_remote_asset(BlobKind::Book, &hash).unwrap();
     db.set_asset_storage_policy(true, true).unwrap();
     let prepared = db.upload_preparation_snapshot().unwrap();
@@ -804,17 +800,15 @@ fn failing_final_schema_version_write_rolls_back_schema_and_replica() {
 }
 
 #[test]
-fn subject_cache_rebuilds_before_subject_browsing() {
+fn subject_browsing_reads_assignments_without_cached_membership() {
     let db = database();
     let mut book = import();
     let hash = book.content_hash;
     book.inspection.as_mut().unwrap().metadata.book.subjects = vec![book_model::BookSubject::new(None, "History / United States / 20th Century", "dc:subject", Some("bisac".into()), Some("HIS036060".into())).unwrap()];
     db.commit_import(book).unwrap();
-    // An empty cache must be built before browsing.
-    db.connection.execute("DELETE FROM library_subject", []).unwrap();
     let (path, parent): (String, String) = db
         .connection
-        .query_row("SELECT route.path,route.parent_path FROM book_unified_concept assignment JOIN curated.unified_concept_paths route ON route.concept_id=assignment.concept_id WHERE route.path!=route.parent_path LIMIT 1", [], |row| {
+        .query_row("SELECT CAST(route.route_id AS TEXT),CAST(route.parent_route_id AS TEXT) FROM book_unified_concept assignment JOIN curated.unified_concept_route route ON route.concept_id=assignment.concept_id WHERE route.route_id!=route.parent_route_id LIMIT 1", [], |row| {
             Ok((row.get(0)?, row.get(1)?))
         })
         .unwrap();
@@ -831,11 +825,10 @@ fn subject_cache_rebuilds_before_subject_browsing() {
     let parent_contents = db.browse_subject_contents(&query, false).unwrap();
     assert!(parent_contents.children.is_empty());
     assert!(parent_contents.books.is_empty());
-    assert!(db.connection.query_row("SELECT COUNT(*) FROM library_subject", [], |row| row.get::<_, i64>(0)).unwrap() > 0);
     query.location = path;
     let contents = db.browse_subject_contents(&query, false).unwrap();
     assert!(contents.books.is_empty());
-    query.location = "Subject".into();
+    query.location = "0".into();
     query.search.clear();
     let root_contents = db.browse_subject_contents(&query, false).unwrap();
     assert_eq!(root_contents.books[0].content_hash, hash);
@@ -858,7 +851,7 @@ fn subject_query(location: &str) -> library_model::LibraryBrowseQuery {
     }
 }
 
-fn cached_subject_fixture() -> (Database, String, String) {
+fn subject_fixture() -> (Database, String, String) {
     let db = database();
     for index in 1..=4 {
         let mut book = import();
@@ -868,34 +861,31 @@ fn cached_subject_fixture() -> (Database, String, String) {
         book.published.name = book.file_name.clone();
         book.published.relative_path = format!("/{}", book.file_name);
         book.inspection.as_mut().unwrap().metadata.title = format!("Book {index}");
-        book.inspection.as_mut().unwrap().metadata.book.subjects=vec![book_model::BookSubject::new(None,"History / United States / 20th Century","dc:subject",Some("bisac".into()),Some("HIS036060".into())).unwrap()];
+        book.inspection.as_mut().unwrap().metadata.book.subjects = vec![book_model::BookSubject::new(None, "History / United States / 20th Century", "dc:subject", Some("bisac".into()), Some("HIS036060".into())).unwrap()];
         db.commit_import(book).unwrap();
     }
-    let (path,parent):(String,String)=db.connection.query_row("SELECT path,parent_path FROM curated.unified_concept_paths WHERE concept_id IN (SELECT concept_id FROM book_unified_concept) AND path!=parent_path AND parent_path!='Subject' LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+    let (path, parent): (String, String) = db
+        .connection
+        .query_row("SELECT path,parent_path FROM curated.unified_concept_paths WHERE concept_id IN (SELECT concept_id FROM book_unified_concept) AND path!=parent_path AND parent_path!='Subject' LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap();
     // Subsequent browse-only edits explicitly operate on the derived fixture.
-    db.connection.execute("UPDATE sync_metadata SET change_origin='remote'",[]).unwrap();
-    (db,path,parent)
+    db.connection.execute("UPDATE sync_metadata SET change_origin='remote'", []).unwrap();
+    (db, path, parent)
 }
 
 #[test]
-fn subject_cache_is_reused_and_updated_after_placement_and_subject_edits() {
-    use library_database::rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-    let (db, _, _) = cached_subject_fixture();
-    let root = db.browse_subject_contents(&subject_query("Subject"), false).unwrap();
+fn subject_browsing_is_read_only_and_follows_placement_and_assignment_edits() {
+    let (db, _, _) = subject_fixture();
+    let root = db.browse_subject_contents(&subject_query("0"), false).unwrap();
     let query = subject_query(&root.children[0].id);
     let initial = db.browse_subject_contents(&query, false).unwrap();
     assert!(initial.children.is_empty());
     assert_eq!(initial.books.len(), 4);
     let changes = db.connection.total_changes();
-    // Once built, membership comes from the cache; names come from the immutable taxonomy.
-    db.connection
-        .authorizer(Some(|context: AuthContext<'_>| match context.action {
-            AuthAction::Read { table_name: "book_unified_concept", .. } => Authorization::Deny,
-            _ => Authorization::Allow,
-        }))
-        .unwrap();
+    db.connection.pragma_update(None, "query_only", true).unwrap();
     assert_eq!(db.browse_subject_contents(&query, false).unwrap().children.len(), initial.children.len());
-    db.connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>).unwrap();
+    db.browse_subject(&query, false).unwrap();
+    db.connection.pragma_update(None, "query_only", false).unwrap();
     assert_eq!(db.connection.total_changes(), changes);
     db.connection.execute("UPDATE book_dir SET deleted_at=10 WHERE book_row_id=(SELECT row_id FROM book WHERE title='Book 4')", []).unwrap();
     let shrunk = db.browse_subject_contents(&query, false).unwrap();
@@ -906,19 +896,22 @@ fn subject_cache_is_reused_and_updated_after_placement_and_subject_edits() {
     db.connection.execute("DELETE FROM book_unified_concept", []).unwrap();
     let empty = db.browse_subject_contents(&query, false).unwrap();
     assert!(empty.children.is_empty() && empty.books.is_empty());
-    assert_eq!(db.connection.query_row("SELECT COUNT(*) FROM subject_browse_member", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
 }
 
 #[test]
-fn subject_cache_rebuild_failure_rolls_back_and_retries() {
-    let (db, _, _) = cached_subject_fixture();
-    db.connection.execute_batch("DELETE FROM subject_browse_member; DELETE FROM library_subject; UPDATE subject_browse_state SET built_revision=-1; INSERT OR IGNORE INTO subject_browse_dirty_book SELECT row_id FROM book;").unwrap();
-    db.connection.execute_batch("CREATE TRIGGER reject_subject_cache BEFORE INSERT ON subject_browse_member BEGIN SELECT RAISE(ABORT,'injected cache failure'); END;").unwrap();
-    assert!(db.browse_subject_contents(&subject_query("Subject"), false).is_err());
-    assert_eq!(db.connection.query_row("SELECT COUNT(*) FROM library_subject", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-    assert!(db.connection.query_row("SELECT COUNT(*) FROM subject_browse_dirty_book", [], |r| r.get::<_, i64>(0)).unwrap() > 0);
-    db.connection.execute_batch("DROP TRIGGER reject_subject_cache").unwrap();
-    assert!(!db.browse_subject_contents(&subject_query("Subject"), false).unwrap().children.is_empty());
+fn failed_subject_read_releases_snapshot_and_can_retry() {
+    use library_database::rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let (db, _, _) = subject_fixture();
+    db.connection
+        .authorizer(Some(|context: AuthContext<'_>| match context.action {
+            AuthAction::Read { table_name: "book_unified_concept", .. } => Authorization::Deny,
+            _ => Authorization::Allow,
+        }))
+        .unwrap();
+    assert!(db.browse_subject_contents(&subject_query("0"), false).is_err());
+    assert!(db.connection.is_autocommit());
+    db.connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>).unwrap();
+    assert!(!db.browse_subject_contents(&subject_query("0"), false).unwrap().children.is_empty());
 }
 
 #[test]
@@ -940,39 +933,10 @@ fn single_folder_walk_handles_nested_transactions_renames_and_broken_ancestry() 
     assert!(db.dir_path_components(&child).unwrap().is_empty());
     assert_eq!(db.directory_relative_path_string(&DirId::new_v4()).unwrap(), None);
     db.connection.execute("UPDATE dir SET deleted_at=NULL,parent_id=?1 WHERE id=?2", [child.to_string(), parent.to_string()]).unwrap();
-    assert!(db.directory_relative_path_string(&child).unwrap_err().to_string().contains("cycle"));
-    assert!(db.connection.is_autocommit(), "failed walks must release their snapshot");
+    // A loop never reaches the root, so its folders are not live.
+    assert_eq!(db.directory_relative_path_string(&child).unwrap(), None);
+    assert!(db.connection.is_autocommit(), "walks must release their snapshot");
 }
-
-
-#[test]
-fn subject_route_cache_invalidates_when_the_bundled_taxonomy_changes() {
-    let (db, _, _) = cached_subject_fixture();
-    db.browse_subject_contents(&subject_query("Subject"), false).unwrap();
-    db.connection.execute("UPDATE subject_browse_state SET taxonomy_revision='previous bundle'", []).unwrap();
-    // An ID can refer to a different route in a new bundle, so all old memberships must go.
-    db.connection.execute("INSERT INTO subject_browse_member SELECT -100,row_id,1 FROM book", []).unwrap();
-    db.connection.execute("INSERT INTO library_subject VALUES(-100)", []).unwrap();
-    let view = db.browse_subject_contents(&subject_query("Subject"), false).unwrap();
-    assert_eq!(view.children[0].book_count, 4);
-    assert_eq!(db.connection.query_row("SELECT count(*) FROM subject_browse_member WHERE route_id=-100", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-    assert_eq!(db.connection.query_row("SELECT taxonomy_revision FROM subject_browse_state", [], |r| r.get::<_, String>(0)).unwrap(), format!("{}:{}", subject_projection::BUNDLED_UNIFIED_TAXONOMY_REVISION_ID, subject_projection::UNIFIED_MATCHER_VERSION));
-}
-
-#[test]
-fn subject_route_ids_preserve_facets_author_labels_and_book_detail_paths() {
-    let (db, path, parent) = cached_subject_fixture();
-    let label: String = db.connection.query_row("SELECT label FROM curated.unified_concept_paths WHERE path=?1", [&path], |r| r.get(0)).unwrap();
-    let (_, formats) = db.browse_subject_facet_counts(&parent, &label, &[], &[], false).unwrap();
-    assert_eq!(formats.iter().map(|f| f.book_count).sum::<u32>(), 4);
-    let (_, missing) = db.browse_subject_facet_counts("No such subject", "", &[], &[], false).unwrap();
-    assert!(missing.is_empty());
-    let authors = db.browse_authors(Default::default(), false).unwrap();
-    assert!(authors.authors.iter().any(|a| a.subjects.iter().any(|s| s.label == label)));
-    let detail = db.browse_book_detail(ContentHash::new(&format!("{:064x}", 1))).unwrap();
-    assert!(detail.subject_paths.contains(&path));
-}
-
 
 fn browse_folder(db: &Database, dir: DirId, search: &str, languages: &[&str]) -> library_model::BrowseContents {
     let mut query = subject_query(&dir.to_string());
@@ -1005,86 +969,88 @@ fn place_book(db: &Database, hash: ContentHash, dir: DirId, downloaded: bool) {
 }
 
 #[test]
-fn folder_projection_preserves_hidden_paths_distinct_counts_and_search_sources() {
+fn folder_counts_include_all_placements_and_search_sources() {
     let db = database();
     let shelf = db.create_directory(&ROOT_DIR_ID, &"Shelf".into()).unwrap().id;
     let nested = db.create_directory(&shelf, &"Nested".into()).unwrap().id;
-    let hidden = db.create_directory(&shelf, &".Hidden".into()).unwrap().id;
+    let branch = db.create_directory(&shelf, &"Branch".into()).unwrap().id;
     let empty = db.create_directory(&ROOT_DIR_ID, &"Empty".into()).unwrap().id;
     let first = import_in_folder(&db, 101, nested);
-    let second = import_in_folder(&db, 102, hidden);
+    let second = import_in_folder(&db, 102, branch);
     let third = import_in_folder(&db, 103, shelf);
     // Exercise derived browse rows without producing unrelated canonical edits.
-    db.connection.execute("UPDATE sync_metadata SET change_origin='remote'",[]).unwrap();
+    db.connection.execute("UPDATE sync_metadata SET change_origin='remote'", []).unwrap();
     db.connection.execute("UPDATE book_dir SET is_downloaded=0", []).unwrap();
     place_book(&db, first, shelf, false);
-    place_book(&db, first, hidden, true);
+    place_book(&db, first, branch, true);
     db.connection.execute("UPDATE book_dir SET is_downloaded=1 WHERE book_row_id IN (SELECT row_id FROM book WHERE content_hash IN (?1,?2))", [second.as_str(), third.as_str()]).unwrap();
-    db.connection.execute("UPDATE book SET format='pdf' WHERE content_hash=?1", [third.as_str()]).unwrap();
-    db.connection.execute("INSERT INTO book_language(book_row_id,position,language_tag) SELECT row_id,0,' EN_us ' FROM book WHERE content_hash!=?1", [third.as_str()]).unwrap();
+    db.connection.execute("UPDATE book SET format=2 WHERE content_hash=?1", [third.as_str()]).unwrap();
+    db.connection.execute("INSERT OR IGNORE INTO book_language(book_row_id,language) SELECT row_id,'en' FROM book WHERE content_hash!=?1", [third.as_str()]).unwrap();
     let view = browse_folder(&db, ROOT_DIR_ID, "", &[]);
     let chip = view.children.iter().find(|c| c.id == shelf.to_string()).unwrap();
-    assert_eq!((chip.book_count, chip.downloaded_book_count), (2, 1), "hidden downloads must not inflate visible subtree counts");
+    assert_eq!((chip.book_count, chip.downloaded_book_count), (5, 3));
     assert_eq!(view.children.iter().find(|c| c.id == empty.to_string()).unwrap().book_count, 0);
     assert!(view.books.is_empty(), "ordinary browsing only shows direct placements");
     let direct = browse_folder(&db, shelf, "", &[]);
     assert_eq!(direct.books.len(), 2);
     assert!(direct.books.iter().all(|b| b.source_directory == Some(shelf)));
     let searched = browse_folder(&db, shelf, "Title", &[]);
-    assert_eq!(searched.books.len(), 3, "search includes dot-directory placements and deduplicates books");
-    let source = [shelf, nested, hidden].into_iter().min_by_key(|id| id.to_string()).unwrap();
+    assert_eq!(searched.books.len(), 5, "search returns each descendant placement");
+    assert_eq!(searched.books.iter().filter(|b| b.content_hash == first).count(), 3);
+    let source = [shelf, nested, branch].into_iter().min_by_key(|id| id.to_string()).unwrap();
     assert_eq!(searched.books.iter().find(|b| b.content_hash == first).unwrap().source_directory, Some(source));
     let filtered = browse_folder(&db, ROOT_DIR_ID, "", &["en"]);
     assert_eq!(filtered.children.len(), 1);
-    assert_eq!(filtered.children[0].book_count, 1);
-    assert_eq!(browse_folder(&db, shelf, "Title", &["EN_us"]).books.len(), 2);
-    let (languages, formats) = db.browse_folder_facet_counts(&shelf.to_string(), "", &[], &["en"], false).unwrap();
+    assert_eq!(filtered.children[0].book_count, 4);
+    assert_eq!(browse_folder(&db, shelf, "Title", &["EN_us"]).books.len(), 4);
+    let mut facet_query = subject_query(&shelf.to_string());
+    facet_query.languages = vec!["en".into()];
+    let facets = db.browse_folder(&facet_query, false).unwrap();
+    let (languages, formats) = (facets.language_counts, facets.format_counts);
     assert_eq!(languages.iter().find(|l| l.language == "en").unwrap().book_count, 2);
-    assert_eq!(formats.iter().map(|f| f.book_count).sum::<u32>(), 2);
+    assert_eq!(formats.iter().map(|f| f.book_count).sum::<u32>(), 3);
     // A folder-name search still finds matching descendant chips and breadcrumbs.
     let nested_search = browse_folder(&db, ROOT_DIR_ID, "Nested", &[]);
     assert_eq!(nested_search.children.len(), 1);
     assert_eq!(nested_search.children[0].path.as_deref(), Some("Shelf"));
     assert_eq!(nested_search.children[0].book_count, 1);
-    // Removing one copy preserves membership; moving the last visible copy
-    // changes chip counts while search can still find its hidden placement.
+    // Every removed or moved placement changes the subtree count.
     db.connection.execute("DELETE FROM book_dir WHERE dir_id=?1 AND book_row_id=(SELECT row_id FROM book WHERE content_hash=?2)", [shelf.to_string(), first.to_string()]).unwrap();
-    assert_eq!(browse_folder(&db, ROOT_DIR_ID, "", &[]).children.iter().find(|c| c.id == shelf.to_string()).unwrap().book_count, 2);
+    assert_eq!(browse_folder(&db, ROOT_DIR_ID, "", &[]).children.iter().find(|c| c.id == shelf.to_string()).unwrap().book_count, 4);
     db.connection.execute("UPDATE book_dir SET dir_id=?1 WHERE dir_id=?2 AND book_row_id=(SELECT row_id FROM book WHERE content_hash=?3)", [empty.to_string(), nested.to_string(), first.to_string()]).unwrap();
     let moved = browse_folder(&db, ROOT_DIR_ID, "", &[]);
-    assert_eq!(moved.children.iter().find(|c| c.id == shelf.to_string()).unwrap().book_count, 1);
+    assert_eq!(moved.children.iter().find(|c| c.id == shelf.to_string()).unwrap().book_count, 3);
     assert_eq!(moved.children.iter().find(|c| c.id == empty.to_string()).unwrap().book_count, 1);
-    assert_eq!(browse_folder(&db, shelf, "Title", &[]).books.iter().find(|b| b.content_hash == first).unwrap().source_directory, Some(hidden));
-    // Book visibility is read live, independently of placement-cache invalidation.
-    db.connection.execute("UPDATE book SET hidden_at=1 WHERE content_hash=?1", [first.as_str()]).unwrap();
-    assert_eq!(browse_folder(&db, ROOT_DIR_ID, "", &[]).children.iter().find(|c| c.id == shelf.to_string()).unwrap().book_count, 1);
+    assert_eq!(browse_folder(&db, shelf, "Title", &[]).books.iter().find(|b| b.content_hash == first).unwrap().source_directory, Some(branch));
 }
 
 #[test]
-fn folder_projection_batches_changes_rolls_back_failed_refresh_and_reuses_clean_state() {
+fn folder_counts_follow_writes_and_browsing_is_read_only() {
     let db = database();
     let shelf = db.create_directory(&ROOT_DIR_ID, &"Shelf".into()).unwrap().id;
-    let hidden = db.create_directory(&shelf, &".Hidden".into()).unwrap().id;
+    let branch = db.create_directory(&shelf, &"Branch".into()).unwrap().id;
     let other = db.create_directory(&ROOT_DIR_ID, &"Other".into()).unwrap().id;
-    let hash = import_in_folder(&db, 201, hidden);
-    browse_folder(&db, ROOT_DIR_ID, "", &[]);
-    let rows_before: i64 = db.connection.query_row("SELECT count(*) FROM folder_book_ownership", [], |r| r.get(0)).unwrap();
-    db.connection.execute_batch("CREATE TEMP TRIGGER reject_folder_refresh BEFORE INSERT ON folder_book_ownership BEGIN SELECT RAISE(ABORT,'refresh failure'); END;").unwrap();
-    // Clean reads perform no projection writes.
-    browse_folder(&db, ROOT_DIR_ID, "", &[]);
+    let hash = import_in_folder(&db, 201, branch);
+    let counts = || {
+        let view = browse_folder(&db, ROOT_DIR_ID, "", &[]);
+        let folder = view.children.iter().find(|row| row.id == shelf.to_string()).unwrap();
+        (folder.book_count, folder.downloaded_book_count)
+    };
+    assert_eq!(counts(), (1, 1));
     for downloaded in [0, 1, 0] {
         db.connection.execute("UPDATE book_dir SET is_downloaded=?1", [downloaded]).unwrap();
+        assert_eq!(counts(), (1, downloaded as usize));
     }
-    assert_eq!(db.connection.query_row("SELECT count(*) FROM folder_browse_dirty_book", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-    let failed = db.browse_library_folder(&ROOT_DIR_ID, false, library_model::LibraryFileTypeFilter::All).err().unwrap();
-    assert!(failed.to_string().contains("refresh failure"));
-    assert_eq!(db.connection.query_row("SELECT count(*) FROM folder_book_ownership", [], |r| r.get::<_, i64>(0)).unwrap(), rows_before);
-    assert_eq!(db.connection.query_row("SELECT count(*) FROM folder_browse_dirty_book", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-    db.connection.execute_batch("DROP TRIGGER reject_folder_refresh;").unwrap();
-    browse_folder(&db, ROOT_DIR_ID, "", &[]);
-    assert_eq!(db.connection.query_row("SELECT count(*) FROM folder_browse_dirty_book", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    let tx = db.connection.unchecked_transaction().unwrap();
+    tx.execute("UPDATE book_dir SET deleted_at=1", []).unwrap();
+    assert_eq!(db.connection.query_row("SELECT count(*) FROM book_dir WHERE deleted_at IS NULL", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    tx.rollback().unwrap();
+    assert_eq!(counts(), (1, 0));
+    db.connection.pragma_update(None, "query_only", true).unwrap();
+    assert_eq!(browse_folder(&db, branch, "", &[]).books.len(), 1);
+    db.connection.pragma_update(None, "query_only", false).unwrap();
     db.connection.execute("UPDATE sync_metadata SET change_origin='remote'", []).unwrap();
-    db.connection.execute("UPDATE dir SET name='Visible',parent_id=?1 WHERE id=?2", [other.to_string(), hidden.to_string()]).unwrap();
+    db.connection.execute("UPDATE dir SET name='Moved',parent_id=?1 WHERE id=?2", [other.to_string(), branch.to_string()]).unwrap();
     db.connection.execute("UPDATE sync_metadata SET change_origin='local'", []).unwrap();
     let view = browse_folder(&db, ROOT_DIR_ID, "", &[]);
     assert_eq!(view.children.iter().find(|c| c.id == shelf.to_string()).unwrap().book_count, 0);
@@ -1094,38 +1060,60 @@ fn folder_projection_batches_changes_rolls_back_failed_refresh_and_reuses_clean_
     db.connection.execute("UPDATE book_dir SET deleted_at=NULL", []).unwrap();
     db.connection.execute("UPDATE dir SET deleted_at=1 WHERE id=?1", [other.to_string()]).unwrap();
     assert!(browse_folder(&db, ROOT_DIR_ID, "Title", &[]).books.is_empty(), "deleted ancestors block membership");
-    assert_eq!(browse_folder(&db, hidden, "", &[]).books.len(), 1, "a live detached subtree retains its own membership");
+    assert_eq!(browse_folder(&db, branch, "", &[]).books.len(), 1, "a live detached subtree retains its own membership");
 }
 
-
 #[test]
-fn grouped_folder_chips_use_visible_membership_and_normalized_languages() {
+fn folder_sections_use_subtree_counts_and_normalized_languages() {
     let db = database();
     let shelf = db.create_directory(&ROOT_DIR_ID, &"Shelf".into()).unwrap().id;
     let child = db.create_directory(&shelf, &"Child".into()).unwrap().id;
     let empty = db.create_directory(&shelf, &"Empty".into()).unwrap().id;
-    let hidden = db.create_directory(&child, &".Hidden".into()).unwrap().id;
+    let branch = db.create_directory(&child, &"Branch".into()).unwrap().id;
     import_in_folder(&db, 301, child);
-    import_in_folder(&db, 302, hidden);
-    db.connection.execute("INSERT INTO book_language(book_row_id,position,language_tag) SELECT row_id,0,'en_US' FROM book", []).unwrap();
+    import_in_folder(&db, 302, branch);
+    db.connection.execute("INSERT OR IGNORE INTO book_language(book_row_id,language) SELECT row_id,'en' FROM book", []).unwrap();
     let mut query = subject_query(&ROOT_DIR_ID.to_string());
     let unfiltered = db.browse_folder(&query, false).unwrap();
-    assert_eq!(unfiltered.chip_groups.len(), 1);
-    assert_eq!(unfiltered.contents.children.iter().map(|row| row.id.clone()).collect::<Vec<_>>(), [child.to_string(), empty.to_string()]);
+    assert_eq!(unfiltered.sections.len(), 1);
+    assert_eq!(unfiltered.sections[0].parent.id, shelf.to_string());
+    assert_eq!(unfiltered.sections[0].children.iter().map(|row| row.id.clone()).collect::<Vec<_>>(), [child.to_string(), empty.to_string()]);
     let downloaded = db.browse_folder(&query, true).unwrap();
-    assert_eq!(downloaded.contents.children.len(), 1);
-    assert_eq!(downloaded.contents.children[0].id, child.to_string());
+    assert_eq!(downloaded.sections[0].children.len(), 1);
+    assert_eq!(downloaded.sections[0].children[0].id, child.to_string());
     query.languages = vec!["en".into()];
     let page = db.browse_folder(&query, false).unwrap();
-    let (contents, groups) = (page.contents, page.chip_groups);
-    assert_eq!(groups.len(), 1);
+    assert_eq!(page.sections.len(), 1);
+    let contents = &page.sections[0];
     assert_eq!(contents.children.len(), 1);
     assert_eq!(contents.children[0].id, child.to_string());
-    assert_eq!(contents.children[0].book_count, 1);
+    assert_eq!(contents.children[0].book_count, 2);
     query.languages = vec!["sv".into()];
     let no_matches = db.browse_folder(&query, false).unwrap();
     assert!(no_matches.contents.children.is_empty());
-    assert!(no_matches.chip_groups.is_empty());
+    assert!(no_matches.sections.is_empty());
+}
+
+#[test]
+fn folder_sections_preserve_wrapper_order_and_direct_search_results() {
+    let db = database();
+    let wrapper = db.create_directory(&ROOT_DIR_ID, &"A wrapper".into()).unwrap().id;
+    let nested = db.create_directory(&wrapper, &"Nested".into()).unwrap().id;
+    let plain = db.create_directory(&ROOT_DIR_ID, &"Z plain".into()).unwrap().id;
+    import_in_folder(&db, 303, nested);
+    import_in_folder(&db, 304, plain);
+    let query = subject_query(&ROOT_DIR_ID.to_string());
+    let page = db.browse_folder(&query, false).unwrap();
+    assert_eq!(page.contents.children.iter().map(|row| row.id.clone()).collect::<Vec<_>>(), [wrapper.to_string(), plain.to_string()]);
+    assert_eq!(page.sections.iter().map(|section| section.parent.id.clone()).collect::<Vec<_>>(), [plain.to_string(), wrapper.to_string()]);
+    assert_eq!(page.sections[1].children[0].id, nested.to_string());
+    assert_eq!(page.sections[0].books.len(), 1);
+    assert!(page.sections[1].books.is_empty());
+    let search = library_model::LibraryBrowseQuery { search: "Nested".into(), ..query };
+    let searched = db.browse_folder(&search, false).unwrap();
+    assert!(searched.sections.is_empty());
+    assert_eq!(searched.contents.children[0].id, nested.to_string());
+    assert_eq!(searched.contents.children[0].path.as_deref(), Some("A wrapper"));
 }
 
 #[test]
@@ -1140,7 +1128,7 @@ fn downloaded_folder_sorting_uses_scoped_counts_and_normalized_names() {
             db.connection.execute("UPDATE book_dir SET is_downloaded=?1 WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?2)", library_database::rusqlite::params![book < downloads, hash.as_str()]).unwrap();
         }
     }
-    db.connection.execute("INSERT INTO book_language(book_row_id,position,language_tag) SELECT row_id,0,'en-US' FROM book", []).unwrap();
+    db.connection.execute("INSERT OR IGNORE INTO book_language(book_row_id,language) SELECT row_id,'en' FROM book", []).unwrap();
     for filtered in [false, true] {
         for search in ["", "ology"] {
             for sort in [library_model::BrowseChipSort::Alphabetical, library_model::BrowseChipSort::BookCount] {
@@ -1164,22 +1152,18 @@ fn downloaded_folder_sorting_uses_scoped_counts_and_normalized_names() {
             }
         }
     }
-    let picker = db.browse_library_folder(&ROOT_DIR_ID, true, library_model::LibraryFileTypeFilter::All).unwrap();
-    assert_eq!(picker.children.len(), 3);
-    let zoology = picker.children.iter().find(|row| row.name == "Zoology").unwrap();
-    assert_eq!((zoology.book_count, zoology.downloaded_book_count), (3, 1));
 }
 
 #[test]
-fn subject_cards_and_facets_share_normalized_language_filtering() {
-    let (db, path, _) = cached_subject_fixture();
-    db.connection.execute("INSERT INTO book_language(book_row_id,position,language_tag) SELECT row_id,0,' EN_us ' FROM book", []).unwrap();
-    db.connection.execute("INSERT INTO book_language(book_row_id,position,language_tag) SELECT row_id,1,'en-GB' FROM book", []).unwrap();
-    let root = db.browse_subject_contents(&subject_query("Subject"), false).unwrap();
+fn subject_cards_and_global_facets_use_normalized_languages() {
+    let (db, _path, _) = subject_fixture();
+    db.connection.execute("INSERT OR IGNORE INTO book_language(book_row_id,language) SELECT row_id,'en' FROM book", []).unwrap();
+    let root = db.browse_subject_contents(&subject_query("0"), false).unwrap();
     let mut query = subject_query(&root.children[0].id);
     query.languages = vec!["en".into()];
     assert_eq!(db.browse_subject_contents(&query, false).unwrap().books.len(), 4);
-    let (languages, formats) = db.browse_subject_facet_counts(&path, "", &[], &["en"], false).unwrap();
+    let facets = db.browse_subject(&query, false).unwrap();
+    let (languages, formats) = (facets.language_counts, facets.format_counts);
     assert_eq!(languages.iter().find(|l| l.language == "en").unwrap().book_count, 4);
     assert_eq!(formats.iter().map(|f| f.book_count).sum::<u32>(), 4);
 }
@@ -1200,19 +1184,20 @@ fn browse_progress_is_derived_without_rewriting_sync_registers_and_audio_is_book
     db.connection.execute("UPDATE book_toc SET entry_count=7 WHERE content_hash=?1", [hash.as_str()]).unwrap();
     let folder = db.create_directory(&ROOT_DIR_ID, &"Copy".into()).unwrap().id;
     place_book(&db, hash, folder, false);
-    let card = db.browse_book_detail(hash).unwrap().book;
-    assert_eq!(card.audiobook_duration_ms, Some(12345));
-    assert_eq!(card.audiobook_chapter_count, Some(7));
+    let detail = db.browse_book_detail(hash).unwrap();
+    assert_eq!(detail.book.audiobook_duration_ms, Some(12345));
+    assert_eq!(detail.audiobook_chapter_count, Some(7));
     db.connection.execute("DELETE FROM audiobook_metadata WHERE content_hash=?1", [hash.as_str()]).unwrap();
-    let card = db.browse_book_detail(hash).unwrap().book;
-    assert_eq!(card.audiobook_duration_ms, None);
-    assert_eq!(card.audiobook_chapter_count, None);
+    let detail = db.browse_book_detail(hash).unwrap();
+    assert_eq!(detail.book.audiobook_duration_ms, None);
+    assert_eq!(detail.audiobook_chapter_count, None);
 }
 
 fn without_navigation(mutations: Vec<library_replica::StateMutation>) -> Vec<Vec<u8>> {
     // Migration reissues transport identities; the domain payloads must survive.
-    let mut values=mutations.into_iter().filter(|m|!matches!(m.body,library_replica::MutationBody::BookToc {..})).map(|m|sync_common::wire::encode(&m.body).unwrap()).collect::<Vec<_>>();
-    values.sort();values
+    let mut values = mutations.into_iter().filter(|m| !matches!(m.body, library_replica::MutationBody::BookToc { .. })).map(|m| sync_common::wire::encode(&m.body).unwrap()).collect::<Vec<_>>();
+    values.sort();
+    values
 }
 
 fn navigation_documents(mutations: &[library_replica::StateMutation]) -> Vec<(String, book_model::BookTocDocument)> {
@@ -1227,81 +1212,13 @@ fn navigation_documents(mutations: &[library_replica::StateMutation]) -> Vec<(St
     documents
 }
 
-
-#[test]
-fn author_subject_chips_match_previous_ranking_with_multiple_routes_and_duplicate_credits() {
-    let (db, _, _) = cached_subject_fixture();
-    // Include several multiply-routed concepts, not merely a single leaf.
-    let concepts = db
-        .connection
-        .prepare("SELECT concept_id FROM curated.unified_concept_route WHERE concept_id>0 GROUP BY concept_id HAVING count(DISTINCT parent_route_id)>1 ORDER BY concept_id LIMIT 5")
-        .unwrap()
-        .query_map([], |r| r.get::<_, i64>(0))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert_eq!(concepts.len(), 5);
-    for (index, concept) in concepts.iter().enumerate() {
-        db.connection.execute("INSERT OR IGNORE INTO book_unified_concept SELECT row_id,?1,1 FROM book WHERE row_id%3<=?2", library_database::rusqlite::params![concept, index as i64 % 3]).unwrap();
-    }
-    // Two credits for the same identity must still count one book.
-    db.connection.execute("INSERT INTO book_contributor(book_row_id,position,author_identity_id,name,role) SELECT book_row_id,10,author_identity_id,name,role FROM book_contributor WHERE position=0", []).unwrap();
-    db.connection.execute("UPDATE book_dir SET is_downloaded=(book_row_id%2)", []).unwrap();
-    let sql = include_str!("fixtures/author_subjects_v60.sql");
-    for downloaded in [false, true] {
-        let mut expected = std::collections::HashMap::<String, Vec<library_model::AuthorSubject>>::new();
-        let mut statement = db.connection.prepare(sql).unwrap();
-        let mut rows = statement.query(library_database::rusqlite::named_params! {":downloaded_only": downloaded, ":per_author": 3}).unwrap();
-        while let Some(row) = rows.next().unwrap() {
-            expected.entry(row.get(0).unwrap()).or_default().push(library_model::AuthorSubject::new(row.get(1).unwrap(), row.get(2).unwrap()));
-        }
-        let authors = db.browse_authors(Default::default(), downloaded).unwrap();
-        assert!(!authors.authors.is_empty());
-        for author in authors.authors {
-            assert_eq!(author.subjects, expected.remove(&author.id.to_string()).unwrap_or_default());
-        }
-        assert!(expected.is_empty());
-    }
+/// Books a search from the root finds, by title or author.
+fn searched(db: &Database, search: &str) -> Vec<ContentHash> {
+    browse_folder(db, ROOT_DIR_ID, search, &[]).books.into_iter().map(|book| book.content_hash).collect()
 }
 
 #[test]
-fn stored_search_text_tracks_titles_subtitles_and_contributor_edits() {
-    let db = database();
-    let first = import_in_folder(&db, 601, ROOT_DIR_ID);
-    let second = import_in_folder(&db, 602, ROOT_DIR_ID);
-    db.connection.execute("UPDATE book SET title='École',subtitle='Über les livres' WHERE content_hash=?1", [first.as_str()]).unwrap();
-    assert_eq!(db.browse_library_search("  ECOLE:   uber ", false).unwrap().title_matches[0].content_hash, first);
-    assert!(db.browse_library_search("ecole uber", false).unwrap().title_matches.is_empty(), "punctuation remains significant");
-    db.connection.execute("UPDATE book_contributor SET name='Émile' WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1)", [first.as_str()]).unwrap();
-    db.connection.execute("INSERT INTO book_contributor(book_row_id,position,author_identity_id,name,role) SELECT book_row_id,5,author_identity_id,'Björk',role FROM book_contributor WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND position=0",[first.as_str()]).unwrap();
-    assert_eq!(db.browse_book_detail(first).unwrap().book.author, "Émile, Björk");
-    assert_eq!(db.browse_library_search("bjork", false).unwrap().author_matches[0].content_hash, first);
-    db.connection.execute("UPDATE book_contributor SET position=10 WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) AND position=0", [first.as_str()]).unwrap();
-    assert_eq!(db.browse_book_detail(first).unwrap().book.author, "Björk, Émile");
-    // A remote reassignment invalidates both the old and new book's text.
-    db.connection.execute("UPDATE sync_metadata SET change_origin='remote'", []).unwrap();
-    db.connection
-        .execute("UPDATE book_contributor SET book_row_id=(SELECT row_id FROM book WHERE content_hash=?1) WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?2) AND position=5", [second.as_str(), first.as_str()])
-        .unwrap();
-    db.connection.execute("UPDATE sync_metadata SET change_origin='local'", []).unwrap();
-    let matches = db.browse_library_search("bjork", false).unwrap().author_matches;
-    assert_eq!(matches.len(), 1);
-    assert_eq!(matches[0].content_hash, second);
-    assert_eq!(db.browse_book_detail(first).unwrap().book.author, "Émile");
-    db.connection.execute("UPDATE book_contributor SET role=X'74726c' WHERE position=5", []).unwrap();
-    assert!(db.browse_library_search("bjork", false).unwrap().author_matches.is_empty());
-    db.connection.execute("DELETE FROM book_contributor WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1)", [first.as_str()]).unwrap();
-    assert_eq!(db.browse_book_detail(first).unwrap().book.author, "");
-    assert!(db.browse_library_search("emile", false).unwrap().author_matches.is_empty());
-    let tx = db.connection.unchecked_transaction().unwrap();
-    tx.execute("UPDATE book SET title='Rolled back',subtitle=NULL WHERE content_hash=?1", [first.as_str()]).unwrap();
-    tx.rollback().unwrap();
-    assert_eq!(db.browse_library_search("uber", false).unwrap().title_matches[0].content_hash, first);
-    assert!(db.browse_library_search("rolled back", false).unwrap().title_matches.is_empty());
-}
-
-#[test]
-fn library_search_reads_stored_keys_without_normalizing_metadata_again() {
+fn search_reads_stored_keys_without_normalizing_metadata_again() {
     let db = database();
     let hash = import_in_folder(&db, 701, ROOT_DIR_ID);
     // Queries still normalize the user's input in Rust. No database scalar call
@@ -1309,10 +1226,9 @@ fn library_search_reads_stored_keys_without_normalizing_metadata_again() {
     db.connection
         .create_scalar_function("normalize_search_text", 1, library_database::rusqlite::functions::FunctionFlags::SQLITE_UTF8, |_| -> library_database::rusqlite::Result<String> { Err(library_database::rusqlite::Error::InvalidQuery) })
         .unwrap();
-    assert_eq!(db.browse_library_search("title", false).unwrap().title_matches[0].content_hash, hash);
-    assert_eq!(db.browse_library_search("original author", false).unwrap().author_matches[0].content_hash, hash);
+    assert_eq!(searched(&db, "title")[0], hash);
+    assert_eq!(searched(&db, "original author")[0], hash);
 }
-
 
 #[test]
 fn folder_count_queries_do_not_scan_unrelated_library_books() {
@@ -1324,7 +1240,7 @@ fn folder_count_queries_do_not_scan_unrelated_library_books() {
     import_in_folder(&db, 901, child);
     db.connection.execute("UPDATE sync_metadata SET change_origin='remote'", []).unwrap();
     let tx = db.connection.unchecked_transaction().unwrap();
-    tx.execute_batch("WITH RECURSIVE numbers(n) AS (VALUES(1000) UNION ALL SELECT n+1 FROM numbers WHERE n<2999) INSERT INTO book(content_hash,title,format) SELECT printf('%064x',n),'Other book','epub' FROM numbers;").unwrap();
+    tx.execute_batch("WITH RECURSIVE numbers(n) AS (VALUES(1000) UNION ALL SELECT n+1 FROM numbers WHERE n<2999) INSERT INTO book(content_hash,title,format) SELECT printf('%064x',n),'Other book',1 FROM numbers;").unwrap();
     tx.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT ?1,row_id,content_hash || '.epub','',1 FROM book WHERE title='Other book'", [big.to_string()]).unwrap();
     tx.execute(
         "WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<1000)
@@ -1335,152 +1251,43 @@ fn folder_count_queries_do_not_scan_unrelated_library_books() {
     tx.commit().unwrap();
     browse_folder(&db, ROOT_DIR_ID, "", &[]);
     let source = include_str!("../src/browse/sql/folders.sql");
-    let query = |name: &str| source.split(&format!("-- name: {name}?\n")).nth(1).unwrap().split("-- name:").next().unwrap();
-    let directory = small.to_string();
-    let directories = serde_json::to_string(&[directory.clone()]).unwrap();
-    let mut direct = db.connection.prepare(query("get_immediate_sub_dirs")).unwrap();
-    let count: i64 = direct.query_row(named_params! {":dir_id":directory,":downloaded_only":false,":chip_sort":0}, |r| r.get(2)).unwrap();
+    let query = source.split("-- name: folder_direct_counts?\n").nth(1).unwrap();
+    let directories = serde_json::to_string(&[child.to_string()]).unwrap();
+    let mut direct = db.connection.prepare(query).unwrap();
+    let count: i64 = direct.query_row(named_params! {":directory_ids":directories,":file_types":0,":languages":""}, |r| r.get(1)).unwrap();
     assert_eq!(count, 1);
-    assert!(direct.get_status(StatementStatus::FullscanStep) < 100, "small-folder counts must not scan 2,000 unrelated books");
-    db.connection.execute("INSERT OR IGNORE INTO book_language(book_row_id,position,language_tag) SELECT row_id,0,'en-US' FROM book WHERE title!='Other book'", []).unwrap();
-    let mut filtered = db.connection.prepare(query("get_filtered_immediate_sub_dirs")).unwrap();
-    let mut previous = db.connection.prepare(query("get_sub_dirs")).unwrap();
-    let read_folder = |r: &library_database::rusqlite::Row<'_>| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?, r.get::<_, Option<String>>(4)?));
-    for sort in [0, 1] {
-        for (formats, languages) in [(1, ""), (2, ""), (3, ""), (0, ",en,"), (1, ",en,"), (1, ",sv,")] {
-            filtered.reset_status(StatementStatus::FullscanStep);
-            let actual = filtered.query_map(named_params! {":dir_id":directory,":downloaded_only":false,":file_types":formats,":chip_sort":sort,":languages":languages}, read_folder).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-            let expected = previous
-                .query_map(named_params! {":dir_id":directory,":downloaded_only":false,":normalized_query":"",":file_types":formats,":chip_sort":sort,":languages":languages}, read_folder)
-                .unwrap()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap();
-            assert_eq!(actual, expected);
-            assert!(filtered.get_status(StatementStatus::FullscanStep) < 100, "metadata filters must not scan unrelated books or expand unrelated directory paths");
-        }
+    assert!(direct.get_status(StatementStatus::FullscanStep) < 100, "direct counts must not scan unrelated books");
+    db.connection.execute("INSERT OR IGNORE INTO book_language(book_row_id,language) SELECT row_id,'en' FROM book WHERE title!='Other book'", []).unwrap();
+    for (formats, languages) in [(1, ""), (2, ""), (3, ""), (0, ",en,"), (1, ",en,"), (1, ",sv,")] {
+        direct.reset_status(StatementStatus::FullscanStep);
+        let actual: i64 = direct.query_row(named_params! {":directory_ids":directories,":file_types":formats,":languages":languages}, |r| r.get(1)).unwrap();
+        assert_eq!(actual, i64::from((formats == 0 || formats & 1 != 0) && (languages.is_empty() || languages == ",en,")));
+        assert!(direct.get_status(StatementStatus::FullscanStep) < 100, "filtered counts must not scan unrelated books");
     }
-    let mut grouped = db.connection.prepare(query("group_folder_children_with")).unwrap();
-    for (formats, languages, expected) in [(0, "", vec![1]), (1, ",en,", vec![1]), (2, "", vec![])] {
-        db.connection.execute("INSERT OR IGNORE INTO book_language(book_row_id,position,language_tag) SELECT row_id,0,'en-US' FROM book WHERE title!='Other book'", []).unwrap();
-        grouped.reset_status(StatementStatus::FullscanStep);
-        let counts =
-            grouped.query_map(named_params! {":directory_ids":directories,":file_types":formats,":languages":languages,":chip_sort":0,":downloaded_only":false}, |r| r.get::<_, i64>(3)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-        assert_eq!(counts, expected);
-        assert!(grouped.get_status(StatementStatus::FullscanStep) < 100, "grouped counts must not scan unrelated books");
-    }
+    assert_eq!(browse_folder(&db, ROOT_DIR_ID, "", &[]).children.iter().find(|row| row.id == small.to_string()).unwrap().book_count, 1);
 }
 
-
 #[test]
-fn dirty_folder_refresh_does_not_scan_unrelated_placements() {
-    use library_database::rusqlite::StatementStatus;
+fn read_time_directory_counts_follow_deletes_and_physical_cascades() {
     let db = database();
-    let target = db.create_directory(&ROOT_DIR_ID, &"Target".into()).unwrap().id;
-    let hash = import_in_folder(&db, 901, target);
-    db.connection.execute("UPDATE sync_metadata SET change_origin='remote'", []).unwrap();
-    db.connection
-        .execute_batch(
-            "WITH RECURSIVE numbers(n) AS (VALUES(1000) UNION ALL SELECT n+1 FROM numbers WHERE n<2999)
-        INSERT INTO book(content_hash,title,format) SELECT printf('%064x',n),'Other book','epub' FROM numbers;",
-        )
-        .unwrap();
-    db.connection
-        .execute(
-            "INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded)
-        SELECT ?1,row_id,content_hash || '.epub','',1 FROM book WHERE title='Other book'",
-            [ROOT_DIR_ID.to_string()],
-        )
-        .unwrap();
-    browse_folder(&db, ROOT_DIR_ID, "", &[]);
-    let book: i64 = db.connection.query_row("SELECT row_id FROM book WHERE content_hash=?1", [hash.as_str()], |r| r.get(0)).unwrap();
-    db.connection.execute("UPDATE book_dir SET is_downloaded=0 WHERE book_row_id=?1", [book]).unwrap();
-    assert_eq!(db.connection.query_row("SELECT count(*) FROM folder_browse_dirty_book", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-    let query = include_str!("../src/browse/sql/folder_cache.sql").split("-- name: folder_cache_placements?\n").nth(1).unwrap().split("-- name:").next().unwrap();
-    let mut statement = db.connection.prepare(query).unwrap();
-    let placements = statement.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?))).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-    assert_eq!(placements, vec![(book, target.to_string(), false)]);
-    assert_eq!(statement.get_status(StatementStatus::FullscanStep), 0, "one dirty book must use indexed placement lookups, regardless of unrelated books");
-    // Exercise the actual refresh too: the changed download state must reach
-    // the cached membership while the book remains visible in its folder.
-    assert_eq!(browse_folder(&db, target, "", &[]).books.len(), 1);
-    assert_eq!(
-        db.connection.query_row("SELECT downloaded_placement_count FROM folder_book_ownership WHERE folder_id=?1 AND book_row_id=?2", library_database::rusqlite::params![target.to_string(), book], |r| r.get::<_, i64>(0)).unwrap(),
-        0
-    );
+    let shelf = db.create_directory(&ROOT_DIR_ID, &"Shelf".into()).unwrap().id;
+    let branch = db.create_directory(&shelf, &"Branch".into()).unwrap().id;
+    let hash = import_in_folder(&db, 901, branch);
+    place_book(&db, hash, shelf, true);
+    let root_count = || browse_folder(&db, ROOT_DIR_ID, "", &[]).children.iter().map(|row| row.book_count).sum::<usize>();
+    assert_eq!(root_count(), 2);
+    db.connection.execute("UPDATE book SET deleted_at=1 WHERE content_hash=?1", [hash.as_str()]).unwrap();
+    assert_eq!(root_count(), 0);
+    db.connection.execute("UPDATE book SET deleted_at=NULL WHERE content_hash=?1", [hash.as_str()]).unwrap();
+    assert_eq!(root_count(), 2);
+    db.connection.execute("DELETE FROM dir WHERE id=?1", [branch.to_string()]).unwrap();
+    assert_eq!(root_count(), 1);
+    db.connection.execute("DELETE FROM book WHERE content_hash=?1", [hash.as_str()]).unwrap();
+    assert_eq!(root_count(), 0);
+    import_in_folder(&db, 902, shelf);
+    db.connection.execute("DELETE FROM dir WHERE id=?1", [shelf.to_string()]).unwrap();
+    assert_eq!(root_count(), 0);
 }
-
-#[test]
-fn subject_format_facets_match_previous_query_after_membership_changes() {
-    use library_database::rusqlite::named_params;
-    let (db, path, parent) = cached_subject_fixture();
-    db.connection.execute("UPDATE book SET format=CASE row_id%3 WHEN 0 THEN 'm4b' WHEN 1 THEN 'epub' ELSE 'pdf' END", []).unwrap();
-    db.connection.execute("UPDATE book_dir SET is_downloaded=book_row_id%2", []).unwrap();
-    db.connection.execute("INSERT INTO book_language SELECT row_id,0,CASE row_id%2 WHEN 0 THEN 'sv' ELSE 'en-US' END FROM book", []).unwrap();
-    db.connection.execute("INSERT INTO book_language SELECT row_id,1,'en-GB' FROM book WHERE row_id%2=1", []).unwrap();
-    let extra = db.create_directory(&ROOT_DIR_ID, &"Extra".into()).unwrap().id;
-    // Duplicate placements and overlapping ancestor assignments still count once.
-    db.connection.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT ?1,row_id,'extra.epub','',1 FROM book WHERE row_id=1", [extra.to_string()]).unwrap();
-    db.connection.execute("INSERT OR IGNORE INTO book_unified_concept SELECT 1,concept_id,1 FROM curated.unified_concept_paths WHERE path=?1 AND concept_id>0", [&parent]).unwrap();
-    let source = include_str!("../src/browse/sql/subjects.sql");
-    let combined = source.split("-- name: get_subject_facets?\n").nth(1).unwrap().split("-- name:").next().unwrap().trim().trim_end_matches(';');
-    // The SQL section may include comments before the next named statement.
-    let combined = combined.split_once(";\n").map_or(combined, |(statement, _)| statement);
-    let sql = format!("SELECT value,book_count FROM ({combined}) WHERE kind=0");
-    let language_sql = format!("SELECT value,book_count FROM ({combined}) WHERE kind=1");
-    let label = book_model::normalize_search_text(path.rsplit(" / ").next().unwrap());
-    for state in 0..4 {
-        match state {
-            1 => {
-                db.connection.execute("UPDATE book SET hidden_at=1 WHERE row_id=1", []).unwrap();
-            }
-            2 => {
-                db.connection.execute("UPDATE book SET hidden_at=NULL", []).unwrap();
-                db.connection.execute("UPDATE book SET deleted_at=1 WHERE row_id=2", []).unwrap();
-                db.connection.execute("UPDATE book_dir SET deleted_at=1 WHERE book_row_id=3", []).unwrap();
-            }
-            3 => {
-                db.connection.execute("UPDATE book SET deleted_at=NULL", []).unwrap();
-                db.connection.execute("UPDATE book_dir SET deleted_at=NULL", []).unwrap();
-            }
-            _ => {}
-        }
-        // Refresh through the public API before reading the cache directly.
-        db.browse_subject_facet_counts(&parent, "", &[], &[], false).unwrap();
-        let route: i64 = db.connection.query_row("SELECT route_id FROM subject_route_paths WHERE path=?1", [&parent], |r| r.get(0)).unwrap();
-        let mut actual = db.connection.prepare(&sql).unwrap();
-        let mut previous = db.connection.prepare(include_str!("fixtures/subject_format_facets_before.sql")).unwrap();
-        let mut language_actual = db.connection.prepare(&language_sql).unwrap();
-        let mut language_previous = db.connection.prepare(include_str!("fixtures/subject_language_facets_before.sql")).unwrap();
-        for route in [route, 0, -1] {
-            for search in ["", "book 1", "original author", label.as_str(), "no matching book qzx"] {
-                // The synthetic root exercises counting; descendant matching is
-                // checked under the real parent without walking the entire taxonomy.
-                if route == 0 && !search.is_empty() {
-                    continue;
-                }
-                for formats in [0, 1, 2, 4, 3] {
-                    for downloaded in [false, true] {
-                        let params = named_params! {":route_id":route, ":normalized_query":search, ":file_types":formats, ":downloaded_only":downloaded};
-                        let read = |r: &library_database::rusqlite::Row<'_>| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?));
-                        let got = language_actual.query_map(params, read).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-                        let expected = language_previous.query_map(params, read).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-                        assert_eq!(got, expected, "language facets: state={state}, route={route}, search={search}, formats={formats}, downloaded={downloaded}");
-                    }
-                }
-                for languages in ["", ",en,", ",sv,"] {
-                    for downloaded in [false, true] {
-                        let params = named_params! {":route_id":route, ":normalized_query":search, ":languages":languages, ":downloaded_only":downloaded};
-                        let read = |r: &library_database::rusqlite::Row<'_>| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?));
-                        let got = actual.query_map(params, read).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-                        let expected = previous.query_map(params, read).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-                        assert_eq!(got, expected, "state={state}, route={route}, search={search}, languages={languages}, downloaded={downloaded}");
-                    }
-                }
-            }
-        }
-    }
-}
-
 
 #[test]
 fn deleted_book_thumbnail_work_is_cancelled_and_restored_when_needed() {
@@ -1488,19 +1295,17 @@ fn deleted_book_thumbnail_work_is_cancelled_and_restored_when_needed() {
     let book = import();
     let hash = book.content_hash;
     db.commit_import(book).unwrap();
-    db.connection.execute("INSERT INTO local_thumbnail_work(content_hash,state) VALUES(?1,'pending')", [hash.as_str()]).unwrap();
+    db.connection.execute("INSERT INTO book_transfer(content_hash,cover_state) VALUES(?1,'pending') ON CONFLICT(content_hash) DO UPDATE SET cover_state='pending'", [hash.as_str()]).unwrap();
     assert_eq!(db.pending_thumbnail_job_count().unwrap(), 1);
     db.connection.execute("UPDATE book SET deleted_at=1 WHERE content_hash=?1", [hash.as_str()]).unwrap();
     assert_eq!(db.pending_thumbnail_job_count().unwrap(), 0);
-    assert_eq!(db.connection.query_row("SELECT count(*) FROM local_thumbnail_work", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-    // A late worker completion must not resurrect a deleted book's pending job.
-    db.connection.execute("INSERT INTO local_thumbnail_work(content_hash,state) VALUES(?1,'pending')", [hash.as_str()]).unwrap();
+    assert_eq!(db.connection.query_row("SELECT count(*) FROM book_transfer WHERE cover_state IS NOT NULL", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    // A late worker retry must not resurrect a deleted book's pending job.
+    db.retry_thumbnail_work(&hash).unwrap();
     assert_eq!(db.pending_thumbnail_job_count().unwrap(), 0);
     db.connection.execute("UPDATE book SET deleted_at=NULL WHERE content_hash=?1", [hash.as_str()]).unwrap();
     assert_eq!(db.pending_thumbnail_job_count().unwrap(), 1);
 }
-
-
 
 #[cfg(feature = "scanner")]
 #[test]
@@ -1526,7 +1331,6 @@ fn scan_file_failures_finish_and_remain_visible_until_next_scan() {
     db.apply_filesystem_scan(&snapshot, &discovery, &InspectedFilesystemScan { readable: true, ..Default::default() }).unwrap();
     assert!(db.operation_status(OperationActivity::default()).unwrap().operation.unwrap().scan_failures.is_empty());
 }
-
 
 #[test]
 fn enriched_subjects_survive_later_page_evidence_and_reload() {
@@ -1602,7 +1406,6 @@ fn subject_checkpoints_respect_backoff_restart_exhaustion_and_revision() {
     assert_eq!(jobs[0].pipeline.next_step(&book), book_enrichment::SubjectStep::InspectPages);
 }
 
-
 #[test]
 fn rescan_recovers_legacy_projection_only_subjects() {
     let db = database();
@@ -1613,5 +1416,4 @@ fn rescan_recovers_legacy_projection_only_subjects() {
     db.commit_import(import()).unwrap();
     let refreshed = db.refresh_subject_enrichment(vec![hash], Default::default()).unwrap();
     assert_eq!(refreshed[0].book.subjects[0].code(), Some("DC38"));
-    assert_eq!(db.connection.query_row("SELECT count(*) FROM book_subject_code WHERE system_id='lcc' AND code='DC38'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
 }

@@ -7,12 +7,18 @@ use sync_common::ContentHash;
 
 impl Database {
     pub fn is_book_downloaded(&self, hash: &ContentHash) -> Result<bool, DatabaseError> {
-        let mut downloaded = false;
-        self.connection.transfer_is_book_downloaded(hash.as_str(), |row| {
-            downloaded = row.get(0)?;
+        Ok(self.download_flags(hash)?.0)
+    }
+
+    /// Whether the book's bytes are marked downloaded, and whether a live
+    /// placement has a queued download request.
+    fn download_flags(&self, hash: &ContentHash) -> Result<(bool, bool), DatabaseError> {
+        let mut flags = (false, false);
+        self.connection.transfer_download_state(hash.as_str(), |row| {
+            flags = (row.get(0)?, row.get(1)?);
             Ok(())
         })?;
-        Ok(downloaded)
+        Ok(flags)
     }
 
     pub fn evict_local_book(&self, hash: &ContentHash) -> Result<bool, DatabaseError> {
@@ -48,9 +54,15 @@ impl Database {
         }
     }
 
+    /// The book's first remembered or live path on this device.
+    fn book_path(&self, hash: &ContentHash) -> Result<Option<RelativeBookPath>, DatabaseError> {
+        self.book_paths(hash)?.into_iter().next().map(|path| RelativeBookPath::parse(&path).map_err(DatabaseError::operation)).transpose()
+    }
+
     pub fn has_pending_asset_work(&self) -> Result<bool, DatabaseError> {
         let mut pending = false;
-        self.connection.transfer_has_pending_asset_work(|row| {
+        let live_dirs = serde_json::to_string(&crate::placements::live_directories(&self.connection)?).map_err(DatabaseError::operation)?;
+        self.connection.transfer_has_pending_asset_work(&live_dirs, |row| {
             pending = row.get(0)?;
             Ok(())
         })?;
@@ -68,12 +80,7 @@ impl Database {
     }
 
     pub fn pending_download_requests(&self) -> Result<Vec<ContentHash>, DatabaseError> {
-        let mut hashes = Vec::new();
-        self.connection.transfer_pending_download_requests(|row| {
-            hashes.push(ContentHash::new(&row.get::<_, String>(0)?));
-            Ok(())
-        })?;
-        Ok(hashes)
+        Ok(self.book_download_requests()?.into_iter().map(|(hash, _)| hash).collect())
     }
 
     pub fn complete_local_book_request(&self, hash: ContentHash) -> Result<(), DatabaseError> {
@@ -86,11 +93,14 @@ impl Database {
         connection.shared_set_book_hash_downloaded(hash.as_str(), 1)?;
         let mut placements = Vec::new();
         connection.transfer_live_placements(hash.as_str(), |row| {
-            placements.push(row.get::<_, String>(2)?);
+            placements.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
             Ok(())
         })?;
-        for path in placements {
-            connection.transfer_queue_restore(hash.as_str(), &path)?;
+        let mut folders = crate::placements::FolderPaths::new(connection);
+        for (dir_id, file_name) in placements {
+            if let Some(path) = folders.placement(&dir_id, &file_name)? {
+                connection.transfer_queue_restore(hash.as_str(), &path)?;
+            }
         }
         connection.shared_transfer_complete_download(hash.as_str())?;
         Ok(())
@@ -104,12 +114,7 @@ impl Database {
     }
 
     pub(super) fn complete_retained_download_on(connection: &rusqlite::Connection, hash: &ContentHash, placement: &BookPlacement) -> Result<bool, DatabaseError> {
-        let mut matches = false;
-        connection.transfer_placement_matches(hash.as_str(), placement.rel_path.as_str(), |row| {
-            matches = row.get(0)?;
-            Ok(())
-        })?;
-        if !matches {
+        if !Self::placement_holds(connection, placement, hash)? {
             return Ok(false);
         }
         connection.shared_set_book_hash_downloaded(hash.as_str(), 1)?;
@@ -133,28 +138,23 @@ impl Database {
         if placement.content_hash != *hash {
             return Ok(false);
         }
-        let mut matches = false;
-        self.connection.transfer_placement_matches(hash.as_str(), placement.rel_path.as_str(), |row| {
-            matches = row.get(0)?;
-            Ok(())
-        })?;
-        Ok(matches)
+        Self::placement_holds(&self.connection, placement, hash)
+    }
+
+    /// Whether the placement's path still resolves to a live placement of `hash`.
+    fn placement_holds(connection: &rusqlite::Connection, placement: &BookPlacement, hash: &ContentHash) -> Result<bool, DatabaseError> {
+        Ok(crate::placements::book_at_path(connection, placement.rel_path.as_str())?.is_some_and(|(current, _, _)| current == *hash))
     }
 
     pub fn native_download_directory(&self, placement: &BookPlacement, hash: &ContentHash) -> Result<Option<sync_common::DirId>, DatabaseError> {
         if placement.content_hash != *hash {
             return Ok(None);
         }
-        let mut raw_directory = None;
-        self.connection.transfer_placement_directory(hash.as_str(), placement.rel_path.as_str(), |row| {
-            raw_directory = Some(row.get::<_, String>(0)?);
-            Ok(())
-        })?;
-        raw_directory.map(|id| sync_common::DirId::parse_str(&id).map_err(DatabaseError::operation)).transpose()
+        Ok(crate::placements::book_at_path(&self.connection, placement.rel_path.as_str())?.filter(|(current, _, _)| current == hash).map(|(_, directory, _)| directory))
     }
 
     pub fn sync_request_book_downloads(&self, hashes: &[ContentHash], origin: library_replica::TransferOrigin) -> Result<(), DatabaseError> {
-        let created_at = super::unix_secs()?;
+        let requested_at = crate::sync::unix_millis()?;
         let transaction = self.connection.unchecked_transaction()?;
         for hash in hashes {
             let mut placed = false;
@@ -165,21 +165,16 @@ impl Database {
             if !placed {
                 return Err(DatabaseError::message(format!("book {hash} has no live placement")));
             }
-            transaction.transfer_add_download_request(hash.as_str(), origin.storage(), created_at)?;
+            transaction.shared_request_book_download(hash.as_str(), origin.storage(), requested_at)?;
         }
         transaction.commit()?;
         Ok(())
     }
 
     pub fn transfer_download_state(&self, hash: &ContentHash, bytes_present: bool) -> Result<DownloadState, DatabaseError> {
-        let mut state = (false, false);
-        self.connection.transfer_download_state(hash.as_str(), |row| {
-            state = (row.get(0)?, row.get(1)?);
-            Ok(())
-        })?;
-        Ok(match (state.0, state.1, bytes_present) {
-            (true, _, true) => DownloadState::Downloaded,
-            (_, true, _) => DownloadState::Queued,
+        Ok(match (self.download_flags(hash)?, bytes_present) {
+            ((true, _), true) => DownloadState::Downloaded,
+            ((_, true), _) => DownloadState::Queued,
             _ => DownloadState::NotDownloaded,
         })
     }
@@ -201,13 +196,6 @@ impl Database {
     }
 
     pub fn is_book_download_requested(&self, hash: &ContentHash) -> Result<bool, DatabaseError> {
-        let mut requested = false;
-        self.connection
-            .download_requested(hash.as_str(), |row| {
-                requested = row.get(0)?;
-                Ok(())
-            })
-            .map_err(DatabaseError::operation)?;
-        Ok(requested)
+        Ok(self.download_flags(hash)?.1)
     }
 }
