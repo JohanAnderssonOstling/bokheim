@@ -2,10 +2,10 @@
 //! No network/service simulator: delivery order here deliberately exceeds server guarantees.
 use super::convergence_tests::{change, db, facts, folder_events, metadata, present, pull};
 use crate::Database;
-use library_replica::{BookLifecycleState, DirectoryLifecycleState, MutationBody};
+use library_replica::{BookLifecycleState, DirectoryLifecycleState, LibraryStateEntry};
 use rusqlite::types::Value;
 use std::collections::BTreeMap;
-use sync_common::{LibraryRevision, ServerMutation};
+use sync_common::{LibraryRevision, StateDelivery};
 
 // Fixed algorithm so a seed remains reproducible across dependency upgrades.
 struct Random(u64);
@@ -30,7 +30,7 @@ fn seeds() -> Vec<u64> {
     (0..cases).collect()
 }
 
-fn history(seed: u64) -> Vec<ServerMutation> {
+fn history(seed: u64) -> Vec<StateDelivery> {
     let mut random = Random(seed);
     // Guaranteed cycle, name collision and missing parent, followed by random edits.
     let mut events = folder_events();
@@ -38,11 +38,11 @@ fn history(seed: u64) -> Vec<ServerMutation> {
     for index in 0..64 {
         let dir_id = uuid::Uuid::from_u128(1 + random.pick(4) as u128);
         let body = match random.pick(8) {
-            0 | 1 => MutationBody::DirectoryParent { dir_id, parent_id: uuid::Uuid::from_u128(random.pick(6) as u128) },
-            2 => MutationBody::DirectoryName { dir_id, name: ["Shelf", "shelf", "Ｓｈｅｌｆ", "Shelf 2", "Étage", "E\u{301}tage", "..", "Folder", "A/B", "A\\B", "CON.txt", "Shelf. "][random.pick(12)].into() },
-            3 => MutationBody::DirectoryLifecycle { dir_id, value: [DirectoryLifecycleState::Present, DirectoryLifecycleState::Deleted, DirectoryLifecycleState::Purged][random.pick(3)].clone() },
+            0 | 1 => LibraryStateEntry::DirectoryParent { dir_id, parent_id: uuid::Uuid::from_u128(random.pick(6) as u128) },
+            2 => LibraryStateEntry::DirectoryName { dir_id, name: ["Shelf", "shelf", "Ｓｈｅｌｆ", "Shelf 2", "Étage", "E\u{301}tage", "..", "Folder", "A/B", "A\\B", "CON.txt", "Shelf. "][random.pick(12)].into() },
+            3 => LibraryStateEntry::DirectoryLifecycle { dir_id, value: [DirectoryLifecycleState::Present, DirectoryLifecycleState::Deleted, DirectoryLifecycleState::Purged][random.pick(3)].clone() },
             4 => {
-                MutationBody::BookLifecycle {
+                LibraryStateEntry::BookLifecycle {
                     content_hash: super::convergence_tests::hash(), // Field registers commute within an existing book's lifetime.
                     // Purge/readd requires server admission order; covered by the
                     // lifetime boundary and server exchange tests, not shuffling
@@ -50,16 +50,16 @@ fn history(seed: u64) -> Vec<ServerMutation> {
                     value: [BookLifecycleState::Present, BookLifecycleState::Deleted { origin_folder_id: None }][random.pick(2)].clone(),
                 }
             }
-            5 => MutationBody::Placement { dir_id, content_hash: super::convergence_tests::hash(), present: random.pick(2) == 0, origin_folder_id: None },
-            6 => MutationBody::from_wire(&metadata(["en", "fr", "sv"][random.pick(3)], 1, 1).mutation).unwrap().unwrap(),
-            _ => MutationBody::ReadingPosition {
+            5 => LibraryStateEntry::Placement { dir_id, content_hash: super::convergence_tests::hash(), present: random.pick(2) == 0, origin_folder_id: None },
+            6 => LibraryStateEntry::decode(&metadata(["en", "fr", "sv"][random.pick(3)], 1, 1).state).unwrap().unwrap(),
+            _ => LibraryStateEntry::ReadingPosition {
                 content_hash: super::convergence_tests::hash(),
                 value: library_replica::ReadingPositionState { location: book_model::ReadingPosition::parse(&format!("epubcfi(/6/{})", 2 + 2 * random.pick(10))).unwrap(), progress: random.pick(101) as f32 / 100. },
             },
         };
         // Small clock range deliberately generates timestamp/rank/replica ties.
         let mut event = change(body, 20 + random.pick(5) as u64, 100 + index);
-        event.replica_id = uuid::Uuid::from_u128(10 + random.pick(3) as u128);
+        event.state.version.replica_id = uuid::Uuid::from_u128(10 + random.pick(3) as u128);
         events.push(event);
     }
     events
@@ -72,7 +72,7 @@ fn rows(db: &Database, sql: &str) -> Vec<Vec<Value>> {
 }
 
 fn canonical(db: &Database) -> Vec<Vec<Value>> {
-    rows(db, "SELECT state_kind,state_key,state_subkey,changed_at,conflict_rank,replica_id,replica_seq,mutation_id,body,book_key FROM sync_state_version ORDER BY state_kind,state_key,state_subkey")
+    rows(db, "SELECT state_kind,state_key,state_subkey,changed_at,conflict_rank,replica_id,replica_seq,body,book_key FROM sync_state_version ORDER BY state_kind,state_key,state_subkey")
 }
 
 fn projection(db: &Database) -> Vec<Vec<Vec<Value>>> {
@@ -80,19 +80,20 @@ fn projection(db: &Database) -> Vec<Vec<Vec<Value>>> {
     // timestamps belong to each device. Tombstone times are publication clocks.
     [
         "SELECT id,parent_id,name,deleted_at IS NOT NULL FROM dir WHERE id='00000000-0000-0000-0000-000000000000' OR EXISTS(SELECT 1 FROM sync_state_version v WHERE v.state_key=dir.id AND v.state_kind LIKE 'directory_%') ORDER BY id",
-        "SELECT content_hash,format,added_at,title,subtitle,read_pos,read_progress,deleted_at IS NOT NULL,trash_origin_dir_id,book_metadata FROM book ORDER BY content_hash",
+        "SELECT content_hash,format,added_at,title,subtitle,read_pos,read_progress,deleted_at IS NOT NULL,trash_origin_dir_id FROM book ORDER BY content_hash",
         "SELECT b.content_hash,l.language FROM book_language l JOIN book b ON b.row_id=l.book_row_id ORDER BY b.content_hash,l.language",
         "SELECT b.content_hash,p.dir_id,p.deleted_at IS NOT NULL,p.trash_origin_dir_id FROM book_dir p JOIN book b ON b.row_id=p.book_row_id ORDER BY b.content_hash,p.dir_id",
     ].map(|sql| rows(db, sql)).to_vec()
 }
 
-fn winners(events: &[ServerMutation]) -> Vec<ServerMutation> {
+fn winners(events: &[StateDelivery]) -> Vec<StateDelivery> {
     let mut winners = BTreeMap::new();
     for event in events {
-        let m = &event.mutation;
-        let key = (m.kind.clone(), m.entity_key.clone(), m.entity_subkey.clone());
+        let m = &event.state;
+        let key = (m.value.address.kind.clone(), m.value.address.entity_key.clone(), m.value.address.entity_subkey.clone());
         // Independent max-register oracle: no database merge/coalescing helper.
-        let rank = (m.changed_at, m.conflict_rank, event.replica_id, m.replica_seq.get(), m.mutation_id);
+        let version = &m.version;
+        let rank = (version.changed_at, version.conflict_rank, version.replica_id, version.replica_seq, version.replica_seq);
         let entry = winners.entry(key).or_insert((rank, event.clone()));
         if rank > entry.0 {
             *entry = (rank, event.clone());
@@ -101,7 +102,7 @@ fn winners(events: &[ServerMutation]) -> Vec<ServerMutation> {
     winners.into_values().map(|(_, event)| event).collect()
 }
 
-fn deliver(db: &Database, events: &[ServerMutation], random: &mut Random) {
+fn deliver(db: &Database, events: &[StateDelivery], random: &mut Random) {
     let mut scheduled = events.to_vec();
     for _ in 0..events.len() / 3 {
         scheduled.push(events[random.pick(events.len())].clone());
@@ -139,7 +140,7 @@ fn seeded_purge_boundaries_discard_absent_updates_and_allow_old_fields_after_rea
         for (index, replica) in devices.iter().enumerate() {
             deliver(replica, &events, &mut Random(seed + index as u64));
         }
-        let purge = change(MutationBody::BookLifecycle { content_hash: super::convergence_tests::hash(), value: BookLifecycleState::Purged }, 100, 10000);
+        let purge = change(LibraryStateEntry::BookLifecycle { content_hash: super::convergence_tests::hash(), value: BookLifecycleState::Purged }, 100, 10000);
         for (index, replica) in devices.iter().enumerate() {
             pull(replica, &[purge.clone()]);
             // Delayed fields while absent are completed no-ops, regardless of
@@ -208,9 +209,9 @@ fn seeded_delivery_pages_duplicates_restarts_and_recovery_converge() {
             let recovered = sent
                 .iter()
                 .enumerate()
-                .map(|(index, m)| ServerMutation { mutation: m.to_wire().unwrap(), replica_id: uuid::Uuid::parse_str(&replica_id).unwrap(), revision: LibraryRevision::new(index as u64 + 1).unwrap() })
+                .map(|(index, m)| sync_common::fixture_delivery(sync_common::transport::representation::<_, sync_common::OpaquePublication>(&(m)).unwrap(), uuid::Uuid::parse_str(&replica_id).unwrap(), LibraryRevision::new(index as u64 + 1).unwrap()))
                 .collect::<Vec<_>>();
-            source.sync_acknowledge_mutations(&sent.iter().map(|m| m.mutation_id).collect::<Vec<_>>()).unwrap();
+            source.sync_acknowledge_mutations(&sent.iter().map(|m| m.publisher_seq).collect::<Vec<_>>()).unwrap();
             let fresh = db();
             pull(&fresh, &recovered);
             assert_eq!(projection(&fresh), projection(&expected), "recovery changed semantics");
@@ -245,9 +246,9 @@ fn seeded_concurrent_local_folder_moves_repair_the_same_cycle() {
         let mut initial = Vec::new();
         for id in [first, second] {
             for body in [
-                MutationBody::DirectoryName { dir_id: id, name: "Shelf".into() },
-                MutationBody::DirectoryParent { dir_id: id, parent_id: sync_common::ROOT_DIR_ID },
-                MutationBody::DirectoryLifecycle { dir_id: id, value: DirectoryLifecycleState::Present },
+                LibraryStateEntry::DirectoryName { dir_id: id, name: "Shelf".into() },
+                LibraryStateEntry::DirectoryParent { dir_id: id, parent_id: sync_common::ROOT_DIR_ID },
+                LibraryStateEntry::DirectoryLifecycle { dir_id: id, value: DirectoryLifecycleState::Present },
             ] {
                 initial.push(change(body, 1, initial.len() as u64 + 1));
             }
@@ -260,8 +261,8 @@ fn seeded_concurrent_local_folder_moves_repair_the_same_cycle() {
         let mut edits = Vec::new();
         for (id, device) in [(100, &left), (101, &right)] {
             let sent = device.sync_publishable_mutations().unwrap();
-            edits.extend(sent.iter().map(|m| ServerMutation { mutation: m.to_wire().unwrap(), replica_id: uuid::Uuid::from_u128(id), revision: LibraryRevision::new(1).unwrap() }));
-            device.sync_acknowledge_mutations(&sent.iter().map(|m| m.mutation_id).collect::<Vec<_>>()).unwrap();
+            edits.extend(sent.iter().map(|m| sync_common::fixture_delivery(sync_common::transport::representation::<_, sync_common::OpaquePublication>(&(m)).unwrap(), uuid::Uuid::from_u128(id), LibraryRevision::new(1).unwrap())));
+            device.sync_acknowledge_mutations(&sent.iter().map(|m| m.publisher_seq).collect::<Vec<_>>()).unwrap();
         }
         let fresh = db();
         let all = initial.into_iter().chain(edits.clone()).collect::<Vec<_>>();

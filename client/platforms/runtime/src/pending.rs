@@ -1,4 +1,6 @@
 //! Correlation and disconnect draining shared by worker transports.
+
+use std::future::Future;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -192,7 +194,7 @@ mod cancellation_tests {
 }
 
 /// Cancellation wins ties and drops the operation before returning to its owner.
-pub async fn until_cancelled<T>(operation: impl std::future::Future<Output = T>, cancelled: impl std::future::Future) -> Option<T> {
+pub async fn until_cancelled<T>(operation: impl Future<Output = T>, cancelled: impl Future) -> Option<T> {
     futures_util::pin_mut!(operation, cancelled);
     match futures_util::future::select(cancelled, operation).await {
         futures_util::future::Either::Left(_) => None,

@@ -1,1 +1,3 @@
-SELECT parent_id,name FROM dir WHERE id=?1 AND deleted_at IS NULL;
+-- name: live_directory_location?
+-- param: dir_id: &str
+SELECT parent_id,name FROM dir WHERE id=:dir_id AND deleted_at IS NULL;

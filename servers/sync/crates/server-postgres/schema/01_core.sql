@@ -2,18 +2,17 @@
 -- file's foreign keys ultimately point back to users/libraries, so this
 -- file must be applied first.
 --
--- A new installation starts at schema version 1.
+-- A new installation starts at schema version 4.
 CREATE TABLE bokheim_schema_version (
-    version integer PRIMARY KEY CHECK (version = 1)
+    version integer PRIMARY KEY CHECK (version = 4)
 );
-INSERT INTO bokheim_schema_version(version) VALUES (1);
+INSERT INTO bokheim_schema_version(version) VALUES (4);
 
 CREATE TABLE users (
     id text PRIMARY KEY,
     created_at timestamp with time zone NOT NULL DEFAULT now(),
     password_hash text,
-    email text,
-    is_admin boolean NOT NULL DEFAULT false
+    email text
 );
 
 CREATE UNIQUE INDEX idx_users_email ON users USING btree (email) WHERE (email IS NOT NULL);

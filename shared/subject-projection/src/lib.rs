@@ -134,8 +134,7 @@ pub fn project_subject_codes(subjects: &[BookSubject]) -> Vec<ProjectedSubjectCo
     // mathematics DDC code on a history title). Keep the strongest source
     // only for unified navigation; raw subjects remain unchanged.
     let has_bisac = projected.keys().any(|(system, _)| system == BISAC_SYSTEM_ID);
-    let ddc = (!declared_lcc && !has_bisac)
-        .then(|| {
+    let ddc = if !declared_lcc && !has_bisac { {
             subjects
                 .iter()
                 .enumerate()
@@ -143,8 +142,7 @@ pub fn project_subject_codes(subjects: &[BookSubject]) -> Vec<ProjectedSubjectCo
                     (subject.authority().and_then(canonical_subject_system)? == DDC_SYSTEM_ID).then(|| ddc::canonical_ddc_notation(subject.code().unwrap_or_else(|| subject.name()))).flatten().map(|code| (position, code))
                 })
                 .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+        } } else { Default::default() };
     let maximum_ddc_specificity = ddc.iter().map(|(_, code)| ddc::specificity(code)).max();
     for (position, code) in ddc {
         if Some(ddc::specificity(&code)) == maximum_ddc_specificity {
@@ -205,7 +203,7 @@ pub fn project_unified_subjects(subjects: &[BookSubject]) -> Vec<ProjectedSubjec
     let mut lcc_evidence = BTreeMap::<String, Vec<ProjectedLccEvidence>>::new();
     for (position, subject) in subjects.iter().enumerate() {
         if subject.authority() == Some(UNIFIED_SYSTEM_ID) && subject.source() == "manual:subject" {
-            if let Some(path) = subject.code().filter(|path| runtime.routes.contains_key(*path)) {
+            if let Some(path) = subject.code().filter(|path| runtime.routes.contains_key(path)) {
                 projected.entry(path.to_owned()).or_default().insert(position);
             }
             continue;

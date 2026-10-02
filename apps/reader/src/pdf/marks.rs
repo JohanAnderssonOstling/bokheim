@@ -48,23 +48,11 @@ pub(super) fn imported_annotations(content_hash: content_address::ContentHash, m
     metadata
         .annotations
         .iter()
-        .map(|a| ReaderAnnotation {
-            id: format!("pdf-external:{}:{}:{}", metadata.checksum, a.page_index, a.index),
-            content_hash,
-            anchor: AnnotationAnchor::pdf(PdfAnnotationAnchor::new(a.page_index as u32, a.rects.iter().map(|r| PdfAnnotationRect::new(r[0], r[1], r[2], r[3])).collect(), None)),
-            exact_text: a.text.clone(),
-            style: match a.kind {
+        .map(|a| ReaderAnnotation { id: format!("pdf-external:{}:{}:{}", metadata.checksum, a.page_index, a.index), state: book_model::AnnotationState { content_hash: content_hash, detail: book_model::AnnotationDetail { anchor: AnnotationAnchor::pdf(PdfAnnotationAnchor::new(a.page_index as u32, a.rects.iter().map(|r| PdfAnnotationRect::new(r[0], r[1], r[2], r[3])).collect(), None)), exact_text: a.text.clone(), style: match a.kind {
                 Kind::Highlight | Kind::Note => AnnotationStyle::Highlight,
                 Kind::Underline => AnnotationStyle::Underline,
                 Kind::Squiggly => AnnotationStyle::Squiggly,
                 Kind::Strikethrough => AnnotationStyle::Strikethrough,
-            },
-            color: a.color.clone(),
-            note: a.note.clone(),
-            created_at: 0,
-            modified_at: 0,
-            toc_ordinal: None,
-            progress: None,
-        })
+            }, color: a.color.clone(), note: a.note.clone(), created_at: 0, toc_ordinal: None, progress: None }, modified_at: 0, deleted: false } })
         .collect()
 }

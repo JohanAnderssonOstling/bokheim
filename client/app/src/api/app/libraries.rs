@@ -1,3 +1,4 @@
+use crate::LibraryEntry;
 use super::AppClient;
 use crate::runtime::AppCommand;
 use crate::LibraryId;
@@ -7,7 +8,7 @@ impl AppClient {
         self.transport.library_list_changes_transport().await.map_err(|error| error.to_string())
     }
 
-    pub async fn libraries(&self) -> Result<Vec<crate::LibraryEntry>, String> {
+    pub async fn libraries(&self) -> Result<Vec<LibraryEntry>, String> {
         self.request(AppCommand::Libraries).await
     }
     pub async fn reconcile_libraries(&self) -> Result<crate::app::LibraryListState, String> {
@@ -20,7 +21,7 @@ impl AppClient {
         let id = match selected {
             Some(id) => id,
             None => {
-                let library: crate::LibraryEntry = self.request(AppCommand::EnsureImportLibrary).await?;
+                let library: LibraryEntry = self.request(AppCommand::EnsureImportLibrary).await?;
                 *library.library_id()
             }
         };
@@ -39,7 +40,7 @@ impl AppClient {
         self.request(AppCommand::EstimateLibraryFolders { locators }).await
     }
 
-    pub async fn create_library_with_asset_storage(&self, name: String, asset_storage_enabled: bool) -> Result<crate::LibraryEntry, String> {
+    pub async fn create_library_with_asset_storage(&self, name: String, asset_storage_enabled: bool) -> Result<LibraryEntry, String> {
         self.request(AppCommand::CreateLibraryWithAssetStorage { name, asset_storage_enabled }).await
     }
 
@@ -47,7 +48,7 @@ impl AppClient {
         self.request(AppCommand::CreateLibrariesWithAssetStorage { locators, asset_storage_enabled }).await
     }
 
-    pub async fn create_library(&self, name: String) -> Result<crate::LibraryEntry, String> {
+    pub async fn create_library(&self, name: String) -> Result<LibraryEntry, String> {
         self.request(AppCommand::CreateLibrary { name }).await
     }
 

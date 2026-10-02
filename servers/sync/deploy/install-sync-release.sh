@@ -17,7 +17,7 @@ for file in sync-server bokheim-sync.service; do
     fi
 done
 [[ -x ${incoming}/sync-server ]] || { echo "staged sync server must be executable" >&2; exit 1; }
-for credential in database-url admin-password resend-api-key test-user-password; do
+for credential in database-url resend-api-key test-user-password; do
     [[ -s /etc/bokheim/${credential} ]] || { echo "missing credential: /etc/bokheim/${credential}" >&2; exit 2; }
 done
 if [[ ! -s /etc/bokheim/account-token-key ]]; then
@@ -74,12 +74,12 @@ for _ in $(seq 1 30); do
 done
 [[ ${ready} == true ]] || { echo "sync server did not become ready" >&2; exit 1; }
 
-# An unauthenticated request must reach the admin route and be rejected as
-# unauthorized. A 404 means the wrong server release is active.
-admin_status=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 -H 'Sec-Fetch-Site: same-origin' https://app.bokheim.se/api/admin/overview)
-[[ ${admin_status} == 401 ]] || { echo "administrator API verification returned HTTP ${admin_status}" >&2; exit 1; }
+# An unauthenticated request must reach an authenticated API route through
+# Caddy and be rejected as unauthorized.
+api_status=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 10 https://app.bokheim.se/api/account/snapshot)
+[[ ${api_status} == 401 ]] || { echo "public API verification returned HTTP ${api_status}" >&2; exit 1; }
 
 deployment_succeeded=true
 unset database_url
 rm -rf -- "${incoming}"
-echo "Bokheim sync server deployed; administrator API verified."
+echo "Bokheim sync server deployed; public API verified."

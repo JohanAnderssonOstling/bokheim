@@ -60,7 +60,7 @@ pub fn inspect_epub(path: &Path) -> MetadataResult<InspectedEpub> {
     let mut metadata = epub_metadata_from_provider(path, &provider)?;
     let container_ms = u64::try_from(container_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let evidence_started = Instant::now();
-    inspect_epub_evidence(&provider, &mut metadata);
+    inspect_epub_pages(&provider, &mut metadata);
     let evidence_ms = u64::try_from(evidence_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let toc_started = Instant::now();
     let mut count = 0;
@@ -69,10 +69,7 @@ pub fn inspect_epub(path: &Path) -> MetadataResult<InspectedEpub> {
     Ok(InspectedEpub { metadata, toc, timings: EpubInspectionTimings { container_ms, evidence_ms, toc_ms } })
 }
 
-/// Cheap EPUB metadata only: no page evidence extraction.
-pub fn inspect_epub_metadata(path: &Path) -> MetadataResult<BookRecord> {
-    epub_metadata_from_provider(path, &open_epub(path)?)
-}
+
 
 /// Reads EPUB metadata from any seekable byte source. Browser ingestion uses
 /// this entry point, while native scanning passes a file through
@@ -86,7 +83,7 @@ where
         return Err("EPUB book contains no readable documents".into());
     }
     let mut metadata = epub_metadata_from_provider(source_name, &provider)?;
-    inspect_epub_evidence(&provider, &mut metadata);
+    inspect_epub_pages(&provider, &mut metadata);
     let mut count = 0;
     let toc = provider.toc()?.unwrap_or_default().into_iter().filter_map(|entry| book_toc_entry(entry, 0, &mut count)).collect();
     Ok(InspectedEpub { metadata, toc, timings: EpubInspectionTimings::default() })
@@ -113,7 +110,7 @@ fn book_toc_entry(entry: epub_provider::TocEntry, depth: usize, count: &mut usiz
 /// Reads all metadata relevant to indexing. Formats without useful embedded
 fn fallback_metadata(path: &Path) -> BookRecord {
     let title = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("Untitled").to_owned();
-    BookRecord { title, subtitle: None, contributors: Vec::new(), description: String::new(), book: Default::default() }
+    BookRecord { metadata: book_model::BookDetails { title: title, subtitle: None, contributors: Vec::new(), book: Default::default() }, description: String::new() }
 }
 
 fn author_credit(name: String) -> Result<Contributor, BookMetadataError> {
@@ -160,44 +157,44 @@ fn author_names(raw: &str) -> Vec<String> {
     for separator in SEPARATORS {
         parts = parts.iter().flat_map(|part| part.split(separator)).map(str::to_owned).collect();
     }
-    parts.into_iter().map(|part| clean_author_name(&part)).filter(|name| !name.is_empty() && !is_author_tool(name)).collect()
-}
-
-/// Strips what authority files and tools leave behind: a role marker in brackets, a
-/// trailing life date, and the full stop that abbreviated entries end
-/// with. What remains is the name as a person would write it.
-fn clean_author_name(value: &str) -> String {
-    let mut name = value.trim().to_owned();
-    while let Some(open) = name.rfind('(') {
-        let Some(close) = name[open..].find(')').map(|offset| open + offset) else { break };
-        let inside = name[open + 1..close].trim().to_ascii_lowercase();
-        if !matches!(inside.as_str(), "author" | "authors" | "ed" | "ed." | "editor" | "editors" | "trans" | "trans." | "translator" | "illustrator" | "compiler") {
-            break;
-        }
-        name.replace_range(open..=close, "");
-        name = name.trim().to_owned();
-    }
-    // A life date: "Grose, Peter, 1934-" or "Cicero, 106-43 B.C."
-    if let Some(comma) = name.rfind(',') {
-        let tail = name[comma + 1..].trim();
-        if !tail.is_empty() && tail.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-            name.truncate(comma);
-        }
-    }
-    // Removing a marker leaves its space behind: "Piper (Author), Murphy"
-    // becomes "Piper , Murphy" unless the gap is closed.
-    name = name.split_whitespace().collect::<Vec<_>>().join(" ").replace(" ,", ",").replace(" .", ".");
-    name = name.trim().trim_end_matches([',', ';']).trim().to_owned();
-    // "Renehan, Edward." keeps a surname-first form but loses the stop; an
-    // initial ("Piper, Fred C.") keeps it, because there the stop is the name.
-    if name.ends_with('.') {
-        let stem = name.trim_end_matches('.');
-        let last_word = stem.rsplit([' ', ',']).next().unwrap_or_default();
-        if last_word.chars().count() > 1 {
-            name = stem.trim().to_owned();
-        }
-    }
-    name
+    parts
+        .into_iter()
+        .map(|part| {
+            // Strip role markers, trailing life dates, and full stops from names.
+            let mut name = part.trim().to_owned();
+            while let Some(open) = name.rfind('(') {
+                let Some(close) = name[open..].find(')').map(|offset| open + offset) else { break };
+                let inside = name[open + 1..close].trim().to_ascii_lowercase();
+                if !matches!(inside.as_str(), "author" | "authors" | "ed" | "ed." | "editor" | "editors" | "trans" | "trans." | "translator" | "illustrator" | "compiler") {
+                    break;
+                }
+                name.replace_range(open..=close, "");
+                name = name.trim().to_owned();
+            }
+            // A life date: "Grose, Peter, 1934-" or "Cicero, 106-43 B.C."
+            if let Some(comma) = name.rfind(',') {
+                let tail = name[comma + 1..].trim();
+                if !tail.is_empty() && tail.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                    name.truncate(comma);
+                }
+            }
+            // Removing a marker leaves its space behind: "Piper (Author), Murphy"
+            // becomes "Piper , Murphy" unless the gap is closed.
+            name = name.split_whitespace().collect::<Vec<_>>().join(" ").replace(" ,", ",").replace(" .", ".");
+            name = name.trim().trim_end_matches([',', ';']).trim().to_owned();
+            // "Renehan, Edward." keeps a surname-first form but loses the stop; an
+            // initial ("Piper, Fred C.") keeps it, because there the stop is the name.
+            if name.ends_with('.') {
+                let stem = name.trim_end_matches('.');
+                let last_word = stem.rsplit([' ', ',']).next().unwrap_or_default();
+                if last_word.chars().count() > 1 {
+                    name = stem.trim().to_owned();
+                }
+            }
+            name
+        })
+        .filter(|name| !name.is_empty() && !is_author_tool(name))
+        .collect()
 }
 
 fn is_author_tool(name: &str) -> bool {
@@ -234,7 +231,7 @@ fn long_description(properties: &[epub_provider::EpubMetadataProperty]) -> Optio
     (!collapsed.is_empty()).then_some(collapsed)
 }
 
-fn open_epub(path: &Path) -> MetadataResult<EpubProvider> {
+pub fn open_epub(path: &Path) -> MetadataResult<EpubProvider> {
     let provider = std::fs::File::open(path).and_then(EpubProvider::try_from_reader)?;
     if provider.document_uris()?.is_empty() {
         return Err("EPUB book contains no readable documents".into());
@@ -242,7 +239,7 @@ fn open_epub(path: &Path) -> MetadataResult<EpubProvider> {
     Ok(provider)
 }
 
-fn epub_metadata_from_provider(path: &Path, provider: &EpubProvider) -> MetadataResult<BookRecord> {
+pub fn epub_metadata_from_provider(path: &Path, provider: &EpubProvider) -> MetadataResult<BookRecord> {
     let metadata = provider.metadata()?;
     let mut authors = metadata
         .creators
@@ -294,10 +291,17 @@ fn epub_metadata_from_provider(path: &Path, provider: &EpubProvider) -> Metadata
     let non_author_contributors =
         metadata.contributors.into_iter().chain(metadata.creators.into_iter().filter(|creator| marc_relator_code_from_metadata_role(creator.role.as_str()) != AUTHOR_MARC_RELATOR_CODE)).map(contributor).collect::<Result<Vec<_>, _>>()?;
     let long_description = long_description(&metadata.properties);
-    if let Some(isbn) = isbn_from_opf_path(provider.package_document_path()) {
+    if let Some(isbn) = (|path: &str| -> Option<String> {
+        let file_name = path.rsplit('/').next()?;
+        let stem = file_name.strip_suffix(".opf").or_else(|| file_name.strip_suffix(".OPF"))?;
+        let stem = stem.trim().trim_start_matches(|character: char| matches!(character, '_' | '-'));
+        let stem = stem.strip_prefix("ISBN").or_else(|| stem.strip_prefix("isbn")).map(|value| value.trim_start_matches(|character: char| matches!(character, '_' | '-' | ':' | ' '))).unwrap_or(stem);
+        book_enrichment::filename_isbn::from_filename_single(stem)
+    })(provider.package_document_path())
+    {
         book_model::push_isbn(&mut identifiers, isbn, Scope::Book)?;
     }
-    let title = if metadata.title.trim().is_empty() { fallback_metadata(path).title } else { metadata.title };
+    let title = if metadata.title.trim().is_empty() { fallback_metadata(path).metadata.title } else { metadata.title };
     let subtitle = metadata.alternate_titles.iter().find(|title| title.title_type.as_deref().is_some_and(|kind| kind.eq_ignore_ascii_case("subtitle"))).map(|title| title.value.clone());
     let mut book = BookMetadata {
         identifiers,
@@ -310,20 +314,12 @@ fn epub_metadata_from_provider(path: &Path, provider: &EpubProvider) -> Metadata
     book.infer_embedded_subject_isbns()?;
     let contributors = authors.into_iter().chain(non_author_contributors).collect();
     let description = long_description.unwrap_or(metadata.description);
-    let mut book = BookRecord { title, subtitle, contributors, description, book };
+    let mut book = BookRecord { metadata: book_model::BookDetails { title: title, subtitle: subtitle, contributors: contributors, book: book }, description: description };
     book.normalize_title();
     Ok(book)
 }
 
 use book_model::from_metadata_value;
-
-fn isbn_from_opf_path(path: &str) -> Option<String> {
-    let file_name = path.rsplit('/').next()?;
-    let stem = file_name.strip_suffix(".opf").or_else(|| file_name.strip_suffix(".OPF"))?;
-    let stem = stem.trim().trim_start_matches(|character: char| matches!(character, '_' | '-'));
-    let stem = stem.strip_prefix("ISBN").or_else(|| stem.strip_prefix("isbn")).map(|value| value.trim_start_matches(|character: char| matches!(character, '_' | '-' | ':' | ' '))).unwrap_or(stem);
-    book_enrichment::filename_isbn::from_filename_single(stem)
-}
 
 #[cfg(test)]
 mod tests {
@@ -396,23 +392,6 @@ mod tests {
         assert_eq!(inspected.metadata.title, "Language metadata test");
         assert_eq!(inspected.metadata.book.languages.iter().map(LanguageTag::as_str).collect::<Vec<_>>(), ["en-US", "sv"]);
     }
-
-    #[test]
-    fn opf_filename_isbn_requires_a_valid_checksum() {
-        assert_eq!(isbn_from_opf_path("OPS/9781501168697.opf").as_deref(), Some("9781501168697"));
-        assert_eq!(isbn_from_opf_path("OPS/ISBN_978-1-5011-6869-7.OPF").as_deref(), Some("9781501168697"));
-        assert_eq!(isbn_from_opf_path("OPS/An excellent book 9781501168697.opf").as_deref(), Some("9781501168697"));
-        assert_eq!(isbn_from_opf_path("OPS/9781501168698.opf"), None);
-        assert_eq!(isbn_from_opf_path("OPS/9781501168697 and 9780131103627.opf"), None);
-        assert_eq!(isbn_from_opf_path("OPS/package.opf"), None);
-    }
-}
-
-fn inspect_epub_evidence(provider: &EpubProvider, book: &mut BookRecord) {
-    if book_enrichment::defer_initial_page_inspection(&book.book) {
-        return;
-    }
-    inspect_epub_pages(provider, book);
 }
 
 fn inspect_epub_pages(provider: &EpubProvider, book: &mut BookRecord) {
@@ -420,7 +399,7 @@ fn inspect_epub_pages(provider: &EpubProvider, book: &mut BookRecord) {
     evidence::apply_evidence(book, &sections, "epub");
 }
 
-/// Text-only fallback after metadata ISBN lookup produced no usable subject.
+/// Page evidence alone, for inspection tools.
 pub fn inspect_epub_pages_reader<R: Read + Seek + Send + 'static>(source_name: &Path, reader: R) -> MetadataResult<BookRecord> {
     let provider = EpubProvider::try_from_reader(reader)?;
     let mut book = epub_metadata_from_provider(source_name, &provider)?;

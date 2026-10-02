@@ -6,7 +6,6 @@ use gpui::{App, SharedString, Task};
 use ropey::Rope;
 
 use super::display_map::DisplayMap;
-use crate::highlighter::DiagnosticSet;
 use crate::highlighter::LanguageRegistry;
 use crate::highlighter::SyntaxHighlighter;
 use crate::input::{InputEdit, RopeExt as _, TabSize};
@@ -45,7 +44,6 @@ pub(crate) enum InputMode {
         indent_guides: bool,
         folding: bool,
         highlighter: Rc<RefCell<Option<SyntaxHighlighter>>>,
-        diagnostics: DiagnosticSet,
         parse_task: Rc<RefCell<Option<Task<()>>>>,
     },
 }
@@ -78,7 +76,6 @@ impl InputMode {
             line_number: true,
             indent_guides: true,
             folding: true,
-            diagnostics: DiagnosticSet::new(&Rope::new()),
             parse_task: Rc::new(RefCell::new(None)),
         }
     }
@@ -294,21 +291,6 @@ impl InputMode {
         }
     }
 
-    #[allow(unused)]
-    pub(super) fn diagnostics(&self) -> Option<&DiagnosticSet> {
-        match self {
-            InputMode::CodeEditor { diagnostics, .. } => Some(diagnostics),
-            _ => None,
-        }
-    }
-
-    pub(super) fn diagnostics_mut(&mut self) -> Option<&mut DiagnosticSet> {
-        match self {
-            InputMode::CodeEditor { diagnostics, .. } => Some(diagnostics),
-            _ => None,
-        }
-    }
-
     /// Get a reference to the highlighter (if available)
     pub(super) fn highlighter(&self) -> Option<&Rc<RefCell<Option<SyntaxHighlighter>>>> {
         match self {
@@ -347,10 +329,7 @@ mod tests {
     use ropey::Rope;
 
     use super::replacement_input_edit;
-    use crate::{
-        highlighter::DiagnosticSet,
-        input::{Point, TabSize, mode::InputMode},
-    };
+    use crate::input::{Point, TabSize, mode::InputMode};
 
     #[test]
     fn test_replacement_input_edit_backspace_at_end_uses_old_range() {
@@ -422,7 +401,6 @@ mod tests {
             tab: Default::default(),
             language: "rust".into(),
             highlighter: Default::default(),
-            diagnostics: DiagnosticSet::new(&Rope::new()),
             parse_task: Default::default(),
         };
         assert_eq!(mode.is_code_editor(), true);

@@ -127,7 +127,7 @@ impl DisplayMap {
         }
     }
 
-    /// Set fold candidates (from tree-sitter/LSP)
+    /// Set fold candidates (from tree-sitter)
     pub fn set_fold_candidates(&mut self, candidates: Vec<FoldRange>) {
         self.fold_map.set_candidates(candidates);
         self.rebuild_fold_projection();

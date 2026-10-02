@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{App, ClickEvent, ElementId, IntoElement, MouseButton, SharedString, Window, div, px};
 use gpui_component::menu::PopupMenuItem;
@@ -55,8 +56,8 @@ where
 pub fn menu_item_with_split_actions(left_label: impl Into<SharedString>, right_label: impl Into<SharedString>, on_left: impl Fn(&mut Window, &mut App) + 'static, on_right: impl Fn(&mut Window, &mut App) + 'static) -> PopupMenuItem {
     let left_label = left_label.into();
     let right_label = right_label.into();
-    let on_left = std::rc::Rc::new(on_left);
-    let on_right = std::rc::Rc::new(on_right);
+    let on_left = Rc::new(on_left);
+    let on_right = Rc::new(on_right);
 
     PopupMenuItem::element(move |_, cx| {
         let theme = browser_theme(cx);
@@ -82,7 +83,7 @@ pub fn menu_item_with_split_actions(left_label: impl Into<SharedString>, right_l
 
 #[allow(clippy::too_many_arguments)]
 fn split_action_half(
-    id: impl Into<ElementId>, trailing_arrow: Option<IconName>, label: SharedString, theme: crate::BrowserTheme, accent: gpui::Hsla, accent_text: gpui::Hsla, radius: gpui::Pixels, on_click: std::rc::Rc<dyn Fn(&mut Window, &mut App)>,
+    id: impl Into<ElementId>, trailing_arrow: Option<IconName>, label: SharedString, theme: crate::BrowserTheme, accent: gpui::Hsla, accent_text: gpui::Hsla, radius: gpui::Pixels, on_click: Rc<dyn Fn(&mut Window, &mut App)>,
 ) -> impl IntoElement {
     div()
         .id(id.into())

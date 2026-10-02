@@ -2,14 +2,12 @@
 //!
 //! Based on the `Input` example from the `gpui` crate.
 //! https://github.com/zed-industries/zed/blob/main/crates/gpui/examples/input.rs
-use anyhow::Result;
 use gpui::{
     Action, App, AppContext, Bounds, ClipboardItem, Context, Edges, Entity, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
     Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, ShapedLine, SharedString, Styled as _,
-    Subscription, Task, UTF16Selection, Window, actions, div, point, prelude::FluentBuilder as _,
-    px,
+    Subscription, UTF16Selection, Window, actions, div, point, prelude::FluentBuilder as _, px,
 };
 use gpui::{Half, TextAlign};
 use ropey::{Rope, RopeSlice};
@@ -34,16 +32,12 @@ use super::{
 };
 use crate::Size;
 use crate::actions::{SelectDown, SelectLeft, SelectRight, SelectUp};
-use crate::highlighter::DiagnosticSet;
 #[cfg(feature = "tree-sitter")]
 use crate::highlighter::LanguageRegistry;
 use crate::input::blink_cursor::CURSOR_WIDTH;
 use crate::input::movement::MoveDirection;
 use crate::input::{
-    HoverDefinition, InlineCompletion, Lsp, Position, RopeExt as _, Selection,
-    display_map::LineLayout,
-    element::RIGHT_MARGIN,
-    popovers::{ContextMenu, DiagnosticPopover, HoverPopover},
+    Position, RopeExt as _, Selection, display_map::LineLayout, element::RIGHT_MARGIN,
     search::SearchPanel,
 };
 use crate::native_menu::NativeMenu;
@@ -114,9 +108,7 @@ actions!(
         MoveToPreviousWord,
         MoveToNextWord,
         Escape,
-        ToggleCodeActions,
         Search,
-        GoToDefinition,
     ]
 );
 
@@ -266,10 +258,6 @@ pub(crate) fn init(cx: &mut App) {
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-y", Redo, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-.", ToggleCodeActions, Some(CONTEXT)),
-        #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-.", ToggleCodeActions, Some(CONTEXT)),
-        #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-f", Search, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-f", Search, Some(CONTEXT)),
@@ -407,11 +395,6 @@ pub struct InputState {
     pub(super) mask_pattern_set: bool,
     pub(super) placeholder: SharedString,
 
-    /// Popover
-    diagnostic_popover: Option<Entity<DiagnosticPopover>>,
-    /// Completion/CodeAction context menu
-    pub(super) context_menu_content: Option<ContextMenu>,
-
     /// An optional context menu builder to allow a custom right-click context menu on the input.
     ///
     /// If set, this overrides the built-in context menu (and ignores [`Self::enable_context_menu`]).
@@ -424,20 +407,10 @@ pub struct InputState {
     /// This value is ignored if a context menu builder is defined in [`Self::context_menu_builder`].
     pub(super) enable_context_menu: bool,
 
-    /// A flag to indicate if we are currently inserting a completion item.
-    pub(super) completion_inserting: bool,
-    pub(super) hover_popover: Option<Entity<HoverPopover>>,
-    /// The LSP definitions locations for "Go to Definition" feature.
-    pub(super) hover_definition: HoverDefinition,
-
-    pub lsp: Lsp,
-
     /// A flag to indicate if we have a pending update to the text.
     ///
-    /// If true, will call some update (for example LSP, Syntax Highlight) before render.
+    /// If true, update syntax highlighting before rendering.
     _pending_update: bool,
-    /// A flag to indicate if we should ignore the next completion event.
-    pub(super) silent_replace_text: bool,
     /// A flag to indicate if we should emit InputEvents.
     pub(super) emit_events: bool,
 
@@ -447,9 +420,6 @@ pub struct InputState {
     /// The second element is the column (usize), fallback to use this.
     pub(super) preferred_column: Option<(Pixels, usize)>,
     _subscriptions: Vec<Subscription>,
-
-    pub(super) _context_menu_task: Task<Result<()>>,
-    pub(super) inline_completion: InlineCompletion,
 
     pub(super) auto_scroll: AutoScroll,
 }
@@ -535,22 +505,13 @@ impl InputState {
             mask_pattern_set: false,
             text_align: TextAlign::Left,
             decorations: DecorationCollections::default(),
-            lsp: Lsp::default(),
-            diagnostic_popover: None,
-            context_menu_content: None,
             context_menu_builder: None,
             pending_context_menu: None,
             enable_context_menu: true,
-            completion_inserting: false,
-            hover_popover: None,
-            hover_definition: HoverDefinition::default(),
-            silent_replace_text: false,
             emit_events: true,
             size: Size::default(),
             _subscriptions,
-            _context_menu_task: Task::ready(Ok(())),
             _pending_update: false,
-            inline_completion: InlineCompletion::default(),
             cursor_line_end_affinity: false,
             auto_scroll: AutoScroll::default(),
         }
@@ -728,16 +689,6 @@ impl InputState {
         cx.notify();
     }
 
-    #[inline]
-    pub fn diagnostics(&self) -> Option<&DiagnosticSet> {
-        self.mode.diagnostics()
-    }
-
-    #[inline]
-    pub fn diagnostics_mut(&mut self) -> Option<&mut DiagnosticSet> {
-        self.mode.diagnostics_mut()
-    }
-
     /// Set placeholder
     pub fn set_placeholder(
         &mut self,
@@ -799,7 +750,9 @@ impl InputState {
         self.emit_events = true;
 
         self.reset_selection();
-        self.reset_lsp_state();
+        if self.mode.is_code_editor() {
+            self._pending_update = true;
+        }
         self.reset_scroll_to_start();
 
         self.history.clear();
@@ -823,7 +776,9 @@ impl InputState {
     ) {
         self.replace_text(text, window, cx);
         self.reset_selection();
-        self.reset_lsp_state();
+        if self.mode.is_code_editor() {
+            self._pending_update = true;
+        }
         self.reset_scroll_to_start();
 
         cx.notify();
@@ -888,13 +843,6 @@ impl InputState {
             self.selected_range = (end..end).into();
         } else {
             self.selected_range.clear();
-        }
-    }
-
-    fn reset_lsp_state(&mut self) {
-        if self.mode.is_code_editor() {
-            self._pending_update = true;
-            self.lsp.reset();
         }
     }
 
@@ -1194,9 +1142,7 @@ impl InputState {
     pub fn default_value(mut self, value: impl Into<SharedString>) -> Self {
         let text: SharedString = value.into();
         self.text = Rope::from(self.normalize_input(&text).as_ref());
-        if let Some(diagnostics) = self.mode.diagnostics_mut() {
-            diagnostics.reset(&self.text)
-        }
+
         // Note: We can't call display_map.set_text here because it needs cx.
         // The text will be set during prepare_if_need in element.rs
         self._pending_update = true;
@@ -1255,19 +1201,7 @@ impl InputState {
         });
     }
 
-    /// Refresh the input, so the next render re-runs syntax highlighting and
-    /// the LSP providers, not just a redraw.
-    ///
-    /// Assigning the `lsp` providers (or other render-affecting state) at
-    /// runtime does not take effect until the text next changes. Call this
-    /// afterwards to force the refresh on the next render.
-    ///
-    /// ```ignore
-    /// input.update(cx, |state, cx| {
-    ///     state.lsp.hover_provider = Some(provider);
-    ///     state.refresh(cx);
-    /// });
-    /// ```
+    /// Refresh input layout and highlighting after changing its configuration.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self._pending_update = true;
         cx.notify();
@@ -1618,15 +1552,6 @@ impl InputState {
     }
 
     pub(super) fn enter(&mut self, action: &Enter, window: &mut Window, cx: &mut Context<Self>) {
-        if self.handle_action_for_context_menu(Box::new(action.clone()), window, cx) {
-            return;
-        }
-
-        // Clear inline completion on enter (user chose not to accept it)
-        if self.has_inline_completion() {
-            self.clear_inline_completion(cx);
-        }
-
         // In multi-line mode with `submit_on_enter` enabled, a plain `Enter`
         // (without Shift) is treated as submit: propagate the action and emit
         // PressEnter without inserting a newline. `Shift+Enter` still inserts
@@ -1663,17 +1588,7 @@ impl InputState {
         self.scroll_to(0, None, cx);
     }
 
-    pub(super) fn escape(&mut self, action: &Escape, window: &mut Window, cx: &mut Context<Self>) {
-        if self.handle_action_for_context_menu(Box::new(action.clone()), window, cx) {
-            return;
-        }
-
-        // Clear inline completion on escape
-        if self.has_inline_completion() {
-            self.clear_inline_completion(cx);
-            return; // Consume the escape, don't propagate
-        }
-
+    pub(super) fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
         if self.ime_marked_range.is_some() {
             self.unmark_text(window, cx);
         }
@@ -1705,53 +1620,31 @@ impl InputState {
         let menu = if let Some(builder) = self.context_menu_builder.clone() {
             builder(NativeMenu::new(), window, cx)
         } else {
-            let is_code_editor = self.mode.is_code_editor();
-            if is_code_editor {
-                self.handle_hover_definition(offset, window, cx);
-            }
-
             let is_enable = !self.disabled;
-            let has_goto_definition = is_enable && self.lsp.definition_provider.is_some();
-            let has_code_action = is_enable && !self.lsp.code_action_providers.is_empty();
             let is_selected = !self.selected_range.is_empty();
             let has_paste = is_enable && cx.read_from_clipboard().is_some();
 
-            let mut menu = NativeMenu::new();
-            if is_code_editor {
-                menu = menu
-                    .menu_with_disabled(
-                        rust_i18n::t!("Input.Go to Definition"),
-                        !has_goto_definition,
-                        Box::new(crate::input::GoToDefinition),
-                    )
-                    .menu_with_disabled(
-                        rust_i18n::t!("Input.Show Code Actions"),
-                        !has_code_action,
-                        Box::new(crate::input::ToggleCodeActions),
-                    )
-                    .separator();
-            }
-
-            menu.menu_with_disabled(
-                rust_i18n::t!("Input.Cut"),
-                !(is_enable && is_selected),
-                Box::new(crate::input::Cut),
-            )
-            .menu_with_disabled(
-                rust_i18n::t!("Input.Copy"),
-                !is_selected,
-                Box::new(crate::input::Copy),
-            )
-            .menu_with_disabled(
-                rust_i18n::t!("Input.Paste"),
-                !has_paste,
-                Box::new(crate::input::Paste),
-            )
-            .separator()
-            .menu(
-                rust_i18n::t!("Input.Select All"),
-                Box::new(crate::input::SelectAll),
-            )
+            NativeMenu::new()
+                .menu_with_disabled(
+                    rust_i18n::t!("Input.Cut"),
+                    !(is_enable && is_selected),
+                    Box::new(crate::input::Cut),
+                )
+                .menu_with_disabled(
+                    rust_i18n::t!("Input.Copy"),
+                    !is_selected,
+                    Box::new(crate::input::Copy),
+                )
+                .menu_with_disabled(
+                    rust_i18n::t!("Input.Paste"),
+                    !has_paste,
+                    Box::new(crate::input::Paste),
+                )
+                .separator()
+                .menu(
+                    rust_i18n::t!("Input.Select All"),
+                    Box::new(crate::input::SelectAll),
+                )
         };
 
         menu.show(position, window, cx);
@@ -1767,9 +1660,6 @@ impl InputState {
         // selection (Root) so it does not start a drag from here.
         crate::global_state::GlobalState::suppress_text_selection(cx);
 
-        // Clear inline completion on any mouse interaction
-        self.clear_inline_completion(cx);
-
         // If there have IME marked range and is empty (Means pressed Esc to abort IME typing)
         // Clear the marked range.
         if let Some(ime_marked_range) = &self.ime_marked_range {
@@ -1780,10 +1670,6 @@ impl InputState {
 
         self.selecting = true;
         let offset = self.index_for_mouse_position(event.position);
-
-        if self.handle_click_hover_definition(event, offset, window, cx) {
-            return;
-        }
 
         // Triple click to select line
         if event.button == MouseButton::Left && event.click_count >= 3 {
@@ -1834,57 +1720,6 @@ impl InputState {
         self.auto_scroll.stop();
     }
 
-    pub(super) fn on_mouse_move(
-        &mut self,
-        event: &MouseMoveEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // Check if mouse is within bounds
-        let within_bounds = self
-            .last_bounds
-            .as_ref()
-            .map(|bounds| bounds.contains(&event.position))
-            .unwrap_or(false);
-
-        if !within_bounds {
-            // Clear hover when mouse leaves the input
-            self.clear_hover_state(cx);
-            return;
-        }
-
-        // Show diagnostic popover on mouse move
-        let offset = self.index_for_mouse_position(event.position);
-        self.handle_mouse_move(offset, event, window, cx);
-
-        if self.mode.is_code_editor() {
-            if let Some(diagnostic) = self
-                .mode
-                .diagnostics()
-                .and_then(|set| set.for_offset(offset))
-            {
-                if let Some(diagnostic_popover) = self.diagnostic_popover.as_ref() {
-                    if diagnostic_popover.read(cx).diagnostic.range == diagnostic.range {
-                        diagnostic_popover.update(cx, |this, cx| {
-                            this.show(cx);
-                        });
-
-                        return;
-                    }
-                }
-
-                self.diagnostic_popover = Some(DiagnosticPopover::new(diagnostic, cx.entity(), cx));
-                cx.notify();
-            } else {
-                if let Some(diagnostic_popover) = self.diagnostic_popover.as_mut() {
-                    diagnostic_popover.update(cx, |this, cx| {
-                        this.check_to_hide(event.position, cx);
-                    })
-                }
-            }
-        }
-    }
-
     pub(super) fn on_scroll_wheel(
         &mut self,
         event: &ScrollWheelEvent,
@@ -1905,8 +1740,6 @@ impl InputState {
         if self.scroll_handle.offset() != old_offset {
             cx.stop_propagation();
         }
-
-        self.diagnostic_popover = None;
     }
 
     pub(super) fn update_scroll_offset(
@@ -2245,8 +2078,6 @@ impl InputState {
     ///
     /// Ensure the offset use self.next_boundary or self.previous_boundary to get the correct offset.
     pub(crate) fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
-        self.clear_inline_completion(cx);
-
         let offset = offset.clamp(0, self.text.len());
         if self.selection_reversed {
             self.selected_range.start = offset
@@ -2353,7 +2184,7 @@ impl InputState {
 
     /// Returns the true to let InputElement to render cursor, when Input is focused and current BlinkCursor is visible.
     pub(crate) fn show_cursor(&self, window: &Window, cx: &App) -> bool {
-        (self.focus_handle.is_focused(window) || self.is_context_menu_open(cx))
+        self.focus_handle.is_focused(window)
             && !self.disabled
             && self.blink_cursor.read(cx).visible()
             && window.is_window_active()
@@ -2367,17 +2198,9 @@ impl InputState {
     }
 
     fn on_blur(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_context_menu_open(cx) {
-            return;
-        }
-
         // NOTE: Do not cancel select, when blur.
         // Because maybe user want to copy the selected text by AppMenuBar (will take focus handle).
 
-        self.hover_popover = None;
-        self.diagnostic_popover = None;
-        self.context_menu_content = None;
-        self.clear_inline_completion(cx);
         self.blink_cursor.update(cx, |cursor, cx| {
             cursor.stop(cx);
         });
@@ -2620,7 +2443,6 @@ impl InputState {
 
     /// Replace text in range in silent.
     ///
-    /// This will not trigger any UI interaction, such as auto-completion.
     pub(crate) fn replace_text_in_range_silent(
         &mut self,
         range_utf16: Option<Range<usize>>,
@@ -2628,9 +2450,7 @@ impl InputState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.silent_replace_text = true;
         self.replace_text_in_range(range_utf16, new_text, window, cx);
-        self.silent_replace_text = false;
     }
 
     /// Update fold candidates from tree-sitter syntax tree (full extraction).
@@ -2947,9 +2767,7 @@ impl EntityInputHandler for InputState {
             self.push_history(&old_text, &range, &new_text);
         }
         self.history.end_grouping();
-        if let Some(diagnostics) = self.mode.diagnostics_mut() {
-            diagnostics.reset(&self.text)
-        }
+
         // Adjust folds before updating wrap map: remove overlapping folds and shift others
         self.display_map
             .adjust_folds_for_edit(&old_text, &range, new_text);
@@ -2964,15 +2782,12 @@ impl EntityInputHandler for InputState {
         }
 
         self.update_fold_candidates_incremental(&range, new_text);
-        self.lsp.update(&self.text, window, cx);
         self.selected_range = (new_offset..new_offset).into();
         self.ime_marked_range.take();
         self.update_preferred_column();
         self.update_search(cx);
         self.mode.update_auto_grow(&self.display_map);
-        if !self.silent_replace_text {
-            self.handle_completion_trigger(&range, &new_text, window, cx);
-        }
+
         if self.emit_events {
             cx.emit(InputEvent::Change);
         }
@@ -2991,8 +2806,6 @@ impl EntityInputHandler for InputState {
         if self.disabled {
             return;
         }
-
-        self.lsp.reset();
 
         // See the same NOTE in `replace_text_in_range`.
         let new_text = self.normalize_input(new_text);
@@ -3022,9 +2835,7 @@ impl EntityInputHandler for InputState {
         }
 
         self.decorations.adjust_for_edit(&range, new_text.len());
-        if let Some(diagnostics) = self.mode.diagnostics_mut() {
-            diagnostics.reset(&self.text)
-        }
+
         // Adjust folds before updating wrap map: remove overlapping folds and shift others
         self.display_map
             .adjust_folds_for_edit(&old_text, &range, new_text);
@@ -3039,7 +2850,6 @@ impl EntityInputHandler for InputState {
         }
 
         self.update_fold_candidates_incremental(&range, new_text);
-        self.lsp.update(&self.text, window, cx);
         if new_text.is_empty() {
             // Cancel selection, when cancel IME input.
             self.selected_range = (range.start..range.start).into();
@@ -3159,7 +2969,6 @@ impl Render for InputState {
             }
 
             self.update_fold_candidates();
-            self.lsp.update(&self.text, window, cx);
             self._pending_update = false;
         }
 
@@ -3170,9 +2979,6 @@ impl Render for InputState {
             .flex_grow_1()
             .overflow_x_hidden()
             .child(TextElement::new(cx.entity().clone()).placeholder(self.placeholder.clone()))
-            .children(self.diagnostic_popover.clone())
-            .children(self.context_menu_content.as_ref().map(|menu| menu.render()))
-            .children(self.hover_popover.clone())
     }
 }
 
@@ -3848,8 +3654,7 @@ ORDER BY id
         });
     }
 
-    /// `replace_all` on a code editor marks a pending update and resets LSP
-    /// state, so diagnostics/completions refresh against the new text.
+    /// `replace_all` on a code editor requests a highlighting update.
     #[gpui::test]
     fn test_replace_all_code_editor(cx: &mut TestAppContext) {
         let input_view = InputView::new(cx);
@@ -3858,7 +3663,7 @@ ORDER BY id
 
         cx.update(|window, cx| {
             input.update(cx, |state, cx| {
-                // Plant a pending-update flag and some LSP state to verify reset.
+                // Clear the update flag to verify replacement requests another update.
                 state.set_value("select 1", window, cx);
                 state._pending_update = false;
 

@@ -1,5 +1,6 @@
 //! Per-window composition for the library and book reader.
 
+use std::path::PathBuf;
 mod audiobook_footer;
 #[cfg(feature = "kobo")]
 mod kobo_bar;
@@ -207,7 +208,7 @@ impl ApplicationRoot {
     }
 
     pub fn new(
-        services: AppServices, backend: AppClient, application_title: impl Into<SharedString>, playback_restore_path: Option<std::path::PathBuf>, #[cfg(feature = "kobo")] kobo_auto_rotate: bool, window: &mut Window, cx: &mut Context<Self>,
+        services: AppServices, backend: AppClient, application_title: impl Into<SharedString>, playback_restore_path: Option<PathBuf>, #[cfg(feature = "kobo")] kobo_auto_rotate: bool, window: &mut Window, cx: &mut Context<Self>,
     ) -> Self {
         cx.set_volume_button_capture(true);
         let sync_state = cx.new(|_| browser_ui::SyncState::new(&services));
@@ -315,7 +316,7 @@ impl ApplicationRoot {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn import_and_open_path(&mut self, name: String, path: std::path::PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn import_and_open_path(&mut self, name: String, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         self.browser.update(cx, |browser, cx| browser.import_and_open_path(name, path, window, cx));
     }
 

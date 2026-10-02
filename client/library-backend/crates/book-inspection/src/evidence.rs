@@ -1,52 +1,28 @@
 //! Network-free bibliographic evidence rules shared by device and authority ingestion.
 //! A checksum is necessary, but never sufficient, to identify the current book.
-use book_model::{BookRecord, BookSubject, Identifier, Scheme, Scope};
-use regex::Regex;
-use std::sync::OnceLock;
+
+use std::collections::BTreeSet;
+pub(crate) use book_model::{BookRecord, BookSubject, Identifier, Scheme, Scope};
+pub(crate) use regex::Regex;
+pub(crate) use std::sync::OnceLock;
 
 pub const INSPECTION_VERSION: u32 = 10;
 pub const EDGE_SECTIONS: usize = 8;
 
-const LOCAL_CIP_SOURCE_PREFIX: &str = "inspection:local-cip:";
+pub(crate) const LOCAL_CIP_SOURCE_PREFIX: &str = "inspection:local-cip:";
 
 pub use book_enrichment::evidence::{IsbnEvidence, IsbnScope, SectionEvidence, MAX_SECTION_BYTES};
 
 // Cross a line boundary only around an explicit hyphen, so printing-number
 // lines cannot be absorbed into the ISBN. PDF extraction often isolates hyphens.
-fn isbn_pattern() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)\b(?P<isbn>(?:[0-9X](?:[\t \x{00a0}]*|\s*[-–‐‑]\s*)){9,}[0-9X])\b[\t \x{00a0}]*(?:\((?P<after>[^)\n]{1,40})\))?").unwrap())
-}
 
-fn complete_isbn(value: &str) -> Option<String> {
+pub(crate) fn complete_isbn(value: &str) -> Option<String> {
     book_model::from_content_candidate(value)
 }
 
-fn number_run_isbns(value: &str) -> Vec<String> {
-    if let Some(isbn) = complete_isbn(value) {
-        return vec![isbn];
-    }
-    // Some copyright pages print the ISBN-10 and ISBN-13 side by side.
-    // Split only at whitespace and only if BOTH complete values validate.
-    let digits = value.chars().filter(|c| c.is_ascii_digit() || matches!(c, 'X' | 'x')).count();
-    if !matches!(digits, 20 | 23 | 26) {
-        return Vec::new();
-    }
-    let parts: Vec<_> = value.split_whitespace().collect();
-    for split in 1..parts.len() {
-        if parts[split - 1].ends_with(['-', '–', '‐', '‑']) || parts[split].starts_with(['-', '–', '‐', '‑']) {
-            continue;
-        }
-        if let (Some(left), Some(right)) = (complete_isbn(&parts[..split].concat()), complete_isbn(&parts[split..].concat())) {
-            return vec![left, right];
-        }
-    }
-    Vec::new()
-}
+pub(crate) const ISBN_SEARCH_CHARS: usize = 128;
 
-const ISBN_SEARCH_CHARS: usize = 128;
-
-fn isbn_marker_pattern() -> &'static Regex {
+pub(crate) fn isbn_marker_pattern() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?i)\b(?:e-?)?I\s{0,4}S\s{0,4}B\s{0,4}N(?:[\t ]*[-:]?[\t ]*1[03]\b)?\b").unwrap())
 }
@@ -67,7 +43,14 @@ pub fn inspect_section(_book: &BookRecord, location: &str, text: &str) -> Sectio
         let limit = tail.char_indices().nth(ISBN_SEARCH_CHARS).map_or(tail.len(), |(i, _)| i);
         let end = isbn_marker_pattern().find(tail).map_or(limit, |next| next.start().min(limit));
         let window = &tail[..end];
-        let mut matched = isbn_pattern().captures_iter(window).find_map(|c| {
+        let mut matched = {
+            (|| -> &'static Regex {
+                static RE: OnceLock<Regex> = OnceLock::new();
+                RE.get_or_init(|| Regex::new(r"(?i)\b(?P<isbn>(?:[0-9X](?:[\t \x{00a0}]*|\s*[-–‐‑]\s*)){9,}[0-9X])\b[\t \x{00a0}]*(?:\((?P<after>[^)\n]{1,40})\))?").unwrap())
+            })()
+        }
+        .captures_iter(window)
+        .find_map(|c| {
             // Do not accept a number cut short by the bounded search window.
             if c.name("isbn").unwrap().end() == end && tail[end..].chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
                 return None;
@@ -119,7 +102,27 @@ pub fn inspect_section(_book: &BookRecord, location: &str, text: &str) -> Sectio
         if out.isbns.len() >= 16 {
             break;
         }
-        let values = number_run_isbns(number.as_str());
+        let values = (|value: &str| -> Vec<String> {
+            if let Some(isbn) = complete_isbn(value) {
+                return vec![isbn];
+            }
+            // Some copyright pages print the ISBN-10 and ISBN-13 side by side.
+            // Split only at whitespace and only if BOTH complete values validate.
+            let digits = value.chars().filter(|c| c.is_ascii_digit() || matches!(c, 'X' | 'x')).count();
+            if !matches!(digits, 20 | 23 | 26) {
+                return Vec::new();
+            }
+            let parts: Vec<_> = value.split_whitespace().collect();
+            for split in 1..parts.len() {
+                if parts[split - 1].ends_with(['-', '–', '‐', '‑']) || parts[split].starts_with(['-', '–', '‐', '‑']) {
+                    continue;
+                }
+                if let (Some(left), Some(right)) = (complete_isbn(&parts[..split].concat()), complete_isbn(&parts[split..].concat())) {
+                    return vec![left, right];
+                }
+            }
+            Vec::new()
+        })(number.as_str());
         // Unlabelled values are lookup references, not electronic identities.
         // Preserve an explicit ePDF label so it cannot identify the EPUB edition.
         let prefix = text[..number.start()].rsplit('\n').next().unwrap_or_default().trim().trim_end_matches(':').trim().to_lowercase();
@@ -164,7 +167,8 @@ pub fn inspect_section(_book: &BookRecord, location: &str, text: &str) -> Sectio
         // was found in that block. This avoids treating code-like fragments
         // embedded in prose or publisher addresses as classifications.
         static LABELED_LCC: OnceLock<Regex> = OnceLock::new();
-        let labeled = LABELED_LCC.get_or_init(|| Regex::new(r"(?im)^[\t ]*(?:classification[\t ]*:[\t ]*)?LCC[\t ]*:?[\t ]*(?:\r?\n[\t ]*)?(?P<class>[A-Z]{1,3}[0-9]{1,4}(?:\.[0-9]+)?)(?:[\t ]+(?P<year>(?:19|20)[0-9]{2}))?[\t ]*$").unwrap());
+        let labeled =
+            LABELED_LCC.get_or_init(|| Regex::new(r"(?im)^[\t ]*(?:classification[\t ]*:[\t ]*)?LCC[\t ]*:?[\t ]*(?:\r?\n[\t ]*)?(?P<class>[A-Z]{1,3}[0-9]{1,4}(?:\.[0-9]+)?)(?:[\t ]+(?P<year>(?:19|20)[0-9]{2}))?[\t ]*$").unwrap());
         for captures in labeled.captures_iter(text).take(16) {
             let class = captures.name("class").unwrap().as_str().to_ascii_uppercase();
             let year = captures.name("year").map_or(String::new(), |year| format!(" {}", year.as_str()));
@@ -192,19 +196,10 @@ pub fn inspect_section(_book: &BookRecord, location: &str, text: &str) -> Sectio
     out
 }
 
-/// Extract identifier evidence from image-derived text.
-pub fn inspect_isbn_image(book: &BookRecord, location: &str, text: &str) -> SectionEvidence {
-    inspect_section(book, location, text)
-}
-
 /// Resolution is separate from extraction: retain rejected candidates for auditing,
 /// but they must not displace metadata or suppress ISBN/authority fallback.
 pub fn usable_lcc(code: &str) -> bool {
     subject_projection::unified_lcc_has_numeric_coverage(code) && !subject_projection::unified_lcc_match_report(code).assignments.is_empty()
-}
-
-fn promotable_lcc(_section: &SectionEvidence, code: &str) -> bool {
-    usable_lcc(code)
 }
 
 /// Promote only locally established evidence. Every accepted ISBN becomes a
@@ -214,18 +209,13 @@ pub fn apply_evidence(book: &mut BookRecord, evidence: &[SectionEvidence], forma
     // Rebuild our own prior page-derived classifications from current evidence.
     // Never let free-text inspection replace an LCC code from package or
     // catalog metadata, which is a higher-confidence source.
-    book.book.subjects.retain(|subject| {
-        !(subject.authority().is_some_and(|authority| authority.eq_ignore_ascii_case("lcc")) && subject.source().starts_with(LOCAL_CIP_SOURCE_PREFIX))
-    });
-    let has_metadata_lcc = book.book.subjects.iter().any(|subject| {
-        subject.authority().is_some_and(|authority| authority.eq_ignore_ascii_case("lcc"))
-            && subject.code().is_some_and(|code| !code.trim().is_empty())
-    });
+    book.book.subjects.retain(|subject| !(subject.authority().is_some_and(|authority| authority.eq_ignore_ascii_case("lcc")) && subject.source().starts_with(LOCAL_CIP_SOURCE_PREFIX)));
+    let has_metadata_lcc = book.book.subjects.iter().any(|subject| subject.authority().is_some_and(|authority| authority.eq_ignore_ascii_case("lcc")) && subject.code().is_some_and(|code| !code.trim().is_empty()));
     for section in evidence.iter().filter(|e| e.accepted).take(32) {
         if !has_metadata_lcc {
             let source = format!("{LOCAL_CIP_SOURCE_PREFIX}{}", section.location);
             for code in &section.lcc {
-                if !promotable_lcc(section, code) {
+                if !usable_lcc(code) {
                     continue;
                 }
                 if book.book.subjects.iter().any(|subject| subject.authority().is_some_and(|authority| authority.eq_ignore_ascii_case("lcc")) && subject.code() == Some(code)) {
@@ -257,7 +247,7 @@ pub fn apply_evidence(book: &mut BookRecord, evidence: &[SectionEvidence], forma
     // Every checksum-valid ISBN from an accepted section is a candidate for
     // enrichment lookups, whatever edition it names. Deduplicated against
     // both prior evidence and the book's own promoted identifiers above.
-    let mut related_isbns: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut related_isbns: BTreeSet<String> = BTreeSet::new();
     for section in evidence.iter().filter(|e| e.accepted).take(32) {
         for candidate in &section.isbns {
             if let Some(isbn) = book_model::from_content_candidate(&candidate.isbn) {
@@ -298,11 +288,12 @@ pub fn xhtml_text(markup: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::related_isbn::lookup_candidates;
     use super::*;
     use book_model::{Contributor, AUTHOR_MARC_RELATOR_CODE};
 
     fn book(title: &str) -> BookRecord {
-        BookRecord { title: title.into(), subtitle: None, contributors: vec![Contributor::new("Ada Author", AUTHOR_MARC_RELATOR_CODE).unwrap()], description: String::new(), book: Default::default() }
+        BookRecord { metadata: book_model::BookDetails { title: title.into(), subtitle: None, contributors: vec![Contributor::new("Ada Author", AUTHOR_MARC_RELATOR_CODE).unwrap()], book: Default::default() }, description: String::new() }
     }
     fn cip(title: &str) -> String {
         format!("Copyright © Ada Author\nLibrary of Congress Cataloging-in-Book Data\nTitle: {title} / Ada Author\nISBN 978-0-8213-3827-8 (hardcover)\nISBN 978-0-393-24327-7 (epub)\nClassification: LCC Q125 .A12 2023\n")
@@ -402,7 +393,7 @@ mod tests {
         apply_evidence(&mut b, &[e], "pdf");
         assert_eq!(b.book.subjects.len(), 1);
         assert_eq!(b.book.subjects[0].code(), Some("E757.D658 2007"));
-        assert_eq!(crate::related_isbn::lookup_candidates(&b.book.identifiers), ["9780465002139"]);
+        assert_eq!(lookup_candidates(&b.book.identifiers), ["9780465002139"]);
     }
     #[test]
     fn isbn_does_not_consume_the_following_printing_number_line() {
@@ -533,6 +524,6 @@ mod tests {
         assert_eq!(e.lcc, ["NC1000.576 2006"]);
         apply_evidence(&mut b, &[e], "pdf");
         assert!(b.book.subjects.is_empty());
-        assert_eq!(crate::related_isbn::lookup_candidates(&b.book.identifiers), ["159253192X"]);
+        assert_eq!(lookup_candidates(&b.book.identifiers), ["159253192X"]);
     }
 }

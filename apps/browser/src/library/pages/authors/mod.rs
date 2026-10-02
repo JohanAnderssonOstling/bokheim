@@ -23,7 +23,7 @@ use ui_components as components;
 use crate::library::pages::browse::controls::SearchField;
 use crate::library::pages::library_empty_state;
 use crate::library::services::{LatestRequest, LibraryContentsChanged, LibraryContext, LibraryScanChanged};
-use crate::library::widgets::{BookCardView, CursorMove, Paginator, PaginatorAxis, PaginatorChild, PaginatorGroup, author_index_entry_policy, author_index_letter_sizing, book_card_policy};
+use crate::library::widgets::{BookCardInteraction, BookCardPresentation, BookCardView, CursorMove, Paginator, PaginatorAxis, PaginatorChild, PaginatorGroup, author_index_entry_policy, author_index_letter_sizing, book_card_policy};
 
 /// The orders the reader may choose between, the first the default.
 const SORTS: [AuthorSort; 2] = [AuthorSort::Name, AuthorSort::BookCount];
@@ -61,8 +61,6 @@ struct Author {
     /// Every book credited to the name. `books` is capped by the query, so this
     /// is the count to state.
     book_count: usize,
-    /// The count and the subjects, as the line under the name reads.
-    detail: SharedString,
     books: Vec<library_model::BookCardRow>,
     /// The first few books as cover-only cards, drawn beside the name.
     covers: Vec<Entity<BookCardView>>,
@@ -185,21 +183,10 @@ impl AuthorsPage {
                             card.update(cx, |card, _| card.replace_row(book.clone(), None));
                             card
                         }
-                        None => {
-                            let card = BookCardView::create(book.clone(), self.ui.clone(), cx);
-                            card.update(cx, |card, cx| card.set_cover_only(true, cx));
-                            card
-                        }
+                        None => BookCardView::create(book.clone(), self.ui.clone(), cx),
                     })
                     .collect();
-                // A leaf means little alone — "20th century" — so a subject is
-                // stated with the parent it was reached through, as its chip is.
-                let subjects = author.subjects.iter().map(|subject| match &subject.parent {
-                    Some(parent) => format!("{parent} \u{203a} {}", subject.label),
-                    None => subject.label.clone(),
-                });
-                let detail = std::iter::once(books_label(author.book_count)).chain(subjects).collect::<Vec<_>>().join(" · ");
-                Author { id, name: author.name.as_str().to_owned().into(), book_count: author.book_count, detail: detail.into(), books: author.books, covers }
+                Author { id, name: author.name.as_str().to_owned().into(), book_count: author.book_count, books: author.books, covers }
             })
             .collect();
         // An author who is no longer here has no books to hold open.
@@ -264,7 +251,7 @@ impl AuthorsPage {
                     && id == &author.id
                 {
                     groups.push(entry_group(std::mem::take(&mut entries), header.take()));
-                    groups.push(PaginatorGroup::new(book_card_policy(false, cover_text), cards.iter().map(card_child)));
+                    groups.push(PaginatorGroup::new(book_card_policy(cover_text), cards.iter().map(card_child)));
                     open_first_child = Some(child);
                     child += cards.len();
                 }
@@ -542,7 +529,7 @@ fn entry_group(entries: Vec<PaginatorChild>, header: Option<(SharedString, Strin
 fn entry_child(author: &Author, child: usize, open: bool, page: WeakEntity<AuthorsPage>) -> PaginatorChild {
     let id = author.id.clone();
     let name = author.name.clone();
-    let detail = author.detail.clone();
+    let detail: SharedString = books_label(author.book_count).into();
     let covers = author.covers.clone();
     let prefetched = author.covers.clone();
     let more = author.book_count.saturating_sub(covers.len());
@@ -558,7 +545,11 @@ fn entry_child(author: &Author, child: usize, open: bool, page: WeakEntity<Autho
         components::author_index_entry(SharedString::from(format!("author-{id}")), open || state.cursor == Some(child), theme)
             .on_click(move |_, _, cx| toggle(click_id.clone(), &click_page, cx))
             .child(components::author_index_name(name.clone(), detail.clone(), theme))
-            .child(components::author_index_covers().children(covers.iter().map(|cover| components::author_index_cover().child(cover.clone()))).when(more > 0, |covers| covers.child(components::author_index_more(format!("+{more}"), theme))))
+            .child(
+                components::author_index_covers()
+                    .children(covers.iter().map(|cover| components::author_index_cover().child(BookCardView::present(cover.clone(), BookCardPresentation::CoverOnly, BookCardInteraction::default()))))
+                    .when(more > 0, |covers| covers.child(components::author_index_more(format!("+{more}"), theme))),
+            )
             .into_any_element()
     })
     .with_activate(move |_, cx| toggle(activate_id.clone(), &activate_page, cx))

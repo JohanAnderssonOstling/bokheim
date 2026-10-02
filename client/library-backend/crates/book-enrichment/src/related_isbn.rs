@@ -60,18 +60,7 @@ pub fn classifications(verified: &[String], records: impl Fn(&str) -> Vec<RichWo
     accepted
 }
 
-/// Lookup accepted local references without claiming an exact edition match.
-pub fn reference_classifications(isbn: &str, records: Vec<RichWorkMetadataMatch>) -> Vec<Classification> {
-    let mut codes = classifications(&[isbn.to_owned()], |_| records.clone());
-    for code in &mut codes {
-        for evidence in &mut code.evidence {
-            if evidence.method == "local_bibliographic_print_isbn_verified_title_author" {
-                evidence.method = "local_bibliographic_isbn_reference".into();
-            }
-        }
-    }
-    codes
-}
+
 
 pub fn classification_record(classifications: Vec<Classification>) -> RichWorkMetadataMatch {
     RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: Vec::new(), classifications, authors: Vec::new(), description: None, subjects: Vec::new() }

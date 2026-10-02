@@ -8,7 +8,7 @@ impl AppClient {
         self.transport.notification_interest_transport(browsing).await.map_err(|error| error.to_string())
     }
 
-    pub async fn transfers(&self) -> Result<Vec<crate::LibraryTransfers>, String> {
+    pub async fn transfers(&self) -> Result<Vec<library_model::LibraryActivitySnapshot>, String> {
         self.request(AppCommand::Transfers).await
     }
 }

@@ -9,18 +9,19 @@ workspace = true
 
 [dependencies]
 axum = "0.7"
+book-enrichment = { path = "../../client/library-backend/crates/book-enrichment" }
+book-model = { path = "../../shared/book-model" }
 bzip2 = "0.6"
 flate2 = "1"
 futures-util = "0.3"
-memmap2 = "0.9"
 subject-projection = { path = "../../shared/subject-projection", features = ["authoritative-taxonomy"] }
 metadata-contract = { path = "../../shared/metadata-contract" }
 r2d2 = "0.8"
 r2d2_sqlite = "0.35"
 rayon = "1"
-reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { workspace = true, default-features = false, features = ["rustls-tls", "stream"] }
 roxmltree = "0.20"
-rusqlite = { version = "0.40.0", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.40.0", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }

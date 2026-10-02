@@ -5,10 +5,10 @@
 //! negotiate with the server, and commit the result themselves afterward.
 use crate::deadline::transfer_deadline;
 use crate::policy::SMALL_REQUEST_TIMEOUT;
-use crate::{TransferError, TransferJob, TransferOrigin};
-use library_database::BookUploadIntent;
+use crate::{TransferError, TransferJob};
 use library_files::AssetStore;
-use library_replica::BlobKind;
+use library_model::BookUploadIntent;
+use library_model::TransferOrigin;
 use std::collections::HashSet;
 use sync_common::ContentHash;
 
@@ -35,57 +35,16 @@ impl<C> TransferPlanner<C>
 where
     C: Fn() -> Result<sync_transport::SyncCredentials, TransferError> + Sync,
 {
-    fn credentials(&self) -> Result<sync_transport::SyncCredentials, TransferError> {
-        (self.credentials)()
-    }
+    
 
-    /// Pure network negotiation: no database reference is ever held across
-    /// the request. The caller reads `intents` from its own database
-    /// snapshot beforehand and commits `present_remotely`/`rejected`
-    /// afterward.
-    pub async fn negotiate_book_uploads(&self, intents: &[BookUploadIntent]) -> Result<BookUploadNegotiation, TransferError> {
-        let credentials = self.credentials()?;
-        let manifest = intents.iter().map(|job| sync_common::api::assets::BlobManifestEntry { content_hash: job.content_hash, checksum: job.checksum, size_bytes: job.size_bytes }).collect();
-        let response = transfer_deadline(SMALL_REQUEST_TIMEOUT, crate::negotiate_blobs(&self.http_client, &credentials, &self.library_id, manifest)).await?.map_err(|error| match error {
-            sync_transport::SyncRequestError::AuthenticationRequired => TransferError::AuthenticationRequired,
-            error => TransferError::retryable(error),
-        })?;
-        let present_remotely = response.owned.iter().chain(&response.claimed).copied().collect::<Vec<_>>();
-        let rejected = response
-            .rejected
-            .iter()
-            .filter_map(|rejection| match TransferError::from_upload_admission(rejection.reason) {
-                TransferError::Rejected(reason) => Some((rejection.content_hash, reason)),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let upload_required = response.upload.into_iter().collect::<HashSet<_>>();
-        Ok(BookUploadNegotiation { present_remotely, rejected, upload_required })
-    }
+    
 
-    /// Pure network negotiation, same shape as [`Self::negotiate_book_uploads`].
-    pub async fn negotiate_thumbnail_availability(&self, hashes: &[ContentHash]) -> Result<ThumbnailAvailabilityNegotiation, TransferError> {
-        let credentials = self.credentials()?;
-        let response = transfer_deadline(SMALL_REQUEST_TIMEOUT, sync_transport::thumbnail_presence(&self.http_client, &credentials, &self.library_id, hashes.to_vec())).await?.map_err(|error| match error {
-            sync_transport::SyncRequestError::AuthenticationRequired => TransferError::AuthenticationRequired,
-            error => TransferError::retryable(error),
-        })?;
-        let requested: HashSet<_> = hashes.iter().copied().collect();
-        let mut answered = HashSet::new();
-        for hash in &response.present {
-            if !requested.contains(hash) || !answered.insert(*hash) {
-                return Err(TransferError::retryable("thumbnail availability response is invalid"));
-            }
-        }
-        let available = response.present;
-        let missing = requested.difference(&answered).copied().collect();
-        Ok(ThumbnailAvailabilityNegotiation { available, missing })
-    }
+    
 
     /// Confirms the server identity has not changed since a snapshot was
     /// read, before its negotiated result is committed.
     pub fn check_transfer_account(&self, credentials: &sync_transport::SyncCredentials) -> Result<(), TransferError> {
-        if self.credentials()?.server_url() != credentials.server_url() {
+        if (self.credentials)()?.server_url() != credentials.server_url() {
             return Err(TransferError::retryable("credentials changed during asset transfer"));
         }
         Ok(())
@@ -93,9 +52,42 @@ where
 }
 
 pub fn prepare_requested_download(assets: &AssetStore, database: &library_database::Database, hash: &ContentHash) -> Result<Option<TransferJob>, TransferError> {
-    if assets.exists(BlobKind::Book, hash)? {
-        database.complete_local_book_request(*hash)?;
+    if assets.book_exists(hash, &database.book_paths(hash)?)? {
+        ({
+            use library_database::assets::*;
+            use library_database::shared_sql::*;
+            use library_database::*;
+            use library_model::{BookPlacement, BookUploadIntent, RelativeBookPath};
+            use sync_common::ContentHash;
+            let database = database;
+            let hash = *hash;
+            (|| -> Result<(), library_database::DatabaseError> {
+                let transaction = database.connection.unchecked_transaction()?;
+                library_database::Database::complete_local_book_request_on(&transaction, &hash)?;
+                transaction.commit().map_err(Into::into)
+            })()
+        })?;
         return Ok(None);
     }
-    Ok(database.requested_book_download(*hash)?.map(|placement| TransferJob::download_blob(*hash, placement, TransferOrigin::UserInitiated)))
+    Ok(({
+        use library_database::assets::*;
+        use library_database::shared_sql::*;
+        use library_database::*;
+        use library_model::{BookPlacement, BookUploadIntent};
+        use sync_common::ContentHash;
+        let database = database;
+        let hash = *hash;
+        (|| -> Result<Option<BookPlacement>, library_database::DatabaseError> {
+            // The book's first remembered or live path on this device.
+            let path = database.book_paths(&hash)?.into_iter().next();
+            match path {
+                Some(path) => Ok(Some(BookPlacement::new(hash, path))),
+                None => {
+                    database.connection.shared_transfer_complete_download(hash.as_str())?;
+                    Ok(None)
+                }
+            }
+        })()
+    })?
+    .map(|placement| TransferJob::download_blob(*hash, placement, TransferOrigin::UserInitiated)))
 }

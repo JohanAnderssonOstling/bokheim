@@ -53,11 +53,6 @@ SELECT EXISTS(
       AND id <> :dir_id AND name = :name AND deleted_at IS NULL
 );
 
--- name: native_directory_rename!
--- param: dir_id: &str
--- param: name: &str
-UPDATE dir SET name = :name, intent_name = :name WHERE id = :dir_id AND deleted_at IS NULL;
-
 -- name: native_directory_queue_work!
 -- param: dir_id: &str
 INSERT INTO local_directory_work(dir_id) VALUES (:dir_id)
@@ -105,31 +100,11 @@ WHERE content_hash = :content_hash AND id = :work_id;
 
 -- Native book staging and conditional publish.
 
--- name: native_occupied_file_names?
--- param: dir_id: &str
-SELECT file_name FROM book_dir WHERE dir_id=:dir_id AND deleted_at IS NULL;
-
--- name: native_book_name_conflict ->
--- param: dir_id: &str
--- param: name_key: &str
--- param: content_hash: &str
-SELECT EXISTS(SELECT 1 FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id WHERE bd.dir_id=:dir_id AND portable_name_key(bd.file_name)=:name_key AND b.content_hash!=:content_hash AND bd.deleted_at IS NULL);
-
 -- name: native_rename_book!
 -- param: dir_id: &str
 -- param: content_hash: &str
 -- param: name: &str
 UPDATE book_dir SET file_name=:name WHERE dir_id=:dir_id AND book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash);
-
--- name: native_set_book_fingerprint!
--- param: dir_id: &str
--- param: content_hash: &str
--- param: fingerprint: &str
-UPDATE book_dir SET local_hash=:fingerprint WHERE dir_id=:dir_id AND book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash);
-
--- name: native_purge_requested ->
--- param: content_hash: &str
-SELECT EXISTS(SELECT 1 FROM local_purge_work WHERE content_hash=:content_hash);
 
 -- name: native_file_work_rows?
 SELECT id,operation,content_hash,relative_path FROM local_file_work ORDER BY id;
@@ -161,15 +136,6 @@ SELECT EXISTS(SELECT 1 FROM local_file_work WHERE id=:id AND operation=:operatio
 SELECT max(bd.checksum) FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id
 WHERE b.content_hash=:content_hash AND b.deleted_at IS NULL AND bd.deleted_at IS NULL AND bd.dir_id=:dir_id AND bd.file_name=:file_name;
 
--- name: native_delete_file_projection!
--- param: content_hash: &str
--- param: relative_path: &str
-DELETE FROM local_file_projection WHERE content_hash=:content_hash AND relative_path=:relative_path;
-
--- name: native_mark_hash_downloaded!
--- param: content_hash: &str
-UPDATE book_dir SET is_downloaded=1 WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash) AND deleted_at IS NULL;
-
 -- name: native_request_thumbnail!
 -- param: content_hash: &str
 INSERT INTO book_transfer(content_hash,cover_state) SELECT content_hash,'pending' FROM book WHERE content_hash=:content_hash AND deleted_at IS NULL
@@ -191,12 +157,6 @@ INSERT INTO local_book_work(content_hash) VALUES(:content_hash) ON CONFLICT(cont
 -- name: native_has_pending_purge_work?
 SELECT EXISTS(SELECT 1 FROM local_purge_work);
 
--- name: native_mark_placement_downloaded!
--- param: content_hash: &str
--- param: dir_id: &str
-UPDATE book_dir SET is_downloaded=1
-WHERE dir_id=:dir_id AND book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash) AND deleted_at IS NULL;
-
 -- name: native_move_file_work_paths!
 -- param: prefix: &str
 -- param: replacement: &str
@@ -204,3 +164,8 @@ WHERE dir_id=:dir_id AND book_row_id=(SELECT row_id FROM book WHERE content_hash
 UPDATE OR REPLACE local_file_work
 SET relative_path = :replacement || substr(relative_path, length(:prefix) + 1)
 WHERE relative_path >= :prefix AND relative_path < :upper;
+
+-- name: native_has_pending_file_work ->
+SELECT EXISTS(SELECT 1 FROM local_directory_work)
+    OR EXISTS(SELECT 1 FROM local_file_work)
+    OR EXISTS(SELECT 1 FROM local_book_work);

@@ -9,14 +9,17 @@
 //!
 //! The worker is `'static`, so planning pages can detach a driver and keep
 //! metadata exchange moving while slow asset HTTP is still in flight.
+
+use std::sync::atomic::Ordering;
 use super::TransferRunResult;
-use crate::runner::{TransferHost, TransferRunner};
+use crate::runner::{DroppedUpload, QueueSettlement, TransferDrain, TransferHost, MAX_CONCURRENT_BOOK_UPLOADS};
 use crate::{ClaimedTransferJob, TransferJob, TransferQueue};
 use crate::{TransferError, TransferOperation};
 use futures_util::future::LocalBoxFuture;
-use library_database::{BookUploadIntent, Database, TransferOutcome, TransferSnapshot, TransferWrite};
+use library_database::{Database, TransferOutcome, TransferSnapshot, TransferWrite};
 use library_files::asset_store::AssetStore;
-use library_replica::BlobKind;
+use library_model::BlobKind;
+use library_model::{BookUploadIntent, TransferJobKind};
 use library_runtime::account::{LibraryAccount, SharedSyncCredentials};
 use library_runtime::events::{LibraryEvent, LibraryEventSender};
 use library_runtime::interest::NotificationInterest;
@@ -44,23 +47,18 @@ pub struct TransferWorker {
 
 impl TransferWorker {
     /// One commit connection per driver: sequential use on one task, so the
-    /// non-`Sync` handle never crosses threads while held.
+    /// non-`Sync` handle never crosses threads while held. The library
+    /// session initialized the schema before any worker existed.
     pub(super) fn commit_connection(&self) -> Result<Database, TransferError> {
-        let database = Database::open(&self.db_path)?;
-        database.initialize_library()?;
-        Ok(database)
+        Ok(Database::open(&self.db_path)?)
     }
 
     pub(crate) fn asset_storage_enabled(&self) -> bool {
-        self.asset_storage_enabled.load(std::sync::atomic::Ordering::Acquire)
+        self.asset_storage_enabled.load(Ordering::Acquire)
     }
 
     pub(super) fn live_user_id(&self) -> Option<String> {
         self.account.as_ref()?.current().ok()??.user_id().to_owned().into()
-    }
-
-    fn runner(&self) -> TransferRunner<'_, Self> {
-        TransferRunner { queue: &self.queue, host: self }
     }
 
     /// Snapshot, drain, and commit one claimed batch.
@@ -68,9 +66,204 @@ impl TransferWorker {
     /// idempotent replays of the guarded commits.
     async fn drain_pass(&self) -> TransferRunResult {
         let database = self.commit_connection()?;
-        let snapshot = database.transfer_snapshot(&self.queue.due_hashes())?;
+        let due_hashes = {
+            let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |duration| duration.as_secs());
+            let state = self.queue.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut hashes = Vec::new();
+            for queued in state.batches.values().flat_map(|batch| batch.jobs.values()).filter(|queued| queued.state == library_runtime::transfer::QueueJobState::Pending && queued.next_attempt_at <= now) {
+                let hash = *queued.job.status_fields().1;
+                if !hashes.contains(&hash) {
+                    hashes.push(hash);
+                }
+            }
+            hashes
+        };
+        let snapshot = database.transfer_snapshot(&due_hashes)?;
         let mut outcome = TransferOutcome::default();
-        let drain = self.runner().drain_one_batch(&snapshot, &mut outcome).await;
+        let drain = {
+            ({
+                let snapshot: &TransferSnapshot = &snapshot;
+                let out: &mut TransferOutcome = &mut outcome;
+                let limit: Option<usize> = Some(1);
+                async move {
+                    let mut processed = 0;
+                    let mut drain = TransferDrain { result: Ok(()), claimed: Vec::new(), settlements: Vec::new() };
+                    loop {
+                        if limit.is_some_and(|limit| processed >= limit) {
+                            break;
+                        }
+                        let mut claimed = self.queue.claim_due_batch();
+                        let claimed_at = web_time::Instant::now();
+                        if claimed.is_empty() {
+                            break;
+                        }
+                        drain.claimed.extend(claimed.iter().cloned());
+                        processed += 1;
+                        self.changed();
+                        if claimed[0].job.batch_kind() == Some(TransferJobKind::UploadBook) {
+                            let mut intents = Vec::new();
+                            for item in &claimed {
+                                let hash = *item.job.status_fields().1;
+                                if let Some(intent) = snapshot.asset_for(&hash).and_then(|asset| asset.upload.intent.as_ref()) {
+                                    if !intents.iter().any(|intent: &BookUploadIntent| intent.content_hash == hash) {
+                                        intents.push(intent.clone());
+                                    }
+                                }
+                            }
+                            let mut trace = sync_transport::PerformanceTrace::new("prepare_upload_batch", "negotiate_and_plan");
+                            log::debug!(target: "sync_performance", "trace_id={} books={}", trace.id(), intents.len());
+                            let result = self.prepare_uploads(&intents, out).await;
+                            trace.finish(result.is_ok());
+                            match result {
+                                Ok(prepared) => {
+                                    claimed.retain_mut(|item| {
+                                        let hash = *item.job.status_fields().1;
+                                        if let Some(job) = prepared.jobs.iter().find(|job| *job.status_fields().1 == hash) {
+                                            item.job = job.clone();
+                                            true
+                                        } else {
+                                            match prepared.dropped.iter().find(|dropped| {
+                                                let dropped_hash = match dropped {
+                                                    DroppedUpload::Completed { hash } | DroppedUpload::Rejected { hash, .. } | DroppedUpload::Changed { hash } => hash,
+                                                };
+                                                dropped_hash == &hash
+                                            }) {
+                                                Some(DroppedUpload::Completed { .. }) => drain.settlements.push(QueueSettlement::Complete(item.id, None)),
+                                                Some(DroppedUpload::Rejected { reason, .. }) => drain.settlements.push(QueueSettlement::Complete(item.id, Some(reason.clone()))),
+                                                _ => {
+                                                    drain.settlements.push(QueueSettlement::Retry(item.id, "upload intent changed during transfer".to_owned()));
+                                                }
+                                            }
+                                            false
+                                        }
+                                    });
+                                    self.changed();
+                                }
+                                Err(TransferError::AuthenticationRequired) => {
+                                    drain.settlements.extend(claimed.iter().map(|item| QueueSettlement::Release(item.id)));
+                                    self.changed();
+                                    drain.result = Err(TransferError::AuthenticationRequired);
+                                    return drain;
+                                }
+                                Err(error) => {
+                                    for item in &claimed {
+                                        drain.settlements.push(QueueSettlement::Retry(item.id, error.to_string()));
+                                    }
+                                    self.changed();
+                                    continue;
+                                }
+                            }
+                        }
+                        // Thumbnail requests are bounded by count and payload size. A
+                        // rejected upload batch does not identify the offending item;
+                        // retry those uploads individually before suppressing any of them.
+                        let is_thumbnail_batch = matches!(claimed.first().and_then(|item| item.job.batch_kind()), Some(TransferJobKind::DownloadThumbnail | TransferJobKind::UploadThumbnail));
+                        if is_thumbnail_batch {
+                            let outcome = { self.execute(snapshot, &claimed, out).await };
+                            match outcome {
+                                Ok(()) => {
+                                    for item in &claimed {
+                                        drain.settlements.push(QueueSettlement::Complete(item.id, None));
+                                    }
+                                }
+                                Err(TransferError::Retryable(message)) => {
+                                    log::warn!("Retryable thumbnail batch error: {message}");
+                                    for item in &claimed {
+                                        drain.settlements.push(QueueSettlement::Retry(item.id, message.to_string()));
+                                    }
+                                }
+                                Err(TransferError::Rejected(message)) => {
+                                    log::warn!("Rejected thumbnail batch: {message}");
+                                    let isolate_uploads = claimed.len() > 1 && claimed[0].job.batch_kind() == Some(TransferJobKind::UploadThumbnail);
+                                    for (index, item) in claimed.iter().enumerate() {
+                                        let result = if isolate_uploads { self.execute(snapshot, std::slice::from_ref(item), out).await } else { Err(TransferError::Rejected(message.clone())) };
+                                        match result {
+                                            Ok(()) => drain.settlements.push(QueueSettlement::Complete(item.id, None)),
+                                            Err(TransferError::Rejected(reason)) => {
+                                                self.settle_rejection(&item.job, &reason.to_string(), out);
+                                                drain.settlements.push(QueueSettlement::Complete(item.id, Some(reason.to_string())));
+                                            }
+                                            Err(TransferError::Retryable(reason)) => drain.settlements.push(QueueSettlement::Retry(item.id, reason.to_string())),
+                                            Err(TransferError::AuthenticationRequired) => {
+                                                drain.settlements.extend(claimed[index..].iter().map(|item| QueueSettlement::Release(item.id)));
+                                                self.changed();
+                                                self.flush();
+                                                drain.result = Err(TransferError::AuthenticationRequired);
+                                                return drain;
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(TransferError::AuthenticationRequired) => {
+                                    drain.settlements.extend(claimed.iter().map(|item| QueueSettlement::Release(item.id)));
+                                    self.changed();
+                                    self.flush();
+                                    drain.result = Err(TransferError::AuthenticationRequired);
+                                    return drain;
+                                }
+                            }
+                        } else {
+                            let mut batch_results = std::collections::VecDeque::new();
+                            for (index, item) in claimed.iter().enumerate() {
+                                let mut trace = sync_transport::PerformanceTrace::new("transfer_job", "execute");
+                                log::debug!(target: "sync_performance", "trace_id={} job_id={} kind={:?} since_batch_claim_ms={:.3}", trace.id(), item.id, item.job.batch_kind(), claimed_at.elapsed().as_secs_f64() * 1000.0);
+                                if batch_results.is_empty() {
+                                    // Browser uploads retain their per-file ownership path.
+                                    // Native PUTs run concurrently for books of every size.
+                                    let count = if cfg!(target_arch = "wasm32") {
+                                        1
+                                    } else {
+                                        claimed[index..].iter().take(MAX_CONCURRENT_BOOK_UPLOADS)
+                                            .take_while(|item| matches!(&item.job.operation, TransferOperation::UploadBlob { intent: Some(_), negotiated: true, .. }))
+                                            .count().max(1)
+                                    };
+                                    if count > 1 {
+                                        let group = &claimed[index..index + count];
+                                        batch_results = match self.execute_uploads(snapshot, group, out).await {
+                                            Ok(results) if results.len() == count => results.into(),
+                                            Ok(_) => (0..count).map(|_| Err(TransferError::retryable("incomplete individual upload results"))).collect(),
+                                            Err(TransferError::AuthenticationRequired) => (0..count).map(|_| Err(TransferError::AuthenticationRequired)).collect(),
+                                            Err(error) => (0..count).map(|_| Err(TransferError::retryable(error.clone()))).collect(),
+                                        };
+                                    } else {
+                                        batch_results.push_back(self.execute(snapshot, std::slice::from_ref(item), out).await);
+                                    }
+                                }
+                                let outcome = batch_results.pop_front().expect("one result per claimed job");
+                                trace.finish(outcome.is_ok());
+                                match outcome {
+                                    Ok(()) => drain.settlements.push(QueueSettlement::Complete(item.id, None)),
+                                    Err(TransferError::Retryable(message)) => {
+                                        log::warn!("Retryable transfer error for job {}: {message}", item.id);
+                                        drain.settlements.push(QueueSettlement::Retry(item.id, message.to_string()));
+                                    }
+                                    Err(TransferError::Rejected(message)) => {
+                                        log::warn!("Rejected transfer for job {}: {message}", item.id);
+                                        self.settle_rejection(&item.job, &message.to_string(), out);
+                                        drain.settlements.push(QueueSettlement::Complete(item.id, Some(message.to_string())));
+                                    }
+                                    Err(TransferError::AuthenticationRequired) => {
+                                        // Release the current and all not-yet-processed
+                                        // jobs. Authentication is global; file failures are
+                                        // deliberately not.
+                                        drain.settlements.extend(claimed[index..].iter().map(|item| QueueSettlement::Release(item.id)));
+                                        self.changed();
+                                        self.flush();
+                                        drain.result = Err(TransferError::AuthenticationRequired);
+                                        return drain;
+                                    }
+                                }
+                                self.changed();
+                            }
+                        }
+                        self.changed();
+                    }
+                    self.flush();
+                    drain
+                }
+            })
+            .await
+        };
         // A stale member's next planning pass simply re-queues it; this batch
         // path only needs the commit to have happened, not stayed current.
         match database.commit_transfer_outcome(&outcome) {
@@ -83,7 +276,16 @@ impl TransferWorker {
             }
             Err(error) => {
                 let error = TransferError::from(error);
-                drain.commit_failed(&self.queue, &error);
+                ({
+                    use crate::runner::*;
+                    let drain: TransferDrain = drain;
+                    let queue: &TransferQueue = &self.queue;
+                    let error: &TransferError = &error;
+
+                    for item in &drain.claimed {
+                        queue.retry(item.id, error.to_string());
+                    }
+                });
                 self.send_transfer_status_changed();
                 Err(error)
             }
@@ -107,7 +309,7 @@ impl TransferWorker {
             }
         }
         for hash in hashes {
-            let present = self.assets.exists(BlobKind::Book, &hash)?;
+            let present = self.assets.book_exists(&hash, &database.book_paths(&hash)?)?;
             let state = database.transfer_download_state(&hash, present)?;
             self.send_download_status(hash, state);
         }
@@ -137,35 +339,7 @@ impl TransferWorker {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) async fn run(&self, jobs: Vec<TransferJob>) -> TransferRunResult {
-        self.queue.reconcile(jobs);
-        self.queue.resume_authentication();
-        if !self.queue.try_start_scheduler() {
-            return Ok(());
-        }
-        let result = self.drain_pass().await;
-        if result.is_err() {
-            self.queue.pause_authentication();
-        }
-        result
-    }
-
-    /// Reconcile one planning page and detach its driver. Slow asset HTTP
-    /// must never hold the metadata gate behind it.
-    pub fn run_page(&self, generation: u64, jobs: Vec<TransferJob>) {
-        self.queue.reconcile_page(generation, jobs);
-        Self::ensure_driver(self.clone());
-    }
-
-    /// Close a planning generation and detach its driver, same contract as
-    /// [`Self::run_page`].
-    pub fn finish_plan(&self, generation: u64) {
-        self.queue.finish_reconcile(generation);
-        Self::ensure_driver(self.clone());
-    }
-
-    fn ensure_driver(worker: Self) {
+    pub fn ensure_driver(worker: Self) {
         if !worker.queue.try_start_scheduler() {
             return;
         }
@@ -227,7 +401,7 @@ impl TransferWorker {
         });
         let result = result.and(commit);
         if download && result.is_err() {
-            if let Ok(present) = self.assets.exists(BlobKind::Book, &hash) {
+            if let Some(present) = database.book_paths(&hash).ok().and_then(|paths| self.assets.book_exists(&hash, &paths).ok()) {
                 if let Ok(state) = database.transfer_download_state(&hash, present) {
                     self.send_download_status(hash, state);
                 }
@@ -240,7 +414,7 @@ impl TransferWorker {
     /// Announces, once per drained queue, that the set of locally available
     /// books changed. Individual books already reported themselves.
     pub(crate) fn flush_availability_changes(&self) {
-        if !self.availability_changed.swap(false, std::sync::atomic::Ordering::AcqRel) {
+        if !self.availability_changed.swap(false, Ordering::AcqRel) {
             return;
         }
         if let Some(tx) = &self.event_tx {
@@ -257,7 +431,24 @@ impl TransferWorker {
 
 impl TransferHost for TransferWorker {
     fn prepare_uploads<'a>(&'a self, intents: &'a [BookUploadIntent], out: &'a mut TransferOutcome) -> LocalBoxFuture<'a, Result<crate::runner::PreparedUploads, TransferError>> {
-        Box::pin(self.prepare_book_uploads_with_refresh(intents, out))
+        Box::pin({
+            use crate::transfer::executor::*;
+
+            async move {
+                {
+                    if !self.asset_storage_enabled() {
+                        return Ok(PreparedUploads { jobs: Vec::new(), dropped: Vec::new() });
+                    }
+                    let guard = self.refresh_guard(crate::transfer::RefreshScope::Planned)?;
+                    let result = self.prepare_book_uploads(intents, out).await;
+                    if !matches!(result, Err(TransferError::AuthenticationRequired)) {
+                        return result;
+                    }
+                    self.refresh_after_auth(guard).await?;
+                    self.prepare_book_uploads(intents, out).await
+                }
+            }
+        })
     }
     fn execute<'a>(&'a self, snapshot: &'a TransferSnapshot, claimed: &'a [ClaimedTransferJob], out: &'a mut TransferOutcome) -> LocalBoxFuture<'a, TransferRunResult> {
         Box::pin(async move {
@@ -269,7 +460,22 @@ impl TransferHost for TransferWorker {
         Box::pin(self.upload_claimed_books_with_refresh(snapshot, claimed, out))
     }
     fn settle_rejection(&self, job: &TransferJob, reason: &str, out: &mut TransferOutcome) {
-        self.resolve_rejected_job(job, reason, out);
+        ({
+            use crate::transfer::executor::*;
+
+            match &job.operation {
+                TransferOperation::DownloadBlob { content_hash, .. } => {
+                    out.record(TransferWrite::CompleteDownload { hash: *content_hash });
+                }
+                TransferOperation::UploadBlob { content_hash, intent, .. } => {
+                    out.record(TransferWrite::SettleRejectedUpload { hash: *content_hash, intent: intent.clone(), reason: reason.to_owned() });
+                }
+                TransferOperation::UploadThumbnail { thumbnail_hash } => {
+                    out.record(TransferWrite::SettleRejectedThumbnail { hash: *thumbnail_hash, reason: reason.to_owned() });
+                }
+                TransferOperation::DownloadThumbnail { .. } => {}
+            }
+        });
     }
     fn changed(&self) {
         self.send_transfer_status_changed();

@@ -1,15 +1,14 @@
-use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use flate2::read::MultiGzDecoder;
 use metadata_contract::{
-    AuthorIdentifier, AuthorMetadata, AuthorSource, Classification, ClassificationRequest, ClassificationResponse, ClassificationScheme, ClassificationSource, EditionIdentityMatch, EditionIdentityQuery, EditionIdentityRequest,
-    EditionIdentityResponse, EditionIdentityResult, EditionIdentityStatus, EditionTitleMatch, IsbnClassificationResult, IsbnMetadataResult, LookupStatus, MetadataEnrichmentRequest, MetadataEnrichmentResponse, RichIsbnMetadataResult,
-    RichMetadataEnrichmentResponse, RichWorkMetadataMatch, SnapshotDescription, SubjectHeading, WorkClassificationMatch, WorkMetadataMatch, MAX_EDITION_QUERIES_PER_REQUEST, MAX_ISBNS_PER_REQUEST, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
+    AuthorIdentifier, AuthorMetadata, AuthorSource, Classification, ClassificationScheme, ClassificationSource, EditionIdentityMatch, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus, EditionTitleMatch,
+    IsbnClassificationResult, IsbnMetadataResult, LookupStatus, RichIsbnMetadataResult, RichWorkMetadataMatch, SnapshotDescription, SubjectHeading, WorkClassificationMatch, WorkMetadataMatch, MAX_EDITION_QUERIES_PER_REQUEST,
+    MAX_ISBNS_PER_REQUEST, MAX_REQUEST_BYTES,
 };
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
@@ -26,7 +25,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::Semaphore;
 
 const SCHEMA_VERSION: i64 = 1;
 const BUILDER_SCHEMA_VERSION: i64 = 1;
@@ -37,6 +35,7 @@ const MAX_REVERSE_TITLE_CANDIDATES: usize = 4_096;
 // One row beyond the public candidate ceiling is enough to prove that the
 // result is truncated without allowing a broad title to build an unbounded
 // intermediate result.
+#[cfg(test)]
 const MAX_RAW_TITLE_CANDIDATES: usize = MAX_REVERSE_TITLE_CANDIDATES + 1;
 const MAX_EDITION_IDENTITY_REVIEW_CANDIDATES: usize = 256;
 const MAX_TITLE_SUBSTRINGS_PER_QUERY: usize = 64;
@@ -50,41 +49,23 @@ const DESCRIPTION_IMPORT_CACHE_KIB: usize = 131_072;
 const PIPELINE_PARSE_RECORDS: usize = 25_000;
 const PIPELINE_BUFFERED_BATCHES: usize = 1;
 const QUERY_CONCURRENCY: u32 = 4;
-const QUERY_EXECUTION_TIMEOUT: Duration = Duration::from_secs(8);
+
 // Check often enough to retain the query deadline without adding noticeable
 // callback overhead to large enrichment batches.
-const QUERY_PROGRESS_OPS: i32 = 1_000;
+
 const READ_CACHE_KIB: usize = 16_384;
 const READ_MMAP_BYTES: usize = 67_108_864;
 const BULK_EVIDENCE_IDS_PER_QUERY: usize = 30_000;
 
 #[derive(Clone)]
-pub struct MetadataService {
-    state: Arc<ServiceState>,
-    library_of_congress: Option<library_of_congress::LibraryOfCongressClient>,
-    librarything: Option<librarything::LibraryThingClient>,
+pub(crate) struct Resolver {
+    state: Arc<ResolverState>,
 }
-
-struct ServiceState {
+struct ResolverState {
     database: PathBuf,
-    pool: Option<Pool<SqliteConnectionManager>>,
-    rich_pool: Pool<SqliteConnectionManager>,
-    identity_pool: Pool<SqliteConnectionManager>,
-    subject_index: Option<Arc<subject_index::SubjectIndex>>,
+    pool: Pool<SqliteConnectionManager>,
     description_pool: Option<Pool<SqliteConnectionManager>>,
-    query_slots: Arc<Semaphore>,
     snapshot: SnapshotDescription,
-    schema_version: i64,
-    descriptions_available: bool,
-    started_at: Instant,
-    requests: AtomicU64,
-    errors: AtomicU64,
-    total_duration_ms: AtomicU64,
-    processed_items: AtomicU64,
-    item_processing_duration_ms: AtomicU64,
-    edition_identities: EndpointMetrics,
-    classifications: EndpointMetrics,
-    enrichment: EndpointMetrics,
 }
 
 #[derive(Default)]
@@ -104,30 +85,6 @@ struct EndpointMetricsSnapshot {
     in_flight: u64,
     total_duration_ms: u64,
     average_duration_ms: f64,
-}
-
-#[derive(Serialize)]
-struct OperationalStats {
-    status: &'static str,
-    uptime_seconds: u64,
-    schema_version: i64,
-    dump_date: String,
-    imported_at_ms: u64,
-    database_bytes: u64,
-    edition_records: u64,
-    work_records: u64,
-    author_records: u64,
-    requests: u64,
-    errors: u64,
-    average_duration_ms: f64,
-    processed_items: u64,
-    average_duration_ms_per_item: f64,
-    items_per_processing_second: f64,
-    query_concurrency: u32,
-    pool_connections: u32,
-    pool_idle_connections: u32,
-    metrics: BTreeMap<String, i64>,
-    endpoint_metrics: BTreeMap<&'static str, EndpointMetricsSnapshot>,
 }
 
 #[derive(Debug)]
@@ -201,54 +158,78 @@ struct KeyReference {
     key: String,
 }
 
+#[path = "serve/audible/mod.rs"]
 mod audible;
+#[path = "serve/books.rs"]
+mod books;
+#[path = "build/duplicate_work.rs"]
 mod duplicate_work;
+#[path = "build/enrichment.rs"]
 mod enrichment;
+#[path = "serve/http.rs"]
 mod http;
+#[path = "build/identity.rs"]
 mod identity;
+#[path = "build/import/mod.rs"]
 mod import;
+#[path = "crawl/library_of_congress.rs"]
 mod library_of_congress;
+#[path = "crawl/librarything.rs"]
 mod librarything;
-mod librarything_background;
-mod loc_background;
+#[path = "build/loc_dump.rs"]
 mod loc_dump;
+#[path = "build/openlibrary.rs"]
 mod openlibrary;
 mod query;
+#[path = "build/service.rs"]
 mod service;
-mod split;
-mod subject_index;
+#[path = "build/wikidata_books.rs"]
 mod wikidata_books;
 
 pub(crate) use enrichment::{attach_authors, attach_rich_fields, classification_similarity_keys, load_embedded_work_descriptions, load_work_bisac_classifications, load_work_descriptions_from_table, lookup_one, sql_placeholders};
 pub use http::app;
+#[cfg(test)]
 pub(crate) use identity::resolve_edition_batch;
 pub use import::{import_description_snapshot, import_snapshot};
 pub(crate) use openlibrary::{
-    building_path, canonical_isbn13, deserialize_key_references, deserialize_optional_description, deserialize_optional_string, deserialize_string_array, deserialize_work_author_references, dump_date, error, open_description_pool,
+    building_path, deserialize_key_references, deserialize_optional_description, deserialize_optional_string, deserialize_string_array, deserialize_work_author_references, dump_date, error, open_description_pool,
     open_library_id, open_read_pool, valid_dump_date, valid_open_library_description,
 };
 pub(crate) use query::query_connection;
-pub use split::split_snapshot;
-pub use subject_index::{build_subject_index, build_subject_index_limited};
+mod isbn;
+pub(crate) use isbn::Isbn13;
 
 #[cfg(test)]
+#[path = "build/tests.rs"]
 mod tests;
 
-/// Explicit provider audit, including ISBNs whose Open Library identity is ambiguous.
-/// Uses the same permanent cache, parser, and persistent API quota as HTTP enrichment.
-pub async fn refresh_librarything_schemes(key_file: &std::path::Path, cache_file: &std::path::Path, isbn: &str) -> Result<serde_json::Value, MetadataError> {
-    let client = librarything::LibraryThingClient::open(key_file, cache_file)?;
-    serde_json::to_value(client.refresh_schemes(isbn).await?).map_err(error)
-}
-
-pub async fn lookup_librarything_isbn(key_file: &std::path::Path, cache_file: &std::path::Path, isbn: &str) -> Result<serde_json::Value, MetadataError> {
-    let client = librarything::LibraryThingClient::open(key_file, cache_file)?;
-    let result = client.lookup_isbn(isbn).await?;
-    serde_json::to_value(result).map_err(error)
-}
-
-mod rebuild_titles;
-pub use rebuild_titles::rebuild_titles;
-
+#[path = "build/authority_ingestion.rs"]
 mod authority_ingestion;
-pub use authority_ingestion::ingest_wikidata_authorities;
+#[cfg(test)]
+pub(crate) use authority_ingestion::ingest_wikidata_authorities;
+
+mod schema;
+#[cfg(test)]
+mod types;
+#[cfg(test)]
+pub(crate) use types::*;
+mod build;
+pub use build::{build_answers, build_answers_with_ratings, import_authorities, BuildReport};
+mod serve;
+pub use serve::MetadataService;
+mod crawl;
+pub use crawl::crawl;
+
+#[cfg(test)]
+mod metadata_contract_test_helpers {
+    use crate::*;
+    pub(crate) fn lcc(notation: &str) -> Classification {
+        Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: notation.into(), source: ClassificationSource::ExactEdition, evidence: vec![] }
+    }
+    pub(crate) fn query(title: &str, author: &str) -> EditionIdentityQuery {
+        EditionIdentityQuery { query_id: "test".into(), title: title.into(), authors: vec![author.into()], publishers: vec![], book_year: None }
+    }
+}
+
+#[path = "serve/covers.rs"]
+mod covers;

@@ -6,10 +6,12 @@ publish = false
 
 [features]
 default = ["random-ids"]
-random-ids = ["library-model/random-ids", "sync-common/random-ids"]
+random-ids = ["library-model/random-ids"]
 
 [dependencies]
-# Projection v1 freezes normalization tables as well as lowercase mappings.
+# Only the read-only protocol-21 payload migration uses prost directly.
+prost = "0.14.4"
+# Keep compatibility normalization consistent across replicas.
 unicode-normalization = "=0.1.25"
 book-model = { path = "../../../../shared/book-model" }
 serde_json = "1"

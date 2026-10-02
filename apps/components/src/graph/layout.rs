@@ -4,6 +4,7 @@
 //! path grows one more column outward on its side. Label slots are measured for
 //! every role a node may take, so selecting a sibling does not move its column.
 
+use std::f32::consts::PI;
 use std::sync::Arc;
 
 use gpui::{Bounds, Point, point, size};
@@ -317,7 +318,7 @@ impl Builder<'_> {
             ((count - 1) as f32 * self.params.fan_angle_step)
                 .min(self.params.fan_max_angle).to_radians()
         };
-        let start = if root { -std::f32::consts::PI * 0.62 } else {
+        let start = if root { -PI * 0.62 } else {
             parent.center.y.atan2(parent.center.x) - span / 2.0
         };
         let mut placed = Vec::with_capacity(count);
@@ -467,7 +468,7 @@ impl Builder<'_> {
                     on_path: self.path.contains(&node) && self.path.contains(&kid.node),
                     opacity: 1.0,
                 });
-                self.place(self.measure(kid.node, kid.role), Some(node), center, if direction > 0.0 { 0.0 } else { std::f32::consts::PI });
+                self.place(self.measure(kid.node, kid.role), Some(node), center, if direction > 0.0 { 0.0 } else { PI });
                 y += kid.slot_height + self.params.row_gap;
             }
             for kid in group.iter() {

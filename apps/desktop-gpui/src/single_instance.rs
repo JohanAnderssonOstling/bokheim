@@ -1,3 +1,4 @@
+use std::time::Instant;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -87,12 +88,12 @@ mod tests {
         };
         assert!(matches!(DesktopInstance::acquire(directory.path()).unwrap(), DesktopInstance::Secondary));
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             if primary.activations.try_recv().is_ok() {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "primary did not receive activation");
+            assert!(Instant::now() < deadline, "primary did not receive activation");
             std::thread::sleep(Duration::from_millis(10));
         }
     }

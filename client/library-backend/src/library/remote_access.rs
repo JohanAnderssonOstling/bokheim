@@ -1,12 +1,14 @@
 //! Account-backed remote reading owned by one library session.
 
-use super::{playback::DirectPlayback, LibrarySession, RemoteFile};
-use crate::BackendError;
-use crate::ContentHash;
+use std::future::Future;
+pub(crate) use super::{playback::DirectPlayback, LibrarySession, RemoteFile};
+pub(crate) use crate::BackendError;
+pub(crate) use crate::ContentHash;
+use crate::LibraryId;
 
 impl LibrarySession {
-    fn account(&self) -> Result<library_runtime::account::LibraryAccount, BackendError> {
-        self.sync().and_then(|sync| sync.account()).ok_or_else(|| BackendError::message("library account access is unavailable"))
+    pub(crate) fn account(&self) -> Result<library_runtime::account::LibraryAccount, BackendError> {
+        self.sync.clone().account().ok_or_else(|| BackendError::message("library account access is unavailable"))
     }
 
     pub(crate) fn downloaded_books_only(&self) -> Result<bool, BackendError> {
@@ -71,13 +73,13 @@ impl LibrarySession {
     }
 }
 
-pub(crate) async fn authenticated_file_request<T, F: std::future::Future<Output = Result<T, book_access::remote_file::RemoteFileError>>>(
+pub(crate) async fn authenticated_file_request<T, F: Future<Output = Result<T, book_access::remote_file::RemoteFileError>>>(
     account: &library_runtime::account::LibraryAccount, request: impl FnMut(account_client::Session) -> F,
 ) -> Result<T, String> {
     authenticated_file_request_typed(account, request).await.map_err(|error| error.to_string())
 }
 
-fn file_auth_error(error: library_runtime::account::AccountSessionError) -> book_access::remote_file::RemoteFileError {
+pub(crate) fn file_auth_error(error: library_runtime::account::AccountSessionError) -> book_access::remote_file::RemoteFileError {
     use book_access::remote_file::RemoteFileError;
     use library_runtime::account::AccountSessionError;
     match error {
@@ -87,7 +89,7 @@ fn file_auth_error(error: library_runtime::account::AccountSessionError) -> book
     }
 }
 
-pub(crate) async fn authenticated_file_request_typed<T, F: std::future::Future<Output = Result<T, book_access::remote_file::RemoteFileError>>>(
+pub(crate) async fn authenticated_file_request_typed<T, F: Future<Output = Result<T, book_access::remote_file::RemoteFileError>>>(
     account: &library_runtime::account::LibraryAccount, mut request: impl FnMut(account_client::Session) -> F,
 ) -> Result<T, book_access::remote_file::RemoteFileError> {
     let session = account.refresh_if_needed().await.map_err(file_auth_error)?.ok_or("sign in to read this remote file")?;
@@ -101,7 +103,7 @@ pub(crate) async fn authenticated_file_request_typed<T, F: std::future::Future<O
     }
 }
 
-pub(crate) async fn describe_remote_file(account: &library_runtime::account::LibraryAccount, library: crate::LibraryId, hash: ContentHash) -> Result<(RemoteFile, Vec<u8>), String> {
+pub(crate) async fn describe_remote_file(account: &library_runtime::account::LibraryAccount, library: LibraryId, hash: ContentHash) -> Result<(RemoteFile, Vec<u8>), String> {
     authenticated_file_request(account, |session| async move {
         let url = sync_transport::blob_endpoint(session.server_url().as_url(), &library, &hash);
         book_access::remote_file::describe(url, session.token().to_owned(), hash).await
@@ -109,12 +111,12 @@ pub(crate) async fn describe_remote_file(account: &library_runtime::account::Lib
     .await
 }
 
-pub(crate) async fn read_remote_file(client: &reqwest::Client, account: &library_runtime::account::LibraryAccount, library: crate::LibraryId, source: &RemoteFile, offset: u64, length: usize) -> Result<Vec<u8>, String> {
+pub(crate) async fn read_remote_file(client: &reqwest::Client, account: &library_runtime::account::LibraryAccount, library: LibraryId, source: &RemoteFile, offset: u64, length: usize) -> Result<Vec<u8>, String> {
     read_remote_file_typed(client, account, library, source, offset, length).await.map_err(|error| error.to_string())
 }
 
 pub(crate) async fn read_remote_file_typed(
-    client: &reqwest::Client, account: &library_runtime::account::LibraryAccount, library: crate::LibraryId, source: &RemoteFile, offset: u64, length: usize,
+    client: &reqwest::Client, account: &library_runtime::account::LibraryAccount, library: LibraryId, source: &RemoteFile, offset: u64, length: usize,
 ) -> Result<Vec<u8>, book_access::remote_file::RemoteFileError> {
     authenticated_file_request_typed(account, |session| async move {
         let url = sync_transport::blob_endpoint(session.server_url().as_url(), &library, &source.hash);

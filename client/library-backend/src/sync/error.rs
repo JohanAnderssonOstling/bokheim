@@ -1,3 +1,5 @@
+use std::error::Error;
+use std::fmt::Display;
 use asset_transfer::TransferError;
 use library_database::DatabaseError;
 
@@ -10,12 +12,12 @@ pub(crate) enum SyncError {
 }
 
 impl SyncError {
-    pub(super) fn failed(error: impl std::fmt::Display) -> Self {
+    pub(crate) fn failed(error: impl Display) -> Self {
         Self::Failed(error.to_string())
     }
 }
 
-impl std::fmt::Display for SyncError {
+impl Display for SyncError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AuthenticationRequired => formatter.write_str("synchronization authentication is required"),
@@ -24,7 +26,7 @@ impl std::fmt::Display for SyncError {
     }
 }
 
-impl std::error::Error for SyncError {}
+impl Error for SyncError {}
 
 impl From<sync_transport::SyncRequestError> for SyncError {
     fn from(error: sync_transport::SyncRequestError) -> Self {
@@ -51,7 +53,7 @@ macro_rules! failed_from {
     )+};
 }
 
-failed_from!(Box<dyn std::error::Error>, &'static str, DatabaseError, library_files::asset_store::AssetStoreError, rusqlite::Error, std::io::Error, web_time::SystemTimeError, std::num::TryFromIntError,);
+failed_from!(Box<dyn Error>, &'static str, DatabaseError, library_files::asset_store::AssetStoreError, rusqlite::Error, std::io::Error, web_time::SystemTimeError, std::num::TryFromIntError,);
 
 impl From<sync_engine::SyncError> for SyncError {
     fn from(error: sync_engine::SyncError) -> Self {

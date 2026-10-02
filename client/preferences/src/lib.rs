@@ -95,37 +95,12 @@ pub struct BrowsingPreferences {
     #[serde(default)]
     appearance_override: Option<ResolvedAppearance>,
     ui_font_size_px: UiFontSize,
-    library_view: LibraryView,
     cover_text: CoverText,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LibraryView {
-    #[default]
-    Covers,
-    Detailed,
-}
-
-impl LibraryView {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Covers => "Covers",
-            Self::Detailed => "Detailed",
-        }
-    }
-
-    pub const fn description(self) -> &'static str {
-        match self {
-            Self::Covers => "A grid of cover art.",
-            Self::Detailed => "Rows with the blurb and actions beside the cover.",
-        }
-    }
 }
 
 impl Default for BrowsingPreferences {
     fn default() -> Self {
-        Self { theme: ApplicationTheme::default(), appearance_override: None, ui_font_size_px: UiFontSize(UI_FONT_SIZE_DEFAULT), library_view: LibraryView::Covers, cover_text: CoverText::Always }
+        Self { theme: ApplicationTheme::default(), appearance_override: None, ui_font_size_px: UiFontSize(UI_FONT_SIZE_DEFAULT), cover_text: CoverText::Always }
     }
 }
 
@@ -140,9 +115,6 @@ impl BrowsingPreferences {
 
     pub fn ui_font_size_px(&self) -> u8 {
         self.ui_font_size_px.get()
-    }
-    pub fn library_view(&self) -> LibraryView {
-        self.library_view
     }
     pub fn cover_text(&self) -> CoverText {
         self.cover_text
@@ -186,7 +158,6 @@ pub enum BrowsingPreferencePatch {
     Theme(ApplicationTheme),
     Palette(ApplicationTheme, ResolvedAppearance),
     UiFontSizePx(u8),
-    LibraryView(LibraryView),
     CoverText(CoverText),
 }
 
@@ -199,7 +170,6 @@ impl BrowsingPreferencePatch {
                 preferences.appearance_override = Some(appearance);
             }
             Self::UiFontSizePx(value) => preferences.ui_font_size_px = UiFontSize::new(value)?,
-            Self::LibraryView(value) => preferences.library_view = value,
             Self::CoverText(value) => preferences.cover_text = value,
         }
         Ok(())
@@ -668,8 +638,8 @@ mod tests {
 
     #[test]
     fn local_preference_patches_keep_the_serialized_shape() {
-        let browsing = BrowsingPreferencePatch::LibraryView(LibraryView::Detailed);
-        assert_eq!(serde_json::to_value(browsing).unwrap(), serde_json::json!({ "preference": "library_view", "value": "detailed" }));
+        let browsing = BrowsingPreferencePatch::CoverText(CoverText::CoverOnly);
+        assert_eq!(serde_json::to_value(browsing).unwrap(), serde_json::json!({ "preference": "cover_text", "value": "cover_only" }));
 
         let palette = BrowsingPreferencePatch::Palette(ApplicationTheme::Cool, ResolvedAppearance::Dark);
         assert_eq!(serde_json::to_value(palette).unwrap(), serde_json::json!({ "preference": "palette", "value": ["cool", "dark"] }));

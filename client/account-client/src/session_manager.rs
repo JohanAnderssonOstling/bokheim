@@ -1,15 +1,18 @@
+use std::future::Future;
+use std::pin::Pin;
+use crate::{AuthError, Session};
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
 #[cfg(not(target_arch = "wasm32"))]
-pub type SessionFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+pub type SessionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[cfg(target_arch = "wasm32")]
-pub type SessionFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + 'a>>;
+pub type SessionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 /// Persistence supplied by the application; writes complete before session readers are notified.
 pub trait SessionPersistence: Clone + std::fmt::Debug {
-    fn load_account_session(&self) -> std::io::Result<Option<crate::Session>>;
-    fn save_account_session(&self, session: &crate::Session) -> std::io::Result<()>;
+    fn load_account_session(&self) -> std::io::Result<Option<Session>>;
+    fn save_account_session(&self, session: &Session) -> std::io::Result<()>;
     fn clear_account_session(&self) -> std::io::Result<()>;
 }
 use crate::ServerUrl;
@@ -19,7 +22,7 @@ const REFRESH_WINDOW_SECONDS: i64 = 15 * 60;
 
 #[derive(Debug, Default)]
 struct SessionState {
-    session: Option<crate::Session>,
+    session: Option<Session>,
     generation: u64,
 }
 
@@ -28,7 +31,7 @@ struct SharedSession(RwLock<SessionState>);
 
 #[derive(Debug)]
 pub enum AccountSessionError {
-    Authentication(crate::AuthError),
+    Authentication(AuthError),
     Persistence(std::io::Error),
     Poisoned,
     Changed,
@@ -71,11 +74,11 @@ impl<P: SessionPersistence> AccountSession<P> {
     }
 
     /// Read the latest usable session without performing persistence or refresh work.
-    pub fn credentials_session(&self) -> Option<crate::Session> {
+    pub fn credentials_session(&self) -> Option<Session> {
         self.state.0.read().ok()?.session.as_ref().filter(|session| !Self::is_expired(session)).cloned()
     }
 
-    pub fn restore_if_empty(&self) -> Result<Option<crate::Session>, AccountSessionError> {
+    pub fn restore_if_empty(&self) -> Result<Option<Session>, AccountSessionError> {
         let mut state = self.state.0.write().map_err(|_| AccountSessionError::Poisoned)?;
         if state.session.is_none() {
             if let Some(restored) = self.persistence.load_account_session().map_err(AccountSessionError::Persistence)? {
@@ -87,7 +90,7 @@ impl<P: SessionPersistence> AccountSession<P> {
         Ok(state.session.clone())
     }
 
-    pub fn current(&self) -> Result<Option<crate::Session>, AccountSessionError> {
+    pub fn current(&self) -> Result<Option<Session>, AccountSessionError> {
         let mut state = self.state.0.write().map_err(|_| AccountSessionError::Poisoned)?;
         self.remove_expired(&mut state)?;
         Ok(state.session.clone())
@@ -100,16 +103,16 @@ impl<P: SessionPersistence> AccountSession<P> {
         Ok(())
     }
 
-    pub fn require(&self) -> Result<crate::Session, AccountSessionError> {
-        self.current()?.ok_or_else(|| AccountSessionError::Authentication(crate::AuthError::InvalidData("not signed in".to_owned())))
+    pub fn require(&self) -> Result<Session, AccountSessionError> {
+        self.current()?.ok_or_else(|| AccountSessionError::Authentication(AuthError::InvalidData("not signed in".to_owned())))
     }
 
-    pub fn set(&self, session: crate::Session) -> Result<(), AccountSessionError> {
+    pub fn set(&self, session: Session) -> Result<(), AccountSessionError> {
         let mut state = self.state.0.write().map_err(|_| AccountSessionError::Poisoned)?;
         self.replace(&mut state, Some(session))
     }
 
-    pub fn take(&self) -> Result<Option<crate::Session>, AccountSessionError> {
+    pub fn take(&self) -> Result<Option<Session>, AccountSessionError> {
         let mut state = self.state.0.write().map_err(|_| AccountSessionError::Poisoned)?;
         let previous = state.session.clone();
         self.replace(&mut state, None)?;
@@ -117,10 +120,10 @@ impl<P: SessionPersistence> AccountSession<P> {
     }
 
     /// The state lock covers persistence as well as book to token readers.
-    fn replace(&self, state: &mut SessionState, session: Option<crate::Session>) -> Result<(), AccountSessionError> {
+    fn replace(&self, state: &mut SessionState, session: Option<Session>) -> Result<(), AccountSessionError> {
         if let Some(session) = &session {
             if !Self::is_usable(session, &self.server) {
-                return Err(AccountSessionError::Authentication(crate::AuthError::InvalidData("cannot adopt an expired session or a session from another server".to_owned())));
+                return Err(AccountSessionError::Authentication(AuthError::InvalidData("cannot adopt an expired session or a session from another server".to_owned())));
             }
             self.persistence.save_account_session(session).map_err(AccountSessionError::Persistence)?;
         } else {
@@ -132,22 +135,22 @@ impl<P: SessionPersistence> AccountSession<P> {
         Ok(())
     }
 
-    pub async fn refresh_if_needed(&self) -> Result<Option<crate::Session>, AccountSessionError> {
+    pub async fn refresh_if_needed(&self) -> Result<Option<Session>, AccountSessionError> {
         self.refresh(None).await
     }
 
-    pub async fn refresh_after_unauthorized(&self, rejected_token: &str) -> Result<Option<crate::Session>, AccountSessionError> {
+    pub async fn refresh_after_unauthorized(&self, rejected_token: &str) -> Result<Option<Session>, AccountSessionError> {
         self.refresh(Some(rejected_token)).await
     }
 
-    async fn refresh(&self, rejected_token: Option<&str>) -> Result<Option<crate::Session>, AccountSessionError> {
+    async fn refresh(&self, rejected_token: Option<&str>) -> Result<Option<Session>, AccountSessionError> {
         self.refresh_using(rejected_token, |session| async move { crate::refresh_session(&session).await }).await
     }
 
-    async fn refresh_using<F, Fut>(&self, rejected_token: Option<&str>, refresh: F) -> Result<Option<crate::Session>, AccountSessionError>
+    async fn refresh_using<F, Fut>(&self, rejected_token: Option<&str>, refresh: F) -> Result<Option<Session>, AccountSessionError>
     where
-        F: FnOnce(crate::Session) -> Fut,
-        Fut: std::future::Future<Output = Result<crate::Session, crate::AuthError>>,
+        F: FnOnce(Session) -> Fut,
+        Fut: Future<Output = Result<Session, AuthError>>,
     {
         let _guard = self.refresh.lock().await;
         let (session, generation) = {
@@ -169,7 +172,7 @@ impl<P: SessionPersistence> AccountSession<P> {
         self.finish_refresh(generation, result)
     }
 
-    fn finish_refresh(&self, generation: u64, result: Result<Option<crate::Session>, crate::AuthError>) -> Result<Option<crate::Session>, AccountSessionError> {
+    fn finish_refresh(&self, generation: u64, result: Result<Option<Session>, AuthError>) -> Result<Option<Session>, AccountSessionError> {
         let mut state = self.state.0.write().map_err(|_| AccountSessionError::Poisoned)?;
         self.remove_expired(&mut state)?;
         // Neither a delayed success nor a rejection may modify a newer login/logout.
@@ -179,7 +182,7 @@ impl<P: SessionPersistence> AccountSession<P> {
         match result {
             Ok(session) => self.replace(&mut state, session)?,
             Err(error) => {
-                if error.is_unauthorized() || matches!(error, crate::AuthError::InvalidData(_)) {
+                if error.is_unauthorized() || matches!(error, AuthError::InvalidData(_)) {
                     self.replace(&mut state, None)?;
                 }
                 return Err(AccountSessionError::Authentication(error));
@@ -188,23 +191,23 @@ impl<P: SessionPersistence> AccountSession<P> {
         Ok(state.session.clone())
     }
 
-    pub async fn request<T>(&self, mut request: impl for<'a> FnMut(&'a crate::Session) -> SessionFuture<'a, Result<T, crate::AuthError>>) -> Result<T, AccountSessionError> {
-        let session = self.refresh_if_needed().await?.ok_or_else(|| AccountSessionError::Authentication(crate::AuthError::InvalidData("not signed in".to_owned())))?;
+    pub async fn request<T>(&self, mut request: impl for<'a> FnMut(&'a Session) -> SessionFuture<'a, Result<T, AuthError>>) -> Result<T, AccountSessionError> {
+        let session = self.refresh_if_needed().await?.ok_or_else(|| AccountSessionError::Authentication(AuthError::InvalidData("not signed in".to_owned())))?;
         match request(&session).await {
             Ok(value) => Ok(value),
             Err(error) if error.is_unauthorized() => {
-                let refreshed = self.refresh_after_unauthorized(session.token()).await?.ok_or_else(|| AccountSessionError::Authentication(crate::AuthError::InvalidData("authentication expired; sign in again".to_owned())))?;
+                let refreshed = self.refresh_after_unauthorized(session.token()).await?.ok_or_else(|| AccountSessionError::Authentication(AuthError::InvalidData("authentication expired; sign in again".to_owned())))?;
                 request(&refreshed).await.map_err(AccountSessionError::Authentication)
             }
             Err(error) => Err(AccountSessionError::Authentication(error)),
         }
     }
 
-    fn is_usable(session: &crate::Session, server: &ServerUrl) -> bool {
+    fn is_usable(session: &Session, server: &ServerUrl) -> bool {
         session.server_url() == server && !Self::is_expired(session)
     }
 
-    fn is_expired(session: &crate::Session) -> bool {
+    fn is_expired(session: &Session) -> bool {
         if session.refresh_token().is_some() {
             session.refresh_expires_within(EXPIRY_SAFETY_WINDOW_SECONDS)
         } else {
@@ -215,15 +218,16 @@ impl<P: SessionPersistence> AccountSession<P> {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
     use super::*;
 
     #[derive(Clone, Debug, Default)]
-    struct MemoryPersistence(Arc<RwLock<Option<crate::Session>>>);
+    struct MemoryPersistence(Arc<RwLock<Option<Session>>>);
     impl SessionPersistence for MemoryPersistence {
-        fn load_account_session(&self) -> std::io::Result<Option<crate::Session>> {
+        fn load_account_session(&self) -> std::io::Result<Option<Session>> {
             Ok(self.0.read().unwrap().clone())
         }
-        fn save_account_session(&self, session: &crate::Session) -> std::io::Result<()> {
+        fn save_account_session(&self, session: &Session) -> std::io::Result<()> {
             *self.0.write().unwrap() = Some(session.clone());
             Ok(())
         }
@@ -233,17 +237,17 @@ mod tests {
         }
     }
 
-    fn session(token: char) -> crate::Session {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-        crate::Session::try_new_with_tokens("https://example.com".parse().unwrap(), "user".into(), "reader@example.com".into(), token.to_string().repeat(43), Some(now + 120), Some("r".repeat(43)), Some(now + 3600)).unwrap()
+    fn session(token: char) -> Session {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        Session::try_new_with_tokens("https://example.com".parse().unwrap(), "user".into(), "reader@example.com".into(), token.to_string().repeat(43), Some(now + 120), Some("r".repeat(43)), Some(now + 3600)).unwrap()
     }
 
     #[tokio::test]
     async fn rejected_current_token_refreshes_early_but_stale_rejections_reuse_the_session() {
         let persistence = MemoryPersistence::default();
         let account = AccountSession::load(persistence, "https://example.com".parse().unwrap()).unwrap();
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
-        let initial = crate::Session::try_new_with_tokens("https://example.com".parse().unwrap(), "user".into(), "reader@example.com".into(), "a".repeat(43), Some(now + 3600), Some("r".repeat(43)), Some(now + 7200)).unwrap();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let initial = Session::try_new_with_tokens("https://example.com".parse().unwrap(), "user".into(), "reader@example.com".into(), "a".repeat(43), Some(now + 3600), Some("r".repeat(43)), Some(now + 7200)).unwrap();
         let rejected_token = initial.token().to_owned();
         account.set(initial).unwrap();
         account.refresh_using(None, |_| async { panic!("a fresh session needs no scheduled refresh") }).await.unwrap();
@@ -267,7 +271,7 @@ mod tests {
                     started_tx.send(()).unwrap();
                     resume_rx.await.unwrap();
                     if rejected {
-                        Err(crate::AuthError::InvalidData("refresh rejected".into()))
+                        Err(AuthError::InvalidData("refresh rejected".into()))
                     } else {
                         Ok(session('b'))
                     }
@@ -299,7 +303,7 @@ mod tests {
         account.refresh_using(None, |_| async { Ok(session('b')) }).await.unwrap();
         assert_eq!(credentials.credentials_session().unwrap().token(), session('b').token());
         assert_eq!(persistence.load_account_session().unwrap().unwrap().token(), session('b').token());
-        account.refresh_using(None, |_| async { Err(crate::AuthError::InvalidData("revoked".into())) }).await.unwrap_err();
+        account.refresh_using(None, |_| async { Err(AuthError::InvalidData("revoked".into())) }).await.unwrap_err();
         assert!(account.current().unwrap().is_none());
         assert!(persistence.load_account_session().unwrap().is_none());
         assert!(credentials.credentials_session().is_none());

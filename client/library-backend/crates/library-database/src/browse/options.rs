@@ -1,8 +1,8 @@
 //! Normalize transport options once, before opening a browse snapshot.
-use book_model::BookFormat;
-use library_model::{BrowseBookSort, BrowseChipSort, LibraryBrowseQuery, LibraryFileTypeFilter};
+pub(crate) use book_model::BookFormat;
+pub(crate) use library_model::{BrowseBookSort, BrowseChipSort, LibraryBrowseQuery, LibraryFileTypeFilter};
 
-pub(super) struct BrowseOptions {
+pub(crate) struct BrowseOptions {
     pub search: String,
     pub file_types: i32,
     pub languages: String,
@@ -17,8 +17,17 @@ impl BrowseOptions {
     pub fn from_query(query: &LibraryBrowseQuery, downloaded_only: bool) -> Self {
         Self {
             search: book_model::normalize_search_text(&query.search),
-            file_types: file_types_query_value(&query.file_types),
-            languages: languages_query_value(&query.languages),
+            file_types: if query.file_types.is_empty() || query.file_types.contains(&LibraryFileTypeFilter::All) { 0 } else { query.file_types.iter().fold(0, |mask, filter| mask | file_type_query_value(*filter)) },
+            languages: {
+                let mut languages = query.languages.iter().map(|language| base_language(language)).filter(|language| !language.is_empty()).collect::<Vec<_>>();
+                languages.sort();
+                languages.dedup();
+                if languages.is_empty() {
+                    String::new()
+                } else {
+                    format!(",{},", languages.join(","))
+                }
+            },
             chip_sort: query.chip_sort,
             book_sort: query.book_sort,
             downloaded_only,
@@ -48,28 +57,7 @@ pub(crate) fn file_type_of(format: Option<i64>) -> LibraryFileTypeFilter {
     }
 }
 
-pub(crate) fn file_types_query_value(filters: &[LibraryFileTypeFilter]) -> i32 {
-    if filters.is_empty() || filters.contains(&LibraryFileTypeFilter::All) {
-        return 0;
-    }
-    filters.iter().fold(0, |mask, filter| mask | file_type_query_value(*filter))
-}
-
 /// The lowercase primary subtag browse filters on: `en-US` and `en_GB` are `en`.
 pub(crate) fn base_language(tag: &str) -> String {
     tag.trim().split(['-', '_']).next().unwrap_or_default().to_lowercase()
-}
-
-pub(crate) fn languages_query_value(languages: &[String]) -> String {
-    let mut languages = languages.iter().map(|language| base_language(language)).filter(|language| !language.is_empty()).collect::<Vec<_>>();
-    languages.sort();
-    languages.dedup();
-    if languages.is_empty() { String::new() } else { format!(",{},", languages.join(",")) }
-}
-
-pub(crate) const fn book_sort_query_value(sort: BrowseBookSort) -> i32 {
-    match sort {
-        BrowseBookSort::Alphabetical => 0,
-        BrowseBookSort::RecentlyRead => 1,
-    }
 }

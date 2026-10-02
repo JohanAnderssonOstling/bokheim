@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -142,9 +143,9 @@ fn build_glyph_segments(glyphs: &[GpuiRunGlyph]) -> Vec<GpuiGlyphSegment> {
     let mut order = None;
     for index in 1..glyphs.len() {
         let next_order = match glyphs[index].byte_index.cmp(&glyphs[index - 1].byte_index) {
-            std::cmp::Ordering::Less => Some(GlyphByteOrder::Descending),
-            std::cmp::Ordering::Greater => Some(GlyphByteOrder::Ascending),
-            std::cmp::Ordering::Equal => None,
+            Ordering::Less => Some(GlyphByteOrder::Descending),
+            Ordering::Greater => Some(GlyphByteOrder::Ascending),
+            Ordering::Equal => None,
         };
         let Some(next_order) = next_order else { continue };
         if let Some(current_order) = order

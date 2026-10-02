@@ -234,3 +234,10 @@ impl UpdateBatch {
         }
     }
 }
+
+#[cfg(test)]
+impl LibraryUpdateBridge {
+    pub(crate) fn for_test(library: LibraryClient, cx: &mut impl AppContext) -> Entity<Self> {
+        cx.new(|_| Self { library, downloads: HashMap::new(), download_watches: HashMap::new(), scanning: Some(false), importing: false, book_count: Some(0), _updates: Task::ready(()), _book_count_request: None })
+    }
+}

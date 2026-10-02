@@ -1,7 +1,7 @@
 #![cfg(all(feature = "book-extractors", not(target_arch = "wasm32")))]
 
 use std::io::{Cursor, Read};
-use thumbnail::{generate_thumbnail_versions_from_reader, generate_thumbnail_versions_with_pdf_renderer};
+use thumbnail::{generate_thumbnail_versions_with_pdf_renderer, render_pdf_cover};
 
 // A red image with page margins and, optionally, a blue vector overlay.
 fn pdf(overlay: bool) -> Vec<u8> {
@@ -60,7 +60,7 @@ fn renderer_errors_propagate() {
 #[test]
 fn pdfium_preserves_page_margins_and_vector_overlay() {
     for overlay in [true] {
-        let versions = generate_thumbnail_versions_from_reader("pdf", Cursor::new(pdf(overlay))).unwrap().unwrap();
+        let versions = generate_thumbnail_versions_with_pdf_renderer("pdf", Cursor::new(pdf(overlay)), render_pdf_cover).unwrap().unwrap();
         for (bytes, width) in [(&versions.browse, 300), (&versions.high_density, 600)] {
             let image = image::load_from_memory(bytes).unwrap().to_rgb8();
             assert_eq!(image.dimensions(), (width, width * 3 / 2));

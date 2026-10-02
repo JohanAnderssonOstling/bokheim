@@ -16,4 +16,4 @@ pub use client_platform_native::sqlite;
 pub use client_platform_web::sqlite;
 
 use client_runtime::BackendError;
-pub use transfer::{ClaimedTransferJob, HistoryPersistence, LibraryTransfers, MessagePackTransferHistory, TransferJob, TransferOperation, TransferOrigin, TransferProducer, TransferQueue, TransferState, TransferStatus};
+pub use transfer::{ClaimedTransferJob, HistoryPersistence, MessagePackTransferHistory, TransferJob, TransferOperation, TransferProducer, TransferQueue};

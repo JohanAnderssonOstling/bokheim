@@ -1,6 +1,8 @@
 //! Format-independent, seekable remote file access. Cached fragments are never
 //! installed as a downloaded asset or treated as a verified complete file.
 
+use std::fmt::Formatter;
+use crate::ContentHash;
 use crate::range_cache::RangeCache;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::time::Duration;
@@ -8,6 +10,7 @@ use std::time::Duration;
 const BLOCK_BYTES: usize = 64 * 1024;
 const CACHE_BLOCKS: usize = 64;
 const MAX_RANGE_BYTES: usize = 4 * BLOCK_BYTES;
+pub(crate) const MAX_BUNDLE_BYTES: usize = 4 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -21,13 +24,13 @@ pub use audiobook_stream::AudioStreamControl;
 /// The owning library resolves and authenticates byte reads.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct RemoteFile {
-    pub hash: crate::ContentHash,
+    pub hash: ContentHash,
     pub length: u64,
-    pub checksum: crate::ContentHash,
+    pub checksum: ContentHash,
 }
 
 impl std::fmt::Debug for RemoteFile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RemoteFile").field("length", &self.length).field("hash", &self.hash).finish_non_exhaustive()
     }
 }
@@ -39,7 +42,7 @@ pub enum RemoteFileError {
     Failed(String),
 }
 impl std::fmt::Display for RemoteFileError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unauthorized => f.write_str("unauthorized"),
             Self::Retryable(error) | Self::Failed(error) => f.write_str(error),
@@ -76,7 +79,7 @@ impl RemoteFileError {
 }
 
 /// Open with a bounded prefix read so discovering the length also fills the cache.
-pub async fn describe(url: reqwest::Url, access_token: String, hash: crate::ContentHash) -> Result<(RemoteFile, Vec<u8>), RemoteFileError> {
+pub async fn describe(url: reqwest::Url, access_token: String, hash: ContentHash) -> Result<(RemoteFile, Vec<u8>), RemoteFileError> {
     let request = async {
         let response = reqwest::Client::new().get(url).bearer_auth(&access_token).header(reqwest::header::RANGE, format!("bytes=0-{}", BLOCK_BYTES - 1)).send().await.map_err(RemoteFileError::transport)?;
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
@@ -90,7 +93,7 @@ pub async fn describe(url: reqwest::Url, access_token: String, hash: crate::Cont
         }
         // Book identity survives metadata edits; ETag identifies the
         // exact uploaded bytes. Pin that revision for every subsequent range.
-        let checksum = response.headers().get(reqwest::header::ETAG).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix('"')).and_then(|v| v.strip_suffix('"')).and_then(|v| v.parse::<crate::ContentHash>().ok());
+        let checksum = response.headers().get(reqwest::header::ETAG).and_then(|value| value.as_bytes().strip_prefix(b"\"")?.strip_suffix(b"\"")).and_then(|value| ContentHash::try_from(value).ok());
         let Some(checksum) = checksum else {
             drop(response.bytes_stream());
             return Err("invalid remote file revision".into());
@@ -256,38 +259,35 @@ where
     F: FnMut(u64, usize) -> crate::FetchFuture<'static, Result<Vec<u8>, String>> + Send + 'static,
 {
     validate_prefix(length, &initial_bytes)?;
-    let mut fetch = native_bundle_fetch(move |ranges| {
-        let (offset, length) = ranges[0];
-        fetch(offset, length)
-    })?;
+    let mut fetch = {
+        let (mut fetch,): (_,) = (move |ranges: Vec<(u64, usize)>| {
+            let (offset, length) = ranges[0];
+            fetch(offset, length)
+        },);
+        (|| -> Result<crate::BundleFetch, String> {
+            type Request = (Vec<(u64, usize)>, std::sync::mpsc::SyncSender<Result<Vec<u8>, String>>);
+            let (send, receive) = std::sync::mpsc::sync_channel::<Request>(1);
+            std::thread::Builder::new()
+                .name("remote-file".into())
+                .spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
+                    while let Ok((ranges, result)) = receive.recv() {
+                        let response = match &runtime {
+                            Ok(runtime) => runtime.block_on(async { tokio::time::timeout(REQUEST_TIMEOUT, fetch(ranges)).await.map_err(|_| "remote file read timed out".to_owned())? }),
+                            Err(error) => Err(error.to_string()),
+                        };
+                        let _ = result.send(response);
+                    }
+                })
+                .map_err(|e| e.to_string())?;
+            Ok(Box::new(move |ranges: Vec<(u64, usize)>| {
+                let (reply, result) = std::sync::mpsc::sync_channel(1);
+                send.send((ranges, reply)).map_err(|_| io::Error::other("remote file reader stopped"))?;
+                result.recv_timeout(REQUEST_TIMEOUT + Duration::from_secs(2)).map_err(io::Error::other)?.map_err(io::Error::other)
+            }))
+        })()
+    }?;
     Ok(Box::new(RangeReader::new(length, Box::new(move |offset, length| fetch(vec![(offset, length)]))).with_prefix(initial_bytes)))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn native_bundle_fetch<F>(mut fetch: F) -> Result<crate::BundleFetch, String>
-where
-    F: FnMut(Vec<(u64, usize)>) -> crate::FetchFuture<'static, Result<Vec<u8>, String>> + Send + 'static,
-{
-    type Request = (Vec<(u64, usize)>, std::sync::mpsc::SyncSender<Result<Vec<u8>, String>>);
-    let (send, receive) = std::sync::mpsc::sync_channel::<Request>(1);
-    std::thread::Builder::new()
-        .name("remote-file".into())
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
-            while let Ok((ranges, result)) = receive.recv() {
-                let response = match &runtime {
-                    Ok(runtime) => runtime.block_on(async { tokio::time::timeout(REQUEST_TIMEOUT, fetch(ranges)).await.map_err(|_| "remote file read timed out".to_owned())? }),
-                    Err(error) => Err(error.to_string()),
-                };
-                let _ = result.send(response);
-            }
-        })
-        .map_err(|e| e.to_string())?;
-    Ok(Box::new(move |ranges| {
-        let (reply, result) = std::sync::mpsc::sync_channel(1);
-        send.send((ranges, reply)).map_err(|_| io::Error::other("remote file reader stopped"))?;
-        result.recv_timeout(REQUEST_TIMEOUT + Duration::from_secs(2)).map_err(io::Error::other)?.map_err(io::Error::other)
-    }))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -298,36 +298,39 @@ pub use browser::{browser_bundle_fetch, browser_reader, BrowserReader};
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;
 
-pub async fn fetch_bundle(client: &reqwest::Client, mut url: reqwest::Url, source: &RemoteFile, token: &str, ranges: Vec<(u64, usize)>) -> Result<Vec<u8>, RemoteFileError> {
-    let request = sync_common::api::assets::BookRanges { checksum: source.checksum, ranges };
-    let length = request.byte_count(source.length).ok_or("invalid book bundle")?;
-    let single_url = url.clone();
-    url.set_path(&format!("{}/ranges", url.path()));
-    let body = sync_common::transport::encode(&request).map_err(|e| RemoteFileError::Failed(e.to_string()))?;
-    let response = client.post(url).bearer_auth(token).header(reqwest::header::CONTENT_TYPE, sync_common::transport::MEDIA_TYPE).body(body).send().await.map_err(RemoteFileError::transport)?;
-    // Older servers retain their bounded, revision-checked range transport.
-    if matches!(response.status(), reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED) {
-        drop(response.bytes_stream());
-        let mut bytes = Vec::with_capacity(length);
-        for (mut offset, mut count) in request.ranges {
-            while count > 0 {
-                let size = count.min(MAX_RANGE_BYTES);
-                bytes.extend(fetch_range(client, single_url.clone(), source, token, offset, size).await?);
-                offset += size as u64;
-                count -= size;
-            }
+/// Validate local bundle bounds before issuing any network requests.
+pub(crate) fn bundle_byte_count(ranges: &[(u64, usize)], length: u64) -> Option<usize> {
+    if ranges.is_empty() || ranges.len() > 128 {
+        return None;
+    }
+    let mut end = 0;
+    let mut total = 0usize;
+    for &(offset, count) in ranges {
+        if count == 0 || offset < end {
+            return None;
         }
-        return Ok(bytes);
+        end = offset.checked_add(count as u64)?;
+        total = total.checked_add(count)?;
+        if end > length || total > MAX_BUNDLE_BYTES {
+            return None;
+        }
     }
-    if response.status() != reqwest::StatusCode::OK {
-        let status = response.status();
-        drop(response.bytes_stream());
-        return Err(RemoteFileError::status(status));
+    Some(total)
+}
+
+/// Fetch bounded HTTP ranges concurrently, concatenating them in request order.
+pub async fn fetch_bundle(client: &reqwest::Client, url: reqwest::Url, source: &RemoteFile, token: &str, ranges: Vec<(u64, usize)>) -> Result<Vec<u8>, RemoteFileError> {
+    use futures_util::{StreamExt, TryStreamExt};
+    let length = bundle_byte_count(&ranges, source.length).ok_or("invalid book bundle")?;
+    let chunks = ranges.into_iter().flat_map(|(offset, count)| {
+        (0..count).step_by(MAX_RANGE_BYTES).map(move |start| (offset + start as u64, (count - start).min(MAX_RANGE_BYTES)))
+    });
+    let mut responses = futures_util::stream::iter(chunks.map(|(offset, count)| {
+        fetch_range(client, url.clone(), source, token, offset, count)
+    })).buffered(8);
+    let mut bytes = Vec::with_capacity(length);
+    while let Some(chunk) = responses.try_next().await? {
+        bytes.extend(chunk);
     }
-    let etag = format!("\"{}\"", source.checksum);
-    if response.headers().get(reqwest::header::ETAG).and_then(|v| v.to_str().ok()) != Some(etag.as_str()) {
-        drop(response.bytes_stream());
-        return Err("book bundle revision changed".into());
-    }
-    read_bounded_response(response, length).await
+    Ok(bytes)
 }

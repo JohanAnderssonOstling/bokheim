@@ -1,5 +1,7 @@
 //! PDFium is owned by one dedicated worker. Only Rust values cross its boundary;
 //! PDFium handles and JavaScript bindings never leave that worker.
+
+use std::task::Poll;
 use super::*;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -117,10 +119,10 @@ async fn request<T: Send + 'static>(work: impl FnOnce() -> PdfResult<T> + Send +
     std::future::poll_fn(|cx| {
         let mut state = state.borrow_mut();
         if let Some(result) = state.0.take() {
-            std::task::Poll::Ready(result)
+            Poll::Ready(result)
         } else {
             state.1 = Some(cx.waker().clone());
-            std::task::Poll::Pending
+            Poll::Pending
         }
     })
     .await

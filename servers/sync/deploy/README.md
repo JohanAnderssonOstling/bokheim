@@ -135,9 +135,6 @@ sudo chmod 0600 /etc/bokheim/database-url
 sudo chown root:root /etc/bokheim/database-url
 ```
 
-The database credential does not create a built-in administrator account or
-contain an administrator password.
-
 Create a separate persistent 32-byte key for account PIN, password-reset, and
 mail-outbox protection. Do not replace this key while pending registrations,
 password resets, or mail rows exist:
@@ -151,13 +148,8 @@ sudo chown root:root /etc/bokheim/account-token-key
 The service receives it through the read-only `account_token_key` systemd
 credential; it is not stored in PostgreSQL.
 
-After the non-destructive sync deployer has been provisioned, configure the
-administrator password and activate a staged sync release without putting the
-password in shell history:
-
-```sh
-servers/sync/deploy/configure-admin-and-deploy-sync.sh
-```
+After the non-destructive sync deployer has been provisioned, activate a
+staged sync release with `sudo /usr/local/sbin/bokheim-deploy-sync`.
 
 The built-in defaults use 32 maximum and 2 warm PostgreSQL connections,
 16 staged books/4 GiB globally, 4 staged books/2 GiB per account, and at most
@@ -206,34 +198,6 @@ Change `BOKHEIM_TEST_USER_EMAIL` in the unit to use a different identifier.
 Changing the credential rotates the password at the next
 restart and revokes that account's existing sessions; an unchanged password
 preserves sessions.
-
-## Administrator dashboard
-
-The checked-in service configures a separate `admin@bokheim.se` account for
-the read-only dashboard at `https://app.bokheim.se/admin/`. Its static source
-lives in `servers/admin-web` and is not compiled into the mobile/reader app. Install a strong,
-unique password in its own credential before deployment:
-
-```sh
-sudo install -o root -g root -m 0600 admin-password /etc/bokheim/admin-password
-```
-
-Change `BOKHEIM_ADMIN_EMAIL` in the unit if another address is required. The
-administrator password must satisfy the public account password policy. On
-startup, an unchanged password preserves sessions; changing the credential
-rotates the password and revokes existing administrator sessions. Do not reuse
-the test-account, database, Resend, or account-token credentials.
-
-Dashboard traffic history is aggregated by minute and retained for 90 days.
-A separate incident-response log retains exact trusted client IP addresses and
-bounded request metadata for seven days. It contains no raw paths, account
-identifiers, query strings, request headers, or bodies. The first read of each dashboard
-resource by an administrator in an hour is append-audited, and the audit table
-rejects updates and deletion.
-
-Unique-account figures count successful authenticated token use and are shown
-for 24-hour, 7-day, 30-day, and all-time windows. Activity updates are batched
-and stored as one row per account rather than one row per request.
 
 ## Install service configuration
 
@@ -352,3 +316,12 @@ drops and recreates the `bokheim` database on every deploy, so there is no
 schema upgrade history and nothing to back up -- redeploying is the recovery
 procedure. Do not point this at a deployment expected to hold data that must
 survive a redeploy without a design change to persist it first.
+
+### Existing production baseline
+
+`sync-server upgrade` transactionally adopts the deployed v14 baseline with
+cloud-storage support. It retains user/library/blob/sync data, updates the two
+LWW triggers to permit revision-only repair, and records schema version 1.
+The old migration history is retained. Repeated upgrades are no-ops; older
+unsupported baselines fail without partial changes. Server startup still only
+verifies the schema. Never run `migrate` against an existing production database.

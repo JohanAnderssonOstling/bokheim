@@ -1,5 +1,7 @@
 //! Complete Windows application packages. Authenticate the ZIP against the pinned
 //! manifest before calling these functions; extraction never changes installed files.
+
+use crate::native_files::sync_dir;
 use std::{collections::BTreeMap, fs::{self, File, OpenOptions}, io::{Read, Write}, path::{Path, PathBuf}};
 
 #[derive(Clone, Debug)]
@@ -93,10 +95,10 @@ pub fn unpack(source: &Path, destination: &Path, available_bytes: u64) -> Result
     // Flush nested directory entries before the host writes its activation journal.
     for path in &package.files {
         for parent in destination.join(path).ancestors().skip(1) {
-            if parent.starts_with(destination) { crate::native_files::sync_dir(parent)?; }
+            if parent.starts_with(destination) { sync_dir(parent)?; }
         }
     }
-    crate::native_files::sync_dir(destination.parent().ok_or("package directory has no parent")?)?;
+    sync_dir(destination.parent().ok_or("package directory has no parent")?)?;
     Ok(package)
 }
 

@@ -19,7 +19,6 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 futures-util = "0.3"
 
 library-model = { path = "../../../library-model" }
-library-replica = { path = "../library-replica" }
 log = "0.4"
 rmp-serde = "1.3"
 serde = { version = "1", features = ["derive"] }

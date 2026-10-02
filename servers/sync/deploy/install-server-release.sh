@@ -25,7 +25,7 @@ if [[ ! -r /home/johan/data/openlibrary/current.sqlite ]]; then
     exit 2
 fi
 
-for credential in database-url account-token-key admin-password resend-api-key test-user-password; do
+for credential in database-url account-token-key resend-api-key test-user-password; do
     if [[ ! -s /etc/bokheim/${credential} ]]; then
         echo "missing credential: /etc/bokheim/${credential}" >&2
         exit 2
@@ -112,9 +112,9 @@ fi
 # Check the public route as well as the internal health endpoint. No provider call.
 audiobook_status=$(curl --proto '=https' --tlsv1.2 --silent --show-error --max-time 15 \
     --output /dev/null --write-out '%{http_code}' -H 'Content-Type: application/json' \
-    --data '{}' "https://${BOKHEIM_METADATA_DOMAIN:-meta.bokheim.se}/v2/audiobooks/audible")
+    --data '{}' "https://${BOKHEIM_METADATA_DOMAIN:-meta.bokheim.se}/v3/books")
 if [[ ${audiobook_status} != 422 ]]; then
-    echo "public audiobook endpoint verification failed: expected 422, got ${audiobook_status}" >&2
+    echo "public books endpoint verification failed: expected 422, got ${audiobook_status}" >&2
     exit 1
 fi
 
@@ -123,9 +123,9 @@ preflight=$(curl --proto '=https' --tlsv1.2 --silent --show-error --max-time 15 
     --dump-header - --output /dev/null -X OPTIONS \
     -H 'Origin: https://app.bokheim.se' -H 'Access-Control-Request-Method: POST' \
     -H 'Access-Control-Request-Headers: content-type' \
-    "https://${BOKHEIM_METADATA_DOMAIN:-meta.bokheim.se}/v2/audiobooks/audible")
+    "https://${BOKHEIM_METADATA_DOMAIN:-meta.bokheim.se}/v3/books")
 if ! grep -Eqi '^access-control-allow-origin:[[:space:]]*\*' <<<"${preflight}"; then
-    echo "public audiobook endpoint is missing browser CORS support" >&2
+    echo "public books endpoint is missing browser CORS support" >&2
     exit 1
 fi
 

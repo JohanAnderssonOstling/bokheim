@@ -1,5 +1,8 @@
 //! Local import commits: inspection projections, placements, observations.
 
+use crate::placements::directory_relative_path;
+use crate::sync::apply::registers::{canonical_body, record_local};
+use crate::timing::PhaseTimer;
 use crate::shared_sql::SharedSql;
 use crate::sync::{normalized_description, toc_entry_count, unix_millis};
 use crate::{Database, DatabaseError};
@@ -13,8 +16,8 @@ use include_sqlite_sql::include_sql;
 // checks arrive as plain data. This method verifies the destination, records
 // the inspection projection, the placement, and the book observation
 // atomically. Shared write helpers use the caller-owned transaction.
-use crate::books::audiobook::AudiobookSql;
 use crate::books::audiobook::navigation_from_chapters;
+use crate::books::audiobook::AudiobookSql;
 use crate::sync::SyncApplySql;
 
 include_sql!("src/import/sql/import_commit.sql");
@@ -45,14 +48,12 @@ pub struct ImportCommit {
     pub restore_paths: Vec<String>,
 }
 
-/// Chapter-derived table of contents, precomputed regardless of whether the
-/// commit ends up preserving an existing database-only chapter plan instead.
+/// Chapter-derived table of contents and the recording evidence sent to the
+/// metadata server.
 pub(crate) struct PreparedAudiobookInsert {
     duration_ms: i64,
     tracks_json: Option<String>,
-    request: metadata_contract::audible::LookupRequest,
     request_json: String,
-    chapters_entry_count: i64,
     chapters_toc_json: String,
 }
 
@@ -70,37 +71,9 @@ pub(crate) struct PreparedInspection {
     pdf_bytes: Option<Vec<u8>>,
 }
 
-pub(crate) fn prepare_inspection(connection: &rusqlite::Connection, hash: &ContentHash, inspection: &book_metadata::InspectedBook, checksum: &ContentHash, format: book_model::BookFormat) -> Result<PreparedInspection, DatabaseError> {
-    let mut timing = crate::timing::PhaseTimer::new("prepare_inspection");
+pub(crate) fn prepare_inspection(inspection: &book_metadata::InspectedBook, checksum: &ContentHash, format: book_model::BookFormat) -> Result<PreparedInspection, DatabaseError> {
+    let mut timing = PhaseTimer::new("prepare_inspection");
     let mut metadata = inspection.metadata.clone();
-    // A content hash identifies unchanged bytes. A new inspector version must
-    // not erase identifiers or classifications learned after the prior scan.
-    connection.shared_book_metadata(hash.as_str(), |row| {
-        let raw: Vec<u8> = row.get(0)?;
-        let previous = crate::sync::decode_book_metadata(&raw).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        for identifier in previous.identifiers {
-            if !metadata.book.identifiers.contains(&identifier) {
-                metadata.book.identifiers.push(identifier);
-            }
-        }
-        for subject in previous.subjects {
-            if (subject.source().starts_with("metadata:") || subject.source().starts_with("openlibrary:")) && !metadata.book.subjects.contains(&subject) {
-                metadata.book.subjects.push(subject);
-            }
-        }
-        Ok(())
-    })?;
-    // Recover classifications written by older versions only to projections.
-    connection.shared_book_subjects(hash.as_str(), |row| {
-        let subject = book_model::BookSubject::new(None, row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get(2)?, row.get(3)?).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        if !(subject.source().starts_with("metadata:") || subject.source().starts_with("openlibrary:")) {
-            return Ok(());
-        }
-        if !metadata.book.subjects.iter().any(|existing| existing.name() == subject.name() && existing.source() == subject.source() && existing.authority() == subject.authority() && existing.code() == subject.code()) {
-            metadata.book.subjects.push(subject);
-        }
-        Ok(())
-    })?;
     book_enrichment::title_identity::normalize(&mut metadata).map_err(|error| DatabaseError::message(format!("book title is not readable: {error}")))?;
     let description = normalized_description(&metadata.description);
     timing.mark("normalize_metadata_and_description");
@@ -120,12 +93,11 @@ pub(crate) fn prepare_inspection(connection: &rusqlite::Connection, hash: &Conte
         .map(|audiobook| -> Result<PreparedAudiobookInsert, DatabaseError> {
             let duration_ms = i64::try_from(audiobook.duration_ms).map_err(|_| DatabaseError::message("audiobook duration exceeds SQLite integer range"))?;
             let entries = navigation_from_chapters(&audiobook.chapters);
-            let chapters_entry_count = i64::try_from(toc_entry_count(&entries)).map_err(|_| DatabaseError::message("table of contents entry count exceeds SQLite integer range"))?;
+            let _ = i64::try_from(toc_entry_count(&entries)).map_err(|_| DatabaseError::message("table of contents entry count exceeds SQLite integer range"))?;
             let chapters_toc_json = serde_json::to_string(&entries).map_err(DatabaseError::operation)?;
             let tracks_json = (!audiobook.tracks.is_empty()).then(|| serde_json::to_string(&audiobook.tracks)).transpose().map_err(DatabaseError::operation)?;
-            let request = audiobook.audible_lookup_request();
-            let request_json = serde_json::to_string(&request).map_err(DatabaseError::operation)?;
-            Ok(PreparedAudiobookInsert { duration_ms, tracks_json, request, request_json, chapters_entry_count, chapters_toc_json })
+            let request_json = serde_json::to_string(&audiobook.audible_lookup_request()).map_err(DatabaseError::operation)?;
+            Ok(PreparedAudiobookInsert { duration_ms, tracks_json, request_json, chapters_toc_json })
         })
         .transpose()?;
     let pdf_bytes = inspection
@@ -139,7 +111,7 @@ pub(crate) fn prepare_inspection(connection: &rusqlite::Connection, hash: &Conte
         })
         .transpose()?;
     timing.mark("encode_reader_metadata");
-    let projection = crate::sync::apply::project_book(&metadata.book, Vec::new())?;
+    let projection = crate::sync::apply::project_book(&metadata.book)?;
     timing.mark("project_book");
     Ok(PreparedInspection { metadata, projection, description, toc, audiobook, pdf_bytes })
 }
@@ -159,52 +131,46 @@ impl Database {
     /// Committing this transaction is the import's success point. Callers
     /// resolve all fallible filesystem data before it.
     pub fn commit_import(&self, import: ImportCommit) -> Result<(), DatabaseError> {
-        self.commit_imports(vec![import])
-    }
+        {
+            let imports: Vec<ImportCommit> = vec![import];
 
-    /// Same as [`Database::commit_import`], for many books in one shared
-    /// transaction (a scan pass discovering hundreds of files at once should
-    /// not open hundreds of writer transactions). Every member shares one
-    /// `scan_id`, matching the scanner's own one-generation-per-pass marker;
-    /// a member's failure rolls back the whole batch, the same all-or-nothing
-    /// semantics a filesystem scan apply already has.
-    pub fn commit_imports(&self, imports: Vec<ImportCommit>) -> Result<(), DatabaseError> {
-        if imports.is_empty() {
-            return Ok(());
-        }
-        // Pure CPU work (normalization, TOC/chapter JSON, PDF validation)
-        // runs before reserving the writer. Destination liveness is checked
-        // inside the transaction: another connection may delete it meanwhile.
-        let mut prepared_imports = Vec::with_capacity(imports.len());
-        for import in imports {
-            let prepared = import.inspection.as_ref().map(|inspection| prepare_inspection(&self.connection, &import.content_hash, inspection, &import.checksum, import.format)).transpose()?;
-            prepared_imports.push((import, prepared));
-        }
-        self.with_write_transaction(|tx| {
-            tx.pragma_update(None, "defer_foreign_keys", "ON").map_err(DatabaseError::operation)?;
-            let mut current: Option<String> = None;
-            tx.shared_scanner_sequence(|row| {
-                current = row.get(0)?;
-                Ok(())
-            })
-            .map_err(DatabaseError::operation)?;
-            let current = current.unwrap_or_default().parse::<i64>().map_err(|error| DatabaseError::message(format!("scan sequence is not readable: {error}")))?;
-            let scan_id = current.checked_add(1).ok_or_else(|| DatabaseError::message("scan sequence overflow"))?;
-            tx.scan_seq_update(scan_id).map_err(DatabaseError::operation)?;
-            for (import, prepared) in prepared_imports {
-                if crate::placements::directory_relative_path(tx, &import.parent_id)?.is_none() {
-                    return Err(DatabaseError::message(format!("library folder does not exist: {}", import.parent_id)));
-                }
-                commit_one(tx, &self.metadata_batch_flag, scan_id, import, prepared)?;
+            if imports.is_empty() {
+                return Ok(());
             }
-            Ok(crate::transactions::WriteOutcome::Commit(()))
-        })
+            // Pure CPU work (normalization, TOC/chapter JSON, PDF validation)
+            // runs before reserving the writer. Destination liveness is checked
+            // inside the transaction: another connection may delete it meanwhile.
+            let mut prepared_imports = Vec::with_capacity(imports.len());
+            for import in imports {
+                let prepared = import.inspection.as_ref().map(|inspection| prepare_inspection(inspection, &import.checksum, import.format)).transpose()?;
+                prepared_imports.push((import, prepared));
+            }
+            self.with_write_transaction(|tx| {
+                tx.pragma_update(None, "defer_foreign_keys", "ON").map_err(DatabaseError::operation)?;
+                let mut current: Option<String> = None;
+                tx.shared_scanner_sequence(|row| {
+                    current = row.get(0)?;
+                    Ok(())
+                })
+                .map_err(DatabaseError::operation)?;
+                let current = current.unwrap_or_default().parse::<i64>().map_err(|error| DatabaseError::message(format!("scan sequence is not readable: {error}")))?;
+                let scan_id = current.checked_add(1).ok_or_else(|| DatabaseError::message("scan sequence overflow"))?;
+                tx.scan_seq_update(scan_id).map_err(DatabaseError::operation)?;
+                for (import, prepared) in prepared_imports {
+                    if directory_relative_path(tx, &import.parent_id)?.is_none() {
+                        return Err(DatabaseError::message(format!("library folder does not exist: {}", import.parent_id)));
+                    }
+                    commit_one(tx, import, prepared)?;
+                }
+                Ok(crate::transactions::WriteOutcome::Commit(()))
+            })
+        }
     }
 
     /// Placement rows for one book with their remembered materialized paths.
     /// The orchestrator filters these against the filesystem (without holding
     /// the writer) and hands the restore set back to the commit.
-    pub fn import_restore_candidates(&self, hash: &ContentHash) -> Result<Vec<(String, Option<String>)>, DatabaseError> {
+    pub fn import_restore_candidates(&self, hash: &ContentHash) -> Result<Vec<(library_model::RelativeBookPath, Option<String>)>, DatabaseError> {
         let mut rows = Vec::new();
         self.connection
             .restore_candidates_select(hash.as_str(), |row| {
@@ -227,11 +193,11 @@ impl Database {
 /// caller owns and commits. Acquiring the writer before this runs means a
 /// directory can vanish between [`Database::commit_imports`]'s pre-check and
 /// here, so the destination is re-validated.
-pub(crate) fn commit_one(tx: &rusqlite::Transaction<'_>, batch_flag: &std::sync::atomic::AtomicBool, scan_id: i64, import: ImportCommit, prepared: Option<PreparedInspection>) -> Result<(), DatabaseError> {
-    let mut timing = crate::timing::PhaseTimer::new("import_book");
+pub(crate) fn commit_one(tx: &rusqlite::Transaction<'_>, import: ImportCommit, prepared: Option<PreparedInspection>) -> Result<(), DatabaseError> {
+    let mut timing = PhaseTimer::new("import_book");
     let ImportCommit { parent_id, file_name: _file_name, format, content_hash, checksum, size_bytes, inspection_version, inspection: _inspection, published, request_thumbnail, restore_paths } = import;
     let hash = content_hash.as_str();
-    if crate::placements::directory_relative_path(tx, &parent_id)?.is_none() {
+    if directory_relative_path(tx, &parent_id)?.is_none() {
         return Err(DatabaseError::message(format!("library folder does not exist: {parent_id}")));
     }
     if prepared.is_none() {
@@ -252,53 +218,68 @@ pub(crate) fn commit_one(tx: &rusqlite::Transaction<'_>, batch_flag: &std::sync:
         // title identity, resolve contributor and publisher agents with
         // provisional-name reuse, then replace every projection row.
         let PreparedInspection { metadata, projection, description, toc, audiobook, pdf_bytes } = prepared;
-        let stored_contributors = crate::contributors::resolve_import_credits(tx, hash, &metadata.contributors)?;
-        let prepared_publishers = crate::contributors::resolve_publishers(tx, &metadata.book.publishers, crate::contributors::IdentityPolicy::ReuseProvisional)?;
-        let mut prepared_book = metadata.book.clone();
-        prepared_book.publishers = prepared_publishers;
-        prepared_book.infer_embedded_subject_isbns().map_err(DatabaseError::operation)?;
-        let encoded = sync_common::wire::encode(&prepared_book).map_err(DatabaseError::operation)?;
-        let added_at = unix_millis()?;
-        timing.mark("resolve_identities_and_encode");
-        // The local relationship rows reference SQLite's integer key, so establish
-        // the content-hash boundary row before projecting contributors into it.
+        // The file's facts become local register values; projection writes
+        // the tables when the transaction commits.
         tx.prepare_cached(include_str!("sql/upsert_scanned_book.sql"))?.execute(rusqlite::named_params! {
-            ":content_hash": hash, ":title": &metadata.title, ":subtitle": metadata.subtitle.as_deref(),
-            ":search_title": crate::browse::text::search_title(hash, Some(&metadata.title), metadata.subtitle.as_deref()),
-            ":book_metadata": &encoded, ":added_at": added_at, ":format": format as i64,
+            ":content_hash": hash,
         })?;
-        timing.mark("write_book_row");
-        tx.set_description(hash, &description).map_err(DatabaseError::operation)?;
-        tx.shared_enrichment_mark_description_scanned(hash).map_err(DatabaseError::operation)?;
-        timing.mark("write_description");
-        crate::transactions::with_metadata_batch(tx, batch_flag, || crate::contributors::write_credits(tx, hash, &stored_contributors))?;
-        timing.mark("contributors_and_metadata_payload");
-        crate::sync::apply::write_book_projection(tx, hash, &projection)?;
-        timing.mark("write_metadata_projection");
-        if let Some(audiobook) = audiobook {
-            tx.audiobook_upsert_metadata(hash, audiobook.duration_ms).map_err(DatabaseError::operation)?;
-            if let Some(tracks_json) = &audiobook.tracks_json {
-                tx.audiobook_upsert_tracks(hash, tracks_json).map_err(DatabaseError::operation)?;
+        let added_at: i64 = tx.query_row("SELECT COALESCE(added_at,?2) FROM book WHERE content_hash=?1", rusqlite::params![hash, unix_millis()?], |row| row.get(0))?;
+        record_local(tx, library_replica::LibraryStateEntry::BookLifecycle { content_hash, value: library_replica::BookLifecycleState::Present })?;
+        record_local(tx, library_replica::LibraryStateEntry::BookFacts { content_hash, value: library_replica::BookFacts { added_at: u64::try_from(added_at).map_err(DatabaseError::operation)?, format } })?;
+        let value = {
+            use crate::metadata::*;
+            let title: &str = &metadata.title;
+            let subtitle: Option<&str> = metadata.subtitle.as_deref();
+            let contributors: &[Contributor] = &metadata.contributors;
+            let mut book: BookMetadata = projection.metadata;
+
+            let previous = match canonical_body(tx, "metadata", hash, "")? {
+                Some((bytes, _)) => match sync_common::wire::decode::<LibraryStateEntry>(&bytes, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)? {
+                    LibraryStateEntry::Metadata { value, .. } => value.contributors,
+                    _ => Vec::new(),
+                },
+                None => Vec::new(),
+            };
+            let mut credits = Vec::with_capacity(contributors.len());
+            for credit in contributors {
+                let Some(name) = parse_author_name_opt(credit.name())? else {
+                    continue;
+                };
+                let kept = previous.get(credits.len()).filter(|old| parse_author_name_opt(old.name()).ok().flatten().is_some_and(|old| old.match_key() == name.match_key()));
+                let id = match kept {
+                    Some(old) => old.agent_id(),
+                    None => crate::contributors::resolve_identity(tx, credit.agent_id(), &name, IdentityPolicy::ReuseProvisional)?.1,
+                };
+                credits.push(Contributor::with_id(id, credit.name(), credit.role_code()).map_err(|error| DatabaseError::message(format!("contributor credit is not writable: {error}")))?);
             }
-            // Preserve a database-only chapter plan while the imported evidence is unchanged.
-            let mut applied_request: Option<String> = None;
-            tx.audiobook_applied_request_select(hash, |row| {
-                applied_request = row.get(0)?;
-                Ok(())
-            })
-            .map_err(DatabaseError::operation)?;
-            let preserve_chapters = applied_request.and_then(|json| serde_json::from_str::<metadata_contract::audible::LookupRequest>(&json).ok()).is_some_and(|applied| applied == audiobook.request);
-            if !preserve_chapters {
-                tx.shared_audiobook_upsert_toc(hash, audiobook.chapters_entry_count, &audiobook.chapters_toc_json).map_err(DatabaseError::operation)?;
-            }
-            let now = unix_millis()?.saturating_div(1000);
-            tx.audible_discover_insert(hash, metadata_contract::audible::POLICY_VERSION, &audiobook.request_json, now).map_err(DatabaseError::operation)?;
+            book.publishers = crate::contributors::resolve_publishers(tx, &book.publishers, IdentityPolicy::ReuseProvisional)?;
+            BookDetails { title: title.to_owned(), subtitle: subtitle.map(str::to_owned), contributors: credits, book }
+        };
+        record_local(tx, library_replica::LibraryStateEntry::Metadata { content_hash, value })?;
+        timing.mark("write_metadata");
+        // A book without a description gets no register unless it had one.
+        if !description.is_empty() || canonical_body(tx, "description", hash, "")?.is_some() {
+            record_local(tx, library_replica::LibraryStateEntry::Description { content_hash, value: description })?;
         }
-        if let Some((entry_count, toc_json)) = toc {
-            tx.shared_audiobook_upsert_toc(hash, entry_count, &toc_json).map_err(DatabaseError::operation)?;
+        timing.mark("write_description");
+        let mut navigation = None;
+        if let Some(audiobook) = audiobook {
+            navigation = Some(book_model::BookTocDocument {
+                entries: serde_json::from_str(&audiobook.chapters_toc_json).map_err(DatabaseError::operation)?,
+                duration_ms: Some(u64::try_from(audiobook.duration_ms).map_err(DatabaseError::operation)?),
+                tracks: audiobook.tracks_json.as_deref().map(serde_json::from_str).transpose().map_err(DatabaseError::operation)?,
+            });
+            tx.audiobook_record_recording(hash, &audiobook.request_json).map_err(DatabaseError::operation)?;
+        }
+        if let Some((_entry_count, toc_json)) = toc {
+            navigation = Some(book_model::BookTocDocument { entries: serde_json::from_str(&toc_json).map_err(DatabaseError::operation)?, duration_ms: None, tracks: None });
+        }
+        if let Some(value) = navigation {
+            record_local(tx, library_replica::LibraryStateEntry::BookToc { content_hash, value })?;
         }
         if let Some(pdf_bytes) = pdf_bytes {
-            tx.pdf_reader_metadata_upsert(hash, checksum.as_str(), &pdf_bytes).map_err(DatabaseError::operation)?;
+            let value = serde_json::from_slice(&pdf_bytes).map_err(DatabaseError::operation)?;
+            record_local(tx, library_replica::LibraryStateEntry::PdfReaderMetadata { content_hash, value })?;
         }
         tx.record_import_inspection(hash, format as i64, inspection_version).map_err(DatabaseError::operation)?;
         timing.mark("reader_metadata_and_inspection");
@@ -308,42 +289,30 @@ pub(crate) fn commit_one(tx: &rusqlite::Transaction<'_>, batch_flag: &std::sync:
     // imports have no placement filesystem, so they skip this recheck.
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let mut conflict: Option<bool> = None;
-        tx.publish_conflict_select(&parent_id.to_string(), &library_replica::portable_name_key(&published.name), hash, |row| {
-            conflict = row.get(0)?;
-            Ok(())
-        })
-        .map_err(DatabaseError::operation)?;
-        let conflict = conflict.ok_or(rusqlite::Error::QueryReturnedNoRows).map_err(DatabaseError::operation)?;
+        let conflict: bool = tx.shared_book_name_conflict(&parent_id.to_string(), &library_replica::portable_name_key(&published.name), hash, |row| row.get(0)).map_err(DatabaseError::operation)?;
         if conflict {
             return Err(DatabaseError::message("destination filename changed during import; retry the import"));
         }
     }
     timing.mark("check_placement_collision");
-    tx.prepare_cached(include_str!("sql/insert_book_dir.sql"))?.execute(rusqlite::named_params! {
-        ":dir_id": parent_id.to_string(), ":content_hash": hash, ":file_name": &published.name,
-        ":local_hash": "", ":last_scan": scan_id, ":is_downloaded": 1,
-    })?;
+    crate::projection::place_book(tx, &parent_id, &ContentHash::new(hash), &published.name)?;
+    // File recording and later imports in this batch read the live placement.
+    crate::projection::project_dirty(tx)?;
     timing.mark("write_placement");
-    #[cfg(not(target_arch = "wasm32"))]
-    tx.shared_scanner_publish_projection(hash, &parent_id.to_string(), &published.relative_path).map_err(DatabaseError::operation)?;
-    if published.published {
-        if let Some(fingerprint) = published.fingerprint.as_deref() {
-            tx.publish_update_2(&parent_id.to_string(), hash, fingerprint).map_err(DatabaseError::operation)?;
-        }
-    }
+    let revision = if published.published {
+        crate::native::observations::Revision::Local { checksum: &checksum, size: i64::try_from(size_bytes).map_err(|_| DatabaseError::message("book size exceeds SQLite range"))? }
+    } else {
+        crate::native::observations::Revision::Retained
+    };
+    crate::native::observations::record_file(tx, &parent_id.to_string(), &ContentHash::new(hash), &published.relative_path, published.fingerprint.as_deref(), revision)?;
     timing.mark("record_path_and_fingerprint");
     if request_thumbnail {
         tx.shared_request_thumbnail(hash).map_err(DatabaseError::operation)?;
     }
     timing.mark("queue_thumbnail");
-    if published.published {
-        let size = i64::try_from(size_bytes).map_err(|_| DatabaseError::message("book size exceeds SQLite range"))?;
-        crate::assets::record_local_version(tx, &parent_id.to_string(), &ContentHash::new(hash), &checksum, size)?;
-    }
     timing.mark("version_and_upload_work");
     for path in &restore_paths {
-        tx.shared_placements_queue_file_work("restore", hash, path).map_err(DatabaseError::operation)?;
+        tx.shared_placements_queue_file_work("materialize", hash, path).map_err(DatabaseError::operation)?;
     }
     timing.mark("restore_work");
     Ok(())
@@ -363,11 +332,13 @@ mod commit_tests {
         book_metadata::InspectedBook {
             pdf: None,
             metadata: book_model::BookRecord {
-                title: title.to_owned(),
-                subtitle: None,
-                contributors: vec![book_model::Contributor::new(author, book_model::MarcRelatorCode(*b"aut")).unwrap()],
+                metadata: book_model::BookDetails {
+                    title: title.to_owned(),
+                    subtitle: None,
+                    contributors: vec![book_model::Contributor::new(author, book_model::MarcRelatorCode(*b"aut")).unwrap()],
+                    book: book_model::BookMetadata::default(),
+                },
                 description: "A synopsis.".to_owned(),
-                book: book_model::BookMetadata::default(),
             },
             audiobook: None,
             toc: vec![book_model::BookTocEntry { title: "Chapter 1".to_owned(), target: "ch1".to_owned(), children: Vec::new() }],
@@ -396,10 +367,165 @@ mod commit_tests {
                 restore_paths: vec!["Fiction/book.epub".to_owned()],
             })
             .expect("commit import");
-        let detail = database.browse_book_detail(hash).expect("read detail");
+        let detail = ({
+            use crate::browse::rows::{invalid_integer_column, invalid_text_column};
+            use crate::browse::DetailSql;
+            use crate::{entry_title, rusqlite, Database, DatabaseError, TocSql};
+            use book_model::{AuthorId, AUTHOR_MARC_RELATOR_CODE};
+            use library_model::{BookCardRow, BookDetail, BookDetailAuthor};
+            use sync_common::ContentHash;
+            struct SourceLocation {
+                source_directory_id: Option<String>,
+                path: Vec<library_model::BrowsePathSegment>,
+            }
+            let database: &Database = &database;
+            let content_hash = hash;
+
+            database.with_browse_snapshot(|| {
+                let (book, audiobook_chapter_count) = {
+                    let content_hash: &ContentHash = &content_hash;
+                    let mut book = None;
+                    database.connection.book_detail_book(content_hash.as_str(), |row| {
+                        let chapter_count: Option<i64> = row.get(1)?;
+                        let chapter_count = chapter_count.map(usize::try_from).transpose().map_err(|error| invalid_integer_column(1, error.to_string()))?;
+                        book = Some((row.get::<_, i64>(0)?, chapter_count));
+                        Ok(())
+                    })?;
+                    let (id, chapter_count) = book.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+                    let card = database.load_cards(&[id])?.pop().ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+                    (card, chapter_count)
+                };
+                let description = {
+                    let content_hash: &ContentHash = &content_hash;
+                    let mut description = String::new();
+                    database.connection.book_detail_description(content_hash.as_str(), |row| {
+                        description = row.get(0)?;
+                        Ok(())
+                    })?;
+                    description
+                };
+                let SourceLocation { source_directory_id, path } = {
+                    let content_hash: &ContentHash = &content_hash;
+                    let mut source_directory_id: Option<String> = None;
+                    database.connection.book_detail_directory(content_hash.as_str(), |row| {
+                        source_directory_id = row.get(0)?;
+                        Ok(())
+                    })?;
+
+                    let path: Vec<library_model::BrowsePathSegment> = source_directory_id
+                        .as_deref()
+                        .map(|directory| {
+                            let directory = sync_common::DirId::parse_str(directory).map_err(DatabaseError::operation)?;
+                            database.dir_path_components(&directory)
+                        })
+                        .transpose()?
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|component| library_model::BrowsePathSegment { id: library_model::BrowseLocation::Folder(component.id), name: component.name.clone() })
+                        .collect();
+
+                    SourceLocation { source_directory_id, path }
+                };
+                let authors = {
+                    let content_hash: &ContentHash = &content_hash;
+                    let mut authors = Vec::new();
+                    database.connection.book_detail_authors(content_hash.as_str(), AUTHOR_MARC_RELATOR_CODE.0.to_vec(), |row| {
+                        let id: String = row.get(0)?;
+                        authors.push(BookDetailAuthor { id: AuthorId::parse_str(&id).map_err(|error| invalid_text_column(0, error.to_string()))?, name: row.get(1)? });
+                        Ok(())
+                    })?;
+
+                    authors
+                };
+                let credits = {
+                    let content_hash: &ContentHash = &content_hash;
+                    // Only narrator and translator: a reader picks an audiobook by
+                    // its narrator and an edition by its translator, and nothing else in the
+                    // contributor list answers a question a reader is asking.
+                    let mut credits = Vec::new();
+                    let narrator = book_model::NARRATOR_MARC_RELATOR_CODE.0.to_vec();
+                    let translator = book_model::TRANSLATOR_MARC_RELATOR_CODE.0.to_vec();
+                    database.connection.book_detail_credits(content_hash.as_str(), narrator, translator, |row| {
+                        let id: String = row.get(0)?;
+                        let role: Vec<u8> = row.get(2)?;
+                        credits.push(library_model::BookDetailCredit {
+                            id: AuthorId::parse_str(&id).map_err(|error| invalid_text_column(0, error.to_string()))?,
+                            name: row.get(1)?,
+                            role: String::from_utf8(role).map_err(|error| invalid_text_column(2, error.to_string()))?,
+                        });
+                        Ok(())
+                    })?;
+
+                    credits
+                };
+                let toc = {
+                    let content_hash: &ContentHash = &content_hash;
+                    let mut stored: Option<String> = None;
+                    database.connection.book_toc_select(content_hash.as_str(), |row| {
+                        stored = row.get(0)?;
+                        Ok(())
+                    })?;
+                    let mut entries = stored
+                        .map(|json| serde_json::from_str::<Vec<library_model::BookTocEntry>>(&json).map_err(|error| DatabaseError::message(format!("stored table of contents is not readable: {error}"))))
+                        .transpose()?
+                        .unwrap_or_default();
+                    for (index, entry) in entries.iter_mut().enumerate() {
+                        if book_model::audiobook_toc_position(&entry.target).is_some() {
+                            entry.title = book_model::audiobook_chapter_display_title(&entry.title, index + 1);
+                        }
+                    }
+                    entries
+                };
+                let (current_entry, current_target) = {
+                    let content_hash: &ContentHash = &content_hash;
+                    let format: library_model::LibraryFileTypeFilter = book.format_category;
+                    let toc: &[library_model::BookTocEntry] = &toc;
+                    'detail: {
+                        if format == library_model::LibraryFileTypeFilter::Audiobook {
+                            let Some(position) = database.audiobook_reading_position(content_hash)? else { break 'detail (None, None) };
+                            let chapter = ({
+                                use crate::{chapters_from_navigation, AudiobookSql};
+                                use library_model::{AudiobookChapter, BookTocEntry};
+                                let hash: &sync_common::ContentHash = content_hash;
+
+                                'chapter: {
+                                    let mut stored: Option<(String, i64)> = None;
+                                    database.connection.audiobook_chapters_select(hash.as_str(), |row| {
+                                        stored = Some((row.get(0)?, row.get(1)?));
+                                        Ok(())
+                                    })?;
+                                    let Some((toc_json, duration_ms)) = stored else { break 'chapter Vec::new() };
+                                    let entries: Vec<BookTocEntry> = serde_json::from_str(&toc_json).map_err(|error| DatabaseError::message(format!("stored table of contents is not readable: {error}")))?;
+                                    chapters_from_navigation(&entries, duration_ms.max(0) as u64)
+                                }
+                            })
+                            .into_iter()
+                            .find(|chapter| position >= chapter.start_ms && position < chapter.end_ms);
+                            break 'detail match chapter {
+                                Some(chapter) => (Some(chapter.title), Some(book_model::audiobook_toc_target(chapter.start_ms))),
+                                None => (None, None),
+                            };
+                        }
+                        let mut target: Option<String> = None;
+                        database.connection.reading_entry_select(content_hash.as_str(), |row| {
+                            target = row.get(0)?;
+                            Ok(())
+                        })?;
+                        let Some(target) = target else { break 'detail (None, None) };
+                        (entry_title(toc, &target), Some(target))
+                    }
+                };
+                Ok(BookDetail { book, audiobook_chapter_count, description, source_directory_id, path, authors, credits, current_entry, current_target, toc })
+            })
+        })
+        .expect("read detail");
         assert_eq!(detail.book.title, "Imported Title");
         assert_eq!(detail.authors.iter().map(|author| author.name.as_str()).collect::<Vec<_>>(), vec!["Import Author"]);
-        assert!(database.has_book_placement(hash).expect("placement"));
+        let body: Vec<u8> = database.connection.query_row("SELECT body FROM sync_state_version WHERE state_kind='metadata' AND state_key=?1", [hash.as_str()], |row| row.get(0)).unwrap();
+        let library_replica::LibraryStateEntry::Metadata { value, .. } = sync_common::wire::decode(&body, sync_common::wire::MAX_DECODED_REQUEST_BYTES).unwrap() else { panic!("metadata register") };
+        assert_eq!(value.title, "Imported Title");
+        assert_eq!(value.contributors.iter().map(|credit| credit.name()).collect::<Vec<_>>(), ["Import Author"], "the register must contain the complete imported credits");
+        assert!(database.thumbnail_book_format(hash).map(|format| format.is_some()).expect("placement"));
         assert!(database.pending_thumbnail_job_count().expect("thumbnail jobs") >= 1);
         let candidates = database.import_restore_candidates(&hash).expect("restore candidates");
         assert_eq!(candidates.len(), 1);
@@ -422,84 +548,5 @@ mod commit_tests {
                 restore_paths: Vec::new(),
             })
             .expect("commit cached import");
-    }
-
-    /// Regression test for the [`Database::commit_import`]/[`Database::commit_imports`]
-    /// batching split: every member of one batch must land in the database
-    /// (not just the first) and share one `scan_id`, since that's the
-    /// generation marker a later scan pass uses to detect vanished placements.
-    #[test]
-    fn commit_imports_lands_every_member_with_one_shared_scan_id() {
-        let holder = open_test_database();
-        let database = &holder.database;
-        let parent = database.create_directory(&sync_common::ROOT_DIR_ID, &"Shelf".to_owned()).expect("create folder");
-        let first = ContentHash::new(&"1".repeat(64));
-        let second = ContentHash::new(&"2".repeat(64));
-        let checksum = ContentHash::new(&"a".repeat(64));
-        database
-            .commit_imports(vec![
-                ImportCommit {
-                    parent_id: parent.id,
-                    file_name: "first.epub".to_owned(),
-                    format: book_model::BookFormat::Epub,
-                    content_hash: first,
-                    checksum,
-                    size_bytes: 10,
-                    inspection_version: 1,
-                    inspection: Some(inspected("First Book", "Author One")),
-                    published: PublishedImport { name: "first.epub".to_owned(), relative_path: "Shelf/first.epub".to_owned(), published: true, fingerprint: None },
-                    request_thumbnail: false,
-                    restore_paths: Vec::new(),
-                },
-                ImportCommit {
-                    parent_id: parent.id,
-                    file_name: "second.epub".to_owned(),
-                    format: book_model::BookFormat::Epub,
-                    content_hash: second,
-                    checksum,
-                    size_bytes: 20,
-                    inspection_version: 1,
-                    inspection: Some(inspected("Second Book", "Author Two")),
-                    published: PublishedImport { name: "second.epub".to_owned(), relative_path: "Shelf/second.epub".to_owned(), published: true, fingerprint: None },
-                    request_thumbnail: false,
-                    restore_paths: Vec::new(),
-                },
-            ])
-            .expect("commit batch");
-        let first_detail = database.browse_book_detail(first).expect("read first detail");
-        assert_eq!(first_detail.book.title, "First Book");
-        let second_detail = database.browse_book_detail(second).expect("read second detail");
-        assert_eq!(second_detail.book.title, "Second Book");
-        let scans: Vec<i64> =
-            [first, second].iter().map(|hash| database.connection.query_row("SELECT last_scan FROM book_dir WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1)", [hash.as_str()], |row| row.get(0)).expect("last_scan")).collect();
-        assert_eq!(scans[0], scans[1], "one batch must share one scan generation");
-    }
-
-    #[test]
-    fn stale_import_destination_rejects_and_rolls_back_the_entire_batch() {
-        let holder = open_test_database();
-        let database = &holder.database;
-        let parent = database.create_directory(&sync_common::ROOT_DIR_ID, &"Deleted while inspecting".to_owned()).unwrap();
-        let make_import = |parent_id, n| ImportCommit {
-            parent_id,
-            file_name: format!("{n}.epub"),
-            format: book_model::BookFormat::Epub,
-            content_hash: ContentHash::new(&format!("{n:064x}")),
-            checksum: ContentHash::new(&format!("{n:064x}")),
-            size_bytes: 10,
-            inspection_version: 1,
-            inspection: Some(inspected("Pending", "Author")),
-            published: PublishedImport { name: format!("{n}.epub"), relative_path: format!("{n}.epub"), published: true, fingerprint: None },
-            request_thumbnail: false,
-            restore_paths: vec![],
-        };
-        let pending = vec![make_import(sync_common::ROOT_DIR_ID, 71), make_import(parent.id, 72)];
-        database.trash_directory(&parent.id).unwrap();
-        let generation: i64 = database.connection.query_row("SELECT scan_seq FROM sync_metadata", [], |row| row.get(0)).unwrap();
-        assert!(database.commit_imports(pending).is_err());
-        assert!(!database.has_book_placement(ContentHash::new(&format!("{:064x}", 71))).unwrap());
-        assert!(!database.has_book_placement(ContentHash::new(&format!("{:064x}", 72))).unwrap());
-        assert!(!database.is_live_destination(&parent.id).unwrap());
-        assert_eq!(database.connection.query_row("SELECT scan_seq FROM sync_metadata", [], |row| row.get::<_, i64>(0)).unwrap(), generation);
     }
 }

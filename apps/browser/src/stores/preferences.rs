@@ -14,11 +14,10 @@ use crate::services::AppServices;
 /// The live "cover text" setting, read by every book card and by the pages
 /// that size the row a card sits in.
 ///
-/// A global rather than a value threaded down through the navigation stack
-/// like `detailed`: `detailed` only ever reaches browse pages, but this
-/// setting has to reach shelves too, and a card and the page around it can
-/// each pick it up on their own `cx.observe_global` instead of every layer
-/// between here and them needing a method just to pass it on.
+/// A global rather than a value threaded down through the navigation stack:
+/// it has to reach browse pages and shelves alike, and a card and the page
+/// around it can each pick it up on their own `cx.observe_global` instead of
+/// every layer between here and them needing a method just to pass it on.
 pub(crate) struct CoverTextSetting(pub(crate) CoverText);
 
 impl gpui::Global for CoverTextSetting {}

@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+use std::time::Instant;
+use crate::{LibraryStorageUsage, StorageUsage};
 use server_asset_store::AssetError;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use sync_common::api::assets::{BlobManifestEntry, BlobManifestRejectionReason, BlobManifestResponse, RejectedBlobManifestEntry};
@@ -71,7 +74,7 @@ async fn require_cloud_storage(transaction: &mut Transaction<'_, Postgres>, user
 }
 
 async fn account_snapshot(transaction: &mut Transaction<'_, Postgres>, user_id: &str) -> Result<AccountSnapshot, AssetError> {
-    let phase_started = std::time::Instant::now();
+    let phase_started = Instant::now();
     sqlx::query_file!("src/sql/account/ensure_exists.sql", user_id).execute(&mut **transaction).await.map_err(storage)?;
     let row = sqlx::query(include_str!("sql/account/select.sql")).bind(user_id).fetch_one(&mut **transaction).await.map_err(storage)?;
     tracing::debug!(target: "sync_performance", phase = "account_ensure_snapshot", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
@@ -87,10 +90,10 @@ async fn expire_reservations(transaction: &mut Transaction<'_, Postgres>, user_i
 }
 
 async fn begin_authorized_transaction<'a>(pool: &'a PgPool, user_id: &str, library_id: &LibraryId) -> Result<Transaction<'a, Postgres>, AssetError> {
-    let phase_started = std::time::Instant::now();
+    let phase_started = Instant::now();
     let mut transaction = pool.begin().await.map_err(storage)?;
     tracing::debug!(target: "sync_performance", phase = "asset_pool_acquire_and_begin", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
-    let phase_started = std::time::Instant::now();
+    let phase_started = Instant::now();
     require_library_owner(&mut transaction, user_id, library_id).await?;
     tracing::debug!(target: "sync_performance", phase = "asset_library_authorize", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
     Ok(transaction)
@@ -102,11 +105,11 @@ async fn prepare_account(transaction: &mut Transaction<'_, Postgres>, user_id: &
     Ok(account)
 }
 
-pub(super) async fn storage_usage(pool: &PgPool, user_id: &str) -> Result<crate::StorageUsage, AssetError> {
+pub(super) async fn storage_usage(pool: &PgPool, user_id: &str) -> Result<StorageUsage, AssetError> {
     let mut transaction = pool.begin().await.map_err(storage)?;
     let account = prepare_account(&mut transaction, user_id).await?;
     transaction.commit().await.map_err(storage)?;
-    Ok(crate::StorageUsage { used_bytes: account.used.max(0) as u64, reserved_bytes: account.reserved.max(0) as u64, quota_bytes: account.limit.max(0) as u64 })
+    Ok(StorageUsage { used_bytes: account.used.max(0) as u64, reserved_bytes: account.reserved.max(0) as u64, quota_bytes: account.limit.max(0) as u64 })
 }
 
 /// Splits the charged bytes across the libraries that hold them.
@@ -115,14 +118,14 @@ pub(super) async fn storage_usage(pool: &PgPool, user_id: &str) -> Result<crate:
 /// deduplicated quota cannot be summed per library. Libraries holding nothing
 /// are absent rather than reported as zero; the caller knows which libraries
 /// exist and the client renders the rest.
-pub(super) async fn library_storage_usage(pool: &PgPool, user_id: &str) -> Result<Vec<crate::LibraryStorageUsage>, AssetError> {
+pub(super) async fn library_storage_usage(pool: &PgPool, user_id: &str) -> Result<Vec<LibraryStorageUsage>, AssetError> {
     let rows = sqlx::query(include_str!("sql/assets/library_storage_usage.sql")).bind(user_id).fetch_all(pool).await.map_err(storage)?;
     rows.into_iter()
         .map(|row| {
             let library_id: String = row.try_get("library_id").map_err(storage)?;
             let used_bytes: i64 = row.try_get("used_bytes").map_err(storage)?;
             let library_id = library_id.parse::<LibraryId>().map_err(|error| AssetError::Storage(format!("stored library id {library_id} is not a valid identifier: {error}")))?;
-            Ok(crate::LibraryStorageUsage { library_id, used_bytes: used_bytes.max(0) as u64 })
+            Ok(LibraryStorageUsage { library_id, used_bytes: used_bytes.max(0) as u64 })
         })
         .collect()
 }
@@ -139,10 +142,10 @@ async fn insert_blob_object(transaction: &mut Transaction<'_, Postgres>, hash: &
 
 /// `verified` contains checksums whose stored permanent identity was checked by
 /// the application before acquiring this transaction's account writer lock.
-pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &LibraryId, blobs: &[BlobManifestEntry], verified: &std::collections::HashSet<ContentHash>) -> Result<BlobManifestResponse, AssetError> {
+pub(super) async fn negotiate_books(pool: &PgPool, user_id: &str, library_id: &LibraryId, blobs: &[BlobManifestEntry], verified: &HashSet<ContentHash>) -> Result<BlobManifestResponse, AssetError> {
     let mut transaction = begin_authorized_transaction(pool, user_id, library_id).await?;
     require_cloud_storage(&mut transaction, user_id, library_id).await?;
-    let mut seen = std::collections::HashSet::with_capacity(blobs.len());
+    let mut seen = HashSet::with_capacity(blobs.len());
     if blobs.iter().any(|blob| !seen.insert(blob.content_hash.clone())) {
         return Err(AssetError::InvalidInput("book manifest contains a duplicate content hash".to_string()));
     }
@@ -359,7 +362,7 @@ async fn require_thumbnail_book(transaction: &mut Transaction<'_, Postgres>, lib
     }
     let present: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM sync_state WHERE library_id=$1
-         AND kind='book_lifecycle' AND present AND content_hash=$2 FOR SHARE)",
+         AND kind='book_lifecycle' AND version_rank<>2 AND content_hash=$2 FOR SHARE)",
     )
     .bind(library_id.to_string())
     .bind(hash.as_str())
@@ -418,6 +421,7 @@ pub(super) async fn apply_lifecycle_reference_deltas(transaction: &mut Transacti
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::isolated_pool;
     use super::*;
 
     // Database fixtures model objects already verified by the application.
@@ -443,9 +447,9 @@ mod tests {
     async fn reference(pool: &PgPool, _user_id: &str, library_id: &LibraryId, hash: &ContentHash, replica_seq: i64) {
         sqlx::query(
             "INSERT INTO sync_state(
-                 library_id,kind,entity_key,entity_subkey,value,present,content_hash,
-                 changed_at,replica_id,replica_seq,version_rank,event_id
-             ) VALUES($1,'book_lifecycle',$2,'',$3,TRUE,$4,1,$5,$6,0,$7)",
+                 library_id,kind,entity_key,entity_subkey,value,content_hash,
+                 changed_at,replica_id,replica_seq,version_rank
+             ) VALUES($1,'book_lifecycle',$2,'',$3,$4,1,$5,$6,0)",
         )
         .bind(library_id.to_string())
         .bind(format!("book-{replica_seq}"))
@@ -453,7 +457,6 @@ mod tests {
         .bind(hash.as_str())
         .bind(format!("replica-{replica_seq}"))
         .bind(replica_seq)
-        .bind(uuid::Uuid::new_v4().to_string())
         .execute(pool)
         .await
         .unwrap();
@@ -468,7 +471,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn quota_is_transactional_deduplicated_per_user_and_reservations_release() {
-        let Some(pool) = crate::test_support::isolated_pool("assets", 8).await else { return };
+        let Some(pool) = isolated_pool("assets", 8).await else { return };
 
         let shared = hash();
         let (first_user, first_library) = seed_user(&pool, 100).await;
@@ -487,7 +490,7 @@ mod tests {
         let second_used: i64 = sqlx::query_scalar("SELECT used_bytes FROM user_storage_account WHERE user_id=$1").bind(&second_user).fetch_one(&pool).await.unwrap();
         let physical_objects: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_object WHERE content_hash=$1").bind(shared.as_str()).fetch_one(&pool).await.unwrap();
         assert_eq!((first_used, second_used, physical_objects), (60, 60, 1));
-        assert_eq!(storage_usage(&pool, &first_user).await.unwrap(), crate::StorageUsage { used_bytes: 60, reserved_bytes: 0, quota_bytes: 100 });
+        assert_eq!(storage_usage(&pool, &first_user).await.unwrap(), StorageUsage { used_bytes: 60, reserved_bytes: 0, quota_bytes: 100 });
 
         let too_large = hash();
         grant_blob_reference(&pool, &first_user, &too_large).await;
@@ -533,13 +536,12 @@ mod tests {
         let placement_seq = if reservation.hash == left { 1_i64 } else { 2_i64 };
         sqlx::query(
             "UPDATE sync_state
-             SET present=FALSE, content_hash=NULL, changed_at=2, replica_id='remover',replica_seq=99,
-                 version_rank=1, event_id=$3, server_seq=DEFAULT
+             SET changed_at=2, replica_id='remover',replica_seq=99,
+                 version_rank=2, server_seq=DEFAULT
              WHERE library_id=$1 AND kind='book_lifecycle' AND entity_key=$2 AND entity_subkey=''",
         )
         .bind(concurrent_library.to_string())
         .bind(format!("book-{placement_seq}"))
-        .bind(uuid::Uuid::new_v4().to_string())
         .execute(&pool)
         .await
         .unwrap();
@@ -565,7 +567,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn thumbnails_are_free_but_require_a_live_book_and_bounded_size() {
-        let Some(pool) = crate::test_support::isolated_pool("free_thumbnails", 4).await else { return };
+        let Some(pool) = isolated_pool("free_thumbnails", 4).await else { return };
         let (user, library) = seed_user(&pool, 0).await;
         let book = hash();
         assert!(matches!(validate_thumbnail(&pool, &user, &library, &book, 60).await, Err(AssetError::Forbidden)));
@@ -575,9 +577,9 @@ mod tests {
         let (other_user, other_library) = seed_user(&pool, 0).await;
         assert!(matches!(validate_thumbnail(&pool, &other_user, &other_library, &book, 60).await, Err(AssetError::Forbidden)));
         assert!(matches!(validate_thumbnail(&pool, &other_user, &library, &book, 60).await, Err(AssetError::Forbidden)));
-        sqlx::query("UPDATE sync_state SET present=FALSE, changed_at=changed_at+1 WHERE library_id=$1").bind(library.to_string()).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE sync_state SET version_rank=2, changed_at=changed_at+1 WHERE library_id=$1").bind(library.to_string()).execute(&pool).await.unwrap();
         assert!(matches!(validate_thumbnail(&pool, &user, &library, &book, 60).await, Err(AssetError::Forbidden)));
-        assert_eq!(storage_usage(&pool, &user).await.unwrap(), crate::StorageUsage { used_bytes: 0, reserved_bytes: 0, quota_bytes: 0 });
+        assert_eq!(storage_usage(&pool, &user).await.unwrap(), StorageUsage { used_bytes: 0, reserved_bytes: 0, quota_bytes: 0 });
         assert!(library_storage_usage(&pool, &user).await.unwrap().is_empty());
         sqlx::query("DELETE FROM users WHERE id=ANY($1)").bind(vec![user, other_user]).execute(&pool).await.unwrap();
     }
@@ -585,7 +587,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn book_manifest_claims_stored_blobs_in_one_account_transaction_and_classifies_every_hash() {
-        let Some(pool) = crate::test_support::isolated_pool("assets", 4).await else { return };
+        let Some(pool) = isolated_pool("assets", 4).await else { return };
         let (user_id, library_id) = seed_user(&pool, 100).await;
         let owned = hash();
         let claimable = hash();
@@ -632,7 +634,7 @@ mod tests {
         // account twice, even when it has no remaining quota.
         sqlx::query("UPDATE user_storage_account SET quota_bytes=used_bytes WHERE user_id=$1").bind(&user_id).execute(&pool).await.unwrap();
         let repair = super::negotiate_books(&pool, &user_id, &library_id,
-            &[BlobManifestEntry { content_hash: owned, checksum: owned, size_bytes: 10 }], &std::collections::HashSet::new()).await.unwrap();
+            &[BlobManifestEntry { content_hash: owned, checksum: owned, size_bytes: 10 }], &HashSet::new()).await.unwrap();
         assert_eq!(repair.upload, vec![owned]);
         assert!(repair.rejected.is_empty());
 
@@ -684,7 +686,7 @@ pub(super) async fn finish_book_revision_upload(pool: &PgPool, user: &str, libra
         .bind(library.to_string()).bind(user).fetch_optional(&mut *transaction).await.map_err(storage)?.is_some();
     if !live { return Err(AssetError::Forbidden); }
     let _ = account_snapshot(&mut transaction, user).await?;
-    let phase_started = std::time::Instant::now();
+    let phase_started = Instant::now();
     sqlx::query("SELECT user_id FROM user_storage_account WHERE user_id=$1 FOR UPDATE").bind(user).fetch_one(&mut *transaction).await.map_err(storage)?;
     tracing::debug!(target: "sync_performance", phase = "upload_account_lock", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
     if let BookUploadAdmission::Reserved(reservation) = admission {

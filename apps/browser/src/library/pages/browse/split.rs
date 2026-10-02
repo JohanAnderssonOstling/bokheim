@@ -3,7 +3,7 @@ use gpui::{App, Context, Entity, FocusHandle, Focusable, IntoElement, Render, Su
 use ui_components as components;
 
 use super::listing::{BrowseCrumb, BrowseKind};
-use super::page::{BrowsePage, BrowseSplitClose, BrowseSplitRequest, BrowseSplitSide, OpenTrash};
+use super::page::{BrowsePage, BrowseSplitClose, BrowseSplitRequest, BrowseSplitSide};
 use crate::library::services::LibraryContext;
 
 /// Owns independent browse pages and gives each page an equal share of the
@@ -11,7 +11,6 @@ use crate::library::services::LibraryContext;
 pub(crate) struct BrowseSplitPlane {
     kind: BrowseKind,
     library: LibraryContext,
-    open_trash: OpenTrash,
     panes: Vec<BrowsePane>,
     focus: FocusHandle,
     restore_focus: bool,
@@ -24,14 +23,12 @@ struct BrowsePane {
 
 impl BrowseSplitPlane {
     pub(crate) fn open_folder(&mut self, directory_id: sync_common::DirId, title: String, cx: &mut Context<Self>) {
-        let path = if directory_id == sync_common::ROOT_DIR_ID { Vec::new() } else { vec![BrowseCrumb { location: directory_id.to_string(), label: title }] };
+        let path = if directory_id == sync_common::ROOT_DIR_ID { Vec::new() } else { vec![BrowseCrumb { location: library_model::BrowseLocation::Folder(directory_id), label: title }] };
         self.panes[0].page.update(cx, |page, cx| page.open_split_path(path, cx));
     }
 
-    /// Opens a subject chip by its raw location string rather than a `DirId`:
-    /// a subject has no directory, just the path segments joined by `" / "`
-    /// that the subject adapter already reads back out of `chip.id`.
-    pub(crate) fn open_subject(&mut self, location: String, label: String, cx: &mut Context<Self>) {
+    /// Opens a subject; the backend supplies its display trail.
+    pub(crate) fn open_subject(&mut self, location: library_model::BrowseLocation, label: String, cx: &mut Context<Self>) {
         self.panes[0].page.update(cx, |page, cx| page.open_split_path(vec![BrowseCrumb { location, label }], cx));
     }
 
@@ -45,26 +42,16 @@ impl BrowseSplitPlane {
         }
     }
 
-    pub(crate) fn new(kind: BrowseKind, library: LibraryContext, open_trash: OpenTrash, cx: &mut Context<Self>) -> Self {
-        let mut plane = Self { kind, library, open_trash, panes: Vec::new(), focus: cx.focus_handle(), restore_focus: false };
+    pub(crate) fn new(kind: BrowseKind, library: LibraryContext, cx: &mut Context<Self>) -> Self {
+        let mut plane = Self { kind, library, panes: Vec::new(), focus: cx.focus_handle(), restore_focus: false };
         plane.add_page_at(0, Vec::new(), cx);
         plane.focus = plane.panes[0].page.read(cx).focus_handle(cx);
         plane
     }
 
-    pub(crate) fn update_pages(&mut self, mut update: impl FnMut(&mut BrowsePage, &mut Context<BrowsePage>), cx: &mut Context<Self>) {
-        for pane in &self.panes {
-            pane.page.update(cx, |page, cx| update(page, cx));
-        }
-    }
-
-    pub(crate) fn set_library_view(&mut self, detailed: bool, cx: &mut Context<Self>) {
-        self.update_pages(|page, cx| page.set_library_view(detailed, cx), cx);
-    }
-
     fn add_page_at(&mut self, index: usize, path: Vec<BrowseCrumb>, cx: &mut Context<Self>) {
-        let (kind, library, open_trash) = (self.kind, self.library.clone(), self.open_trash.clone());
-        let page = cx.new(|cx| BrowsePage::new(kind, library, open_trash, cx));
+        let (kind, library) = (self.kind, self.library.clone());
+        let page = cx.new(|cx| BrowsePage::new(kind, library, cx));
         let subscription = cx.subscribe(&page, |plane, source, request: &BrowseSplitRequest, cx| {
             plane.add_page(source, request.side, request.path.clone(), cx);
         });
@@ -118,7 +105,9 @@ impl BrowseSplitPlane {
 
     fn refresh_close_buttons(&mut self, cx: &mut Context<Self>) {
         let enabled = self.panes.len() > 1;
-        self.update_pages(|page, cx| page.set_split_close_enabled(enabled, cx), cx);
+        for pane in &self.panes {
+            pane.page.update(cx, |page, cx| page.set_split_close_enabled(enabled, cx));
+        }
     }
 }
 

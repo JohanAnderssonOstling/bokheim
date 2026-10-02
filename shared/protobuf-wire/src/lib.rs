@@ -1,18 +1,18 @@
 //! Protobuf codec for HTTP and WebSocket transport only.
 //!
 //! Persisted BLOBs use the separate `wire` storage crate. Synchronization
-//! values use the explicit `MutationValue` protobuf schema below.
+//! values serialize their domain types through this same codec.
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fmt;
 
-pub const MEDIA_TYPE: &str = "application/vnd.bokheim+protobuf; version=21";
+pub const MEDIA_TYPE: &str = "application/vnd.bokheim+protobuf; version=23";
 pub const MEDIA_TYPE_BASE: &str = "application/vnd.bokheim+protobuf";
 pub const MAX_DECODED_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_DECODED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
-const VERSION: u32 = 21;
+const VERSION: u32 = 23;
 
 /// The protobuf protocol version written into every envelope.
 pub const fn version() -> u32 {
@@ -68,6 +68,13 @@ pub fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, WireError> {
     let mut body = Vec::with_capacity(envelope.encoded_len());
     envelope.encode(&mut body).map_err(|error| WireError::Encode(error.to_string()))?;
     Ok(body)
+}
+
+/// Apply serialization adapters without encoding and reparsing an outer byte
+/// envelope. Used when a relay needs the opaque form of a typed payload.
+pub fn representation<S: Serialize + ?Sized, D: DeserializeOwned>(value: &S) -> Result<D, WireError> {
+    let value = serde_value::to_value(value).map_err(|error| WireError::Encode(error.to_string()))?;
+    D::deserialize(value).map_err(|error| WireError::Decode(error.to_string()))
 }
 
 pub fn decode<T: DeserializeOwned>(body: &[u8], decoded_limit: usize) -> Result<T, WireError> {
@@ -152,24 +159,6 @@ pub mod protobuf {
     include!("bokheim.wire.v16.rs");
 }
 
-/// Encodes one typed mutation value without the generic transport envelope.
-pub fn encode_mutation_value(value: &protobuf::MutationValue) -> Result<Vec<u8>, WireError> {
-    use prost::Message;
-    let mut body = Vec::with_capacity(value.encoded_len());
-    value.encode(&mut body).map_err(|error| WireError::Encode(error.to_string()))?;
-    Ok(body)
-}
-
-/// Decodes one typed mutation value. Unknown protobuf fields remain safe for
-/// forwarding because the sync service stores these bytes without decoding.
-pub fn decode_mutation_value(body: &[u8], decoded_limit: usize) -> Result<protobuf::MutationValue, WireError> {
-    use prost::Message;
-    if body.len() > decoded_limit {
-        return Err(WireError::TooLarge { limit: decoded_limit });
-    }
-    protobuf::MutationValue::decode(body).map_err(|error| WireError::Decode(error.to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,7 +197,7 @@ mod tests {
 
     #[test]
     fn version_and_decoded_size_are_bounded() {
-        assert_eq!(version(), 21);
+        assert_eq!(version(), 23);
         let mut unsupported = encode(&example(1)).unwrap();
         unsupported[1] = (VERSION + 1) as u8;
         assert!(matches!(decode::<Example>(&unsupported, MAX_DECODED_REQUEST_BYTES), Err(WireError::UnsupportedVersion(version)) if version == VERSION + 1));
@@ -234,7 +223,7 @@ mod tests {
     #[test]
     fn media_type_requires_the_current_version() {
         assert!(is_current_media_type(MEDIA_TYPE));
-        assert!(is_current_media_type("Application/Vnd.Bokheim+Protobuf; charset=binary; version=21"));
+        assert!(is_current_media_type("Application/Vnd.Bokheim+Protobuf; charset=binary; version=23"));
         assert!(!is_current_media_type("application/vnd.bokheim+protobuf; version=14"));
         assert!(!is_current_media_type(MEDIA_TYPE_BASE));
         assert!(!is_current_media_type("application/vnd.bokheim+protobuf; version=1"));
@@ -242,14 +231,5 @@ mod tests {
         assert!(!is_current_media_type("application/vnd.bokheim+protobuf; version=6"));
         assert!(!is_current_media_type("application/vnd.bokheim+protobuf; version=1; version=5"));
         assert!(!is_current_media_type("application/json; version=1"));
-    }
-
-    #[test]
-    fn mutation_value_field_numbers_are_a_stable_compatibility_baseline() {
-        use protobuf::mutation_value::Kind;
-        let value = protobuf::MutationValue { kind: Some(Kind::DirectoryName("Shelf".to_owned())) };
-        // field 1 (directory_name), wire type 2, followed by the UTF-8 value.
-        assert_eq!(encode_mutation_value(&value).unwrap(), b"\x0a\x05Shelf");
-        assert_eq!(decode_mutation_value(b"\x0a\x05Shelf", 64).unwrap(), value);
     }
 }

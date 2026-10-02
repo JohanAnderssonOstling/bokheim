@@ -8,11 +8,11 @@ create table if not exists dir(
     -- Authoritative synchronized register. The parent/name/deleted_at columns
     -- above are the derived, filesystem-safe projection and may temporarily
     -- suppress an otherwise-present intent to break cycles/path collisions.
-    intent_parent_id TEXT,
-    intent_name      TEXT,
+    canonical_parent_id TEXT,
+    canonical_name      TEXT,
     -- 0 = present, 1 = Trash, 2 = purge awaiting physical row deletion.
     -- Purge tombstones survive separately in sync_state_version.
-    intent_lifecycle INTEGER,
+    lifecycle INTEGER,
     deleted_at      INTEGER,
     CHECK (id != '00000000-0000-0000-0000-000000000000' OR deleted_at IS NULL)
 );
@@ -26,12 +26,8 @@ create table if not exists book_dir(
     -- their contents (see get_book_dir_by_hash). Not unique and not portable
     -- across devices, so it is an attribute, not the key.
     local_hash      TEXT not null,
-    is_downloaded   INTEGER not null default 0,
-    -- Monotonic scan generation in which this placement was last seen on disk.
-    -- After a full scan, locally-present rows (is_downloaded = 1) not stamped
-    -- with the current generation are reconciled as vanished. Remote placements
-    -- never downloaded keep 0 and are excluded via the is_downloaded filter.
-    last_scan       INTEGER not null default 0,
+    -- Native: this placement has materialized bytes. Browser: its shared OPFS object exists.
+    is_downloaded   INTEGER not null default 0 CHECK(is_downloaded IN (0,1)),
     deleted_at      INTEGER,
     trash_origin_dir_id TEXT,
     -- Content checksum and size of the bytes this device last recorded at

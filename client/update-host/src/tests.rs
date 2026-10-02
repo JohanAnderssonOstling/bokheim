@@ -18,6 +18,9 @@ fn approve(host: &mut Host, key: &Ed25519KeyPair, manifest: &Manifest, app: &[u8
     let bytes = serde_json::to_vec(&SignedManifest { key_id: "fixture".into(), signature: hex(key.sign(&message).as_ref()), payload }).unwrap();
     host.coordinator.discovered(bytes, now()).unwrap();
     host.approve().unwrap();
+    // The UI must be able to report preparation before any download completes.
+    assert_eq!(host.view(), UpdateView::Preparing);
+    assert!(host.coordinator.record().approved.as_ref().unwrap().completed.is_empty());
     let staging = host.root.join("staging").join(&host.coordinator.record().approved.as_ref().unwrap().id);
     fs::create_dir_all(&staging).unwrap();
     fs::write(staging.join("application.bin"), app).unwrap();
@@ -39,9 +42,21 @@ fn combined_update_recovers_interruption_then_commits_candidate_migrations() {
     let data = temp.path().join("data");
     fs::create_dir_all(data.join("libraries/one")).unwrap();
     let library = data.join("libraries/one/library.db");
-    library_database::Database::prepare_update(&library).unwrap();
+    (|| -> Result<(), library_database::DatabaseError> {
+        let db = library_database::Database::open(&library)?;
+        db.initialize_library()?;
+        let integrity: String = db.connection.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+        if integrity != "ok" {
+            return Err(library_database::DatabaseError::message(integrity));
+        }
+        let violations: i64 = db.connection.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?;
+        if violations != 0 {
+            return Err(library_database::DatabaseError::message("migrated library has invalid relationships"));
+        }
+        db.connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        Ok(())
+    })().unwrap();
     let connection = library_database::open_fixture_connection(&library).unwrap();
-    connection.execute("UPDATE sync_metadata SET change_origin='remote' WHERE singleton=1", []).unwrap();
     let (manual_id, manual_path): (i64, String) = connection.query_row("SELECT concept_id,path FROM curated.unified_concept_paths ORDER BY route_id LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
     let mut raw_books = Vec::new();
     for (id, code) in [(1, "QA76"), (2, "QZ999")] {
@@ -56,9 +71,22 @@ fn combined_update_recovers_interruption_then_commits_candidate_migrations() {
     let raw = sync_common::wire::encode(&manual).unwrap();
     connection.execute("INSERT INTO book(row_id,content_hash,book_metadata) VALUES(3,?1,?2)", rusqlite::params!["c".repeat(64), raw]).unwrap();
     raw_books.push(raw);
-    connection.execute("DELETE FROM local_taxonomy_projection", []).unwrap();
+    connection.execute("UPDATE library_local_state SET taxonomy_revision=NULL WHERE singleton=1", []).unwrap();
     drop(connection);
-    library_database::Database::prepare_update(&library).unwrap();
+    (|| -> Result<(), library_database::DatabaseError> {
+        let db = library_database::Database::open(&library)?;
+        db.initialize_library()?;
+        let integrity: String = db.connection.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+        if integrity != "ok" {
+            return Err(library_database::DatabaseError::message(integrity));
+        }
+        let violations: i64 = db.connection.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?;
+        if violations != 0 {
+            return Err(library_database::DatabaseError::message("migrated library has invalid relationships"));
+        }
+        db.connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        Ok(())
+    })().unwrap();
     let assignments = |path: &Path| {
         let db = rusqlite::Connection::open(path).unwrap();
         let rows =

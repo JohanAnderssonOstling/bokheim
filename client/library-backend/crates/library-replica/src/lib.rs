@@ -2,50 +2,33 @@
 //!
 //! The sync service depends only on `sync-common` and never links this crate.
 
+use std::sync::OnceLock;
 use book_model::AnnotationState;
+pub use book_model::BookDetails;
 pub mod filenames;
 mod folder_management;
 mod folder_names;
 pub use folder_names::project_folder_name;
 mod library_state;
 
-pub use folder_management::{FolderDestinationPolicy, numbered_file_name, numbered_folder_name, unique_file_name, unique_folder_name};
-pub use library_state::{BookFacts, BookLifecycleState, DirectoryLifecycleState, ReadingPositionState, SyncBookMetadata, portable_name_key};
+pub use folder_management::{file_name_candidates, folder_name_candidates, numbered_file_name, numbered_folder_name, unique_file_name, unique_folder_name};
+pub use library_state::{portable_name_key, BookFacts, BookLifecycleState, DirectoryLifecycleState, ReadingPositionState};
 
 use serde::{Deserialize, Serialize};
 
-mod transfer;
-mod transfer_values;
 use std::collections::HashMap;
 use sync_common::ContentHash;
 pub use sync_common::VersionKey;
-use sync_common::{DeclaredBlobReference, DirId, FileName, MutationId, ReplicaSeq, UnixMillis, WireMutation};
-pub use transfer::{BlobKey, BlobKind, LibraryOperation, LibraryOperationKind, LibraryOperationState, LibraryTransfers, ScanProgress, TransferJobKind, TransferOrigin, TransferState, TransferStatus};
-pub use transfer_values::{BookPlacement, BookUploadIntent, RelativeBookPath, RelativeBookPathError, RelativeDirPath, RelativeDirPathError};
+use sync_common::{ConflictRank, DirId, FileName, OpaqueStateEntry, Publication, ReplicaId, ReplicaSeq, StateAddress, StatePayload, UnixMillis, Versioned};
 
 mod directory_projection;
-mod mutation_protobuf;
-pub use directory_projection::{DirectoryIntent, DirectoryProjection, project_directories};
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum StateKey {
-    DirectoryName(DirId),
-    DirectoryParent(DirId),
-    DirectoryLifecycle(DirId),
-    BookLifecycle(ContentHash),
-    BookFacts(ContentHash),
-    Placement { content_hash: ContentHash, dir_id: DirId },
-    ReadingPosition(ContentHash),
-    Annotation(String),
-    Metadata(ContentHash),
-    Description(ContentHash),
-    PdfReaderMetadata(ContentHash, String),
-    BookToc(ContentHash),
-}
+mod legacy_mutation;
+pub(crate) mod serde_enum;
+pub use directory_projection::{project_directories, DirectoryIntent, DirectoryProjection};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum MutationBody {
+pub enum LibraryStateEntry {
     DirectoryName {
         dir_id: DirId,
         name: FileName,
@@ -78,7 +61,7 @@ pub enum MutationBody {
     },
     Metadata {
         content_hash: ContentHash,
-        value: SyncBookMetadata,
+        value: BookDetails,
     },
     Description {
         content_hash: ContentHash,
@@ -104,69 +87,34 @@ pub enum MutationBody {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct StateMutation {
-    /// Stable retry/idempotency key used for conditional outbox acknowledgement.
-    pub mutation_id: MutationId,
-    pub body: MutationBody,
-    pub changed_at: UnixMillis,
-    pub replica_seq: ReplicaSeq,
-    pub origin: Option<sync_common::MutationOrigin>,
-}
+/// A publication uses the same envelope whether its state is decoded or opaque.
+pub type StatePublication = Publication<LibraryStateEntry>;
 
-/// Reduces pending mutations produced by one replica without changing their
-/// observable server-side meaning.
-///
-/// Ordinary state domains are unconditional registers and safely collapse to
-/// their greatest local version.
-pub fn reduce_same_replica_mutations<'a>(mutations: impl IntoIterator<Item = &'a StateMutation>) -> Vec<&'a StateMutation> {
-    let mut registers = HashMap::<StateKey, &'a StateMutation>::new();
-    let mut reduced = Vec::new();
-    for mutation in mutations {
-        // Forwarded winners can belong to different replicas. Do not reduce
-        // them using the publisher's local sequence order.
-        if mutation.origin.is_some() {
-            reduced.push(mutation);
-            continue;
-        }
-        let key = mutation.body.state_key();
-        match registers.get(&key) {
-            Some(current) if !same_replica_candidate_wins(current, mutation) => {}
+/// Coalesce state by its original winning version, independently of the
+/// publication's retry ID, publishing replica, or queue sequence.
+pub fn coalesce_mutations_for_push(publications: Vec<StatePublication>) -> Vec<StatePublication> {
+    let mut entries = HashMap::<StateAddress, StatePublication>::new();
+    for publication in publications {
+        let address = publication.state.value.address();
+        match entries.get(&address) {
+            Some(current) if current.state.version >= publication.state.version => {}
             _ => {
-                registers.insert(key, mutation);
+                entries.insert(address, publication);
             }
         }
     }
-    reduced.extend(registers.into_values());
-    reduced.sort_by_key(|mutation| (mutation.replica_seq, mutation.mutation_id));
+    let mut reduced = entries.into_values().collect::<Vec<_>>();
+    reduced.sort_by_key(|publication| publication.publisher_seq);
     reduced
 }
 
-/// Reduces unsent local mutations to one canonical winner per state cell.
-pub fn coalesce_mutations_for_push(mutations: Vec<StateMutation>) -> Vec<StateMutation> {
-    reduce_same_replica_mutations(&mutations).into_iter().cloned().collect()
+pub fn prepare_push(mut publications: Vec<StatePublication>) -> Result<sync_common::PushBatcher, Box<dyn std::error::Error>> {
+    publications.sort_by_key(|publication| !matches!(publication.state.value, LibraryStateEntry::BookLifecycle { .. }));
+    let encoded = publications.iter().map(sync_common::transport::representation::<_, sync_common::OpaquePublication>).collect::<Result<Vec<_>, _>>()?;
+    Ok(sync_common::PushBatcher::new(encoded)?)
 }
 
-/// Encodes replica-domain mutations and partitions them into bounded protocol
-/// pages while retaining oversized mutation identities for diagnostics.
-pub fn prepare_push(mut changes: Vec<StateMutation>) -> Result<sync_common::PushBatcher, Box<dyn std::error::Error>> {
-    // Recovery inventory order is not creation order. Declarations must precede
-    // fields even when bounded requests split the pending snapshot into pages.
-    changes.sort_by_key(|mutation| !matches!(mutation.body, MutationBody::BookLifecycle { .. }));
-    let mutations = changes.into_iter().map(|mutation| mutation.to_wire()).collect::<Result<Vec<_>, _>>()?;
-    Ok(sync_common::PushBatcher::new(mutations)?)
-}
-
-fn same_replica_candidate_wins(current: &StateMutation, candidate: &StateMutation) -> bool {
-    candidate.body.state_key() == current.body.state_key()
-        && sync_common::compare_same_replica_versions(
-            (candidate.changed_at, candidate.body.conflict_rank(), candidate.replica_seq, candidate.mutation_id),
-            (current.changed_at, current.body.conflict_rank(), current.replica_seq, current.mutation_id),
-        )
-        .is_gt()
-}
-
-impl MutationBody {
+impl LibraryStateEntry {
     /// Book bytes that must be uploaded before this state can be shared.
     /// Removals must remain possible even when a local import never uploaded.
     pub fn upload_dependency(&self) -> Option<sync_common::ContentHash> {
@@ -184,119 +132,152 @@ impl MutationBody {
         }
     }
 
-    /// Stable, open wire kind. Every producer obtains its kind here so a
-    /// misspelled literal cannot create an unreachable register.
-    pub const fn kind(&self) -> &'static str {
-        match self {
-            Self::DirectoryName { .. } => sync_common::mutation_kind::DIRECTORY_NAME,
-            Self::DirectoryParent { .. } => sync_common::mutation_kind::DIRECTORY_PARENT,
-            Self::DirectoryLifecycle { .. } => sync_common::mutation_kind::DIRECTORY_LIFECYCLE,
-            Self::BookLifecycle { .. } => sync_common::mutation_kind::BOOK_LIFECYCLE,
-            Self::BookFacts { .. } => sync_common::mutation_kind::BOOK_FACTS,
-            Self::Placement { .. } => sync_common::mutation_kind::PLACEMENT,
-            Self::ReadingPosition { .. } => sync_common::mutation_kind::READING_POSITION,
-            Self::Annotation { .. } => sync_common::mutation_kind::ANNOTATION,
-            Self::Metadata { .. } => sync_common::mutation_kind::METADATA,
-            Self::PdfReaderMetadata { .. } => sync_common::mutation_kind::PDF_READER_METADATA,
-            Self::Description { .. } => sync_common::mutation_kind::DESCRIPTION,
-            Self::BookToc { .. } => sync_common::mutation_kind::BOOK_TOC,
-        }
+    /// The wire kind is the variant name provided by this type's Serde schema.
+    pub fn kind(&self) -> &'static str {
+        use crate::serde_enum::NameSerializer;
+        self.serialize(NameSerializer).expect("state entries must serialize as enum variants")
     }
 
-    /// Encodes the domain value into the generic wire envelope.
-    pub fn to_wire(&self, mutation_id: MutationId, changed_at: UnixMillis, replica_seq: ReplicaSeq) -> Result<WireMutation, sync_common::transport::WireError> {
-        let (entity_key, entity_subkey, blob_reference) = match self {
-            Self::DirectoryName { dir_id, .. } => (dir_id.to_string(), String::new(), None),
-            Self::DirectoryParent { dir_id, .. } => (dir_id.to_string(), String::new(), None),
-            Self::DirectoryLifecycle { dir_id, .. } => (dir_id.to_string(), String::new(), None),
-            Self::BookLifecycle { content_hash, value } => {
-                let blob_reference = match value {
-                    BookLifecycleState::Present | BookLifecycleState::Deleted { .. } => DeclaredBlobReference { present: true, content_hash: Some(content_hash.clone()) },
-                    BookLifecycleState::Purged => DeclaredBlobReference { present: false, content_hash: None },
-                };
-                (content_hash.to_string(), String::new(), Some(blob_reference))
-            }
-            Self::Placement { dir_id, content_hash, .. } => (content_hash.to_string(), dir_id.to_string(), None),
-            Self::ReadingPosition { content_hash, .. } => (content_hash.to_string(), String::new(), None),
-            Self::Annotation { annotation_id, value } => (annotation_id.clone(), String::new(), Some(DeclaredBlobReference { present: !value.deleted, content_hash: Some(value.content_hash) })),
-            Self::PdfReaderMetadata { content_hash, value } => (content_hash.to_string(), value.checksum.clone(), None),
-            Self::BookFacts { content_hash, .. } | Self::Metadata { content_hash, .. } | Self::Description { content_hash, .. } | Self::BookToc { content_hash, .. } => (content_hash.to_string(), String::new(), None),
+    /// Identity is projected from the entry, never kept in a parallel enum.
+    pub fn address(&self) -> StateAddress {
+        let (entity_key, entity_subkey) = match self {
+            Self::DirectoryName { dir_id, .. } | Self::DirectoryParent { dir_id, .. } | Self::DirectoryLifecycle { dir_id, .. } => (dir_id.to_string(), String::new()),
+            Self::Placement { content_hash, dir_id, .. } => (content_hash.to_string(), dir_id.to_string()),
+            Self::Annotation { annotation_id, .. } => (annotation_id.clone(), String::new()),
+            Self::PdfReaderMetadata { content_hash, value } => (content_hash.to_string(), value.checksum.clone()),
+            Self::BookFacts { content_hash, .. }
+            | Self::BookLifecycle { content_hash, .. }
+            | Self::ReadingPosition { content_hash, .. }
+            | Self::Metadata { content_hash, .. }
+            | Self::Description { content_hash, .. }
+            | Self::BookToc { content_hash, .. } => (content_hash.to_string(), String::new()),
         };
-        // Non-lifecycle declarations are upload prerequisites only; they do not
-        // increment the server's lifecycle reference count.
-        let blob_reference = blob_reference.or_else(|| {
-            self.upload_dependency()
-                .map(|hash| DeclaredBlobReference { present: true, content_hash: Some(hash) })
-                .or_else(|| matches!(self, Self::Placement { present: false, .. } | Self::Annotation { .. }).then_some(DeclaredBlobReference { present: false, content_hash: None }))
-        });
-        let value = mutation_protobuf::encode(self)?;
-        Ok(WireMutation { origin: None, mutation_id, kind: self.kind().to_owned(), entity_key, entity_subkey, value, conflict_rank: self.conflict_rank(), blob_reference, changed_at, replica_seq })
+        StateAddress { kind: self.kind().to_owned(), entity_key, entity_subkey }
     }
 
-    /// Decodes a recognized wire value. Unknown kinds are intentionally
-    /// forward-compatible and return `None` without interpreting their bytes.
-    pub fn from_wire(wire_mutation: &WireMutation) -> Result<Option<Self>, sync_common::transport::WireError> {
-        if !matches!(
-            wire_mutation.kind.as_str(),
-            sync_common::mutation_kind::DIRECTORY_NAME
-                | sync_common::mutation_kind::DIRECTORY_PARENT
-                | sync_common::mutation_kind::DIRECTORY_LIFECYCLE
-                | sync_common::mutation_kind::BOOK_LIFECYCLE
-                | sync_common::mutation_kind::BOOK_FACTS
-                | sync_common::mutation_kind::PLACEMENT
-                | sync_common::mutation_kind::READING_POSITION
-                | sync_common::mutation_kind::ANNOTATION
-                | sync_common::mutation_kind::METADATA
-                | sync_common::mutation_kind::PDF_READER_METADATA
-                | sync_common::mutation_kind::DESCRIPTION
-                | sync_common::mutation_kind::BOOK_TOC
-        ) {
-            return Ok(None);
-        }
-        mutation_protobuf::decode(wire_mutation).map(Some)
-    }
-    /// Every field of every variant is bound here (payload fields discarded
-    /// as `_` by name) rather than skipped with `..`, so adding a new field
-    /// to any `MutationBody` variant fails to compile here until someone
-    /// decides whether it belongs in the cell's identity or not.
-    pub fn state_key(&self) -> StateKey {
+    /// The book this value belongs to. The service purges and accounts by it.
+    pub fn book(&self) -> Option<sync_common::ContentHash> {
         match self {
-            Self::DirectoryName { dir_id, name: _ } => StateKey::DirectoryName(dir_id.clone()),
-            Self::DirectoryParent { dir_id, parent_id: _ } => StateKey::DirectoryParent(dir_id.clone()),
-            Self::DirectoryLifecycle { dir_id, value: _ } => StateKey::DirectoryLifecycle(dir_id.clone()),
-            Self::BookLifecycle { content_hash, value: _ } => StateKey::BookLifecycle(content_hash.clone()),
-            Self::BookFacts { content_hash, value: _ } => StateKey::BookFacts(*content_hash),
-            Self::Placement { dir_id, content_hash, .. } => StateKey::Placement { content_hash: content_hash.clone(), dir_id: dir_id.clone() },
-            Self::ReadingPosition { content_hash, value: _ } => StateKey::ReadingPosition(content_hash.clone()),
-            Self::Annotation { annotation_id, value: _ } => StateKey::Annotation(annotation_id.clone()),
-            Self::Metadata { content_hash, value: _ } => StateKey::Metadata(content_hash.clone()),
-            Self::PdfReaderMetadata { content_hash, value } => StateKey::PdfReaderMetadata(*content_hash, value.checksum.clone()),
-            Self::Description { content_hash, value: _ } => StateKey::Description(content_hash.clone()),
-            Self::BookToc { content_hash, value: _ } => StateKey::BookToc(content_hash.clone()),
+            Self::DirectoryName { .. } | Self::DirectoryParent { .. } | Self::DirectoryLifecycle { .. } => None,
+            Self::Annotation { value, .. } => Some(value.content_hash),
+            Self::BookFacts { content_hash, .. }
+            | Self::BookLifecycle { content_hash, .. }
+            | Self::Placement { content_hash, .. }
+            | Self::ReadingPosition { content_hash, .. }
+            | Self::Metadata { content_hash, .. }
+            | Self::Description { content_hash, .. }
+            | Self::PdfReaderMetadata { content_hash, .. }
+            | Self::BookToc { content_hash, .. } => Some(*content_hash),
         }
+    }
+
+    /// Construct a new authored state and its initial publication.
+    pub fn publication(self, replica_id: ReplicaId, changed_at: UnixMillis, sequence: ReplicaSeq) -> StatePublication {
+        let version = VersionKey::new(changed_at, self.conflict_rank(), replica_id, sequence);
+        Publication { publisher_seq: sequence, state: Versioned { value: self, version } }
+    }
+
+    pub fn decode(state: &Versioned<OpaqueStateEntry>) -> Result<Option<Self>, sync_common::transport::WireError> {
+        Ok(sync_common::state_encoding::decode_known::<Self>(state)?.map(|state| state.value))
+    }
+
+    pub fn validate(&self) -> Result<(), sync_common::transport::WireError> {
+        use sync_common::transport::WireError;
+        let invalid = |message: &str| WireError::Decode(message.to_owned());
+        match self {
+            Self::ReadingPosition { value, .. } => {
+                book_model::ReadProgress::new(value.progress).map_err(|error| invalid(&error.to_string()))?;
+                if let book_model::ReadingPosition::PdfAtPoint { full_page_position, .. } = value.location {
+                    if !full_page_position.is_finite() || full_page_position < 0.0 {
+                        return Err(invalid("invalid PDF full-page position"));
+                    }
+                }
+            }
+            Self::Annotation { value, .. } => {
+                value.validate().map_err(|error| invalid(&error.to_string()))?;
+            }
+            Self::PdfReaderMetadata { value, .. } => {
+                if !value.valid_for(&value.checksum) {
+                    return Err(invalid("invalid PDF reader metadata"));
+                }
+            }
+            Self::BookToc { value, .. } => {
+                if let Some(tracks) = &value.tracks {
+                    let mut end = 0;
+                    let mut names = std::collections::HashSet::new();
+                    if tracks.is_empty()
+                        || tracks.len() > 1024
+                        || tracks.iter().any(|track| {
+                            let invalid = !track.valid() || track.start_ms != end || !names.insert(&track.name);
+                            end = track.end_ms;
+                            invalid
+                        })
+                        || value.duration_ms != Some(end)
+                    {
+                        return Err(invalid("invalid audiobook track index"));
+                    }
+                }
+                if sync_common::transport::encode(value)?.len() > 512 * 1024 {
+                    return Err(invalid("navigation document exceeds the mutation envelope"));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Rank used inside [`VersionKey`]. Destructive updates in unconditional
     /// registers win an exact timestamp tie.
-    pub fn conflict_rank(&self) -> u8 {
+    pub fn conflict_rank(&self) -> ConflictRank {
         match self {
-            Self::Placement { present: false, .. } => 1,
-            Self::DirectoryLifecycle { value: DirectoryLifecycleState::Deleted, .. } | Self::BookLifecycle { value: BookLifecycleState::Deleted { .. }, .. } | Self::Annotation { value: AnnotationState { deleted: true, .. }, .. } => 1,
-            Self::DirectoryLifecycle { value: DirectoryLifecycleState::Purged, .. } | Self::BookLifecycle { value: BookLifecycleState::Purged, .. } => 2,
-            _ => 0,
+            Self::Placement { present: false, .. } => ConflictRank::Delete,
+            Self::DirectoryLifecycle { value: DirectoryLifecycleState::Deleted, .. } | Self::BookLifecycle { value: BookLifecycleState::Deleted { .. }, .. } | Self::Annotation { value: AnnotationState { deleted: true, .. }, .. } => ConflictRank::Delete,
+            Self::DirectoryLifecycle { value: DirectoryLifecycleState::Purged, .. } | Self::BookLifecycle { value: BookLifecycleState::Purged, .. } => ConflictRank::Purge,
+            _ => ConflictRank::Update,
         }
     }
 }
 
-impl StateMutation {
-    pub fn to_wire(&self) -> Result<WireMutation, sync_common::transport::WireError> {
-        let mut wire = self.body.to_wire(self.mutation_id, self.changed_at, self.replica_seq)?;
-        wire.origin = self.origin.clone();
-        Ok(wire)
+impl StatePayload for LibraryStateEntry {
+    fn recognizes_kind(kind: &str) -> bool {
+        static VARIANTS: OnceLock<&'static [&'static str]> = OnceLock::new();
+        VARIANTS
+            .get_or_init(|| match Self::deserialize(serde::de::value::StrDeserializer::<serde_enum::Names>::new("")) {
+                Err(serde_enum::Names(names)) if !names.is_empty() => names,
+                _ => panic!("state entries must deserialize as named enum variants"),
+            })
+            .contains(&kind)
     }
 
-    pub fn from_wire(wire_mutation: &WireMutation) -> Result<Option<Self>, sync_common::transport::WireError> {
-        Ok(MutationBody::from_wire(wire_mutation)?.map(|body| Self { mutation_id: wire_mutation.mutation_id, body, changed_at: wire_mutation.changed_at, replica_seq: wire_mutation.replica_seq, origin: wire_mutation.origin.clone() }))
+    fn serialize_entry<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        let entry = OpaqueStateEntry { address: self.address(), book: self.book(), bytes: sync_common::transport::encode(self).map_err(serde::ser::Error::custom)? };
+        entry.serialize(serializer)
+    }
+
+    fn deserialize_entry<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let entry = OpaqueStateEntry::deserialize(deserializer)?;
+        let decode = || -> Result<Self, sync_common::transport::WireError> {
+            use sync_common::transport::WireError;
+            if !Self::recognizes_kind(&entry.address.kind) {
+                return Err(WireError::Decode("unknown state kind".into()));
+            }
+            // Malformed generic envelopes never fall back to the legacy reader.
+            let value: Self = if entry.bytes.first() == Some(&0x08) { sync_common::transport::decode(&entry.bytes, sync_common::transport::MAX_DECODED_REQUEST_BYTES)? } else { legacy_mutation::decode(&entry)? };
+            value.validate()?;
+            if value.address() != entry.address || value.book() != entry.book {
+                return Err(WireError::Decode("state envelope does not match its value".to_owned()));
+            }
+            Ok(value)
+        };
+        decode().map_err(serde::de::Error::custom)
+    }
+
+    fn validate_version(&self, version: &VersionKey) -> Result<(), sync_common::transport::WireError> {
+        if version.conflict_rank != self.conflict_rank() {
+            return Err(sync_common::transport::WireError::Decode("state version rank does not match its value".into()));
+        }
+        Ok(())
     }
 }
 
@@ -314,12 +295,12 @@ mod tests {
         DirId::parse_str(value).unwrap()
     }
 
-    fn metadata() -> SyncBookMetadata {
+    fn metadata() -> BookDetails {
         let mut book = book_model::BookMetadata::default();
         book.subjects.push(
             BookSubject::with_details(None, "Historiska romaner", vec![LocalizedText::new("en", "Historical fiction").unwrap()], Some("Romaner, historiska".to_owned()), Vec::new(), "test:subject", Some("saogf".to_owned()), None).unwrap(),
         );
-        SyncBookMetadata { title: "Book".to_owned(), subtitle: None, contributors: Vec::new(), book }
+        BookDetails { title: "Book".to_owned(), subtitle: None, contributors: Vec::new(), book }
     }
 
     #[test]
@@ -328,47 +309,56 @@ mod tests {
         let second_dir = dir_id("22222222-2222-4222-8222-222222222222");
         let first_hash = content_hash('a');
         let bodies = vec![
-            MutationBody::DirectoryName { dir_id: first_dir, name: "Shelf".to_owned() },
-            MutationBody::DirectoryParent { dir_id: first_dir, parent_id: second_dir },
-            MutationBody::DirectoryLifecycle { dir_id: first_dir, value: DirectoryLifecycleState::Present },
-            MutationBody::BookLifecycle { content_hash: first_hash, value: BookLifecycleState::Present },
-            MutationBody::BookFacts { content_hash: first_hash, value: BookFacts { added_at: 1, format: BookFormat::Epub } },
-            MutationBody::Placement { dir_id: first_dir, content_hash: first_hash, present: true, origin_folder_id: None },
-            MutationBody::ReadingPosition { content_hash: first_hash, value: ReadingPositionState { location: ReadingPosition::parse("epubcfi(/6/2)").unwrap(), progress: 0.5 } },
-            MutationBody::Annotation {
+            LibraryStateEntry::DirectoryName { dir_id: first_dir, name: "Shelf".to_owned() },
+            LibraryStateEntry::DirectoryParent { dir_id: first_dir, parent_id: second_dir },
+            LibraryStateEntry::DirectoryLifecycle { dir_id: first_dir, value: DirectoryLifecycleState::Present },
+            LibraryStateEntry::BookLifecycle { content_hash: first_hash, value: BookLifecycleState::Present },
+            LibraryStateEntry::BookFacts { content_hash: first_hash, value: BookFacts { added_at: 1, format: BookFormat::Epub } },
+            LibraryStateEntry::Placement { dir_id: first_dir, content_hash: first_hash, present: true, origin_folder_id: None },
+            LibraryStateEntry::ReadingPosition { content_hash: first_hash, value: ReadingPositionState { location: ReadingPosition::parse("epubcfi(/6/2)").unwrap(), progress: 0.5 } },
+            LibraryStateEntry::Annotation {
                 annotation_id: "annotation".to_owned(),
                 value: AnnotationState {
                     content_hash: first_hash,
-                    anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/2!/4/1:0)"),
-                    exact_text: "Text".to_owned(),
-                    style: AnnotationStyle::Highlight,
-                    color: "#ffee00".to_owned(),
-                    note: String::new(),
-                    created_at: 1,
+                    detail: book_model::AnnotationDetail {
+                        anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/2!/4/1:0)"),
+                        exact_text: "Text".to_owned(),
+                        style: AnnotationStyle::Highlight,
+                        color: "#ffee00".to_owned(),
+                        note: String::new(),
+                        created_at: 1,
+                        toc_ordinal: Some(5),
+                        progress: Some(42.5),
+                    },
                     modified_at: 2,
                     deleted: false,
-                    toc_ordinal: Some(5),
-                    progress: Some(42.5),
                 },
             },
-            MutationBody::Metadata { content_hash: first_hash, value: metadata() },
-            MutationBody::Description { content_hash: first_hash, value: "Independent description".into() },
-            MutationBody::BookToc {
+            LibraryStateEntry::Metadata { content_hash: first_hash, value: metadata() },
+            LibraryStateEntry::Description { content_hash: first_hash, value: "Independent description".into() },
+            LibraryStateEntry::BookToc {
                 content_hash: first_hash,
                 value: book_model::BookTocDocument { entries: vec![book_model::BookTocEntry { title: "One".into(), target: book_model::audiobook_toc_target(0), children: Vec::new() }], duration_ms: Some(1000), tracks: None },
             },
         ];
 
         for (index, body) in bodies.into_iter().enumerate() {
-            let mutation = StateMutation { origin: None, mutation_id: MutationId::new(), body, changed_at: 100 + index as u64, replica_seq: ReplicaSeq::new(index as u64 + 1).unwrap() };
-            let wire = mutation.to_wire().unwrap();
-            assert_eq!(wire.kind, mutation.body.kind());
+            let mutation = body.publication(sync_common::ReplicaId::nil(), 100 + index as u64, ReplicaSeq::new(index as u64 + 1).unwrap());
+            let wire = sync_common::transport::representation::<_, sync_common::OpaquePublication>(&mutation).unwrap();
+            let bytes = sync_common::transport::encode(&mutation).unwrap();
+            let opaque: sync_common::OpaquePublication = sync_common::transport::decode(&bytes, 8192).unwrap();
+            assert_eq!(opaque, wire);
+            assert_eq!(sync_common::transport::encode(&opaque).unwrap(), bytes);
+            assert_eq!(sync_common::transport::decode::<StatePublication>(&bytes, 8192).unwrap(), mutation);
+            let stored = sync_common::wire::encode(&mutation).unwrap();
+            assert_eq!(sync_common::wire::decode::<StatePublication>(&stored, 8192).unwrap(), mutation);
+            assert_eq!(wire.state.value.address.kind, mutation.state.value.kind());
             let dependency = (index >= 3).then_some(first_hash);
-            assert_eq!(mutation.body.upload_dependency(), dependency);
-            assert_eq!(wire.blob_reference.as_ref().and_then(|r| r.content_hash), dependency);
-            assert!(!wire.value.starts_with(b"BKHM"), "network mutation values must not use the bincode storage envelope");
-            sync_common::transport::decode_mutation_value(&wire.value, sync_common::transport::MAX_DECODED_REQUEST_BYTES).unwrap();
-            assert_eq!(StateMutation::from_wire(&wire).unwrap(), Some(mutation));
+            assert_eq!(mutation.state.value.upload_dependency(), dependency);
+            assert_eq!(wire.state.value.book, dependency);
+            assert!(!wire.state.value.bytes.starts_with(b"BKHM"), "network mutation values must not use the bincode storage envelope");
+            sync_common::transport::decode::<LibraryStateEntry>(&wire.state.value.bytes, sync_common::transport::MAX_DECODED_REQUEST_BYTES).unwrap();
+            assert_eq!(sync_common::state_encoding::decode_publication::<LibraryStateEntry>(&wire).unwrap(), Some(mutation));
         }
     }
 
@@ -376,97 +366,129 @@ mod tests {
     fn recovery_push_sends_creation_first_and_defers_fields_across_pages() {
         let hash = content_hash('a');
         let other = content_hash('b');
-        let mutation = |body, sequence| StateMutation { origin: None, mutation_id: MutationId::new(), body, changed_at: 1, replica_seq: ReplicaSeq::new(sequence).unwrap() };
+        let mutation = |body: LibraryStateEntry, sequence| body.publication(sync_common::ReplicaId::nil(), 1, ReplicaSeq::new(sequence).unwrap());
         let mut queued = (0..sync_common::MAX_PUSH_MUTATIONS)
-            .map(|i| mutation(MutationBody::Placement { content_hash: hash, dir_id: sync_common::DirId::from_u128(i as u128 + 1), present: true, origin_folder_id: None }, i as u64 + 1))
+            .map(|i| mutation(LibraryStateEntry::Placement { content_hash: hash, dir_id: sync_common::DirId::from_u128(i as u128 + 1), present: true, origin_folder_id: None }, i as u64 + 1))
             .collect::<Vec<_>>();
-        queued.push(mutation(MutationBody::BookLifecycle { content_hash: hash, value: BookLifecycleState::Present }, 1000));
-        queued.push(mutation(MutationBody::Description { content_hash: other, value: "Other book".into() }, 1001));
+        queued.push(mutation(LibraryStateEntry::BookLifecycle { content_hash: hash, value: BookLifecycleState::Present }, 1000));
+        queued.push(mutation(LibraryStateEntry::Description { content_hash: other, value: "Other book".into() }, 1001));
         let mut batcher = prepare_push(queued).unwrap();
         let first = batcher.next_batch();
-        assert_eq!(first[0].kind, sync_common::mutation_kind::BOOK_LIFECYCLE);
+        assert_eq!(first[0].state.value.address.kind, "book_lifecycle");
         assert_eq!(first.len(), sync_common::MAX_PUSH_MUTATIONS);
         batcher.defer_book_fields(&[hash.to_string()]);
         let next = batcher.next_batch();
         assert_eq!(next.len(), 1);
-        assert_eq!(next[0].book_field_owner(), Some(other.as_str()));
+        assert_eq!(next[0].state.value.book, Some(other));
         assert!(batcher.is_empty());
     }
 
     #[test]
     fn annotation_deletion_keeps_owner_without_upload_dependency() {
         let hash = content_hash('a');
-        let body = MutationBody::Annotation {
+        let body = LibraryStateEntry::Annotation {
             annotation_id: "note".into(),
             value: book_model::AnnotationState {
                 content_hash: hash,
-                anchor: book_model::AnnotationAnchor::epub_cfi("epubcfi(/6/2)"),
-                exact_text: String::new(),
-                style: book_model::AnnotationStyle::Highlight,
-                color: "#fff".into(),
-                note: String::new(),
-                created_at: 1,
+                detail: book_model::AnnotationDetail {
+                    anchor: book_model::AnnotationAnchor::epub_cfi("epubcfi(/6/2)"),
+                    exact_text: String::new(),
+                    style: book_model::AnnotationStyle::Highlight,
+                    color: "#fff".into(),
+                    note: String::new(),
+                    created_at: 1,
+                    toc_ordinal: None,
+                    progress: None,
+                },
                 modified_at: 2,
                 deleted: true,
-                toc_ordinal: None,
-                progress: None,
             },
         };
         assert_eq!(body.upload_dependency(), None);
-        let mut wire = body.to_wire(MutationId::new(), 2, ReplicaSeq::new(1).unwrap()).unwrap();
-        assert_eq!(wire.book_field_owner(), Some(hash.as_str()));
-        assert!(!wire.blob_reference.as_ref().unwrap().present);
-        assert_eq!(MutationBody::from_wire(&wire).unwrap(), Some(body));
-        wire.blob_reference.as_mut().unwrap().content_hash = Some(content_hash('b'));
-        assert!(MutationBody::from_wire(&wire).is_err());
+        let mut wire = sync_common::transport::representation::<_, sync_common::OpaquePublication>(&body.clone().publication(sync_common::ReplicaId::nil(), 2, ReplicaSeq::new(1).unwrap())).unwrap();
+        assert_eq!(wire.state.value.book, Some(hash));
+        assert_eq!(LibraryStateEntry::decode(&wire.state).unwrap(), Some(body));
+        wire.state.value.book = Some(content_hash('b'));
+        assert!(LibraryStateEntry::decode(&wire.state).is_err());
     }
 
     #[test]
     fn removing_an_unuploaded_import_does_not_require_its_bytes() {
         let hash = content_hash('a');
-        let removals = [MutationBody::BookLifecycle { content_hash: hash, value: BookLifecycleState::Purged }, MutationBody::Placement { dir_id: sync_common::ROOT_DIR_ID, content_hash: hash, present: false, origin_folder_id: None }];
+        let removals =
+            [LibraryStateEntry::BookLifecycle { content_hash: hash, value: BookLifecycleState::Purged }, LibraryStateEntry::Placement { dir_id: sync_common::ROOT_DIR_ID, content_hash: hash, present: false, origin_folder_id: None }];
         for body in removals {
             assert_eq!(body.upload_dependency(), None);
-            let wire = body.to_wire(MutationId::new(), 1, ReplicaSeq::new(1).unwrap()).unwrap();
-            assert_eq!(wire.blob_reference, Some(DeclaredBlobReference { present: false, content_hash: None }));
+            let wire = sync_common::transport::representation::<_, sync_common::OpaquePublication>(&body.clone().publication(sync_common::ReplicaId::nil(), 1, ReplicaSeq::new(1).unwrap())).unwrap();
+            assert_eq!(wire.state.value.book, Some(hash), "a removal still names its book");
         }
     }
 
     #[test]
     fn unknown_service_payloads_remain_forward_compatible() {
-        let wire = WireMutation {
-            origin: None,
-            mutation_id: MutationId::new(),
-            kind: "future_kind".to_owned(),
-            entity_key: String::new(),
-            entity_subkey: String::new(),
-            value: Vec::new(),
-            conflict_rank: 0,
-            blob_reference: None,
-            changed_at: 1,
-            replica_seq: ReplicaSeq::new(1).unwrap(),
+        let wire = sync_common::Publication {
+            publisher_seq: ReplicaSeq::new(1).unwrap(),
+            state: sync_common::Versioned {
+                version: sync_common::VersionKey::new(1, ConflictRank::Update, sync_common::ReplicaId::nil(), ReplicaSeq::new(1).unwrap()),
+                value: sync_common::OpaqueStateEntry { address: sync_common::StateAddress { kind: "future_kind".to_owned(), entity_key: String::new(), entity_subkey: String::new() }, bytes: Vec::new(), book: None },
+            },
         };
-        assert_eq!(StateMutation::from_wire(&wire).unwrap(), None);
+        assert_eq!(sync_common::state_encoding::decode_publication::<LibraryStateEntry>(&wire).unwrap(), None);
     }
 
     #[test]
     fn placement_updates_coalesce_to_the_latest_register_value() {
         let dir_id = dir_id("11111111-1111-4111-8111-111111111111");
-        let claim = StateMutation {
-            origin: None,
-            mutation_id: MutationId::new(),
-            body: MutationBody::Placement { dir_id, content_hash: content_hash('a'), present: true, origin_folder_id: None },
-            changed_at: 1,
-            replica_seq: ReplicaSeq::new(1).unwrap(),
-        };
-        let release = StateMutation {
-            origin: None,
-            mutation_id: MutationId::new(),
-            body: MutationBody::Placement { dir_id, content_hash: content_hash('a'), present: false, origin_folder_id: None },
-            changed_at: 2,
-            replica_seq: ReplicaSeq::new(2).unwrap(),
-        };
+        let claim = (LibraryStateEntry::Placement { dir_id, content_hash: content_hash('a'), present: true, origin_folder_id: None }).publication(sync_common::ReplicaId::nil(), 1, ReplicaSeq::new(1).unwrap());
+        let release = (LibraryStateEntry::Placement { dir_id, content_hash: content_hash('a'), present: false, origin_folder_id: None }).publication(sync_common::ReplicaId::nil(), 2, ReplicaSeq::new(2).unwrap());
         let reduced = coalesce_mutations_for_push(vec![claim, release]);
-        assert!(matches!(reduced.as_slice(), [StateMutation { body: MutationBody::Placement { present: false, .. }, .. }]));
+        assert!(matches!(reduced.as_slice(), [StatePublication { state: Versioned { value: LibraryStateEntry::Placement { present: false, .. }, .. }, .. }]));
+    }
+
+    #[test]
+    fn forwarding_and_coalescing_use_the_original_state_version() {
+        let dir_id = DirId::from_u128(7);
+        let older = LibraryStateEntry::DirectoryName { dir_id, name: "Older".into() }.publication(ReplicaId::from_u128(1), 10, ReplicaSeq::new(90).unwrap());
+        let mut winner = LibraryStateEntry::DirectoryName { dir_id, name: "Winner".into() }.publication(ReplicaId::from_u128(2), 10, ReplicaSeq::new(1).unwrap());
+        let original = winner.state.clone();
+
+        winner.publisher_seq = ReplicaSeq::new(500).unwrap();
+        let encoded = sync_common::transport::representation::<_, sync_common::OpaquePublication>(&winner).unwrap();
+        assert_eq!(sync_common::state_encoding::decode_publication::<LibraryStateEntry>(&encoded).unwrap().unwrap(), winner);
+        let reduced = coalesce_mutations_for_push(vec![winner.clone(), older.clone(), winner.clone()]);
+        assert_eq!(reduced, vec![winner]);
+        assert_eq!(reduced[0].state, original);
+        assert_eq!(coalesce_mutations_for_push(vec![older, reduced[0].clone()]), reduced);
+    }
+
+    #[test]
+    fn direct_serialization_rejects_conflicting_addresses_declarations_and_versions() {
+        let entry = LibraryStateEntry::Placement { content_hash: content_hash('a'), dir_id: DirId::from_u128(7), present: true, origin_folder_id: None };
+        let publication = entry.publication(ReplicaId::from_u128(1), 10, ReplicaSeq::new(1).unwrap());
+        let encoded = sync_common::transport::representation::<_, sync_common::OpaquePublication>(&publication).unwrap();
+        for field in 0..5 {
+            let mut corrupt = encoded.clone();
+            match field {
+                0 => corrupt.state.value.address.kind = "description".into(),
+                1 => corrupt.state.value.address.entity_key = content_hash('b').to_string(),
+                2 => corrupt.state.value.address.entity_subkey = DirId::from_u128(8).to_string(),
+                3 => corrupt.state.value.book = None,
+                4 => corrupt.state.version.conflict_rank = ConflictRank::Purge,
+                _ => unreachable!(),
+            }
+            assert!(sync_common::state_encoding::decode_publication::<LibraryStateEntry>(&corrupt).is_err());
+        }
+    }
+
+    #[test]
+    fn metadata_uses_domain_deserialization_validation() {
+        let entry = LibraryStateEntry::Metadata { content_hash: content_hash('a'), value: metadata() };
+        let publication = entry.publication(ReplicaId::from_u128(1), 10, ReplicaSeq::new(1).unwrap());
+        let mut encoded = sync_common::transport::representation::<_, sync_common::OpaquePublication>(&publication).unwrap();
+        let mut malformed = publication.state.value;
+        let LibraryStateEntry::Metadata { value, .. } = &mut malformed else { unreachable!() };
+        value.book.subjects[0].name_localizations[0].value.clear();
+        encoded.state.value.bytes = sync_common::transport::encode(&malformed).unwrap();
+        assert!(sync_common::state_encoding::decode_publication::<LibraryStateEntry>(&encoded).is_err());
     }
 }

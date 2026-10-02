@@ -14,3 +14,12 @@ gpui.workspace = true
 gpui-component.workspace = true
 gpui-component-assets.workspace = true
 unicode-normalization.workspace = true
+
+# Configure GPUI's shared decoder dependencies explicitly instead of enabling
+# its broad image-formats feature. Keep the same UI formats on every platform,
+# including raster images embedded inside SVGs.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
+resvg = { version = "0.46", default-features = false, features = ["raster-images"] }
+
+[package.metadata.cargo-machete]
+ignored = ["image", "resvg"]

@@ -1,6 +1,6 @@
 //! One ordered writer with a bounded, latest-snapshot mailbox.
 use super::MessagePackTransferHistory;
-use crate::TransferStatus;
+use library_model::TransferStatus;
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 

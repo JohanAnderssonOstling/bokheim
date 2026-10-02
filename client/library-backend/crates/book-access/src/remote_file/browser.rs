@@ -1,6 +1,10 @@
 //! A seekable file bridge from blocking parser workers to an existing async
 //! event loop. Only Rust-owned bytes and atomics cross threads; JS handles and
 //! authentication remain on the event loop that created the file.
+
+use std::io::Error;
+use std::time::Duration;
+use crate::FetchFuture;
 use super::*;
 use client_platform_web::signal::Signal;
 use client_platform_web::transport::range::Source;
@@ -45,7 +49,7 @@ impl Read for BrowserReader {
                 let length = self.length.saturating_sub(start).min(64 * 1024) as u32;
                 let chunk = self.source.read(start, length)?;
                 if chunk.len() > length as usize {
-                    return Err(std::io::Error::other("invalid book read length"));
+                    return Err(Error::other("invalid book read length"));
                 }
                 Ok(chunk)
             };
@@ -70,7 +74,7 @@ impl Seek for BrowserReader {
             SeekFrom::Current(n) => self.position as i128 + n as i128,
             SeekFrom::End(n) => self.length as i128 + n as i128,
         };
-        self.position = u64::try_from(position).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid book seek"))?;
+        self.position = u64::try_from(position).map_err(|_| Error::new(std::io::ErrorKind::InvalidInput, "invalid book seek"))?;
         Ok(self.position)
     }
 }
@@ -93,7 +97,7 @@ impl Drop for FileRequests {
 
 pub fn browser_reader<F>(length: u64, initial_bytes: Option<Vec<u8>>, mut fetch: F) -> Result<crate::BoxedBookReader, String>
 where
-    F: FnMut(u64, usize) -> crate::FetchFuture<'static, Result<Vec<u8>, String>> + 'static,
+    F: FnMut(u64, usize) -> FetchFuture<'static, Result<Vec<u8>, String>> + 'static,
 {
     if let Some(bytes) = &initial_bytes {
         validate_prefix(length, bytes)?;
@@ -107,7 +111,7 @@ where
 
 pub fn browser_bundle_fetch<F>(mut fetch: F) -> Result<crate::BundleFetch, String>
 where
-    F: FnMut(Vec<(u64, usize)>) -> crate::FetchFuture<'static, Result<Vec<u8>, String>> + 'static,
+    F: FnMut(Vec<(u64, usize)>) -> FetchFuture<'static, Result<Vec<u8>, String>> + 'static,
 {
     Signal::check()?;
     let (sender, receiver) = crossbeam_channel::bounded::<Request>(1);
@@ -125,7 +129,7 @@ where
                     request.ready.notify();
                 }
                 Err(crossbeam_channel::TryRecvError::Disconnected) => break,
-                Err(crossbeam_channel::TryRecvError::Empty) => ready.wait_async(observed, std::time::Duration::from_secs(35)).await,
+                Err(crossbeam_channel::TryRecvError::Empty) => ready.wait_async(observed, Duration::from_secs(35)).await,
             }
         }
     });
@@ -141,7 +145,7 @@ where
                 Err(crossbeam_channel::TryRecvError::Disconnected) => return Err(io::Error::other("remote file service stopped")),
                 Err(crossbeam_channel::TryRecvError::Empty) => {}
             }
-            let status = ready.wait(observed, std::time::Duration::from_secs(35)).map_err(io::Error::other)?;
+            let status = ready.wait(observed, Duration::from_secs(35)).map_err(io::Error::other)?;
             if status == "timed-out" {
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "remote file read timed out"));
             }

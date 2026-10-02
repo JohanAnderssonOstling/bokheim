@@ -1,5 +1,7 @@
 //! Best-effort, device-local cache for immutable remote books. This
 //! database never participates in sync or in the downloaded-asset inventory.
+
+use std::future::Future;
 use super::storage::{CacheError as DatabaseError, CacheExecutor, CachePriority as Priority, CacheStorage};
 use crate::{ContentHash, RemoteFile};
 use rusqlite::{params, OptionalExtension};
@@ -94,7 +96,7 @@ impl<S: CacheStorage> BookCache<S> {
     pub async fn read<F, Fut>(&self, executor: &impl CacheExecutor, source: &RemoteFile, offset: u64, length: usize, mut fetch: F) -> Result<Vec<u8>, String>
     where
         F: FnMut(u64, usize) -> Fut,
-        Fut: std::future::Future<Output = Result<Vec<u8>, String>>,
+        Fut: Future<Output = Result<Vec<u8>, String>>,
     {
         if source.length > i64::MAX as u64 || length == 0 || length > MAX_RANGE_BYTES || offset.checked_add(length as u64).is_none_or(|end| end > source.length) {
             return Err("invalid book cache range".into());
@@ -224,17 +226,31 @@ fn read_offsets(conn: &mut rusqlite::Connection, source: &RemoteFile, offsets: &
     tx.commit()?;
     // Keep valid reads usable when the cache is full or read-only. All LRU
     // touches for a page share one best-effort transaction.
-    let _ = (|| -> rusqlite::Result<()> {
-        let tx = conn.transaction()?;
-        let tick = next_tick(&tx)?;
-        {
-            let mut touch = tx.prepare_cached(include_str!("sql/touch_block.sql"))?;
-            for &offset in offsets {
-                touch.execute(params![tick, source.hash.as_str(), offset as i64])?;
+    let _ = {
+        'read_offsets: {
+            let tx = match conn.transaction() {
+                Ok(value) => value,
+                Err(error) => break 'read_offsets Err(error.into()),
+            };
+            let tick = match next_tick(&tx) {
+                Ok(value) => value,
+                Err(error) => break 'read_offsets Err(error.into()),
+            };
+            {
+                let mut touch = match tx.prepare_cached(include_str!("sql/touch_block.sql")) {
+                    Ok(value) => value,
+                    Err(error) => break 'read_offsets Err(error.into()),
+                };
+                for &offset in offsets {
+                    match touch.execute(params![tick, source.hash.as_str(), offset as i64]) {
+                        Ok(value) => value,
+                        Err(error) => break 'read_offsets Err(error.into()),
+                    };
+                }
             }
+            tx.commit()
         }
-        tx.commit()
-    })();
+    };
     Ok(blocks)
 }
 
@@ -242,14 +258,13 @@ fn read_offsets(conn: &mut rusqlite::Connection, source: &RemoteFile, offsets: &
 mod tests;
 
 impl<S: CacheStorage> BookCache<S> {
-    /// One database probe and one network batch for all missing aligned blocks.
+    /// One database probe and one fetch of missing ranges for all missing aligned blocks.
     pub async fn read_bundle<F, Fut>(&self, executor: &impl CacheExecutor, source: &RemoteFile, ranges: Vec<(u64, usize)>, mut fetch: F) -> Result<Vec<u8>, String>
     where
         F: FnMut(Vec<(u64, usize)>) -> Fut,
-        Fut: std::future::Future<Output = Result<Vec<u8>, String>>,
+        Fut: Future<Output = Result<Vec<u8>, String>>,
     {
-        let request = sync_common::api::assets::BookRanges { checksum: source.checksum, ranges: ranges.clone() };
-        let total = request.byte_count(source.length).ok_or("invalid book bundle")?;
+        let total = crate::remote_file::bundle_byte_count(&ranges, source.length).ok_or("invalid book bundle")?;
         if ranges.iter().any(|(offset, length)| offset % BLOCK_BYTES as u64 != 0 || (*length % BLOCK_BYTES != 0 && *offset + *length as u64 != source.length)) {
             return Err("book bundles require aligned blocks".into());
         }
@@ -288,7 +303,34 @@ impl<S: CacheStorage> BookCache<S> {
                 }
                 consumed += size;
             }
-            self.remember_bundle(executor, source.clone(), writes);
+            ({
+                let source: RemoteFile = source.clone();
+                'read_bundle: {
+                    if self.database.is_none() || writes.iter().map(|(_, bytes)| bytes.len()).sum::<usize>() > crate::remote_file::MAX_BUNDLE_BYTES {
+                        break 'read_bundle ();
+                    }
+                    if self.pending.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < MAX_PENDING_WRITES).then_some(n + 1)).is_err() {
+                        break 'read_bundle ();
+                    }
+                    struct Pending(Arc<AtomicUsize>);
+                    impl Drop for Pending {
+                        fn drop(&mut self) {
+                            self.0.fetch_sub(1, Ordering::Release);
+                        }
+                    }
+                    let pending = Pending(self.pending.clone());
+                    let cache = self.clone();
+                    executor.spawn_detached(Box::pin(async move {
+                        let _pending = pending;
+                        for (offset, bytes) in writes {
+                            if let Err(error) = cache.store(source.clone(), offset, bytes).await {
+                                log::debug!("Book bundle cache write skipped: {error}");
+                                break;
+                            }
+                        }
+                    }));
+                }
+            });
             let mut chunks = bytes.chunks(BLOCK_BYTES);
             for block in &mut blocks {
                 if block.is_none() {
@@ -304,30 +346,4 @@ impl<S: CacheStorage> BookCache<S> {
     }
 }
 
-impl<S: CacheStorage> BookCache<S> {
-    fn remember_bundle(&self, executor: &impl CacheExecutor, source: RemoteFile, writes: Vec<(u64, Vec<u8>)>) {
-        if self.database.is_none() || writes.iter().map(|(_, bytes)| bytes.len()).sum::<usize>() > sync_common::api::assets::MAX_BOOK_BUNDLE_BYTES {
-            return;
-        }
-        if self.pending.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < MAX_PENDING_WRITES).then_some(n + 1)).is_err() {
-            return;
-        }
-        struct Pending(Arc<AtomicUsize>);
-        impl Drop for Pending {
-            fn drop(&mut self) {
-                self.0.fetch_sub(1, Ordering::Release);
-            }
-        }
-        let pending = Pending(self.pending.clone());
-        let cache = self.clone();
-        executor.spawn_detached(Box::pin(async move {
-            let _pending = pending;
-            for (offset, bytes) in writes {
-                if let Err(error) = cache.store(source.clone(), offset, bytes).await {
-                    log::debug!("Book bundle cache write skipped: {error}");
-                    break;
-                }
-            }
-        }));
-    }
-}
+impl<S: CacheStorage> BookCache<S> {}

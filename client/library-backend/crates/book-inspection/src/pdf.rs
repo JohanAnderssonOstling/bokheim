@@ -1,3 +1,8 @@
+use std::cell::RefCell;
+use std::error::Error;
+use std::fs::File;
+use std::io::{Result, SeekFrom};
+use std::rc::Rc;
 use crate::{author_from_field, author_names, fallback_metadata, MetadataResult};
 use book_model::{canonical_doi, canonical_uuid, BookDate, BookMetadata, BookRecord, BookSubject, Contributor, Identifier, LanguageTag, PublisherCredit, Scheme, Scope, CONTRIBUTOR_MARC_RELATOR_CODE};
 use lopdf::{Dictionary, Document};
@@ -23,21 +28,13 @@ pub struct InspectedPdf {
 /// Extracts bounded, allow-listed bibliographic metadata from the PDF info
 /// dictionary and XMP packet. First and last pages use the shared context-aware evidence rules; arbitrary XMP extensions are never promoted.
 pub fn inspect_pdf(path: &Path) -> MetadataResult<InspectedPdf> {
-    inspect_pdf_reader(path, std::fs::File::open(path)?)
+    inspect_pdf_reader(path, File::open(path)?)
 }
 
-pub fn inspect_pdf_reader<R: Read + Seek + 'static>(source_name: &Path, mut reader: R) -> MetadataResult<InspectedPdf> {
-    // Resolve cheap dictionaries first; metadata ISBNs defer page work until
-    // the document lookup has actually missed.
-    if let Ok(document) = super::pdf_ranges::metadata(&mut reader) {
-        if let Ok(inspected) = inspect_pdf_document(source_name, document) {
-            if book_enrichment::defer_initial_page_inspection(&inspected.metadata.book) {
-                return Ok(inspected);
-            }
-        }
-    }
-    reader.seek(std::io::SeekFrom::Start(0))?;
-    inspect_pdf_pages_reader(source_name, reader)
+/// Page evidence is always read: it joins the file facts the metadata server
+/// is asked about.
+pub fn inspect_pdf_reader<R: Read + Seek + 'static>(source_name: &Path, reader: R) -> MetadataResult<InspectedPdf> {
+    inspect_pdf_pages_mode(source_name, reader)
 }
 
 pub fn inspect_pdf_pages_reader<R: Read + Seek + 'static>(source_name: &Path, reader: R) -> MetadataResult<InspectedPdf> {
@@ -51,14 +48,21 @@ fn inspect_pdf_pages_mode<R: Read + Seek + 'static>(source_name: &Path, mut read
         // A PDFium-readable book must not lose its page evidence just because
         // the metadata-only parser cannot handle its cross-reference variant.
         let mut inspected = inspected.unwrap_or_else(|_| InspectedPdf { metadata: fallback_metadata(source_name) });
-        reader.seek(std::io::SeekFrom::Start(0))?;
-        let reader = SharedReader(std::rc::Rc::new(std::cell::RefCell::new(reader)));
+        reader.seek(SeekFrom::Start(0))?;
+        let reader = SharedReader(Rc::new(RefCell::new(reader)));
         let (count, pages) = pdf_reader_core::inspect_page_text_with_count(reader.clone(), EARLY_TEXT_PAGES, crate::evidence::MAX_SECTION_BYTES)?;
         let evidence = pages
             .into_iter()
             .map(|(page, text)| {
                 if page >= count.saturating_sub(1) {
-                    crate::evidence::inspect_isbn_image(&inspected.metadata, &format!("pdf:page:{page}:back-cover"), &text)
+                    {
+                        use crate::evidence::*;
+                        let book: &BookRecord = &inspected.metadata;
+                        let location: &str = &format!("pdf:page:{page}:back-cover");
+                        let text: &str = &text;
+
+                        inspect_section(book, location, text)
+                    }
                 } else {
                     crate::evidence::inspect_section(&inspected.metadata, &format!("pdf:page:{page}"), &text)
                 }
@@ -70,19 +74,19 @@ fn inspect_pdf_pages_mode<R: Read + Seek + 'static>(source_name: &Path, mut read
     }
 }
 
-struct SharedReader<R>(std::rc::Rc<std::cell::RefCell<R>>);
+struct SharedReader<R>(Rc<RefCell<R>>);
 impl<R> Clone for SharedReader<R> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
 impl<R: Read> Read for SharedReader<R> {
-    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+    fn read(&mut self, bytes: &mut [u8]) -> Result<usize> {
         self.0.borrow_mut().read(bytes)
     }
 }
 impl<R: Seek> Seek for SharedReader<R> {
-    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+    fn seek(&mut self, position: SeekFrom) -> Result<u64> {
         self.0.borrow_mut().seek(position)
     }
 }
@@ -92,8 +96,57 @@ fn inspect_pdf_document(path: &Path, document: Document) -> MetadataResult<Inspe
         return Err("password-protected PDF books are not supported".into());
     }
 
-    let info = pdf_info_dictionary(&document);
-    let xmp = pdf_xmp(&document);
+    let info = document.trailer.get(b"Info").ok().and_then(|object| document.dereference(object).ok()).and_then(|(_, object)| object.as_dict().ok());
+    let xmp = {
+        let document: &Document = &document;
+        'xmp: {
+            let root = match match document
+                .dereference(match document.trailer.get(b"Root").ok() {
+                    Some(value) => value,
+                    None => break 'xmp None,
+                })
+                .ok()
+            {
+                Some(value) => value,
+                None => break 'xmp None,
+            }
+            .1
+            .as_dict()
+            .ok()
+            {
+                Some(value) => value,
+                None => break 'xmp None,
+            };
+            let metadata = match match document
+                .dereference(match root.get(b"Metadata").ok() {
+                    Some(value) => value,
+                    None => break 'xmp None,
+                })
+                .ok()
+            {
+                Some(value) => value,
+                None => break 'xmp None,
+            }
+            .1
+            .as_stream()
+            .ok()
+            {
+                Some(value) => value,
+                None => break 'xmp None,
+            };
+            if metadata.content.len() > MAX_XMP_BYTES {
+                break 'xmp None;
+            }
+            let bytes = match metadata.decompressed_content().ok() {
+                Some(value) => value,
+                None => break 'xmp None,
+            };
+            if bytes.len() > MAX_XMP_BYTES {
+                break 'xmp None;
+            }
+            std::str::from_utf8(&bytes).ok().map(str::to_owned)
+        }
+    };
     let parsed = xmp.as_deref().and_then(|xml| XmlDocument::parse(xml).ok());
 
     let title_values = parsed.as_ref().map(|xml| xmp_values(xml, DC, "title", MAX_TEXT_BYTES)).unwrap_or_default();
@@ -113,13 +166,56 @@ fn inspect_pdf_document(path: &Path, document: Document) -> MetadataResult<Inspe
     if let Some(xml) = parsed.as_ref() {
         contributors.extend(xmp_values(xml, DC, "contributor", MAX_TEXT_BYTES).into_iter().filter_map(|value| Contributor::new(value.text, CONTRIBUTOR_MARC_RELATOR_CODE).ok()));
     }
-    dedup_contributors(&mut contributors);
+    {
+        let values: &mut Vec<Contributor> = &mut contributors;
+        let mut seen = HashSet::new();
+        values.retain(|value| seen.insert((value.name().to_owned(), value.role_code())));
+    };
     let valid_titles = title_values.iter().filter(|value| !book_enrichment::title_identity::unusable_title(&value.text, &contributors)).cloned().collect::<Vec<_>>();
-    let title = preferred_language_value(&valid_titles).or_else(|| info_title.clone().filter(|title| !book_enrichment::title_identity::unusable_title(title, &contributors))).unwrap_or_else(|| fallback_metadata(path).title);
+    let title = preferred_language_value(&valid_titles).or_else(|| info_title.clone().filter(|title| !book_enrichment::title_identity::unusable_title(title, &contributors))).unwrap_or_else(|| fallback_metadata(path).metadata.title);
 
     let mut book = BookMetadata::default();
     if let Some(xml) = parsed.as_ref() {
-        book.identifiers = xmp_identifiers(xml);
+        book.identifiers = {
+            let document: &XmlDocument<'_> = xml;
+
+            let mut values = xmp_values(document, DC, "identifier", MAX_TEXT_BYTES);
+            values.extend(xmp_values(document, XMP, "Identifier", MAX_TEXT_BYTES));
+            for node in document
+                .descendants()
+                .filter(|node| node.is_element() && node.tag_name().namespace().is_some_and(|namespace| namespace.contains("prismstandard.org")) && matches!(node.tag_name().name().to_ascii_lowercase().as_str(), "isbn" | "doi" | "issn"))
+            {
+                let mut extra = Vec::new();
+                push_xmp_value(&mut extra, node, MAX_TEXT_BYTES);
+                for value in &mut extra {
+                    value.scheme = Some(node.tag_name().name().to_owned());
+                }
+                values.extend(extra);
+            }
+            values
+                .into_iter()
+                .filter_map(|value: XmpValue| -> Option<Identifier> {
+                    let declared = value.scheme.as_deref().unwrap_or_default().to_ascii_lowercase();
+                    let trimmed = {
+                        let text = value.text.trim();
+                        ["ISBN-13:", "ISBN-10:", "ISBN:", "isbn-13:", "isbn-10:", "isbn:", "DOI:", "doi:"].iter().find_map(|label| text.strip_prefix(label)).unwrap_or(text).trim()
+                    };
+                    let (value, scheme) = if declared.contains("isbn") || book_model::from_metadata_value(trimmed).is_some() {
+                        (book_model::from_metadata_value(trimmed)?, Scheme::Isbn)
+                    } else if declared.contains("doi") || canonical_doi(trimmed).is_some() {
+                        (canonical_doi(trimmed)?, Scheme::Doi)
+                    } else if declared.contains("uuid") || canonical_uuid(trimmed).is_some() {
+                        (canonical_uuid(trimmed)?, Scheme::Uuid)
+                    } else if declared.contains("issn") {
+                        (trimmed.to_owned(), Scheme::Issn)
+                    } else {
+                        (trimmed.to_owned(), Scheme::Unspecified)
+                    };
+                    Identifier::new(value, scheme, Scope::Book).ok()
+                })
+                .take(MAX_VALUES)
+                .collect()
+        };
         book.publishers = xmp_values(xml, DC, "publisher", MAX_TEXT_BYTES).into_iter().filter_map(|value| PublisherCredit::new(value.text).ok()).collect();
         book.languages = xmp_values(xml, DC, "language", MAX_TEXT_BYTES).into_iter().filter_map(|value| LanguageTag::parse(value.text).ok()).collect();
         book.dates = xmp_values(xml, DC, "date", MAX_TEXT_BYTES).into_iter().filter_map(|value| BookDate::new(None, value.text, Some("dc:date".to_owned()), "pdf:xmp:dc:date").ok()).collect();
@@ -154,9 +250,23 @@ fn inspect_pdf_document(path: &Path, document: Document) -> MetadataResult<Inspe
         }
     }
 
-    dedup_book(&mut book);
-    let mut metadata = BookRecord { title, subtitle: None, contributors, description, book };
-    book_enrichment::title_identity::normalize(&mut metadata).map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?;
+    {
+        let book: &mut BookMetadata = &mut book;
+        let mut identifiers = Vec::new();
+        book.identifiers.retain(|value| {
+            let key = (value.scheme().clone(), value.lookup_value());
+            if identifiers.contains(&key) {
+                false
+            } else {
+                identifiers.push(key);
+                true
+            }
+        });
+        let mut subjects = HashSet::new();
+        book.subjects.retain(|value| subjects.insert(value.name().to_owned()));
+    };
+    let mut metadata = BookRecord { metadata: book_model::BookDetails { title: title, subtitle: None, contributors: contributors, book: book }, description: description };
+    book_enrichment::title_identity::normalize(&mut metadata).map_err(|error| -> Box<dyn Error + Send + Sync> { error.into() })?;
     Ok(InspectedPdf { metadata })
 }
 
@@ -167,25 +277,8 @@ struct XmpValue {
     scheme: Option<String>,
 }
 
-fn pdf_info_dictionary(document: &Document) -> Option<&Dictionary> {
-    document.dereference(document.trailer.get(b"Info").ok()?).ok()?.1.as_dict().ok()
-}
-
 fn dictionary_text(dictionary: &Dictionary, key: &[u8]) -> Option<String> {
     bounded_text(&lopdf::decode_text_string(dictionary.get(key).ok()?).ok()?, MAX_DESCRIPTION_BYTES)
-}
-
-fn pdf_xmp(document: &Document) -> Option<String> {
-    let root = document.dereference(document.trailer.get(b"Root").ok()?).ok()?.1.as_dict().ok()?;
-    let metadata = document.dereference(root.get(b"Metadata").ok()?).ok()?.1.as_stream().ok()?;
-    if metadata.content.len() > MAX_XMP_BYTES {
-        return None;
-    }
-    let bytes = metadata.decompressed_content().ok()?;
-    if bytes.len() > MAX_XMP_BYTES {
-        return None;
-    }
-    std::str::from_utf8(&bytes).ok().map(str::to_owned)
 }
 
 fn xmp_values(document: &XmlDocument<'_>, namespace: &str, local_name: &str, max_bytes: usize) -> Vec<XmpValue> {
@@ -233,76 +326,12 @@ fn preferred_language_value(values: &[XmpValue]) -> Option<String> {
     values.iter().find(|value| value.language.as_deref() == Some("x-default")).or_else(|| values.first()).map(|value| value.text.clone())
 }
 
-fn xmp_identifiers(document: &XmlDocument<'_>) -> Vec<Identifier> {
-    let mut values = xmp_values(document, DC, "identifier", MAX_TEXT_BYTES);
-    values.extend(xmp_values(document, XMP, "Identifier", MAX_TEXT_BYTES));
-    for node in document
-        .descendants()
-        .filter(|node| node.is_element() && node.tag_name().namespace().is_some_and(|namespace| namespace.contains("prismstandard.org")) && matches!(node.tag_name().name().to_ascii_lowercase().as_str(), "isbn" | "doi" | "issn"))
-    {
-        let mut extra = Vec::new();
-        push_xmp_value(&mut extra, node, MAX_TEXT_BYTES);
-        for value in &mut extra {
-            value.scheme = Some(node.tag_name().name().to_owned());
-        }
-        values.extend(extra);
-    }
-    values.into_iter().filter_map(book_identifier).take(MAX_VALUES).collect()
-}
-
-fn book_identifier(value: XmpValue) -> Option<Identifier> {
-    let declared = value.scheme.as_deref().unwrap_or_default().to_ascii_lowercase();
-    let trimmed = strip_identifier_label(&value.text);
-    let (value, scheme) = if declared.contains("isbn") || book_model::from_metadata_value(trimmed).is_some() {
-        (book_model::from_metadata_value(trimmed)?, Scheme::Isbn)
-    } else if declared.contains("doi") || canonical_doi(trimmed).is_some() {
-        (canonical_doi(trimmed)?, Scheme::Doi)
-    } else if declared.contains("uuid") || canonical_uuid(trimmed).is_some() {
-        (canonical_uuid(trimmed)?, Scheme::Uuid)
-    } else if declared.contains("issn") {
-        (trimmed.to_owned(), Scheme::Issn)
-    } else {
-        (trimmed.to_owned(), Scheme::Unspecified)
-    };
-    Identifier::new(value, scheme, Scope::Book).ok()
-}
-
-fn strip_identifier_label(value: &str) -> &str {
-    let value = value.trim();
-    for label in ["ISBN-13:", "ISBN-10:", "ISBN:", "isbn-13:", "isbn-10:", "isbn:", "DOI:", "doi:"] {
-        if let Some(value) = value.strip_prefix(label) {
-            return value.trim();
-        }
-    }
-    value
-}
-
 fn bounded_text(value: &str, max_bytes: usize) -> Option<String> {
     let value = value.trim();
     if value.is_empty() || value.len() > max_bytes || value.chars().any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t')) {
         return None;
     }
     Some(value.split_whitespace().collect::<Vec<_>>().join(" "))
-}
-
-fn dedup_contributors(values: &mut Vec<Contributor>) {
-    let mut seen = HashSet::new();
-    values.retain(|value| seen.insert((value.name().to_owned(), value.role_code())));
-}
-
-fn dedup_book(book: &mut BookMetadata) {
-    let mut identifiers = Vec::new();
-    book.identifiers.retain(|value| {
-        let key = (value.scheme().clone(), value.lookup_value());
-        if identifiers.contains(&key) {
-            false
-        } else {
-            identifiers.push(key);
-            true
-        }
-    });
-    let mut subjects = HashSet::new();
-    book.subjects.retain(|value| subjects.insert(value.name().to_owned()));
 }
 
 #[cfg(test)]
@@ -331,7 +360,7 @@ mod tests {
         assert!(!files.is_empty());
         let mut successful = 0;
         for path in files.iter().take(30) {
-            let full = Document::load(path).map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) }).and_then(|document| inspect_pdf_document(path, document));
+            let full = Document::load(path).map_err(|e| -> Box<dyn Error + Send + Sync> { Box::new(e) }).and_then(|document| inspect_pdf_document(path, document));
             let ranged = inspect_pdf(path);
             match (full, ranged) {
                 (Ok(full), Ok(ranged)) => {
@@ -450,7 +479,7 @@ mod tests {
 
 /// Read dictionary and XMP values without page text.
 pub fn inspect_pdf_metadata(path: &Path) -> MetadataResult<InspectedPdf> {
-    inspect_pdf_document(path, super::pdf_ranges::metadata(std::fs::File::open(path)?)?)
+    inspect_pdf_document(path, super::pdf_ranges::metadata(File::open(path)?)?)
 }
 
 /// Every case here is a real `/Author` value from a scanned library.

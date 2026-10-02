@@ -2,7 +2,7 @@ use crate::extract::AuthUser;
 use crate::state::AppState;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
-use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::http::{StatusCode};
 use axum::response::Response;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
@@ -14,7 +14,6 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const ACCOUNT_CHANNEL_CAPACITY: usize = 256;
 const MAX_CONTROL_MESSAGE_BYTES: usize = 4 * 1024;
-const FORWARDED_PROTO: &str = "x-forwarded-proto";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NotificationConfig {
@@ -127,14 +126,9 @@ impl NotificationHub {
         }
         let _ = channel.sender.send(HubEvent { origin_credential, message });
     }
-
-    pub(crate) fn active_connections(&self) -> usize {
-        self.config.max_connections.saturating_sub(self.connections.available_permits())
-    }
 }
 
-pub(crate) async fn connect(State(state): State<AppState>, user: AuthUser, headers: HeaderMap, upgrade: WebSocketUpgrade) -> Result<Response, StatusCode> {
-    require_websocket_origin(user.cookie_authenticated, &headers)?;
+pub(crate) async fn connect(State(state): State<AppState>, user: AuthUser, upgrade: WebSocketUpgrade) -> Result<Response, StatusCode> {
     let subscription = state.notifications.subscribe(&user.user_id).ok_or(StatusCode::TOO_MANY_REQUESTS)?;
     let config = state.notifications.config;
     let account = state.account.clone();
@@ -144,44 +138,6 @@ pub(crate) async fn connect(State(state): State<AppState>, user: AuthUser, heade
 #[path = "notification_auth.rs"]
 mod auth;
 pub(crate) use auth::websocket_bearer;
-
-fn require_websocket_origin(cookie_authenticated: bool, headers: &HeaderMap) -> Result<(), StatusCode> {
-    if !cookie_authenticated {
-        return Ok(());
-    }
-    require_cookie_websocket_origin(headers)
-}
-
-fn require_cookie_websocket_origin(headers: &HeaderMap) -> Result<(), StatusCode> {
-    let mut origins = headers.get_all(header::ORIGIN).iter();
-    let origin = origins.next().and_then(|value| value.to_str().ok()).ok_or(StatusCode::FORBIDDEN)?;
-    if origins.next().is_some() {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    let origin: Uri = origin.parse().map_err(|_| StatusCode::FORBIDDEN)?;
-    let scheme = origin.scheme_str().filter(|scheme| matches!(*scheme, "http" | "https")).ok_or(StatusCode::FORBIDDEN)?;
-    let authority = origin.authority().ok_or(StatusCode::FORBIDDEN)?;
-    if origin.path_and_query().is_some_and(|path| path.as_str() != "/") {
-        return Err(StatusCode::FORBIDDEN);
-    }
-
-    let mut hosts = headers.get_all(header::HOST).iter();
-    let host = hosts.next().and_then(|value| value.to_str().ok()).ok_or(StatusCode::FORBIDDEN)?;
-    if hosts.next().is_some() || !authority.as_str().eq_ignore_ascii_case(host) {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    let mut forwarded_values = headers.get_all(FORWARDED_PROTO).iter();
-    if let Some(forwarded) = forwarded_values.next() {
-        let forwarded = forwarded.to_str().map_err(|_| StatusCode::FORBIDDEN)?;
-        if forwarded_values.next().is_some() {
-            return Err(StatusCode::FORBIDDEN);
-        }
-        if forwarded.contains(',') || !forwarded.eq_ignore_ascii_case(scheme) {
-            return Err(StatusCode::FORBIDDEN);
-        }
-    }
-    Ok(())
-}
 
 enum SocketAction {
     Send(Message),
@@ -283,29 +239,6 @@ mod tests {
         assert_eq!(defaults.timeout(), Duration::from_secs(150));
         assert_eq!(defaults.auth_revalidation(), Duration::from_secs(30));
         assert!(defaults.timeout() >= defaults.heartbeat() * 2);
-    }
-
-    fn websocket_headers(origin: &str, host: &str, forwarded_proto: Option<&str>) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert(header::ORIGIN, origin.parse().unwrap());
-        headers.insert(header::HOST, host.parse().unwrap());
-        if let Some(proto) = forwarded_proto {
-            headers.insert(FORWARDED_PROTO, proto.parse().unwrap());
-        }
-        headers
-    }
-
-    #[test]
-    fn cookie_websockets_require_an_exact_origin() {
-        assert_eq!(require_cookie_websocket_origin(&websocket_headers("https://app.bokheim.se", "app.bokheim.se", Some("https"))), Ok(()));
-        assert_eq!(require_cookie_websocket_origin(&websocket_headers("http://127.0.0.1:8080", "127.0.0.1:8080", Some("http"))), Ok(()));
-        assert_eq!(require_cookie_websocket_origin(&websocket_headers("https://evil.example", "app.bokheim.se", Some("https"))), Err(StatusCode::FORBIDDEN));
-        assert_eq!(require_cookie_websocket_origin(&websocket_headers("https://app.bokheim.se:444", "app.bokheim.se", Some("https"))), Err(StatusCode::FORBIDDEN));
-        assert_eq!(require_cookie_websocket_origin(&websocket_headers("https://app.bokheim.se/path", "app.bokheim.se", Some("https"))), Err(StatusCode::FORBIDDEN));
-        assert_eq!(require_cookie_websocket_origin(&websocket_headers("http://app.bokheim.se", "app.bokheim.se", Some("https"))), Err(StatusCode::FORBIDDEN));
-        assert_eq!(require_cookie_websocket_origin(&websocket_headers("null", "app.bokheim.se", Some("https"))), Err(StatusCode::FORBIDDEN));
-        assert_eq!(require_cookie_websocket_origin(&HeaderMap::new()), Err(StatusCode::FORBIDDEN));
-        assert_eq!(require_websocket_origin(false, &HeaderMap::new()), Ok(()), "bearer-token clients do not need a browser Origin header");
     }
 
     #[tokio::test]

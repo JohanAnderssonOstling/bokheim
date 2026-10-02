@@ -26,9 +26,81 @@ pub struct DirectoryProjection {
 pub fn project_directories(intents: &HashMap<DirId, DirectoryIntent>) -> DirectoryProjection {
     let mut suppressed: HashSet<_> = intents.values().filter(|intent| intent.lifecycle != DirectoryLifecycleState::Present).map(|intent| intent.id).collect();
     let mut parents = intents.iter().map(|(id, intent)| (*id, intent.parent_id)).collect();
-    repair_cycles(intents, &suppressed, &mut parents);
-    cascade_unreachable(intents, &parents, &mut suppressed);
-    let names = resolve_path_collisions(intents, &parents, &suppressed);
+    {
+        let (intents, suppressed, parents): (&HashMap<DirId, DirectoryIntent>, &HashSet<DirId>, &mut HashMap<DirId, DirId>) = (intents, &suppressed, &mut parents);
+        let mut ids: Vec<_> = intents.keys().copied().collect();
+        ids.sort();
+        for start in ids {
+            if suppressed.contains(&start) {
+                continue;
+            }
+            let mut path = Vec::new();
+            let mut positions = HashMap::new();
+            let mut current = start;
+            loop {
+                if suppressed.contains(&current) || current == ROOT_DIR_ID {
+                    break;
+                }
+                if let Some(position) = positions.get(&current).copied() {
+                    if let Some(loser) = path[position..].iter().max().copied() {
+                        parents.insert(loser, ROOT_DIR_ID);
+                    }
+                    break;
+                }
+                let Some(parent) = parents.get(&current) else {
+                    break;
+                };
+                positions.insert(current, path.len());
+                path.push(current);
+                current = *parent;
+            }
+        }
+    };
+    {
+        let (intents, parents, suppressed): (&HashMap<DirId, DirectoryIntent>, &HashMap<DirId, DirId>, &mut HashSet<DirId>) = (intents, &parents, &mut suppressed);
+        loop {
+            let newly_suppressed: Vec<_> = intents
+                .values()
+                .filter(|intent| !suppressed.contains(&intent.id))
+                .filter(|intent| parents[&intent.id] != ROOT_DIR_ID && (!intents.contains_key(&parents[&intent.id]) || suppressed.contains(&parents[&intent.id])))
+                .map(|intent| intent.id)
+                .collect();
+            if newly_suppressed.is_empty() {
+                break;
+            }
+            suppressed.extend(newly_suppressed);
+        }
+    };
+    let names = {
+        let mut groups: HashMap<(DirId, String), Vec<&DirectoryIntent>> = HashMap::new();
+        let mut occupied: HashMap<DirId, HashSet<String>> = HashMap::new();
+        let mut names: HashMap<_, _> = intents.values().map(|intent| (intent.id, crate::project_folder_name(&intent.name))).collect();
+        for intent in intents.values().filter(|intent| !suppressed.contains(&intent.id)) {
+            let key = crate::portable_name_key(&names[&intent.id]);
+            occupied.entry(parents[&intent.id]).or_default().insert(key.clone());
+            groups.entry((parents[&intent.id], key)).or_default().push(intent);
+        }
+        let mut collisions: Vec<_> = groups.into_iter().filter(|(_, group)| group.len() > 1).collect();
+        collisions.sort_by(|left, right| left.0.cmp(&right.0));
+        for ((parent_id, _), mut group) in collisions {
+            // Stable identity, not timestamps: recovery cannot reshuffle names.
+            group.sort_by(|left, right| right.id.cmp(&left.id));
+            let base = names[&group[0].id].clone();
+            let parent_occupied = occupied.entry(parent_id).or_default();
+            for (offset, loser) in group.into_iter().skip(1).enumerate() {
+                let mut number = offset + 2;
+                loop {
+                    let candidate = crate::numbered_folder_name(&base, number);
+                    if parent_occupied.insert(crate::portable_name_key(&candidate)) {
+                        names.insert(loser.id, candidate);
+                        break;
+                    }
+                    number += 1;
+                }
+            }
+        }
+        names
+    };
 
     let mut remaining: Vec<_> = intents.keys().filter(|id| !suppressed.contains(*id)).copied().collect();
     remaining.sort();
@@ -47,82 +119,6 @@ pub fn project_directories(intents: &HashMap<DirId, DirectoryIntent>) -> Directo
         ordered_active.push(id);
     }
     DirectoryProjection { ordered_active, suppressed, parents, names }
-}
-
-fn cascade_unreachable(intents: &HashMap<DirId, DirectoryIntent>, parents: &HashMap<DirId, DirId>, suppressed: &mut HashSet<DirId>) {
-    loop {
-        let newly_suppressed: Vec<_> = intents
-            .values()
-            .filter(|intent| !suppressed.contains(&intent.id))
-            .filter(|intent| parents[&intent.id] != ROOT_DIR_ID && (!intents.contains_key(&parents[&intent.id]) || suppressed.contains(&parents[&intent.id])))
-            .map(|intent| intent.id)
-            .collect();
-        if newly_suppressed.is_empty() {
-            break;
-        }
-        suppressed.extend(newly_suppressed);
-    }
-}
-
-fn repair_cycles(intents: &HashMap<DirId, DirectoryIntent>, suppressed: &HashSet<DirId>, parents: &mut HashMap<DirId, DirId>) {
-    let mut ids: Vec<_> = intents.keys().copied().collect();
-    ids.sort();
-    for start in ids {
-        if suppressed.contains(&start) {
-            continue;
-        }
-        let mut path = Vec::new();
-        let mut positions = HashMap::new();
-        let mut current = start;
-        loop {
-            if suppressed.contains(&current) || current == ROOT_DIR_ID {
-                break;
-            }
-            if let Some(position) = positions.get(&current).copied() {
-                if let Some(loser) = path[position..].iter().max().copied() {
-                    parents.insert(loser, ROOT_DIR_ID);
-                }
-                break;
-            }
-            let Some(parent) = parents.get(&current) else {
-                break;
-            };
-            positions.insert(current, path.len());
-            path.push(current);
-            current = *parent;
-        }
-    }
-}
-
-fn resolve_path_collisions(intents: &HashMap<DirId, DirectoryIntent>, parents: &HashMap<DirId, DirId>, suppressed: &HashSet<DirId>) -> HashMap<DirId, FileName> {
-    let mut groups: HashMap<(DirId, String), Vec<&DirectoryIntent>> = HashMap::new();
-    let mut occupied: HashMap<DirId, HashSet<String>> = HashMap::new();
-    let mut names: HashMap<_, _> = intents.values().map(|intent| (intent.id, crate::project_folder_name(&intent.name))).collect();
-    for intent in intents.values().filter(|intent| !suppressed.contains(&intent.id)) {
-        let key = crate::portable_name_key(&names[&intent.id]);
-        occupied.entry(parents[&intent.id]).or_default().insert(key.clone());
-        groups.entry((parents[&intent.id], key)).or_default().push(intent);
-    }
-    let mut collisions: Vec<_> = groups.into_iter().filter(|(_, group)| group.len() > 1).collect();
-    collisions.sort_by(|left, right| left.0.cmp(&right.0));
-    for ((parent_id, _), mut group) in collisions {
-        // Stable identity, not timestamps: recovery cannot reshuffle names.
-        group.sort_by(|left, right| right.id.cmp(&left.id));
-        let base = names[&group[0].id].clone();
-        let parent_occupied = occupied.entry(parent_id).or_default();
-        for (offset, loser) in group.into_iter().skip(1).enumerate() {
-            let mut number = offset + 2;
-            loop {
-                let candidate = crate::numbered_folder_name(&base, number);
-                if parent_occupied.insert(crate::portable_name_key(&candidate)) {
-                    names.insert(loser.id, candidate);
-                    break;
-                }
-                number += 1;
-            }
-        }
-    }
-    names
 }
 
 #[cfg(test)]
@@ -232,6 +228,7 @@ mod tests {
 
 #[cfg(test)]
 mod safe_component_tests {
+    use crate::filenames::validate_component;
     use super::*;
 
     #[test]
@@ -274,6 +271,7 @@ mod safe_component_tests {
 
 #[cfg(test)]
 mod adversarial_component_properties {
+    use crate::filenames::validate_component;
     use super::*;
 
     #[test]

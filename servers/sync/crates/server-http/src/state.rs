@@ -1,10 +1,7 @@
 use crate::bandwidth::{TransferGovernor, TransferLimits};
 use crate::notifications::{NotificationConfig, NotificationHub};
-use crate::operations::OperationalServices;
-use crate::traffic::TrafficRecorder;
 use crate::{Readiness, RequestLimits};
 use server_account::PostgresAccountService;
-use server_postgres::PostgresDatabase;
 use server_postgres::{AssetApplication, PostgresSyncRepository};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
@@ -61,7 +58,6 @@ impl ThumbnailUploadGate {
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) playback: Arc<crate::playback::Grants>,
-    pub(crate) database: PostgresDatabase,
     pub(crate) account: Arc<PostgresAccountService>,
     pub(crate) sync: Arc<PostgresSyncRepository>,
     pub(crate) assets: Arc<AssetApplication>,
@@ -69,17 +65,14 @@ pub(crate) struct AppState {
     pub(crate) transfer_governor: TransferGovernor,
     pub(crate) thumbnail_uploads: Arc<ThumbnailUploadGate>,
     pub(crate) notifications: NotificationHub,
-    pub(crate) traffic: TrafficRecorder,
-    pub(crate) operational_services: OperationalServices,
 }
 
 impl AppState {
     pub(super) fn new(
-        database: PostgresDatabase, account: Arc<PostgresAccountService>, sync: Arc<PostgresSyncRepository>, assets: Arc<AssetApplication>, readiness: Arc<Readiness>, transfer_limits: TransferLimits, request_limits: RequestLimits,
-        notification_config: NotificationConfig, operational_services: OperationalServices, traffic: TrafficRecorder,
+        account: Arc<PostgresAccountService>, sync: Arc<PostgresSyncRepository>, assets: Arc<AssetApplication>, readiness: Arc<Readiness>, transfer_limits: TransferLimits, request_limits: RequestLimits,
+        notification_config: NotificationConfig,
     ) -> Self {
         Self {
-            database,
             playback: Arc::new(crate::playback::Grants::default()),
             account,
             sync,
@@ -93,8 +86,6 @@ impl AppState {
                 request_limits.max_in_flight_thumbnail_bytes_per_account,
             )),
             notifications: NotificationHub::new(notification_config),
-            traffic,
-            operational_services,
         }
     }
 }

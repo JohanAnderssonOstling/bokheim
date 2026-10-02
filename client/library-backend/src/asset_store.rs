@@ -1,4 +1,6 @@
 //! Host adapters for library-owned filesystem services.
+
+use std::sync::Arc;
 #[cfg(target_arch = "wasm32")]
 use crate::executor::BoxedBackendFuture;
 pub use library_files::asset_store::*;
@@ -9,12 +11,12 @@ pub(crate) fn open(locator: &str) -> Result<AssetStore, AssetStoreError> {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn open(locator: &str, cpu: std::sync::Arc<dyn cpu_host::CpuHost>) -> Result<AssetStore, AssetStoreError> {
-    AssetStore::open(locator, std::sync::Arc::new(WorkerHashService(cpu)))
+pub(crate) fn open(locator: &str, cpu: Arc<dyn cpu_host::CpuHost>) -> Result<AssetStore, AssetStoreError> {
+    AssetStore::open(locator, Arc::new(WorkerHashService(cpu)))
 }
 
 #[cfg(target_arch = "wasm32")]
-struct WorkerHashService(std::sync::Arc<dyn cpu_host::CpuHost>);
+struct WorkerHashService(Arc<dyn cpu_host::CpuHost>);
 #[cfg(target_arch = "wasm32")]
 impl std::fmt::Debug for WorkerHashService {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

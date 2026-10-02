@@ -34,7 +34,6 @@ fn page_sheet(sheet: gpui::AnyElement, window: &Window) -> gpui::AnyElement {
 /// streaming resources of its own.
 pub struct AudiobookDock {
     player: Entity<PlaybackSession>,
-    snapshot: (String, Option<String>, bool, Option<String>, bool, Option<u64>, Option<u64>),
     speed_menu_open: bool,
     sleep_menu_open: bool,
     mobile_expanded: bool,
@@ -53,16 +52,8 @@ pub struct AudiobookDock {
 
 impl AudiobookDock {
     pub fn new(player: Entity<PlaybackSession>, cx: &mut Context<Self>) -> Self {
-        cx.observe(&player, |dock, player, cx| {
-            let next = Self::snapshot(player.read(cx));
-            if next != dock.snapshot {
-                dock.snapshot = next;
-                cx.notify();
-            }
-        })
-        .detach();
-        let snapshot = Self::snapshot(player.read(cx));
-        Self { player, snapshot, speed_menu_open: false, sleep_menu_open: false, mobile_expanded: false, scrub: None, progress_hover: None, progress_bounds: Rc::new(Cell::new(Bounds::default())), swipe: None }
+        cx.observe(&player, |_, _, cx| cx.notify()).detach();
+        Self { player, speed_menu_open: false, sleep_menu_open: false, mobile_expanded: false, scrub: None, progress_hover: None, progress_bounds: Rc::new(Cell::new(Bounds::default())), swipe: None }
     }
 
     /// Collapses the mobile expanded view back to the skinny docked bar, e.g.
@@ -128,44 +119,24 @@ impl AudiobookDock {
     /// Commits the drag: the seek happens once, where the pointer was released.
     fn finish_scrub(&mut self, cx: &mut Context<Self>) {
         let Some(fraction) = self.scrub.take() else { return };
-        self.player.update(cx, |player, cx| {
-            if let Some(chapter) = player.book.as_ref().and_then(|book| book.chapters.get(player.active_chapter_index())) {
-                let target = super::chapter_position_at_fraction(chapter.start, chapter.end, fraction);
-                player.seek_to(target);
-                player.ensure_source(cx);
-            }
-            cx.notify();
-        });
+        self.player.update(cx, |player, cx| player.seek_in_chapter(fraction, cx));
         cx.notify();
-    }
-
-    fn snapshot(player: &PlaybackSession) -> (String, Option<String>, bool, Option<String>, bool, Option<u64>, Option<u64>) {
-        let title = player.book.as_ref().map(|book| book.title.clone()).unwrap_or_else(|| "Opening audiobook…".into());
-        let chapter = player.book.as_ref().and_then(|book| book.chapters.get(player.active_chapter_index())).map(|chapter| super::chapter_display_title(&chapter.title));
-        let minutes_left = player.book.as_ref().filter(|book| !book.duration.is_zero()).map(|book| book.duration.saturating_sub(player.position).as_secs().div_ceil(60));
-        (title, chapter, player.transport_playing(), player.error.clone(), player.is_buffering(), player.book.as_ref().and_then(|book| book.cover.as_ref()).map(|cover| cover.id()), minutes_left)
     }
 }
 
 impl EventEmitter<DockAction> for AudiobookDock {}
 
-/// Window-wide mouse listeners installed for the duration of a scrub, so a
-/// drag that strays off the (thin) progress bar still tracks and still ends
-/// the drag on release.
-fn dock_scrub_capture(target: gpui::WeakEntity<AudiobookDock>) -> impl IntoElement {
+/// A window-wide mouse listener installed for the duration of a scrub, so a
+/// drag that strays off the (thin) progress bar still tracks. Releasing off
+/// the bar is the track's own `on_mouse_up_out`.
+fn dock_scrub_capture(cx: &Context<AudiobookDock>) -> impl IntoElement {
+    let hover = cx.listener(|dock, event: &MouseMoveEvent, _, cx| dock.hover_scrub(event.position.x, cx));
     canvas(
         |_, _, _| (),
         move |_, _: (), window, _| {
-            let moved = target.clone();
-            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
                 if phase == DispatchPhase::Bubble {
-                    let _ = moved.update(cx, |dock, cx| dock.hover_scrub(event.position.x, cx));
-                }
-            });
-            let released = target.clone();
-            window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                if phase == DispatchPhase::Bubble && event.button == MouseButton::Left {
-                    let _ = released.update(cx, |dock, cx| dock.finish_scrub(cx));
+                    hover(event, window, cx);
                 }
             });
         },
@@ -174,113 +145,42 @@ fn dock_scrub_capture(target: gpui::WeakEntity<AudiobookDock>) -> impl IntoEleme
     .size_full()
 }
 
-/// Each action re-renders the dock itself. Toggling playback is the exception:
-/// play/pause is in the snapshot, so the player's own notification reaches the
-/// dock through the observer. A seek may leave the snapshot unchanged — it
-/// ignores the playback clock — so it has to notify the dock directly.
 impl AudiobookDock {
     fn toggle_playback(&mut self, cx: &mut Context<Self>) {
         self.player.update(cx, |player, cx| player.request_toggle(cx));
     }
-    fn seek_by(&mut self, seconds: f64, cx: &mut Context<Self>) {
-        self.update_position(cx, |player| player.seek_by(seconds));
+    fn skip(&mut self, seconds: f64, cx: &mut Context<Self>) {
+        self.player.update(cx, |player, cx| player.skip(seconds, cx));
     }
     fn previous_chapter(&mut self, cx: &mut Context<Self>) {
-        self.update_position(cx, PlaybackSession::previous_chapter);
+        self.player.update(cx, |player, cx| player.previous_chapter(cx));
     }
     fn next_chapter(&mut self, cx: &mut Context<Self>) {
-        self.update_position(cx, PlaybackSession::next_chapter);
+        self.player.update(cx, |player, cx| player.next_chapter(cx));
     }
-    fn update_position(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut PlaybackSession)) {
-        self.player.update(cx, |player, cx| {
-            change(player);
-            player.ensure_source(cx);
-            cx.notify();
-        });
-        cx.notify();
-    }
-    pub(super) fn set_rate(&mut self, rate: f64, cx: &mut Context<Self>) {
-        self.player.update(cx, |player, cx| {
-            player.set_rate(rate, cx);
-            cx.notify();
-        });
+    /// A choice from a compact sheet: the dropdowns talk to the player
+    /// directly, but a sheet is the dock's to close.
+    fn set_rate(&mut self, rate: f64, cx: &mut Context<Self>) {
+        self.player.update(cx, |player, cx| player.set_rate(rate, cx));
         self.speed_menu_open = false;
         cx.notify();
     }
-    pub(super) fn choose_sleep(&mut self, choice: super::SleepChoice, cx: &mut Context<Self>) {
-        self.player.update(cx, |player, cx| {
-            player.set_sleep(choice.plan(player.active_chapter_index()));
-            cx.notify();
-        });
+    fn choose_sleep(&mut self, choice: super::SleepChoice, cx: &mut Context<Self>) {
+        self.player.update(cx, |player, cx| player.choose_sleep(choice, cx));
         self.sleep_menu_open = false;
         cx.notify();
     }
-    pub(super) fn toggle_sleep_menu(&mut self, cx: &mut Context<Self>) {
+    fn toggle_sleep_menu(&mut self, cx: &mut Context<Self>) {
         self.sleep_menu_open = !self.sleep_menu_open;
         self.speed_menu_open = false;
         cx.notify();
     }
-    pub(super) fn toggle_speed_menu(&mut self, cx: &mut Context<Self>) {
+    fn toggle_speed_menu(&mut self, cx: &mut Context<Self>) {
         self.speed_menu_open = !self.speed_menu_open;
         self.sleep_menu_open = false;
         cx.notify();
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn snapshot_tracks_cover_but_not_playback_clock() {
-        let (sender, _) = async_channel::unbounded();
-        let mut player = PlaybackSession::new(1.0, sender);
-        player.stopped = true;
-        player.book = Some(Arc::new(AudiobookBook { title: "Book".into(), author: None, narrator: None, duration: Duration::from_secs(100), chapters: vec![], cover: None }));
-        let initial = AudiobookDock::snapshot(&player);
-        player.position = Duration::from_secs(10);
-        assert_eq!(initial, AudiobookDock::snapshot(&player));
-        player.position = Duration::from_secs(40);
-        assert_ne!(initial, AudiobookDock::snapshot(&player));
-        player.position = Duration::from_secs(10);
-        Arc::make_mut(player.book.as_mut().unwrap()).cover = Some(Arc::new(Image::from_bytes(ImageFormat::Jpeg, vec![0xff, 0xd8, 0xff])));
-        assert_ne!(initial, AudiobookDock::snapshot(&player));
-    }
-
-    #[gpui::test]
-    fn clock_notifications_do_not_invalidate_dock_but_metadata_changes_do(cx: &mut gpui::TestAppContext) {
-        let (sender, _) = async_channel::unbounded();
-        let player = cx.new(|_| {
-            let mut player = PlaybackSession::new(1.0, sender);
-            player.stopped = true;
-            player.book = Some(Arc::new(AudiobookBook { title: "Book".into(), author: None, narrator: None, duration: Duration::from_secs(100), chapters: vec![], cover: None }));
-            player
-        });
-        let dock = cx.new(|cx| AudiobookDock::new(player.clone(), cx));
-        let notifications = Rc::new(Cell::new(0));
-        let recorded = notifications.clone();
-        let _observer = cx.new(|cx| {
-            cx.observe(&dock, move |_: &mut (), _, _| recorded.set(recorded.get() + 1)).detach();
-        });
-        cx.run_until_parked();
-        let before = notifications.get();
-        for second in 1..=20 {
-            player.update(cx, |player, cx| {
-                player.position = Duration::from_secs(second);
-                cx.notify();
-            });
-            cx.run_until_parked();
-        }
-        assert_eq!(notifications.get(), before);
-        player.update(cx, |player, cx| {
-            Arc::make_mut(player.book.as_mut().unwrap()).title = "Updated metadata".into();
-            cx.notify();
-        });
-        cx.run_until_parked();
-        assert_eq!(notifications.get(), before + 1);
-    }
-}
-
 
 /// Title over the current chapter, both truncated: the same block in every
 /// layout.
@@ -304,30 +204,36 @@ impl Render for AudiobookDock {
         let player = self.player.read(cx);
         let cover = player.book.as_ref().and_then(|book| book.cover.clone());
         let compact = ui_components::WindowWidthClass::for_window(window).is_compact();
-        let target = cx.entity().downgrade();
 
+        let position = super::shown_position(player.position);
         let (chapter_start, chapter_position, chapter_duration) = player
             .book
             .as_ref()
             .and_then(|book| book.chapters.get(player.active_chapter_index()))
             .map(|chapter| {
                 let duration = chapter.end.saturating_sub(chapter.start);
-                (chapter.start, player.position.saturating_sub(chapter.start).min(duration), duration)
+                (chapter.start, position.saturating_sub(chapter.start).min(duration), duration)
             })
             .unwrap_or_default();
         let progress_fraction = if chapter_duration.is_zero() { 0.0 } else { (chapter_position.as_secs_f64() / chapter_duration.as_secs_f64()) as f32 };
-        let current_chapter = self.snapshot.1.clone().unwrap_or_else(|| "No chapter".into());
+        let title = player.book.as_ref().map(|book| book.title.clone()).unwrap_or_else(|| "Opening audiobook…".into());
+        let current_chapter = player.book.as_ref().and_then(|book| book.chapters.get(player.active_chapter_index())).map(|chapter| super::chapter_display_title(&chapter.title)).unwrap_or_else(|| "No chapter".into());
+        let playing = player.transport_playing();
         // While scrubbing (dragging, or the finger/pointer resting after a
         // press), the bar and the time readout follow the drag instead of
-        // live playback, so what the digits say matches where the fill is.
+        // playback, to the second, so what the digits say matches where the
+        // fill is. Otherwise they show whole minutes.
         let display_fraction = self.progress_hover.unwrap_or(progress_fraction);
         let display_position = self.progress_hover.map(|fraction| super::chapter_position_at_fraction(Duration::ZERO, chapter_duration, fraction)).unwrap_or(chapter_position);
-        let display_book_position = if self.progress_hover.is_some() { chapter_start.saturating_add(display_position) } else { player.position };
+        let display_book_position = if self.progress_hover.is_some() { chapter_start.saturating_add(display_position) } else { position };
         let book_remaining = player.book.as_ref().filter(|book| !book.duration.is_zero()).map(|book| super::format_time_left(book.duration.saturating_sub(display_book_position)));
-        let chapter_time = format!("{} / {}", super::format_time(display_position), super::format_time(chapter_duration));
+        let chapter_time = match self.progress_hover {
+            Some(_) => format!("{} / {}", super::format_time(display_position), super::format_time(chapter_duration)),
+            None => format!("{} / {}", super::format_duration_short(display_position), super::format_duration_short(chapter_duration)),
+        };
 
         if compact && !self.mobile_expanded {
-            let summary = title_block(self.snapshot.0.clone(), current_chapter, theme)
+            let summary = title_block(title, current_chapter, theme)
                 .id("audiobook-dock-expand")
                 .cursor_pointer()
                 .on_click(cx.listener(|dock, _, _, cx| {
@@ -335,7 +241,6 @@ impl Render for AudiobookDock {
                     cx.emit(DockAction::Expand);
                     cx.notify();
                 }));
-            let playing = self.snapshot.2;
             let play = ui_components::selectable_button(ui_components::outlined_icon_button("dock-play", if playing { "Pause" } else { "Play" }, if playing { IconName::Pause } else { IconName::Play }, theme), true, theme)
                 .on_click(cx.listener(|dock, _, _, cx| dock.toggle_playback(cx)));
             return ui_components::bottom_bar(theme)
@@ -371,18 +276,17 @@ impl Render for AudiobookDock {
             }));
         let sleep_label = player.sleep_label();
         let rate = player.rate;
-        let playing = self.snapshot.2;
 
         // The controls both expanded layouts share; each only arranges them.
         let transport = [
             ui_components::outlined_icon_button("dock-previous-chapter", "Previous chapter", IconName::ChevronLeft, theme)
                 .on_click(cx.listener(|dock, _, _, cx| dock.previous_chapter(cx))),
             ui_components::outlined_icon_button("dock-seek-back", "Back 15 seconds", IconName::Undo2, theme)
-                .on_click(cx.listener(|dock, _, _, cx| dock.seek_by(super::SKIP_BACK_SECONDS, cx))),
+                .on_click(cx.listener(|dock, _, _, cx| dock.skip(super::SKIP_BACK_SECONDS, cx))),
             ui_components::selectable_button(ui_components::outlined_icon_button("dock-play", if playing { "Pause" } else { "Play" }, if playing { IconName::Pause } else { IconName::Play }, theme), true, theme)
                 .on_click(cx.listener(|dock, _, _, cx| dock.toggle_playback(cx))),
             ui_components::outlined_icon_button("dock-seek-forward", "Forward 30 seconds", IconName::Redo2, theme)
-                .on_click(cx.listener(|dock, _, _, cx| dock.seek_by(super::SKIP_FORWARD_SECONDS, cx))),
+                .on_click(cx.listener(|dock, _, _, cx| dock.skip(super::SKIP_FORWARD_SECONDS, cx))),
             ui_components::outlined_icon_button("dock-next-chapter", "Next chapter", IconName::ChevronRight, theme)
                 .on_click(cx.listener(|dock, _, _, cx| dock.next_chapter(cx))),
         ];
@@ -397,7 +301,7 @@ impl Render for AudiobookDock {
         let speed = ui_components::selectable_button(speed, self.speed_menu_open, theme);
 
         if compact {
-            let titles = title_block(self.snapshot.0.clone(), current_chapter, theme).id("audiobook-dock-title").cursor_pointer().on_click(cx.listener(|dock, _, _, cx| dock.collapse_mobile(cx)));
+            let titles = title_block(title, current_chapter, theme).id("audiobook-dock-title").cursor_pointer().on_click(cx.listener(|dock, _, _, cx| dock.collapse_mobile(cx)));
             let collapse = ui_components::outlined_icon_button("dock-collapse", "Collapse player", IconName::ChevronDown, theme)
                 .on_click(cx.listener(|dock, _, _, cx| dock.collapse_mobile(cx)));
             let top_row = ui_components::row(SPACE_XS)
@@ -408,8 +312,8 @@ impl Render for AudiobookDock {
                 .child(close);
 
             // The menus are rendered in a window-sized anchored layer.
-            let sleep_sheet = self.sleep_menu_open.then(|| gpui::deferred(page_sheet(super::sleep_sheet(target.clone(), sleep_label, theme), window)).with_priority(1));
-            let speed_sheet = self.speed_menu_open.then(|| gpui::deferred(page_sheet(super::playback_speed_sheet(target.clone(), rate, theme), window)).with_priority(1));
+            let sleep_sheet = self.sleep_menu_open.then(|| gpui::deferred(page_sheet(super::sleep_menu(sleep_label.as_deref()).sheet(|choice| cx.listener(move |dock, _, _, cx| dock.choose_sleep(choice, cx)), cx.listener(|dock, _, _, cx| dock.toggle_sleep_menu(cx)), theme), window)).with_priority(1));
+            let speed_sheet = self.speed_menu_open.then(|| gpui::deferred(page_sheet(super::speed_menu(rate).sheet(|rate| cx.listener(move |dock, _, _, cx| dock.set_rate(rate, cx)), cx.listener(|dock, _, _, cx| dock.toggle_speed_menu(cx)), theme), window)).with_priority(1));
 
             let time_row = ui_components::spread_row(SPACE_SM)
                 .child(ui_components::caption_line(chapter_time, theme).flex_none())
@@ -427,11 +331,11 @@ impl Render for AudiobookDock {
                 .child(scrub_track)
                 .children(sleep_sheet)
                 .children(speed_sheet)
-                .when(self.scrub.is_some(), |dock| dock.child(dock_scrub_capture(target.clone())))
+                .when(self.scrub.is_some(), |dock| dock.child(dock_scrub_capture(cx)))
                 .into_any_element();
         }
 
-        let book = title_block(self.snapshot.0.clone(), current_chapter, theme)
+        let book = title_block(title, current_chapter, theme)
             .id("audiobook-dock-expand")
             .cursor_pointer()
             .on_click(cx.listener(|_, _, _, cx| cx.emit(DockAction::Expand)));
@@ -441,10 +345,12 @@ impl Render for AudiobookDock {
             .child(ui_components::caption_line(chapter_time, theme))
             .child(ui_components::row(SPACE_XXS).children(transport));
 
-        let sleep_target = target.clone();
-        let sleep = sleep.dropdown_menu_with_anchor(gpui::Anchor::BottomLeft, move |menu, _, _| super::sleep_items(menu, sleep_target.clone(), sleep_label.clone()));
-        let speed_target = target.clone();
-        let speed = speed.dropdown_menu_with_anchor(gpui::Anchor::BottomRight, move |menu, _, _| super::playback_speed_items(menu, speed_target.clone(), rate));
+        let player = self.player.clone();
+        let choose_sleep = move |choice, cx: &mut App| player.update(cx, |player, cx| player.choose_sleep(choice, cx));
+        let sleep = sleep.dropdown_menu_with_anchor(gpui::Anchor::BottomLeft, move |menu, _, _| super::sleep_menu(sleep_label.as_deref()).dropdown(menu, choose_sleep.clone()));
+        let player = self.player.clone();
+        let set_rate = move |rate, cx: &mut App| player.update(cx, |player, cx| player.set_rate(rate, cx));
+        let speed = speed.dropdown_menu_with_anchor(gpui::Anchor::BottomRight, move |menu, _, _| super::speed_menu(rate).dropdown(menu, set_rate.clone()));
         // A matched-width counterpart to the book: both sides fill, so the
         // transport between them lands in the dock's true center rather than
         // wherever the book's content leaves off.
@@ -460,7 +366,7 @@ impl Render for AudiobookDock {
             .relative()
             .child(ui_components::row(SPACE_SM).fill().h(px(COVER_SIZE)).pr(px(SPACE_SM)).child(ui_components::row(SPACE_SM).fill().h_full().child(cover_box(cover, theme)).child(book)).child(transport).child(tools))
             .child(scrub_track)
-            .when(self.scrub.is_some(), |dock| dock.child(dock_scrub_capture(target.clone())))
+            .when(self.scrub.is_some(), |dock| dock.child(dock_scrub_capture(cx)))
             .into_any_element()
     }
 }

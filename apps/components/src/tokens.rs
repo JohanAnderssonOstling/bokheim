@@ -214,7 +214,6 @@ pub const BOOK_CARD_SUBTITLE_LINES: usize = 1;
 pub const BOOK_CARD_AUTHOR_LINE_HEIGHT_EM: f32 = 1.0;
 /// Compact card spacing for the GPUI browser surface.
 pub const BOOK_CARD_COVER_CONTENT_GAP: f32 = SPACE_SM;
-pub const BOOK_CARD_TEXT_GAP: f32 = SPACE_XS;
 pub const BOOK_CARD_TITLE_HEIGHT_REM: f32 = {
     // The title always claims its full two lines, subtitle or not, so the
     // reserved box is that plus the subtitle's one line when there is one —
@@ -249,43 +248,6 @@ pub const BOOK_COVER_BADGE_INSET: f32 = SPACE_XS + 2.0;
 pub const BOOK_CARD_NO_TEXT_HEIGHT_REM: f32 = 0.0;
 pub const BOOK_CARD_NO_TEXT_FIXED_HEIGHT: f32 = 0.0;
 
-/// Detailed cards combine a fixed cover and padding with a scalable text column.
-pub const BOOK_CARD_DETAIL_TEXT_WIDTH_REM: f32 = 24.0;
-pub const BOOK_CARD_DETAIL_TEXT_MAXIMUM_WIDTH_REM: f32 = 36.0;
-pub const BOOK_CARD_DETAIL_FIXED_WIDTH: f32 = BOOK_CARD_WIDTH + BOOK_CARD_DETAIL_GAP;
-/// How much of a detailed card's content the cover takes. Half, so the cover is
-/// drawn at the ordinary card's width whatever the row stretches to.
-pub const BOOK_CARD_DETAIL_COVER_FRACTION: f32 = 0.5;
-/// Between the cover and the words beside it. Wider than the gap under a cover
-/// in the ordinary card: horizontally the two columns need a visible channel,
-/// where stacked blocks read as one column without it.
-pub const BOOK_CARD_DETAIL_GAP: f32 = SPACE_MD;
-/// The ratio a detailed card is sized by.
-///
-/// The paginator resolves an aspect policy against the child's whole content
-/// width, but only the cover's half of it carries the height — so the ordinary
-/// cover ratio, widened by the fraction the cover is drawn at, is what makes the
-/// card exactly as tall as its cover.
-pub const BOOK_CARD_DETAIL_ASPECT_RATIO: f32 = BOOK_COVER_ASPECT_RATIO / BOOK_CARD_DETAIL_COVER_FRACTION;
-/// The blurb on a detailed card, at `TEXT_SM`. A step above the author line:
-/// it is read rather than scanned, and it is the reason the card is twice
-/// as wide.
-pub const BOOK_CARD_DESCRIPTION_LINE_HEIGHT_EM: f32 = 1.4;
-
-/// The full blurb, opened from the card.
-///
-/// A measure rather than a share of the window: this is a column of prose, and
-/// prose set across a wide window is harder to read, not easier. Around 70
-/// characters at the overlay's size.
-pub const BOOK_DESCRIPTION_OVERLAY_WIDTH_REM: f32 = 34.0;
-/// How much of the window's height the overlay may take before it scrolls.
-/// Short of the whole, so the page it opened over stays visible around it and
-/// the overlay reads as a layer rather than a new screen.
-pub const BOOK_DESCRIPTION_OVERLAY_HEIGHT_FRACTION: f32 = 0.75;
-/// Set at `TEXT_MD`, larger than the card's blurb: on the card it is a sample
-/// squeezed beside the cover, here it is the thing being read.
-pub const BOOK_DESCRIPTION_OVERLAY_LINE_HEIGHT_EM: f32 = 1.5;
-
 /// The compact detail page's single measure. Desktop reading columns use the
 /// narrower limits below.
 pub const BOOK_DETAIL_PAGE_WIDTH_REM: f32 = 38.5;
@@ -314,15 +276,6 @@ pub const CAROUSEL_CONTROL_GAP: f32 = SPACE_XS;
 /// because the row's height is computed from it — see `shelf_rows_policy`.
 pub const SHELF_HEADING_LINE_HEIGHT_EM: f32 = 1.25;
 pub const SHELF_HEADING_HEIGHT_REM: f32 = CAROUSEL_TITLE_SIZE * SHELF_HEADING_LINE_HEIGHT_EM;
-/// Subject chips share the heading line with the title, so they are set at the
-/// smallest step: the title is what the row is filed under, the chips qualify it.
-pub const SHELF_SUBJECT_SIZE: f32 = TEXT_XS;
-
-/// A chip's own box. Stated rather than left to text plus padding, because the
-/// heading's height is computed from it and a chip has to be exactly as tall as
-/// the band it is stacked in.
-pub const SHELF_SUBJECT_LINE_HEIGHT_EM: f32 = 1.5;
-pub const SHELF_SUBJECT_CHIP_HEIGHT_REM: f32 = SHELF_SUBJECT_SIZE * SHELF_SUBJECT_LINE_HEIGHT_EM;
 // A shelf row's height is not stated here. A shelf card is the ordinary book
 // card at its ordinary width — a shelf that sized its covers differently would
 // be a second visual language for the same object — and that card stretches

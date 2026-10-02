@@ -4,7 +4,6 @@
 use super::*;
 use lopdf::{Dictionary, Document, Object, Stream};
 
-mod codecs;
 mod color;
 
 type Matrix = [f64; 6];
@@ -17,58 +16,35 @@ struct State {
     matrix: Matrix,
     clip: Rect,
 }
-struct Candidate<'a> {
-    stream: &'a Stream,
-    state: State,
-}
 
 pub(super) fn extract(reader: &mut (impl Read + Seek)) -> Option<RgbImage> {
-    extract_with_reason(reader, &mut "")
-}
-
-fn extract_with_reason(reader: &mut (impl Read + Seek), reason: &mut &'static str) -> Option<RgbImage> {
-    *reason = "PDF structure or inspection limits";
-    let document = pdf_range_reader::cover(reader).ok()?;
-    *reason = "Page properties or transparency group";
+    let document = &pdf_range_reader::cover(reader).ok()?;
     let page = document.objects.values().find_map(|object| {
         let dictionary = object.as_dict().ok()?;
         (dictionary.get(b"BokheimInspectionPage").and_then(Object::as_i64).ok() == Some(1)).then_some(dictionary)
     })?;
-    let media = rectangle(inherited(&document, page, b"MediaBox")?)?;
-    let clip = match inherited(&document, page, b"CropBox") {
+    let media = rectangle(inherited(document, page, b"MediaBox")?)?;
+    let clip = match inherited(document, page, b"CropBox") {
         Some(bounds) => intersect(media, rectangle(bounds)?)?,
         None => media,
     };
-    let rotation = match inherited(&document, page, b"Rotate") {
+    let rotation = match inherited(document, page, b"Rotate") {
         Some(value) => value.as_i64().ok()?.rem_euclid(360),
         None => 0,
     };
     if rotation % 90 != 0 {
         return None;
     }
-    let resources = inherited(&document, page, b"Resources")?.as_dict().ok()?;
-    let initial = State { matrix: IDENTITY, clip };
+    let resources = inherited(document, page, b"Resources")?.as_dict().ok()?;
     if page.has(b"Group") {
         return None;
     }
-    *reason = "Page drawing instructions";
-    let candidate = image_candidate(&document, page.get(b"Contents").ok()?, resources, initial)?;
-    *reason = "Image encoding, colour space, mask, or dimensions";
-    let mut image = decode(&document, candidate.stream, resources, reason)?;
-    *reason = "Image placement";
-    image = place(image, candidate.state)?;
-    Some(match rotation {
-        90 => image::imageops::rotate90(&image),
-        180 => image::imageops::rotate180(&image),
-        270 => image::imageops::rotate270(&image),
-        _ => image,
-    })
-}
 
-fn image_candidate<'a>(document: &'a Document, contents: &'a Object, resources: &'a Dictionary, mut state: State) -> Option<Candidate<'a>> {
+    // Find the sole image and the graphics state it is drawn with.
+    let mut state = State { matrix: IDENTITY, clip };
     let mut remaining = CONTENT_LIMIT;
-    let mut candidate = None;
-    let contents = resolve(document, contents)?;
+    let mut candidate: Option<(&Stream, State)> = None;
+    let contents = resolve(document, page.get(b"Contents").ok()?)?;
     let mut bytes = Vec::new();
     let objects = match contents {
         Object::Array(items) => items.iter().collect::<Vec<_>>(),
@@ -94,8 +70,13 @@ fn image_candidate<'a>(document: &'a Document, contents: &'a Object, resources: 
             }
             "Q" if args.is_empty() => state = stack.pop()?,
             "cm" if args.len() == 6 => {
-                let matrix = numbers(args)?.try_into().ok()?;
-                state.matrix = multiply(state.matrix, matrix)?;
+                let [a, b, c, d, e, f] = state.matrix;
+                let [aa, bb, cc, dd, ee, ff]: Matrix = numbers(args)?.try_into().ok()?;
+                let matrix = [a * aa + c * bb, b * aa + d * bb, a * cc + c * dd, b * cc + d * dd, a * ee + c * ff + e, b * ee + d * ff + f];
+                if !matrix.iter().all(|v| v.is_finite()) {
+                    return None;
+                }
+                state.matrix = matrix;
             }
             "Do" if args.len() == 1 && candidate.is_none() => {
                 let objects = resolve(document, resources.get(b"XObject").ok()?)?.as_dict().ok()?;
@@ -104,7 +85,7 @@ fn image_candidate<'a>(document: &'a Document, contents: &'a Object, resources: 
                 if stream.dict.get(b"Subtype").and_then(Object::as_name).ok()? != b"Image" || stream.dict.has(b"OC") {
                     return None;
                 }
-                candidate = Some(Candidate { stream, state: state.clone() });
+                candidate = Some((stream, state.clone()));
             }
             _ => return None,
         }
@@ -112,35 +93,177 @@ fn image_candidate<'a>(document: &'a Document, contents: &'a Object, resources: 
     if !stack.is_empty() {
         return None;
     }
-    candidate
-}
+    let (stream, placed) = candidate?;
 
-fn multiply(p: Matrix, q: Matrix) -> Option<Matrix> {
-    let [a, b, c, d, e, f] = p;
-    let [aa, bb, cc, dd, ee, ff] = q;
-    let result = [a * aa + c * bb, b * aa + d * bb, a * cc + c * dd, b * cc + d * dd, a * ee + c * ff + e, b * ee + d * ff + f];
-    result.iter().all(|v| v.is_finite()).then_some(result)
-}
-fn axis_aligned([a, b, c, d, _, _]: Matrix) -> bool {
+    // Decode the image to RGB.
+    let dict = &stream.dict;
+    if dict.get(b"Subtype").and_then(Object::as_name).ok()? != b"Image" {
+        return None;
+    }
+    // Preblended matte colours and standalone stencils need separate handling.
+    if [b"Matte".as_slice(), b"Mask", b"SMask", b"SMaskInData"].iter().any(|key| dict.has(key)) {
+        return None;
+    }
+    if let Ok(value) = dict.get(b"ImageMask") {
+        if value.as_bool().ok()? {
+            return None;
+        }
+    }
+    let width = u32::try_from(dict.get(b"Width").ok()?.as_i64().ok()?).ok()?;
+    let height = u32::try_from(dict.get(b"Height").ok()?.as_i64().ok()?).ok()?;
+    validate_cover_image_dimensions(width, height).ok()?;
+    // Peel ordinary PDF filters in order, retaining the final image codec and its
+    // own DecodeParms. A parameter array belongs to individual filters, not all of them.
+    let (encoded, codec, codec_parameters) = 'payload: {
+        let filters = match stream.dict.get(b"Filter") {
+            Ok(value) => match resolve(document, value)? {
+                Object::Array(values) => values.iter().map(|value| resolve(document, value)?.as_name().ok()).collect::<Option<Vec<_>>>()?,
+                value => vec![value.as_name().ok()?],
+            },
+            Err(_) => Vec::new(),
+        };
+        if filters.len() > 8 {
+            return None;
+        }
+        let decode_parms = match stream.dict.get(b"DecodeParms") {
+            Ok(value) => Some(resolve(document, value)?),
+            Err(_) => None,
+        };
+        let mut bytes = stream.content.clone();
+        let limit = usize::try_from(MAX_COVER_IMAGE_PIXELS).ok()?.checked_mul(4)?.checked_add(MAX_COVER_IMAGE_DIMENSION as usize)?;
+        if bytes.len() > limit {
+            return None;
+        }
+        for (index, filter) in filters.iter().enumerate() {
+            let parameter = match decode_parms {
+                Some(Object::Array(values)) if values.len() == filters.len() => resolve(document, &values[index])?,
+                Some(Object::Array(_)) => return None,
+                Some(value) if filters.len() == 1 => value,
+                None => &Object::Null,
+                _ => return None,
+            };
+            let parameters = match parameter {
+                Object::Null => Dictionary::new(),
+                value => value.as_dict().ok()?.clone(),
+            };
+            if matches!(*filter, b"DCTDecode" | b"JPXDecode") {
+                if index + 1 != filters.len() || bytes.len() > MAX_COVER_IMAGE_BYTES {
+                    return None;
+                }
+                break 'payload (bytes, filter.to_vec(), parameters);
+            }
+            if !matches!(*filter, b"FlateDecode" | b"LZWDecode" | b"ASCII85Decode") {
+                return None;
+            }
+            let mut dictionary = Dictionary::new();
+            dictionary.set("Filter", Object::Name(filter.to_vec()));
+            dictionary.set("DecodeParms", parameters);
+            bytes = Stream::new(dictionary, bytes).get_plain_content_with_limit(limit).ok()?;
+        }
+        (bytes, Vec::new(), Dictionary::new())
+    };
+    let jpx = codec == b"JPXDecode";
+    let space;
+    let mut samples;
+    let bits = if jpx { 8 } else { dict.get(b"BitsPerComponent").and_then(Object::as_i64).ok()? };
+    if jpx {
+        let image = hayro_jpeg2000::Image::new(&encoded, &Default::default()).ok()?;
+        if image.has_alpha() || (image.width(), image.height()) != (width, height) {
+            return None;
+        }
+        let embedded = match image.color_space() {
+            hayro_jpeg2000::ColorSpace::Gray => color::Space::Device(1),
+            hayro_jpeg2000::ColorSpace::RGB => color::Space::Device(3),
+            hayro_jpeg2000::ColorSpace::CMYK => color::Space::Device(4),
+            hayro_jpeg2000::ColorSpace::Icc { profile, num_channels } => color::Space::icc(profile, usize::from(*num_channels))?,
+            hayro_jpeg2000::ColorSpace::Unknown { .. } => return None,
+        };
+        let mut context = hayro_jpeg2000::DecoderContext::default();
+        let decoded = image.decode(&mut context).ok()?;
+        let data = decoded.data_u8();
+        let pixels = usize::try_from(u64::from(width) * u64::from(height)).ok()?;
+        if data.len() != pixels.checked_mul(embedded.channels() + usize::from(image.has_alpha()))? {
+            return None;
+        }
+        // A PDF ColorSpace overrides the colour space embedded in JP2.
+        space = match dict.get(b"ColorSpace") {
+            Ok(value) => color::resolve_space(document, resources, value)?,
+            Err(_) => embedded,
+        };
+        samples = data;
+    } else {
+        space = color::resolve_space(document, resources, dict.get(b"ColorSpace").ok()?)?;
+        let channels = space.channels();
+        if !matches!(bits, 1 | 2 | 4 | 8 | 16) {
+            return None;
+        }
+        samples = match codec.as_slice() {
+            b"DCTDecode" if bits == 8 => {
+                let limit = usize::try_from(u64::from(width) * u64::from(height)).ok()?.checked_mul(channels)?;
+                let mut decoder = jpeg_decoder::Decoder::new(Cursor::new(&encoded));
+                decoder.set_max_decoding_buffer_size(limit);
+                decoder.read_info().ok()?;
+                let info = decoder.info()?;
+                if (u32::from(info.width), u32::from(info.height), info.pixel_format.pixel_bytes()) != (width, height, channels) {
+                    return None;
+                }
+                if let Ok(transform) = codec_parameters.get(b"ColorTransform") {
+                    let transform = match (transform.as_i64().ok()?, channels) {
+                        (0, 3) => jpeg_decoder::ColorTransform::RGB,
+                        (0, 4) => jpeg_decoder::ColorTransform::CMYK,
+                        (1, 3) => jpeg_decoder::ColorTransform::YCbCr,
+                        (1, 4) => jpeg_decoder::ColorTransform::YCCK,
+                        _ => return None,
+                    };
+                    decoder.set_color_transform(transform);
+                }
+                let mut samples = decoder.decode().ok()?;
+                // Undo jpeg-decoder's CMYK polarity normalization before PDF /Decode.
+                if channels == 4 {
+                    for sample in &mut samples {
+                        *sample = 255 - *sample;
+                    }
+                }
+                samples
+            }
+            b"" => unpack(&encoded, width, height, channels, bits)?,
+            _ => return None,
+        };
+    }
+    let channels = space.channels();
+    let pixels = usize::try_from(u64::from(width) * u64::from(height)).ok()?;
+    if samples.len() != pixels.checked_mul(channels)? {
+        return None;
+    }
+    // ISO 32000: /Decode is ignored for JPXDecode, whose samples are normalized
+    // by the JPEG2000 decoder. All other codecs produce PDF sample values.
+    if !jpx {
+        let mapping = match dict.get(b"Decode") {
+            Ok(value) => Some(numbers(resolve(document, value)?.as_array().ok()?)?),
+            Err(_) => None,
+        };
+        let indexed = matches!(space, color::Space::Indexed(_));
+        if (indexed && bits > 8) || mapping.as_ref().is_some_and(|values| values.len() != channels * 2) {
+            return None;
+        }
+        if indexed || mapping.is_some() {
+            let default_max = if indexed { ((1_u32 << bits) - 1) as f64 } else { 1. };
+            let scale = if indexed { 1. } else { 255. };
+            for pixel in samples.chunks_exact_mut(channels) {
+                for (i, sample) in pixel.iter_mut().enumerate() {
+                    let (min, max) = mapping.as_deref().map_or((0., default_max), |values| (values[2 * i], values[2 * i + 1]));
+                    let value = min + f64::from(*sample) / 255. * (max - min);
+                    *sample = (value * scale).round().clamp(0., 255.) as u8;
+                }
+            }
+        }
+    }
+    let mut image = space.rgb(samples, width, height)?;
+
+    // Place the image as drawn: mirror, rotate, crop to the clip and scale.
+    let [a, b, c, d, e, f] = placed.matrix;
     // Do not silently approximate skew as rotation.
-    (b == 0. && c == 0. && a != 0. && d != 0.) || (a == 0. && d == 0. && b != 0. && c != 0.)
-}
-fn rectangle(object: &Object) -> Option<Rect> {
-    let rect: Rect = numbers(object.as_array().ok()?)?.try_into().ok()?;
-    (rect[2] > rect[0] && rect[3] > rect[1]).then_some(rect)
-}
-fn transformed(rect: Rect, [a, b, c, d, e, f]: Matrix) -> Option<Rect> {
-    let points = [(rect[0], rect[1]), (rect[0], rect[3]), (rect[2], rect[1]), (rect[2], rect[3])].map(|(x, y)| (a * x + c * y + e, b * x + d * y + f));
-    let result = [points.iter().map(|p| p.0).reduce(f64::min)?, points.iter().map(|p| p.1).reduce(f64::min)?, points.iter().map(|p| p.0).reduce(f64::max)?, points.iter().map(|p| p.1).reduce(f64::max)?];
-    result.iter().all(|v| v.is_finite()).then_some(result)
-}
-fn intersect(a: Rect, b: Rect) -> Option<Rect> {
-    let r = [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
-    (r[2] > r[0] && r[3] > r[1]).then_some(r)
-}
-fn place(mut image: RgbImage, state: State) -> Option<RgbImage> {
-    let [a, b, c, d, _, _] = state.matrix;
-    if !axis_aligned(state.matrix) {
+    if !((b == 0. && c == 0. && a != 0. && d != 0.) || (a == 0. && d == 0. && b != 0. && c != 0.)) {
         return None;
     }
     if b == 0. && c == 0. {
@@ -159,8 +282,12 @@ fn place(mut image: RgbImage, state: State) -> Option<RgbImage> {
             image::imageops::flip_vertical_in_place(&mut image);
         }
     }
-    let bounds = transformed([0., 0., 1., 1.], state.matrix)?;
-    let visible = intersect(bounds, state.clip)?;
+    let corners = [(0., 0.), (0., 1.), (1., 0.), (1., 1.)].map(|(x, y)| (a * x + c * y + e, b * x + d * y + f));
+    let bounds = [corners.iter().map(|p| p.0).reduce(f64::min)?, corners.iter().map(|p| p.1).reduce(f64::min)?, corners.iter().map(|p| p.0).reduce(f64::max)?, corners.iter().map(|p| p.1).reduce(f64::max)?];
+    if !bounds.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let visible = intersect(bounds, placed.clip)?;
     let sx = f64::from(image.width()) / (bounds[2] - bounds[0]);
     let sy = f64::from(image.height()) / (bounds[3] - bounds[1]);
     // PDF coordinates start at the bottom; decoded raster rows start at the top.
@@ -182,9 +309,22 @@ fn place(mut image: RgbImage, state: State) -> Option<RgbImage> {
     if image.dimensions() != (width, height) {
         image = image::imageops::resize(&image, width, height, image::imageops::FilterType::Lanczos3);
     }
-    Some(image)
+    Some(match rotation {
+        90 => image::imageops::rotate90(&image),
+        180 => image::imageops::rotate180(&image),
+        270 => image::imageops::rotate270(&image),
+        _ => image,
+    })
 }
 
+fn rectangle(object: &Object) -> Option<Rect> {
+    let rect: Rect = numbers(object.as_array().ok()?)?.try_into().ok()?;
+    (rect[2] > rect[0] && rect[3] > rect[1]).then_some(rect)
+}
+fn intersect(a: Rect, b: Rect) -> Option<Rect> {
+    let r = [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
+    (r[2] > r[0] && r[3] > r[1]).then_some(r)
+}
 fn resolve<'a>(document: &'a Document, object: &'a Object) -> Option<&'a Object> {
     document.dereference(object).ok().map(|(_, object)| object)
 }
@@ -197,85 +337,18 @@ fn inherited<'a>(document: &'a Document, mut page: &'a Dictionary, key: &[u8]) -
     }
     None
 }
-fn number(object: &Object) -> Option<f64> {
-    let number = match object {
-        Object::Integer(value) => *value as f64,
-        Object::Real(value) => f64::from(*value),
-        _ => return None,
-    };
-    number.is_finite().then_some(number)
-}
 fn numbers(objects: &[Object]) -> Option<Vec<f64>> {
-    objects.iter().map(number).collect()
-}
-
-fn decode(document: &Document, stream: &Stream, resources: &Dictionary, reason: &mut &'static str) -> Option<RgbImage> {
-    *reason = "Image mask or subtype";
-    let dict = &stream.dict;
-    if dict.get(b"Subtype").and_then(Object::as_name).ok()? != b"Image" {
-        return None;
-    }
-    // Preblended matte colours and standalone stencils need separate handling.
-    if [b"Matte".as_slice(), b"Mask", b"SMask", b"SMaskInData"].iter().any(|key| dict.has(key)) {
-        return None;
-    }
-    if let Ok(value) = dict.get(b"ImageMask") {
-        if value.as_bool().ok()? {
-            return None;
-        }
-    }
-    *reason = "Image dimensions or size limits";
-    let width = u32::try_from(dict.get(b"Width").ok()?.as_i64().ok()?).ok()?;
-    let height = u32::try_from(dict.get(b"Height").ok()?.as_i64().ok()?).ok()?;
-    validate_cover_image_dimensions(width, height).ok()?;
-    *reason = "Image filter chain";
-    let payload = codecs::payload(document, stream)?;
-    let jpx = payload.filter == b"JPXDecode";
-    let space;
-    let mut samples;
-    let bits = if jpx { 8 } else { dict.get(b"BitsPerComponent").and_then(Object::as_i64).ok()? };
-    if jpx {
-        *reason = "JPEG 2000 decoding";
-        let decoded = codecs::jpeg2000(&payload, width, height)?;
-        // A PDF ColorSpace overrides the colour space embedded in JP2.
-        space = match dict.get(b"ColorSpace") {
-            Ok(value) => color::resolve_space(document, resources, value)?,
-            Err(_) => decoded.space,
-        };
-        samples = decoded.samples;
-    } else {
-        *reason = "Image colour space or ICC profile";
-        space = color::resolve_space(document, resources, dict.get(b"ColorSpace").ok()?)?;
-        let channels = space.channels();
-        *reason = "Image bit depth";
-        if !matches!(bits, 1 | 2 | 4 | 8 | 16) {
-            return None;
-        }
-        *reason = "Image codec decoding";
-        samples = match payload.filter.as_slice() {
-            b"DCTDecode" if bits == 8 => codecs::jpeg(&payload, width, height, channels, reason)?,
-            b"" => unpack(&payload.bytes, width, height, channels, bits)?,
-            _ => return None,
-        };
-    }
-    let channels = space.channels();
-    let pixels = usize::try_from(u64::from(width) * u64::from(height)).ok()?;
-    *reason = "Decoded sample dimensions";
-    if samples.len() != pixels.checked_mul(channels)? {
-        return None;
-    }
-    // ISO 32000: /Decode is ignored for JPXDecode, whose samples are normalized
-    // by the JPEG2000 decoder. All other codecs produce PDF sample values.
-    if !jpx {
-        *reason = "Image Decode mapping";
-        let mapping = match dict.get(b"Decode") {
-            Ok(value) => Some(numbers(resolve(document, value)?.as_array().ok()?)?),
-            Err(_) => None,
-        };
-        space.map_samples(&mut samples, bits, mapping.as_deref())?;
-    }
-    *reason = "Image colour conversion";
-    space.rgb(samples, width, height)
+    objects
+        .iter()
+        .map(|object| {
+            let number = match object {
+                Object::Integer(value) => *value as f64,
+                Object::Real(value) => f64::from(*value),
+                _ => return None,
+            };
+            number.is_finite().then_some(number)
+        })
+        .collect()
 }
 
 // Packed samples restart on each byte-aligned image row.
@@ -602,51 +675,5 @@ mod tests {
         let image = run(document).unwrap();
         assert_eq!(image.dimensions(), (600, 900));
         assert!(image.as_raw().iter().all(|v| (i16::from(*v) - 100).abs() <= 2));
-    }
-
-    /// Read-only compatibility audit against a real library; never updates its database/cache.
-    #[test]
-    #[ignore = "set BOKHEIM_PDF_SURVEY_ROOT and BOKHEIM_PDF_SURVEY_OUTPUT for a local corpus audit"]
-    fn audit_pdf_cover_extraction() {
-        let root = std::path::PathBuf::from(std::env::var_os("BOKHEIM_PDF_SURVEY_ROOT").unwrap());
-        let output = std::path::PathBuf::from(std::env::var_os("BOKHEIM_PDF_SURVEY_OUTPUT").unwrap());
-        std::fs::create_dir_all(&output).unwrap();
-        let mut directories = vec![root.clone()];
-        let mut paths = Vec::new();
-        while let Some(directory) = directories.pop() {
-            for entry in std::fs::read_dir(directory).unwrap() {
-                let entry = entry.unwrap();
-                if entry.file_name().to_string_lossy().starts_with('.') {
-                    continue;
-                }
-                if entry.file_type().unwrap().is_dir() {
-                    directories.push(entry.path());
-                } else if entry.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("pdf")) {
-                    paths.push(entry.path());
-                }
-            }
-        }
-        paths.sort();
-        let mut extracted = Vec::new();
-        let mut fallback = Vec::new();
-        let mut reasons = Vec::new();
-        for path in paths {
-            let name = path.strip_prefix(&root).unwrap().display().to_string();
-            let mut reason = "";
-            match extract_with_reason(&mut std::fs::File::open(&path).unwrap(), &mut reason) {
-                Some(image) => {
-                    image.save(output.join(format!("{:03}.png", extracted.len() + 1))).unwrap();
-                    extracted.push(name);
-                }
-                None => {
-                    reasons.push(format!("{reason}\t{name}"));
-                    fallback.push(name);
-                }
-            }
-        }
-        std::fs::write(output.join("extracted.txt"), extracted.join("\n")).unwrap();
-        std::fs::write(output.join("pdfium-fallback.txt"), fallback.join("\n")).unwrap();
-        std::fs::write(output.join("fallback-reasons.tsv"), reasons.join("\n")).unwrap();
-        println!("Direct extraction: {}; PDFium fallback: {}", extracted.len(), fallback.len());
     }
 }

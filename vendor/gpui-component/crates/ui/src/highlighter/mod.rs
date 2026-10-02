@@ -1,7 +1,3 @@
-// Diagnostics module - works on all platforms (no tree-sitter dependency)
-mod diagnostics;
-pub use diagnostics::*;
-
 // Native implementation with full tree-sitter support
 #[cfg(feature = "tree-sitter")]
 mod highlighter;

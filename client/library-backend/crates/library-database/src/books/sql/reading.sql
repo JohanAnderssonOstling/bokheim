@@ -4,24 +4,9 @@
 -- param: content_hash: &str
 SELECT read_pos FROM book WHERE content_hash = :content_hash AND deleted_at IS NULL;
 
--- name: reading_set_position!
--- param: content_hash: &str
--- param: position: &str
--- param: progress: Option<f32>
--- param: read_at: i64
--- A reader which cannot cheaply calculate book-wide progress (PDF,
--- audiobook seeking) updates only the canonical location register.
--- Reopening at the same place is not a new read.
-UPDATE book
-SET read_pos = :position,
-    read_progress = COALESCE(:progress, read_progress),
-    read_at = :read_at
-WHERE content_hash = :content_hash
-  AND (read_pos, read_progress) IS NOT (:position, COALESCE(:progress, read_progress));
-
 -- name: reading_upsert_toc_entry!
 -- param: content_hash: &str
 -- param: target: &str
-INSERT INTO book_reading_entry(content_hash,target)
+INSERT INTO book_local_state(content_hash,reading_target)
 VALUES(:content_hash,:target)
-ON CONFLICT(content_hash) DO UPDATE SET target=excluded.target;
+ON CONFLICT(content_hash) DO UPDATE SET reading_target=excluded.reading_target;

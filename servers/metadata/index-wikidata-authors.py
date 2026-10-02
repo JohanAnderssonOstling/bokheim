@@ -4,7 +4,6 @@ Never edits the live catalog or the concurrent classification index.
 """
 import argparse, fcntl, gzip, importlib.util, json, os, re, sqlite3, subprocess, time
 from pathlib import Path
-import orjson
 
 def load(name, file):
     spec=importlib.util.spec_from_file_location(name,Path(__file__).with_name(file))
@@ -84,7 +83,7 @@ def _build(root,authors,output,ol_dump_date):
             try:
                 with c:
                     for line in child.stdout:
-                        insert(c,orjson.loads(line))
+                        insert(c,json.loads(line))
                     if child.wait()!=0:raise RuntimeError('decompression failed')
                     # Chunk hashes describe compressed files in older bundles, so
                     # identity is pinned by their extraction manifest/checkpoint.
@@ -96,7 +95,7 @@ def _build(root,authors,output,ol_dump_date):
         if not c.execute("SELECT 1 FROM state WHERE key='ol_complete'").fetchone():
             with gzip.open(authors,'rb') as f:
                 for n,line in enumerate(f,1):
-                    record=orjson.loads(line.split(b'\t',4)[-1]);key=record.get('key','')
+                    record=json.loads(line.split(b'\t',4)[-1]);key=record.get('key','')
                     match=re.fullmatch(r'/authors/OL([1-9][0-9]*)A',key)
                     if match:
                         aliases=record.get('alternate_names',[])

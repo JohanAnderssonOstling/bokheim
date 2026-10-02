@@ -49,7 +49,7 @@ def extend(root,path):
                 try:
                     with c:
                         for line in proc.stdout:
-                            r=m.orjson.loads(line)
+                            r=m.json.loads(line)
                             if phase=='bibliography':insert(c,r)
                             elif r.get('id') in publishers:
                                 labels=r.get('labels',{});name=labels.get('en',{}).get('value') or next((v.get('value') for _,v in sorted(labels.items()) if v.get('value')),None)

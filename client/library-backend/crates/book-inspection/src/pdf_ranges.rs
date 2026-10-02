@@ -2,6 +2,8 @@ pub(super) use pdf_range_reader::{document_root, load_edges, metadata};
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Cursor, Result};
+    use std::path::Path;
     use lopdf::dictionary;
     use lopdf::{Dictionary, Document, Object, Stream};
     use pdf_range_reader::{load, load_edges};
@@ -34,10 +36,10 @@ mod tests {
         document.trailer.set("Info", info);
         let mut bytes = Vec::new();
         document.save_to(&mut bytes).unwrap();
-        let loaded = load_edges(std::io::Cursor::new(bytes.clone()), 8).unwrap();
+        let loaded = load_edges(Cursor::new(bytes.clone()), 8).unwrap();
         assert!(!loaded.objects.contains_key(&streams[25]));
         assert!(loaded.objects.contains_key(&streams[49]));
-        let inspected = crate::inspect_pdf_reader(std::path::Path::new("book.pdf"), std::io::Cursor::new(bytes)).unwrap();
+        let inspected = crate::inspect_pdf_reader(Path::new("book.pdf"), Cursor::new(bytes)).unwrap();
         {
             assert!(inspected.metadata.book.subjects.iter().any(|s| s.code() == Some("Q125 .A12 2023")));
             assert_eq!(inspected.metadata.book.identifiers[0].canonical_value().as_deref(), Some("9780393243277"));
@@ -49,14 +51,14 @@ mod tests {
         read: Arc<AtomicUsize>,
     }
     impl<R: Read> Read for Counted<R> {
-        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        fn read(&mut self, bytes: &mut [u8]) -> Result<usize> {
             let count = self.inner.read(bytes)?;
             self.read.fetch_add(count, Ordering::Relaxed);
             Ok(count)
         }
     }
     impl<R: Seek> Seek for Counted<R> {
-        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        fn seek(&mut self, position: SeekFrom) -> Result<u64> {
             self.inner.seek(position)
         }
     }
@@ -81,9 +83,9 @@ mod tests {
                 let update = format!("{info}xref\n10 1\n{offset:010} 00000 n\ntrailer\n<< /Size 11 /Info 10 0 R /Prev {previous} >>\nstartxref\n{xref}\n%%EOF\n");
                 bytes.extend_from_slice(update.as_bytes());
             }
-            let inspected = crate::inspect_pdf_reader(std::path::Path::new("readable.pdf"), std::io::Cursor::new(bytes.clone())).unwrap();
+            let inspected = crate::inspect_pdf_reader(Path::new("readable.pdf"), Cursor::new(bytes.clone())).unwrap();
             assert_eq!(inspected.metadata.title, "readable");
-            let loaded = load(std::io::Cursor::new(bytes), 20).unwrap();
+            let loaded = load(Cursor::new(bytes), 20).unwrap();
             assert_eq!(loaded.get_pages().len(), 1);
         }
     }
@@ -106,7 +108,7 @@ mod tests {
         let trailer = format!("xref\n10 1\n{object:010} 00000 n\ntrailer\n<< /Size 11 /Info 10 0 R /Prev {previous} >>\nstartxref\n{xref}\n%%EOF\n");
         bytes.extend_from_slice(update.as_bytes());
         bytes.extend_from_slice(trailer.as_bytes());
-        let loaded = load(std::io::Cursor::new(bytes), 20).unwrap();
+        let loaded = load(Cursor::new(bytes), 20).unwrap();
         assert_eq!(loaded.get_pages().len(), 1);
         assert_eq!(loaded.get_object((10, 0)).unwrap().as_dict().unwrap().get(b"Title").unwrap().as_str().unwrap(), b"Latest title");
     }
@@ -132,7 +134,7 @@ mod tests {
                 document.save_to(&mut bytes).unwrap();
             }
             let read = Arc::new(AtomicUsize::new(0));
-            let reader = Counted { inner: std::io::Cursor::new(bytes), read: read.clone() };
+            let reader = Counted { inner: Cursor::new(bytes), read: read.clone() };
             let loaded = load(reader, 20).unwrap();
             assert_eq!(loaded.get_object(info).unwrap().as_dict().unwrap().get(b"Title").unwrap().as_str().unwrap(), b"Large illustrated book");
             assert!(loaded.extract_text(&[1]).unwrap().contains("978-0-8213-3827-8"));

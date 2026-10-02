@@ -1,4 +1,6 @@
 //! Stable transfer failures shared by execution, queues and browser RPC.
+
+use std::io::ErrorKind;
 use client_runtime::BackendError;
 use std::fmt;
 
@@ -95,10 +97,10 @@ mod tests {
 
     #[test]
     fn retryable_retains_its_source_when_cloned() {
-        let error = TransferError::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let error = TransferError::from(std::io::Error::from(ErrorKind::PermissionDenied));
         let cloned = error.clone();
         let source = cloned.source().unwrap().source().unwrap().downcast_ref::<std::io::Error>().unwrap();
-        assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(source.kind(), ErrorKind::PermissionDenied);
     }
 
     #[test]

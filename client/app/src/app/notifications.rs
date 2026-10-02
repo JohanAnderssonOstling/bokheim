@@ -1,4 +1,6 @@
 //! Account-scoped wakeups. Reconnect reconciles missed events; no remote polling.
+
+use crate::notification_interest::RemoteChanges;
 use crate::sync::SyncScheduler;
 use crate::DeviceAccountSession;
 use std::time::Duration;
@@ -31,7 +33,7 @@ impl ResumeRefresh {
     }
 }
 
-pub(super) async fn run(account: DeviceAccountSession, discovery: SyncScheduler, interest: crate::notification_interest::NotificationInterest, remote_changes: crate::notification_interest::RemoteChanges) {
+pub(super) async fn run(account: DeviceAccountSession, discovery: SyncScheduler, interest: crate::notification_interest::NotificationInterest, remote_changes: RemoteChanges) {
     let mut activity = interest.subscribe();
     let initial_activity = *activity.borrow_and_update();
     let mut resume = ResumeRefresh::new(initial_activity.foreground(), initial_activity.resume_generation(), Instant::now());
@@ -79,7 +81,7 @@ pub(super) async fn run(account: DeviceAccountSession, discovery: SyncScheduler,
     }
 }
 
-fn notify(bytes: &[u8], discovery: &SyncScheduler, browsing: bool, remote_changes: &crate::notification_interest::RemoteChanges) -> Result<(), String> {
+fn notify(bytes: &[u8], discovery: &SyncScheduler, browsing: bool, remote_changes: &RemoteChanges) -> Result<(), String> {
     let message = sync_common::transport::decode::<NotificationMessage>(bytes, 4096).map_err(|e| e.to_string())?;
     // Hello reconciles after initial connection or reconnection.
     match message {
@@ -101,7 +103,7 @@ fn notify(bytes: &[u8], discovery: &SyncScheduler, browsing: bool, remote_change
 pub(super) async fn socket_contract(url: &str, token: &str) -> Result<u32, String> {
     let (scheduler, requests) = SyncScheduler::new();
     let (discovery, discoveries) = SyncScheduler::new();
-    socket::listen(url, token, |bytes| notify(bytes, &discovery, true, &crate::notification_interest::RemoteChanges::default())).await?;
+    socket::listen(url, token, |bytes| notify(bytes, &discovery, true, &RemoteChanges::default())).await?;
     drop(discoveries);
     Ok(std::iter::from_fn(|| requests.try_recv().ok()).count() as u32)
 }

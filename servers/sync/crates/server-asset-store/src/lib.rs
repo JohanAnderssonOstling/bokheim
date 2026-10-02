@@ -1,3 +1,5 @@
+use std::io::ErrorKind;
+use std::time::Instant;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
@@ -169,7 +171,7 @@ impl TemporaryFile {
         let path = self.path.take().expect("temporary file path is present until cleanup");
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
             Err(error) => {
                 self.path = Some(path);
                 Err(error)
@@ -248,34 +250,96 @@ impl FsAssetStore {
     }
 
     pub async fn size(&self, user_id: &str, kind: AssetKind, hash: &ContentHash) -> Result<Option<u64>, AssetError> {
+        if kind != AssetKind::Book {
+            if let Some((bytes, browse)) = self.thumbnail_pair(user_id, hash).await? {
+                return Ok(Some(if kind == AssetKind::Thumbnail { bytes.len() } else { browse.len() } as u64));
+            }
+        }
         match tokio::fs::metadata(self.path(user_id, kind, hash)?).await {
             Ok(metadata) if metadata.is_file() => Ok(Some(metadata.len())),
             Ok(_) => Ok(None),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
             Err(error) => Err(AssetError::Storage(error.to_string())),
         }
     }
 
+    fn thumbnail_pair_path(&self, user_id: &str, hash: &ContentHash) -> PathBuf {
+        self.thumbnails_root.join("users").join(Self::user_scope(user_id)).join(format!("{hash}.pair"))
+    }
+
+    /// Publish both opaque variants with a single atomic rename.
+    pub async fn put_thumbnail_pair(&self, user_id: &str, hash: &ContentHash, bytes: &[u8], browse_bytes: &[u8]) -> Result<(), AssetError> {
+        for variant in [bytes, browse_bytes] {
+            if variant.is_empty() {
+                return Err(AssetError::InvalidInput("thumbnail variants must not be empty".into()));
+            }
+            if variant.len() as u64 > sync_common::MAX_THUMBNAIL_BYTES {
+                return Err(AssetError::TooLarge { limit: sync_common::MAX_THUMBNAIL_BYTES });
+            }
+        }
+        let path = self.thumbnail_pair_path(user_id, hash);
+        let parent = path.parent().expect("thumbnail path has a parent");
+        tokio::fs::create_dir_all(parent).await.map_err(|error| AssetError::Storage(error.to_string()))?;
+        let temp = TemporaryFile::new(parent.join(format!(".thumbnail-{}.part", uuid::Uuid::new_v4())));
+        // Create synchronously so cancellation cannot strand a file after its guard runs.
+        let mut file = File::from_std(std::fs::OpenOptions::new().write(true).create_new(true).open(temp.path()).map_err(|error| AssetError::Storage(error.to_string()))?);
+        file.write_all(b"BTH1").await.map_err(|error| AssetError::Storage(error.to_string()))?;
+        file.write_all(&(bytes.len() as u64).to_le_bytes()).await.map_err(|error| AssetError::Storage(error.to_string()))?;
+        file.write_all(bytes).await.map_err(|error| AssetError::Storage(error.to_string()))?;
+        file.write_all(browse_bytes).await.map_err(|error| AssetError::Storage(error.to_string()))?;
+        file.flush().await.map_err(|error| AssetError::Storage(error.to_string()))?;
+        file.sync_all().await.map_err(|error| AssetError::Storage(error.to_string()))?;
+        drop(file);
+        tokio::fs::rename(temp.path(), &path).await.map_err(|error| AssetError::Storage(error.to_string()))?;
+        std::fs::File::open(parent).and_then(|directory| directory.sync_all()).map_err(|error| AssetError::Storage(error.to_string()))?;
+        Ok(())
+    }
+
+    /// Opening one file pins both variants even when another upload replaces it.
+    pub async fn thumbnail_pair(&self, user_id: &str, hash: &ContentHash) -> Result<Option<(Vec<u8>, Vec<u8>)>, AssetError> {
+        let file = match File::open(self.thumbnail_pair_path(user_id, hash)).await {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(AssetError::Storage(error.to_string())),
+        };
+        let mut data = Vec::new();
+        file.take(2 * sync_common::MAX_THUMBNAIL_BYTES + 13).read_to_end(&mut data).await.map_err(|error| AssetError::Storage(error.to_string()))?;
+        if data.len() < 12 || &data[..4] != b"BTH1" || data.len() as u64 > 2 * sync_common::MAX_THUMBNAIL_BYTES + 12 {
+            return Err(AssetError::Storage("invalid stored thumbnail pair".into()));
+        }
+        let count = u64::from_le_bytes(data[4..12].try_into().unwrap());
+        if count == 0 || count > sync_common::MAX_THUMBNAIL_BYTES || count >= (data.len() - 12) as u64 || (data.len() - 12) as u64 - count > sync_common::MAX_THUMBNAIL_BYTES {
+            return Err(AssetError::Storage("invalid stored thumbnail variant lengths".into()));
+        }
+        let browse = data.split_off(12 + count as usize);
+        Ok(Some((data.split_off(12), browse)))
+    }
+
     pub async fn remove_thumbnail(&self, user_id: &str, hash: &ContentHash) -> Result<(), AssetError> {
+        match tokio::fs::remove_file(self.thumbnail_pair_path(user_id, hash)).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(AssetError::Storage(error.to_string())),
+        }
         for kind in [AssetKind::Thumbnail, AssetKind::ThumbnailBrowse] {
             let path = self.path(user_id, kind, hash)?;
             match tokio::fs::remove_file(path).await {
                 Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
                 Err(error) => return Err(AssetError::Storage(error.to_string())),
             }
         }
         Ok(())
     }
 
-    /// A cheap validator for the current cover file. Replacing a cover uses
+    /// A cheap validator for the atomically published cover pair. Replacing a cover uses
     /// atomic rename, so a new inode changes this token even when byte length
     /// and filesystem timestamp resolution are unchanged.
     pub async fn thumbnail_revision(&self, user_id: &str, hash: &ContentHash) -> Result<Option<ContentHash>, AssetError> {
-        let metadata = match tokio::fs::metadata(self.path(user_id, AssetKind::Thumbnail, hash)?).await {
+        let metadata = match tokio::fs::metadata(self.thumbnail_pair_path(user_id, hash)).await {
             Ok(metadata) if metadata.is_file() => metadata,
             Ok(_) => return Ok(None),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(AssetError::Storage(error.to_string())),
         };
         let mut hasher = blake3::Hasher::new();
@@ -293,9 +357,21 @@ impl FsAssetStore {
     }
 
     pub async fn open_from(&self, user_id: &str, kind: AssetKind, hash: &ContentHash, offset: u64) -> Result<Option<StoredAsset>, AssetError> {
+        if kind != AssetKind::Book {
+            if let Some((bytes, browse)) = self.thumbnail_pair(user_id, hash).await? {
+                let bytes = if kind == AssetKind::Thumbnail { bytes } else { browse };
+                let len = bytes.len() as u64;
+                if offset > len || (offset > 0 && offset == len) {
+                    return Err(AssetError::RangeNotSatisfiable { offset, len });
+                }
+                let mut reader = std::io::Cursor::new(bytes);
+                reader.set_position(offset);
+                return Ok(Some(StoredAsset { reader: Box::new(reader), total_len: len, offset, checksum: *hash }));
+            }
+        }
         let mut file = match File::open(self.path(user_id, kind, hash)?).await {
             Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(AssetError::Storage(error.to_string())),
         };
         let len = file.metadata().await.map_err(|error| AssetError::Storage(error.to_string()))?.len();
@@ -339,7 +415,7 @@ impl FsAssetStore {
         // Open synchronously so cancellation cannot race an offloaded create
         // operation and strand a file after the cleanup guard has run.
         let mut file = File::from_std(std::fs::File::create(temp.path()).map_err(|error| AssetError::Storage(error.to_string()))?);
-        let stream_started = std::time::Instant::now();
+        let stream_started = Instant::now();
         let mut read_time = std::time::Duration::ZERO;
         let mut write_time = std::time::Duration::ZERO;
         let measure = tracing::enabled!(target: "sync_performance", tracing::Level::DEBUG);
@@ -347,7 +423,7 @@ impl FsAssetStore {
         let mut book_hasher = (kind == AssetKind::Book).then(blake3::Hasher::new);
         let mut buffer = vec![0_u8; 64 * 1024];
         loop {
-            let read_started = measure.then(std::time::Instant::now);
+            let read_started = measure.then(Instant::now);
             let count = match reader.read(&mut buffer).await {
                 Ok(count) => count,
                 Err(error) => return Err(AssetError::InvalidInput(error.to_string())),
@@ -366,7 +442,7 @@ impl FsAssetStore {
             if kind.max_bytes().is_some_and(|limit| total > limit) {
                 return Err(AssetError::TooLarge { limit: kind.max_bytes().unwrap_or(u64::MAX) });
             }
-            let write_started = measure.then(std::time::Instant::now);
+            let write_started = measure.then(Instant::now);
             file.write_all(&buffer[..count]).await.map_err(|error| AssetError::Storage(error.to_string()))?;
             if let Some(started) = write_started { write_time += started.elapsed(); }
         }
@@ -379,19 +455,19 @@ impl FsAssetStore {
             }
         }
         tracing::debug!(target: "sync_performance", phase = "receive_hash_write", bytes = total, elapsed_ms = stream_started.elapsed().as_secs_f64() * 1000.0, read_ms = read_time.as_secs_f64() * 1000.0, write_ms = write_time.as_secs_f64() * 1000.0);
-        let durable_started = std::time::Instant::now();
+        let durable_started = Instant::now();
         file.flush().await.map_err(|error| AssetError::Storage(error.to_string()))?;
         drop(file);
         let durable_file = tokio::fs::OpenOptions::new().write(true).open(temp.path()).await.map_err(|error| AssetError::Storage(error.to_string()))?;
         durable_file.sync_all().await.map_err(|error| AssetError::Storage(error.to_string()))?;
         drop(durable_file);
         tracing::debug!(target: "sync_performance", phase = "file_flush_fsync", elapsed_ms = durable_started.elapsed().as_secs_f64() * 1000.0);
-        let publish_started = std::time::Instant::now();
+        let publish_started = Instant::now();
         if kind == AssetKind::Book {
             // Book revisions are content addressed and remain immutable.
             match tokio::fs::hard_link(temp.path(), &final_path).await {
                 Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
                     let existing_len = tokio::fs::metadata(&final_path).await.map_err(|metadata_error| AssetError::Storage(metadata_error.to_string()))?.len();
                     if existing_len != total {
                         return Err(AssetError::Storage(format!("existing content-addressed asset has length {existing_len}, uploaded copy has length {total}")));
@@ -603,6 +679,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn thumbnail_pairs_are_atomic_bounded_and_revisioned_together() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(FsAssetStore::new(temp.path().join("books"), temp.path().join("thumbs")));
+        store.initialize().await.unwrap();
+        let hash = ContentHash::new(&"d".repeat(64));
+        store.put_thumbnail_pair("alice", &hash, b"master", b"browse-one").await.unwrap();
+        let old_revision = store.thumbnail_revision("alice", &hash).await.unwrap();
+        store.put_thumbnail_pair("alice", &hash, b"master", b"browse-two").await.unwrap();
+        assert_ne!(store.thumbnail_revision("alice", &hash).await.unwrap(), old_revision, "a browse-only replacement changes the pair revision");
+        for (master, browse) in [(Vec::new(), b"browse".to_vec()), (b"master".to_vec(), Vec::new()), (vec![0; sync_common::MAX_THUMBNAIL_BYTES as usize + 1], b"browse".to_vec()), (b"master".to_vec(), vec![0; sync_common::MAX_THUMBNAIL_BYTES as usize + 1])] {
+            assert!(store.put_thumbnail_pair("alice", &hash, &master, &browse).await.is_err());
+            assert_eq!(store.thumbnail_pair("alice", &hash).await.unwrap(), Some((b"master".to_vec(), b"browse-two".to_vec())));
+        }
+        assert!(store.thumbnail_pair("bob", &hash).await.unwrap().is_none());
+        assert!(store.thumbnail_revision("bob", &hash).await.unwrap().is_none());
+        let mut pinned = store.open_from("alice", AssetKind::ThumbnailBrowse, &hash, 0).await.unwrap().unwrap();
+        store.put_thumbnail_pair("alice", &hash, &[0; 100], &[0; 40]).await.unwrap();
+        let mut bytes = Vec::new();
+        pinned.reader.read_to_end(&mut bytes).await.unwrap();
+        assert_eq!(bytes, b"browse-two");
+        let writer_store = store.clone();
+        let writer = tokio::spawn(async move {
+            for generation in 1..40u8 {
+                writer_store.put_thumbnail_pair("alice", &hash, &[generation; 100], &[generation; 40]).await.unwrap();
+            }
+        });
+        for _ in 0..100 {
+            let (master, browse) = store.thumbnail_pair("alice", &hash).await.unwrap().unwrap();
+            assert_eq!(master.len(), 100);
+            assert_eq!(browse.len(), 40);
+            assert_eq!(master[0], browse[0], "concurrent replacements must never mix variants");
+            tokio::task::yield_now().await;
+        }
+        writer.await.unwrap();
+        store.remove_thumbnail("alice", &hash).await.unwrap();
+        assert!(store.thumbnail_pair("alice", &hash).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn incomplete_legacy_thumbnails_are_not_reported_as_a_pair() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = FsAssetStore::new(temp.path().join("books"), temp.path().join("thumbs"));
+        store.initialize().await.unwrap();
+        let hash = ContentHash::new(&"e".repeat(64));
+        store.put("alice", AssetKind::Thumbnail, &hash, None, reader(b"old master".to_vec())).await.unwrap();
+        assert!(store.thumbnail_pair("alice", &hash).await.unwrap().is_none());
+        assert!(store.thumbnail_revision("alice", &hash).await.unwrap().is_none());
+        tokio::fs::write(store.thumbnail_pair_path("alice", &hash), b"BTH1bad").await.unwrap();
+        assert!(store.thumbnail_pair("alice", &hash).await.is_err());
+    }
+
+    #[tokio::test]
     async fn thumbnails_are_opaque_bounded_and_isolated_by_user() {
         let temp = tempfile::tempdir().unwrap();
         let thumbnails = temp.path().join("thumbs");
@@ -614,11 +742,11 @@ mod tests {
 
         let first = jpeg([1, 2, 3]);
         let second = jpeg([9, 8, 7]);
-        store.put("alice", AssetKind::Thumbnail, &hash, None, reader(first.clone())).await.unwrap();
+        store.put_thumbnail_pair("alice", &hash, &first, &first).await.unwrap();
         let first_revision = store.thumbnail_revision("alice", &hash).await.unwrap().unwrap();
-        store.put("alice", AssetKind::Thumbnail, &hash, None, reader(second.clone())).await.unwrap();
+        store.put_thumbnail_pair("alice", &hash, &second, &first).await.unwrap();
         assert_ne!(store.thumbnail_revision("alice", &hash).await.unwrap(), Some(first_revision));
-        store.put("bob", AssetKind::Thumbnail, &hash, None, reader(second.clone())).await.unwrap();
+        store.put_thumbnail_pair("bob", &hash, &second, &second).await.unwrap();
 
         for (user, expected) in [("alice", &second), ("bob", &second)] {
             let mut stored = store.open_from(user, AssetKind::Thumbnail, &hash, 0).await.unwrap().unwrap();

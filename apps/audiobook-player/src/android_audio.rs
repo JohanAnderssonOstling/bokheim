@@ -1,6 +1,11 @@
 //! Android owns playback in a foreground service. This module owns the seekable
 //! playback source and forwards service position events to library persistence,
 //! independently of the GPUI activity's rendering/lifetime.
+
+use std::fs::File;
+use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::pin::Pin;
+use std::task::{Context, Waker};
 use crate::{AudiobookBook, PlaybackPosition, ReadSeek, playback_progress, position_save_required};
 use serde_json::{Value, json};
 use std::{
@@ -61,7 +66,7 @@ struct Session {
     release: (async_channel::Sender<()>, async_channel::Receiver<()>),
     stop_error: Mutex<Option<String>>,
     reader: Mutex<Option<Box<dyn ReadSeek>>>,
-    _file: Option<std::fs::File>,
+    _file: Option<File>,
     duration: Duration,
     global_offset: Duration,
     global_duration: Duration,
@@ -94,7 +99,7 @@ pub fn read_source(id: u64, offset: u64, length: usize) -> Result<Vec<u8>, Strin
         }
     }
     let reader = guard.as_mut().ok_or("audio session has no stream")?;
-    reader.seek(std::io::SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+    reader.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
     let mut bytes = vec![0; length];
     let count = reader.read(&mut bytes).map_err(|e| e.to_string())?;
     if session.read_generation.load(Ordering::Acquire) != generation {
@@ -122,7 +127,7 @@ pub(crate) struct AudioEngine {
 }
 impl AudioEngine {
     pub(crate) fn open(
-        mut reader: Box<dyn ReadSeek>, file: Option<std::fs::File>, control: Option<app::AudioStreamControl>, book: &AudiobookBook, track: Option<&book_model::AudiobookTrack>, initial: Duration, updates: async_channel::Sender<PlaybackPosition>,
+        mut reader: Box<dyn ReadSeek>, file: Option<File>, control: Option<app::AudioStreamControl>, book: &AudiobookBook, track: Option<&book_model::AudiobookTrack>, initial: Duration, updates: async_channel::Sender<PlaybackPosition>,
     ) -> Result<Self, String> {
         BRIDGE.get().ok_or("Android audio bridge is not initialized")?;
         #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -132,7 +137,7 @@ impl AudioEngine {
         });
         #[cfg(not(any(target_os = "android", target_os = "linux")))]
         let path: Option<PathBuf> = None;
-        let length = if path.is_none() { reader.seek(std::io::SeekFrom::End(0)).map_err(|e| e.to_string())? } else { 0 };
+        let length = if path.is_none() { reader.seek(SeekFrom::End(0)).map_err(|e| e.to_string())? } else { 0 };
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let global_offset = track.map(|track| Duration::from_millis(track.start_ms)).unwrap_or_default();
         let duration = track.map(|track| Duration::from_millis(track.end_ms - track.start_ms)).unwrap_or(book.duration);
@@ -250,11 +255,11 @@ impl AudioEngine {
         }
     }
 
-    pub fn release_completion(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>>>> {
+    pub fn release_completion(&self) -> Pin<Box<dyn std::future::Future<Output = Result<(), String>>>> {
         self.release_completion_with_timeout(Duration::from_secs(30))
     }
 
-    fn release_completion_with_timeout(&self, timeout: Duration) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>>>> {
+    fn release_completion_with_timeout(&self, timeout: Duration) -> Pin<Box<dyn std::future::Future<Output = Result<(), String>>>> {
         let started = self.started.load(Ordering::Acquire);
         let session = self.session.clone();
         Box::pin(async move {
@@ -339,7 +344,7 @@ mod tests {
             control: Some(Default::default()),
             release: async_channel::bounded(1),
             stop_error: Mutex::new(None),
-            reader: Mutex::new(Some(Box::new(std::io::Cursor::new(Vec::<u8>::new())))),
+            reader: Mutex::new(Some(Box::new(Cursor::new(Vec::<u8>::new())))),
             _file: None,
             duration: Duration::from_secs(600),
             global_offset: Duration::ZERO,
@@ -357,7 +362,7 @@ mod tests {
     #[test]
     fn loader_acknowledges_latest_seek_generation_and_keeps_byte_offsets() {
         let (id, session, _) = session();
-        *session.reader.lock().unwrap() = Some(Box::new(std::io::Cursor::new(vec![0, 1, 2, 3, 4, 5])));
+        *session.reader.lock().unwrap() = Some(Box::new(Cursor::new(vec![0, 1, 2, 3, 4, 5])));
         interrupt_source(id);
         interrupt_source(id);
         let control = session.control.as_ref().unwrap();
@@ -373,24 +378,24 @@ mod tests {
         struct InterruptedReader {
             id: u64,
             interrupted: bool,
-            bytes: std::io::Cursor<Vec<u8>>,
+            bytes: Cursor<Vec<u8>>,
         }
-        impl std::io::Read for InterruptedReader {
+        impl Read for InterruptedReader {
             fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
                 if !self.interrupted {
                     self.interrupted = true;
                     interrupt_source(self.id);
                 }
-                std::io::Read::read(&mut self.bytes, out)
+                Read::read(&mut self.bytes, out)
             }
         }
-        impl std::io::Seek for InterruptedReader {
-            fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
-                std::io::Seek::seek(&mut self.bytes, position)
+        impl Seek for InterruptedReader {
+            fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+                Seek::seek(&mut self.bytes, position)
             }
         }
         let (id, session, _) = session();
-        *session.reader.lock().unwrap() = Some(Box::new(InterruptedReader { id, interrupted: false, bytes: std::io::Cursor::new(vec![0, 1, 2, 3]) }));
+        *session.reader.lock().unwrap() = Some(Box::new(InterruptedReader { id, interrupted: false, bytes: Cursor::new(vec![0, 1, 2, 3]) }));
         assert_eq!(read_source(id, 0, 2), Err("audio read superseded".into()));
         assert_eq!(read_source(id, 2, 2).unwrap(), vec![2, 3]);
         event(id, 0, 0, false, false, true);
@@ -499,7 +504,7 @@ mod tests {
         let (id, session, updates) = session();
         let engine = AudioEngine { id, session, load: Value::Null, started: AtomicBool::new(true) };
         let mut released = engine.release_completion();
-        let mut poll = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut poll = Context::from_waker(Waker::noop());
         assert!(released.as_mut().poll(&mut poll).is_pending());
         event(id, 0, 42_000, false, true, true);
         assert!(matches!(released.as_mut().poll(&mut poll), std::task::Poll::Ready(Ok(()))));
@@ -513,7 +518,7 @@ mod tests {
         let mut released = engine.release_completion();
         *session.stop_error.lock().unwrap() = Some("service unavailable".to_owned());
         session.release.0.close();
-        let mut poll = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut poll = Context::from_waker(Waker::noop());
         assert!(matches!(released.as_mut().poll(&mut poll), std::task::Poll::Ready(Err(error)) if error == "service unavailable"));
         sessions().lock().unwrap().remove(&id);
     }
@@ -523,7 +528,7 @@ mod tests {
         let (id, session, _) = session();
         let engine = AudioEngine { id, session, load: Value::Null, started: AtomicBool::new(true) };
         let mut released = engine.release_completion_with_timeout(Duration::ZERO);
-        let mut poll = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut poll = Context::from_waker(Waker::noop());
         assert!(matches!(released.as_mut().poll(&mut poll), std::task::Poll::Ready(Err(error)) if error.contains("did not acknowledge")));
         sessions().lock().unwrap().remove(&id);
     }
@@ -539,22 +544,22 @@ mod tests {
         let book = AudiobookBook { title: "Example".into(), author: Some("Author".into()), narrator: None, duration: Duration::from_secs(60), chapters: Vec::new(), cover: None };
         let (updates, _) = async_channel::unbounded();
         struct TrackedReader {
-            cursor: std::io::Cursor<&'static [u8]>,
+            cursor: Cursor<&'static [u8]>,
             reads: Arc<AtomicU64>,
         }
-        impl std::io::Read for TrackedReader {
+        impl Read for TrackedReader {
             fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
                 self.reads.fetch_add(1, Ordering::Relaxed);
-                std::io::Read::read(&mut self.cursor, bytes)
+                Read::read(&mut self.cursor, bytes)
             }
         }
-        impl std::io::Seek for TrackedReader {
-            fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
-                std::io::Seek::seek(&mut self.cursor, position)
+        impl Seek for TrackedReader {
+            fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+                Seek::seek(&mut self.cursor, position)
             }
         }
         let reads = Arc::new(AtomicU64::new(0));
-        let reader = TrackedReader { cursor: std::io::Cursor::new(b"seekable M4B bytes"), reads: reads.clone() };
+        let reader = TrackedReader { cursor: Cursor::new(b"seekable M4B bytes"), reads: reads.clone() };
         let mut audio = AudioEngine::open(Box::new(reader), None, None, &book, None, Duration::from_secs(90), updates).unwrap();
         assert_eq!(reads.load(Ordering::Relaxed), 0, "opening must not copy the stream");
         assert!(audio.load["path"].is_null());
@@ -580,10 +585,10 @@ mod tests {
         {
             let original = directory.path().join("original.m4b");
             std::fs::write(&original, b"original audiobook").unwrap();
-            let file = std::fs::File::open(&original).unwrap();
+            let file = File::open(&original).unwrap();
             let (updates, _) = async_channel::unbounded();
             // An empty reader proves playback did not copy its bytes.
-            let audio = AudioEngine::open(Box::new(std::io::Cursor::new(Vec::<u8>::new())), Some(file), None, &book, None, Duration::ZERO, updates).unwrap();
+            let audio = AudioEngine::open(Box::new(Cursor::new(Vec::<u8>::new())), Some(file), None, &book, None, Duration::ZERO, updates).unwrap();
             assert!(audio.session.reader.lock().unwrap().is_none());
             let descriptor_path = PathBuf::from(audio.load["path"].as_str().unwrap());
             audio.play();

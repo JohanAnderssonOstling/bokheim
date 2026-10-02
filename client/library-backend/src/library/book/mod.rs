@@ -1,7 +1,9 @@
 //! Shared book-opening policy. Hosts provide local readers and supported
 //! streaming mechanisms; metadata selection and download fallback are common.
+
 use crate::BackendError;
-use crate::{ContentHash, DownloadState, LibrarySession};
+use crate::BoxedBookReader;
+use crate::{ContentHash, LibrarySession};
 use book_model::BookFormat;
 
 #[cfg(target_arch = "wasm32")]
@@ -37,29 +39,23 @@ impl ResolvedBook {
             Self::Audiobook(_) => Err("expected a document".into()),
         }
     }
-    pub fn into_audiobook(self) -> Result<AudiobookBook, String> {
-        match self {
-            Self::Audiobook(book) => Ok(book),
-            Self::Document(_) => Err("expected an audiobook".into()),
-        }
-    }
 }
 pub struct DocumentBook {
     pub pdf_page_source: Option<std::sync::Arc<dyn pdf_view_common::PdfPageSource>>,
     pub pdf_metadata: Option<pdf_view_common::PdfReaderMetadata>,
     pub path: String,
     pub format: BookFormat,
-    pub reader: crate::BoxedBookReader,
+    pub reader: BoxedBookReader,
 }
 impl DocumentBook {
-    pub fn new(path: String, format: BookFormat, reader: crate::BoxedBookReader) -> Self {
+    pub fn new(path: String, format: BookFormat, reader: BoxedBookReader) -> Self {
         Self { pdf_page_source: None, pdf_metadata: None, path, format, reader }
     }
 }
 
 struct BookInfo {
     format: BookFormat,
-    path: Option<String>,
+    path: Option<library_model::RelativeBookPath>,
 }
 async fn book_info(library: &LibrarySession, hash: ContentHash) -> Result<BookInfo, BackendError> {
     let info = library.db.local_book_info(&hash)?;
@@ -86,14 +82,7 @@ impl LibrarySession {
         if let Some(book) = host::local(self, hash, &info).await? {
             return Ok(book);
         }
-        if host::supports_streaming(info.format) {
-            return host::remote(self, hash, &info).await;
-        }
-        match self.request_download(hash).await? {
-            DownloadState::Downloaded => host::local(self, hash, &info).await?.ok_or_else(|| BackendError::message("book is unavailable")),
-            DownloadState::NotDownloaded => Err(BackendError::message(format!("book is unavailable for download: {hash}"))),
-            DownloadState::Queued | DownloadState::Downloading(_) => Err(BackendError::message(format!("book download did not complete: {hash}"))),
-        }
+        host::remote(self, hash, &info).await
     }
 }
 

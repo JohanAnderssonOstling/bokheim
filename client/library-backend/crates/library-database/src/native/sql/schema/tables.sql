@@ -2,7 +2,8 @@
 -- Device-local work queues and ingestion output. None of this is replicated.
 CREATE TABLE IF NOT EXISTS local_file_work(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        operation TEXT NOT NULL CHECK(operation IN ('trash','restore')),
+        -- Soft trash/restore commands do not enqueue either operation.
+        operation TEXT NOT NULL CHECK(operation IN ('remove','materialize')),
         content_hash TEXT NOT NULL,
         relative_path TEXT NOT NULL,
         UNIQUE(operation,content_hash,relative_path)
@@ -26,34 +27,17 @@ CREATE TABLE IF NOT EXISTS local_directory_projection(
         dir_id TEXT PRIMARY KEY,relative_path TEXT NOT NULL
     );
 
-CREATE TABLE IF NOT EXISTS local_import_inspection(
-        content_hash TEXT PRIMARY KEY REFERENCES book(content_hash) ON DELETE CASCADE,
-        format INTEGER NOT NULL,
-        version INTEGER NOT NULL
-    );
-
-CREATE TABLE IF NOT EXISTS local_subject_pipeline(
-        content_hash TEXT PRIMARY KEY REFERENCES book(content_hash) ON DELETE CASCADE,
-        phase INTEGER NOT NULL, revision INTEGER NOT NULL,
-        metadata BLOB NOT NULL, title TEXT NOT NULL,
-        complete INTEGER NOT NULL DEFAULT 0, retry_at INTEGER NOT NULL DEFAULT 0
-    );
-
-CREATE TABLE IF NOT EXISTS local_isbn_response(
-        isbn TEXT PRIMARY KEY, response TEXT NOT NULL, expires_at INTEGER NOT NULL
-    );
-
-CREATE TABLE IF NOT EXISTS audible_enrichment_jobs(
-        content_hash TEXT PRIMARY KEY REFERENCES audiobook_metadata(content_hash) ON DELETE CASCADE,
-        policy TEXT NOT NULL,
-        request_json TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('pending','resolving','applied','no_match','unavailable','ambiguous')),
-        response_json TEXT,
-        claim_token TEXT,
-        lease_until INTEGER,
-        retry_at INTEGER NOT NULL DEFAULT 0,
-        updated_at INTEGER NOT NULL
-    );
+-- Device-local book state. Each writer updates only the fields it owns.
+CREATE TABLE IF NOT EXISTS book_local_state(
+        content_hash TEXT PRIMARY KEY NOT NULL REFERENCES book(content_hash) ON DELETE CASCADE,
+        inspection_format INTEGER,
+        inspection_version INTEGER,
+        -- Recording evidence extracted from an audiobook's files.
+        recording_json TEXT,
+        -- The navigation target resolved by the reader when saving position.
+        reading_target TEXT,
+        CHECK((inspection_format IS NULL) = (inspection_version IS NULL))
+    ) STRICT;
 
 CREATE TABLE IF NOT EXISTS pdf_reader_metadata (
         content_hash TEXT NOT NULL REFERENCES book(content_hash) ON DELETE CASCADE,
@@ -61,3 +45,12 @@ CREATE TABLE IF NOT EXISTS pdf_reader_metadata (
     );
 
 CREATE TABLE IF NOT EXISTS local_scan_failure(path TEXT PRIMARY KEY, error TEXT NOT NULL);
+
+-- Device-local values for this library; initialized as one singleton row.
+CREATE TABLE IF NOT EXISTS library_local_state(
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    scan_state TEXT NOT NULL DEFAULT 'idle' CHECK(scan_state IN ('idle','pending','failed')),
+    transfer_history_json TEXT,
+    taxonomy_revision TEXT,
+    enrichment_policy TEXT
+) STRICT;

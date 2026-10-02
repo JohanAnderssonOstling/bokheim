@@ -1,39 +1,42 @@
 //! The sole owner of a concrete library's SQLite connection.
 //!
-//! Other crates use typed database operations; they never own a SQLite
-//! connection or select a connection policy.
+//! Callers may borrow the connection for inlined library operations.
+//! This crate retains connection ownership and chooses the connection policy.
 
+use std::error::Error;
+use std::sync::Arc;
 use crate::annotations::{IndexSql as AnnotationsIndexSql, TablesSql as AnnotationsTablesSql};
 use crate::assets::TablesSql as AssetsTablesSql;
-use crate::enrichment::{IndexSql as EnrichmentIndexSql, TablesSql as EnrichmentTablesSql, TriggersSql as EnrichmentTriggersSql};
-use crate::native::{IndexSql as NativeIndexSql, TablesSql as NativeTablesSql, TriggersSql as NativeTriggersSql, ViewsSql as NativeViewsSql};
+use crate::enrichment::{IndexSql as EnrichmentIndexSql, TablesSql as EnrichmentTablesSql};
+use crate::native::{IndexSql as NativeIndexSql, TablesSql as NativeTablesSql};
 use crate::placements::{IndexSql as PlacementsIndexSql, TablesSql as PlacementsTablesSql};
 use crate::shared_sql::SharedSql;
-use crate::sync::{IndexSql as SyncIndexSql, TablesSql as SyncTablesSql, TriggersSql as SyncTriggersSql};
+use crate::sync::{IndexSql as SyncIndexSql, TablesSql as SyncTablesSql};
+#[cfg(test)]
+use sync_common::ContentHash;
 #[macro_use]
 mod query_methods;
-mod contributors;
-mod purge;
-mod shared_sql;
+pub(crate) mod contributors;
+pub(crate) mod metadata;
+pub(crate) mod purge;
+pub mod shared_sql;
 mod taxonomy_update;
 #[cfg(test)]
 mod test_support;
 mod timing;
 mod transactions;
 
-pub const LIBRARY_SCHEMA_VERSION: i64 = 7;
+pub const LIBRARY_SCHEMA_VERSION: i64 = 23;
 
 pub use client_platform_runtime::executor;
 pub use client_platform_runtime::storage_queue;
 pub use rusqlite;
+pub use transactions::commit;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use client_platform_native::sqlite;
 #[cfg(target_arch = "wasm32")]
 pub use client_platform_web::sqlite;
-
-pub use library_replica::{BookPlacement, BookUploadIntent, RelativeBookPath, RelativeBookPathError, RelativeDirPath, RelativeDirPathError};
-use sync_common::ContentHash;
 
 // Connection ownership for one concrete library session.
 use std::fmt;
@@ -50,7 +53,7 @@ pub struct LibrarySyncDetails {
 #[derive(Clone, Debug)]
 pub enum DatabaseError {
     Message(String),
-    Operation(std::sync::Arc<dyn std::error::Error + Send + Sync>),
+    Operation(Arc<dyn Error + Send + Sync>),
 }
 
 impl fmt::Display for DatabaseError {
@@ -62,8 +65,8 @@ impl fmt::Display for DatabaseError {
     }
 }
 
-impl std::error::Error for DatabaseError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl Error for DatabaseError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Operation(error) => Some(error.as_ref()),
             Self::Message(_) => None,
@@ -72,8 +75,8 @@ impl std::error::Error for DatabaseError {
 }
 
 impl DatabaseError {
-    pub fn operation(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
-        Self::Operation(std::sync::Arc::from(error.into()))
+    pub fn operation(error: impl Into<Box<dyn Error + Send + Sync>>) -> Self {
+        Self::Operation(Arc::from(error.into()))
     }
     pub fn message(message: impl Into<String>) -> Self {
         Self::Message(message.into())
@@ -99,83 +102,69 @@ fn configure_library_connection(connection: &rusqlite::Connection) -> rusqlite::
     if !journal_mode.eq_ignore_ascii_case("wal") {
         connection.pragma_update(None, "journal_mode", "WAL")?;
     }
-    crate::sync::functions::register_sync_functions(connection)?;
-    attach_curated_taxonomy_to(connection).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
-}
-
-/// Scalar flag coalescing metadata payloads without a persistent batch flag.
-fn configure_metadata_batch_flag(connection: &rusqlite::Connection) -> rusqlite::Result<std::sync::Arc<std::sync::atomic::AtomicBool>> {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    let flag = std::sync::Arc::new(AtomicBool::new(false));
-    let active = flag.clone();
-    connection.create_scalar_function("metadata_batch_flag", 1, rusqlite::functions::FunctionFlags::SQLITE_UTF8, move |ctx| {
-        Ok(match ctx.get::<Option<bool>>(0)? {
-            Some(value) => active.swap(value, Ordering::Relaxed),
-            None => active.load(Ordering::Relaxed),
-        })
-    })?;
-    Ok(flag)
-}
-
-fn attach_curated_taxonomy_to(connection: &rusqlite::Connection) -> Result<(), DatabaseError> {
-    let mut attached = false;
-    connection.taxonomy_attached(|row| {
-        attached = row.get(0)?;
-        Ok(())
-    })?;
-    if attached {
-        return Ok(());
+    use rusqlite::functions::FunctionFlags;
+    connection.create_scalar_function("normalize_search_text", 1, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, |context| Ok(book_model::normalize_search_text(&context.get::<String>(0)?)))?;
+    connection.create_scalar_function("portable_name_key", 1, FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC, |context| Ok(library_replica::portable_name_key(&context.get::<String>(0)?)))?;
+    {
+        'configure_library_connection: {
+            let mut attached = false;
+            (match connection.taxonomy_attached(|row| {
+                attached = row.get(0)?;
+                Ok(())
+            }) {
+                Ok(value) => value,
+                Err(error) => break 'configure_library_connection Err(error.into()),
+            });
+            if attached {
+                break 'configure_library_connection Ok(());
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(path) = subject_projection::installed::active_path() {
+                let path = match path.to_str().ok_or_else(|| DatabaseError::message("taxonomy path is not UTF-8")) {
+                    Ok(value) => value,
+                    Err(error) => break 'configure_library_connection Err(error.into()),
+                };
+                let encoded = path.bytes().map(|b| if b.is_ascii_alphanumeric() || b"/-_.".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect::<String>();
+                let uri = format!("file:{encoded}?mode=ro&immutable=1");
+                (match connection.taxonomy_attach(&uri) {
+                    Ok(value) => value,
+                    Err(error) => break 'configure_library_connection Err(error.into()),
+                });
+                break 'configure_library_connection Ok(());
+            }
+            (match connection.taxonomy_attach(":memory:") {
+                Ok(value) => value,
+                Err(error) => break 'configure_library_connection Err(error.into()),
+            });
+            // SAFETY: this non-owning wrapper is confined to connection
+            // configuration; no statement is active and it cannot outlive or
+            // close the original handle. SQLite reads the static bundled bytes
+            // directly without copying the tree.
+            let mut borrowed = unsafe {
+                match rusqlite::Connection::from_handle(connection.handle()) {
+                    Ok(value) => value,
+                    Err(error) => break 'configure_library_connection Err(error.into()),
+                }
+            };
+            (match borrowed.deserialize_bytes("curated", subject_projection::DEFAULT_UNIFIED_TAXONOMY_SQLITE) {
+                Ok(value) => value,
+                Err(error) => break 'configure_library_connection Err(error.into()),
+            });
+            Ok::<_, DatabaseError>(())
+        }
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Some(path) = subject_projection::installed::active_path() {
-        let uri = format!("{}?mode=ro&immutable=1", url_for_taxonomy(path)?);
-        connection.taxonomy_attach(&uri)?;
-        return Ok(());
-    }
-    connection.taxonomy_attach(":memory:")?;
-    // SAFETY: this non-owning wrapper is confined to connection
-    // configuration; no statement is active and it cannot outlive or
-    // close the original handle. SQLite reads the static bundled bytes
-    // directly without copying the tree.
-    let mut borrowed = unsafe { rusqlite::Connection::from_handle(connection.handle())? };
-    borrowed.deserialize_bytes("curated", subject_projection::DEFAULT_UNIFIED_TAXONOMY_SQLITE)?;
-    Ok(())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn url_for_taxonomy(path: &Path) -> Result<String, DatabaseError> {
-    let path = path.to_str().ok_or_else(|| DatabaseError::message("taxonomy path is not UTF-8"))?;
-    Ok(format!("file:{}", path.bytes().map(|b| if b.is_ascii_alphanumeric() || b"/-_.".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect::<String>()))
+    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
 pub struct Database {
-    pub(crate) connection: rusqlite::Connection,
+    pub connection: rusqlite::Connection,
     path: PathBuf,
-    metadata_batch_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl fmt::Debug for Database {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("Database").finish_non_exhaustive()
     }
-}
-
-/// Queues every book's newest local version in a live folder for upload.
-fn requeue_cloud_storage(transaction: &rusqlite::Transaction<'_>) -> Result<(), DatabaseError> {
-    let mut candidates = Vec::new();
-    transaction.owner_cloud_storage_candidates(|row| {
-        candidates.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?));
-        Ok(())
-    })?;
-    let mut folders = placements::FolderPaths::new(transaction);
-    let mut queued = std::collections::HashSet::new();
-    for (content_hash, dir_id, checksum, size_bytes) in candidates {
-        if !queued.contains(&content_hash) && folders.folder(&dir_id)?.is_some() {
-            transaction.owner_queue_book_upload(&content_hash, &checksum, size_bytes)?;
-            queued.insert(content_hash);
-        }
-    }
-    Ok(())
 }
 
 impl Database {
@@ -188,12 +177,11 @@ impl Database {
         const VERSION: i64 = LIBRARY_SCHEMA_VERSION;
         let version: i64 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version == VERSION {
-            let mut raw: Option<String> = None;
-            transaction.shared_owner_replica_id(|row| {
-                raw = row.get::<_, Option<String>>(0)?;
-                Ok(())
-            })?;
-            let replica_id = raw.ok_or_else(|| DatabaseError::message("library has no replica id"))?.parse().map_err(DatabaseError::operation)?;
+            transaction.schema_placements_views()?;
+            transaction.schema_assets_views()?;
+            transaction.execute_batch(include_str!("enrichment/sql/migrate_policy.sql"))?;
+            let raw: String = transaction.query_row("SELECT replica_id FROM sync_metadata WHERE singleton=1", [], |row| row.get(0))?;
+            let replica_id = raw.parse().map_err(DatabaseError::operation)?;
             transaction.commit()?;
             self.refresh_taxonomy_assignments()?;
             return Ok(replica_id);
@@ -204,7 +192,9 @@ impl Database {
         transaction.schema_sync_tables()?;
         transaction.schema_native_tables()?;
         transaction.schema_placements_tables()?;
+        transaction.schema_placements_views()?;
         transaction.schema_assets_tables()?;
+        transaction.schema_assets_views()?;
         transaction.schema_enrichment_tables()?;
         transaction.schema_annotations_tables()?;
 
@@ -212,7 +202,8 @@ impl Database {
         transaction.execute_batch(
             "INSERT OR IGNORE INTO sync_clock VALUES(1,0);
             INSERT OR IGNORE INTO sync_metadata(singleton) VALUES(1);
-            INSERT INTO dir(id,parent_id,name,intent_parent_id,intent_name,intent_lifecycle,deleted_at)
+            INSERT OR IGNORE INTO library_local_state(singleton,enrichment_policy) VALUES(1,'books_v3');
+            INSERT INTO dir(id,parent_id,name,canonical_parent_id,canonical_name,lifecycle,deleted_at)
             VALUES('00000000-0000-0000-0000-000000000000','00000000-0000-0000-0000-000000000000','','00000000-0000-0000-0000-000000000000','',0,NULL)
             ON CONFLICT(id) DO UPDATE SET parent_id=excluded.parent_id,name=excluded.name,deleted_at=NULL;",
         )?;
@@ -222,12 +213,7 @@ impl Database {
         transaction.schema_placements_index()?;
         transaction.schema_enrichment_index()?;
         transaction.schema_annotations_index()?;
-        transaction.schema_native_views()?;
-        transaction.schema_sync_triggers()?;
-        transaction.schema_native_triggers()?;
-        transaction.schema_enrichment_triggers()?;
         let replica_id = sync_common::ReplicaId::new_v4();
-        transaction.owner_set_change_origin("local")?;
         transaction.owner_set_replica_id(&replica_id.to_string())?;
         transaction.pragma_update(None, "user_version", VERSION)?;
         transaction.commit()?;
@@ -237,56 +223,6 @@ impl Database {
 
     pub fn set_remote_library_name(&self, name: &str) -> Result<(), DatabaseError> {
         self.connection.owner_set_remote_library_name(name)?;
-        Ok(())
-    }
-
-    pub fn sync_remote_library_name(&self) -> Result<Option<String>, DatabaseError> {
-        let mut name = None;
-        self.connection.shared_owner_remote_library_name(|row| {
-            name = row.get(0)?;
-            Ok(())
-        })?;
-        Ok(name)
-    }
-
-    pub fn load_transfer_history(&self) -> Result<Option<String>, DatabaseError> {
-        let mut history = None;
-        self.connection.owner_transfer_history(|row| {
-            history = Some(row.get(0)?);
-            Ok(())
-        })?;
-        Ok(history)
-    }
-
-    pub fn save_transfer_history(&self, entries_json: &str) -> Result<(), DatabaseError> {
-        self.connection.owner_save_transfer_history(entries_json)?;
-        Ok(())
-    }
-
-    /// Returns the locally stored name when this account/server still needs a
-    /// remote library created, or `None` when creation was already recorded.
-    pub fn remote_library_name_to_create(&self, identity: &str) -> Result<Option<String>, DatabaseError> {
-        let mut created: Option<String> = None;
-        self.connection.shared_owner_server_library_created(|row| {
-            created = row.get::<_, Option<String>>(0)?;
-            Ok(())
-        })?;
-        if created.as_deref() == Some(identity) {
-            return Ok(None);
-        }
-        let mut name: Option<String> = None;
-        self.connection.shared_owner_remote_library_name(|row| {
-            name = row.get::<_, Option<String>>(0)?;
-            Ok(())
-        })?;
-        let name = name.ok_or_else(|| DatabaseError::message("library has no remote name"))?;
-        Ok(Some(name))
-    }
-
-    /// Records only a successful remote-library creation for the supplied
-    /// account/server identity.
-    pub fn record_remote_library_created(&self, identity: &str) -> Result<(), DatabaseError> {
-        self.connection.owner_set_server_library_created(identity)?;
         Ok(())
     }
 
@@ -305,36 +241,37 @@ impl Database {
 
     pub fn set_asset_storage_policy(&self, enabled: bool, reset_cloud_presence: bool) -> Result<(), DatabaseError> {
         let enabled = if enabled { "1" } else { "0" };
-        if reset_cloud_presence {
-            let transaction = self.connection.unchecked_transaction()?;
-            transaction.owner_reset_remote_books()?;
-            transaction.owner_reset_rejected_book_uploads()?;
-            requeue_cloud_storage(&transaction)?;
-            transaction.owner_refresh_book_uploads()?;
+        self.write(|transaction| {
+            if reset_cloud_presence {
+                transaction.owner_reset_remote_books()?;
+                transaction.owner_reset_rejected_book_uploads()?;
+                let mut candidates = Vec::new();
+                transaction.owner_cloud_storage_candidates(|row| {
+                    candidates.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?));
+                    Ok(())
+                })?;
+                let mut folders = placements::FolderPaths::new(transaction);
+                let mut queued = std::collections::HashSet::new();
+                for (content_hash, dir_id, checksum, size_bytes) in candidates {
+                    if !queued.contains(&content_hash) && folders.folder(&dir_id)?.is_some() {
+                        transaction.owner_queue_book_upload(&content_hash, &checksum, size_bytes)?;
+                        queued.insert(content_hash);
+                    }
+                }
+                transaction.owner_refresh_book_uploads()?;
+            }
             transaction.owner_cloud_storage_policy(enabled)?;
-            transaction.commit()?;
-            return Ok(());
-        }
-        self.connection.owner_cloud_storage_policy(enabled)?;
-        Ok(())
+            Ok(())
+        })
     }
 
     pub fn needs_scan(&self) -> Result<bool, DatabaseError> {
-        let mut record: Option<(String, bool, bool)> = None;
-        self.connection.owner_operation_record(|row| {
-            let kind: Option<String> = row.get(0)?;
-            let Some(kind) = kind else { return Ok(()) };
-            let scan_complete: Option<i64> = row.get(1)?;
-            let completed: Option<i64> = row.get(2)?;
-            record = Some((kind, scan_complete.unwrap_or(0) != 0, completed.unwrap_or(0) != 0));
-            Ok(())
-        })?;
-        Ok(record.is_some_and(|(kind, scan_complete, completed)| !completed && kind == "Import" && !scan_complete))
+        Ok(self.connection.owner_needs_scan(|row| row.get(0))?)
     }
 
     pub fn book_format(&self, hash: &sync_common::ContentHash) -> Result<Option<book_model::BookFormat>, DatabaseError> {
         let mut format = None;
-        self.connection.owner_book_format(hash.as_str(), |row| {
+        self.connection.shared_book_format(hash.as_str(), |row| {
             format = Some(row.get::<_, Option<i64>>(0)?);
             Ok(())
         })?;
@@ -344,9 +281,8 @@ impl Database {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, DatabaseError> {
         let path = path.as_ref().to_path_buf();
         let connection = device_sqlite::open(&path, device_sqlite::OpenOptions::new()).map_err(DatabaseError::operation)?;
-        let metadata_batch_flag = configure_metadata_batch_flag(&connection)?;
         sqlite::initialize(&connection, configure_library_connection).map_err(DatabaseError::operation)?;
-        Ok(Self { connection, path, metadata_batch_flag })
+        Ok(Self { connection, path })
     }
 
     /// Filesystem location of this library, so detached transfer drivers can
@@ -380,29 +316,20 @@ pub fn configure_fixture_connection(database: &Database, configure: impl FnOnce(
     Ok(())
 }
 
-/// Bounds a fixture query so a broken recursive projection fails promptly.
-#[cfg(feature = "fixture-sql")]
-pub fn set_fixture_progress_limit(database: &Database, limit: usize) -> Result<(), DatabaseError> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let steps = AtomicUsize::new(0);
-    database.connection.progress_handler(1000, Some(move || steps.fetch_add(1, Ordering::Relaxed) > limit))?;
-    Ok(())
-}
-
 include_sql!("src/sql/owner.sql");
 
 mod annotations;
-mod assets;
-mod books;
-mod browse;
-mod enrichment;
+pub mod assets;
+pub(crate) mod books;
+pub mod browse;
+pub mod enrichment;
 mod import;
-mod native;
-mod placements;
-mod sync;
+pub mod native;
+pub(crate) mod placements;
+mod projection;
+pub(crate) mod sync;
 pub mod sync_status;
 
-pub(crate) use annotations::*;
 pub use assets::*;
 pub use browse::*;
 pub use enrichment::*;
@@ -445,3 +372,6 @@ mod local_evict_guard_tests;
 #[cfg(test)]
 #[path = "../tests/regressions.rs"]
 mod regression_tests;
+
+pub use books::audiobook::{AudiobookSql, chapters_from_navigation};
+pub use books::toc::{TocSql, entry_title};

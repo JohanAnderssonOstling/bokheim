@@ -5,5 +5,5 @@ FROM book_unified_concept assignment
 JOIN book ON book.row_id=assignment.book_row_id
 JOIN curated.unified_concept_route route ON route.concept_id=assignment.concept_id
 WHERE book.deleted_at IS NULL
-  AND EXISTS(SELECT 1 FROM book_dir placement
-      WHERE placement.book_row_id=book.row_id AND placement.deleted_at IS NULL);
+  AND EXISTS(SELECT 1 FROM library_book_presence presence
+             WHERE presence.book_row_id=book.row_id);

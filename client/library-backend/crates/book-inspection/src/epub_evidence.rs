@@ -66,12 +66,6 @@ pub(super) fn inspect(provider: &EpubProvider, book: &BookRecord) -> Vec<Section
 }
 
 #[allow(dead_code)]
-fn is_cover_image(path: &str) -> bool {
-    let path = path.split(['?', '#']).next().unwrap_or(path);
-    path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase().contains("cover")
-}
-
-#[allow(dead_code)]
 fn ranked_images(reader: &mut dyn Read, uri: &str, anchors: &BTreeMap<String, bool>) -> io::Result<Vec<(String, bool)>> {
     let mut xml = Reader::from_reader(BufReader::new(reader));
     xml.expand_empty_elements(true);
@@ -103,7 +97,9 @@ fn ranked_images(reader: &mut dyn Read, uri: &str, anchors: &BTreeMap<String, bo
                     for (key, value) in &attrs {
                         if matches!(key.rsplit(':').next(), Some("src" | "href")) && images.len() < 128 {
                             let path = epub_provider::resolve_resource_href(uri, value);
-                            if !is_cover_image(&path) {
+                            let image_path = path.split(['?', '#']).next().unwrap_or(&path);
+                            let is_cover = image_path.rsplit('/').next().unwrap_or(image_path).to_ascii_lowercase().contains("cover");
+                            if !is_cover {
                                 images.push((path, priority));
                             }
                         }
@@ -280,12 +276,12 @@ fn scan(reader: &mut dyn Read, book: &BookRecord, uri: &str, anchors: &BTreeMap<
 mod tests {
     use super::*;
     fn inspect(html: &str, anchors: &[(&str, bool)]) -> Vec<SectionEvidence> {
-        let book = BookRecord { title: "wrong metadata".into(), subtitle: None, contributors: vec![], description: String::new(), book: Default::default() };
+        let book = BookRecord { metadata: book_model::BookDetails { title: "wrong metadata".into(), subtitle: None, contributors: vec![], book: Default::default() }, description: String::new() };
         scan(&mut html.as_bytes(), &book, "book.xhtml", &anchors.iter().map(|(k, v)| (k.to_string(), *v)).collect()).unwrap()
     }
     #[test]
     fn generic_index_filename_does_not_discard_copyright_isbns() {
-        let book = BookRecord { title: "Book".into(), subtitle: None, contributors: vec![], description: String::new(), book: Default::default() };
+        let book = BookRecord { metadata: book_model::BookDetails { title: "Book".into(), subtitle: None, contributors: vec![], book: Default::default() }, description: String::new() };
         for (line, expected) in [("ISBN 978–0–19–921142–5", "9780199211425"), ("ISBN: 978-1-591-39782-3", "9781591397823")] {
             let html = format!("<html><body><p>Copyright 2007</p><p>{line}</p><h2>Contents</h2><p>ISBN 9780821338278</p></body></html>");
             let found = scan(&mut html.as_bytes(), &book, "index_split_000.html", &BTreeMap::new()).unwrap();

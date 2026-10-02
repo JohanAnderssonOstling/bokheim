@@ -12,7 +12,7 @@ if [[ -z ${deploy_user} ]] || ! id "${deploy_user}" >/dev/null 2>&1; then
     echo "a valid deployment user is required" >&2
     exit 2
 fi
-for required in install-metadata-release.sh bokheim-metadata.service; do
+for required in install-metadata-release.sh bokheim-metadata.service bokheim-metadata-crawl.service; do
     if [[ ! -f ${script_directory}/${required} || -L ${script_directory}/${required} ]]; then
         echo "${required} must be a regular file next to this provisioner" >&2
         exit 1
@@ -30,6 +30,10 @@ install -d -o root -g root -m 0755 /usr/local/share/bokheim-deploy
 install -o root -g root -m 0644 \
     "${script_directory}/bokheim-metadata.service" \
     /usr/local/share/bokheim-deploy/bokheim-metadata.service
+
+install -o root -g root -m 0644 \
+    "${script_directory}/bokheim-metadata-crawl.service" \
+    /usr/local/share/bokheim-deploy/bokheim-metadata-crawl.service
 
 sudoers_file=/etc/sudoers.d/bokheim-metadata-deploy
 printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/bokheim-deploy-metadata\n' "${deploy_user}" >"${sudoers_file}"

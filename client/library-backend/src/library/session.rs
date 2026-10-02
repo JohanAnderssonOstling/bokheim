@@ -1,35 +1,35 @@
 //! Coordination state owned by one library session.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+pub(crate) use std::collections::HashMap;
+pub(crate) use std::sync::atomic::{AtomicBool, Ordering};
+pub(crate) use std::sync::{Arc, Mutex};
 
-use library_replica::ScanProgress;
-use uuid::Uuid;
+pub(crate) use library_model::ScanProgress;
+pub(crate) use uuid::Uuid;
 
-use super::thumbnails::ThumbnailWork;
-use library_runtime::events::{LibraryEvent, LibraryEventSender};
+pub(crate) use super::thumbnails::ThumbnailWork;
+pub(crate) use library_runtime::events::{LibraryEvent, LibraryEventSender};
 
 #[derive(Default)]
-struct DirectoryImports {
-    active: HashMap<Uuid, ImportState>,
+pub(crate) struct DirectoryImports {
+    pub(crate) active: HashMap<Uuid, ImportState>,
     // Retain completed contributions until the overlapping group finishes.
-    progress: ScanProgress,
+    pub(crate) progress: ScanProgress,
 }
 
 #[derive(Default)]
-struct ImportState {
-    progress: ScanProgress,
-    file: Option<Arc<Mutex<library_model::ImportFileProgress>>>,
+pub(crate) struct ImportState {
+    pub(crate) progress: ScanProgress,
+    pub(crate) file: Option<Arc<Mutex<library_model::ImportFileProgress>>>,
 }
 
 /// Mutable coordination state for one open library, independent of app policy
 /// and of the storage implementation used by that library.
 #[derive(Default)]
 pub struct LibraryRuntime {
-    directory_imports: Mutex<DirectoryImports>,
-    local_work_running: AtomicBool,
-    thumbnails: ThumbnailWork,
+    pub(crate) directory_imports: Mutex<DirectoryImports>,
+    pub(crate) local_work_running: AtomicBool,
+    pub(crate) thumbnails: ThumbnailWork,
 }
 
 impl LibraryRuntime {
@@ -107,44 +107,31 @@ impl LibraryRuntime {
         imports.active.remove(&id).is_some()
     }
 
-    pub fn thumbnail_work_running(&self) -> bool {
-        self.thumbnails.running()
-    }
-
-    pub fn thumbnail_batch_progress(&self) -> Option<ScanProgress> {
-        self.thumbnails.progress()
-    }
-
-    pub fn thumbnail_batch_waiting(&self) -> bool {
-        self.thumbnails.waiting()
-    }
-
     pub fn thumbnail_generations_running(&self) -> usize {
-        self.thumbnails.generations_running()
+        self.thumbnails.state.lock().unwrap_or_else(|error| error.into_inner()).generations_running
     }
 
-    pub fn prepare_thumbnail_batch(&self, pending: u64) {
-        self.thumbnails.prepare_batch(pending);
-    }
-
-    pub fn complete_thumbnail_batch_item(&self) {
-        self.thumbnails.complete_item();
-    }
-
-    pub fn begin_thumbnail_generation(self: &Arc<Self>, events: LibraryEventSender) -> ThumbnailActivity {
-        self.thumbnails.begin_generation();
+    pub(crate) fn begin_thumbnail_generation(self: &Arc<Self>, events: LibraryEventSender) -> ThumbnailActivity {
+        self.thumbnails.state.lock().unwrap_or_else(|error| error.into_inner()).generations_running += 1;
         let _ = events.try_send(LibraryEvent::TransferStatusChanged);
         ThumbnailActivity(self.clone(), events)
     }
 
+    /// Starts the one thumbnail batch; None while another batch runs.
     pub fn begin_thumbnail_work(self: &Arc<Self>, events: LibraryEventSender) -> Option<LibraryActivity> {
-        if !self.thumbnails.begin_batch() {
-            return None;
+        {
+            let mut state = self.thumbnails.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.batch_active {
+                return None;
+            }
+            state.batch_active = true;
+            state.progress = ScanProgress::default();
         }
         let _ = events.try_send(LibraryEvent::TransferStatusChanged);
         Some(LibraryActivity { runtime: self.clone(), kind: LibraryActivityKind::ThumbnailWork, events })
     }
 
+    /// Starts local file replay; None while another replay runs.
     pub fn begin_local_work(self: &Arc<Self>, events: LibraryEventSender) -> Option<LibraryActivity> {
         self.local_work_running.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).ok()?;
         let _ = events.try_send(LibraryEvent::TransferStatusChanged);
@@ -153,32 +140,39 @@ impl LibraryRuntime {
 }
 
 #[derive(Clone, Copy)]
-enum LibraryActivityKind {
+pub(crate) enum LibraryActivityKind {
     LocalWork,
     ThumbnailWork,
 }
 
 pub struct LibraryActivity {
-    runtime: Arc<LibraryRuntime>,
-    kind: LibraryActivityKind,
-    events: LibraryEventSender,
+    pub(crate) runtime: Arc<LibraryRuntime>,
+    pub(crate) kind: LibraryActivityKind,
+    pub(crate) events: LibraryEventSender,
 }
 
 impl Drop for LibraryActivity {
     fn drop(&mut self) {
         match self.kind {
             LibraryActivityKind::LocalWork => self.runtime.local_work_running.store(false, Ordering::Release),
-            LibraryActivityKind::ThumbnailWork => self.runtime.thumbnails.finish_batch(),
+            LibraryActivityKind::ThumbnailWork => {
+                use crate::library::thumbnails::*;
+                self.runtime.thumbnails.state.lock().unwrap_or_else(|error| error.into_inner()).batch_active = false;
+            }
         }
         let _ = self.events.try_send(LibraryEvent::TransferStatusChanged);
     }
 }
 
-pub struct ThumbnailActivity(Arc<LibraryRuntime>, LibraryEventSender);
+pub struct ThumbnailActivity(pub(crate) Arc<LibraryRuntime>, pub(crate) LibraryEventSender);
 
 impl Drop for ThumbnailActivity {
     fn drop(&mut self) {
-        self.0.thumbnails.finish_generation();
+        ({
+            use crate::library::thumbnails::*;
+            let mut state = self.0.thumbnails.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.generations_running = state.generations_running.checked_sub(1).expect("thumbnail generation activity must be balanced");
+        });
         let _ = self.1.try_send(LibraryEvent::TransferStatusChanged);
     }
 }

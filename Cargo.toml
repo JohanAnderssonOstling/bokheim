@@ -28,7 +28,6 @@ members = [
     "shared/wire",
     "shared/protobuf-wire",
     "shared/metadata-contract",
-    "shared/taxonomy-contract",
     "shared/update-client",
     "client/update-host",
     "shared/sync-common",
@@ -38,7 +37,6 @@ members = [
     "apps/kobo-device",
     "servers/metadata",
     "servers/updates",
-    "servers/taxonomy",
     "servers/taxonomy/curation"
 ]
 exclude = ["servers/sync"]

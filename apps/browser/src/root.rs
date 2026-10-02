@@ -1,8 +1,9 @@
 //! Window-level browser shell.
 
+use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render, Subscription, Window, px};
-use gpui_component::Root;
+use gpui_component::{Root, WindowExt, dialog::DialogButtonProps};
 use library_model::BookLocator;
 
 use crate::navigation::{BrowserShell, GlobalRoute};
@@ -28,7 +29,8 @@ pub struct BrowserRoot {
     shell: Entity<BrowserShell>,
     focus: FocusHandle,
     _shell_subscription: Subscription,
-    _preferences_subscription: Subscription,
+    updates: Option<Entity<crate::services::UpdateControls>>,
+    _update_subscription: Option<Subscription>,
 }
 
 impl BrowserRoot {
@@ -51,7 +53,7 @@ impl BrowserRoot {
         self.shell.update(cx, |shell, cx| shell.open_folder(library_id, directory_id, title, window, cx));
     }
 
-    pub fn open_subject(&mut self, library_id: sync_common::LibraryId, location: String, label: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_subject(&mut self, library_id: sync_common::LibraryId, location: library_model::BrowseLocation, label: String, window: &mut Window, cx: &mut Context<Self>) {
         self.shell.update(cx, |shell, cx| shell.open_subject(library_id, location, label, window, cx));
     }
 
@@ -62,7 +64,7 @@ impl BrowserRoot {
         let import_notifications = crate::services::import_progress::watch_browser_imports(services.backend.clone(), services.sync_events.clone().expect("web sync event inbox"), window, cx);
         let preferences = cx.new(|cx| Preferences::new(services.clone(), cx));
         let theme_preferences = preferences.clone();
-        cx.set_global(ui_components::theme::PaletteSelectionHandler(std::rc::Rc::new(move |theme, appearance, cx| {
+        cx.set_global(ui_components::theme::PaletteSelectionHandler(Rc::new(move |theme, appearance, cx| {
             theme_preferences.update(cx, |preferences, cx| {
                 if let Err(error) = preferences.update_browsing(app_preferences::BrowsingPreferencePatch::Palette(theme, appearance), cx) {
                     log::error!("failed to select application palette: {error}");
@@ -80,22 +82,22 @@ impl BrowserRoot {
             .detach();
 
         let browser = cx.entity().downgrade();
-        let open_book: crate::library::OpenBook = std::rc::Rc::new(move |locator, title, initial_target, _, cx| {
+        let open_book: crate::library::OpenBook = Rc::new(move |locator, title, initial_target, _, cx| {
             let _ = browser.update(cx, |_, cx| cx.emit(OpenBookRequested { locator, title, initial_target }));
         });
         let browser = cx.entity().downgrade();
-        let book_detail_closed: crate::library::BookDetailClosed = std::rc::Rc::new(move |cx| {
+        let book_detail_closed: crate::library::BookDetailClosed = Rc::new(move |cx| {
             let _ = browser.update(cx, |_, cx| cx.emit(BookDetailDismissed));
         });
         let shell = cx.new(|cx| BrowserShell::new(services.clone(), sync_state, open_book, book_detail_closed, preferences.clone(), window, cx));
         let shell_subscription = cx.observe(&shell, |_, _, cx| cx.notify());
-        let shell_for_preferences = shell.clone();
-        let preferences_subscription = cx.observe(&preferences, move |_, preferences, cx| {
-            let view = preferences.read(cx).browsing().library_view();
-            shell_for_preferences.update(cx, |shell, cx| shell.set_library_view(view, cx));
-        });
-        let initial_view = preferences.read(cx).browsing().library_view();
-        shell.update(cx, |shell, cx| shell.set_library_view(initial_view, cx));
+
+        let updates = services.updates.clone();
+        let update_subscription = updates.as_ref().map(|updates| cx.observe_in(updates, window, |root, _, window, cx| root.prompt_for_update(window, cx)));
+        // A persisted offer can already be available before the first window.
+        // Wait until the enclosing component Root exists before opening a dialog.
+        cx.defer_in(window, |root, window, cx| root.prompt_for_update(window, cx));
+        cx.observe_window_activation(window, |root, window, cx| root.prompt_for_update(window, cx)).detach();
 
         let focus = cx.focus_handle();
         focus.focus(window, cx);
@@ -106,8 +108,38 @@ impl BrowserRoot {
             shell,
             focus,
             _shell_subscription: shell_subscription,
-            _preferences_subscription: preferences_subscription,
+            updates,
+            _update_subscription: update_subscription,
         }
+    }
+
+    fn prompt_for_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !window.is_window_active() {
+            return;
+        }
+        let Some(updates) = &self.updates else { return };
+        let Some(handler) = updates.update(cx, |updates, _| updates.take_available_prompt()) else { return };
+        let shell = self.shell.downgrade();
+        window.open_alert_dialog(cx, move |dialog, window, _| {
+            let handler = handler.clone();
+            let shell = shell.clone();
+            dialog
+                .width(px((f32::from(window.viewport_size().width) - 32.0).clamp(1.0, 448.0)))
+                .title("Update available")
+                .description("A new Bokheim update is available. Would you like to update now?")
+                .button_props(DialogButtonProps::default().ok_text("Update").cancel_text("Later").show_cancel(true))
+                .on_ok(move |_, window, cx| {
+                    // The existing Settings flow shows download progress and
+                    // the platform's permission, install, or restart action.
+                    let shell = shell.clone();
+                    let handler = handler.clone();
+                    window.defer(cx, move |window, cx| {
+                        let _ = shell.update(cx, |shell, cx| shell.navigate(GlobalRoute::Settings.into(), window, cx));
+                        handler(crate::services::UpdateAction::Update, cx);
+                    });
+                    true
+                })
+        });
     }
 
     pub fn contains_library(&self, library_id: &sync_common::LibraryId, cx: &App) -> bool {

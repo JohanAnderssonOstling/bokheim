@@ -7,6 +7,7 @@
 //! These functions style and lay out. What a button does, which entry the reader
 //! is inside, and whether the file is on the device are the page's business.
 
+use crate::DISPLAY_FONT_FAMILY;
 use gpui::prelude::*;
 use gpui::{Div, SharedString, div, px, rems};
 
@@ -81,7 +82,7 @@ pub fn book_detail_title(title: impl Into<SharedString>, subtitle: Option<&str>,
         .flex()
         .flex_col()
         .gap(px(SPACE_XS))
-        .child(div().font_family(crate::DISPLAY_FONT_FAMILY).text_size(rems(if large { TITLE_LG } else { TITLE_MD })).text_color(theme.text).child(title.into()))
+        .child(div().font_family(DISPLAY_FONT_FAMILY).text_size(rems(if large { TITLE_LG } else { TITLE_MD })).text_color(theme.text).child(title.into()))
         .children(subtitle.filter(|subtitle| !subtitle.trim().is_empty()).map(|subtitle| div().text_size(rems(TEXT_MD)).text_color(theme.text_muted).child(subtitle.to_owned())))
 }
 
@@ -110,10 +111,6 @@ pub fn book_detail_facts(facts: impl IntoIterator<Item = SharedString>, theme: B
         row = row.child(div().flex_none().child(fact));
     }
     row
-}
-
-pub fn book_detail_subjects() -> Div {
-    div().flex().flex_col().items_start().gap(px(SPACE_XS))
 }
 
 /// Where the reader is, in the book's own words rather than as a percentage:
@@ -157,7 +154,7 @@ pub fn book_detail_section() -> Div {
 }
 
 pub fn book_detail_heading(heading: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().font_family(crate::DISPLAY_FONT_FAMILY).text_size(rems(TEXT_LG)).text_color(theme.text).child(heading.into())
+    div().font_family(DISPLAY_FONT_FAMILY).text_size(rems(TEXT_LG)).text_color(theme.text).child(heading.into())
 }
 
 /// The blurb, read as the markup it is. Publishers write descriptions in HTML

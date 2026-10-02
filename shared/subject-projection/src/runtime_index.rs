@@ -337,7 +337,7 @@ fn build_routes(concepts: &[UnifiedConceptDefinition]) -> Result<BTreeMap<String
     let mut child_counts = HashMap::<i64, usize>::new();
     for concept in concepts {
         for parent_id in &concept.parent_ids {
-            *child_counts.entry(parent_id.clone()).or_insert(0) += 1;
+            *child_counts.entry(*parent_id).or_insert(0) += 1;
         }
     }
 
@@ -354,10 +354,10 @@ fn build_routes(concepts: &[UnifiedConceptDefinition]) -> Result<BTreeMap<String
         let path = concept.preferred_label.clone();
         routes.insert(
             path.clone(),
-            UnifiedConceptRoute { concept_id: concept.concept_id.clone(), path: path.clone(), parent_path: ROOT_SUBJECT_PATH.to_owned(), label: concept.preferred_label.clone(), sort_order: sort_orders[&concept.concept_id] },
+            UnifiedConceptRoute { concept_id: concept.concept_id, path: path.clone(), parent_path: ROOT_SUBJECT_PATH.to_owned(), label: concept.preferred_label.clone(), sort_order: sort_orders[&concept.concept_id] },
         );
-        known.entry(concept.concept_id.clone()).or_default().push(path);
-        routed_concepts.insert(concept.concept_id.clone());
+        known.entry(concept.concept_id).or_default().push(path);
+        routed_concepts.insert(concept.concept_id);
     }
 
     loop {
@@ -374,16 +374,16 @@ fn build_routes(concepts: &[UnifiedConceptDefinition]) -> Result<BTreeMap<String
                         // A multi-parent diamond can discover the same route
                         // more than once. Keep one navigable route while still
                         // recording the concept's projection onto that route.
-                        let concept_paths = known.entry(concept.concept_id.clone()).or_default();
+                        let concept_paths = known.entry(concept.concept_id).or_default();
                         if !concept_paths.contains(&path) {
                             concept_paths.push(path);
                         }
-                        routed_concepts.insert(concept.concept_id.clone());
+                        routed_concepts.insert(concept.concept_id);
                         continue;
                     }
-                    routes.insert(path.clone(), UnifiedConceptRoute { concept_id: concept.concept_id.clone(), path: path.clone(), parent_path, label: concept.preferred_label.clone(), sort_order: sort_orders[&concept.concept_id] });
-                    known.entry(concept.concept_id.clone()).or_default().push(path);
-                    routed_concepts.insert(concept.concept_id.clone());
+                    routes.insert(path.clone(), UnifiedConceptRoute { concept_id: concept.concept_id, path: path.clone(), parent_path, label: concept.preferred_label.clone(), sort_order: sort_orders[&concept.concept_id] });
+                    known.entry(concept.concept_id).or_default().push(path);
+                    routed_concepts.insert(concept.concept_id);
                     added = true;
                 }
             }
@@ -410,7 +410,7 @@ fn build_selectors(concepts: &[UnifiedConceptDefinition]) -> Result<BTreeMap<Str
                     if prefix.is_empty() {
                         return Err(format!("unified concept {} has an empty prefix selector", concept.concept_id));
                     }
-                    index.prefixes.push((prefix.to_owned(), concept.concept_id.clone()));
+                    index.prefixes.push((prefix.to_owned(), concept.concept_id));
                 } else if system_id == LCC_SYSTEM_ID && selector.contains("..") {
                     if selector.contains('@') {
                         return Err(format!("invalid legacy LCC range suffix: {selector}"));
@@ -427,14 +427,14 @@ fn build_selectors(concepts: &[UnifiedConceptDefinition]) -> Result<BTreeMap<Str
                         start_number: start.number,
                         end_letters: end.letters,
                         end_number: end.number,
-                        concept_id: concept.concept_id.clone(),
+                        concept_id: concept.concept_id,
                     });
                 } else {
                     if system_id == LCC_SYSTEM_ID && selector.bytes().all(|byte| byte.is_ascii_alphabetic()) {
                         index.lcc_subclasses.insert(selector.clone());
                     }
                     let selector = if system_id == LCC_SYSTEM_ID { lcc_match_keys(&selector).and_then(|keys| keys.last().cloned()).unwrap_or(selector) } else { selector };
-                    index.exact.entry(selector).or_default().insert(concept.concept_id.clone());
+                    index.exact.entry(selector).or_default().insert(concept.concept_id);
                 }
             }
         }

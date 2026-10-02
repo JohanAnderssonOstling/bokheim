@@ -54,12 +54,7 @@ impl<P: account_client::SessionPersistence> LibraryAccountSession<P> {
     pub fn load(persistence: P, server: account_client::ServerUrl) -> Result<Self, AccountSessionError> {
         account_client::AccountSession::load(persistence, server).map(Self)
     }
-    pub fn shared_sync_credentials(&self) -> SharedSyncCredentials
-    where
-        Self: sync_transport::CredentialsSource + 'static,
-    {
-        Arc::new(self.clone())
-    }
+    
 }
 
 impl<P> LibraryAccountSession<P>
@@ -89,7 +84,7 @@ where
                 let account = create_library.clone();
                 Box::pin(async move { account.request(|session| Box::pin(account_client::create_library(session, library_id, name.clone()))).await.map(|_| ()) })
             }),
-            credentials: self.shared_sync_credentials(),
+            credentials: Arc::new(self.clone()),
         }
     }
 }

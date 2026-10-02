@@ -10,33 +10,6 @@ pub mod assets {
     use std::collections::HashSet;
     use std::fmt;
 
-    pub const MAX_BOOK_BUNDLE_BYTES: usize = 4 * 1024 * 1024;
-    #[derive(Clone, Debug, Serialize, Deserialize)]
-    pub struct BookRanges {
-        pub checksum: ContentHash,
-        pub ranges: Vec<(u64, usize)>,
-    }
-    impl BookRanges {
-        pub fn byte_count(&self, length: u64) -> Option<usize> {
-            if self.ranges.is_empty() || self.ranges.len() > 128 {
-                return None;
-            }
-            let mut end = 0;
-            let mut total = 0usize;
-            for &(offset, count) in &self.ranges {
-                if count == 0 || offset < end {
-                    return None;
-                }
-                end = offset.checked_add(count as u64)?;
-                total = total.checked_add(count)?;
-                if end > length || total > MAX_BOOK_BUNDLE_BYTES {
-                    return None;
-                }
-            }
-            Some(total)
-        }
-    }
-
     /// Ephemeral read capability, never part of saved playback state.
     #[derive(Clone, Serialize, Deserialize)]
     pub struct PlaybackGrant {
@@ -54,8 +27,8 @@ pub mod assets {
     pub const MAX_BLOB_MANIFEST_ENTRIES: usize = 4096;
     pub const MAX_THUMBNAIL_PRESENCE_ENTRIES: usize = MAX_BLOB_MANIFEST_ENTRIES;
     pub const MAX_THUMBNAIL_BATCH_ENTRIES: usize = 16;
-    pub const MAX_THUMBNAIL_BATCH_BYTES: usize = MAX_THUMBNAIL_BATCH_ENTRIES * crate::MAX_THUMBNAIL_BYTES as usize;
-    pub const MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES: usize = 2 * MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024;
+    pub const MAX_THUMBNAIL_BATCH_BYTES: usize = 2 * MAX_THUMBNAIL_BATCH_ENTRIES * crate::MAX_THUMBNAIL_BYTES as usize;
+    pub const MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES: usize = MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024;
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct ThumbnailPresenceRequest {
@@ -136,14 +109,14 @@ pub mod assets {
 
     /// Ensures every requested blob is classified exactly once by the server.
     pub fn validate_blob_manifest_response(request: &BlobManifestRequest, response: &BlobManifestResponse) -> Result<(), BlobManifestValidationError> {
-        let requested: HashSet<_> = request.blobs.iter().map(|blob| blob.content_hash.clone()).collect();
+        let requested: HashSet<_> = request.blobs.iter().map(|blob| blob.content_hash).collect();
         if requested.len() != request.blobs.len() {
             return Err(BlobManifestValidationError::DuplicateRequestHash);
         }
         let classified = response.owned.iter().chain(&response.claimed).chain(&response.upload).chain(response.rejected.iter().map(|entry| &entry.content_hash));
         let mut unique = HashSet::with_capacity(requested.len());
         for hash in classified {
-            if !requested.contains(hash) || !unique.insert(hash.clone()) {
+            if !requested.contains(hash) || !unique.insert(*hash) {
                 return Err(BlobManifestValidationError::UnknownOrRepeatedResponseHash);
             }
         }
@@ -157,6 +130,7 @@ pub mod assets {
     pub struct ThumbnailBatchEntry {
         pub content_hash: ContentHash,
         pub bytes: Vec<u8>,
+        pub browse_bytes: Vec<u8>,
     }
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -175,13 +149,8 @@ pub mod assets {
         pub missing: Vec<ContentHash>,
     }
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-    pub struct ThumbnailBatchDownloadEntry {
-        pub content_hash: ContentHash,
-        pub bytes: Vec<u8>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub browse_bytes: Option<Vec<u8>>,
-    }
+    pub type ThumbnailBatchDownloadEntry = ThumbnailBatchEntry;
+
 }
 
 pub mod libraries {
@@ -237,6 +206,7 @@ pub mod notifications {
 
 #[cfg(test)]
 mod tests {
+    use crate::transport::{decode, encode};
     use super::{assets, libraries, notifications};
     use crate::ContentHash;
 
@@ -244,8 +214,8 @@ mod tests {
     where
         T: serde::Serialize + serde::de::DeserializeOwned,
     {
-        let encoded = crate::transport::encode(value).unwrap();
-        crate::transport::decode(&encoded, crate::transport::MAX_DECODED_REQUEST_BYTES).unwrap()
+        let encoded = encode(value).unwrap();
+        decode(&encoded, crate::transport::MAX_DECODED_REQUEST_BYTES).unwrap()
     }
 
     fn hash(character: char) -> ContentHash {
@@ -281,24 +251,12 @@ mod tests {
 
     #[test]
     fn thumbnail_batch_contract_round_trips() {
-        let thumbnail = assets::ThumbnailBatchEntry { content_hash: hash('d'), bytes: vec![0xff, 0xd8, 0xff] };
+        let thumbnail = assets::ThumbnailBatchEntry { content_hash: hash('d'), bytes: vec![0xff, 0xd8, 0xff], browse_bytes: vec![0xff, 0xd8, 0xff, 1] };
         let request = assets::ThumbnailBatchUploadRequest { thumbnails: vec![thumbnail.clone()] };
         assert_eq!(round_trip(&request), request);
-        let response = assets::ThumbnailBatchDownloadResponse { thumbnails: vec![assets::ThumbnailBatchDownloadEntry { content_hash: thumbnail.content_hash, bytes: thumbnail.bytes, browse_bytes: Some(vec![0xff, 0xd8, 0xff]) }], missing: vec![hash('e')] };
-        let encoded = crate::transport::encode(&response).unwrap();
-        assert_eq!(crate::transport::decode::<assets::ThumbnailBatchDownloadResponse>(&encoded, assets::MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES).unwrap(), response);
-        // Old servers omit the browse bytes; old clients ignore the new field.
-        let old_response = assets::ThumbnailBatchDownloadResponse { thumbnails: vec![assets::ThumbnailBatchDownloadEntry { content_hash: hash('f'), bytes: vec![0xff, 0xd8, 0xff], browse_bytes: None }], missing: vec![] };
-        let encoded_old = crate::transport::encode(&old_response).unwrap();
-        assert_eq!(crate::transport::decode::<assets::ThumbnailBatchDownloadResponse>(&encoded_old, assets::MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES).unwrap(), old_response);
-        #[derive(serde::Deserialize)]
-        struct OldEntry { content_hash: crate::ContentHash, bytes: Vec<u8> }
-        #[derive(serde::Deserialize)]
-        struct OldResponse { thumbnails: Vec<OldEntry>, missing: Vec<crate::ContentHash> }
-        let old_client: OldResponse = crate::transport::decode(&encoded, assets::MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES).unwrap();
-        assert_eq!(old_client.thumbnails[0].content_hash, hash('d'));
-        assert_eq!(old_client.thumbnails[0].bytes, vec![0xff, 0xd8, 0xff]);
-        assert_eq!(old_client.missing, vec![hash('e')]);
+        let response = assets::ThumbnailBatchDownloadResponse { thumbnails: vec![thumbnail], missing: vec![hash('e')] };
+        let encoded = encode(&response).unwrap();
+        assert_eq!(decode::<assets::ThumbnailBatchDownloadResponse>(&encoded, assets::MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES).unwrap(), response);
     }
 
     #[test]
@@ -313,7 +271,7 @@ mod tests {
     fn notification_contract_is_granular_without_carrying_state() {
         let message = notifications::NotificationMessage::LibraryChanged { library_id: crate::LibraryId::parse_str("11111111-1111-4111-8111-111111111111").unwrap() };
         assert_eq!(round_trip(&message), message);
-        let encoded = crate::transport::encode(&notifications::NotificationMessage::LibrariesChanged).unwrap();
-        assert_eq!(crate::transport::decode::<notifications::NotificationMessage>(&encoded, 1024).unwrap(), notifications::NotificationMessage::LibrariesChanged);
+        let encoded = encode(&notifications::NotificationMessage::LibrariesChanged).unwrap();
+        assert_eq!(decode::<notifications::NotificationMessage>(&encoded, 1024).unwrap(), notifications::NotificationMessage::LibrariesChanged);
     }
 }

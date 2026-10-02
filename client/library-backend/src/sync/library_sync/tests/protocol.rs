@@ -26,8 +26,8 @@ fn push_pages_are_bounded_by_count_and_preserve_sequence_order() {
 
     assert_eq!(first.len(), sync_common::MAX_PUSH_MUTATIONS);
     assert_eq!(second.len(), 7);
-    assert_eq!(first.first().unwrap().replica_seq.get(), 1);
-    assert_eq!(second.first().unwrap().replica_seq.get(), sync_common::MAX_PUSH_MUTATIONS as u64 + 1);
+    assert_eq!(first.first().unwrap().publisher_seq.get(), 1);
+    assert_eq!(second.first().unwrap().publisher_seq.get(), sync_common::MAX_PUSH_MUTATIONS as u64 + 1);
 }
 
 /// The service refuses a request larger than its decoded request limit, and
@@ -44,9 +44,9 @@ fn a_mutation_too_large_to_transmit_does_not_block_the_rest_of_the_outbox() {
 
     let mut queued = prepare_push(vec![ahead.clone(), oversized.clone(), behind.clone()]).unwrap();
 
-    assert_eq!(queued.untransmittable(), &[oversized.mutation_id], "only the untransmittable mutation is set aside");
+    assert_eq!(queued.untransmittable(), &[oversized.publisher_seq], "only the untransmittable mutation is set aside");
     let page = queued.next_batch();
-    assert_eq!(page.iter().map(|mutation| mutation.mutation_id).collect::<Vec<_>>(), vec![ahead.mutation_id, behind.mutation_id], "the mutations queued behind it still go out, in sequence order");
+    assert_eq!(page.iter().map(|mutation| mutation.publisher_seq).collect::<Vec<_>>(), vec![ahead.publisher_seq, behind.publisher_seq], "the mutations queued behind it still go out, in sequence order");
     assert!(queued.is_empty(), "the exchange loop has nothing left to spin on");
 }
 
@@ -70,7 +70,7 @@ fn push_pages_stop_before_the_encoded_byte_target() {
 fn push_coalesces_reading_positions_per_book_by_winning_version() {
     let changes = vec![
         reading_change(1, 1, "epubcfi(/6/10)", 10),
-        StateMutation { origin: None, mutation_id: sync_common::MutationId::new(), body: added(3, 1), changed_at: millis(1), replica_seq: local_seq(2) },
+        (added(3, 1)).publication(sync_common::ReplicaId::nil(), millis(1), local_seq(2)),
         reading_change(3, 2, "epubcfi(/6/12)", 30),
         reading_change(4, 1, "epubcfi(/6/14)", 20),
         // Later local sequence, but an older wall clock: the server retains
@@ -79,75 +79,68 @@ fn push_coalesces_reading_positions_per_book_by_winning_version() {
     ];
 
     let coalesced = coalesce_mutations_for_push(changes);
-    assert_eq!(coalesced.iter().map(|change| change.replica_seq.get()).collect::<Vec<_>>(), vec![2, 3, 4]);
-    assert!(matches!(&coalesced[1].body, MutationBody::ReadingPosition { value: ReadingPositionState { location, .. }, .. } if location.as_str() == "epubcfi(/6/12)"));
-    assert!(matches!(&coalesced[2].body, MutationBody::ReadingPosition { value: ReadingPositionState { location, .. }, .. } if location.as_str() == "epubcfi(/6/14)"));
+    assert_eq!(coalesced.iter().map(|change| change.publisher_seq.get()).collect::<Vec<_>>(), vec![2, 3, 4]);
+    assert!(matches!(&coalesced[1].state.value, LibraryStateEntry::ReadingPosition { value: ReadingPositionState { location, .. }, .. } if location.as_str() == "epubcfi(/6/12)"));
+    assert!(matches!(&coalesced[2].state.value, LibraryStateEntry::ReadingPosition { value: ReadingPositionState { location, .. }, .. } if location.as_str() == "epubcfi(/6/14)"));
 }
 
 #[test]
 fn push_coalesces_every_protocol_singleton_but_preserves_append_events() {
     let dir_id = test_support::fixture_dir_id("singleton-dir");
     let changes = vec![
-        StateMutation {
-            origin: None,
-            mutation_id: sync_common::MutationId::new(),
-            // The tombstone wins an exact wall-clock tie through conflict_rank,
-            // even though the later local sequence below says present.
-            body: MutationBody::DirectoryLifecycle { dir_id, value: library_replica::DirectoryLifecycleState::Deleted },
-            changed_at: millis(10),
-            replica_seq: local_seq(1),
-        },
-        StateMutation { origin: None, mutation_id: sync_common::MutationId::new(), body: added(2, 10), changed_at: millis(10), replica_seq: local_seq(3) },
-        StateMutation { origin: None, mutation_id: sync_common::MutationId::new(), body: MutationBody::DirectoryLifecycle { dir_id, value: library_replica::DirectoryLifecycleState::Present }, changed_at: millis(10), replica_seq: local_seq(4) },
+        LibraryStateEntry::DirectoryLifecycle { dir_id, value: library_replica::DirectoryLifecycleState::Deleted }.publication(sync_common::ReplicaId::nil(), millis(10), local_seq(1)),
+        (added(2, 10)).publication(sync_common::ReplicaId::nil(), millis(10), local_seq(3)),
+        (LibraryStateEntry::DirectoryLifecycle { dir_id, value: library_replica::DirectoryLifecycleState::Present }).publication(sync_common::ReplicaId::nil(), millis(10), local_seq(4)),
         reading_change(6, 1, "epubcfi(/6/18)", 10),
         reading_change(7, 1, "epubcfi(/6/20)", 20),
     ];
 
     let coalesced = coalesce_mutations_for_push(changes);
-    assert_eq!(coalesced.iter().map(|change| change.replica_seq.get()).collect::<Vec<_>>(), vec![1, 3, 7]);
-    assert!(matches!(&coalesced[0].body, MutationBody::DirectoryLifecycle { value: library_replica::DirectoryLifecycleState::Deleted, .. }));
-    assert!(matches!(&coalesced[1].body, MutationBody::BookLifecycle { .. }));
+    assert_eq!(coalesced.iter().map(|change| change.publisher_seq.get()).collect::<Vec<_>>(), vec![1, 3, 7]);
+    assert!(matches!(&coalesced[0].state.value, LibraryStateEntry::DirectoryLifecycle { value: library_replica::DirectoryLifecycleState::Deleted, .. }));
+    assert!(matches!(&coalesced[1].state.value, LibraryStateEntry::BookLifecycle { .. }));
 }
 
 #[test]
 fn coalesced_push_does_not_checkpoint_across_an_interleaved_rejection() {
     let changes = coalesce_mutations_for_push(vec![
         reading_change(1, 1, "epubcfi(/6/18)", 10),
-        StateMutation { origin: None, mutation_id: sync_common::MutationId::new(), body: added(2, 1), changed_at: millis(1), replica_seq: local_seq(2) },
+        (added(2, 1)).publication(sync_common::ReplicaId::nil(), millis(1), local_seq(2)),
         reading_change(3, 1, "epubcfi(/6/22)", 20),
     ]);
-    assert_eq!(changes.iter().map(|change| change.replica_seq).collect::<Vec<_>>(), vec![local_seq(2), local_seq(3)]);
+    assert_eq!(changes.iter().map(|change| change.publisher_seq).collect::<Vec<_>>(), vec![local_seq(2), local_seq(3)]);
 
-    let response = PushMutationsResponse { accepted: vec![changes[1].mutation_id], rejected: vec![MutationRejection { mutation_id: changes[0].mutation_id, reason: MutationRejectionReason::TimestampTooFarFuture }] };
-    let requested_ids = changes.iter().map(|mutation| mutation.mutation_id).collect::<Vec<_>>();
+    let response = PushMutationsResponse { rejected: vec![MutationRejection { publisher_seq: changes[0].publisher_seq, reason: MutationRejectionReason::TimestampTooFarFuture }] };
+    let requested_ids = changes.iter().map(|mutation| mutation.publisher_seq).collect::<Vec<_>>();
     let validated = validate_push_response(&requested_ids, &response).unwrap();
-    assert_eq!(validated.accepted, vec![changes[1].mutation_id]);
-    assert_eq!(validated.issues, vec![sync_common::MutationIssue::Retryable(MutationRejection { mutation_id: changes[0].mutation_id, reason: MutationRejectionReason::TimestampTooFarFuture })]);
+    assert_eq!(validated.accepted, vec![changes[1].publisher_seq]);
+    assert_eq!(validated.issues, vec![sync_common::MutationIssue::Retryable(MutationRejection { publisher_seq: changes[0].publisher_seq, reason: MutationRejectionReason::TimestampTooFarFuture })]);
 }
 
 #[test]
 fn push_acceptance_uses_mutation_identity() {
     let requested = [reading_change(1, 1, "epubcfi(/6/24)", 1), reading_change(2, 2, "epubcfi(/6/26)", 2)];
-    let response = PushMutationsResponse { accepted: requested.iter().rev().map(|mutation| mutation.mutation_id).collect(), rejected: Vec::new() };
-    let requested_ids = requested.iter().map(|mutation| mutation.mutation_id).collect::<Vec<_>>();
-    assert_eq!(validate_push_response(&requested_ids, &response).unwrap().accepted, response.accepted);
+    let response = PushMutationsResponse { rejected: Vec::new() };
+    let requested_ids = requested.iter().map(|mutation| mutation.publisher_seq).collect::<Vec<_>>();
+    assert_eq!(validate_push_response(&requested_ids, &response).unwrap().accepted, requested_ids);
 }
 
 #[test]
 fn permanent_rejection_is_reported_by_mutation_identity() {
     let requested = [reading_change(1, 1, "epubcfi(/6/24)", 1)];
-    let response = PushMutationsResponse { accepted: Vec::new(), rejected: vec![MutationRejection { mutation_id: requested[0].mutation_id, reason: MutationRejectionReason::InvalidPayload }] };
-    let requested_ids = requested.iter().map(|mutation| mutation.mutation_id).collect::<Vec<_>>();
-    assert_eq!(validate_push_response(&requested_ids, &response).unwrap().issues, vec![sync_common::MutationIssue::Rejected(MutationRejection { mutation_id: requested[0].mutation_id, reason: MutationRejectionReason::InvalidPayload })]);
+    let response = PushMutationsResponse { rejected: vec![MutationRejection { publisher_seq: requested[0].publisher_seq, reason: MutationRejectionReason::InvalidPayload }] };
+    let requested_ids = requested.iter().map(|mutation| mutation.publisher_seq).collect::<Vec<_>>();
+    assert_eq!(validate_push_response(&requested_ids, &response).unwrap().issues, vec![sync_common::MutationIssue::Rejected(MutationRejection { publisher_seq: requested[0].publisher_seq, reason: MutationRejectionReason::InvalidPayload })]);
 }
 
 #[test]
-fn incomplete_or_contradictory_acknowledgments_are_rejected() {
+fn foreign_or_duplicate_rejections_are_rejected() {
     let requested = [reading_change(1, 1, "epubcfi(/6/24)", 1), reading_change(2, 2, "epubcfi(/6/26)", 2)];
-    let requested_ids = requested.iter().map(|mutation| mutation.mutation_id).collect::<Vec<_>>();
-    let missing = PushMutationsResponse { accepted: vec![requested[0].mutation_id], rejected: Vec::new() };
+    let requested_ids = requested.iter().map(|mutation| mutation.publisher_seq).collect::<Vec<_>>();
+    let missing = PushMutationsResponse { rejected: vec![MutationRejection { publisher_seq: sync_common::ReplicaSeq::new(99).unwrap(), reason: MutationRejectionReason::InvalidPayload }] };
     assert!(matches!(validate_push_response(&requested_ids, &missing), Err(PushResponseError::InvalidAcknowledgments(_))));
 
-    let contradictory = PushMutationsResponse { accepted: vec![requested[0].mutation_id], rejected: vec![MutationRejection { mutation_id: requested[0].mutation_id, reason: MutationRejectionReason::TimestampTooFarFuture }] };
+    let contradictory = PushMutationsResponse { rejected: vec![MutationRejection { publisher_seq: requested[0].publisher_seq, reason: MutationRejectionReason::TimestampTooFarFuture }] };
+    let contradictory = PushMutationsResponse { rejected: vec![contradictory.rejected[0].clone(), contradictory.rejected[0].clone()] };
     assert!(matches!(validate_push_response(&requested_ids[..1], &contradictory), Err(PushResponseError::InvalidAcknowledgments(_))));
 }

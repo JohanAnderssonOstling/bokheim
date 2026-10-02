@@ -62,19 +62,13 @@ mod tests {
             authors: vec!["Smith, Jane".into()],
             classifications: vec![Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: "DC161".into(), source: ClassificationSource::Work, evidence: vec![] }],
         };
-        let response = EditionIdentityResponse {
-            snapshot: SnapshotDescription { dump_date: "2016".into(), imported_at_ms: 1 },
-            results: vec![EditionIdentityResult { query_id: "1".into(), status: EditionIdentityStatus::NoMatch, matched: None, candidates: vec![], candidates_truncated: false, authority_subjects: Some(m) }],
-        };
-        let decoded = decode_v2_edition_identity_response(&encode_v2_edition_identity_response(&response).unwrap(), MAX_RESPONSE_BYTES).unwrap();
-        let m = decoded.results[0].authority_subjects.as_ref().unwrap();
         assert_eq!(m.record_ids, vec!["12345"]);
-        let r = classification_record(&q, m).unwrap();
+        let r = classification_record(&q, &m).unwrap();
         assert!(r.exact_edition_ids.is_empty() && r.open_library_work_id.is_none());
         assert!(r.classifications[0].evidence[0].isbn13.is_empty());
         assert_eq!(r.classifications[0].evidence[0].method, "library_of_congress_title_author:12345");
         let mut wrong = q.clone();
         wrong.authors = vec!["John Smith".into()];
-        assert!(classification_record(&wrong, m).is_none());
+        assert!(classification_record(&wrong, &m).is_none());
     }
 }

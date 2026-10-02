@@ -12,10 +12,8 @@ create table if not exists book(
     author          TEXT not null default '',
     search_title    TEXT not null default '',
     search_author   TEXT not null default '',
-    description_scanned INTEGER not null default 0,
     -- Canonical synchronized bibliographic metadata. Dedicated tables below
     -- are disposable query projections rebuilt from this value.
-    book_metadata BLOB not null default X'',
     -- book_model::BookFormat code. Fixed for the life of the row: identity is
     -- derived from the bytes, so the format cannot change without becoming a
     -- different book. NULL only on a row that has never been observed on any
@@ -95,24 +93,14 @@ create table if not exists book_unified_concept_evidence(
 -- Local bookkeeping for explicit external enrichment. Provider vocabularies
 -- are never cached here; this records only whether one book was attempted.
 
--- Author identity and external identifiers.
+-- Author identity and local name matching.
 create table if not exists author_identity(
     id              INTEGER primary key autoincrement,
     stable_id       TEXT not null unique,
-    preferred_name  TEXT not null,
     -- Name matching only selects an unresolved candidate. stable_id and
-    -- authority identifiers remain the identity boundary for real people.
+    -- not a matching name identifies a person.
     normalized_name TEXT not null,
-    is_provisional  INTEGER not null default 1 check(is_provisional in (0, 1)),
-    created_at      INTEGER not null
-);
-
-create table if not exists author_external_identifier(
-    author_identity_id INTEGER not null references author_identity(id) on delete cascade,
-    authority          TEXT not null check(authority in ('wikidata', 'open_library', 'viaf', 'isni', 'orcid', 'library_of_congress')),
-    external_id        TEXT not null,
-    verified_at        INTEGER not null,
-    primary key(authority, external_id)
+    is_provisional  INTEGER not null default 1 check(is_provisional in (0, 1))
 );
 
 -- Canonical description storage, kept off the frequently read book row.
@@ -121,7 +109,7 @@ CREATE TABLE IF NOT EXISTS book_description(
     description TEXT NOT NULL
 );
 
--- Book navigation, reading entry, and audiobook metadata.
+-- Book navigation and local reading entry.
 -- The book's own navigation document, whatever the format called it:
 -- a nav document, an outline, or a chapter list. Stored so the library can draw
 -- a book's contents without opening the file — which may be remote, and which
@@ -134,33 +122,14 @@ CREATE TABLE IF NOT EXISTS book_description(
 -- Keyed by the book's identity, not by the bytes it was read from: an identity
 -- survives a revision, and so do the targets, because a PDF's pagination and an
 -- audiobook's offsets are both fixed by what the identity is derived from.
-create table if not exists book_toc(
-    content_hash    TEXT primary key not null,
+create table if not exists book_navigation(
+    content_hash    TEXT primary key not null references book(content_hash) on delete cascade,
     entry_count     INTEGER not null check(entry_count >= 0),
-    toc_json        TEXT not null
-);
-
--- Which navigation entry the reader was inside when it last saved a position.
--- Derived from the position and the book's own navigation, so it is local and
--- never synchronized: another device recomputes it when it opens the book.
--- Stored as the entry's target rather than its title, so a re-parsed navigation
--- document supplies the wording.
-create table if not exists book_reading_entry(
-    content_hash    TEXT primary key not null,
-    target          TEXT not null
-);
-
--- What an audiobook is, beyond its navigation. The chapters themselves live in
--- book_toc with every other format's; the duration stays here because it is not
--- navigation, and because it is what turns a chapter's start into its end.
-create table if not exists audiobook_metadata(
-    content_hash    TEXT primary key not null,
-    duration_ms     INTEGER not null check(duration_ms >= 0)
-);
-
-create table if not exists audiobook_track_index(
-    content_hash TEXT primary key not null,
-    tracks_json TEXT not null
+    toc_json        TEXT not null,
+    -- Optional playback fields from the same complete navigation document.
+    -- Duration also supplies the end of the final audiobook chapter.
+    duration_ms     INTEGER check(duration_ms >= 0),
+    tracks_json     TEXT
 );
 
 -- Durable synchronization outbox, winning versions, and replica metadata.
@@ -168,13 +137,12 @@ create table if not exists audiobook_track_index(
 -- publication snapshot is prepared, then immutable until superseded/acknowledged.
 create table if not exists sync_outbox(
     replica_seq INTEGER PRIMARY KEY,
-    mutation_id TEXT NOT NULL UNIQUE,
     state_kind TEXT NOT NULL,
     state_key TEXT NOT NULL,
     state_subkey TEXT NOT NULL DEFAULT '',
     body BLOB,
     changed_at INTEGER,
-    origin BLOB,
+    winning_version BLOB,
     UNIQUE(state_kind,state_key,state_subkey),
     CHECK ((body IS NULL) = (changed_at IS NULL))
 );
@@ -190,7 +158,6 @@ create table if not exists sync_state_version(
     conflict_rank   INTEGER not null check(conflict_rank in (0, 1, 2)),
     replica_id      TEXT not null,
     replica_seq     INTEGER not null,
-    mutation_id     TEXT not null,
     body BLOB,
     book_key TEXT,
     primary key(state_kind, state_key, state_subkey)
@@ -207,32 +174,12 @@ CREATE TABLE IF NOT EXISTS sync_projection_dirty(
 create table if not exists sync_metadata(
     singleton                   INTEGER primary key check(singleton = 1),
     replica_id                  TEXT,
-    change_origin               TEXT not null default 'local' check(change_origin in ('local', 'remote')),
     last_successful_sync_at     INTEGER check(last_successful_sync_at is null or last_successful_sync_at >= 0),
-    last_pull_state_seq         INTEGER check(last_pull_state_seq is null or last_pull_state_seq >= 0),
-    last_pull_reading_seq       INTEGER check(last_pull_reading_seq is null or last_pull_reading_seq >= 0),
-    inventory_repair_kind       TEXT,
-    inventory_repair_key        TEXT,
-    inventory_repair_subkey     TEXT,
+    last_pull_lifecycle_seq         INTEGER check(last_pull_lifecycle_seq is null or last_pull_lifecycle_seq >= 0),
+    last_pull_field_seq       INTEGER check(last_pull_field_seq is null or last_pull_field_seq >= 0),
     cursor_recovery_pending     INTEGER check(cursor_recovery_pending is null or cursor_recovery_pending in (0, 1)),
     scan_seq                    INTEGER not null default 0 check(scan_seq >= 0),
-    operation_id                TEXT,
-    operation_kind              TEXT check(operation_kind is null or operation_kind in ('Import', 'Sync')),
-    operation_scan_complete     INTEGER check(operation_scan_complete is null or operation_scan_complete in (0, 1)),
-    operation_scan_failed       INTEGER check(operation_scan_failed is null or operation_scan_failed in (0, 1)),
-    operation_discovered        INTEGER check(operation_discovered is null or operation_discovered >= 0),
-    operation_failures          INTEGER check(operation_failures is null or operation_failures >= 0),
-    operation_requires_sync     INTEGER check(operation_requires_sync is null or operation_requires_sync in (0, 1)),
-    operation_completed         INTEGER check(operation_completed is null or operation_completed in (0, 1)),
-    operation_sync_unfinished   INTEGER check(operation_sync_unfinished is null or operation_sync_unfinished in (0, 1)),
     cloud_storage_enabled       INTEGER check(cloud_storage_enabled is null or cloud_storage_enabled in (0, 1)),
     remote_library_name         TEXT,
     server_library_created      TEXT
-);
-
--- Session-local UI history is not synchronization metadata. It has one
--- durable value per library and therefore has its own table.
-create table if not exists local_transfer_history(
-    singleton    INTEGER primary key check(singleton = 1),
-    entries_json TEXT not null
 );

@@ -1,6 +1,9 @@
 //! Sequential import orchestration shared by direct readers and durable staging.
 //! Adapters own source access and checkpoints; the workflow owns progress cadence
 //! and always releases the activity after an attempted batch.
+
+use std::time::Duration;
+use crate::{ImportFailure, ImportFailureKind};
 use std::collections::BTreeMap;
 use sync_common::DirId;
 
@@ -31,7 +34,7 @@ pub async fn run<B: Batch>(batch: &mut B) -> Result<(), B::Error> {
     finished
 }
 
-pub(crate) const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+pub(crate) const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 
 // A report belongs to one live import activity. Recovery starts a new reporter
 // and supplies the outcomes restored from its journal.
@@ -60,14 +63,14 @@ impl ProgressReporter {
     }
 }
 
-pub fn file_failure(path: &[String], error: &str) -> crate::ImportFailure {
+pub fn file_failure(path: &[String], error: &str) -> ImportFailure {
     log::warn!("Could not import {}: {error}", path.join("/"));
-    crate::ImportFailure::operation(crate::ImportFailureKind::File, path, error)
+    ImportFailure::operation(ImportFailureKind::File, path, error)
 }
 
-pub fn folder_failure(path: &[String], error: &str) -> crate::ImportFailure {
+pub fn folder_failure(path: &[String], error: &str) -> ImportFailure {
     log::warn!("Could not import folder {}: {error}", path.join("/"));
-    crate::ImportFailure::operation(crate::ImportFailureKind::Folder, path, error)
+    ImportFailure::operation(ImportFailureKind::Folder, path, error)
 }
 
 #[derive(Default)]
@@ -97,10 +100,10 @@ mod tests {
     fn failures_preserve_category_path_and_diagnostic() {
         let path = vec!["Shelf".into(), "Book.epub".into()];
         let failure = file_failure(&path, "io error");
-        assert_eq!(failure.kind, crate::ImportFailureKind::File);
+        assert_eq!(failure.kind, ImportFailureKind::File);
         assert_eq!(failure.path, path);
         assert_eq!(failure.diagnostic.as_deref(), Some("io error"));
-        assert_eq!(folder_failure(&[], "io error").kind, crate::ImportFailureKind::Folder);
+        assert_eq!(folder_failure(&[], "io error").kind, ImportFailureKind::Folder);
     }
 
     #[test]

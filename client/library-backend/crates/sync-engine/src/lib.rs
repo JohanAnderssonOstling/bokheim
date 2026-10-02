@@ -1,16 +1,18 @@
 //! Storage-independent state synchronization orchestration.
 
-use library_replica::{StateMutation, coalesce_mutations_for_push, prepare_push};
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
-use sync_common::{LibraryId, MutationId, MutationIssue, PullStateResponse, PushMutationsResponse, ReplicaId, StateCell, SyncCursor};
+use std::error::Error;
+use std::fmt::Display;
+use std::future::Future;
+use std::pin::Pin;
+use library_replica::{StatePublication, coalesce_mutations_for_push, prepare_push};
+use sync_common::{LibraryId, ReplicaSeq, MutationIssue, PullStateResponse, PushMutationsResponse, ReplicaId, SyncCursor};
 
-pub type StoreError = Box<dyn std::error::Error + Send + Sync>;
+pub type StoreError = Box<dyn Error + Send + Sync>;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub type StoreFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, StoreError>> + Send + 'a>>;
+pub type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, StoreError>> + Send + 'a>>;
 #[cfg(target_arch = "wasm32")]
-pub type StoreFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, StoreError>> + 'a>>;
+pub type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, StoreError>> + 'a>>;
 
 /// Persistence required by state synchronization. Implementations own their
 /// transaction semantics; the engine owns protocol and recovery policy.
@@ -19,17 +21,13 @@ pub trait SyncStore {
     fn begin_cursor_recovery(&self) -> StoreFuture<'_, ()>;
     fn complete_cursor_recovery(&self) -> StoreFuture<'_, usize>;
     fn pull_cursor(&self) -> StoreFuture<'_, SyncCursor>;
-    fn inventory_page(&self, after: Option<StateCell>) -> StoreFuture<'_, Vec<StateCell>>;
-    fn inventory_checkpoint(&self) -> StoreFuture<'_, Option<StateCell>>;
-    fn save_inventory_checkpoint(&self, after: Option<StateCell>) -> StoreFuture<'_, ()>;
-    fn enqueue_missing_state_cells(&self, cells: &[StateCell]) -> StoreFuture<'_, usize>;
-    fn pending_mutations(&self) -> StoreFuture<'_, Vec<StateMutation>>;
-    fn acknowledge_mutations(&self, mutation_ids: &[MutationId]) -> StoreFuture<'_, ()>;
+    fn pending_mutations(&self) -> StoreFuture<'_, Vec<StatePublication>>;
+    fn acknowledge_mutations(&self, mutation_ids: &[ReplicaSeq]) -> StoreFuture<'_, ()>;
     /// Atomically applies the mutations and advances the cursor.
     fn apply_pull_page(&self, page: &PullStateResponse) -> StoreFuture<'_, ()>;
     /// Persists validated push acknowledgments and a pull page. Implementations
     /// may share a commit, but must retain acknowledgments if applying pull fails.
-    fn apply_exchange_response(&self, ids: &[MutationId], page: &PullStateResponse) -> StoreFuture<'_, ()>;
+    fn apply_exchange_response(&self, ids: &[ReplicaSeq], page: &PullStateResponse) -> StoreFuture<'_, ()>;
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -40,12 +38,12 @@ pub enum SyncError {
 }
 
 impl SyncError {
-    fn failed(error: impl std::fmt::Display) -> Self {
+    fn failed(error: impl Display) -> Self {
         Self::Failed(error.to_string())
     }
 }
 
-impl std::fmt::Display for SyncError {
+impl Display for SyncError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AuthenticationRequired => formatter.write_str("synchronization authentication is required"),
@@ -55,7 +53,7 @@ impl std::fmt::Display for SyncError {
     }
 }
 
-impl std::error::Error for SyncError {}
+impl Error for SyncError {}
 
 impl From<sync_transport::SyncRequestError> for SyncError {
     fn from(error: sync_transport::SyncRequestError) -> Self {
@@ -78,7 +76,6 @@ pub struct SyncEngine<'a, S: SyncStore> {
     library_id: LibraryId,
     replica_id: ReplicaId,
     credentials: Option<sync_transport::SyncCredentials>,
-    inventory_checked: AtomicBool,
 }
 
 pub struct SyncEngineConfig<'a, S: SyncStore> {
@@ -87,7 +84,6 @@ pub struct SyncEngineConfig<'a, S: SyncStore> {
     pub library_id: LibraryId,
     pub replica_id: ReplicaId,
     pub credentials: Option<sync_transport::SyncCredentials>,
-    pub inventory_checked: &'a AtomicBool,
 }
 
 impl<'a, S: SyncStore> SyncEngine<'a, S> {
@@ -98,13 +94,9 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
             library_id: config.library_id,
             replica_id: config.replica_id,
             credentials: config.credentials,
-            inventory_checked: AtomicBool::new(config.inventory_checked.load(Ordering::Acquire)),
         }
     }
 
-    pub fn inventory_checked(&self) -> bool {
-        self.inventory_checked.load(Ordering::Acquire)
-    }
     pub fn store(&self) -> &S {
         &self.store
     }
@@ -117,8 +109,8 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
         let mut result = SyncOutcome { mutation_issues: remaining.untransmittable().iter().copied().map(MutationIssue::Untransmittable).collect() };
         while !remaining.is_empty() {
             let requested = remaining.next_batch();
-            let creations = requested.iter().filter(|m| m.kind == sync_common::mutation_kind::BOOK_LIFECYCLE).map(|m| (m.mutation_id, m.entity_key.clone())).collect::<Vec<_>>();
-            let ids = requested.iter().map(|mutation| mutation.mutation_id).collect::<Vec<_>>();
+            let creations = requested.iter().filter(|m| m.state.value.address.kind == "book_lifecycle").map(|m| (m.publisher_seq, m.state.value.address.entity_key.clone())).collect::<Vec<_>>();
+            let ids = requested.iter().map(|mutation| mutation.publisher_seq).collect::<Vec<_>>();
             let credentials = self.current_credentials()?;
             let response = sync_transport::exchange_changes(self.http_client, &credentials, self.library_id, self.replica_id, requested, SyncCursor::default()).await?;
             result.mutation_issues.extend(self.apply_push_response_semantics(&ids, &response.push).await?);
@@ -147,7 +139,6 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
 
     pub async fn begin_cursor_recovery(&self) -> Result<(), SyncError> {
         self.store.begin_cursor_recovery().await.map_err(SyncError::failed)?;
-        self.inventory_checked.store(false, Ordering::Release);
         Ok(())
     }
 
@@ -157,50 +148,8 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
         let credentials = self.current_credentials()?;
         self.exchange_until_idle(&credentials, SyncCursor::default(), &mut remaining, &mut result).await?;
         let inserted = self.store.complete_cursor_recovery().await.map_err(SyncError::failed)?;
-        self.inventory_checked.store(true, Ordering::Release);
         log::warn!("Recovered a rejected synchronization cursor and queued {inserted} canonical cells for republishing");
         Ok(())
-    }
-
-    /// Independent, resumable repair. Ordinary exchange never awaits this audit.
-    pub async fn repair_inventory(&self) -> Result<(), SyncError> {
-        if self.inventory_checked.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        let mut after = self.store.inventory_checkpoint().await.map_err(SyncError::failed)?;
-        loop {
-            let mut trace = sync_transport::PerformanceTrace::new("inventory_page", "load_local");
-            let cells = self.store.inventory_page(after.clone()).await.map_err(SyncError::failed)?;
-            log::debug!(target: "sync_performance", "trace_id={} library_id={} cells={}", trace.id(), self.library_id, cells.len());
-            trace.phase("compare_remote");
-            if cells.is_empty() {
-                self.store.save_inventory_checkpoint(None).await.map_err(SyncError::failed)?;
-                self.inventory_checked.store(true, Ordering::Release);
-                trace.finish(true);
-                return Ok(());
-            }
-            let credentials = self.current_credentials()?;
-            let Some(response) = sync_transport::compare_state_inventory(self.http_client, &credentials, self.library_id, cells.clone()).await? else {
-                self.store.save_inventory_checkpoint(None).await.map_err(SyncError::failed)?;
-                self.inventory_checked.store(true, Ordering::Release);
-                trace.finish(true);
-                return Ok(());
-            };
-            trace.phase("queue_missing_and_checkpoint");
-            log::debug!(target: "sync_performance", "trace_id={} missing={}", trace.id(), response.missing.len());
-            let requested = cells.iter().collect::<HashSet<_>>();
-            if response.missing.len() > cells.len() || response.missing.iter().any(|cell| !requested.contains(cell)) {
-                return Err(SyncError::failed("server returned an invalid state inventory response"));
-            }
-            if !response.missing.is_empty() {
-                self.store.enqueue_missing_state_cells(&response.missing).await.map_err(SyncError::failed)?;
-            }
-            after = cells.last().cloned();
-            // Checkpoint only after missing cells are durably queued. A crash
-            // between these operations can repeat a page but cannot lose work.
-            self.store.save_inventory_checkpoint(after.clone()).await.map_err(SyncError::failed)?;
-            trace.finish(true);
-        }
     }
 
     pub async fn exchange_events_with_server(&self, starting_cursor: SyncCursor) -> Result<SyncOutcome, SyncError> {
@@ -224,10 +173,10 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
         self.exchange_until_idle(&credentials, cursor, &mut remaining, &mut result).await
     }
 
-    pub async fn apply_push_response(&self, requested_ids: &[MutationId], response: &PushMutationsResponse) -> Result<Vec<sync_common::MutationRejection>, SyncError> {
+    pub async fn apply_push_response(&self, requested_ids: &[ReplicaSeq], response: &PushMutationsResponse) -> Result<Vec<sync_common::MutationRejection>, SyncError> {
         let issues = self.apply_push_response_semantics(requested_ids, response).await?;
         if let Some(MutationIssue::Rejected(rejection)) = issues.iter().find(|issue| matches!(issue, MutationIssue::Rejected(_))) {
-            return Err(SyncError::failed(sync_common::PushResponseError::PermanentRejection { mutation_id: rejection.mutation_id, reason: rejection.reason }));
+            return Err(SyncError::failed(sync_common::PushResponseError::PermanentRejection { publisher_seq: rejection.publisher_seq, reason: rejection.reason }));
         }
         Ok(issues
             .into_iter()
@@ -238,9 +187,9 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
             .collect())
     }
 
-    async fn apply_push_response_semantics(&self, requested_ids: &[MutationId], response: &PushMutationsResponse) -> Result<Vec<MutationIssue>, SyncError> {
+    async fn apply_push_response_semantics(&self, requested_ids: &[ReplicaSeq], response: &PushMutationsResponse) -> Result<Vec<MutationIssue>, SyncError> {
         let validated = sync_transport::validate_push_response(requested_ids, response).map_err(SyncError::failed)?;
-        let completed = validated.completed_ids();
+        let completed = validated.completed_sequences();
         if !completed.is_empty() {
             self.store.acknowledge_mutations(&completed).await.map_err(SyncError::failed)?;
         }
@@ -253,15 +202,15 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
             page_number += 1;
             let mut trace = sync_transport::PerformanceTrace::new("sync_page", "prepare_request");
             let requested = remaining.next_batch();
-            let creations = requested.iter().filter(|m| m.kind == sync_common::mutation_kind::BOOK_LIFECYCLE).map(|m| (m.mutation_id, m.entity_key.clone())).collect::<Vec<_>>();
-            let requested_ids = requested.iter().map(|mutation| mutation.mutation_id).collect::<Vec<_>>();
+            let creations = requested.iter().filter(|m| m.state.value.address.kind == "book_lifecycle").map(|m| (m.publisher_seq, m.state.value.address.entity_key.clone())).collect::<Vec<_>>();
+            let requested_ids = requested.iter().map(|mutation| mutation.publisher_seq).collect::<Vec<_>>();
             log::debug!(target: "sync_performance", "trace_id={} library_id={} page={page_number} push_count={} cursor={cursor:?}", trace.id(), self.library_id, requested.len());
             trace.phase("http_roundtrip");
             let response = sync_transport::exchange_changes(self.http_client, credentials, self.library_id, self.replica_id, requested, cursor).await?;
             trace.phase("validate_response");
-            log::debug!(target: "sync_performance", "trace_id={} accepted={} rejected={} pull_count={} has_more={}", trace.id(), response.push.accepted.len(), response.push.rejected.len(), response.pull.mutations.len(), response.pull.has_more);
+            log::debug!(target: "sync_performance", "trace_id={} accepted={} rejected={} pull_count={} has_more={}", trace.id(), requested_ids.len().saturating_sub(response.push.rejected.len()), response.push.rejected.len(), response.pull.mutations.len(), response.pull.has_more);
             let validated = sync_transport::validate_push_response(&requested_ids, &response.push).map_err(SyncError::failed)?;
-            let completed = validated.completed_ids();
+            let completed = validated.completed_sequences();
             result.mutation_issues.extend(validated.issues);
             let has_more = response.pull.has_more;
             if let Err(error) = sync_transport::validate_pull_batch(&response.pull, cursor) {
@@ -288,8 +237,8 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
     }
 }
 
-fn defer_rejected_creation_fields(remaining: &mut sync_common::PushBatcher, creations: &[(MutationId, String)], response: &PushMutationsResponse) {
-    let books = creations.iter().filter(|(id, _)| response.rejected.iter().any(|rejection| rejection.mutation_id == *id)).map(|(_, hash)| hash.clone()).collect::<Vec<_>>();
+fn defer_rejected_creation_fields(remaining: &mut sync_common::PushBatcher, creations: &[(ReplicaSeq, String)], response: &PushMutationsResponse) {
+    let books = creations.iter().filter(|(id, _)| response.rejected.iter().any(|rejection| rejection.publisher_seq == *id)).map(|(_, hash)| hash.clone()).collect::<Vec<_>>();
     remaining.defer_book_fields(&books);
 }
 

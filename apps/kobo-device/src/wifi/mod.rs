@@ -1,4 +1,6 @@
 //! Serialized Kobo Wi-Fi operations. Hardware and supplicant work never runs on GPUI.
+
+use std::ffi::OsStr;
 mod control;
 use control::{Control, Result, decode_ssid, fields, hex};
 use std::fs;
@@ -398,10 +400,10 @@ impl Controller {
         }
         self.power_with_helper_timeout(enabled, &helper, timeout)
     }
-    fn power_with_helper(&mut self, enabled: bool, helper: &std::ffi::OsStr) -> Result<()> {
+    fn power_with_helper(&mut self, enabled: bool, helper: &OsStr) -> Result<()> {
         self.power_with_helper_timeout(enabled, helper, Duration::from_secs(15))
     }
-    fn power_with_helper_timeout(&mut self, enabled: bool, helper: &std::ffi::OsStr, timeout: Duration) -> Result<()> {
+    fn power_with_helper_timeout(&mut self, enabled: bool, helper: &OsStr, timeout: Duration) -> Result<()> {
         if !self.snapshot.power_available {
             return Err("Wi-Fi power control is unavailable on this device".into());
         }

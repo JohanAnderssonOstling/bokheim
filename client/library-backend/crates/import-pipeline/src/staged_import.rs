@@ -1,4 +1,6 @@
 //! Durable staged import workflow over typed storage and library services.
+
+use crate::ImportFailure;
 use crate::import_journal::{self, Journal, Progress};
 use client_runtime::BackendError;
 use serde::{Deserialize, Serialize};
@@ -40,7 +42,7 @@ pub trait Storage {
 /// The library's answer to preparation: resolved directories plus early failures.
 pub struct PreparedImport {
     pub directories: Vec<(Vec<String>, DirId)>,
-    pub failures: Vec<crate::ImportFailure>,
+    pub failures: Vec<ImportFailure>,
 }
 /// One debounced progress report for the library to publish.
 pub struct AdvanceProgress {
@@ -68,7 +70,7 @@ pub struct Update {
     pub phase: Phase,
     pub counts: Progress,
     pub current_file: Option<String>,
-    pub failures: Option<Vec<crate::ImportFailure>>,
+    pub failures: Option<Vec<ImportFailure>>,
 }
 struct Reporter<F> {
     progress: F,
@@ -76,8 +78,8 @@ struct Reporter<F> {
     name: String,
 }
 impl<F: Fn(Update) -> Result<(), Error>> Reporter<F> {
-    fn emit(&self, phase: Phase, counts: Progress, current_file: Option<&str>, failures: Option<&[crate::ImportFailure]>) -> Result<(), Error> {
-        (self.progress)(Update { id: self.id.clone(), name: self.name.clone(), phase, counts, current_file: current_file.map(str::to_owned), failures: failures.map(<[crate::ImportFailure]>::to_vec) })
+    fn emit(&self, phase: Phase, counts: Progress, current_file: Option<&str>, failures: Option<&[ImportFailure]>) -> Result<(), Error> {
+        (self.progress)(Update { id: self.id.clone(), name: self.name.clone(), phase, counts, current_file: current_file.map(str::to_owned), failures: failures.map(<[ImportFailure]>::to_vec) })
     }
 }
 struct ImportIo<S>(S);
@@ -163,12 +165,31 @@ impl<S: Storage> ImportIo<S> {
     }
 }
 
-pub async fn run<S: Storage>(job: Manifest, io: S, client: &impl Library, progress: impl Fn(Update) -> Result<(), Error>) -> Result<Vec<crate::ImportFailure>, Error> {
+pub async fn run<S: Storage>(job: Manifest, io: S, client: &impl Library, progress: impl Fn(Update) -> Result<(), Error>) -> Result<Vec<ImportFailure>, Error> {
     let io = ImportIo(io);
     let manifest = io.manifest(job).await?;
     let journal = io.open_file("journal").await?;
     let bytes = journal.read()?;
-    let mut state = import_journal::replay(&bytes).map_err(error)?.with_files(manifest.files.iter().map(|file| file.size).collect()).map_err(error)?;
+    let mut state = ({
+        use crate::import_journal::*;
+        let mut journal: Journal = import_journal::replay(&bytes).map_err(error)?;
+        let sizes: Vec<u64> = manifest.files.iter().map(|file| file.size).collect();
+        'state: {
+            journal.total_bytes = match sizes.iter().try_fold(0_u64, |sum, size| sum.checked_add(*size)).ok_or("import size overflow") {
+                Ok(value) => value,
+                Err(error) => break 'state Err(error.into()),
+            };
+            for index in journal.copied.keys().chain(journal.added.keys()) {
+                if *index >= sizes.len() {
+                    break 'state Err("import checkpoint refers to an unknown file".into());
+                }
+            }
+            journal.copied_bytes = journal.copied.keys().map(|index| sizes[*index]).sum();
+            journal.sizes = Some(sizes);
+            Ok::<_, String>(journal)
+        }
+    })
+    .map_err(error)?;
     journal.truncate(state.offset as u64)?;
     let reporter = Reporter { progress, id: manifest.id.clone(), name: manifest.name.clone() };
     if let Some(failures) = &state.completed {
@@ -181,7 +202,12 @@ pub async fn run<S: Storage>(job: Manifest, io: S, client: &impl Library, progre
             continue;
         }
         let hash = io.copy_file(index as u32, file, &reporter, state.progress(0)).await?;
-        let checkpoint = state.record_copied(index, hash).map_err(error)?;
+        let checkpoint = ({
+            use crate::import_journal::*;
+
+            state.record(Checkpoint::Copied { index, hash })
+        })
+        .map_err(error)?;
         journal.persist(&state, checkpoint)?;
         reporter.emit(Phase::Copying, state.progress(0), None, None)?;
     }
@@ -189,12 +215,22 @@ pub async fn run<S: Storage>(job: Manifest, io: S, client: &impl Library, progre
     reporter.emit(Phase::Adding, state.progress(0), None, None)?;
     let activity = uuid::Uuid::new_v4();
     let prepared: PreparedImport = client.prepare(activity, &manifest).await?;
-    state.prepare_directories(prepared.directories);
+    ({
+        use crate::import_journal::*;
+        let directories: Vec<(Vec<String>, DirId)> = prepared.directories;
+        state.directories = crate::import_workflow::Destinations::new(directories);
+    });
     let mut failures = prepared.failures;
     let mut batch = Adding { state: &mut state, journal: &journal, client, storage: &io, manifest: &manifest, reporter: &reporter, activity, failures: &mut failures };
     crate::import_workflow::run(&mut batch).await?;
     client.cleanup(manifest.id, manifest.files.len() as u32).await?;
-    let checkpoint = state.record_complete(failures.clone()).map_err(error)?;
+    let checkpoint = ({
+        use crate::import_journal::*;
+        let failures: Vec<ImportFailure> = failures.clone();
+
+        state.record(Checkpoint::Complete { failures })
+    })
+    .map_err(error)?;
     journal.persist(&state, checkpoint)?;
     reporter.emit(Phase::Complete, state.progress(0), None, Some(&failures))?;
     Ok(failures)
@@ -208,7 +244,7 @@ struct Adding<'a, L, F, S, P> {
     manifest: &'a Manifest,
     reporter: &'a Reporter<P>,
     activity: uuid::Uuid,
-    failures: &'a mut Vec<crate::ImportFailure>,
+    failures: &'a mut Vec<ImportFailure>,
 }
 impl<L: Library, F: FileAccess, S: Storage, P: Fn(Update) -> Result<(), Error>> crate::import_workflow::Batch for Adding<'_, L, F, S, P> {
     type Error = Error;
@@ -217,9 +253,40 @@ impl<L: Library, F: FileAccess, S: Storage, P: Fn(Update) -> Result<(), Error>> 
     }
     async fn process(&mut self, index: usize) -> Result<(), Error> {
         let file = &self.manifest.files[index];
-        if !self.state.has_added(index) {
+        if !({
+            use crate::import_journal::*;
+
+            self.state.added.contains_key(&index)
+        }) {
             let result = async {
-                let command = self.state.import_command(self.storage.staged_path(self.manifest, index), index, &file.path).map_err(error)?;
+                let command = ({
+                    use crate::import_journal::*;
+                    let physical: String = self.storage.staged_path(self.manifest, index);
+                    let path: &[String] = &file.path;
+                    'command: {
+                        let (parent_id, file_name) = match self.state.destination(path) {
+                            Ok(value) => value,
+                            Err(error) => break 'command Err(error.into()),
+                        };
+                        let length = *match self.state.sizes.as_ref().and_then(|sizes| sizes.get(index)).ok_or("import file is absent from the manifest") {
+                            Ok(value) => value,
+                            Err(error) => break 'command Err(error.into()),
+                        };
+                        let hash = match match self.state.copied_hash(index).ok_or("import file has not been copied") {
+                            Ok(value) => value,
+                            Err(error) => break 'command Err(error.into()),
+                        }
+                        .parse::<ContentHash>()
+                        .map_err(|error| error.to_string())
+                        {
+                            Ok(value) => value,
+                            Err(error) => break 'command Err(error.into()),
+                        };
+                        let command = crate::staged_import::StagedBook { parent_id, file_name, physical, length, hash };
+                        Ok::<_, String>(command)
+                    }
+                })
+                .map_err(error)?;
                 self.client.import(command).await?;
                 Ok::<_, Error>(())
             }
@@ -233,17 +300,48 @@ impl<L: Library, F: FileAccess, S: Storage, P: Fn(Update) -> Result<(), Error>> 
                     Some(value.source.to_string())
                 }
             };
-            let checkpoint = self.state.record_added(index, failure).map_err(error)?;
+            let checkpoint = ({
+                use crate::import_journal::*;
+                let error: Option<String> = failure;
+
+                self.state.record(Checkpoint::Added { index, error })
+            })
+            .map_err(error)?;
             self.journal.persist(self.state, checkpoint)?;
         }
-        if let Some(error) = self.state.added_error(index).filter(|error| !error.is_empty()) {
+        if let Some(error) = ({
+            use crate::import_journal::*;
+
+            self.state.added.get(&index).and_then(Option::as_deref)
+        })
+        .filter(|error| !error.is_empty())
+        {
             self.failures.push(crate::import_workflow::file_failure(&file.path, error));
         }
         self.reporter.emit(Phase::Adding, self.state.progress(0), Some(&file.path.join("/")), None)?;
         Ok(())
     }
     async fn progress(&mut self) -> Result<(), Error> {
-        if let Some(command) = self.state.advance_command(self.activity).map_err(error)? {
+        if let Some(command) = ({
+            use crate::import_journal::*;
+            let activity: uuid::Uuid = self.activity;
+            'progress: {
+                let total = match self.state.sizes.as_ref().ok_or("import manifest is absent") {
+                    Ok(value) => value,
+                    Err(error) => break 'progress Err(error.into()),
+                }
+                .len() as u64;
+                Ok::<_, String>(
+                    match self.state.reporter.advance(total, (self.state.added_count() - self.state.failed) as u64, self.state.failed as u64) {
+                        Ok(value) => value,
+                        Err(error) => break 'progress Err(error.into()),
+                    }
+                    .map(|delta| crate::staged_import::AdvanceProgress { activity, total: delta.total, succeeded: delta.succeeded, failed: delta.failed }),
+                )
+            }
+        })
+        .map_err(error)?
+        {
             self.client.advance(command).await?;
         }
         Ok(())

@@ -5,8 +5,8 @@
 CREATE TABLE IF NOT EXISTS book_transfer(
     content_hash TEXT PRIMARY KEY NOT NULL REFERENCES book(content_hash) ON DELETE CASCADE,
     -- What the server holds: the book's bytes and its cover.
-    server_has_book INTEGER NOT NULL DEFAULT 0,
-    server_has_cover INTEGER NOT NULL DEFAULT 0,
+    server_has_book INTEGER NOT NULL DEFAULT 0 CHECK(server_has_book IN (0,1)),
+    server_has_cover INTEGER NOT NULL DEFAULT 0 CHECK(server_has_cover IN (0,1)),
     -- A requested download of the book's bytes, and when it was requested.
     book_download TEXT CHECK(book_download IN ('background', 'user_initiated')),
     book_download_at INTEGER,

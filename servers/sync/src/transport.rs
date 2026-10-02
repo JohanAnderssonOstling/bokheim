@@ -1,3 +1,5 @@
+use std::io::ErrorKind;
+use std::os::unix::net::UnixListener;
 use axum::Router;
 use server_account::ClientAddressSource;
 use std::error::Error;
@@ -141,22 +143,22 @@ async fn shutdown_signal() {
 }
 
 #[cfg(unix)]
-fn bind_unix_socket(path: &Path) -> Result<std::os::unix::net::UnixListener, std::io::Error> {
-    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "Unix socket must have a parent directory"))?;
+fn bind_unix_socket(path: &Path) -> Result<UnixListener, std::io::Error> {
+    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty()).ok_or_else(|| std::io::Error::new(ErrorKind::InvalidInput, "Unix socket must have a parent directory"))?;
     if !parent.is_dir() {
-        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("Unix socket parent directory does not exist: {}", parent.display())));
+        return Err(std::io::Error::new(ErrorKind::NotFound, format!("Unix socket parent directory does not exist: {}", parent.display())));
     }
 
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_socket() => std::fs::remove_file(path)?,
         Ok(_) => {
-            return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("refusing to replace non-socket path: {}", path.display())));
+            return Err(std::io::Error::new(ErrorKind::AlreadyExists, format!("refusing to replace non-socket path: {}", path.display())));
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
 
-    let listener = std::os::unix::net::UnixListener::bind(path)?;
+    let listener = UnixListener::bind(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
     listener.set_nonblocking(true)?;
     Ok(listener)
@@ -257,7 +259,7 @@ mod tests {
         let ordinary_file = directory.path().join("do-not-delete");
         std::fs::write(&ordinary_file, b"important").unwrap();
         let error = bind_unix_socket(&ordinary_file).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(ordinary_file).unwrap(), b"important");
     }
 
@@ -274,7 +276,7 @@ mod tests {
             loop {
                 match tokio::net::UnixStream::connect(&socket).await {
                     Ok(stream) => break stream,
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound || error.kind() == std::io::ErrorKind::ConnectionRefused => tokio::task::yield_now().await,
+                    Err(error) if error.kind() == ErrorKind::NotFound || error.kind() == ErrorKind::ConnectionRefused => tokio::task::yield_now().await,
                     Err(error) => panic!("failed to connect to test socket: {error}"),
                 }
             }

@@ -13,7 +13,7 @@ gpui-component-macros = { path = "crates/macros", version = "0.5.1" }
 gpui-component-assets = { path = "crates/assets", version = "0.5.1" }
 story = { path = "crates/story" }
 
-gpui = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", rev = "cb2f5b981889d421153d5804526929e32c0788fd" }
+gpui = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", rev = "cb2f5b981889d421153d5804526929e32c0788fd", default-features = false, features = ["font-kit", "wayland", "x11", "windows-manifest"] }
 gpui_platform = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", rev = "cb2f5b981889d421153d5804526929e32c0788fd", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 gpui_web = { git = "https://github.com/zed-industries/zed" }
 gpui_macros = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", rev = "cb2f5b981889d421153d5804526929e32c0788fd" }
@@ -32,8 +32,6 @@ reqwest = { git = "https://github.com/zed-industries/reqwest.git", rev = "c15662
 
 anyhow = "1"
 log = "0.4"
-lsp-types = { version = "0.97.0", features = ["proposed"] }
-notify = "7.0.0"
 raw-window-handle = "0.6.2"
 ropey = { version = "=2.0.0-beta.1", features = [
     "metric_lines_lf",
@@ -91,7 +89,6 @@ gpui_macros = { opt-level = 3 }
 tree-sitter = { opt-level = 3 }
 sum_tree = { opt-level = 3 }
 ropey = { opt-level = 3 }
-lsp-types = { opt-level = 3 }
 reqwest_client = { opt-level = 3 }
 markdown = { opt-level = 3 }
 xml5ever = { opt-level = 3 }

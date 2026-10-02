@@ -1,3 +1,4 @@
+use crate::PerformanceTrace;
 use crate::api::{send, SyncCredentials, TransportError};
 use crate::state::SyncRequestError;
 use std::{error::Error, fmt};
@@ -18,14 +19,6 @@ pub enum AssetResponseError {
     Retryable(reqwest::Error),
     Rejected(reqwest::Error),
     Wire(sync_common::transport::WireError),
-}
-
-/// The transport-level outcomes of a blob download. File staging,
-/// hashing, and book remain the backend's responsibility.
-#[derive(Debug)]
-pub enum BlobDownloadResponse {
-    Missing,
-    Content(reqwest::Response),
 }
 
 impl fmt::Display for AssetResponseError {
@@ -110,7 +103,7 @@ pub async fn negotiate_blobs(client: &reqwest::Client, credentials: &SyncCredent
 pub async fn upload_book_revision_stream(
     client: &reqwest::Client, server_url: &reqwest::Url, access_token: &str, library_id: &LibraryId, identity: &ContentHash, checksum: &ContentHash, content_length: u64, body: reqwest::Body,
 ) -> Result<(), AssetResponseError> {
-    let mut trace = crate::PerformanceTrace::new("book_http_upload", "send_body_wait_response");
+    let mut trace = PerformanceTrace::new("book_http_upload", "send_body_wait_response");
     log::debug!(target: "sync_performance", "trace_id={} library_id={} bytes={content_length}", trace.id(), library_id);
     let upload_started = web_time::Instant::now();
     let response = client
@@ -133,16 +126,8 @@ pub async fn upload_book_revision_stream(
     Ok(())
 }
 
-pub async fn download_blob_stream(client: &reqwest::Client, server_url: &reqwest::Url, access_token: &str, library_id: &LibraryId, content_hash: &ContentHash) -> Result<BlobDownloadResponse, AssetResponseError> {
-    let response = client.get(blob_endpoint(server_url, library_id, content_hash)).bearer_auth(access_token).send().await.map_err(AssetResponseError::Retryable)?;
-    match response.status() {
-        reqwest::StatusCode::NOT_FOUND => Ok(BlobDownloadResponse::Missing),
-        _ => validate_streaming_asset_response(response).map(BlobDownloadResponse::Content),
-    }
-}
-
 pub async fn upload_thumbnail_batch(client: &reqwest::Client, server_url: &reqwest::Url, access_token: &str, library_id: &LibraryId, thumbnails: Vec<ThumbnailBatchEntry>) -> Result<(), AssetResponseError> {
-    let mut trace = crate::PerformanceTrace::new("thumbnail_http_upload", "encode");
+    let mut trace = PerformanceTrace::new("thumbnail_http_upload", "encode");
     log::debug!(target: "sync_performance", "trace_id={} library_id={} thumbnails={}", trace.id(), library_id, thumbnails.len());
     let body = sync_common::transport::encode(&ThumbnailBatchUploadRequest { thumbnails }).map_err(AssetResponseError::Wire)?;
     trace.phase("send_body_wait_response");
@@ -183,6 +168,86 @@ pub async fn download_thumbnail_batch(client: &reqwest::Client, server_url: &req
 mod tests {
     use super::*;
     use axum::{http::StatusCode, routing::get, Router};
+
+    #[tokio::test]
+    async fn individual_book_puts_preserve_revision_headers_and_retry_only_the_failed_file() {
+        use axum::{body::Bytes, http::HeaderMap, routing::put};
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let library = test_support::fixture_library_id("individual-books");
+        let first = test_support::fixture_content_hash(61);
+        let second = test_support::fixture_content_hash(62);
+        let first_checksum = test_support::fixture_content_hash(63);
+        let second_checksum = test_support::fixture_content_hash(64);
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let first_counter = first_calls.clone();
+        let second_counter = second_calls.clone();
+        let app = Router::new()
+            .route(&format!("/api/libraries/{library}/blobs/{first}"), put(move |headers: HeaderMap, body: Bytes| async move {
+                assert_eq!(headers[reqwest::header::AUTHORIZATION], "Bearer test-token");
+                assert_eq!(headers["x-bokheim-content-checksum"], first_checksum.as_str());
+                assert_eq!(headers[reqwest::header::CONTENT_LENGTH], "5");
+                assert_eq!(body.as_ref(), b"first");
+                first_counter.fetch_add(1, Ordering::SeqCst);
+                StatusCode::OK
+            }))
+            .route(&format!("/api/libraries/{library}/blobs/{second}"), put(move |headers: HeaderMap, body: Bytes| async move {
+                assert_eq!(headers[reqwest::header::AUTHORIZATION], "Bearer test-token");
+                assert_eq!(headers["x-bokheim-content-checksum"], second_checksum.as_str());
+                assert_eq!(headers[reqwest::header::CONTENT_LENGTH], "6");
+                assert_eq!(body.as_ref(), b"second");
+                if second_counter.fetch_add(1, Ordering::SeqCst) == 0 { StatusCode::SERVICE_UNAVAILABLE } else { StatusCode::OK }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = reqwest::Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let (first_result, second_result) = tokio::join!(
+            upload_book_revision_stream(&client, &url, "test-token", &library, &first, &first_checksum, 5, reqwest::Body::from("first")),
+            upload_book_revision_stream(&client, &url, "test-token", &library, &second, &second_checksum, 6, reqwest::Body::from("second")),
+        );
+        first_result.unwrap();
+        assert!(matches!(second_result, Err(AssetResponseError::Retryable(_))));
+        upload_book_revision_stream(&client, &url, "test-token", &library, &second, &second_checksum, 6, reqwest::Body::from("second")).await.unwrap();
+        assert_eq!(first_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(second_calls.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn thumbnail_http_upload_and_download_preserve_both_variants() {
+        use axum::{body::Bytes, http::HeaderMap, response::IntoResponse};
+        use std::sync::{Arc, Mutex};
+        let library = test_support::fixture_library_id("thumbnail-pair");
+        let pair = ThumbnailBatchEntry { content_hash: test_support::fixture_content_hash(51), bytes: vec![0xff, 0xd8, 0xff, 1, 2], browse_bytes: vec![0xff, 0xd8, 0xff, 3] };
+        let stored = Arc::new(Mutex::new(None::<ThumbnailBatchEntry>));
+        let upload_store = stored.clone();
+        let download_store = stored.clone();
+        let app = Router::new().route(&format!("/api/libraries/{library}/thumbnail-batch"), axum::routing::put(move |headers: HeaderMap, body: Bytes| async move {
+            assert_eq!(headers[reqwest::header::AUTHORIZATION], "Bearer test-token");
+            let request: ThumbnailBatchUploadRequest = sync_common::transport::decode(&body, sync_common::api::assets::MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024).unwrap();
+            assert_eq!(request.thumbnails.len(), 1);
+            *upload_store.lock().unwrap() = request.thumbnails.into_iter().next();
+            StatusCode::OK
+        }).post(move |headers: HeaderMap, body: Bytes| async move {
+            assert_eq!(headers[reqwest::header::AUTHORIZATION], "Bearer test-token");
+            let request: ThumbnailBatchDownloadRequest = sync_common::transport::decode(&body, 64 * 1024).unwrap();
+            let pair = download_store.lock().unwrap().clone().unwrap();
+            assert_eq!(request.content_hashes, vec![pair.content_hash]);
+            let response = ThumbnailBatchDownloadResponse { thumbnails: vec![pair], missing: vec![] };
+            ([(reqwest::header::CONTENT_TYPE, sync_common::transport::MEDIA_TYPE)], sync_common::transport::encode(&response).unwrap()).into_response()
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = reqwest::Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        upload_thumbnail_batch(&client, &url, "test-token", &library, vec![pair.clone()]).await.unwrap();
+        assert_eq!(stored.lock().unwrap().as_ref(), Some(&pair));
+        let downloaded = download_thumbnail_batch(&client, &url, "test-token", &library, vec![pair.content_hash]).await.unwrap();
+        assert_eq!(downloaded.thumbnails, vec![pair]);
+        assert!(downloaded.missing.is_empty());
+        server.abort();
+    }
 
     #[test]
     fn native_asset_endpoints_share_the_canonical_service_paths() {

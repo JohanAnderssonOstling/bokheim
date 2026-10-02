@@ -1,5 +1,6 @@
 //! PDF appearance controls and their persisted settings.
 
+use crate::invalidation::notify;
 use gpui::Context;
 use gpui::prelude::*;
 use pdf_view_gpui::{MAX_VISIBLE_PAGE_COUNT, MIN_VISIBLE_PAGE_COUNT, PdfZoomMode};
@@ -19,13 +20,13 @@ impl PdfReaderView {
             preferences.pdf_zoom_mode = PdfZoomModePreference::Fixed;
             preferences.pdf_zoom = zoom;
         });
-        crate::invalidation::notify(cx, Component::PdfShell, "zoom_changed");
+        notify(cx, Component::PdfShell, "zoom_changed");
     }
 
     fn set_zoom_mode(&self, zoom_mode: PdfZoomMode, cx: &mut Context<Self>) {
         self.pdf.update(cx, |pdf, cx| pdf.set_zoom_mode(zoom_mode, cx));
         ReaderSettings::update(cx, |preferences| store_zoom_mode(zoom_mode, preferences));
-        crate::invalidation::notify(cx, Component::PdfShell, "zoom_mode_changed");
+        notify(cx, Component::PdfShell, "zoom_mode_changed");
     }
 
     /// Sets the page count, switching to the mode where it is held fixed.
@@ -42,7 +43,7 @@ impl PdfReaderView {
             return;
         }
         self.pdf.update(cx, |pdf, cx| pdf.set_trim_margins(trim_margins, cx));
-        crate::invalidation::notify(cx, Component::PdfShell, "trim_margins_changed");
+        notify(cx, Component::PdfShell, "trim_margins_changed");
     }
 
     pub(super) fn render_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {

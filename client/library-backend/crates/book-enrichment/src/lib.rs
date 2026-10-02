@@ -1,79 +1,48 @@
-//! Portable enrichment policy shared by client and authority ingestion.
-//! Storage, scheduling, file decoding, and network transport belong to callers.
+//! Portable enrichment policy: the metadata server runs it; clients use the
+//! file-evidence parts at import. Storage and transport belong to callers.
 pub mod evidence;
 pub mod filename_identity;
 pub mod filename_isbn;
 pub mod related_isbn;
-mod subject_pipeline;
 pub mod title_identity;
-use book_model::{from_metadata_value, BookMetadata, Scheme};
-use serde::{Deserialize, Serialize};
-pub use subject_pipeline::{isbn_key, SubjectCode, SubjectPhase, SubjectPipeline, SubjectStep};
+use book_model::{from_metadata_value, BookMetadata};
 
-/// Library-wide enrichment waves. Hosts may execute a wave using their own
-/// storage and workers, but must not start a later wave while an earlier wave
-/// still has candidates.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EnrichmentWave {
-    CheapMetadata,
-    TitleAuthor,
-}
-
-impl EnrichmentWave {
-    pub const ALL: [Self; 2] = [Self::CheapMetadata, Self::TitleAuthor];
-
-    pub const fn next(self) -> Option<Self> {
-        match self {
-            Self::CheapMetadata => Some(Self::TitleAuthor),
-            Self::TitleAuthor => None,
-        }
-    }
-}
-
-/// Shared decisions; each host supplies its own storage and provider adapter.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LookupPlan {
-    pub subject_complete: bool,
-    pub subject_isbns: Vec<String>,
-    pub author_isbns: Vec<String>,
-    pub needs_page_inspection: bool,
-}
-impl LookupPlan {
-    pub fn from_metadata(metadata: &BookMetadata) -> Self {
-        let printed = related_isbn::lookup_candidates(&metadata.identifiers);
-        let embedded =
-            metadata.identifiers.iter().filter(|id| id.scheme() == &Scheme::Isbn).filter_map(|id| id.canonical_value().as_deref().and_then(from_metadata_value)).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>();
-        let isbns = if printed.is_empty() { embedded } else { printed };
-        let subject_complete = has_resolved_lcc(metadata);
-        Self { needs_page_inspection: !subject_complete && isbns.is_empty(), subject_isbns: if subject_complete { Vec::new() } else { isbns.clone() }, author_isbns: isbns, subject_complete }
-    }
-}
-
-pub(crate) fn has_resolved_lcc(metadata: &BookMetadata) -> bool {
+/// A subject search is finished once an LCC code resolves in the taxonomy.
+/// BISAC and unresolvable LCC codes never end it.
+pub fn has_resolved_lcc(metadata: &BookMetadata) -> bool {
     metadata.subjects.iter().any(|s| s.authority().is_some_and(|a| a.eq_ignore_ascii_case("lcc")) && s.code().is_some_and(|c| !subject_projection::unified_lcc_subject_paths(c).is_empty()))
 }
 
-/// Initial import should defer expensive page work while metadata ISBN lookup
-/// is pending. This is NOT subject completion: SubjectPipeline requests page
-/// inspection if that lookup finishes without resolved LCC.
-pub fn defer_initial_page_inspection(metadata: &BookMetadata) -> bool {
-    !LookupPlan::from_metadata(metadata).needs_page_inspection
+/// Every ISBN as its ISBN-13, so both forms of one edition compare equal.
+pub fn isbn_key(value: &str) -> Option<String> {
+    let isbn = from_metadata_value(value)?;
+    if isbn.len() == 13 {
+        return Some(isbn);
+    }
+    let mut isbn13 = format!("978{}", &isbn[..9]);
+    let sum: u32 = isbn13.bytes().enumerate().map(|(i, c)| u32::from(c - b'0') * if i % 2 == 0 { 1 } else { 3 }).sum();
+    isbn13.push(char::from(b'0' + ((10 - sum % 10) % 10) as u8));
+    Some(isbn13)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn usable_metadata_skips_inspection_and_supplies_both_lookups() {
+    fn only_a_resolvable_lcc_ends_the_subject_search() {
+        let subject = |authority: &str, code: &str| book_model::BookSubject::new(None, code, "test", Some(authority.into()), Some(code.into())).unwrap();
         let mut metadata = BookMetadata::default();
-        assert!(LookupPlan::from_metadata(&metadata).needs_page_inspection);
-        metadata.identifiers.push(book_model::Identifier::new("0000000000000", Scheme::Isbn, book_model::Scope::Book).unwrap());
-        assert!(LookupPlan::from_metadata(&metadata).needs_page_inspection);
-        metadata.identifiers.push(book_model::Identifier::new("9781934356555", Scheme::Isbn, book_model::Scope::Book).unwrap());
-        let plan = LookupPlan::from_metadata(&metadata);
-        assert!(!plan.needs_page_inspection);
-        assert_eq!(plan.subject_isbns, ["9781934356555"]);
-        assert_eq!(plan.author_isbns, plan.subject_isbns);
+        metadata.subjects.push(subject("bisac", "COM051010"));
+        metadata.subjects.push(subject("lcc", "NOT-A-CODE"));
+        assert!(!has_resolved_lcc(&metadata));
+        metadata.subjects.push(subject("lcc", "Q125"));
+        assert!(has_resolved_lcc(&metadata));
+    }
+
+    #[test]
+    fn isbn_10_and_13_share_a_key() {
+        assert_eq!(isbn_key("0-201-63361-2").as_deref(), Some("9780201633610"));
+        assert_eq!(isbn_key("9780201633610").as_deref(), Some("9780201633610"));
     }
 
     #[test]
@@ -103,16 +72,8 @@ mod tests {
     }
 }
 
-/// Reserve CPU capacity for interactive work and bound image-decoding memory.
-pub fn background_worker_limit(available_cpus: usize) -> usize {
-    (available_cpus / 2).clamp(1, 4)
-}
-
 pub mod resolution;
 
 mod filename_identifiers;
-
-/// Invalidate checkpoints when subject extraction or persistence changes.
-pub const SUBJECT_PIPELINE_REVISION: i64 = 10;
 
 pub mod filename_lookup;

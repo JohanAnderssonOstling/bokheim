@@ -9,7 +9,7 @@ const OTHER: &str = "00000000-0000-0000-0000-000000000004";
 fn fixture(books: usize) -> Database {
     let db = Database::open(":memory:").unwrap();
     db.initialize_library().unwrap();
-    db.connection.execute("UPDATE sync_metadata SET change_origin='remote'", []).unwrap();
+
     let tx = db.connection.unchecked_transaction().unwrap();
     for (id, parent, name) in [(TARGET, ROOT, "Target"), (CHILD, TARGET, "Nested"), (BRANCH, TARGET, "Branch"), (OTHER, ROOT, "Targetish")] {
         tx.execute("INSERT INTO dir(id,parent_id,name) VALUES(?1,?2,?3)", [id, parent, name]).unwrap();
@@ -30,7 +30,7 @@ fn fixture(books: usize) -> Database {
 }
 fn query(location: &str, search: &str) -> library_model::LibraryBrowseQuery {
     library_model::LibraryBrowseQuery {
-        location: location.into(),
+        location: library_model::BrowseLocation::Folder(location.parse().unwrap()),
         search: search.into(),
         file_types: vec![],
         languages: vec![],
@@ -54,19 +54,20 @@ fn direct_descendants_and_directory_counts_follow_mutations() {
         db.connection.execute_batch(mutation).unwrap();
         let ids = db.connection.prepare("SELECT id FROM dir").unwrap().query_map([], |r| r.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
         for id in ids {
-            for folder in db.browse_folder_contents(&query(&id, ""), false).unwrap().children {
-                let expected = db.connection.query_row("WITH RECURSIVE subtree(id) AS (SELECT ?1 UNION SELECT d.id FROM subtree s JOIN dir d ON d.parent_id=s.id WHERE d.id!=s.id AND d.deleted_at IS NULL) SELECT count(*),coalesce(sum(p.is_downloaded),0) FROM subtree s JOIN book_dir p ON p.dir_id=s.id AND p.deleted_at IS NULL JOIN book b ON b.row_id=p.book_row_id AND b.deleted_at IS NULL", [&folder.id], |r| Ok((r.get::<_, i64>(0)?,r.get::<_, i64>(1)?))).unwrap();
+            for folder in db.browse_contents(&query(&id, ""), false).unwrap().children {
+                let library_model::BrowseLocation::Folder(folder_id) = folder.id else { panic!("folder browse returned a subject") };
+                let expected = db.connection.query_row("WITH RECURSIVE subtree(id) AS (SELECT ?1 UNION SELECT d.id FROM subtree s JOIN dir d ON d.parent_id=s.id WHERE d.id!=s.id AND d.deleted_at IS NULL) SELECT count(*),coalesce(sum(p.is_downloaded),0) FROM subtree s JOIN book_dir p ON p.dir_id=s.id AND p.deleted_at IS NULL JOIN book b ON b.row_id=p.book_row_id AND b.deleted_at IS NULL", [folder_id.to_string()], |r| Ok((r.get::<_, i64>(0)?,r.get::<_, i64>(1)?))).unwrap();
                 assert_eq!((folder.book_count as i64, folder.downloaded_book_count as i64), expected, "{mutation}: {}", folder.id);
             }
         }
         // Both cards and counts reflect the committed writes immediately.
-        let mut hashes = db.browse_folder_contents(&query(TARGET, "book"), false).unwrap().books.iter().map(|b| b.content_hash.to_string()).collect::<Vec<_>>();
+        let mut hashes = db.browse_contents(&query(TARGET, "book"), false).unwrap().books.iter().map(|b| b.content_hash.to_string()).collect::<Vec<_>>();
         hashes.sort();
         let mut stmt = db.connection.prepare("WITH RECURSIVE subtree(id) AS (SELECT id FROM dir WHERE id=?1 AND deleted_at IS NULL UNION SELECT d.id FROM dir d JOIN subtree s ON d.parent_id=s.id WHERE d.id!=d.parent_id AND d.deleted_at IS NULL) SELECT b.content_hash FROM book b JOIN book_dir p ON p.book_row_id=b.row_id JOIN subtree s ON s.id=p.dir_id WHERE b.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY b.content_hash").unwrap();
         let expected = stmt.query_map([TARGET], |r| r.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(hashes, expected, "{mutation}");
         let formats = db
-            .browse_folder(&query(ROOT, ""), false)
+            .browse(&query(ROOT, ""), false)
             .unwrap()
             .format_counts
             .iter()

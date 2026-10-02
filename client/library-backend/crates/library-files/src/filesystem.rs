@@ -3,6 +3,8 @@
 //! This module deliberately exposes bytes, paths, and directory entries only.
 //! It does not classify books or persist scan decisions.
 
+use std::fs::File;
+use std::io::Error;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
@@ -46,9 +48,12 @@ impl DirectoryEntry {
 }
 
 impl DirectoryWalk {
-    pub fn next(&mut self) -> Option<Result<DirectoryEntry, std::io::Error>> {
+    pub fn next(&mut self) -> Option<Result<DirectoryEntry, Error>> {
         self.entries.next().map(|entry| {
-            let entry = entry.map_err(walk_error)?;
+            let entry = entry.map_err(|error| {
+                let message = error.to_string();
+                error.into_io_error().unwrap_or_else(|| Error::other(message))
+            })?;
             let kind = entry.file_type();
             Ok(DirectoryEntry {
                 path: entry.path().to_path_buf(),
@@ -77,8 +82,8 @@ pub fn read_to_string(path: impl AsRef<Path>) -> std::io::Result<String> {
 pub fn write(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
     std::fs::write(path, bytes)
 }
-pub fn open(path: impl AsRef<Path>) -> std::io::Result<std::fs::File> {
-    std::fs::File::open(path)
+pub fn open(path: impl AsRef<Path>) -> std::io::Result<File> {
+    File::open(path)
 }
 
 pub fn fingerprint(path: impl AsRef<Path>) -> std::io::Result<u64> {
@@ -106,9 +111,4 @@ pub fn audiobook_fingerprint(folder: &Path, tracks: &[audiobook_folder::Track]) 
         hasher.update(&fingerprint(&cover.path)?.to_le_bytes());
     }
     Ok(u64::from_le_bytes(hasher.finalize().as_bytes()[..8].try_into().unwrap()))
-}
-
-fn walk_error(error: walkdir::Error) -> std::io::Error {
-    let message = error.to_string();
-    error.into_io_error().unwrap_or_else(|| std::io::Error::other(message))
 }

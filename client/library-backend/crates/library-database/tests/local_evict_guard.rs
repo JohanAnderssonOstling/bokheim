@@ -20,13 +20,7 @@ fn import() -> ImportCommit {
         inspection: Some(book_metadata::InspectedBook {
             pdf: None,
             audiobook: None,
-            metadata: book_model::BookRecord {
-                title: "Original".into(),
-                subtitle: None,
-                contributors: vec![book_model::Contributor::new("Original Author", book_model::MarcRelatorCode(*b"aut")).unwrap()],
-                description: String::new(),
-                book: Default::default(),
-            },
+            metadata: book_model::BookRecord { metadata: book_model::BookDetails { title: "Original".into(), subtitle: None, contributors: vec![book_model::Contributor::new("Original Author", book_model::MarcRelatorCode(*b"aut")).unwrap()], book: Default::default() }, description: String::new() },
             toc: vec![book_model::BookTocEntry { title: "Chapter".into(), target: "ch1".into(), children: vec![] }],
         }),
         published: library_database::PublishedImport { name: "book.epub".into(), relative_path: "/book.epub".into(), published: false, fingerprint: None },
@@ -42,7 +36,7 @@ fn downloaded_book() -> (Database, ContentHash) {
     let commit = import();
     let hash = commit.content_hash;
     db.commit_import(commit).unwrap();
-    db.sync_request_book_downloads(&[hash], library_replica::TransferOrigin::UserInitiated).unwrap();
+    db.sync_request_book_downloads(&[hash], library_model::TransferOrigin::UserInitiated).unwrap();
     db.complete_local_book_request(hash).unwrap();
     assert!(db.is_book_downloaded(&hash).unwrap(), "setup must leave the book downloaded");
     (db, hash)
@@ -59,7 +53,7 @@ fn evicting_a_downloaded_book_without_a_server_copy_is_refused() {
 #[test]
 fn evicting_a_downloaded_book_with_a_server_copy_keeps_the_entry() {
     let (db, hash) = downloaded_book();
-    db.record_remote_asset(library_replica::BlobKind::Book, &hash).unwrap();
+    db.record_remote_asset(library_model::BlobKind::Book, &hash).unwrap();
     assert!(db.evict_local_book(&hash).unwrap(), "a server-backed download must evict");
     assert!(!db.is_book_downloaded(&hash).unwrap(), "eviction must clear the download");
     assert!(!db.book_paths(&hash).unwrap().is_empty(), "eviction must keep the book's placements");

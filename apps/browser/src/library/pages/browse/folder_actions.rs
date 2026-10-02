@@ -5,6 +5,9 @@
 //! keeping them together gives one picker, one confirmation and one error path
 //! for a selection that mixes the two.
 
+use library_backend::{LibraryCommand, ReadyCommand, SessionCommand};
+
+use crate::services::notify_error;
 use std::rc::Rc;
 
 use gpui::prelude::*;
@@ -57,7 +60,7 @@ fn remove_description(targets: &FolderTargets) -> String {
 /// The folder commands for a menu opened over a selection, worked out when the
 /// menu opens and laid into it by [`FolderActions::item_menu_items`].
 #[derive(Clone)]
-pub(crate) struct ItemCommands {
+pub(crate) struct FolderMenuOptions {
     targets: FolderTargets,
     /// A lone folder and the name it would be renamed from. Renaming is a
     /// single-folder command: there is one name to type.
@@ -69,8 +72,7 @@ pub(crate) struct ItemCommands {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FolderActionsEvent {
     Reload,
-    Renamed(String),
-    OpenRoot,
+    Moved(Vec<DirId>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,7 +84,7 @@ enum FolderNameMode {
 struct FolderNameDialog {
     mode: FolderNameMode,
     /// The folder being renamed, or the parent a new folder is created under.
-    /// Held per dialog rather than read from `current_id`, because a chip's
+    /// Held per dialog because a chip's
     /// context menu acts on a folder the page is not inside.
     target_id: DirId,
     /// The name a rename is replacing, which is what undoing it puts back.
@@ -113,6 +115,31 @@ pub(crate) struct FolderTargets {
 }
 
 impl FolderTargets {
+    pub(super) fn from_items(items: &[super::listing::BrowseItem], source: DirId, cx: &App) -> Option<Self> {
+        let mut targets = Self { source, ..Self::default() };
+        for item in items {
+            match item {
+                super::listing::BrowseItem::Child { row, parent } => {
+                    if let library_model::BrowseLocation::Folder(id) = row.id {
+                        targets.folders.push(id);
+                        if let Some(parent) = parent {
+                            targets.folder_parents.insert(id, *parent);
+                        }
+                    }
+                }
+                super::listing::BrowseItem::Book(book) => targets.books.push(book.read(cx).content_hash()),
+            }
+        }
+        if targets.books.is_empty()
+            && let Some(parent) = targets.folders.first().and_then(|id| targets.folder_parents.get(id)).copied()
+            && targets.folders.iter().all(|id| targets.folder_parents.get(id).copied().unwrap_or(source) == parent)
+        {
+            targets.source = parent;
+            targets.folder_parents.clear();
+        }
+        (!targets.is_empty()).then_some(targets)
+    }
+
     /// Whether dropping these into `destination` would do anything: a folder
     /// cannot go into itself, and a drop that leaves everything where it is
     /// has nothing to ask about.
@@ -145,8 +172,6 @@ struct MoveFolderDialog {
 /// implementation state for every adapter.
 pub(crate) struct FolderActions {
     ui: LibraryContext,
-    current_id: DirId,
-    current_name: Option<String>,
     name_dialog: Option<FolderNameDialog>,
     move_dialog: Option<MoveFolderDialog>,
     move_request: LatestRequest,
@@ -155,33 +180,12 @@ pub(crate) struct FolderActions {
 impl EventEmitter<FolderActionsEvent> for FolderActions {}
 
 impl FolderActions {
-    pub(crate) fn new(ui: LibraryContext, current_id: DirId, current_name: Option<String>) -> Self {
-        Self { ui, current_id, current_name, name_dialog: None, move_dialog: None, move_request: LatestRequest::default() }
-    }
-
-    pub(crate) fn set_location(&mut self, location: &str, name: Option<String>, cx: &mut Context<Self>) {
-        let Ok(id) = DirId::parse_str(location) else {
-            log::warn!("ignored invalid folder browse location {location}");
-            return;
-        };
-        if self.current_id != id {
-            self.cancel_move_selection(cx);
-        }
-        self.current_id = id;
-        self.current_name = name;
-        cx.notify();
+    pub(crate) fn new(ui: LibraryContext) -> Self {
+        Self { ui, name_dialog: None, move_dialog: None, move_request: LatestRequest::default() }
     }
 
     pub(crate) fn has_modal(&self) -> bool {
         self.name_dialog.is_some() || self.move_dialog.is_some()
-    }
-
-    pub(crate) fn library_loading(&self, cx: &App) -> bool {
-        self.ui.updates().read(cx).loading()
-    }
-
-    pub(crate) fn scanner_running(&self, cx: &App) -> bool {
-        self.ui.updates().read(cx).scanning()
     }
 
     pub(crate) fn dismiss_modal(&mut self, cx: &mut Context<Self>) {
@@ -199,12 +203,11 @@ impl FolderActions {
         cx.notify();
     }
 
-    fn choose_book(&mut self, cx: &mut Context<Self>) {
-        self.ui.choose_and_import_book(self.current_id, cx);
+    fn choose_book(&mut self, parent_id: DirId, cx: &mut Context<Self>) {
+        self.ui.choose_and_import_book(parent_id, cx);
     }
 
-    fn choose_folder(&mut self, cx: &mut Context<Self>) {
-        let parent_id = self.current_id;
+    fn choose_folder(&mut self, parent_id: DirId, cx: &mut Context<Self>) {
         let extensions = book_import_extensions();
         let selection = cx.prompt_for_directories_with_filters(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Add folder".into()) }, vec![FileDialogFilter { name: "Books".to_owned(), extensions }]);
         let library = self.ui.backend().clone();
@@ -222,7 +225,7 @@ impl FolderActions {
                         match crate::prepare_directory_import(directory, &executor).await {
                             Ok(directory) => {
                                 #[cfg(not(target_arch = "wasm32"))]
-                                let result = library.import_directory_with_activity(parent_id, directory, activity).await;
+                                let result = library.import_selected_directory(parent_id, directory, true, Some(activity)).await;
                                 #[cfg(target_arch = "wasm32")]
                                 {
                                     let result = library.import_directory(parent_id, directory).await;
@@ -248,17 +251,10 @@ impl FolderActions {
                         crate::services::notify_warning("folder-add-folder-warning", format!("Folder added, but {} item(s) could not be imported. {}", failures.len(), crate::services::import_failure_message(&failures[0])), window, cx);
                     }
                 }
-                Err(error) => crate::services::notify_error("folder-add-folder-error", format!("Could not add folder: {error}"), window, cx),
+                Err(error) => notify_error("folder-add-folder-error", format!("Could not add folder: {error}"), window, cx),
             });
         })
         .detach();
-    }
-
-    fn open_name_dialog(&mut self, mode: FolderNameMode, window: &mut Window, cx: &mut Context<Self>) {
-        if mode == FolderNameMode::Rename && self.current_name.is_none() {
-            return;
-        }
-        self.open_name_dialog_for(mode, self.current_id, self.current_name.clone(), window, cx);
     }
 
     /// Renames one listed folder, which need not be the folder the page is
@@ -349,17 +345,9 @@ impl FolderActions {
                 cx.spawn(async move |actions, cx| {
                     let result = operation.await;
                     let _ = actions.update(cx, |actions, cx| match result {
-                        Ok(name) => {
+                        Ok(_) => {
                             actions.name_dialog = None;
-                            // Renaming a chip's folder leaves the page where it
-                            // is: only the crumb for the folder being browsed
-                            // needs the new name.
-                            if actions.current_id == directory_id {
-                                actions.current_name = Some(name.clone());
-                                cx.emit(FolderActionsEvent::Renamed(name));
-                            } else {
-                                cx.emit(FolderActionsEvent::Reload);
-                            }
+                            cx.emit(FolderActionsEvent::Reload);
                             cx.notify();
                         }
                         Err(error) => {
@@ -446,10 +434,7 @@ impl FolderActions {
         if targets.is_empty() || targets.folders.contains(&destination_id) {
             return;
         }
-        // Moving the folder the page is inside invalidates its path, so the
-        // page returns to the root. A copy leaves its source where it is, and
-        // moving anything else only changes what this listing holds.
-        let left_current = placement == FolderPlacement::Move && targets.folders.contains(&self.current_id);
+        let moved = if placement == FolderPlacement::Move { targets.folders.clone() } else { Vec::new() };
         let source = targets.source;
         let folder_parents = targets.folder_parents.clone();
         let label = format!("{} {}", if placement == FolderPlacement::Copy { "Copied" } else { "Moved" }, describe(&targets));
@@ -485,7 +470,10 @@ impl FolderActions {
                 }
                 for book in targets.books {
                     let placed = match placement {
-                        FolderPlacement::Copy => library.copy_book_to_directory(book, source, destination_id).await.map(|_| UndoStep::RemoveBookFromDirectory { book, directory: destination_id }),
+                        FolderPlacement::Copy => library
+                            .request::<String>(LibraryCommand::Session(SessionCommand::Ready(ReadyCommand::CopyBookToDirectory { content_hash: book, source_id: source, destination_id })))
+                            .await
+                            .map(|_| UndoStep::RemoveBookFromDirectory { book, directory: destination_id }),
                         FolderPlacement::Move => library.move_book_to_directory(book, source, destination_id).await.map(|_| UndoStep::MoveBook { book, from: destination_id, to: source }),
                     };
                     match placed {
@@ -504,7 +492,7 @@ impl FolderActions {
             undo.push(entry);
             let _ = actions.update_in(cx, |_, window, cx| match result {
                 Ok(()) => {
-                    cx.emit(if left_current { FolderActionsEvent::OpenRoot } else { FolderActionsEvent::Reload });
+                    cx.emit(FolderActionsEvent::Moved(moved));
                     crate::services::notify_undoable("folder-placement", confirmation, window, cx);
                 }
                 Err(error) => {
@@ -512,7 +500,7 @@ impl FolderActions {
                     // leaves the earlier ones placed. Reloading shows what
                     // actually happened rather than what was asked for.
                     cx.emit(FolderActionsEvent::Reload);
-                    crate::services::notify_error(
+                    notify_error(
                         "folder-placement-error",
                         format!(
                             "Could not {} everything selected: {error}",
@@ -564,7 +552,7 @@ impl FolderActions {
             let _ = actions.update_in(cx, |_, window, cx| {
                 cx.emit(FolderActionsEvent::Reload);
                 if let Err(error) = result {
-                    crate::services::notify_error("folder-trash-error", format!("Could not move everything selected to Trash: {error}"), window, cx);
+                    notify_error("folder-trash-error", format!("Could not move everything selected to Trash: {error}"), window, cx);
                 }
             });
         })
@@ -601,7 +589,7 @@ impl FolderActions {
             let _ = actions.update_in(cx, |_, window, cx| {
                 cx.emit(FolderActionsEvent::Reload);
                 if let Err(error) = result {
-                    crate::services::notify_error("folder-remove-error", format!("Could not remove everything selected from the folder: {error}"), window, cx);
+                    notify_error("folder-remove-error", format!("Could not remove everything selected from the folder: {error}"), window, cx);
                 }
             });
         })
@@ -635,7 +623,7 @@ impl FolderActions {
             let _ = actions.update_in(cx, |_, window, cx| {
                 cx.emit(FolderActionsEvent::Reload);
                 if let Err(error) = result {
-                    crate::services::notify_error("folder-evict-error", format!("Could not remove every download: {error}"), window, cx);
+                    notify_error("folder-evict-error", format!("Could not remove every download: {error}"), window, cx);
                 }
             });
         })
@@ -717,20 +705,20 @@ impl FolderActions {
     /// Works out the commands over `targets`. The listing supplies what only it
     /// knows about its folders: their names, and whether they hold downloaded
     /// books.
-    pub(crate) fn item_commands(&self, targets: FolderTargets, folder_name: impl Fn(DirId) -> Option<String>, folder_has_downloads: impl Fn(DirId) -> bool, cx: &App) -> ItemCommands {
+    pub(super) fn item_options(&self, targets: FolderTargets, items: &[super::listing::BrowseItem], cx: &App) -> FolderMenuOptions {
         let rename = match (targets.folders.as_slice(), targets.books.is_empty()) {
-            ([id], true) => Some((*id, folder_name(*id).unwrap_or_default())),
+            ([id], true) => Some((*id, items.iter().filter_map(super::listing::BrowseItem::child).find(|row| row.id == library_model::BrowseLocation::Folder(*id)).map(|row| row.name.clone()).unwrap_or_default())),
             _ => None,
         };
         let bridge = self.ui.updates().read(cx);
-        let can_evict = targets.books.iter().any(|hash| matches!(bridge.download_state(*hash), Some(app::DownloadState::Downloaded))) || targets.folders.iter().any(|id| folder_has_downloads(*id));
-        ItemCommands { targets, rename, can_evict }
+        let can_evict = targets.books.iter().any(|hash| matches!(bridge.download_state(*hash), Some(app::DownloadState::Downloaded))) || items.iter().filter_map(super::listing::BrowseItem::child).any(|row| row.downloaded_book_count > 0);
+        FolderMenuOptions { targets, rename, can_evict }
     }
 
     /// Lays the commands over a selection into a menu: rename, copy and move,
     /// taking books out of this folder, dropping downloads, and Trash.
-    pub(crate) fn item_menu_items(actions: Entity<Self>, commands: ItemCommands, mut menu: PopupMenu) -> PopupMenu {
-        let ItemCommands { targets, rename, can_evict } = commands;
+    pub(crate) fn item_menu_items(actions: Entity<Self>, commands: FolderMenuOptions, mut menu: PopupMenu) -> PopupMenu {
+        let FolderMenuOptions { targets, rename, can_evict } = commands;
         let folder_icon = || components::navigation_icon(components::NavigationIcon::Folder);
         if let Some((id, name)) = rename {
             let actions = actions.clone();
@@ -738,9 +726,11 @@ impl FolderActions {
         }
         let (copy_actions, copy_targets) = (actions.clone(), targets.clone());
         let (move_actions, move_targets) = (actions.clone(), targets.clone());
-        menu = menu
-            .item(components::menu_item_with_icon("Copy to folder…", IconName::Copy, move |_, _, cx| copy_actions.update(cx, |actions, cx| actions.open_copy_targets(copy_targets.clone(), cx))))
-            .item(components::menu_item_with_icon("Move to folder…", folder_icon(), move |_, _, cx| move_actions.update(cx, |actions, cx| actions.open_move_targets(move_targets.clone(), cx))));
+        menu = menu.item(components::menu_item_with_icon("Copy to folder…", IconName::Copy, move |_, _, cx| copy_actions.update(cx, |actions, cx| actions.open_copy_targets(copy_targets.clone(), cx)))).item(components::menu_item_with_icon(
+            "Move to folder…",
+            folder_icon(),
+            move |_, _, cx| move_actions.update(cx, |actions, cx| actions.open_move_targets(move_targets.clone(), cx)),
+        ));
         // Leaving a folder and leaving the library are separate commands: the
         // first keeps the books in their other folders, the second moves the
         // whole selection to Trash.
@@ -769,24 +759,26 @@ impl FolderActions {
         menu.item(components::menu_item_with_icon(format!("Move to {name}"), components::navigation_icon(components::NavigationIcon::Folder), move |_, _, cx| {
             move_actions.update(cx, |actions, cx| actions.place_targets(FolderPlacement::Move, move_targets.clone(), destination, Some(move_name.clone()), cx))
         }))
-        .item(components::menu_item_with_icon(format!("Copy to {name}"), IconName::Copy, move |_, _, cx| actions.update(cx, |actions, cx| actions.place_targets(FolderPlacement::Copy, targets.clone(), destination, Some(copy_name.clone()), cx))))
+        .item(components::menu_item_with_icon(format!("Copy to {name}"), IconName::Copy, move |_, _, cx| {
+            actions.update(cx, |actions, cx| actions.place_targets(FolderPlacement::Copy, targets.clone(), destination, Some(copy_name.clone()), cx))
+        }))
     }
 
     /// The commands for adding content to the folder being browsed, as menu
     /// items. Shared by the toolbar's Add button and by a secondary click on
     /// the listing's empty space.
-    pub(crate) fn add_menu_items(actions: Entity<Self>, menu: PopupMenu) -> PopupMenu {
+    pub(crate) fn add_menu_items(actions: Entity<Self>, parent_id: DirId, menu: PopupMenu) -> PopupMenu {
         let add_book_actions = actions.clone();
         let add_folder_actions = actions.clone();
         let create_actions = actions;
-        menu.item(components::menu_item_with_icon("Add book", IconName::BookOpen, move |_, _, cx| add_book_actions.update(cx, |actions, cx| actions.choose_book(cx))))
-            .item(components::menu_item_with_icon("Add folder", IconName::FolderOpen, move |_, _, cx| add_folder_actions.update(cx, |actions, cx| actions.choose_folder(cx))))
-            .item(components::menu_item_with_icon("Create folder", IconName::Plus, move |_, window, cx| create_actions.update(cx, |actions, cx| actions.open_name_dialog(FolderNameMode::Create, window, cx))))
+        menu.item(components::menu_item_with_icon("Add book", IconName::BookOpen, move |_, _, cx| add_book_actions.update(cx, |actions, cx| actions.choose_book(parent_id, cx))))
+            .item(components::menu_item_with_icon("Add folder", IconName::FolderOpen, move |_, _, cx| add_folder_actions.update(cx, |actions, cx| actions.choose_folder(parent_id, cx))))
+            .item(components::menu_item_with_icon("Create folder", IconName::Plus, move |_, window, cx| create_actions.update(cx, |actions, cx| actions.open_name_dialog_for(FolderNameMode::Create, parent_id, None, window, cx))))
     }
 
-    pub(crate) fn render_trigger(actions: Entity<Self>, menu_anchor: Anchor, cx: &mut App) -> AnyElement {
+    pub(crate) fn render_trigger(actions: Entity<Self>, parent_id: DirId, menu_anchor: Anchor, cx: &mut App) -> AnyElement {
         let trigger = components::outlined_icon_button("folder-add", "Add", IconName::Plus, components::browser_theme(cx));
-        let menu = trigger.dropdown_menu_with_anchor(menu_anchor, move |menu, _, _| Self::add_menu_items(actions.clone(), menu));
+        let menu = trigger.dropdown_menu_with_anchor(menu_anchor, move |menu, _, _| Self::add_menu_items(actions.clone(), parent_id, menu));
         div().flex().items_center().child(menu).into_any_element()
     }
 

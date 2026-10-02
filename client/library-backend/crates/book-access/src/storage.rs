@@ -1,4 +1,6 @@
 //! Host interfaces for SQLite scheduling and background cache writes.
+
+use crate::FetchFuture;
 use std::{fmt, path::Path};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -36,14 +38,14 @@ impl From<rusqlite::Error> for CacheError {
 
 pub trait CacheStorage: Clone + fmt::Debug + CacheSend + Sync + 'static {
     fn open(path: &Path, initialize: fn(&rusqlite::Connection) -> rusqlite::Result<()>) -> Result<Self, CacheError>;
-    fn command<T: CacheSend + 'static>(&self, priority: CachePriority, operation: impl FnOnce(&mut rusqlite::Connection) -> Result<T, CacheError> + CacheSend + 'static) -> crate::FetchFuture<'static, Result<T, CacheError>>;
+    fn command<T: CacheSend + 'static>(&self, priority: CachePriority, operation: impl FnOnce(&mut rusqlite::Connection) -> Result<T, CacheError> + CacheSend + 'static) -> FetchFuture<'static, Result<T, CacheError>>;
 }
 pub trait CacheExecutor {
-    fn spawn_detached(&self, future: crate::FetchFuture<'static, ()>);
+    fn spawn_detached(&self, future: FetchFuture<'static, ()>);
 }
 
 impl CacheExecutor for client_platform_runtime::executor::BackendExecutor {
-    fn spawn_detached(&self, future: crate::FetchFuture<'static, ()>) {
+    fn spawn_detached(&self, future: FetchFuture<'static, ()>) {
         client_platform_runtime::executor::BackendExecutor::spawn_detached(self, future);
     }
 }

@@ -9,16 +9,10 @@ SELECT
 FROM author_identity
 JOIN book_contributor credit ON credit.author_identity_id = author_identity.id AND credit.role = :author_role
 JOIN book ON book.row_id = credit.book_row_id
-JOIN book_dir ON book_dir.book_row_id = book.row_id
+JOIN library_book_presence presence ON presence.book_row_id = book.row_id
 WHERE book.deleted_at IS NULL
-  AND book_dir.deleted_at IS NULL
   AND TRIM(credit.name) != ''
-  AND (:downloaded_only = 0 OR EXISTS (
-      SELECT 1 FROM book_dir available
-      WHERE available.book_row_id = book.row_id
-        AND available.deleted_at IS NULL
-        AND available.is_downloaded = 1
-  ))
+  AND (:downloaded_only = 0 OR presence.downloaded = 1)
 GROUP BY author_identity.id, author_identity.stable_id
 ORDER BY LOWER(display_name);
 
@@ -40,9 +34,8 @@ WITH credited AS (
     JOIN book_contributor credit ON credit.author_identity_id = author_identity.id AND credit.role = :author_role
     JOIN book ON book.row_id = credit.book_row_id
     WHERE book.deleted_at IS NULL
-      AND EXISTS(SELECT 1 FROM book_dir placement
-             WHERE placement.book_row_id=book.row_id AND placement.deleted_at IS NULL
-               AND (:downloaded_only=0 OR placement.is_downloaded=1))
+      AND EXISTS(SELECT 1 FROM library_book_presence presence
+             WHERE presence.book_row_id=book.row_id AND (:downloaded_only=0 OR presence.downloaded=1))
 )
 SELECT author_id, book_row_id
 FROM (

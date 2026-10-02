@@ -4,24 +4,7 @@ use book_model::{AuthorAuthority, BookSubject, ExternalAuthorId};
 use metadata_contract::{ClassificationScheme, ClassificationSource, EditionIdentityQuery, LookupStatus, RichWorkMetadataMatch};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-/// Project supported classifications into unique canonical subject paths.
-pub fn classification_paths(classifications: &[metadata_contract::Classification]) -> Vec<String> {
-    classifications
-        .iter()
-        .flat_map(|classification| match classification.scheme {
-            ClassificationScheme::LibraryOfCongress => subject_projection::unified_lcc_subject_paths(&classification.notation),
-            ClassificationScheme::Bisac => subject_projection::unified_subject_paths(subject_projection::BISAC_SYSTEM_ID, &classification.notation),
-            _ => Vec::new(),
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
 
-pub fn classification_rank(paths: &[String]) -> (usize, usize, usize) {
-    let depths = paths.iter().map(|path| path.split('/').filter(|part| !part.trim().is_empty()).count()).collect::<Vec<_>>();
-    (depths.len(), depths.iter().sum(), depths.into_iter().max().unwrap_or(0))
-}
 
 pub fn merge_rich_matches(matches: &[RichWorkMetadataMatch]) -> RichWorkMetadataMatch {
     metadata_contract::merge_rich_work_matches(matches, classification_similarity_keys)
@@ -239,7 +222,6 @@ mod tests {
     fn authoritative_authors_do_not_require_local_name_matches_or_choose_duplicate_ids() {
         let author = |id: &str, name: &str| metadata_contract::AuthorMetadata { open_library_author_id: id.into(), name: Some(name.into()), identifiers: vec![], source: metadata_contract::AuthorSource::Work, position: 0 };
         let mut result = RichIsbnMetadataResult {
-            wikidata_books: Vec::new(),
             requested_isbn: "9780393242768".into(),
             canonical_isbn13: Some("9780393242768".into()),
             status: LookupStatus::Matched,
@@ -298,7 +280,6 @@ mod tests {
         let merged = metadata_contract::merge_rich_work_matches([&record, &record], |_, _| vec![]);
         assert_eq!(merged.authors.len(), 2);
         let result = metadata_contract::RichIsbnMetadataResult {
-            wikidata_books: vec![],
             requested_isbn: "9780306406157".into(),
             canonical_isbn13: Some("9780306406157".into()),
             status: metadata_contract::LookupStatus::Matched,

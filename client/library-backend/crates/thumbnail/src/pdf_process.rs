@@ -61,7 +61,9 @@ impl PdfCoverProcess {
             worker.output.read_exact(&mut tag)?;
             match tag[0] {
                 READ => {
-                    let offset = read_u64(&mut worker.output)?;
+                    let mut offset = [0; 8];
+                    worker.output.read_exact(&mut offset)?;
+                    let offset = u64::from_le_bytes(offset);
                     let count = read_u32(&mut worker.output)? as usize;
                     if count > MAX_BLOCK || offset.checked_add(count as u64).is_none_or(|end| end > length) {
                         return Err("invalid cover worker read request".into());
@@ -102,11 +104,6 @@ impl PdfCoverProcess {
     }
 }
 
-fn read_u64(input: &mut impl Read) -> io::Result<u64> {
-    let mut bytes = [0; 8];
-    input.read_exact(&mut bytes)?;
-    Ok(u64::from_le_bytes(bytes))
-}
 fn read_u32(input: &mut impl Read) -> io::Result<u32> {
     let mut bytes = [0; 4];
     input.read_exact(&mut bytes)?;
@@ -157,42 +154,42 @@ pub fn run_pdf_cover_process() -> bool {
     if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new(ARGUMENT)) {
         return false;
     }
-    if let Err(error) = serve() {
+    let served = (|| -> ThumbnailResult<()> {
+        loop {
+            let mut first = [0];
+            if io::stdin().read(&mut first)? == 0 {
+                return Ok(());
+            }
+            let mut rest = [0; 7];
+            io::stdin().read_exact(&mut rest)?;
+            let mut length = [0; 8];
+            length[0] = first[0];
+            length[1..].copy_from_slice(&rest);
+            let result = pdf_reader_core::render_first_page_image_from_reader(ParentReader { length: u64::from_le_bytes(length), position: 0 }, THUMBNAIL_WIDTH as u16);
+            let mut output = io::stdout().lock();
+            match result {
+                Ok(image) => {
+                    if image.rgba().len() > MAX_PIXELS {
+                        return Err("cover raster exceeds process limit".into());
+                    }
+                    output.write_all(&[IMAGE])?;
+                    output.write_all(&image.pixel_width().to_le_bytes())?;
+                    output.write_all(&image.pixel_height().to_le_bytes())?;
+                    output.write_all(image.rgba())?;
+                }
+                Err(error) => {
+                    let error = error.to_string();
+                    let bytes = &error.as_bytes()[..error.len().min(16 * 1024)];
+                    output.write_all(&[ERROR])?;
+                    output.write_all(&(bytes.len() as u32).to_le_bytes())?;
+                    output.write_all(bytes)?;
+                }
+            }
+            output.flush()?;
+        }
+    })();
+    if let Err(error) = served {
         eprintln!("PDF cover worker: {error}");
     }
     true
-}
-fn serve() -> ThumbnailResult<()> {
-    loop {
-        let mut first = [0];
-        if io::stdin().read(&mut first)? == 0 {
-            return Ok(());
-        }
-        let mut rest = [0; 7];
-        io::stdin().read_exact(&mut rest)?;
-        let mut length = [0; 8];
-        length[0] = first[0];
-        length[1..].copy_from_slice(&rest);
-        let result = pdf_reader_core::render_first_page_image_from_reader(ParentReader { length: u64::from_le_bytes(length), position: 0 }, THUMBNAIL_WIDTH as u16);
-        let mut output = io::stdout().lock();
-        match result {
-            Ok(image) => {
-                if image.rgba().len() > MAX_PIXELS {
-                    return Err("cover raster exceeds process limit".into());
-                }
-                output.write_all(&[IMAGE])?;
-                output.write_all(&image.pixel_width().to_le_bytes())?;
-                output.write_all(&image.pixel_height().to_le_bytes())?;
-                output.write_all(image.rgba())?;
-            }
-            Err(error) => {
-                let error = error.to_string();
-                let bytes = &error.as_bytes()[..error.len().min(16 * 1024)];
-                output.write_all(&[ERROR])?;
-                output.write_all(&(bytes.len() as u32).to_le_bytes())?;
-                output.write_all(bytes)?;
-            }
-        }
-        output.flush()?;
-    }
 }

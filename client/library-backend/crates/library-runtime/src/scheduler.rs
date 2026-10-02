@@ -37,19 +37,8 @@ impl SyncScheduler {
     pub fn wake_hashes(&self, hashes: Vec<ContentHash>) {
         let _ = self.0.try_send(SyncRequest::Wake(hashes));
     }
-    pub fn wake_after(&self, delay: Duration) {
-        let _ = self.0.try_send(SyncRequest::WakeAfter(delay));
-    }
     pub fn stop(&self) {
         let _ = self.0.try_send(SyncRequest::Stop);
-    }
-
-    pub async fn run<C, F>(self, cycle: C, requests: async_channel::Receiver<SyncRequest>, retry: Duration, debounce: Duration)
-    where
-        C: FnMut(CycleInput) -> F,
-        F: Future<Output = Result<(), ()>>,
-    {
-        run_timed(cycle, requests, retry, debounce).await;
     }
 }
 

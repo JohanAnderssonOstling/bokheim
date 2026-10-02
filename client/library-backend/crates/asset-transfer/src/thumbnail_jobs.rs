@@ -1,10 +1,14 @@
 //! Executes durable thumbnail recovery without application handles or UI events.
+
+use std::io::SeekFrom;
+use std::sync::Arc;
 use book_access::BoxedBookReader;
 use client_platform_runtime::executor::BoxedBackendFuture;
 use client_runtime::BackendError;
+use library_database::enrichment::EnrichmentSql;
 use library_database::Database;
 use library_files::asset_store::{AssetStore, AssetStoreError};
-use library_replica::BlobKind;
+use library_model::BlobKind;
 use sync_common::ContentHash;
 pub use thumbnail::ThumbnailVersions;
 
@@ -18,10 +22,10 @@ pub trait ThumbnailProcessor: Sync {
 /// thumbnail jobs stay platform-neutral without a process-wide default.
 #[derive(Clone)]
 pub struct ThumbnailExtractor {
-    host: std::sync::Arc<dyn cpu_host::CpuHost>,
+    host: Arc<dyn cpu_host::CpuHost>,
 }
 impl ThumbnailExtractor {
-    pub fn new(host: std::sync::Arc<dyn cpu_host::CpuHost>) -> Self {
+    pub fn new(host: Arc<dyn cpu_host::CpuHost>) -> Self {
         Self { host }
     }
 }
@@ -57,7 +61,7 @@ pub struct ThumbnailJobs<'a, P> {
 }
 
 /// Selection differs; execution, progress and activity lifetime do not.
-enum BatchSelection {
+pub enum BatchSelection {
     Pending { after: String, now: i64 },
     Members(Vec<ContentHash>),
 }
@@ -67,7 +71,16 @@ impl BatchSelection {
         match self {
             Self::Members(hashes) => Ok(std::mem::take(hashes)),
             Self::Pending { after, now } => loop {
-                let page = db.pending_thumbnail_jobs_page(after)?;
+                let page = {
+                    let mut jobs = Vec::new();
+                    db.connection
+                        .thumbnail_pending_jobs(after, |row| {
+                            jobs.push((ContentHash::new(&row.get::<_, String>(0)?), row.get::<_, i64>(1)?));
+                            Ok(())
+                        })
+                        .map_err(library_database::DatabaseError::from)?;
+                    jobs
+                };
                 let Some((last, _)) = page.last() else { return Ok(Vec::new()) };
                 *after = last.as_str().to_owned();
                 let ready = page.into_iter().filter_map(|(hash, retry_after)| (retry_after <= *now).then_some(hash)).collect::<Vec<_>>();
@@ -91,15 +104,7 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
         self.run_selected(BatchSelection::Pending { after: String::new(), now }, observer).await
     }
 
-    pub async fn run_members(&self, hashes: Vec<ContentHash>, observer: &mut impl ThumbnailObserver) -> Result<(), BackendError> {
-        if hashes.is_empty() {
-            return Ok(());
-        }
-        observer.prepare(hashes.len() as u64);
-        self.run_selected(BatchSelection::Members(hashes), observer).await
-    }
-
-    async fn run_selected(&self, mut selection: BatchSelection, observer: &mut impl ThumbnailObserver) -> Result<(), BackendError> {
+    pub async fn run_selected(&self, mut selection: BatchSelection, observer: &mut impl ThumbnailObserver) -> Result<(), BackendError> {
         let mut activity = None;
         let mut failure = None;
         loop {
@@ -145,25 +150,23 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
             };
             if let Some(versions) = cached {
                 self.store(hash, &versions, observer).await?;
-                self.db.confirm_thumbnail_available(&hash)?;
+                self.db.connection.thumbnail_set_result(hash.as_str(), "ready").map_err(library_database::DatabaseError::from)?;
                 return Ok(true);
             }
-            if self.db.has_remote_thumbnail(&hash)? {
-                self.db.defer_thumbnail_to_download(&hash)?;
+            if self.db.connection.thumbnail_has_remote(hash.as_str(), |row| row.get(0)).map_err(library_database::DatabaseError::from)? {
+                {
+                    let transaction = self.db.connection.unchecked_transaction().map_err(library_database::DatabaseError::from)?;
+                    transaction.thumbnail_discard(hash.as_str()).map_err(library_database::DatabaseError::from)?;
+                    library_database::commit(transaction)?;
+                }
                 return Ok(true);
             }
-            let mut local_reader = match format {
-                book_model::BookFormat::Mp3Folder => self.assets.local_mp3_folder_archive(&hash).await.map_err(BackendError::operation)?,
-                book_model::BookFormat::M4b => self.assets.local_m4b_reader(&hash).await.map_err(BackendError::operation)?,
-                _ => None,
-            };
+            let paths = self.db.book_paths(&hash)?;
+            let mut local_reader = self.assets.open_book_reader(&hash, paths.clone()).await.map_err(BackendError::operation)?;
             let local_source_available = local_reader.is_some();
-            if matches!(format, book_model::BookFormat::Mp3Folder | book_model::BookFormat::M4b) && local_reader.is_none() {
-                local_reader = self.assets.prepare_reader(BlobKind::Book, &hash).await.map_err(BackendError::operation)?;
-            }
             // Artwork shipped with an audiobook becomes its cover.
             if format == book_model::BookFormat::M4b && local_source_available {
-                if let Some(bytes) = self.assets.m4b_sidecar_cover(&hash).await.map_err(BackendError::operation)? {
+                if let Some(bytes) = self.assets.m4b_sidecar_cover(paths).await.map_err(BackendError::operation)? {
                     match self.processor.decode(bytes).await {
                         Ok(versions) => {
                             self.store(hash, &versions, observer).await?;
@@ -186,27 +189,25 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
                             Err(error) => log::warn!("ignoring invalid MP3 folder cover for {hash}: {error}"),
                         }
                     }
-                    reader.seek(std::io::SeekFrom::Start(0))?;
+                    reader.seek(SeekFrom::Start(0))?;
                 }
             }
-            let Some(mut reader) = (if matches!(format, book_model::BookFormat::Mp3Folder | book_model::BookFormat::M4b) {
-                local_reader
-            } else {
-                self.assets.prepare_reader(BlobKind::Book, &hash).await.map_err(BackendError::operation)?
-            }) else { return Ok(false) };
-            if reader.seek(std::io::SeekFrom::End(0))? == 0 {
+            let Some(mut reader) = local_reader else {
+                return Ok(false);
+            };
+            if reader.seek(SeekFrom::End(0))? == 0 {
                 // Retire legacy empty-file jobs without making them candidates
                 // for external cover enrichment or publishing a thumbnail.
-                self.db.discard_thumbnail_work(&hash)?;
+                self.db.connection.thumbnail_discard(hash.as_str()).map_err(library_database::DatabaseError::from)?;
                 return Ok(true);
             }
-            reader.seek(std::io::SeekFrom::Start(0))?;
+            reader.seek(SeekFrom::Start(0))?;
             // The opened reader owns its bytes. Do not hold a placement lease
             // while waiting for CPU work: file moves must be able to proceed.
             drop(_lease);
             let versions = self.processor.generate(format.canonical_extension().to_owned(), reader).await.map_err(BackendError::operation)?;
             let _lease = self.assets.lease_book(&hash).await.map_err(BackendError::operation)?;
-            if !self.db.has_book_placement(hash)? {
+            if !self.db.thumbnail_book_format(hash).map(|format| format.is_some())? {
                 return Ok(false);
             }
             let has_cover = versions.is_some();
@@ -219,7 +220,11 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
         }
         .await;
         if outcome.is_err() {
-            let _ = self.db.retry_thumbnail_work(&hash);
+            let _ = (|| -> Result<(), library_database::DatabaseError> {
+                let retry_after = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_err(library_database::DatabaseError::operation)?.as_secs().saturating_add(30) as i64;
+                self.db.connection.thumbnail_retry(hash.as_str(), retry_after)?;
+                Ok(())
+            })();
         }
         outcome
     }

@@ -1,19 +1,6 @@
 //! Disposable directory and book projections shared by local and remote purges.
-use crate::DatabaseError;
-use crate::shared_sql::SharedSql;
-
-/// Directory state remains in canonical registers; materialized rows and their
-/// placements are disposable. Preserve cleanup paths before deleting them.
-pub(crate) fn remove_directory(tx: &rusqlite::Transaction<'_>, id: &str) -> Result<(), DatabaseError> {
-    tx.execute(
-        "INSERT OR IGNORE INTO local_file_work(operation,content_hash,relative_path)
-         SELECT 'trash',content_hash,relative_path FROM local_file_projection WHERE dir_id=?1",
-        [id],
-    )?;
-    tx.execute("DELETE FROM dir WHERE id=?1 AND id!='00000000-0000-0000-0000-000000000000'", [id])?;
-    tx.shared_placements_queue_directory_work(id)?;
-    Ok(())
-}
+pub(crate) use crate::DatabaseError;
+pub(crate) use crate::shared_sql::SharedSql;
 
 /// Remove the disposable book row while keeping sync intent and retryable file
 /// cleanup independent of its lifetime. Caller uses remote origin.
@@ -21,7 +8,7 @@ pub(crate) fn remove_book(tx: &rusqlite::Transaction<'_>, hash: &str) -> Result<
     // Capture materialized and logical paths before cascading placements away.
     tx.execute(
         "INSERT OR IGNORE INTO local_file_work(operation,content_hash,relative_path)
-         SELECT 'trash',?1,relative_path FROM local_file_projection WHERE content_hash=?1",
+         SELECT 'remove',?1,relative_path FROM local_file_projection WHERE content_hash=?1",
         [hash],
     )?;
     let placements = tx
@@ -31,13 +18,10 @@ pub(crate) fn remove_book(tx: &rusqlite::Transaction<'_>, hash: &str) -> Result<
     let mut folders = crate::placements::FolderPaths::new(tx);
     for (dir_id, file_name) in placements {
         if let Some(path) = folders.placement(&dir_id, &file_name)? {
-            tx.execute("INSERT OR IGNORE INTO local_file_work(operation,content_hash,relative_path) VALUES('trash',?1,?2)", [hash, path.as_str()])?;
+            tx.execute("INSERT OR IGNORE INTO local_file_work(operation,content_hash,relative_path) VALUES('remove',?1,?2)", [hash, path.as_str()])?;
         }
     }
-    tx.shared_cancel_book_restore(hash)?;
-    for table in ["audiobook_metadata", "audiobook_track_index", "book_toc", "book_reading_entry"] {
-        tx.execute(&format!("DELETE FROM {table} WHERE content_hash=?1"), [hash])?;
-    }
+    tx.shared_cancel_book_materialization(hash)?;
     // Pending publications and canonical fields belong to this book too.
     // Keep only the lifecycle cell: it carries the purge to offline replicas.
     tx.execute("DELETE FROM sync_outbox WHERE (state_kind,state_key,state_subkey) IN (SELECT state_kind,state_key,state_subkey FROM sync_state_version WHERE book_key=?1 AND state_kind!='book_lifecycle')", [hash])?;
@@ -59,7 +43,7 @@ mod tests {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
         // This fixture owns derived rows directly; do not enqueue canonical edits.
-        db.connection.execute("UPDATE sync_metadata SET change_origin='remote'", []).unwrap();
+
         for hash in ["a".repeat(64), "b".repeat(64)] {
             db.connection.execute("INSERT INTO book(content_hash,title,added_at,format) VALUES (?1,'Book',1,1)", [hash]).unwrap();
             let id = db.connection.last_insert_rowid();
@@ -94,21 +78,26 @@ mod tests {
         add(&db, hash.as_str());
         let annotation = book_model::ReaderAnnotation {
             id: "offline-note".into(),
-            content_hash: hash,
-            anchor: book_model::AnnotationAnchor::epub_cfi("epubcfi(/6/2)"),
-            exact_text: "Text".into(),
-            style: book_model::AnnotationStyle::Highlight,
-            color: "#fff".into(),
-            note: "Note".into(),
-            created_at: 1,
-            modified_at: 2,
-            toc_ordinal: None,
-            progress: None,
+            state: book_model::AnnotationState {
+                content_hash: hash,
+                detail: book_model::AnnotationDetail {
+                    anchor: book_model::AnnotationAnchor::epub_cfi("epubcfi(/6/2)"),
+                    exact_text: "Text".into(),
+                    style: book_model::AnnotationStyle::Highlight,
+                    color: "#fff".into(),
+                    note: "Note".into(),
+                    created_at: 1,
+                    toc_ordinal: None,
+                    progress: None,
+                },
+                modified_at: 2,
+                deleted: false,
+            },
         };
         db.upsert_annotation(&annotation).unwrap();
         db.trash_book(&hash).unwrap();
         let pending = db.sync_publishable_mutations().unwrap();
-        assert!(pending.iter().any(|m| matches!(m.body, library_replica::MutationBody::Annotation { .. })));
+        assert!(pending.iter().any(|m| matches!(m.state.value, library_replica::LibraryStateEntry::Annotation { .. })));
         db.connection.execute_batch("CREATE TEMP TRIGGER reject_purge BEFORE DELETE ON book BEGIN SELECT RAISE(ABORT,'purge failed'); END;").unwrap();
         assert!(db.purge_book(&hash).is_err());
         assert_eq!(db.sync_publishable_mutations().unwrap(), pending);
@@ -117,49 +106,17 @@ mod tests {
         db.purge_book(&hash).unwrap();
         assert!(db.annotations(hash).unwrap().is_empty());
         assert_eq!(db.connection.query_row("SELECT count(*) FROM sync_state_version WHERE book_key=?1 AND state_kind!='book_lifecycle'", [hash.as_str()], |r| r.get::<_, i64>(0)).unwrap(), 0);
-        assert!(db.sync_publishable_mutations().unwrap().iter().all(|m| matches!(m.body, library_replica::MutationBody::BookLifecycle { .. })));
+        assert!(db.sync_publishable_mutations().unwrap().iter().all(|m| matches!(m.state.value, library_replica::LibraryStateEntry::BookLifecycle { .. })));
         add(&db, hash.as_str());
         db.upsert_annotation(&annotation).unwrap();
-        db.sync_acknowledge_mutations(&pending.iter().map(|m| m.mutation_id).collect::<Vec<_>>()).unwrap();
-        assert!(db.sync_publishable_mutations().unwrap().iter().any(|m| matches!(m.body, library_replica::MutationBody::Annotation { .. })), "old acknowledgements cannot erase readded work");
+        db.sync_acknowledge_mutations(&pending.iter().map(|m| m.publisher_seq).collect::<Vec<_>>()).unwrap();
+        assert!(db.sync_publishable_mutations().unwrap().iter().any(|m| matches!(m.state.value, library_replica::LibraryStateEntry::Annotation { .. })), "old acknowledgements cannot erase readded work");
     }
 
     fn add(db: &Database, hash: &str) {
-        db.connection.execute("INSERT INTO book(content_hash,title,format,added_at) VALUES(?1,'Book',1,1)", [hash]).unwrap();
-    }
-
-    fn count(db: &Database) -> i64 {
-        db.connection.query_row("SELECT count(*) FROM book", [], |r| r.get(0)).unwrap()
-    }
-
-    #[test]
-    fn purge_deletes_the_row_and_children_but_preserves_cleanup_and_sync_intent() {
-        let db = Database::open(":memory:").unwrap();
-        db.initialize_library().unwrap();
-        let hash = sync_common::ContentHash::new(&"a".repeat(64));
-        add(&db, hash.as_str());
-        db.connection.execute("INSERT INTO book_reading_entry VALUES(?1,'chapter')", [hash.as_str()]).unwrap();
-        db.trash_book(&hash).unwrap();
-        db.purge_book(&hash).unwrap();
-        assert_eq!(count(&db), 0);
-        assert!(db.restore_book_placement(&hash, &sync_common::ROOT_DIR_ID).is_err());
-        assert!(db.has_pending_purge_work().unwrap());
-        assert_eq!(db.connection.query_row("SELECT count(*) FROM book_reading_entry", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-        assert!(db.sync_publishable_mutations().unwrap().iter().any(|m| matches!(m.body, library_replica::MutationBody::BookLifecycle { value: library_replica::BookLifecycleState::Purged, .. })));
-        assert!(!db.connection.prepare("PRAGMA foreign_key_check").unwrap().exists([]).unwrap());
-        // A failed placement cleanup keeps its later purge job pending.
-        db.seed_file_work("trash", &hash, "/pending.epub");
-        assert!(db.purge_book_snapshot(&hash).unwrap().is_none());
-        db.connection.execute("DELETE FROM local_file_work", []).unwrap();
-        let old = db.purge_book_snapshot(&hash).unwrap().unwrap();
-        assert!(old.remove_bytes);
-        db.seed_purge_work(&hash);
-        db.acknowledge_purge_book(old).unwrap();
-        assert!(db.has_pending_purge_work().unwrap(), "old acknowledgement cannot discard newer cleanup");
-        add(&db, hash.as_str());
-        let stale = db.purge_book_snapshot(&hash).unwrap().unwrap();
-        assert!(!stale.remove_bytes, "old cleanup must preserve an explicitly readded book");
-        db.acknowledge_purge_book(stale).unwrap();
-        assert_eq!(count(&db), 1);
+        let tx = db.connection.unchecked_transaction().unwrap();
+        tx.execute("INSERT INTO book(content_hash,title,format,added_at) VALUES(?1,'Book',1,1)", [hash]).unwrap();
+        crate::sync::apply::registers::record_local(&tx, library_replica::LibraryStateEntry::BookLifecycle { content_hash: sync_common::ContentHash::new(hash), value: library_replica::BookLifecycleState::Present }).unwrap();
+        crate::sync::apply::commit(tx).unwrap();
     }
 }

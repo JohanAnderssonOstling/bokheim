@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "m4b" => book_model::BookFormat::M4b,
             _ => continue,
         };
-        let metadata = book_metadata::inspect_book(&path, format).map(|book| book.metadata);
+        let metadata = (|| book_metadata::inspect_book_reader(&path, format, std::fs::File::open(&path)?))().map(|book| book.metadata);
         let value = match metadata {
             Ok(book) => serde_json::json!({"file":path,"format":extension,"title":book.title,"subtitle":book.subtitle()}),
             Err(error) => serde_json::json!({"file":path,"format":extension,"error":error.to_string()}),

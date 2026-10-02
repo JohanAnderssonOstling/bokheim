@@ -70,19 +70,7 @@ mod tests {
     const TEST_CONTENT_HASH: &str = concat!("00000000000000000000000000000000", "00000000000000000000000000000001");
 
     fn annotation(id: &str, color: &str) -> ReaderAnnotation {
-        ReaderAnnotation {
-            id: id.to_owned(),
-            content_hash: sync_common::ContentHash::new(TEST_CONTENT_HASH),
-            anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/4!/4/2,/1:0,/1:8)".to_owned()),
-            exact_text: "a furrow".to_owned(),
-            style: AnnotationStyle::Highlight,
-            color: color.to_owned(),
-            note: String::new(),
-            created_at: 0,
-            modified_at: 0,
-            toc_ordinal: None,
-            progress: None,
-        }
+        ReaderAnnotation { id: id.to_owned(), state: book_model::AnnotationState { content_hash: sync_common::ContentHash::new(TEST_CONTENT_HASH), detail: book_model::AnnotationDetail { anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/4!/4/2,/1:0,/1:8)".to_owned()), exact_text: "a furrow".to_owned(), style: AnnotationStyle::Highlight, color: color.to_owned(), note: String::new(), created_at: 0, toc_ordinal: None, progress: None }, modified_at: 0, deleted: false } }
     }
 
     fn selection(text: &str) -> Selection {

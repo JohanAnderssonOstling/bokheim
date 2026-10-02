@@ -17,7 +17,7 @@ pub mod web {
 
 /// CPU worker requests and execution.
 pub mod cpu {
-    pub use cpu_host::{execute, execute_book, BookTask, CpuRequest, CpuResponse, ThumbnailBytes};
+    pub use cpu_host::{execute, execute_book_with_mobi, BookTask, CpuRequest, CpuResponse, ThumbnailBytes};
     #[cfg(not(target_arch = "wasm32"))]
     pub use thumbnail::{configure_pdf_cover_process, run_pdf_cover_process};
 }

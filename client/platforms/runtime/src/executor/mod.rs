@@ -2,6 +2,7 @@
 //! native hosts get Tokio's thread pool and browser hosts get the local event
 //! loop required by Fetch and single-connection SQLite.
 
+use std::error::Error;
 use std::fmt;
 use std::future::Future;
 
@@ -14,7 +15,7 @@ impl fmt::Display for BackendExecutorError {
     }
 }
 
-impl std::error::Error for BackendExecutorError {}
+impl Error for BackendExecutorError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BackendTimeout;
@@ -25,7 +26,7 @@ impl fmt::Display for BackendTimeout {
     }
 }
 
-impl std::error::Error for BackendTimeout {}
+impl Error for BackendTimeout {}
 
 #[cfg(not(target_arch = "wasm32"))]
 pub trait BackendSend: Send {}

@@ -17,11 +17,9 @@ Environment=SYNC_SERVER_SOCKET=/run/bokheim/sync.sock
 Environment=RUST_LOG=info,sync_performance=debug
 Environment="BOKHEIM_EMAIL_FROM=Bokheim <accounts@mail.bokheim.se>"
 Environment=BOKHEIM_TEST_USER_EMAIL=test@bokheim.se
-Environment=BOKHEIM_ADMIN_EMAIL=admin@bokheim.se
 Environment=BOKHEIM_ASSETS_DIR=/var/lib/bokheim/assets
 LoadCredential=database_url:/etc/bokheim/database-url
 LoadCredential=account_token_key:/etc/bokheim/account-token-key
-LoadCredential=admin_password:/etc/bokheim/admin-password
 LoadCredential=resend_api_key:/etc/bokheim/resend-api-key
 LoadCredential=test_user_password:/etc/bokheim/test-user-password
 

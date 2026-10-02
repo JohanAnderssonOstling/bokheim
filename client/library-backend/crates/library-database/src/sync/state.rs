@@ -1,20 +1,16 @@
-//! Sync cursor, inventory, and recovery primitives.
+//! Sync cursor and recovery primitives.
 
 use crate::shared_sql::SharedSql;
-use crate::sync::{PullCursorKey, SyncApplySql, SyncStateSql, write_cursor_revision};
+use crate::sync::{write_cursor_revision, PullCursorKey, SyncApplySql, SyncStateSql};
 use crate::{Database, DatabaseError};
 
-// Sync cursor, inventory, and recovery primitives.
+// Sync cursor and recovery primitives.
 //
 // Each method is one bounded read or one bounded write in its own
 // transaction. Page- and chunk-sized looping belongs to the orchestrator,
 // which drives these methods and the network between them.
 
-use sync_common::{StateCell, SyncCursor};
-
-fn read_cell(row: &rusqlite::Row<'_>) -> rusqlite::Result<StateCell> {
-    Ok(StateCell { kind: row.get(0)?, entity_key: row.get(1)?, entity_subkey: row.get(2)? })
-}
+use sync_common::{StateAddress, SyncCursor};
 
 fn parse_stored_revision(value: Option<String>) -> Result<Option<sync_common::LibraryRevision>, DatabaseError> {
     value
@@ -29,15 +25,15 @@ fn parse_stored_revision(value: Option<String>) -> Result<Option<sync_common::Li
 pub const CURSOR_RECOVERY_PENDING_KEY: &str = "cursor_recovery_pending";
 
 impl Database {
-    /// Reads the independent state and reading pull checkpoints.
+    /// Reads the lifecycle and field pull checkpoints.
     pub fn sync_pull_cursor(&self) -> Result<SyncCursor, DatabaseError> {
         let mut raw = None;
         self.connection.sync_pull_cursor(|row| {
             raw = Some((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?));
             Ok(())
         })?;
-        let (state, reading) = raw.ok_or_else(|| DatabaseError::message("sync metadata row is missing"))?;
-        Ok(SyncCursor { state_revision: parse_stored_revision(state)?, reading_revision: parse_stored_revision(reading)? })
+        let (lifecycle, field) = raw.ok_or_else(|| DatabaseError::message("sync metadata row is missing"))?;
+        Ok(SyncCursor { lifecycle_revision: parse_stored_revision(lifecycle)?, field_revision: parse_stored_revision(field)? })
     }
 
     /// Whether a rejected cursor still needs recovery.
@@ -50,15 +46,15 @@ impl Database {
         Ok(pending == Some(1))
     }
 
-    /// Resets both pull channels and persists the recovery marker in one commit.
+    /// Resets both pull checkpoints and persists the recovery marker in one commit.
     pub fn sync_begin_cursor_recovery(&self) -> Result<(), DatabaseError> {
         self.connection.sync_begin_cursor_recovery().map(|_| ()).map_err(Into::into)
     }
 
     /// Persists both pull checkpoints. A missing revision clears its channel.
     pub fn set_sync_pull_cursor(&self, cursor: &SyncCursor) -> Result<(), DatabaseError> {
-        write_cursor_revision(&self.connection, PullCursorKey::State, cursor.state_revision)?;
-        write_cursor_revision(&self.connection, PullCursorKey::Reading, cursor.reading_revision)?;
+        write_cursor_revision(&self.connection, PullCursorKey::Lifecycle, cursor.lifecycle_revision)?;
+        write_cursor_revision(&self.connection, PullCursorKey::Field, cursor.field_revision)?;
         Ok(())
     }
 
@@ -68,10 +64,9 @@ impl Database {
         use crate::query_methods::first_column;
         let value: Option<Option<String>> = match key {
             "replica_id" => first_column(|read| self.connection.shared_owner_replica_id(read))?,
-            "change_origin" => first_column(|read| self.connection.change_origin_select(read))?,
             "last_successful_sync_at" => first_column(|read| self.connection.shared_owner_last_successful_sync_at(read))?,
-            "last_pull_state_seq" => first_column(|read| self.connection.shared_cursor_state_select(read))?,
-            "last_pull_reading_seq" => first_column(|read| self.connection.shared_cursor_reading_select(read))?,
+            "last_pull_lifecycle_seq" => first_column(|read| self.connection.shared_cursor_lifecycle_select(read))?,
+            "last_pull_field_seq" => first_column(|read| self.connection.shared_cursor_field_select(read))?,
             "cursor_recovery_pending" => first_column(|read| self.connection.syncmeta_cursor_recovery_pending(read))?,
             "scan_seq" => first_column(|read| self.connection.shared_scanner_sequence(read))?,
             "cloud_storage_enabled" => first_column(|read| self.connection.syncmeta_cloud_storage_enabled(read))?,
@@ -85,38 +80,20 @@ impl Database {
     /// Read only the next bounded set of register identities. Local changes
     /// made behind this cursor already create durable outbox work through
     /// normal triggers.
-    pub fn sync_inventory_page(&self, after: Option<&StateCell>) -> Result<Vec<StateCell>, DatabaseError> {
+    pub fn sync_inventory_page(&self, after: Option<&StateAddress>) -> Result<Vec<StateAddress>, DatabaseError> {
         let (kind, key, subkey) = after.map(|cell| (cell.kind.as_str(), cell.entity_key.as_str(), cell.entity_subkey.as_str())).unwrap_or(("", "", ""));
         let mut cells = Vec::new();
         self.connection.sync_state_inventory_page(kind, key, subkey, |row| {
-            cells.push(read_cell(row)?);
+            cells.push((|row: &rusqlite::Row<'_>| -> rusqlite::Result<StateAddress> { Ok(StateAddress { kind: row.get(0)?, entity_key: row.get(1)?, entity_subkey: row.get(2)? }) })(row)?);
             Ok(())
         })?;
         Ok(cells)
     }
 
-    pub fn sync_inventory_checkpoint(&self) -> Result<Option<StateCell>, DatabaseError> {
-        let mut raw = None;
-        self.connection.sync_inventory_checkpoint(|row| {
-            raw = Some((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?));
-            Ok(())
-        })?;
-        Ok(raw.and_then(|(kind, key, subkey)| kind.map(|kind| StateCell { kind, entity_key: key.unwrap_or_default(), entity_subkey: subkey.unwrap_or_default() })))
-    }
-
-    pub fn sync_save_inventory_checkpoint(&self, after: Option<StateCell>) -> Result<(), DatabaseError> {
-        if let Some(after) = after {
-            self.connection.sync_save_inventory_checkpoint(&after.kind, &after.entity_key, &after.entity_subkey)?;
-        } else {
-            self.connection.sync_clear_inventory_checkpoint()?;
-        }
-        Ok(())
-    }
-
-    /// Recreates durable outbox entries for state cells confirmed absent on
-    /// the server, in one transaction. Cells already queued are skipped
+    /// Recreates durable outbox entries for the given state cells, in one
+    /// transaction. Cells already queued are skipped
     /// without re-encoding; cells with no current value are skipped.
-    pub fn sync_enqueue_missing_state_cells(&self, cells: &[StateCell]) -> Result<usize, DatabaseError> {
+    pub fn sync_enqueue_missing_state_cells(&self, cells: &[StateAddress]) -> Result<usize, DatabaseError> {
         if cells.is_empty() {
             return Ok(0);
         }
@@ -133,17 +110,13 @@ impl Database {
     /// marker. After interruption, restarting from the first page is safe
     /// because enqueue preserves existing outbox identities. Only an empty
     /// final page clears the marker.
-    pub fn sync_recover_state_page(&self, after: Option<&StateCell>) -> Result<(Option<StateCell>, usize), DatabaseError> {
+    pub fn sync_recover_state_page(&self, after: Option<&StateAddress>) -> Result<(Option<StateAddress>, usize), DatabaseError> {
         let cells = self.sync_inventory_page(after)?;
         if cells.is_empty() {
-            self.clear_cursor_recovery()?;
+            self.connection.sync_clear_cursor_recovery()?;
             return Ok((None, 0));
         }
         let inserted = self.sync_enqueue_missing_state_cells(&cells)?;
         Ok((cells.last().cloned(), inserted))
-    }
-
-    fn clear_cursor_recovery(&self) -> Result<(), DatabaseError> {
-        self.connection.sync_clear_cursor_recovery().map(|_| ()).map_err(Into::into)
     }
 }

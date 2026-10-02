@@ -1,5 +1,6 @@
 //! PDF annotation loading, editing, navigation, and sidebar presentation.
 
+use crate::invalidation::notify;
 use book_model::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, annotation_progress};
 use gpui::prelude::*;
 use gpui::{Context, Window};
@@ -27,7 +28,7 @@ impl PdfReaderView {
             |this, cx, annotations| {
                 this.marks.merge_loaded(annotations);
                 this.refresh_annotation_overlays(cx);
-                crate::invalidation::notify(cx, Component::PdfShell, "marks_loaded");
+                notify(cx, Component::PdfShell, "marks_loaded");
             },
         );
     }
@@ -44,25 +45,13 @@ impl PdfReaderView {
         let rects = selection.rects.iter().map(|rect| PdfAnnotationRect::new(rect.left(), rect.top(), rect.width(), rect.height())).collect::<Vec<_>>();
         let anchor = AnnotationAnchor::pdf(PdfAnnotationAnchor::new(selection.page_index as u32, rects, None));
         let now = crate::shell::marks::now_millis();
-        let annotation = ReaderAnnotation {
-            id: uuid::Uuid::new_v4().to_string(),
-            content_hash: self.locator.content_hash(),
-            anchor,
-            exact_text: selection.text,
-            style: AnnotationStyle::Highlight,
-            color: ui_components::READER_ANNOTATION_DEFAULT_COLOR.to_owned(),
-            note: String::new(),
-            created_at: now,
-            modified_at: now,
-            toc_ordinal: self.toc.ordinal_at(selection.page_index).map(|ordinal| ordinal as i64),
-            progress: annotation_progress(selection.page_index as f64 + 1.0, self.page_count as f64),
-        };
+        let annotation = ReaderAnnotation { id: uuid::Uuid::new_v4().to_string(), state: book_model::AnnotationState { content_hash: self.locator.content_hash(), detail: book_model::AnnotationDetail { anchor: anchor, exact_text: selection.text, style: AnnotationStyle::Highlight, color: ui_components::READER_ANNOTATION_DEFAULT_COLOR.to_owned(), note: String::new(), created_at: u64::try_from(now).expect("annotation timestamps must be nonnegative"), toc_ordinal: self.toc.ordinal_at(selection.page_index).map(|ordinal| ordinal as i64), progress: annotation_progress(selection.page_index as f64 + 1.0, self.page_count as f64) }, modified_at: u64::try_from(now).expect("annotation timestamps must be nonnegative"), deleted: false } };
         let annotation_id = annotation.id.clone();
         self.marks.prepend(annotation, "save PDF annotation");
         let note = self.marks.select(annotation_id);
         self.annotation_note_input.update(cx, |input, cx| input.set_value(note, window, cx));
         self.refresh_annotation_overlays(cx);
-        crate::invalidation::notify(cx, Component::PdfShell, "annotation_created");
+        notify(cx, Component::PdfShell, "annotation_created");
     }
 
     pub(super) fn select_annotation(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -76,14 +65,14 @@ impl PdfReaderView {
         let note = self.marks.select(id.clone());
         self.pdf.update(cx, |pdf, cx| pdf.set_active_annotation(Some(id), cx));
         self.annotation_note_input.update(cx, |input, cx| input.set_value(note, window, cx));
-        crate::invalidation::notify(cx, Component::PdfShell, "annotation_selected");
+        notify(cx, Component::PdfShell, "annotation_selected");
     }
 
     fn close_annotation_editor(&mut self, cx: &mut Context<Self>) {
         self.marks.clear_selection();
         self.annotation_popup_anchor = None;
         self.pdf.update(cx, |pdf, cx| pdf.set_active_annotation(None, cx));
-        crate::invalidation::notify(cx, Component::PdfShell, "annotation_editor_closed");
+        notify(cx, Component::PdfShell, "annotation_editor_closed");
     }
 
     fn save_selected_annotation(&mut self, style: Option<AnnotationStyle>, color: Option<&'static str>, cx: &mut Context<Self>) {
@@ -95,7 +84,7 @@ impl PdfReaderView {
             return;
         }
         self.refresh_annotation_overlays(cx);
-        crate::invalidation::notify(cx, Component::PdfShell, "annotation_updated");
+        notify(cx, Component::PdfShell, "annotation_updated");
     }
 
     pub(in crate::pdf) fn delete_annotation(&mut self, id: String, cx: &mut Context<Self>) {
@@ -107,7 +96,7 @@ impl PdfReaderView {
             self.pdf.update(cx, |pdf, cx| pdf.set_active_annotation(None, cx));
         }
         self.refresh_annotation_overlays(cx);
-        crate::invalidation::notify(cx, Component::PdfShell, "annotation_deleted");
+        notify(cx, Component::PdfShell, "annotation_deleted");
     }
 
     fn navigate_to_annotation(&self, annotation: &ReaderAnnotation, cx: &mut Context<Self>) {

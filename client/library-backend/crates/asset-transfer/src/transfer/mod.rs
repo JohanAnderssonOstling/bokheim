@@ -1,7 +1,7 @@
 //! Transfer execution: the worker snapshots, drains, commits.
 mod authentication;
 mod coordination;
-mod executor;
+pub(crate) mod executor;
 mod worker;
 
 use authentication::RefreshScope;

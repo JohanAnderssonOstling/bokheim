@@ -5,7 +5,7 @@ use crate::{
     StyleSized, StyledExt,
     button::ButtonIcon,
     h_flex,
-    select::Caret,
+    button::caret::Caret,
     tooltip::{ManagedTooltipExt as _, Tooltip},
 };
 use gpui::{

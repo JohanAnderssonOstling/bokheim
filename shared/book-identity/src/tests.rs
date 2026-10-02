@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use super::*;
 use lopdf::{dictionary, Document, Object, Stream};
 use std::{fs, io::Cursor, path::Path};
@@ -167,7 +169,7 @@ fn encrypted_pdf(path: &Path, encryption: u8, password: &str) {
         EncryptionVersion::V4 {
             document: &doc,
             encrypt_metadata: true,
-            crypt_filters: std::collections::BTreeMap::from([(b"StdCF".to_vec(), std::sync::Arc::new(lopdf::encryption::crypt_filters::Aes128CryptFilter) as std::sync::Arc<dyn lopdf::encryption::crypt_filters::CryptFilter>)]),
+            crypt_filters: BTreeMap::from([(b"StdCF".to_vec(), Arc::new(lopdf::encryption::crypt_filters::Aes128CryptFilter) as Arc<dyn lopdf::encryption::crypt_filters::CryptFilter>)]),
             stream_filter: b"StdCF".to_vec(),
             string_filter: b"StdCF".to_vec(),
             owner_password: "owner",
@@ -177,7 +179,7 @@ fn encrypted_pdf(path: &Path, encryption: u8, password: &str) {
     } else if encryption == 5 {
         EncryptionVersion::V5 {
             encrypt_metadata: false,
-            crypt_filters: std::collections::BTreeMap::from([(b"StdCF".to_vec(), std::sync::Arc::new(lopdf::encryption::crypt_filters::Aes256CryptFilter) as std::sync::Arc<dyn lopdf::encryption::crypt_filters::CryptFilter>)]),
+            crypt_filters: BTreeMap::from([(b"StdCF".to_vec(), Arc::new(lopdf::encryption::crypt_filters::Aes256CryptFilter) as Arc<dyn lopdf::encryption::crypt_filters::CryptFilter>)]),
             file_encryption_key: &[42; 32],
             stream_filter: b"StdCF".to_vec(),
             string_filter: b"StdCF".to_vec(),

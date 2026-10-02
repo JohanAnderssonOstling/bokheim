@@ -1,6 +1,6 @@
 //! Presentation timing only: backend work and its progress continue immediately.
 use super::LibraryActivitySummary;
-use app::TransferJobKind;
+use library_model::TransferJobKind;
 use std::time::Duration;
 use sync_common::LibraryId;
 use web_time::Instant;
@@ -11,11 +11,6 @@ const IDLE_GRACE: Duration = Duration::from_millis(800);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ActivityKind {
     StorageQuota,
-    Operation,
-    OperationThumbnails,
-    OperationBookUploads,
-    OperationCoverUploads,
-    OperationSyncChanges,
     Files,
     Scan,
     Thumbnails,
@@ -25,7 +20,7 @@ pub(super) enum ActivityKind {
 }
 impl ActivityKind {
     fn server(self) -> bool {
-        !matches!(self, Self::Operation | Self::OperationThumbnails | Self::Files | Self::Scan | Self::Thumbnails)
+        !matches!(self, Self::Files | Self::Scan | Self::Thumbnails)
     }
 }
 

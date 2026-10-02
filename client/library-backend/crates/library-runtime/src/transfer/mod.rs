@@ -1,13 +1,13 @@
 //! In-process transfer scheduling and its durable completed-history log.
 //!
 //! This layer is independent of book storage and network execution.
-mod history;
-mod queue;
+pub(crate) mod history;
+pub(crate) mod queue;
 
 pub use history::{HistoryPersistence, MessagePackTransferHistory};
-use library_replica::{BookPlacement, BookUploadIntent, TransferJobKind};
-pub use library_replica::{LibraryTransfers, TransferOrigin, TransferState, TransferStatus};
-pub use queue::{ClaimedTransferJob, TransferProducer, TransferQueue};
+use library_model::{BookPlacement, BookUploadIntent};
+use library_model::{TransferJobKind, TransferOrigin};
+pub use queue::{ClaimedTransferJob, QueueJobState, TransferProducer, TransferQueue};
 use sync_common::ContentHash;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -37,9 +37,7 @@ impl TransferJob {
     pub fn download_blob(content_hash: ContentHash, placement: BookPlacement, origin: TransferOrigin) -> Self {
         Self { operation: TransferOperation::DownloadBlob { content_hash, placement }, origin }
     }
-    pub fn download_thumbnail(thumbnail_hash: ContentHash, origin: TransferOrigin) -> Self {
-        Self { operation: TransferOperation::DownloadThumbnail { thumbnail_hash }, origin }
-    }
+
     pub fn batch_kind(&self) -> Option<TransferJobKind> {
         match self.operation {
             TransferOperation::UploadBlob { .. } => Some(TransferJobKind::UploadBook),

@@ -1,76 +1,54 @@
 //! Verified book upload/download workflows with host-supplied resources.
+pub(crate) use super::deadline::transfer_deadline;
+pub(crate) use crate::policy::{upload_timeout, SMALL_REQUEST_TIMEOUT};
+pub(crate) use crate::TransferError;
+pub(crate) use futures_util::StreamExt;
 #[cfg(not(target_arch = "wasm32"))]
-mod batch;
-use super::deadline::transfer_deadline;
-use crate::policy::{download_progress, upload_timeout, SMALL_REQUEST_TIMEOUT};
-use crate::TransferError;
-use futures_util::StreamExt;
-use library_database::{BookPlacement, NativeBookCompletion};
-use library_files::AssetStore;
-use library_model::{DownloadProgress, DownloadState};
-use library_replica::BlobKind;
-use sync_common::ContentHash;
+pub(crate) use library_database::NativeBookCompletion;
+pub(crate) use library_files::AssetStore;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use library_model::BlobKind;
+pub(crate) use library_model::BookPlacement;
+pub(crate) use library_model::{DownloadProgress, DownloadState};
+pub(crate) use sync_common::ContentHash;
 
 #[cfg(target_arch = "wasm32")]
 pub mod web_upload;
 
 /// Credentials and notifications are supplied by the host; execution owns the
-/// byte lifecycle, revision checks, account checks, and conditional book.
+/// byte lifecycle, revision checks, and conditional completion records.
 pub struct BookTransfers<C, S> {
     pub assets: AssetStore,
     pub http_client: reqwest::Client,
     pub library_id: sync_common::LibraryId,
     pub credentials: C,
     pub status: S,
-    pub diagnostic: fn(String),
 }
 impl<C, S> BookTransfers<C, S>
 where
     C: Fn() -> Result<sync_transport::SyncCredentials, TransferError> + Sync,
     S: Fn(ContentHash, DownloadState) + Sync,
 {
-    fn credentials(&self) -> Result<sync_transport::SyncCredentials, TransferError> {
+    pub(crate) fn credentials(&self) -> Result<sync_transport::SyncCredentials, TransferError> {
         (self.credentials)()
     }
-    fn check_transfer_account(&self, credentials: &sync_transport::SyncCredentials) -> Result<(), TransferError> {
-        if self.credentials()?.server_url() != credentials.server_url() {
-            return Err(TransferError::retryable("credentials changed during asset transfer"));
-        }
-        Ok(())
-    }
-    fn send_download_status(&self, hash: ContentHash, state: DownloadState) {
+    pub(crate) fn send_download_status(&self, hash: ContentHash, state: DownloadState) {
         (self.status)(hash, state);
     }
 
-    fn book_label(versions: &[(String, String, String)]) -> String {
-        versions.first().map(|(_, file_name, _)| file_name.as_str()).unwrap_or("unknown file").to_owned()
-    }
-
-    pub async fn upload_blob(&self, snapshot: &library_database::TransferSnapshot, content_hash: &ContentHash, out: &mut library_database::TransferOutcome) -> Result<(), TransferError> {
-        self.upload_blob_version(snapshot, content_hash, None, false, out).await
-    }
-
     pub async fn upload_blob_version(
-        &self, snapshot: &library_database::TransferSnapshot, content_hash: &ContentHash, planned: Option<&library_database::BookUploadIntent>, negotiated: bool, out: &mut library_database::TransferOutcome,
+        &self, snapshot: &library_database::TransferSnapshot, content_hash: &ContentHash, planned: Option<&library_model::BookUploadIntent>, already_admitted: bool, out: &mut library_database::TransferOutcome,
     ) -> Result<(), TransferError> {
-        let mut trace = sync_transport::PerformanceTrace::new("book_upload", "read_intent");
-        log::debug!(target: "sync_performance", "trace_id={} library_id={}", trace.id(), self.library_id);
         let credentials = self.credentials()?;
-        let asset = snapshot.asset_for(content_hash).cloned().ok_or_else(|| TransferError::retryable("transfer snapshot changed during drain"))?;
-        let local_versions = asset.upload.local_versions;
-        let intent = asset.upload.intent;
-        if intent.is_none() {
-            trace.finish(true);
+        let asset = snapshot.asset_for(content_hash).ok_or_else(|| TransferError::retryable("transfer snapshot changed during drain"))?;
+        let Some(intent) = asset.upload.intent.as_ref() else {
+            return Ok(());
+        };
+        if planned.is_some_and(|planned| planned != intent) {
             return Ok(());
         }
-        if planned.is_some() && intent.as_ref() != planned {
-            trace.finish(true);
-            return Ok(());
-        }
-        let file_name = Self::book_label(&local_versions);
-        trace.phase("verify_local_file");
-        let paths = asset.upload_paths;
-        let Some(book) = self.assets.verified_book_version_reader_at_paths(*content_hash, intent.as_ref().map(|job| job.checksum), paths).await? else {
+        let file_name = asset.upload.local_versions.first().map(|(_, file_name, _)| file_name.as_str()).unwrap_or("unknown file");
+        let Some(book) = self.assets.verified_book_version_reader(*content_hash, intent.checksum, asset.upload_paths.clone()).await? else {
             // Verification rejects missing or mismatching bytes without deleting
             // other local revisions. Retrying that same job forever would
             // pin the queue behind one pathological file.
@@ -79,54 +57,53 @@ where
         if book.length == 0 {
             return Err(TransferError::rejected(format!("local book is empty: {file_name}")));
         }
-        if intent.as_ref().is_some_and(|job| job.checksum != book.checksum || job.size_bytes != book.length) {
+        if intent.size_bytes != book.length {
             return Err(TransferError::retryable("local bytes do not match queued book version"));
         }
-        log::debug!(target: "sync_performance", "trace_id={} bytes={} negotiated={negotiated}", trace.id(), book.length);
-        trace.phase("negotiate");
-        let upload_required = if negotiated {
+        let upload_required = if already_admitted {
             true
         } else {
-            let negotiated = transfer_deadline(
+            let admission = transfer_deadline(
                 SMALL_REQUEST_TIMEOUT,
-                crate::negotiate_blobs(&self.http_client, &credentials, &self.library_id, vec![sync_common::api::assets::BlobManifestEntry { content_hash: *content_hash, checksum: book.checksum, size_bytes: book.length }]),
+                crate::negotiate_blobs(&self.http_client, &credentials, &self.library_id, vec![sync_common::api::assets::BlobManifestEntry { content_hash: *content_hash, checksum: intent.checksum, size_bytes: intent.size_bytes }]),
             )
             .await?;
-            self.check_transfer_account(&credentials)?;
-            let negotiated = negotiated.map_err(|error| match error {
+            let admission = admission.map_err(|error| match error {
                 sync_transport::SyncRequestError::AuthenticationRequired => TransferError::AuthenticationRequired,
                 error => TransferError::retryable(error),
             })?;
-            if let Some(rejected) = negotiated.rejected.first() {
+            if let Some(rejected) = admission.rejected.first() {
                 return Err(TransferError::from_upload_admission(rejected.reason));
             }
             // Transport validates that every requested hash has one outcome.
-            !negotiated.upload.is_empty()
+            !admission.upload.is_empty()
         };
-        trace.phase("upload_http");
-        let response = if upload_required {
+        if upload_required {
             #[cfg(not(target_arch = "wasm32"))]
-            let response = {
-                let content_length = book.length;
-                let checksum = book.checksum;
-                let body = book.into_upload_body()?;
-                transfer_deadline(upload_timeout(content_length), crate::upload_book_revision_stream(&self.http_client, credentials.server_url(), credentials.access_token(), &self.library_id, content_hash, &checksum, content_length, body))
-                    .await?
-                    .map_err(TransferError::from)
-            };
+            {
+                transfer_deadline(
+                    upload_timeout(intent.size_bytes),
+                    crate::upload_book_revision_stream(
+                        &self.http_client,
+                        credentials.server_url(),
+                        credentials.access_token(),
+                        &self.library_id,
+                        content_hash,
+                        &intent.checksum,
+                        intent.size_bytes,
+                        reqwest::Body::wrap_stream(book.into_upload_stream()),
+                    ),
+                )
+                .await?
+                .map_err(TransferError::from)?;
+            }
             #[cfg(target_arch = "wasm32")]
-            let response = transfer_deadline(upload_timeout(book.length), web_upload::upload(&book, &sync_transport::blob_endpoint(credentials.server_url(), &self.library_id, content_hash), credentials.access_token())).await?;
-            response
-        } else {
-            Ok(())
-        };
-        trace.phase("record_local_completion");
-        response?;
+            transfer_deadline(upload_timeout(book.length), web_upload::upload(&book, &sync_transport::blob_endpoint(credentials.server_url(), &self.library_id, content_hash), credentials.access_token())).await??;
+        }
         // Currency is re-validated when the orchestrator commits this record;
         // a placement that changed mid-drain is rejected there and the next
         // planning pass retries the current version.
-        out.record(library_database::TransferWrite::CompleteUploadedBook { hash: *content_hash, local_versions, intent });
-        trace.finish(true);
+        out.record(library_database::TransferWrite::CompleteUploadedBook { hash: *content_hash, local_versions: asset.upload.local_versions.clone(), intent: Some(intent.clone()) });
         Ok(())
     }
 
@@ -134,100 +111,67 @@ where
         // No live placement expects this download: the placement went stale
         // (or never named this hash), so there is nothing to publish. This
         // mirrors the currency skip below; the queue job still completes.
-        let Some(entry) = snapshot.placement_for(content_hash, placement.rel_path.as_str()) else {
+        let Some(entry) = snapshot.placement_for(content_hash, &placement.rel_path) else {
             return Ok(());
         };
-        let credentials = self.credentials()?;
-        self.send_download_status(*content_hash, DownloadState::Downloading(DownloadProgress::ZERO));
-        (self.diagnostic)(format!("resolve_book phase=http_request content_hash={content_hash}"));
-        let response = client_platform_runtime::executor::timeout(std::time::Duration::from_secs(20), crate::download_blob_stream(&self.http_client, credentials.server_url(), credentials.access_token(), &self.library_id, content_hash))
-            .await
-            .map_err(|_| TransferError::retryable("stage=http_headers: book download timed out after 20 seconds"))?;
-        self.check_transfer_account(&credentials)?;
-        let response = match response? {
-            crate::BlobDownloadResponse::Missing => {
-                self.check_transfer_account(&credentials)?;
-                out.record(library_database::TransferWrite::CancelDownload { hash: *content_hash });
-                return Ok(());
-            }
-            crate::BlobDownloadResponse::Content(response) => response,
-        };
-        (self.diagnostic)(format!("resolve_book phase=http_headers content_hash={content_hash} content_length={:?}", response.content_length()));
-        let total_bytes = response.content_length();
-        let transfer_checksum = response
-            .headers()
-            .get("x-bokheim-content-checksum")
-            .map(|value| value.to_str().ok().and_then(|value| value.parse::<ContentHash>().ok()).ok_or_else(|| TransferError::rejected("invalid book transfer checksum")))
-            .transpose()?
-            .ok_or_else(|| TransferError::rejected("book response is missing its transfer checksum"))?;
-        self.assets.check_write_capacity(total_bytes.unwrap_or(1))?;
-        #[cfg(target_arch = "wasm32")]
-        let mut destination = self.assets.begin_stream_write(BlobKind::Book, content_hash).await?;
         #[cfg(not(target_arch = "wasm32"))]
-        let mut destination = {
-            if entry.download_directory.is_none() {
-                return Ok(());
-            }
-            self.assets.ensure_placement_parent(placement.rel_path.as_str())?;
-            if !entry.placement_current {
-                return Ok(());
-            }
-            self.assets.begin_book_write(placement.rel_path.as_str(), content_hash).await?
+        let Some(book) = entry.book.clone() else {
+            return Ok(());
         };
-        destination.set_transfer_checksum(transfer_checksum);
-        let mut completed_bytes = 0_u64;
-        let mut last_progress = web_time::Instant::now();
-        let mut stream = response.bytes_stream();
-        loop {
-            let next = client_platform_runtime::executor::timeout(std::time::Duration::from_secs(20), stream.next()).await.map_err(|_| TransferError::retryable("stage=http_body: book download stalled for 20 seconds"))?;
-            let Some(chunk) = next else { break };
-            let chunk = chunk.map_err(TransferError::retryable)?;
-            completed_bytes = completed_bytes.saturating_add(chunk.len() as u64);
-            destination.write_all(&chunk).await?;
-            if let Some(progress) = download_progress(completed_bytes, total_bytes, &mut last_progress, web_time::Instant::now()) {
-                self.send_download_status(*content_hash, DownloadState::Downloading(progress));
-            }
-        }
-        (self.diagnostic)(format!("resolve_book phase=body_complete content_hash={content_hash} bytes={completed_bytes}"));
-        if let Err(error) = destination.verify().await {
-            self.check_transfer_account(&credentials)?;
-            out.record(library_database::TransferWrite::CancelDownload { hash: *content_hash });
-            return Err(TransferError::rejected(error.to_string()));
-        }
-        (self.diagnostic)(format!("resolve_book phase=hash_verified content_hash={content_hash}"));
-        self.check_transfer_account(&credentials)?;
+        #[cfg(target_arch = "wasm32")]
         if !entry.placement_current {
             out.record(library_database::TransferWrite::CancelDownload { hash: *content_hash });
             return Ok(());
         }
-
-        let _lease = self.assets.lease_book(content_hash).await?;
-        self.check_transfer_account(&credentials)?;
+        let credentials = self.credentials()?;
+        self.send_download_status(*content_hash, DownloadState::Downloading(DownloadProgress::ZERO));
+        let response = self.http_client.get(sync_transport::blob_endpoint(credentials.server_url(), &self.library_id, content_hash)).bearer_auth(credentials.access_token()).send().await.map_err(crate::AssetResponseError::Retryable)?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            out.record(library_database::TransferWrite::CancelDownload { hash: *content_hash });
+            return Ok(());
+        }
+        let response = crate::validate_streaming_asset_response(response)?;
+        let total_bytes = response.content_length();
+        let checksum_header = response.headers().get("x-bokheim-content-checksum").ok_or_else(|| TransferError::rejected("book response is missing its transfer checksum"))?;
+        let transfer_checksum = ContentHash::try_from(checksum_header.as_bytes()).map_err(|_| TransferError::rejected("invalid book transfer checksum"))?;
+        self.assets.check_write_capacity(total_bytes.unwrap_or(1))?;
+        #[cfg(target_arch = "wasm32")]
+        let mut destination = self.assets.begin_stream_write(BlobKind::Book, content_hash, transfer_checksum).await?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut destination = {
+            self.assets.ensure_placement_parent(&placement.rel_path)?;
+            self.assets.begin_book_write(&placement.rel_path, content_hash, transfer_checksum).await?
+        };
+        let mut completed_bytes = 0_u64;
+        let mut reported_percent = 0_u8;
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(TransferError::retryable)?;
+            completed_bytes = completed_bytes.saturating_add(chunk.len() as u64);
+            destination.write_all(&chunk).await?;
+            if let Some(total) = total_bytes.filter(|total| *total > 0) {
+                let progress = DownloadProgress::from_ratio(completed_bytes, total);
+                let percent = (progress.value() * 100.0) as u8;
+                if percent > reported_percent {
+                    reported_percent = percent;
+                    self.send_download_status(*content_hash, DownloadState::Downloading(progress));
+                }
+            }
+        }
+        let destination = destination.verify().await.map_err(|error| {
+            out.record(library_database::TransferWrite::CancelDownload { hash: *content_hash });
+            TransferError::rejected(error.to_string())
+        })?;
         #[cfg(not(target_arch = "wasm32"))]
         {
-            // A content mismatch here is the same permanent failure the
-            // checksum verify above rejects; retrying would just download the
-            // same wrong bytes again.
-            let destination = match destination.finish_book().await {
-                Ok(destination) => destination,
-                Err(error) => {
-                    self.check_transfer_account(&credentials)?;
-                    out.record(library_database::TransferWrite::CancelDownload { hash: *content_hash });
-                    return Err(TransferError::rejected(error.to_string()));
-                }
-            };
-            let Some(book) = entry.book.clone() else {
+            let destination = destination.finish_book().await.map_err(|error| {
                 out.record(library_database::TransferWrite::CancelDownload { hash: *content_hash });
-                return Ok(());
-            };
-            let published = destination.publish_snapshot(&self.assets, &book.relative_path, &book.occupied_names)?;
-            self.check_transfer_account(&credentials)?;
-            // The commit re-validates the snapshot triple and re-checks name
-            // conflicts; an obsolete placement is rejected there. The event
-            // below is optimistic: a rejected commit leaves the placement
-            // untouched and the next planning pass retries.
+                TransferError::rejected(error.to_string())
+            })?;
+            let published = destination.publish_snapshot(&self.assets, &book.relative_path, &book.occupied_names, book.format == book_model::BookFormat::Mp3Folder)?;
+            // Commit revalidates the placement and name conflicts before applying the result.
             out.record(library_database::TransferWrite::CompleteDownloadedBook {
-                completion: NativeBookCompletion { snapshot: book, name: published.name, relative_path: published.relative_path, published: published.published, fingerprint: published.fingerprint },
+                completion: NativeBookCompletion { snapshot: book, publication: published, checksum: transfer_checksum, size_bytes: completed_bytes },
                 thumbnail_set_exists: self.assets.thumbnail_set_exists(content_hash)?,
             });
         }
@@ -237,31 +181,5 @@ where
             out.record(library_database::TransferWrite::CompleteLocalBookRequest { hash: *content_hash });
         }
         Ok(())
-    }
-}
-
-/// Validate identity using the connection that will commit the result. Token
-/// refresh for the same account does not discard otherwise valid work.
-pub fn validate_account(original: &sync_transport::SyncCredentials, current: impl FnOnce() -> Result<sync_transport::SyncCredentials, TransferError>) -> Result<(), TransferError> {
-    if current()?.server_url() != original.server_url() {
-        return Err(TransferError::retryable("credentials changed during asset transfer"));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use sync_transport::SyncCredentials;
-
-    #[test]
-    fn account_validation_preserves_refresh_and_rejects_server_switch_before_credentials() {
-        let server = "https://sync.example.test".parse().unwrap();
-        let original = SyncCredentials::new(server, "old-token");
-
-        // A refreshed token for the same server preserves the work.
-        validate_account(&original, || Ok(SyncCredentials::new(original.server_url().as_str().parse().unwrap(), "new-token"))).unwrap();
-        assert!(matches!(validate_account(&original, || Err(TransferError::AuthenticationRequired)), Err(TransferError::AuthenticationRequired)));
-        assert!(matches!(validate_account(&original, || Ok(SyncCredentials::new("https://other.example.test".parse().unwrap(), "new-token"))), Err(TransferError::Retryable(_))));
     }
 }

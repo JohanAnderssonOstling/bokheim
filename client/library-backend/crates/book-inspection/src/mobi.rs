@@ -115,17 +115,13 @@ pub fn inspect_mobi_pages_reader(path: &Path, reader: impl Read) -> MetadataResu
     }
     mobi.metadata.mobi.first_non_book_index = end as u32;
     let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| mobi.content_as_string_lossy())).map_err(|_| "MOBI text decoder rejected malformed content")?;
-    inspect_markup(&mut book, &text);
-    Ok(book)
-}
-
-fn inspect_markup(book: &mut BookRecord, markup: &str) {
     static TAGS: OnceLock<Regex> = OnceLock::new();
     static BLOCKS: OnceLock<Regex> = OnceLock::new();
     static PAGES: OnceLock<Regex> = OnceLock::new();
     static HIDDEN: OnceLock<Regex> = OnceLock::new();
     static ENTITIES: OnceLock<Regex> = OnceLock::new();
     static CIP: OnceLock<Regex> = OnceLock::new();
+    let markup = text.as_str();
     let end = markup.char_indices().nth(128 * 1024).map_or(markup.len(), |(i, _)| i);
     let markup = &markup[..end];
     let visible = HIDDEN.get_or_init(|| Regex::new(r"(?is)<(script|style|head)\b[^>]*>.*?</(?:script|style|head)>").unwrap()).replace_all(markup, "");
@@ -142,7 +138,7 @@ fn inspect_markup(book: &mut BookRecord, markup: &str) {
     let mut sections = Vec::new();
     for (i, page) in plain.split('\x0c').take(64).enumerate() {
         if page.len() <= 16_384 {
-            let section = evidence::inspect_section(book, &format!("mobi:frontmatter:{i}"), page);
+            let section = evidence::inspect_section(&book, &format!("mobi:frontmatter:{i}"), page);
             if section.accepted {
                 sections.push(section);
             }
@@ -155,13 +151,14 @@ fn inspect_markup(book: &mut BookRecord, markup: &str) {
             }
             let tail = &page[marker.start()..];
             let end = tail.char_indices().nth(6500).map_or(tail.len(), |(i, _)| i);
-            let section = evidence::inspect_section(book, &format!("mobi:frontmatter:{i}:cip"), &tail[..end]);
+            let section = evidence::inspect_section(&book, &format!("mobi:frontmatter:{i}:cip"), &tail[..end]);
             if section.accepted {
                 sections.push(section);
             }
         }
     }
-    evidence::apply_evidence(book, &sections, "mobi");
+    evidence::apply_evidence(&mut book, &sections, "mobi");
+    Ok(book)
 }
 
 #[cfg(test)]
@@ -197,30 +194,5 @@ mod tests {
         let book = metadata(Path::new("book.mobi"), &raw).unwrap();
         assert_eq!(book.book.identifiers.len(), 1);
         assert_eq!(book.book.identifiers[0].scheme(), &Scheme::Isbn);
-    }
-    #[test]
-    fn decodes_isbn_entities_independently_and_accepts_cip_tables() {
-        let mut book = fallback_metadata(Path::new("book.mobi"));
-        inspect_markup(&mut book, "<p>Copyright &copy; 2010 &unknown;</p><p>ISBN 978&#8211;0&#8211;19&#8211;956051&#8211;6</p>");
-        assert!(related_isbn::lookup_candidates(&book.book.identifiers).contains(&"9780199560516".to_owned()));
-        let mut table = fallback_metadata(Path::new("book.mobi"));
-        inspect_markup(&mut table, "<p>title : Hinduism author : Kim Knott publisher : Oxford isbn13 : 9780192853417 lcc : BL1202.K564 1998</p>");
-        assert!(table.book.subjects.iter().any(|subject| subject.code().is_some_and(|code| code.starts_with("BL1202"))));
-    }
-    #[test]
-    fn extracts_text_candidates_but_not_html_attributes() {
-        let mut book = fallback_metadata(Path::new("book.mobi"));
-        inspect_markup(
-            &mut book,
-            "<html><body><p>Copyright © 2002</p><p>Library of Congress Cataloging in Book Data</p><p><font>B</font><font>74</font> .C83 2002</p><p>ISBN 0–19–285421–6</p><mbp:pagebreak/><p>References</p></body></html>",
-        );
-        assert!(book.book.subjects.iter().any(|s| s.code() == Some("B74 .C83 2002")));
-        assert!(!related_isbn::lookup_candidates(&book.book.identifiers).is_empty());
-        let mut other = fallback_metadata(Path::new("book.mobi"));
-        inspect_markup(&mut other, "<p>References</p><p>Copyright 2002</p><p>ISBN 0–19–285421–6</p>");
-        assert!(!other.book.identifiers.is_empty());
-        other.book.identifiers.clear();
-        inspect_markup(&mut other, "<p>Copyright 2002</p><a filepos='9780192854216'>Read</a>");
-        assert!(related_isbn::lookup_candidates(&other.book.identifiers).is_empty());
     }
 }

@@ -1,21 +1,28 @@
 //! Group-aware paginator with declared child sizes.
 
+use std::cell::Cell;
 mod element;
 mod geometry;
+mod identity;
 mod policy;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 use std::time::Duration;
 
 #[cfg(feature = "mobile")]
 use gpui::TouchPhase;
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Bounds, Context, ElementId, EventEmitter, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Window, div, ease_in_out};
+use gpui::{AnyElement, App, Bounds, Context, ElementId, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Window, div, ease_in_out};
 use web_time::Instant;
 
 use element::PaginatorElement;
-pub(crate) use policy::{PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy, author_index_entry_policy, author_index_letter_sizing, book_card_policy, browse_section_card_policy, browse_section_item_policy, graph_cover_policy, shelf_card_policy, shelf_rows_policy};
+use identity::ItemPosition;
+pub(crate) use identity::PaginatorPosition;
+pub(crate) use policy::{
+    PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy, author_index_entry_policy, author_index_letter_sizing, book_card_policy, browse_section_card_policy, browse_section_item_policy, graph_cover_policy, shelf_card_policy,
+    shelf_rows_policy,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PaginatorAxis {
@@ -35,7 +42,7 @@ pub(crate) enum CursorMove {
 type RenderChild = dyn Fn(&PaginatorState, &mut Window, &mut App) -> AnyElement;
 type PrepareChild = dyn Fn(&mut Window, &mut App);
 type ActivateChild = dyn Fn(&mut Window, &mut App);
-type ContextMenuHandler = dyn Fn(Option<usize>, Point<Pixels>, &mut Window, &mut App);
+type ContextMenuHandler = dyn Fn(Option<SharedString>, Point<Pixels>, &mut Window, &mut App);
 
 const PAGE_TRANSITION_DURATION: Duration = Duration::from_millis(140);
 /// How far a press has to travel before it is a rubber band rather than a
@@ -109,22 +116,42 @@ impl PaginatorSwipe {
 pub(crate) struct PaginatorState {
     pub(crate) cursor: Option<usize>,
     pub(crate) selection: BTreeSet<usize>,
-    /// Whether a rubber band is sweeping. See [`PaginatorMarqueeChanged`].
+    /// Whether a rubber band is sweeping; children suppress hover during it.
     pub(crate) marquee: bool,
+    data: Rc<PaginatorData>,
+}
+
+impl PaginatorState {
+    pub(crate) fn is_selected(&self, id: &SharedString) -> bool {
+        self.data.indices.get(id).is_some_and(|index| self.selection.contains(index))
+    }
+    pub(crate) fn is_focused(&self, id: &SharedString) -> bool {
+        self.cursor.and_then(|index| self.data.children.get(index)).and_then(|child| child.id.as_ref()) == Some(id)
+    }
+    pub(crate) fn target_ids(&self, id: &SharedString) -> Vec<SharedString> {
+        self.data.target_ids(id, &self.selection)
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct PaginatorChild {
+    id: Option<SharedString>,
     pub(super) activate: Option<Rc<ActivateChild>>,
     pub(super) prepare: Option<Rc<PrepareChild>>,
     pub(super) render: Rc<RenderChild>,
     intrinsic_width: Option<Rc<dyn Fn(&mut Window, &mut App) -> Pixels>>,
-    measured_width: Rc<std::cell::Cell<Pixels>>,
+    measured_width: Rc<Cell<Pixels>>,
 }
 
 impl PaginatorChild {
     pub(crate) fn new(render: impl Fn(&PaginatorState, &mut Window, &mut App) -> AnyElement + 'static) -> Self {
-        Self { activate: None, prepare: None, render: Rc::new(render), intrinsic_width: None, measured_width: Rc::new(std::cell::Cell::new(Pixels::ZERO)) }
+        Self { id: None, activate: None, prepare: None, render: Rc::new(render), intrinsic_width: None, measured_width: Rc::new(Cell::new(Pixels::ZERO)) }
+    }
+
+    /// Stable identity used to retain selection and focus when results reorder.
+    pub(crate) fn with_id(mut self, id: impl Into<SharedString>) -> Self {
+        self.id = Some(id.into());
+        self
     }
 
     /// Measures content without constructing off-page interactive children.
@@ -192,13 +219,29 @@ impl GroupSpan {
     }
 }
 
+#[derive(Default)]
 pub(super) struct PaginatorData {
+    indices: HashMap<SharedString, usize>,
     headers: Vec<Option<Rc<PaginatorHeader>>>,
     pub(super) groups: Vec<GroupSpan>,
     pub(super) children: Vec<PaginatorChild>,
 }
 
 impl PaginatorData {
+    fn target_ids(&self, id: &SharedString, selection: &BTreeSet<usize>) -> Vec<SharedString> {
+        if self.indices.get(id).is_some_and(|index| selection.contains(index)) { selection.iter().filter_map(|&index| self.children.get(index)?.id.clone()).collect() } else { vec![id.clone()] }
+    }
+
+    fn position(&self, index: usize) -> Option<ItemPosition> {
+        Some(ItemPosition { id: self.children.get(index)?.id.clone(), index })
+    }
+    fn resolve(&self, position: &ItemPosition) -> Option<usize> {
+        match &position.id {
+            Some(id) => self.indices.get(id).copied(),
+            None => (!self.children.is_empty()).then_some(position.index.min(self.children.len().saturating_sub(1))),
+        }
+    }
+
     fn new(groups: impl IntoIterator<Item = PaginatorGroup>) -> Self {
         let mut spans = Vec::new();
         let mut headers = Vec::new();
@@ -216,26 +259,14 @@ impl PaginatorData {
             headers.push(header);
             spans.push(GroupSpan { policy: group.policy, header_sizing, start, end: children.len() });
         }
-        Self { groups: spans, children, headers }
+        let indices = children.iter().enumerate().filter_map(|(index, child)| child.id.clone().map(|id| (id, index))).collect();
+        Self { indices, groups: spans, children, headers }
     }
 
     pub(super) fn group_index_for_child(&self, child_index: usize) -> Option<usize> {
         self.groups.iter().position(|group| child_index >= group.start && child_index < group.end)
     }
 }
-
-/// The rubber-band selection changed. Carries nothing: the page reads the set
-/// back, the way it reads the cursor.
-pub(crate) struct PaginatorSelectionChanged;
-
-/// A rubber-band drag started or finished.
-///
-/// The band sweeps the pointer across every child it selects, and a child that
-/// answers that with its hover style reports the pointer's path rather than the
-/// selection — the whole row lights up and drops back as the band moves on.
-/// Children suppress hover while this is running, so only the band itself says
-/// what it has picked up.
-pub(crate) struct PaginatorMarqueeChanged;
 
 /// A rubber band in flight. Both points are in window coordinates, which is
 /// what the element reports its child bounds in.
@@ -347,7 +378,7 @@ impl Paginator {
 
     /// Handles a secondary click on the selection, with the child clicked, or
     /// on the space between children, with `None`.
-    pub(crate) fn on_context_menu(mut self, handler: impl Fn(Option<usize>, Point<Pixels>, &mut Window, &mut App) + 'static) -> Self {
+    pub(crate) fn on_context_menu(mut self, handler: impl Fn(Option<SharedString>, Point<Pixels>, &mut Window, &mut App) + 'static) -> Self {
         self.on_context_menu = Some(Rc::new(handler));
         self
     }
@@ -367,15 +398,33 @@ impl Paginator {
         self
     }
 
+    pub(crate) fn target_ids(&self, id: &SharedString) -> Vec<SharedString> {
+        self.data.target_ids(id, &self.selection)
+    }
+
+    pub(crate) fn child_id(&self, index: usize) -> Option<&SharedString> {
+        self.data.children.get(index)?.id.as_ref()
+    }
+
+    pub(crate) fn position(&self) -> PaginatorPosition {
+        PaginatorPosition { cursor: self.cursor.and_then(|index| self.data.position(index)), anchor: self.data.position(self.child_anchor()), selection: self.selection.iter().filter_map(|&index| self.child_id(index).cloned()).collect() }
+    }
+
+    pub(crate) fn restore_position(&mut self, position: &PaginatorPosition, cx: &mut Context<Self>) {
+        self.cursor = position.cursor.as_ref().and_then(|cursor| self.data.resolve(cursor));
+        self.child_offset = position.anchor.as_ref().and_then(|anchor| self.data.resolve(anchor)).unwrap_or_else(|| position.anchor.as_ref().map_or(0, |anchor| anchor.index.min(self.data.children.len().saturating_sub(1))));
+        self.selection = position.selection.iter().filter_map(|id| self.data.indices.get(id).copied()).collect();
+        cx.notify();
+    }
+
     /// Replaces the children while staying where the reader was.
     ///
     /// A background refresh — a finished download, a scanner batch — is not a
-    /// navigation, so it must not send the reader back to the first page. The
-    /// offset and cursor are kept and clamped, because the list may be one item
-    /// longer than it was.
+    /// navigation, so it must not send the reader back to the first page.
+    /// Identified children retain their cursor and selection across reordering.
+    /// Other children retain the positional offset and cursor.
     pub(crate) fn refresh_groups(&mut self, groups: impl IntoIterator<Item = PaginatorGroup>, cx: &mut Context<Self>) {
-        let child_offset = self.child_offset;
-        let cursor = self.cursor;
+        let position = self.position();
         let direction = self.direction;
         // A page turn already in flight survives too, for the same reason. The
         // keystroke that walks the cursor onto the next page is followed by a
@@ -386,9 +435,7 @@ impl Paginator {
         let transition = self.transition.take();
         let content_height = self.content_height;
         self.set_groups(groups, cx);
-        let last = self.data.children.len().saturating_sub(1);
-        self.child_offset = child_offset.min(last);
-        self.cursor = cursor.map(|cursor| cursor.min(last));
+        self.restore_position(&position, cx);
         self.direction = direction;
         self.transition = transition;
         self.content_height = content_height;
@@ -443,10 +490,7 @@ impl Paginator {
         // The children are different books now, so a retained index would point
         // the cursor at something the reader never put it on.
         self.cursor = None;
-        if !self.selection.is_empty() {
-            self.selection.clear();
-            cx.emit(PaginatorSelectionChanged);
-        }
+        self.selection.clear();
         self.marquee = None;
         self.child_bounds = Rc::new(Vec::new());
         self.content_height = None;
@@ -550,7 +594,6 @@ impl Paginator {
         }
         self.selection.clear();
         self.marquee = None;
-        cx.emit(PaginatorSelectionChanged);
         cx.notify();
         true
     }
@@ -576,23 +619,15 @@ impl Paginator {
                 return;
             }
             marquee.active = true;
-            cx.emit(PaginatorMarqueeChanged);
         }
         let band = marquee.bounds();
-        let picked = self.child_bounds.iter().filter(|(_, bounds)| bounds.intersects(&band)).map(|(index, _)| *index).collect::<BTreeSet<_>>();
-        if picked != self.selection {
-            self.selection = picked;
-            cx.emit(PaginatorSelectionChanged);
-        }
+        self.selection = self.child_bounds.iter().filter(|(_, bounds)| bounds.intersects(&band)).map(|(index, _)| *index).collect();
         cx.notify();
     }
 
     /// Ends the drag, keeping whatever it picked up.
     pub(super) fn end_marquee(&mut self, cx: &mut Context<Self>) {
-        if let Some(marquee) = self.marquee.take() {
-            if marquee.active {
-                cx.emit(PaginatorMarqueeChanged);
-            }
+        if self.marquee.take().is_some() {
             cx.notify();
         }
     }
@@ -601,8 +636,7 @@ impl Paginator {
         self.marquee.filter(|marquee| marquee.active).map(|marquee| marquee.bounds())
     }
 
-    /// Whether a rubber-band drag is currently sweeping. See
-    /// [`PaginatorMarqueeChanged`] for why a child cares.
+    /// Whether a rubber-band drag is sweeping, suppressing child hover.
     pub(crate) fn marquee_active(&self) -> bool {
         self.marquee.is_some_and(|marquee| marquee.active)
     }
@@ -804,7 +838,6 @@ impl Paginator {
         self.cancel_page_transition();
         cx.notify();
     }
-
 
     pub(crate) fn is_empty(&self) -> bool {
         self.data.children.is_empty()
@@ -1024,9 +1057,6 @@ impl Paginator {
     }
 }
 
-impl EventEmitter<PaginatorSelectionChanged> for Paginator {}
-impl EventEmitter<PaginatorMarqueeChanged> for Paginator {}
-
 impl Render for Paginator {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let id = ElementId::from(self.id.clone());
@@ -1065,7 +1095,7 @@ impl Render for Paginator {
             Some(_) => (0.0, 0.0),
             None => rendered_transition.as_ref().and_then(|(transition, progress)| progress.map(|progress| page_transition_vector(transition.axis, page_transition_offsets(transition.direction, progress).1))).unwrap_or((0.0, 0.0)),
         };
-        let state = Rc::new(PaginatorState { cursor: self.cursor, selection: self.selection.clone(), marquee: self.marquee_active() });
+        let state = Rc::new(PaginatorState { cursor: self.cursor, selection: self.selection.clone(), marquee: self.marquee_active(), data: self.data.clone() });
         let incoming = PaginatorElement::new(
             ElementId::named_usize(format!("{id}-layout"), self.children_revision),
             cx.entity().downgrade(),
@@ -1176,4 +1206,57 @@ pub(super) struct PrefetchKey {
     pub(super) width: Pixels,
     pub(super) height: Pixels,
     pub(super) rem_size: Pixels,
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    use gpui::{AppContext, TestAppContext, px};
+
+    fn groups(ids: &[&str]) -> Vec<PaginatorGroup> {
+        let children = ids.iter().map(|id| PaginatorChild::new(|_, _, _| div().into_any_element()).with_id((*id).to_owned()));
+        vec![PaginatorGroup::new(PaginatorGroupPolicy::new(PaginatorWidthPolicy::pixels(px(100.0)), PaginatorSizing::pixels(px(100.0)), px(0.0)), children)]
+    }
+
+    #[gpui::test]
+    fn marquee_selects_items_and_keeps_selection_after_release(cx: &mut TestAppContext) {
+        let paginator = cx.new(|_| Paginator::new("test", groups(&["book:a", "book:b"])));
+        paginator.update(cx, |paginator, cx| {
+            paginator.set_child_bounds(vec![(0, Bounds::new(gpui::point(px(0.0), px(0.0)), gpui::size(px(100.0), px(100.0)))), (1, Bounds::new(gpui::point(px(150.0), px(0.0)), gpui::size(px(100.0), px(100.0))))]);
+            paginator.begin_marquee(gpui::point(px(1.0), px(1.0)), cx);
+            paginator.drag_marquee(gpui::point(px(2.0), px(2.0)), cx);
+            assert!(!paginator.marquee_active());
+            assert!(paginator.selection.is_empty());
+            paginator.drag_marquee(gpui::point(px(90.0), px(90.0)), cx);
+            assert!(paginator.marquee_active());
+            assert_eq!(paginator.selection, BTreeSet::from([0]));
+            paginator.drag_marquee(gpui::point(px(200.0), px(90.0)), cx);
+            assert_eq!(paginator.selection, BTreeSet::from([0, 1]));
+            paginator.end_marquee(cx);
+            assert!(!paginator.marquee_active());
+            assert_eq!(paginator.selection, BTreeSet::from([0, 1]));
+            assert!(paginator.clear_selection(cx));
+            assert!(paginator.selection.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn refresh_retains_selected_items_and_cursor_but_navigation_clears_them(cx: &mut TestAppContext) {
+        let paginator = cx.new(|_| Paginator::new("test", groups(&["folder:a", "book:b", "book:c"])));
+        paginator.update(cx, |paginator, cx| {
+            paginator.cursor = Some(1);
+            paginator.child_offset = 1;
+            paginator.selection = BTreeSet::from([0, 1]);
+            paginator.refresh_groups(groups(&["book:c", "folder:new", "folder:a", "book:b"]), cx);
+            assert_eq!(paginator.cursor, Some(3));
+            assert_eq!(paginator.child_offset, 3);
+            assert_eq!(paginator.selection, BTreeSet::from([2, 3]));
+            paginator.refresh_groups(groups(&["folder:a", "book:c"]), cx);
+            assert_eq!(paginator.cursor, None);
+            assert_eq!(paginator.selection, BTreeSet::from([0]));
+            paginator.set_groups(groups(&["folder:a", "book:c"]), cx);
+            assert_eq!(paginator.cursor, None);
+            assert!(paginator.selection.is_empty());
+        });
+    }
 }

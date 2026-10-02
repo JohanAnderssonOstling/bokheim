@@ -1,5 +1,6 @@
 //! EPUB search visibility, debounce, and whole-book scanning.
 
+use crate::invalidation::notify;
 use std::time::Duration;
 
 use gpui::{Context, Window};
@@ -20,7 +21,7 @@ impl ReaderView {
         self.with_renderer(cx, |renderer, cx| {
             renderer.apply(RendererCommand::ActivateSearch, cx);
         });
-        crate::invalidation::notify(cx, Component::ReaderShell, "search_visibility_changed");
+        notify(cx, Component::ReaderShell, "search_visibility_changed");
     }
 
     pub(super) fn queue_search(&mut self, query: String, cx: &mut Context<Self>) {
@@ -80,6 +81,6 @@ impl SearchBarTarget for ReaderView {
             renderer.apply(RendererCommand::DeactivateSearch, cx);
         });
         self.focus_document(window, cx);
-        crate::invalidation::notify(cx, Component::ReaderShell, "search_closed");
+        notify(cx, Component::ReaderShell, "search_closed");
     }
 }

@@ -8,8 +8,8 @@ publish = false
 workspace = true
 
 [dependencies]
+book-model = { path = "../book-model" }
 unicode-normalization.workspace = true
-prost = "0.14.4"
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

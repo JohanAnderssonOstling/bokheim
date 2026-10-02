@@ -6,16 +6,13 @@ portraits, websites, or book content.
 
 The current run is on the metadata server, `192.168.1.68`, so laptop suspension
 or disconnection does not interrupt it. It uses two bzip2 decoding threads,
-normal Python execution with the orjson parser, and one Zstandard compression
+normal Python execution with the standard-library json parser, and one Zstandard compression
 thread. The job runs at nice level 10. No Rust binary is built or launched.
 
 ## Runtime
 
 - Python 3.13 on the server.
 - `indexed_bzip2` 1.7.0 in `/home/johan/lib/indexed-bzip2-1.7.0`.
-- `orjson` 3.12.0 in `/home/johan/lib/wikidata-extraction`, installed from the
-  published CPython 3.13 manylinux wheel after validating its PyPI SHA-256:
-  `1c680706fc8396d95e7c4c1f9482563f552137aef91b57237a3ad5aaf64629df`.
 - System `zstd`.
 - Deployed scripts in `/home/johan/bin/wikidata-extraction/`.
 

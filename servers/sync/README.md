@@ -86,46 +86,7 @@ return the same `202 Accepted` response. Disposable-domain policy rejection and
 malformed email/password inputs return `400` because they reveal no account
 existence.
 
-## Administrator dashboard
-
-The dedicated administrator web application is deployed separately from the
-GPUI WebAssembly frontend and exposed at `/admin`. Configure it
-with `BOKHEIM_ADMIN_EMAIL` and either `BOKHEIM_ADMIN_PASSWORD` or the
-`admin_password` systemd credential. Administrator status is stored explicitly
-on the account and checked from PostgreSQL on every dashboard request; the
-ordinary configured test account is not an administrator.
-
-The dashboard stores 90 days of minute aggregates containing only bounded
-route categories, HTTP method and status class, counts, declared transfer
-bytes, and latency totals. For incident response, a separate request log keeps
-the exact trusted client IP, bounded route category, method, status class,
-declared bytes, and latency for seven days. Neither store contains raw paths,
-account or email identifiers, headers, tokens, query strings, or bodies. Dashboard reads are
-persistently rate-limited. The first read of each dashboard resource by an
-administrator in an hour is appended to a database-enforced immutable audit
-log. Browser reads require the secure session cookie and
-`Sec-Fetch-Site: same-origin`; bearer authentication remains available for
-trusted operational clients. Admin responses are the only JSON API in this
-service; synchronization and account contracts remain versioned binary wire
-messages.
-
-`GET /api/admin/services` collects bounded JSON operational snapshots from the
-local authority and metadata services for the same authenticated dashboard.
-The default targets are `http://127.0.0.1:8090/` and
-`http://127.0.0.1:8091/`. `BOKHEIM_ADMIN_AUTHORITY_URL` and
-`BOKHEIM_ADMIN_METADATA_URL` may override them with literal loopback HTTP base
-URLs, or an empty value may disable a section. Redirects, non-loopback targets,
-credentials, queries, responses over 1 MiB, and requests exceeding five seconds
-are rejected. The browser never connects to either internal service directly.
-
-Successful authenticated token use is batched into one lifetime activity row
-per account and one aggregate row per active account per UTC day. The dashboard
-reports daily, weekly, and monthly active accounts; new verified accounts;
-first-time and returning accounts; and whether active accounts used sync or
-only authenticated. It also exposes a 30-day aggregate history without account
-identities. Daily account rows expire after 90 days, and administrator-dashboard
-reads do not count as engagement. Registrations that have not been verified and
-failed authentication attempts do not count as account use.
+## Configured test account
 
 For development deployments, `BOKHEIM_TEST_USER_EMAIL` together with either
 `BOKHEIM_TEST_USER_PASSWORD` or the `test_user_password` systemd credential
@@ -171,59 +132,61 @@ Uploads require an exact `Content-Length`. The server reserves that many bytes
 before storage, validates the completed asset, then atomically converts the
 reservation into used bytes. Failed and abandoned reservations are released;
 removing the user's final synchronized reference refunds the charge.
-Synchronized values are canonical PostgreSQL state, not a JSONB event archive.
-Each domain table owns its complete value and synchronization metadata: the
-total `VersionKey`, actor identity, and a globally ordered `server_seq`. The
-server stores and relays that state; it does not interpret it. Directories
-and physical placements keep a handful of typed columns because the server
-itself needs them (referential existence checks, and content-hash deltas
-computed transactionally for blob quota accounting); every other domain's
-payload -- book lifecycle, metadata, and annotations -- is an opaque
-wire-encoded `value` column the server never reads
-inside of. Adding or changing a synchronized field on those domains never
-touches this schema; only the client interprets what is inside. Pulls merge
-the indexed directory, book-lifecycle, physical-placement, reading-position,
-annotation and metadata tables. Winning LWW updates
-redraw the global sequence so offline clients receive the new value, while
-retries and losing versions do not grow storage or redraw the cursor. A push
-therefore needs only one row write, with no shared envelope join.
+Synchronized values are canonical PostgreSQL state, with one `sync_state` row
+per logical cell. Every kind, including reading positions, shares this table.
+Rows retain opaque value bytes, the state address, book ownership, the original
+four-part `VersionKey`, and a globally ordered `server_seq`. The server recognizes
+book lifecycles for quota and lifecycle-first delivery; clients interpret the payload.
+Winning updates allocate a delivery revision. Exact retries leave the committed
+head unchanged; losing updates republish the stored winner so the sender converges.
+
 Every synchronized wall-clock field uses the `UnixMillis` protocol type. It is
 encoded as a plain integer but is explicitly measured in Unix milliseconds and
 bounded to the signed 64-bit range shared by PostgreSQL and SQLite. The server
 rejects LWW clocks beyond the allowed future-skew window.
-Per-library reading and general-state revision heads are maintained by
-transition-table statement triggers. A scanner batch advances each head once
-per non-empty typed-state statement rather than rewriting the same head row for
-every book property in that statement.
-
-A newly scanned book publishes two state cells: lifecycle and physical
-placement. Lifecycle carries the title and ordered author credits as initializer metadata, avoiding
-a redundant metadata mutation for every ingest. It only fills a client row that
-does not have metadata yet. Subsequent title or author-list edits—including changes
-made while reactivating an existing book—continue to use the independent
-metadata register, so those edits cannot accidentally change deletion or
-resurrection ordering.
-
-Physical placement is a path register: additions compete for a directory/name
-path and removals affect only its current occupant. The canonical placement
-upsert returns its winning old/new content hashes directly, so per-user blob
-reference counts are updated without a second path projection. Ordinary state
-updates such as reading positions do not touch placement or blob references.
+A transition-table statement trigger maintains only the per-library committed
+`current_revision`. The library lock is held before revision allocation and through
+commit. Pulls deliver lifecycles before fields using the lifecycle and field cursors.
+A purge removes every field owned by its book; placement registers describe
+membership in a directory, and ordinary field edits do not change quota references.
 
 Every typed account, library, preference, asset-manifest, and
 synchronization body negotiates the versioned
-`application/vnd.bokheim+protobuf; version=18` representation. The wire body
+`application/vnd.bokheim+protobuf; version=23` representation. The wire body
 is a versioned protobuf envelope whose value preserves the Serde data model
 and numeric enum variants. Bodies use identity encoding and retain the 8 MiB
 request limit. JSON is neither accepted nor returned by this protocol;
 unsupported media types, missing version negotiation, unsupported versions, and
-compressed bodies fail before application logic runs. Raw book and thumbnail
-endpoints continue to transfer their exact validated bytes.
-Mutation `value` fields use the explicitly typed protobuf `MutationValue`
-schema. The PostgreSQL relay stores those protobuf bytes without interpreting
-them, keeping the service independent of client domain models. Protobuf field
-numbers and enum values are stable from protocol version 14 onward; compatible
-changes are additive and removed field numbers must never be reused.
+compressed bodies fail before application logic runs. Book endpoints and thumbnail
+GETs continue to transfer their exact bytes. Thumbnail PUTs use the typed pair
+contract described below.
+Library state values serialize their canonical domain types directly through
+Serde into the generic protobuf envelope. There is no parallel protobuf domain
+model or separate kind catalogue: entry kinds come from the canonical enum's
+Serde variant names. The PostgreSQL relay retains opaque entry bytes, their state address, the
+book each value belongs to (`content_hash`), and the original winning version.
+A book lifecycle holds its book's bytes for quota unless its version is a
+purge; the relay needs no other kind-specific facts. Publications add the publisher sequence for exact retry acknowledgements; deliveries add the server
+revision for pagination. Forwarding never changes the original winning version.
+Typed publications and versioned state define their wire serialization directly;
+callers do not construct parallel transport envelopes. Book records contain the
+canonical `BookDetails` plus their separately updated description. Reader
+annotations contain canonical `AnnotationState`, which composes `AnnotationDetail`
+with its book identity, modification time, and deletion flag. Stored detail blobs
+serialize that same detail type. Existing flat JSON and positional binary layouts
+remain readable and writable without converting between mirrored value types.
+
+Protocol 23 requires clients and servers to upgrade together. Clients retain a
+read-only decoder for historical typed payloads already stored by the relay;
+new writes use direct domain serialization. SQLite schema 22 removes UUID identities
+from the outbox and authored versions. Queue generations use the publisher's monotonic
+sequence; forwarded state retains its original authored version. Push responses list
+only rejected sequences, and clients acknowledge exactly the submitted sequences
+that were accepted or permanently rejected. Transient rejections remain queued.
+Server schema 4 merges reading state into `sync_state` and removes unused channel
+revision columns. The explicit upgrade command applies schema 1's owner migration,
+schema 3's UUID removal, and schema 4's row-preserving table merge as needed.
+Unfrozen queue entries obtain their payload and version from canonical state.
 Push and exchange pages are bounded to 1,000 mutations and clients also stop at
 the 4 MiB encoded-mutation target, whichever limit is reached first.
 Pull pages may cut across directory dependencies. SQLite clients therefore
@@ -234,6 +197,27 @@ becoming visible before a dependency delivered by a later page.
 
 Book and thumbnail routes retain their original bytes, content hashes, content lengths,
 and byte-range semantics and never pass through the sync codec.
+
+Books upload through individual `PUT /api/libraries/{library_id}/blobs/{hash}`
+requests with an exact `Content-Length` and `x-bokheim-content-checksum`.
+Upload negotiation remains batched, but file bytes have no batch framing or
+book-batch endpoint. Native clients run at most four independent PUTs at a time;
+each file commits and retries separately, regardless of its size. Browser
+clients retain their individual OPFS upload path. Quota reservations and server
+staging limits apply to each PUT.
+
+Thumbnail upload and batch download entries carry both `bytes` (the full-size
+image) and `browse_bytes` (the browse-size image), keyed by book identity. Clients
+generate both variants. The server stores them in one `.pair` file published by
+atomic rename, and presence revisions describe that entire pair. Downloads
+return the stored images without resizing. Each variant is limited to 4 MiB;
+batches allow 16 pairs and 128 MiB of image bytes, plus 1 MiB of wire overhead.
+A single-thumbnail PUT accepts the same typed pair entry and requires its book
+identity to match the URL; GET and HEAD still expose the full-size JPEG.
+
+Existing loose thumbnail files are not treated as complete pairs by presence
+or batch download. Clients with the source image reupload both variants; no
+book-to-cover-hash mapping or server-side image conversion is introduced.
 
 Upload and download traffic have independent, work-conserving deficit-round-
 robin schedulers. Scheduling is by authenticated user rather than connection,
@@ -295,11 +279,12 @@ steady-state database throughput.
 
 Notification WebSockets revalidate their access token every 30 seconds and
 before sending account notifications or heartbeat pings. Expired, logged-out,
-reset, or revoked sessions are closed. Browser connections authenticated by
-the secure access-token cookie must supply an HTTP(S) `Origin` whose authority
-exactly matches `Host` (and whose scheme matches Caddy's
-`X-Forwarded-Proto`). Native clients authenticate with a bearer token and do
-not need an `Origin` header. The revalidation interval accepts 5–300 seconds.
+reset, or revoked sessions are closed. Native clients authenticate with an
+Authorization bearer token. Browser WebSockets send the token through the
+`bearer.*` subprotocol on `/api/notifications`; credentials are never included
+in the URL or echoed as the negotiated subprotocol. The revalidation interval
+accepts 5–300 seconds. HTTP requests use the same bearer-token API on every client;
+there are no separate cookie-authenticated `auth/web/*` routes.
 
 ## Asset storage configuration
 
@@ -371,15 +356,3 @@ by `BOKHEIM_STRESS_BLOB_BYTES`. All values are bounded, and the workload binary
 refuses non-loopback URLs so it cannot accidentally load-test the public service.
 
 `BOKHEIM_STRESS_MODE=ingest` uses the production protobuf sync transport.
-
-`BOKHEIM_STRESS_MODE=inventory` measures complete library state-inventory
-reconciliation through the production HTTP and PostgreSQL path. It profiles
-all-present, one-missing, and one-percent-missing inventories, validates every
-returned cell, and reports cycle/request latency plus wire volume. Configure it
-with `BOKHEIM_INVENTORY_CELLS` (default 10,000) and
-`BOKHEIM_INVENTORY_REPETITIONS` (default 5):
-
-```sh
-BOKHEIM_STRESS_MODE=inventory BOKHEIM_INVENTORY_CELLS=100000 \
-    servers/sync/tests/run_server_stress.sh
-```

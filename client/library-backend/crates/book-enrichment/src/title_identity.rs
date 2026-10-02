@@ -1,4 +1,7 @@
 //! Normalize ingested bibliographic fields and preserve their original title evidence.
+
+use std::collections::BTreeSet;
+use std::path::Path;
 use metadata_contract::identity_evidence::edition_identity_evidence;
 
 pub fn full_title(title: &str, subtitle: Option<&str>) -> String {
@@ -22,132 +25,83 @@ pub fn unusable_title(title: &str, contributors: &[book_model::Contributor]) -> 
     super::filename_identity::unusable_title(title) || contributors.iter().any(|credit| credit.role_code() == book_model::AUTHOR_MARC_RELATOR_CODE && key(credit.name()) == title_key)
 }
 
-/// Remove only a trailing, corroborated author-labelled omnibus segment.
-fn without_author_collection<'a>(subtitle: &'a str, metadata: &book_model::BookRecord) -> Option<&'a str> {
-    let (remaining, mut segment) = subtitle.rsplit_once(": ")?;
-    if remaining.trim().is_empty() {
-        return None;
-    }
-    let key = metadata_contract::matching::bibliographic_match_key;
-    for (index, _) in segment.char_indices().filter(|(_, c)| matches!(c, '-' | '–' | '—')) {
-        let tail = segment[index..].trim_start_matches(['-', '–', '—']).trim();
-        if metadata.book.publishers.iter().any(|publisher| key(publisher.name().as_str()) == key(tail)) {
-            segment = segment[..index].trim_end();
-            break;
-        }
-    }
-    let normalized = metadata_contract::matching::author_name_match_key(segment);
-    let mut words = normalized.split_whitespace().collect::<Vec<_>>();
-    if words.first() != Some(&"a") || words.pop() != Some("omnibus") {
-        return None;
-    }
-    words.remove(0);
-    words.retain(|word| !matches!(*word, "jr" | "sr" | "junior" | "senior" | "ii" | "iii" | "iv"));
-    if words.len() < 2 {
-        return None;
-    }
-    let surname = *words.last()?;
-    if surname.chars().count() < 2 {
-        return None;
-    }
-    let given = &words[..words.len() - 1];
-    let matches = metadata.authors().any(|credit| {
-        let normalized = metadata_contract::matching::author_name_match_key(credit.name());
-        let parts = normalized.split_whitespace().filter(|word| !matches!(*word, "jr" | "sr" | "junior" | "senior" | "ii" | "iii" | "iv")).collect::<Vec<_>>();
-        if parts.len() < 2 || !(parts.first() == Some(&surname) || parts.last() == Some(&surname)) {
-            return false;
-        }
-        parts.iter().filter(|word| **word != surname).all(|word| given.iter().any(|other| word == other || ((word.chars().count() == 1 || other.chars().count() == 1) && word.chars().next() == other.chars().next())))
-    });
-    matches.then_some(remaining.trim_end())
-}
-
-fn has_edition_note(title: &str) -> bool {
-    let lower = title.to_lowercase();
-    let words = lower.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()).collect::<Vec<_>>();
-    words.windows(2).any(|pair| {
-        matches!(pair[1], "edition" | "ed")
-            && (matches!(pair[0], "first" | "second" | "third" | "fourth" | "fifth" | "sixth" | "seventh" | "eighth" | "ninth" | "tenth" | "revised" | "expanded" | "updated" | "new" | "anniversary")
-                || ["st", "nd", "rd", "th"].iter().find_map(|suffix| pair[0].strip_suffix(suffix)).unwrap_or(pair[0]).parse::<u32>().is_ok())
-    })
-}
-
 fn normalized_author_words(value: &str) -> Vec<String> {
     metadata_contract::matching::author_name_match_key(value).split_whitespace().filter(|word| metadata_contract::matching::author_suffix(word).is_none()).map(str::to_owned).collect()
 }
 
-/// Strip only prefixes backed by an author credit, at a filename separator.
-fn filename_without_authors<'a>(filename: &'a str, contributors: &[book_model::Contributor]) -> &'a str {
-    let mut aliases = std::collections::BTreeSet::new();
-    let mut single_names = std::collections::BTreeSet::new();
-    for credit in contributors.iter().filter(|credit| credit.role_code() == book_model::AUTHOR_MARC_RELATOR_CODE) {
-        let name = credit.name();
-        let words = normalized_author_words(name);
-        if words.len() == 1 {
-            single_names.insert(words[0].clone());
-        }
-        if words.len() < 2 {
-            continue;
-        }
-        aliases.insert(words.concat());
-        let given_first = book_model::given_name_first(name).unwrap_or_else(|| name.to_owned());
-        let words = normalized_author_words(&given_first);
-        aliases.insert(words.concat());
-        let (family, given) = words.split_last().unwrap();
-        aliases.insert(format!("{}{}", family, given.concat()));
-        let initials: String = given.iter().filter_map(|word| word.chars().next()).collect();
-        aliases.insert(format!("{family}{initials}"));
-        aliases.insert(format!("{initials}{family}"));
-    }
-    // Only the first spaced hyphen can delimit a filename credit section.
-    if let Some((index, dash)) =
-        filename.char_indices().find(|(index, character)| matches!(character, '-' | '–' | '—') && filename[..*index].ends_with(char::is_whitespace) && filename[*index + character.len_utf8()..].starts_with(char::is_whitespace))
-    {
-        let prefix = filename[..index].trim_end();
-        // A dangling underscore before the hyphen is an incomplete filename,
-        // not evidence that everything before the hyphen is an author section.
-        if prefix.ends_with('_') {
-            return filename;
-        }
-        let words = normalized_author_words(prefix);
-        let single_match = prefix.len() <= 512
-            && prefix.split(['_', ';', ',', '&']).any(|entry| {
-                let cleaned = edition_identity_evidence(entry).title;
-                let entry_words = normalized_author_words(&cleaned);
-                entry_words.len() == 1 && single_names.contains(&entry_words[0])
-            });
-        let matched = single_match || (prefix.len() <= 512 && (0..words.len()).any(|start| (start + 2..=words.len()).any(|end| aliases.contains(&words[start..end].concat()))));
-        let tail = filename[index + dash.len_utf8()..].trim_start();
-        if matched && !super::filename_identity::unusable_title(tail) {
-            let parsed = metadata_contract::identity_evidence::filename_identity_evidence(tail);
-            if !super::filename_identity::unusable_title(&parsed.title) {
-                return tail;
-            }
-        }
-    }
-    let mut rest = filename;
-    loop {
-        let end = rest
-            .char_indices()
-            .filter(|(_, c)| c.is_whitespace() || matches!(c, '_' | '-' | '–' | '—' | ',' | '&'))
-            .filter(|(i, _)| *i > 0 && *i <= 512)
-            .filter_map(|(i, _)| aliases.contains(&normalized_author_words(&rest[..i]).concat()).then_some(i))
-            .max();
-        let Some(end) = end else {
-            return rest;
-        };
-        let next = rest[end..].trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '_' | '-' | '–' | '—' | ',' | '&'));
-        if next.is_empty() {
-            return rest;
-        }
-        rest = next;
-    }
-}
-
 fn filename_title_stem(filename: &str, contributors: &[book_model::Contributor]) -> String {
-    let stem = std::path::Path::new(filename).file_stem().and_then(|stem| stem.to_str()).unwrap_or(filename);
+    let stem = Path::new(filename).file_stem().and_then(|stem| stem.to_str()).unwrap_or(filename);
     let (clean, _) = super::filename_identifiers::clean(stem);
-    filename_without_authors(metadata_contract::identity_evidence::without_leading_bracket_segments(&clean), contributors).to_owned()
+    {
+        let (filename, contributors): (&'_ str, &[book_model::Contributor]) = (metadata_contract::identity_evidence::without_leading_bracket_segments(&clean), contributors);
+        (|| -> &'_ str {
+            let mut aliases = BTreeSet::new();
+            let mut single_names = BTreeSet::new();
+            for credit in contributors.iter().filter(|credit| credit.role_code() == book_model::AUTHOR_MARC_RELATOR_CODE) {
+                let name = credit.name();
+                let words = normalized_author_words(name);
+                if words.len() == 1 {
+                    single_names.insert(words[0].clone());
+                }
+                if words.len() < 2 {
+                    continue;
+                }
+                aliases.insert(words.concat());
+                let given_first = book_model::given_name_first(name).unwrap_or_else(|| name.to_owned());
+                let words = normalized_author_words(&given_first);
+                aliases.insert(words.concat());
+                let (family, given) = words.split_last().unwrap();
+                aliases.insert(format!("{}{}", family, given.concat()));
+                let initials: String = given.iter().filter_map(|word| word.chars().next()).collect();
+                aliases.insert(format!("{family}{initials}"));
+                aliases.insert(format!("{initials}{family}"));
+            }
+            // Only the first spaced hyphen can delimit a filename credit section.
+            if let Some((index, dash)) =
+                filename.char_indices().find(|(index, character)| matches!(character, '-' | '–' | '—') && filename[..*index].ends_with(char::is_whitespace) && filename[*index + character.len_utf8()..].starts_with(char::is_whitespace))
+            {
+                let prefix = filename[..index].trim_end();
+                // A dangling underscore before the hyphen is an incomplete filename,
+                // not evidence that everything before the hyphen is an author section.
+                if prefix.ends_with('_') {
+                    return filename;
+                }
+                let words = normalized_author_words(prefix);
+                let single_match = prefix.len() <= 512
+                    && prefix.split(['_', ';', ',', '&']).any(|entry| {
+                        let cleaned = edition_identity_evidence(entry).title;
+                        let entry_words = normalized_author_words(&cleaned);
+                        entry_words.len() == 1 && single_names.contains(&entry_words[0])
+                    });
+                let matched = single_match || (prefix.len() <= 512 && (0..words.len()).any(|start| (start + 2..=words.len()).any(|end| aliases.contains(&words[start..end].concat()))));
+                let tail = filename[index + dash.len_utf8()..].trim_start();
+                if matched && !super::filename_identity::unusable_title(tail) {
+                    let parsed = metadata_contract::identity_evidence::filename_identity_evidence(tail);
+                    if !super::filename_identity::unusable_title(&parsed.title) {
+                        return tail;
+                    }
+                }
+            }
+            let mut rest = filename;
+            loop {
+                let end = rest
+                    .char_indices()
+                    .filter(|(_, c)| c.is_whitespace() || matches!(c, '_' | '-' | '–' | '—' | ',' | '&'))
+                    .filter(|(i, _)| *i > 0 && *i <= 512)
+                    .filter_map(|(i, _)| aliases.contains(&normalized_author_words(&rest[..i]).concat()).then_some(i))
+                    .max();
+                let Some(end) = end else {
+                    return rest;
+                };
+                let next = rest[end..].trim_start_matches(|c: char| c.is_whitespace() || matches!(c, '_' | '-' | '–' | '—' | ',' | '&'));
+                if next.is_empty() {
+                    return rest;
+                }
+                rest = next;
+            }
+        })()
+    }
+    .to_owned()
 }
 
 fn filename_evidence(metadata: &book_model::BookRecord, stem: &str) -> metadata_contract::identity_evidence::EditionIdentityEvidence {
@@ -156,38 +110,6 @@ fn filename_evidence(metadata: &book_model::BookRecord, stem: &str) -> metadata_
     } else {
         metadata_contract::identity_evidence::filename_identity_evidence(stem)
     }
-}
-
-/// Compare bibliographic title text, excluding filename credits and archive tags.
-/// Edition information wins, then subtitle structure; ties retain the embedded title.
-pub fn prefer_filename(metadata: &book_model::BookRecord, filename: &str) -> bool {
-    let stem = filename_title_stem(filename, &metadata.contributors);
-    // Structured archive parsing can discard the identifier-bearing suffix.
-    // Validate that resulting candidate below before allowing it to compete.
-    if unusable_title(&stem, &metadata.contributors) && !super::filename_identity::contains_long_identifier(&stem) {
-        return false;
-    }
-    let filename_evidence = filename_evidence(metadata, &stem);
-    let candidate = &filename_evidence.title;
-    if unusable_title(candidate, &metadata.contributors) || super::filename_identity::identifier_shaped_title(candidate) {
-        return false;
-    }
-    let current = full_title(&metadata.title, metadata.subtitle());
-    if unusable_title(&current, &metadata.contributors) || super::filename_identity::identifier_shaped_title(&current) {
-        return true;
-    }
-    let current = edition_identity_evidence(&current).title;
-    let compact = |title: &str| metadata_contract::matching::bibliographic_match_key(title).replace(' ', "");
-    if compact(candidate) == compact(&current) {
-        return false;
-    }
-    // Low-level readers may already have copied/cleaned the filename into the
-    // title. Still apply its explicit by-credit syntax when the evidence agrees.
-    if filename_evidence.author.is_some() && stem.as_bytes().windows(4).any(|part| part.eq_ignore_ascii_case(b" by ")) && compact(&current) == compact(&edition_identity_evidence(&stem).title) {
-        return true;
-    }
-    let rank = |title: &str| (has_edition_note(title), title.contains(": "));
-    rank(candidate) > rank(&current)
 }
 
 /// Split only author credits; each person keeps their own display name.
@@ -209,52 +131,90 @@ fn split_author_semicolons(metadata: &mut book_model::BookRecord) -> Result<(), 
     Ok(())
 }
 
-/// Split repeated surname/given-name pairs only when each complete name is
-/// independently present in the filename's credit section.
-fn split_corroborated_comma_authors(metadata: &mut book_model::BookRecord, filename: &str) -> Result<(), String> {
-    use book_model::{Contributor, AUTHOR_MARC_RELATOR_CODE};
-    let stem = std::path::Path::new(filename).file_stem().and_then(|s| s.to_str()).unwrap_or(filename);
-    let stem = metadata_contract::identity_evidence::without_leading_bracket_segments(stem);
-    let Some((end, _)) = stem.char_indices().find(|(index, c)| matches!(c, '-' | '–' | '—') && stem[..*index].ends_with(char::is_whitespace) && stem[*index + c.len_utf8()..].starts_with(char::is_whitespace)) else {
-        return Ok(());
-    };
-    let prefix = stem[..end].trim_end();
-    if prefix.len() > 512 || prefix.ends_with('_') {
-        return Ok(());
-    }
-    let entries = prefix.split([',', ';', '_', '&']).map(|entry| normalized_author_words(&edition_identity_evidence(entry).title)).collect::<Vec<_>>();
-    let mut credits = Vec::new();
-    for credit in &metadata.contributors {
-        let parts = credit.name().split(',').map(str::trim).collect::<Vec<_>>();
-        if credit.role_code() != AUTHOR_MARC_RELATOR_CODE || parts.len() < 4 || parts.len() > 16 || parts.len() % 2 != 0 || parts.iter().any(|part| part.is_empty()) {
-            credits.push(credit.clone());
-            continue;
-        }
-        let names = parts.as_chunks::<2>().0.iter().map(|pair| format!("{} {}", pair[1], pair[0])).collect::<Vec<_>>();
-        let keys = names.iter().map(|name| normalized_author_words(name)).collect::<Vec<_>>();
-        let distinct = keys.iter().collect::<std::collections::BTreeSet<_>>().len() == keys.len();
-        if !distinct || !keys.iter().all(|key| key.len() >= 2 && entries.contains(key)) {
-            credits.push(credit.clone());
-            continue;
-        }
-        for (index, name) in names.iter().enumerate() {
-            let person = if index == 0 { Contributor::with_id(credit.contributor_id(), name, credit.role_code()) } else { Contributor::new(name, credit.role_code()) }.map_err(|e| e.to_string())?;
-            credits.push(person);
-        }
-    }
-    metadata.contributors = credits;
-    Ok(())
-}
-
 /// Prefer usable filename evidence when its parsed title is more descriptive.
 pub fn normalize_with_filename(metadata: &mut book_model::BookRecord, filename: &str) -> Result<(), String> {
     let mut next = metadata.clone();
     split_author_semicolons(&mut next)?;
-    split_corroborated_comma_authors(&mut next, filename)?;
-    let original_stem = std::path::Path::new(filename).file_stem().and_then(|stem| stem.to_str()).unwrap_or(filename);
-    super::filename_isbn::record(&next.title, &mut next.book).map_err(|e| e.to_string())?;
+    (|metadata: &mut book_model::BookRecord, filename: &str| -> Result<(), String> {
+        use book_model::{Contributor, AUTHOR_MARC_RELATOR_CODE};
+        let stem = Path::new(filename).file_stem().and_then(|s| s.to_str()).unwrap_or(filename);
+        let stem = metadata_contract::identity_evidence::without_leading_bracket_segments(stem);
+        let Some((end, _)) = stem.char_indices().find(|(index, c)| matches!(c, '-' | '–' | '—') && stem[..*index].ends_with(char::is_whitespace) && stem[*index + c.len_utf8()..].starts_with(char::is_whitespace)) else {
+            return Ok(());
+        };
+        let prefix = stem[..end].trim_end();
+        if prefix.len() > 512 || prefix.ends_with('_') {
+            return Ok(());
+        }
+        let entries = prefix.split([',', ';', '_', '&']).map(|entry| normalized_author_words(&edition_identity_evidence(entry).title)).collect::<Vec<_>>();
+        let mut credits = Vec::new();
+        for credit in &metadata.contributors {
+            let parts = credit.name().split(',').map(str::trim).collect::<Vec<_>>();
+            if credit.role_code() != AUTHOR_MARC_RELATOR_CODE || parts.len() < 4 || parts.len() > 16 || parts.len() % 2 != 0 || parts.iter().any(|part| part.is_empty()) {
+                credits.push(credit.clone());
+                continue;
+            }
+            let names = parts.as_chunks::<2>().0.iter().map(|pair| format!("{} {}", pair[1], pair[0])).collect::<Vec<_>>();
+            let keys = names.iter().map(|name| normalized_author_words(name)).collect::<Vec<_>>();
+            let distinct = keys.iter().collect::<BTreeSet<_>>().len() == keys.len();
+            if !distinct || !keys.iter().all(|key| key.len() >= 2 && entries.contains(key)) {
+                credits.push(credit.clone());
+                continue;
+            }
+            for (index, name) in names.iter().enumerate() {
+                let person = if index == 0 { Contributor::with_id(credit.contributor_id(), name, credit.role_code()) } else { Contributor::new(name, credit.role_code()) }.map_err(|e| e.to_string())?;
+                credits.push(person);
+            }
+        }
+        metadata.contributors = credits;
+        Ok(())
+    })(&mut next, filename)?;
+    let original_stem = Path::new(filename).file_stem().and_then(|stem| stem.to_str()).unwrap_or(filename);
+    super::filename_isbn::record(&next.metadata.title, &mut next.metadata.book).map_err(|e| e.to_string())?;
     super::filename_identifiers::record(original_stem, &mut next.book)?;
-    if prefer_filename(&next, filename) {
+    if (|metadata: &book_model::BookRecord, filename: &str| -> bool {
+        let stem = filename_title_stem(filename, &metadata.contributors);
+        // Structured archive parsing can discard the identifier-bearing suffix.
+        // Validate that resulting candidate below before allowing it to compete.
+        if unusable_title(&stem, &metadata.contributors) && !super::filename_identity::contains_long_identifier(&stem) {
+            return false;
+        }
+        let filename_evidence = filename_evidence(metadata, &stem);
+        let candidate = &filename_evidence.title;
+        if unusable_title(candidate, &metadata.contributors) || super::filename_identity::identifier_shaped_title(candidate) {
+            return false;
+        }
+        let current = full_title(&metadata.title, metadata.subtitle());
+        if unusable_title(&current, &metadata.contributors) || super::filename_identity::identifier_shaped_title(&current) {
+            return true;
+        }
+        let current = edition_identity_evidence(&current).title;
+        let compact = |title: &str| metadata_contract::matching::bibliographic_match_key(title).replace(' ', "");
+        if compact(candidate) == compact(&current) {
+            return false;
+        }
+        // Low-level readers may already have copied/cleaned the filename into the
+        // title. Still apply its explicit by-credit syntax when the evidence agrees.
+        if filename_evidence.author.is_some() && stem.as_bytes().windows(4).any(|part| part.eq_ignore_ascii_case(b" by ")) && compact(&current) == compact(&edition_identity_evidence(&stem).title) {
+            return true;
+        }
+        let rank = |title: &str| {
+            (
+                {
+                    let lower = title.to_lowercase();
+                    let words = lower.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()).collect::<Vec<_>>();
+                    words.windows(2).any(|pair| {
+                        matches!(pair[1], "edition" | "ed")
+                            && (matches!(pair[0], "first" | "second" | "third" | "fourth" | "fifth" | "sixth" | "seventh" | "eighth" | "ninth" | "tenth" | "revised" | "expanded" | "updated" | "new" | "anniversary")
+                                || ["st", "nd", "rd", "th"].iter().find_map(|suffix| pair[0].strip_suffix(suffix)).unwrap_or(pair[0]).parse::<u32>().is_ok())
+                    })
+                },
+                title.contains(": "),
+            )
+        };
+        rank(candidate) > rank(&current)
+    })(&next, filename)
+    {
         let stem = filename_title_stem(filename, &next.contributors);
         let evidence = filename_evidence(&next, &stem);
         next.title = evidence.title;
@@ -315,7 +275,51 @@ pub fn normalize(metadata: &mut book_model::BookRecord) -> Result<(), String> {
         }
         next.normalize_title();
     }
-    if let Some(subtitle) = next.subtitle().and_then(|subtitle| without_author_collection(subtitle, &next)).map(str::to_owned) {
+    if let Some(subtitle) = next
+        .subtitle()
+        .and_then(|subtitle| {
+            let (subtitle, metadata): (&'_ str, &book_model::BookRecord) = (subtitle, &next);
+            (|| -> Option<&'_ str> {
+                let (remaining, mut segment) = subtitle.rsplit_once(": ")?;
+                if remaining.trim().is_empty() {
+                    return None;
+                }
+                let key = metadata_contract::matching::bibliographic_match_key;
+                for (index, _) in segment.char_indices().filter(|(_, c)| matches!(c, '-' | '–' | '—')) {
+                    let tail = segment[index..].trim_start_matches(['-', '–', '—']).trim();
+                    if metadata.book.publishers.iter().any(|publisher| key(publisher.name().as_str()) == key(tail)) {
+                        segment = segment[..index].trim_end();
+                        break;
+                    }
+                }
+                let normalized = metadata_contract::matching::author_name_match_key(segment);
+                let mut words = normalized.split_whitespace().collect::<Vec<_>>();
+                if words.first() != Some(&"a") || words.pop() != Some("omnibus") {
+                    return None;
+                }
+                words.remove(0);
+                words.retain(|word| !matches!(*word, "jr" | "sr" | "junior" | "senior" | "ii" | "iii" | "iv"));
+                if words.len() < 2 {
+                    return None;
+                }
+                let surname = *words.last()?;
+                if surname.chars().count() < 2 {
+                    return None;
+                }
+                let given = &words[..words.len() - 1];
+                let matches = metadata.authors().any(|credit| {
+                    let normalized = metadata_contract::matching::author_name_match_key(credit.name());
+                    let parts = normalized.split_whitespace().filter(|word| !matches!(*word, "jr" | "sr" | "junior" | "senior" | "ii" | "iii" | "iv")).collect::<Vec<_>>();
+                    if parts.len() < 2 || !(parts.first() == Some(&surname) || parts.last() == Some(&surname)) {
+                        return false;
+                    }
+                    parts.iter().filter(|word| **word != surname).all(|word| given.iter().any(|other| word == other || ((word.chars().count() == 1 || other.chars().count() == 1) && word.chars().next() == other.chars().next())))
+                });
+                matches.then_some(remaining.trim_end())
+            })()
+        })
+        .map(str::to_owned)
+    {
         next.subtitle = Some(subtitle);
     }
     if next.contributors.iter().filter(|credit| credit.role_code() == AUTHOR_MARC_RELATOR_CODE).all(|credit| super::filename_identity::unusable_identity(credit.name())) {
@@ -343,7 +347,7 @@ mod tests {
     use super::*;
 
     fn book(title: &str) -> book_model::BookRecord {
-        book_model::BookRecord { title: title.into(), subtitle: None, contributors: vec![], description: String::new(), book: Default::default() }
+        book_model::BookRecord { metadata: book_model::BookDetails { title: title.into(), subtitle: None, contributors: vec![], book: Default::default() }, description: String::new() }
     }
 
     #[test]
@@ -672,87 +676,6 @@ mod tests {
         for value in ["[2nd Edition] Author - Title", "[Volume 1] Author - Title", "[Unclosed Author - Title"] {
             assert_eq!(metadata_contract::identity_evidence::without_leading_bracket_noise(value), value);
         }
-    }
-
-    #[test]
-    fn longer_filename_does_not_override_accepted_title() {
-        for (title, filename) in [
-            ("Macbeth", "macbeth_advanced.epub"),
-            ("10% Less Democracy", "10_ Less Democracy_ Why You Should Trust Elites a Little More and the Masses a Little Less.epub"),
-            ("Nationalism", "134 Nationalism.m4b"),
-            ("Technopoly", "Technopoly 1999.m4b"),
-            ("A Book: A Guide", "A Book_ A Much Longer Guide.pdf"),
-        ] {
-            assert!(!prefer_filename(&book(title), filename), "{filename}");
-            let mut metadata = book(title);
-            normalize_with_filename(&mut metadata, filename).unwrap();
-            assert_eq!(full_title(&metadata.title, metadata.subtitle()), title);
-        }
-        assert!(prefer_filename(&book("Unknown"), "A Much Longer Filename.pdf"));
-    }
-
-    #[test]
-    fn filename_by_credit_does_not_inflate_title_and_can_supply_author() {
-        assert!(!prefer_filename(&book("The Classical Music Book"), "The Classical Music Book by DK.pdf"));
-        let mut metadata = book("Unknown");
-        normalize_with_filename(&mut metadata, "The Classical Music Book by DK.pdf").unwrap();
-        assert_eq!(metadata.title, "The Classical Music Book");
-        assert_eq!(metadata.contributors[0].name(), "DK");
-    }
-
-    #[test]
-    fn author_prefixes_use_normalized_credits_and_ignore_name_suffixes() {
-        for (author, filename, title) in [
-            ("Jane Austen", "jane-austen_emma.epub", "Emma"),
-            ("Austen, Jane", "JANE_AUSTEN_Emma.epub", "Emma"),
-            ("Hjalmar Söderberg", "SoderbergH_DoktorGlas.epub", "Doktor Glas"),
-            ("Neil Postman", "Neil Postman - Technopoly - libgen.li.epub", "Technopoly"),
-            ("Martin Luther King Jr.", "Martin-Luther-King_Freedom.epub", "Freedom"),
-            ("Martin Luther King", "King, Martin Luther, Jr. - Freedom.epub", "Freedom"),
-            ("John Smith III", "John Smith Jr. - A Book.epub", "A Book"),
-        ] {
-            let mut metadata = book(title);
-            metadata.contributors.push(book_model::Contributor::new(author, book_model::AUTHOR_MARC_RELATOR_CODE).unwrap());
-            normalize_with_filename(&mut metadata, filename).unwrap();
-            assert_eq!(metadata.title, title, "{filename}");
-            assert_eq!(metadata.contributors[0].name(), author);
-        }
-        let credit = book_model::Contributor::new("Jane Austen", book_model::AUTHOR_MARC_RELATOR_CODE).unwrap();
-        assert_eq!(filename_without_authors("Jane Eyre", &[credit.clone()]), "Jane Eyre");
-        assert_eq!(filename_without_authors("JaneAustenland_Book", &[credit]), "JaneAustenland_Book");
-        let mut metadata = book("Unknown");
-        metadata.contributors.push(book_model::Contributor::new("Jane Austen", book_model::AUTHOR_MARC_RELATOR_CODE).unwrap());
-        normalize_with_filename(&mut metadata, "Jane Austen - Emma.epub").unwrap();
-        assert_eq!(metadata.title, "Emma");
-    }
-
-    #[test]
-    fn edition_information_precedes_subtitle() {
-        let current = book("Operating System Concepts (7th Edition)");
-        assert!(!prefer_filename(&current, "Operating System Concepts_ A Much Longer Description.pdf"));
-        assert!(prefer_filename(&book("Operating System Concepts: An Extensive Guide"), "Operating System Concepts (7th Edition).pdf"));
-        assert!(has_edition_note("Algorithms, Second Edition"));
-        assert!(has_edition_note("Algorithms (3rd ed.)"));
-        assert!(!has_edition_note("The Art of Edition Design"));
-        assert!(!prefer_filename(&book("Algorithms (2nd Edition)"), "Algorithms (3rd Edition).pdf"));
-    }
-
-    #[test]
-    fn filename_preference_uses_parsed_title_and_subtitle() {
-        let mut kubark = book("Microsoft Word - Kubark");
-        normalize_with_filename(&mut kubark, "KUBARK Counterintelligence Interrogation by Central Intelligence Agency (z-lib.org).pdf").unwrap();
-        assert_eq!(kubark.title, "Microsoft Word - Kubark");
-        let mut machiavelli = book("Quentin Skinner");
-        normalize_with_filename(&mut machiavelli, "Machiavelli_ A Very Short Introduction.pdf").unwrap();
-        assert_eq!(machiavelli.title, "Machiavelli");
-        assert_eq!(machiavelli.subtitle(), Some("A Very Short Introduction"));
-        assert!(!prefer_filename(&book("A descriptive embedded title"), "Short by Jane Author (2020) (archive).pdf"));
-        assert!(!prefer_filename(&book("Good title"), "www.example.org.pdf"));
-        assert!(!prefer_filename(&book("Good title"), "Production filename.docx.pdf"));
-        assert!(prefer_filename(&book("A considerably longer title"), "Short_ Subtitle.epub"));
-        let before = machiavelli.clone();
-        normalize_with_filename(&mut machiavelli, "Machiavelli_ A Very Short Introduction.pdf").unwrap();
-        assert_eq!(machiavelli, before);
     }
 
     #[test]

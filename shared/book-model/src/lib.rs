@@ -1,5 +1,6 @@
 //! Bibliographic values shared by local-library metadata.
 
+use std::error::Error;
 mod annotations;
 mod audiobook;
 mod author_name;
@@ -14,13 +15,13 @@ mod search_text;
 mod titles;
 mod toc_target;
 
-pub use annotations::{annotation_progress, AnnotationAnchor, AnnotationState, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, StoredAnnotationDetail};
+pub use annotations::{annotation_progress, AnnotationAnchor, AnnotationDetail, AnnotationState, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect};
 pub use audiobook::{AudiobookChapter, ChapterOrigin};
 pub use author_name::{AuthorName, AuthorNameError, AuthorNameMatchKey};
 pub use book_format::BookFormat;
 pub use canonical::{canonical_doi, canonical_isbn, canonical_uuid, from_content_candidate, from_text};
 pub use content_address::ContentHash;
-pub use credits::{agent_id_from_migration_seed, tracks_match_archive, AgentId, AudiobookTrack, AuthorId, BookMetadata, BookMetadataError, BookRecord, BookTocDocument, BookTocEntry, Contributor, ContributorId, PublisherCredit, PublisherId, PublisherMatchKey, PublisherName};
+pub use credits::{agent_id_from_migration_seed, tracks_match_archive, AgentId, AudiobookTrack, AuthorId, BookDetails, BookMetadata, BookMetadataError, BookRecord, BookTocDocument, BookTocEntry, Contributor, ContributorId, PublisherCredit, PublisherId, PublisherMatchKey, PublisherName};
 pub use marc::{marc_relator_code_from_metadata_role, MarcRelatorCode, AUTHOR_MARC_RELATOR_CODE, CONTRIBUTOR_MARC_RELATOR_CODE, NARRATOR_MARC_RELATOR_CODE, TRANSLATOR_MARC_RELATOR_CODE};
 pub use names::{comparison_key, given_name_first, looks_like_organization, recognized_suffix};
 pub use reader_annotation::{ReaderAnnotation, EXTERNAL_PDF_ANNOTATION_ID_PREFIX};
@@ -135,7 +136,9 @@ pub struct Identifier {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LocalizedText {
+    #[serde(deserialize_with = "deserialize_bounded_text")]
     pub language: String,
+    #[serde(deserialize_with = "deserialize_bounded_text")]
     pub value: String,
 }
 
@@ -197,7 +200,7 @@ impl fmt::Display for LanguageTagError {
     }
 }
 
-impl std::error::Error for LanguageTagError {}
+impl Error for LanguageTagError {}
 
 /// One date assertion carried by a book, together with the metadata
 /// source that supplied it. `event` distinguishes book, modification,
@@ -261,7 +264,7 @@ impl fmt::Display for DateError {
     }
 }
 
-impl std::error::Error for DateError {}
+impl Error for DateError {}
 
 /// A secondary or specially typed title exactly as supplied by a book.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -404,7 +407,7 @@ impl fmt::Display for ValueError {
     }
 }
 
-impl std::error::Error for ValueError {}
+impl Error for ValueError {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Audience {
@@ -536,7 +539,7 @@ impl fmt::Display for SubjectError {
     }
 }
 
-impl std::error::Error for SubjectError {}
+impl Error for SubjectError {}
 
 impl LocalizedText {
     pub fn new(language: impl AsRef<str>, value: impl AsRef<str>) -> Result<Self, CollectionError> {
@@ -651,7 +654,7 @@ impl fmt::Display for CollectionError {
     }
 }
 
-impl std::error::Error for CollectionError {}
+impl Error for CollectionError {}
 
 impl Identifier {
     pub fn new(value: impl AsRef<str>, scheme: Scheme, scope: Scope) -> Result<Self, IdentifierError> {
@@ -710,6 +713,10 @@ impl<'de> Deserialize<'de> for Identifier {
     }
 }
 
+fn deserialize_bounded_text<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    bounded(&String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+}
+
 fn bounded(value: &str) -> Result<String, IdentifierError> {
     let value = value.trim();
     if value.is_empty() || value.len() > MAX_VALUE_BYTES || value.chars().any(char::is_control) {
@@ -727,7 +734,7 @@ impl fmt::Display for IdentifierError {
     }
 }
 
-impl std::error::Error for IdentifierError {}
+impl Error for IdentifierError {}
 
 #[cfg(test)]
 mod tests {

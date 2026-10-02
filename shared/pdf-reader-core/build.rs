@@ -18,7 +18,7 @@ fn main() {
     let missing = || format!("PDFium inputs are missing or stale. Run: python3 shared/pdfium/prepare.py --target {target}");
     let receipt_path = directory.join("receipt.json");
     println!("cargo:rerun-if-changed={}", receipt_path.display());
-    let receipt: serde_json::Value = serde_json::from_str(&fs::read_to_string(&receipt_path).expect(&missing())).expect("invalid PDFium receipt");
+    let receipt: serde_json::Value = serde_json::from_str(&fs::read_to_string(&receipt_path).unwrap_or_else(|_| panic!("{}", missing()))).expect("invalid PDFium receipt");
     assert_eq!(receipt["target"].as_str(), Some(target.as_str()), "{}", missing());
     let manifest_hash = format!("{:x}", Sha256::digest(fs::read(&manifest_path).unwrap()));
     assert_eq!(receipt["manifest_sha256"].as_str(), Some(manifest_hash.as_str()), "{}", missing());
@@ -26,7 +26,7 @@ fn main() {
     for name in spec["files"].as_table().unwrap().values().map(|v| v.as_str().unwrap()).chain(["LICENSE", "VERSION"]) {
         let path = directory.join(name);
         println!("cargo:rerun-if-changed={}", path.display());
-        let bytes = fs::read(&path).expect(&missing());
+        let bytes = fs::read(&path).unwrap_or_else(|_| panic!("{}", missing()));
         let actual = format!("{:x}", Sha256::digest(&bytes));
         assert_eq!(receipt["files"][name].as_str(), Some(actual.as_str()), "PDFium prepared file checksum mismatch: {}", path.display());
     }

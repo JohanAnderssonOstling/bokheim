@@ -1340,11 +1340,10 @@ fn parse_opf_metadata(opf_xml: &str) -> EpubMetadata {
         if let Some(source_id) = source_id {
             identifier.identifier_types.extend(identifier_type_refinements.iter().filter(|(target, _)| target == &source_id).map(|(_, identifier_type)| identifier_type.clone()));
         }
-        if matches!(identifier.scheme, IdentifierScheme::Unspecified) {
-            if let Some(scheme) = identifier.identifier_types.iter().find_map(identifier_scheme_from_type) {
+        if matches!(identifier.scheme, IdentifierScheme::Unspecified)
+            && let Some(scheme) = identifier.identifier_types.iter().find_map(identifier_scheme_from_type) {
                 identifier.scheme = scheme;
             }
-        }
         // A checksum-valid whole value outranks the producer's scheme,
         // including EPUB 3 identifier-type refinements.
         if let Some(isbn) = book_model::from_metadata_value(&identifier.value) {

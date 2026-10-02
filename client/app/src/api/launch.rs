@@ -1,4 +1,7 @@
 //! Platform startup configuration; running operations go through client handles.
+
+#[cfg(test)]
+use crate::LibraryId;
 use crate::app::{AppDataLocation, BackendContext};
 use std::path::{Path, PathBuf};
 
@@ -59,7 +62,7 @@ mod tests {
         context.registry.set_default_library_save_location(chosen.to_str().unwrap()).unwrap();
         let restarted = launch.into_context().unwrap();
         let created = restarted.registry.create("Created", None).unwrap();
-        let remote = restarted.registry.attach_remote(&crate::LibraryId::new_v4(), "Remote").unwrap();
+        let remote = restarted.registry.attach_remote(&LibraryId::new_v4(), "Remote").unwrap();
         assert_eq!(Path::new(created.storage_locator()), chosen.join("Created"));
         assert_eq!(Path::new(remote.storage_locator()), chosen.join("Remote"));
     }
@@ -75,7 +78,7 @@ mod tests {
         let launch = BackendLaunch::initialize(location).unwrap().with_library_discovery(visible.clone(), "Kobo".into(), visible.join("default"));
         let context = launch.clone().into_context().unwrap();
         let created = context.registry.create("Created", None).unwrap();
-        let remote = context.registry.attach_remote(&crate::LibraryId::new_v4(), "Remote").unwrap();
+        let remote = context.registry.attach_remote(&LibraryId::new_v4(), "Remote").unwrap();
         assert_eq!(Path::new(created.storage_locator()), visible.join("Created"));
         assert_eq!(Path::new(remote.storage_locator()), visible.join("Remote"));
         let restarted = launch.clone().into_context().unwrap();

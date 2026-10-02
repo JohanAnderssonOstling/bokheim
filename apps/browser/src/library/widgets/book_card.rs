@@ -1,3 +1,5 @@
+use std::rc::Rc;
+use crate::services::notify_error;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,8 +11,8 @@ const COVER_FADE_DURATION: Duration = Duration::from_millis(180);
 
 use gpui::prelude::*;
 use gpui::{App, AppContext, Context, DismissEvent, Entity, Focusable as _, IntoElement, Pixels, Point, PromptLevel, Render, RenderImage, Subscription, Task, Window, px};
-use gpui_component::menu::PopupMenu;
 use gpui_component::IconName;
+use gpui_component::menu::PopupMenu;
 use library_model::BookCardRow;
 use ui_components as components;
 
@@ -34,7 +36,7 @@ pub(crate) struct LoadedCover {
 /// up afterwards, and not only to save the lookup: this is called from inside
 /// the card's own update, so anything that went back and read the cards would
 /// read one that is currently leased, and panic.
-pub(crate) type OpenBookDetail = std::rc::Rc<dyn Fn(BookCardRow, Option<LoadedCover>, &mut gpui::App)>;
+pub(crate) type OpenBookDetail = Rc<dyn Fn(BookCardRow, Option<LoadedCover>, &mut gpui::App)>;
 
 #[derive(Clone, Copy)]
 pub(crate) enum BookPlacement {
@@ -42,8 +44,8 @@ pub(crate) enum BookPlacement {
     Move,
 }
 
-pub(crate) type PlaceBook = std::rc::Rc<dyn Fn(sync_common::ContentHash, DirId, BookPlacement, &mut gpui::App)>;
-pub(crate) type RemoveBook = std::rc::Rc<dyn Fn(sync_common::ContentHash, DirId, String, &mut Window, &mut gpui::App)>;
+pub(crate) type PlaceBook = Rc<dyn Fn(sync_common::ContentHash, DirId, BookPlacement, &mut gpui::App)>;
+pub(crate) type RemoveBook = Rc<dyn Fn(sync_common::ContentHash, DirId, String, &mut Window, &mut gpui::App)>;
 
 /// A decoded cover's width over its height, for boxing it at its own
 /// proportions instead of the placeholder's.
@@ -97,34 +99,42 @@ enum CoverState {
     Missing,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BookCardPresentation {
+    Grid,
+    Section,
+    GraphCover,
+    CoverOnly,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct BookCardInteraction {
+    pub(crate) focused: bool,
+    pub(crate) selected: bool,
+    pub(crate) marquee: bool,
+}
+
+pub(crate) struct BookCardElement {
+    card: Entity<BookCardView>,
+    presentation: BookCardPresentation,
+    interaction: BookCardInteraction,
+}
+
+impl gpui::View for BookCardElement {
+    fn entity_id(&self) -> Option<gpui::EntityId> {
+        Some(self.card.entity_id())
+    }
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        self.card.update(cx, |card, cx| card.render_card(self.presentation, self.interaction, window, cx))
+    }
+}
+
 pub(crate) struct BookCardView {
     book: BookCardRow,
     /// Whether this card holds the paginator's keyboard cursor. Pushed in by
     /// the page rather than read out of anything: the card knows what focused
     /// looks like, not where the cursor is.
     focused: bool,
-    /// Whether a rubber band has picked this card up. Painted exactly like
-    /// `focused` — the two cannot coexist, since moving the cursor drops the
-    /// selection — but held apart, because a selected card hands its secondary
-    /// click to the page's menu over the whole selection.
-    selected: bool,
-    /// Whether a rubber band is currently sweeping the grid. Suppresses the
-    /// card's hover style: a band drags the pointer across every card it picks
-    /// up, and a card answering that with hover reports where the pointer went
-    /// rather than what is selected.
-    marquee: bool,
-    /// Whether the card is drawn in its detailed mode: twice as wide, with the
-    /// blurb beside the cover instead of nothing but the title under it. Pushed
-    /// in by the page, exactly like the cursor — the grid decides how wide a
-    /// cell is, and the card decides what to put in one.
-    detailed: bool,
-    /// A cover carousel can reuse the book's cover loading and activation
-    /// behavior without adding title or author text around the artwork.
-    cover_only: bool,
-    /// Section covers keep their total padding, with the artwork optically
-    /// aligned to the section heading when a page starts with books.
-    section_cover_left_aligned: bool,
-    cover_top_aligned: bool,
     /// When the artwork arrived, which is what the fade is computed from.
     ///
     /// A timestamp rather than an element animation: the paginator repaints its
@@ -196,12 +206,6 @@ impl BookCardView {
         Self {
             book: row,
             focused: false,
-            selected: false,
-            marquee: false,
-            detailed: false,
-            cover_only: false,
-            section_cover_left_aligned: false,
-            cover_top_aligned: false,
             cover_loaded_at: None,
             cover: CoverState::Pending,
             ui,
@@ -234,55 +238,9 @@ impl BookCardView {
         cx.notify();
     }
 
-    pub(crate) fn set_selected(&mut self, selected: bool, cx: &mut Context<Self>) {
-        if self.selected == selected {
-            return;
-        }
-        self.selected = selected;
-        cx.notify();
-    }
-
-    pub(crate) fn set_marquee(&mut self, marquee: bool, cx: &mut Context<Self>) {
-        if self.marquee == marquee {
-            return;
-        }
-        self.marquee = marquee;
-        cx.notify();
-    }
-
-    /// Switches the card between its two modes. The paginator has to be told
-    /// separately, because the cell's width is the grid's business — a card
-    /// drawn detailed in an ordinary cell would have no room for the blurb.
-    pub(crate) fn set_detailed(&mut self, detailed: bool, cx: &mut Context<Self>) {
-        if self.detailed == detailed {
-            return;
-        }
-        self.detailed = detailed;
-        cx.notify();
-    }
-
-    pub(crate) fn set_cover_only(&mut self, cover_only: bool, cx: &mut Context<Self>) {
-        if self.cover_only == cover_only {
-            return;
-        }
-        self.cover_only = cover_only;
-        cx.notify();
-    }
-
-    pub(crate) fn set_section_cover_left_aligned(&mut self, aligned: bool, cx: &mut Context<Self>) {
-        if self.section_cover_left_aligned == aligned {
-            return;
-        }
-        self.section_cover_left_aligned = aligned;
-        cx.notify();
-    }
-
-    pub(crate) fn set_cover_top_aligned(&mut self, aligned: bool, cx: &mut Context<Self>) {
-        if self.cover_top_aligned == aligned {
-            return;
-        }
-        self.cover_top_aligned = aligned;
-        cx.notify();
+    /// Supplies presentation to this drawing while retaining the card's reactive identity.
+    pub(crate) fn present(card: Entity<Self>, presentation: BookCardPresentation, interaction: BookCardInteraction) -> gpui::ViewElement<BookCardElement> {
+        gpui::ViewElement::new(BookCardElement { card, presentation, interaction })
     }
 
     pub(crate) fn replace_row(&mut self, row: BookCardRow, source_directory: Option<DirId>) {
@@ -304,7 +262,7 @@ impl BookCardView {
             let _ = card.update_in(cx, |card, window, cx| {
                 card.download_task.take();
                 if let Err(error) = result {
-                    crate::services::notify_error("book-download-error", format!("Could not download book: {error}"), window, cx);
+                    notify_error("book-download-error", format!("Could not download book: {error}"), window, cx);
                 }
                 cx.notify();
             });
@@ -459,7 +417,7 @@ impl BookCardView {
                 }
                 if let Err(error) = operation.await {
                     let _ = card.update_in(cx, |_, window, cx| {
-                        crate::services::notify_error(error_id, format!("{error_prefix}: {error}"), window, cx);
+                        notify_error(error_id, format!("{error_prefix}: {error}"), window, cx);
                     });
                 }
             })
@@ -507,7 +465,7 @@ impl BookCardView {
                             cx.spawn(async move |card, cx| {
                                 if let Err(error) = operation.await {
                                     let _ = card.update_in(cx, |_, window, cx| {
-                                        crate::services::notify_error("book-evict-error", format!("Could not remove download: {error}"), window, cx);
+                                        notify_error("book-evict-error", format!("Could not remove download: {error}"), window, cx);
                                     });
                                 }
                             })
@@ -577,11 +535,12 @@ impl BookCardView {
     }
 }
 
-impl Render for BookCardView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl BookCardView {
+    fn render_card(&mut self, presentation: BookCardPresentation, interaction: BookCardInteraction, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         self.prepare(Self::thumbnail_resolution(window), cx);
         let theme = components::browser_theme(cx);
-        let highlighted = self.focused || self.selected;
+        let highlighted = interaction.focused || interaction.selected;
+        let cover_only = presentation != BookCardPresentation::Grid;
         let cover_opacity = match self.cover_loaded_at {
             Some(_) if cfg!(feature = "kobo") || cx.reduce_motion() => 1.0,
             Some(loaded_at) => {
@@ -598,13 +557,7 @@ impl Render for BookCardView {
         let element_id = format!("book-card-{}", book.content_hash);
         let cover_id = format!("book-cover-{}", book.content_hash);
 
-        let cover_text = if self.cover_only {
-            app_preferences::CoverText::CoverOnly
-        } else if self.detailed {
-            app_preferences::CoverText::Always
-        } else {
-            crate::stores::current_cover_text(cx)
-        };
+        let cover_text = if cover_only { app_preferences::CoverText::CoverOnly } else { crate::stores::current_cover_text(cx) };
         let open_target = cx.entity();
         let cover_ratio = match &cover {
             CoverState::Loaded(cover, _) => cover_aspect_ratio(&cover.image),
@@ -642,51 +595,42 @@ impl Render for BookCardView {
                 // A blank placeholder says nothing without the title line
                 // under it, so "cover only" replaces it with a generated
                 // cover that carries the title itself.
-                CoverState::Missing if cover_text == app_preferences::CoverText::CoverOnly => components::book_cover_generated(book.title.clone(), book.subtitle.as_deref(), generated_cover_variant(book.content_hash), theme).aspect_ratio(cover_ratio),
+                CoverState::Missing if cover_text == app_preferences::CoverText::CoverOnly => {
+                    components::book_cover_generated(book.title.clone(), book.subtitle.as_deref(), generated_cover_variant(book.content_hash), theme).aspect_ratio(cover_ratio)
+                }
                 CoverState::Missing => components::missing_book_cover("No cover", theme).aspect_ratio(cover_ratio),
             })
-            .when(!self.cover_only, |frame| frame.children(components::book_cover_progress(book.progress, theme)).children(download_badge))
-            .when(!self.cover_only && book.format_category == library_model::LibraryFileTypeFilter::Audiobook, |frame| {
-                frame.child(components::book_cover_audiobook_length(book.audiobook_duration_ms.map(audiobook_card_length)))
-            });
+            .when(!cover_only, |frame| frame.children(components::book_cover_progress(book.progress, theme)).children(download_badge))
+            .when(!cover_only && book.format_category == library_model::LibraryFileTypeFilter::Audiobook, |frame| frame.child(components::book_cover_audiobook_length(book.audiobook_duration_ms.map(audiobook_card_length))));
 
         let context_menu = self.context_menu.as_ref().map(|active| mobile_context_menu::render(active.menu.clone(), active.position, window));
         let context_menu_target = cx.entity();
-        let card = components::book_card(element_id, highlighted, self.marquee, theme)
-            .when(self.section_cover_left_aligned, |card| card.pl(px(4.0)).pr(px(components::BOOK_CARD_PADDING * 2.0 - 4.0)))
-            .on_aux_click(move |event, window, cx| {
+        let card = components::book_card(element_id, highlighted, interaction.marquee, theme).when(presentation == BookCardPresentation::Section, |card| card.pl(px(4.0)).pr(px(components::BOOK_CARD_PADDING * 2.0 - 4.0))).on_aux_click(
+            move |event, window, cx| {
                 // A card inside a selection is not the subject of its own menu:
                 // the page opens one over everything the band picked up.
-                if event.is_secondary() && !context_menu_target.read(cx).selected {
+                if event.is_secondary() && !interaction.selected {
                     context_menu_target.update(cx, |card, cx| card.open_context_menu(event.position(), window, cx));
                     cx.stop_propagation();
                 }
-            });
+            },
+        );
 
-        // The two modes differ in where the cover stands, so each lays the card
-        // out itself rather than sharing a stack the cover is threaded into.
-        let card = if self.detailed {
-            let description = components::book_card_description(format!("book-description-{}", book.content_hash), &book.description, theme);
-            card.child(
-                components::book_card_detail_body()
-                    .child(components::book_card_detail_cover().child(cover_frame).child(components::book_card_text().child(components::book_card_title_row(book.title, book.subtitle.as_deref()))))
-                    .child(components::book_card_detail_text().children(description)),
-            )
-        } else {
-            let card = card.child(cover_frame);
-            // No text block at all under "cover only", not an empty one: an
-            // empty child would still hold the cover-to-text gap open under
-            // a cover that has nothing under it. The download mark is on the
-            // cover, so it stays.
-            match cover_text {
-                app_preferences::CoverText::Always => card.child(components::book_card_text_title_only().child(components::book_card_title_row(book.title, book.subtitle.as_deref()))),
-                app_preferences::CoverText::CoverOnly => card,
-            }
+        let card = card.child(cover_frame);
+        // No text block at all under "cover only", not an empty one: an empty
+        // child would still hold the cover-to-text gap open under a cover that
+        // has nothing under it. The download mark is on the cover, so it stays.
+        let card = match cover_text {
+            app_preferences::CoverText::Always => card.child(components::book_card_text_title_only().child(components::book_card_title_row(book.title, book.subtitle.as_deref()))),
+            app_preferences::CoverText::CoverOnly => card,
         };
 
-        components::book_card_cell()
-            .when(self.cover_top_aligned, |cell| cell.justify_start())
-            .child(card.children(context_menu))
-            .into_any_element()
+        components::book_card_cell().when(presentation == BookCardPresentation::GraphCover, |cell| cell.justify_start()).child(card.children(context_menu)).into_any_element()
+    }
+}
+
+impl Render for BookCardView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_card(BookCardPresentation::Grid, BookCardInteraction { focused: self.focused, ..Default::default() }, window, cx)
     }
 }

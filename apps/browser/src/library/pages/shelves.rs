@@ -7,6 +7,8 @@
 //! into a page it animates, so the page always shows whole rows instead of
 //! stopping halfway down a cover.
 
+use crate::services::library_add_trace::mark;
+use crate::stores::current_cover_text;
 use std::collections::HashMap;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -88,13 +90,13 @@ impl<S: ShelfSource> ShelfPage<S> {
         let generation = self.refresh.begin();
         let library_id = *self.ui.backend().id();
         if S::ID == "home" {
-            crate::services::library_add_trace::mark(library_id, "home_request_started");
+            mark(library_id, "home_request_started");
         }
         let load = S::load(self.ui.backend().clone());
         let task = cx.spawn(async move |page, cx| {
             let result = load.await;
             if S::ID == "home" {
-                crate::services::library_add_trace::mark(library_id, "home_response_received");
+                mark(library_id, "home_response_received");
             }
             cx.defer_update(page, move |page, cx| {
                 if !page.refresh.is_current(generation) {
@@ -104,7 +106,7 @@ impl<S: ShelfSource> ShelfPage<S> {
                 // still waiting: an error surfaces its own banner and must not
                 // leave the body claiming to be loading forever.
                 if S::ID == "home" {
-                    crate::services::library_add_trace::mark(library_id, if result.is_ok() { "home_result_installed" } else { "home_load_failed" });
+                    mark(library_id, if result.is_ok() { "home_result_installed" } else { "home_load_failed" });
                 }
                 page.loaded = true;
                 match result {
@@ -161,7 +163,7 @@ impl<S: ShelfSource> ShelfPage<S> {
             // here in the same order, there is nothing to rebuild.
             if !shelf_unchanged {
                 let children = Self::shelf_children(&entry.cards);
-                let cover_text = crate::stores::current_cover_text(cx);
+                let cover_text = current_cover_text(cx);
                 entry.shelf.update(cx, |shelf, cx| shelf.set_groups([PaginatorGroup::new(shelf_card_policy(cover_text), children)], cx));
             }
             self.rows.push(entry);
@@ -198,7 +200,7 @@ impl<S: ShelfSource> ShelfPage<S> {
     /// the setting changed, not the books, so every shelf's reserved height is
     /// stale regardless of whether its cards are.
     fn refresh_cover_text(&mut self, cx: &mut Context<Self>) {
-        let cover_text = crate::stores::current_cover_text(cx);
+        let cover_text = current_cover_text(cx);
         for entry in &self.rows {
             let children = Self::shelf_children(&entry.cards);
             entry.shelf.update(cx, |shelf, cx| shelf.set_groups([PaginatorGroup::new(shelf_card_policy(cover_text), children)], cx));
@@ -232,7 +234,7 @@ impl<S: ShelfSource> ShelfPage<S> {
         if children.is_empty() {
             return Vec::new();
         }
-        vec![PaginatorGroup::new(shelf_rows_policy(crate::stores::current_cover_text(cx)), children)]
+        vec![PaginatorGroup::new(shelf_rows_policy(current_cover_text(cx)), children)]
     }
 
     /// Up and down walk the rows and turn the page at the edges; left and right
@@ -378,9 +380,9 @@ impl<S: ShelfSource> Render for ShelfPage<S> {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.loaded && self.error.is_none() && S::ID == "home" {
             let library_id = *self.ui.backend().id();
-            if crate::services::library_add_trace::mark(library_id, "home_content_render") {
+            if mark(library_id, "home_content_render") {
                 window.on_next_frame(move |_, _| {
-                    crate::services::library_add_trace::mark(library_id, "home_frame_completed");
+                    mark(library_id, "home_frame_completed");
                 });
             }
         }

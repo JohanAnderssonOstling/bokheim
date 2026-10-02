@@ -1,16 +1,17 @@
+use std::io::{Error, Result};
 use super::*;
 use pdf_view_common::PdfStoredPage;
 use std::sync::Mutex;
 
 struct SharedReader<R>(Arc<Mutex<R>>);
 impl<R: Read> Read for SharedReader<R> {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        self.0.lock().map_err(|_| std::io::Error::other("PDF reader poisoned"))?.read(buffer)
+    fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
+        self.0.lock().map_err(|_| Error::other("PDF reader poisoned"))?.read(buffer)
     }
 }
 impl<R: Seek> Seek for SharedReader<R> {
-    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
-        self.0.lock().map_err(|_| std::io::Error::other("PDF reader poisoned"))?.seek(position)
+    fn seek(&mut self, position: SeekFrom) -> Result<u64> {
+        self.0.lock().map_err(|_| Error::other("PDF reader poisoned"))?.seek(position)
     }
 }
 
@@ -69,7 +70,7 @@ pub fn inspect_reader_metadata<R: Read + Seek + 'static>(mut reader: R) -> PdfRe
 }
 
 impl PdfError {
-    fn new_io(error: std::io::Error) -> Self {
+    fn new_io(error: Error) -> Self {
         Self::new(error.to_string())
     }
 }

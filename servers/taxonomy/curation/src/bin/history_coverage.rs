@@ -1,8 +1,10 @@
 //! Read-only coverage audit of master History codes and observed D/E/F codes.
+
+use std::error::Error;
 use std::path::Path;
 use subject_projection::{canonical_lcc_notation, read_unified_taxonomy_sqlite, UnifiedTaxonomy};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
     let args = std::env::args().collect::<Vec<_>>();
     if args.len() != 4 {
         return Err("usage: history_coverage CURATED MASTER CODE_USAGE".into());
@@ -13,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut output = csv::Writer::from_writer(std::io::stdout());
     output.write_record(["source", "system", "code", "uses", "status", "candidates"])?;
     let mut counts = std::collections::BTreeMap::<String, (u64, i64)>::new();
-    let mut check = |source: &str, system: &str, code: &str, uses: i64| -> Result<(), Box<dyn std::error::Error>> {
+    let mut check = |source: &str, system: &str, code: &str, uses: i64| -> Result<(), Box<dyn Error>> {
         let resolved = taxonomy.matching_concept_ids(system, code);
         let candidates = if resolved.is_empty() { taxonomy.match_candidates(system, code) } else { Vec::new() };
         let status = if !resolved.is_empty() {

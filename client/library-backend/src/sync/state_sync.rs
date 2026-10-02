@@ -1,9 +1,9 @@
 //! Owner-committed pages for the storage-independent sync engine.
 use library_database::DatabaseError;
-use sync_common::{MutationId, PullStateResponse, StateCell, SyncCursor};
+use sync_common::{ReplicaSeq, PullStateResponse, SyncCursor};
 use sync_engine::{StoreError, StoreFuture};
 
-/// Storage commands for a complete native exchange or repair pass. The local
+/// Storage commands for a complete native exchange. The local
 /// library is authoritative, so commands never validate a stored account
 /// binding: switching accounts leaves sync state untouched.
 #[cfg(not(target_arch = "wasm32"))]
@@ -30,12 +30,12 @@ impl AccountStore<'_> {
     /// breaks that, since the connection isn't `Sync`. The caller
     /// that drives this exchange, outside this trait's `Send` bound, drains
     /// pending directory work once the page settles instead.
-    fn commit_response(&self, ids: &[MutationId], page: &PullStateResponse) -> Result<bool, StoreError> {
+    fn commit_response(&self, ids: &[ReplicaSeq], page: &PullStateResponse) -> Result<bool, StoreError> {
         self.database()?.sync_commit_pull_response(ids, page).map_err(store_error)
     }
     /// Batching policy belongs to the orchestrator: one owner transaction
     /// per bounded chunk.
-    fn acknowledge(&self, ids: &[MutationId]) -> Result<(), StoreError> {
+    fn acknowledge(&self, ids: &[ReplicaSeq]) -> Result<(), StoreError> {
         let database = self.database()?;
         ids.chunks(256).try_for_each(|chunk| database.sync_acknowledge_mutations(chunk)).map_err(store_error)
     }
@@ -79,27 +79,11 @@ impl sync_engine::SyncStore for AccountStore<'_> {
         let cursor = self.database().and_then(|database| database.sync_pull_cursor().map_err(store_error));
         Box::pin(async move { cursor })
     }
-    fn inventory_page(&self, after: Option<StateCell>) -> StoreFuture<'_, Vec<StateCell>> {
-        let page = self.database().and_then(|database| database.sync_inventory_page(after.as_ref()).map_err(store_error));
-        Box::pin(async move { page })
-    }
-    fn inventory_checkpoint(&self) -> StoreFuture<'_, Option<StateCell>> {
-        let checkpoint = self.database().and_then(|database| database.sync_inventory_checkpoint().map_err(store_error));
-        Box::pin(async move { checkpoint })
-    }
-    fn save_inventory_checkpoint(&self, after: Option<StateCell>) -> StoreFuture<'_, ()> {
-        let saved = self.database().and_then(|database| database.sync_save_inventory_checkpoint(after).map_err(store_error));
-        Box::pin(async move { saved })
-    }
-    fn enqueue_missing_state_cells(&self, cells: &[StateCell]) -> StoreFuture<'_, usize> {
-        let enqueued = self.database().and_then(|database| database.sync_enqueue_missing_state_cells(cells).map_err(store_error));
-        Box::pin(async move { enqueued })
-    }
-    fn pending_mutations(&self) -> StoreFuture<'_, Vec<library_replica::StateMutation>> {
+    fn pending_mutations(&self) -> StoreFuture<'_, Vec<library_replica::StatePublication>> {
         let mutations = self.database().and_then(|database| database.sync_publishable_mutations().map_err(store_error));
         Box::pin(async move { mutations })
     }
-    fn acknowledge_mutations(&self, ids: &[MutationId]) -> StoreFuture<'_, ()> {
+    fn acknowledge_mutations(&self, ids: &[ReplicaSeq]) -> StoreFuture<'_, ()> {
         // The work runs synchronously here so the returned future captures
         // no database reference and stays Send.
         let committed = self.acknowledge(ids);
@@ -113,7 +97,7 @@ impl sync_engine::SyncStore for AccountStore<'_> {
         });
         Box::pin(async move { result })
     }
-    fn apply_exchange_response(&self, ids: &[MutationId], page: &PullStateResponse) -> StoreFuture<'_, ()> {
+    fn apply_exchange_response(&self, ids: &[ReplicaSeq], page: &PullStateResponse) -> StoreFuture<'_, ()> {
         if ids.is_empty() {
             return self.apply_pull_page(page);
         }

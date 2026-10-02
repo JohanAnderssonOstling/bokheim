@@ -1,5 +1,5 @@
 //! Build and compact the displayed subject tree from current assignments.
-use super::*;
+pub(crate) use super::*;
 
 impl Database {
     pub(super) fn load_subject_tree(&self) -> Result<BTreeMap<i64, SubjectNode>, DatabaseError> {
@@ -48,7 +48,7 @@ impl Database {
 
 /// Collapse small leaves, then absorb a sole child of an empty wrapper while
 /// keeping the wrapper's label. Membership is independent of page filters.
-fn compact_node(route: i64, nodes: &mut BTreeMap<i64, SubjectNode>) -> bool {
+pub(crate) fn compact_node(route: i64, nodes: &mut BTreeMap<i64, SubjectNode>) -> bool {
     let children = nodes[&route].children.clone();
     for child in children {
         if !compact_node(child, nodes) {
@@ -76,7 +76,7 @@ fn compact_node(route: i64, nodes: &mut BTreeMap<i64, SubjectNode>) -> bool {
     true
 }
 
-pub(super) fn subtree_routes(nodes: &BTreeMap<i64, SubjectNode>, root: i64) -> BTreeSet<i64> {
+pub(crate) fn subtree_routes(nodes: &BTreeMap<i64, SubjectNode>, root: i64) -> BTreeSet<i64> {
     let mut routes = BTreeSet::new();
     let mut pending = vec![root];
     while let Some(route) = pending.pop() {
@@ -99,7 +99,7 @@ mod tests {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
         // This fixture owns derived rows directly; do not enqueue canonical edits.
-        db.connection.execute("UPDATE sync_metadata SET change_origin='remote'", []).unwrap();
+
         db.connection
             .execute_batch(
                 "DETACH curated; ATTACH ':memory:' AS curated;
@@ -136,8 +136,8 @@ mod tests {
         insert(3, 3);
         assert_eq!(visible(), vec![1]);
         assert_eq!(owners(), vec![(1, 1), (1, 2), (1, 3)]);
-        let query = |location: &str| library_model::LibraryBrowseQuery {
-            location: location.to_owned(),
+        let query = |route: i64| library_model::LibraryBrowseQuery {
+            location: library_model::BrowseLocation::Subject(route),
             search: String::new(),
             file_types: vec![],
             languages: vec![],
@@ -147,9 +147,9 @@ mod tests {
             include_direct_child_books: false,
         };
         let writes = db.connection.total_changes();
-        let root = db.browse_subject_contents(&query("0"), false).unwrap();
+        let root = db.browse_contents(&query(0), false).unwrap();
         assert_eq!(root.children.iter().map(|child| child.name.as_str()).collect::<Vec<_>>(), ["Transportation"]);
-        let transportation = db.browse_subject_contents(&query("1"), false).unwrap();
+        let transportation = db.browse_contents(&query(1), false).unwrap();
         assert!(transportation.children.is_empty());
         assert_eq!(transportation.books.len(), 3);
         assert_eq!(db.connection.total_changes(), writes, "browsing must not perform compaction writes");
@@ -178,7 +178,7 @@ mod tests {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
         // This fixture owns derived rows directly; do not enqueue canonical edits.
-        db.connection.execute("UPDATE sync_metadata SET change_origin='remote'", []).unwrap();
+
         db.connection
             .execute_batch(
                 "DETACH curated; ATTACH ':memory:' AS curated;
@@ -212,7 +212,7 @@ mod tests {
         insert(1..=6);
         assert_eq!(visible(), vec![(1, 0), (3, 1), (4, 1)]);
         let query = library_model::LibraryBrowseQuery {
-            location: "1".into(),
+            location: library_model::BrowseLocation::Subject(1),
             search: String::new(),
             file_types: vec![],
             languages: vec![],
@@ -221,7 +221,7 @@ mod tests {
             hide_finished: false,
             include_direct_child_books: false,
         };
-        let contents = db.browse_subject_contents(&query, false).unwrap();
+        let contents = db.browse_contents(&query, false).unwrap();
         assert_eq!(contents.children.iter().map(|child| child.name.as_str()).collect::<Vec<_>>(), ["Optics", "Quantum"]);
         assert!(contents.books.is_empty());
         insert(7..=7);
@@ -241,7 +241,7 @@ mod tests {
         db.initialize_library().unwrap();
         db.connection
             .execute_batch(
-                "UPDATE sync_metadata SET change_origin='remote';
+                "
             DETACH curated; ATTACH ':memory:' AS curated;
             CREATE TABLE curated.concept(concept_id INTEGER PRIMARY KEY,preferred_label TEXT NOT NULL);
             INSERT INTO curated.concept VALUES(1,'Science'),(2,'Physics'),(3,'Other'),(4,'Quantum');
@@ -259,7 +259,7 @@ mod tests {
         }
         db.connection.execute("INSERT INTO book_unified_concept VALUES(1,3,1)", []).unwrap();
         let mut query = library_model::LibraryBrowseQuery {
-            location: "0".into(),
+            location: library_model::BrowseLocation::Subject(0),
             search: String::new(),
             file_types: vec![],
             languages: vec![],
@@ -269,28 +269,28 @@ mod tests {
             include_direct_child_books: false,
         };
         db.connection.pragma_update(None, "query_only", true).unwrap();
-        let root = db.browse_subject(&query, false).unwrap();
+        let root = db.browse(&query, false).unwrap();
         assert_eq!(root.contents.children.iter().map(|row| (row.name.as_str(), row.book_count)).collect::<Vec<_>>(), [("Other", 3), ("Science", 3)]);
         assert_eq!(root.sections.len(), 2);
         query.search = "book".into();
-        assert_eq!(db.browse_subject_contents(&query, false).unwrap().books.len(), 3, "multiple routes must not duplicate cards");
-        query.location = "1".into();
+        assert_eq!(db.browse_contents(&query, false).unwrap().books.len(), 3, "multiple routes must not duplicate cards");
+        query.location = library_model::BrowseLocation::Subject(1);
         query.search = "Other".into();
-        let searched = db.browse_subject_contents(&query, false).unwrap();
+        let searched = db.browse_contents(&query, false).unwrap();
         assert!(searched.books.is_empty() && searched.children.is_empty(), "search stays inside the selected subject");
-        query.location = "0".into();
+        query.location = library_model::BrowseLocation::Subject(0);
         query.search.clear();
         query.languages = vec!["en".into()];
-        let filtered = db.browse_subject_contents(&query, false).unwrap();
+        let filtered = db.browse_contents(&query, false).unwrap();
         assert_eq!(filtered.children.iter().map(|row| (row.name.as_str(), row.book_count)).collect::<Vec<_>>(), [("Other", 1), ("Science", 1)], "filters must not change compaction");
         query.languages.clear();
-        let downloaded = db.browse_subject_contents(&query, true).unwrap();
+        let downloaded = db.browse_contents(&query, true).unwrap();
         assert!(downloaded.children.iter().all(|row| row.book_count == 1 && row.downloaded_book_count == 1));
         db.connection.pragma_update(None, "query_only", false).unwrap();
         db.connection.execute("UPDATE curated.concept SET preferred_label='Renamed science' WHERE concept_id=1", []).unwrap();
-        assert!(db.browse_subject_contents(&query, false).unwrap().children.iter().any(|row| row.name == "Renamed science"));
+        assert!(db.browse_contents(&query, false).unwrap().children.iter().any(|row| row.name == "Renamed science"));
         db.connection.execute("DELETE FROM book_dir WHERE book_row_id=3", []).unwrap();
-        let collapsed = db.browse_subject_contents(&query, false).unwrap();
+        let collapsed = db.browse_contents(&query, false).unwrap();
         assert!(collapsed.children.is_empty());
         assert_eq!(collapsed.books.len(), 2);
         assert_eq!(db.connection.query_row("SELECT count(*) FROM book_unified_concept", [], |row| row.get::<_, i64>(0)).unwrap(), 4, "compaction never rewrites assignments");

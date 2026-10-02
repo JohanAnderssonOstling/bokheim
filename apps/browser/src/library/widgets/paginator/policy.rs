@@ -16,7 +16,6 @@ pub(super) const COLUMN_GAP: f32 = ui_components::SPACE_SM;
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) struct PaginatorSizing {
     aspect_ratio: Option<f32>,
-    aspect_width_limit: Option<Pixels>,
     rems: Rems,
     pixels: Pixels,
     /// Padding the child carries on every side.
@@ -38,21 +37,15 @@ pub(crate) struct PaginatorSizing {
 
 impl PaginatorSizing {
     pub(crate) fn rems(height: Rems) -> Self {
-        Self { aspect_width_limit: None, aspect_ratio: None, rems: height, pixels: Pixels::ZERO, padding: Pixels::ZERO, nested: None }
+        Self { aspect_ratio: None, rems: height, pixels: Pixels::ZERO, padding: Pixels::ZERO, nested: None }
     }
 
     pub(crate) fn pixels(height: Pixels) -> Self {
-        Self { aspect_width_limit: None, aspect_ratio: None, rems: Rems::ZERO, pixels: height, padding: Pixels::ZERO, nested: None }
+        Self { aspect_ratio: None, rems: Rems::ZERO, pixels: height, padding: Pixels::ZERO, nested: None }
     }
 
     pub(crate) fn aspect_ratio(ratio: f32) -> Self {
-        Self { aspect_width_limit: None, aspect_ratio: Some(ratio), rems: Rems::ZERO, pixels: Pixels::ZERO, padding: Pixels::ZERO, nested: None }
-    }
-
-    /// Cap the width used for aspect-ratio height while text can grow wider.
-    pub(crate) fn with_aspect_width_limit(mut self, width: Pixels) -> Self {
-        self.aspect_width_limit = Some(width);
-        self
+        Self { aspect_ratio: Some(ratio), rems: Rems::ZERO, pixels: Pixels::ZERO, padding: Pixels::ZERO, nested: None }
     }
 
     pub(crate) fn with_rems(mut self, height: Rems) -> Self {
@@ -79,7 +72,6 @@ impl PaginatorSizing {
     pub(super) fn height(self, width: Pixels, rem_size: Pixels) -> Pixels {
         let padding = f32::from(self.padding).max(0.0);
         let content_width = (f32::from(width) - padding * 2.0).max(0.0);
-        let content_width = self.aspect_width_limit.map_or(content_width, |limit| content_width.min(f32::from(limit)));
         let aspect_height = self.aspect_ratio.filter(|ratio| ratio.is_finite() && *ratio > 0.0).map(|ratio| content_width / ratio).unwrap_or_default();
         let nested = self.nested.map_or(0.0, |nested| f32::from(nested(width, rem_size)));
         px((aspect_height + nested + f32::from(self.rems.to_pixels(rem_size)) + f32::from(self.pixels) + padding * 2.0).max(1.0))
@@ -101,13 +93,6 @@ impl PaginatorWidthPolicy {
 
     pub(crate) fn pixels(width: Pixels) -> Self {
         Self { rems: Rems::ZERO, fixed_pixels: px(f32::from(width).max(1.0)) }
-    }
-
-    /// Adds fixed chrome, such as a cover and card padding, to the rem-based
-    /// text measure declared by `new`.
-    pub(crate) fn with_pixels(mut self, fixed: Pixels) -> Self {
-        self.fixed_pixels = px(f32::from(fixed).max(0.0));
-        self
     }
 
     pub(super) fn width(self, rem_size: Pixels) -> Pixels {
@@ -153,7 +138,19 @@ pub(crate) struct PaginatorGroupPolicy {
 
 impl PaginatorGroupPolicy {
     pub(crate) fn new(width: PaginatorWidthPolicy, sizing: PaginatorSizing, row_gap: Pixels) -> Self {
-        Self { intrinsic: false, width, sizing, row_gap: px(f32::from(row_gap).max(0.0)), column_gap: px(COLUMN_GAP), maximum_width: None, minimum_columns: 1, inset_edges: true, edge_inset: Pixels::ZERO, pack_start: false, grid_rules: false }
+        Self {
+            intrinsic: false,
+            width,
+            sizing,
+            row_gap: px(f32::from(row_gap).max(0.0)),
+            column_gap: px(COLUMN_GAP),
+            maximum_width: None,
+            minimum_columns: 1,
+            inset_edges: true,
+            edge_inset: Pixels::ZERO,
+            pack_start: false,
+            grid_rules: false,
+        }
     }
 
     /// Wrap measured child widths with fixed gaps and no stretching.
@@ -247,42 +244,14 @@ fn text_block_height(cover_text: CoverText) -> (f32, f32) {
     }
 }
 
-/// The book grid on a browse page, in either of the card's two modes.
-///
-/// A detailed card is the ordinary card with a blurb opened out beside it: the
-/// cover and title keep their stack, at the ordinary card's width, and the
-/// doubled cell gives the gained half to the words. So both modes are the
-/// same arithmetic — cover, then title and subtitle — and the only thing the
-/// detailed card changes is the width the cover is a fraction of, which is
-/// what its ratio carries.
-///
-/// Detailed cards widen their description up to a cap, then expand gaps.
-/// Cover-only cards grow up to 25% before expanding gaps.
-///
-/// A detailed card always states its title — the blurb needs a heading, and
-/// there is no separate cover-scale grid to compare it against — so
-/// `cover_text` is read only in the compact case.
-pub(crate) fn book_card_policy(detailed: bool, cover_text: CoverText) -> PaginatorGroupPolicy {
-    let (width, maximum_width, cover_ratio, minimum_columns) = if detailed {
-        (
-            PaginatorWidthPolicy::new(Rems(ui_components::BOOK_CARD_DETAIL_TEXT_WIDTH_REM)).with_pixels(px(ui_components::BOOK_CARD_DETAIL_FIXED_WIDTH)),
-            PaginatorWidthPolicy::new(Rems(ui_components::BOOK_CARD_DETAIL_TEXT_MAXIMUM_WIDTH_REM)).with_pixels(px(ui_components::BOOK_CARD_DETAIL_FIXED_WIDTH)),
-            ui_components::BOOK_CARD_DETAIL_ASPECT_RATIO,
-            // A detailed card is already two ordinary cards wide, so a narrow
-            // window shows one rather than halving the covers.
-            1,
-        )
-    } else {
-        let width = PaginatorWidthPolicy::pixels(px(ui_components::BOOK_CARD_WIDTH));
-        (width, PaginatorWidthPolicy::pixels(px(ui_components::BOOK_CARD_MAXIMUM_WIDTH)), ui_components::BOOK_COVER_ASPECT_RATIO, ui_components::BOOK_GRID_MINIMUM_COLUMNS)
-    };
-    let (extra_height, fixed_height) = text_block_height(if detailed { CoverText::Always } else { cover_text });
-    let mut sizing = PaginatorSizing::aspect_ratio(cover_ratio).with_rems(Rems(extra_height)).with_pixels(px(fixed_height)).with_padding(px(ui_components::BOOK_CARD_PADDING));
-    if detailed {
-        sizing = sizing.with_aspect_width_limit(px(ui_components::BOOK_CARD_CONTENT_WIDTH / ui_components::BOOK_CARD_DETAIL_COVER_FRACTION));
-    }
+/// The book grid on a browse page. Cover-only cards grow up to 25% before
+/// expanding gaps.
+pub(crate) fn book_card_policy(cover_text: CoverText) -> PaginatorGroupPolicy {
+    let width = PaginatorWidthPolicy::pixels(px(ui_components::BOOK_CARD_WIDTH));
+    let (extra_height, fixed_height) = text_block_height(cover_text);
+    let sizing = PaginatorSizing::aspect_ratio(ui_components::BOOK_COVER_ASPECT_RATIO).with_rems(Rems(extra_height)).with_pixels(px(fixed_height)).with_padding(px(ui_components::BOOK_CARD_PADDING));
     let gap = px(ui_components::BOOK_GRID_BOOK_GAP);
-    PaginatorGroupPolicy::new(width, sizing, gap).with_gap(gap).with_maximum_width(maximum_width).with_minimum_columns(minimum_columns).flush_edges()
+    PaginatorGroupPolicy::new(width, sizing, gap).with_gap(gap).with_maximum_width(PaginatorWidthPolicy::pixels(px(ui_components::BOOK_CARD_MAXIMUM_WIDTH))).with_minimum_columns(ui_components::BOOK_GRID_MINIMUM_COLUMNS).flush_edges()
 }
 
 /// Cover-only cards in the graph sidebar. The preferred width is 200 px and
@@ -292,15 +261,11 @@ pub(crate) fn book_card_policy(detailed: bool, cover_text: CoverText) -> Paginat
 pub(crate) fn graph_cover_policy() -> PaginatorGroupPolicy {
     let width = PaginatorWidthPolicy::pixels(px(200.0));
     let gap = px(ui_components::BOOK_GRID_BOOK_GAP);
-    PaginatorGroupPolicy::new(
-        width,
-        PaginatorSizing::aspect_ratio(ui_components::BOOK_COVER_ASPECT_RATIO).with_padding(px(ui_components::BOOK_CARD_PADDING)),
-        gap,
-    )
-    .with_gap(gap)
-    .with_maximum_width(PaginatorWidthPolicy::pixels(px(300.0)))
-    .with_minimum_columns(if ui_components::has_native_back_button() { 2 } else { 1 })
-    .with_edge_inset(px(12.0))
+    PaginatorGroupPolicy::new(width, PaginatorSizing::aspect_ratio(ui_components::BOOK_COVER_ASPECT_RATIO).with_padding(px(ui_components::BOOK_CARD_PADDING)), gap)
+        .with_gap(gap)
+        .with_maximum_width(PaginatorWidthPolicy::pixels(px(300.0)))
+        .with_minimum_columns(if ui_components::has_native_back_button() { 2 } else { 1 })
+        .with_edge_inset(px(12.0))
 }
 
 /// Section cards in the mixed subject/folder browse flow. Every card in a row
@@ -331,10 +296,7 @@ pub(crate) fn browse_section_card_policy() -> PaginatorGroupPolicy {
     let sizing = PaginatorSizing::pixels(frame).with_rems(Rems(ui_components::SECTION_CARD_HEADING_HEIGHT_REM)).with_nested(browse_section_body_height);
     // Keep the gap between tiles, while the first tile starts at the same
     // content inset as the breadcrumb and the first book cover.
-    PaginatorGroupPolicy::new(width, sizing, px(ui_components::SPACE_MD))
-        .with_gap(px(ui_components::SPACE_MD))
-        .with_edge_inset(px(ui_components::CONTENT_INSET))
-        .flush_edges()
+    PaginatorGroupPolicy::new(width, sizing, px(ui_components::SPACE_MD)).with_gap(px(ui_components::SPACE_MD)).with_edge_inset(px(ui_components::CONTENT_INSET)).flush_edges()
 }
 
 /// A cover-only book row inside a browse section card. The cell width
@@ -342,14 +304,7 @@ pub(crate) fn browse_section_card_policy() -> PaginatorGroupPolicy {
 pub(crate) fn browse_section_cover_policy() -> PaginatorGroupPolicy {
     let width = PaginatorWidthPolicy::pixels(px(section_cover_cell_width()));
     let gap = px(ui_components::BOOK_GRID_BOOK_GAP);
-    PaginatorGroupPolicy::new(
-        width,
-        PaginatorSizing::aspect_ratio(ui_components::BOOK_COVER_ASPECT_RATIO).with_padding(px(ui_components::BOOK_CARD_PADDING)),
-        gap,
-    )
-    .with_gap(gap)
-    .with_maximum_width(width)
-    .pack_start()
+    PaginatorGroupPolicy::new(width, PaginatorSizing::aspect_ratio(ui_components::BOOK_COVER_ASPECT_RATIO).with_padding(px(ui_components::BOOK_CARD_PADDING)), gap).with_gap(gap).with_maximum_width(width).pack_start()
 }
 
 /// One shared horizontal sequence of child-entry columns followed by covers.
@@ -357,10 +312,7 @@ pub(crate) fn browse_section_cover_policy() -> PaginatorGroupPolicy {
 /// its own trailing space when direct books follow it.
 pub(crate) fn browse_section_item_policy() -> PaginatorGroupPolicy {
     let width = PaginatorWidthPolicy::pixels(px(section_cover_cell_width()));
-    PaginatorGroupPolicy::new(width, PaginatorSizing::pixels(Pixels::ZERO).with_nested(browse_section_body_height), Pixels::ZERO)
-        .with_gap(Pixels::ZERO)
-        .with_maximum_width(width)
-        .pack_start()
+    PaginatorGroupPolicy::new(width, PaginatorSizing::pixels(Pixels::ZERO).with_nested(browse_section_body_height), Pixels::ZERO).with_gap(Pixels::ZERO).with_maximum_width(width).pack_start()
 }
 
 /// How tall the cards on a shelf resolve to, given the width of the row they

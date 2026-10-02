@@ -1,4 +1,6 @@
 //! Task ownership and cancellation are identical on every executor.
+
+use std::panic::AssertUnwindSafe;
 use super::{BackendExecutorError, BackendFuture, BackendOutput};
 use futures_util::future::{AbortHandle, Abortable};
 use futures_util::FutureExt;
@@ -33,7 +35,7 @@ pub(super) fn owned_task<T: BackendOutput>(future: impl BackendFuture<T>) -> (Ba
     let (sender, receiver) = oneshot::channel();
     let (abort, registration) = AbortHandle::new_pair();
     let runner = async move {
-        if let Ok(result) = Abortable::new(std::panic::AssertUnwindSafe(future).catch_unwind(), registration).await {
+        if let Ok(result) = Abortable::new(AssertUnwindSafe(future).catch_unwind(), registration).await {
             let _ = sender.send(result.map_err(|_| BackendExecutorError("backend task panicked".to_owned())));
         }
     };
@@ -48,7 +50,7 @@ pub(super) fn owned_local_task<T: 'static>(future: impl Future<Output = T> + 'st
     let (sender, receiver) = oneshot::channel();
     let (abort, registration) = AbortHandle::new_pair();
     let runner = async move {
-        if let Ok(result) = Abortable::new(std::panic::AssertUnwindSafe(future).catch_unwind(), registration).await {
+        if let Ok(result) = Abortable::new(AssertUnwindSafe(future).catch_unwind(), registration).await {
             let _ = sender.send(result.map_err(|_| BackendExecutorError("backend task panicked".to_owned())));
         }
     };

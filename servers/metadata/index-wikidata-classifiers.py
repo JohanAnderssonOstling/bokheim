@@ -6,7 +6,6 @@ are exposed in a separate view, never promoted to exact book classifications.
 """
 import argparse,importlib.util,json,sqlite3,subprocess
 from pathlib import Path
-import orjson
 
 def load(name,file):
     spec=importlib.util.spec_from_file_location(name,Path(__file__).with_name(file))
@@ -76,7 +75,7 @@ def build(root,database):
         try:
             with c:
                 for line in p.stdout:
-                    if any(t in line for t in tokens):insert(c,orjson.loads(line),registry)
+                    if any(t in line for t in tokens):insert(c,json.loads(line),registry)
                 if p.wait()!=0:raise RuntimeError('zstd failed')
                 c.execute('INSERT INTO completed_chunk VALUES(?,?)',(key,meta['sha256']))
             print(json.dumps({'chunk':key,'status':'indexed'}),flush=True)

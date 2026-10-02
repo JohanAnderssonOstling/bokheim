@@ -1,17 +1,14 @@
 //! Axum transport adapter for the synchronization server.
 
 mod account;
-mod admin;
 mod assets;
-mod book_batch;
 mod bandwidth;
 mod extract;
 mod notifications;
-mod operations;
 mod playback;
 mod state;
 mod sync;
-mod traffic;
+mod trace;
 
 use axum::{
     extract::{DefaultBodyLimit, State},
@@ -35,7 +32,6 @@ use tower_http::{
 
 pub use bandwidth::TransferLimits;
 pub use notifications::NotificationConfig;
-pub use operations::OperationalServices;
 
 const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = server_asset_store::MAX_BOOK_UPLOAD_DURATION;
@@ -129,11 +125,10 @@ fn parse_bounded<T: std::str::FromStr + PartialOrd + Copy + std::fmt::Display>(n
 }
 
 pub fn router_with_operational_limits(
-    database: PostgresDatabase, account_routes: Router, account: Arc<PostgresAccountService>, sync: Arc<PostgresSyncRepository>, assets: Arc<AssetApplication>, readiness: Arc<Readiness>, transfer_limits: TransferLimits,
-    request_limits: RequestLimits, notification_config: NotificationConfig, operational_services: OperationalServices, client_address_source: server_account::ClientAddressSource,
+    account_routes: Router, account: Arc<PostgresAccountService>, sync: Arc<PostgresSyncRepository>, assets: Arc<AssetApplication>, readiness: Arc<Readiness>, transfer_limits: TransferLimits, request_limits: RequestLimits,
+    notification_config: NotificationConfig,
 ) -> Router {
-    let traffic = traffic::TrafficRecorder::new(database.clone(), client_address_source);
-    let state = AppState::new(database, account, sync, assets, readiness, transfer_limits, request_limits, notification_config, operational_services, traffic.clone());
+    let state = AppState::new(account, sync, assets, readiness, transfer_limits, request_limits, notification_config);
     let routes = Router::new()
         .route("/api/live", get(live))
         .route("/api/ready", get(ready))
@@ -141,39 +136,26 @@ pub fn router_with_operational_limits(
         .route("/api/notifications", get(notifications::connect))
         .route("/api/account/snapshot", get(account::get_snapshot))
         .route("/api/sync/exchange", post(sync::exchange_events))
-        .route("/api/sync/inventory", post(sync::compare_state_inventory))
         .route("/api/cloud-storage", axum::routing::get(sync::cloud_storage))
         .route("/api/libraries/:library_id/cloud-storage", axum::routing::put(sync::set_cloud_storage))
         .route("/api/libraries", post(sync::create_library).put(sync::rename_library))
         .route("/api/libraries/:library_id", delete(sync::delete_library))
         .route("/api/libraries/:library_id/blobs/:hash", head(assets::head_blob).get(assets::get_blob).put(assets::put_blob))
-        .route("/api/libraries/:library_id/blobs/:hash/ranges", post(assets::get_blob_ranges))
         .route("/api/libraries/:library_id/blobs/:hash/playback", post(playback::issue))
         .route("/api/playback/:ticket", get(playback::read).head(playback::read).delete(playback::revoke))
         .route("/api/playback/:ticket/tracks/:index", get(playback::read_track).head(playback::read_track))
         .route("/api/libraries/:library_id/blobs/negotiate", post(assets::post_blob_manifest))
-        .route("/api/libraries/:library_id/book-batch", axum::routing::put(book_batch::upload))
-        .route("/api/libraries/:library_id/thumbnails/:content_hash", head(assets::head_thumbnail).get(assets::get_thumbnail).put(assets::put_thumbnail).delete(assets::delete_thumbnail))
+        .route("/api/libraries/:library_id/thumbnails/:content_hash", head(assets::head_thumbnail).get(assets::get_thumbnail).put(assets::put_thumbnail).delete(assets::delete_thumbnail).layer(DefaultBodyLimit::max(2 * sync_common::MAX_THUMBNAIL_BYTES as usize + 64 * 1024)))
         .route("/api/libraries/:library_id/thumbnails/presence", post(assets::post_thumbnail_presence))
         .route("/api/libraries/:library_id/thumbnail-batch", post(assets::post_thumbnail_batch).put(assets::put_thumbnail_batch).layer(DefaultBodyLimit::max(sync_common::api::assets::MAX_THUMBNAIL_BATCH_BYTES + 1024 * 1024)))
-        .route("/api/admin/overview", get(admin::overview))
-        .route("/api/admin/traffic", get(admin::traffic))
-        .route("/api/admin/requests", get(admin::requests))
-        .route("/api/admin/engagement", get(admin::engagement))
-        .route("/api/admin/accounts", get(admin::accounts))
-        .route("/api/admin/services", get(admin::services))
-        .route("/api/admin/authority-processes/:process", post(admin::authority_process_action).layer(DefaultBodyLimit::max(4 * 1024)))
-        .route("/api/admin/authority-identity-reviews", get(admin::authority_identity_reviews))
-        .route("/api/admin/authority-identity-reviews/:review_id", post(admin::authority_identity_review_action).layer(DefaultBodyLimit::max(16 * 1024)))
-        .route("/api/admin/login", post(admin::login).layer(DefaultBodyLimit::max(16 * 1024)))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state);
-    request_limits.apply(account_routes.merge(routes)).layer(middleware::from_fn_with_state(traffic, traffic::record_traffic)).layer(browser_cors_layer())
+    request_limits.apply(account_routes.merge(routes)).layer(middleware::from_fn(trace::trace_request)).layer(browser_cors_layer())
 }
 
 /// Browser transport policy for the same bearer-token API used by native
 /// clients. This deliberately does not enable credentialed cross-origin
-/// requests; the cookie-authenticated web endpoints remain same-origin only.
+/// requests. Browser clients send bearer credentials explicitly.
 fn browser_cors_layer() -> CorsLayer {
     CorsLayer::new()
         .allow_origin(Any)

@@ -1,13 +1,13 @@
 //! Account discovery, queued account writes, registration, and credential retries.
 use super::super::core::*;
+use library_backend::library::handle::{LibraryActorCommand, LibraryControl};
 use sync_common::api::libraries::{CloudStorageChange, LibraryCloudStorage};
 
 /// Account-global maintenance is owned by the account subsystem.  It holds
 /// only a weak app state; library workers are never scheduled from here.
-pub(in crate::app) fn start_maintenance(executor: &crate::executor::BackendExecutor, state: &std::sync::Weak<AppState>, account: (SyncScheduler, async_channel::Receiver<crate::sync::SyncRequest>)) {
-    let (account_scheduler, account_requests) = account;
+pub(in crate::app) fn start_maintenance(executor: &crate::executor::BackendExecutor, state: &std::sync::Weak<AppState>, account_requests: async_channel::Receiver<crate::sync::SyncRequest>) {
     let account_state = state.clone();
-    executor.spawn_detached(account_scheduler.run(
+    executor.spawn_detached(crate::sync::run_timed(
         move |_| {
             let state = account_state.clone();
             async move {
@@ -138,7 +138,10 @@ impl AppBackend {
 
     fn apply_open_cloud_storage(&self, id: LibraryId, enabled: bool) -> Result<(), BackendError> {
         if let Ok(library) = self.state.library_directory.get(&id) {
-            library.set_asset_storage(enabled, true);
+            let _ = library.commands.try_send(LibraryActorCommand::Control(LibraryControl::SetAssetStorage {
+                enabled,
+                reset_cloud_presence: true,
+            }));
         }
         Ok(())
     }

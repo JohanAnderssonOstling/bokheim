@@ -1,4 +1,5 @@
 //! Errors retain their concrete source while they travel inside the backend.
+
 use std::{error::Error, fmt, sync::Arc};
 
 #[derive(Clone, Debug)]
@@ -143,13 +144,14 @@ backend_error_from!(std::io::Error, rusqlite::Error, client_platform_runtime::ex
 
 #[cfg(test)]
 mod tests {
+    use std::io::ErrorKind;
     use super::*;
     #[test]
     fn operation_preserves_the_concrete_error_across_clones() {
-        let error = BackendError::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let error = BackendError::from(std::io::Error::from(ErrorKind::PermissionDenied));
         let cloned = error.clone();
         let source = cloned.source().unwrap().downcast_ref::<std::io::Error>().unwrap();
-        assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(source.kind(), ErrorKind::PermissionDenied);
     }
 
     fn roundtrip(error: &BackendError) -> BackendError {

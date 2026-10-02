@@ -1,15 +1,16 @@
 //! Browser CPU worker execution for opaque application requests.
 
+use std::time::Duration;
 /// Admission limits and startup deadline for a browser CPU worker.
 #[derive(Clone, Copy, Debug)]
 pub struct CpuWorkerOptions {
     pub jobs: usize,
     pub bytes: usize,
-    pub startup_timeout: std::time::Duration,
+    pub startup_timeout: Duration,
 }
 impl Default for CpuWorkerOptions {
     fn default() -> Self {
-        Self { jobs: 32, bytes: 64 * 1024 * 1024, startup_timeout: std::time::Duration::from_secs(5) }
+        Self { jobs: 32, bytes: 64 * 1024 * 1024, startup_timeout: Duration::from_secs(5) }
     }
 }
 
@@ -43,7 +44,7 @@ struct State {
 }
 struct Service {
     budget: client_platform_runtime::byte_budget::ByteBudget,
-    startup_timeout: std::time::Duration,
+    startup_timeout: Duration,
     create_worker: Box<dyn Fn() -> Result<WorkerEndpoint, JsValue>>,
     state: RefCell<State>,
 }

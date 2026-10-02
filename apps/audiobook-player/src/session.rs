@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use super::*;
 
 /// Device-local playback restoration owned by the playback UI, not by a
@@ -30,6 +32,9 @@ impl ActiveAudiobook {
     }
 }
 
+/// Shown position, playing, buffering, rate and sleep label.
+type ShownState = (Duration, bool, bool, f64, Option<SharedString>);
+
 /// Playback resources and behavior, independent of focus, menus, and view layout.
 /// The application controller retains this session when individual views disappear.
 pub struct PlaybackSession {
@@ -40,7 +45,7 @@ pub struct PlaybackSession {
     stopped_position: Option<android::PositionSnapshot>,
     position_task: Option<gpui::Task<Result<(), String>>>,
     #[cfg(target_os = "android")]
-    release: Option<std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>>>>>,
+    release: Option<Pin<Box<dyn Future<Output = Result<(), String>>>>>,
     #[cfg(not(target_arch = "wasm32"))]
     stream_control: Option<app::AudioStreamControl>,
     resolve_task: Option<gpui::Task<()>>,
@@ -61,6 +66,8 @@ pub struct PlaybackSession {
     pub(super) rate: f64,
     pub(super) observed_playing: bool,
     observed_buffering: bool,
+    /// What the dock showed after the last notification; see `shown_state`.
+    shown: ShownState,
     pub(super) error: Option<String>,
     pub(super) sleep: Option<SleepPlan>,
     pub(super) position_updates: async_channel::Sender<PlaybackPosition>,
@@ -293,26 +300,19 @@ impl PlaybackSession {
         }
     }
 
-    pub(super) fn set_rate(&mut self, rate: f64, cx: &mut App) {
-        let tempo = match tempo_for(rate) {
-            Ok(tempo) => tempo,
-            Err(error) => {
-                self.error = Some(error);
-                return;
-            }
-        };
-        let Some(audio) = self.audio.as_mut() else {
-            self.rate = rate;
-            (self.save_speed)(rate, cx);
-            return;
-        };
-        match audio.set_tempo(tempo) {
+    pub(super) fn set_rate(&mut self, rate: f64, cx: &mut Context<Self>) {
+        let applied = tempo_for(rate).and_then(|tempo| match self.audio.as_mut() {
+            Some(audio) => audio.set_tempo(tempo),
+            None => Ok(()),
+        });
+        match applied {
             Ok(()) => {
                 self.rate = rate;
                 (self.save_speed)(rate, cx);
             }
             Err(error) => self.error = Some(error),
         }
+        cx.notify();
     }
 
     pub fn open(locator: BookLocator, library: LibraryClient, resolved: ResolvedBook, initial_target: Option<String>, speed: f64, save_speed: fn(f64, &mut App), cx: &mut Context<Self>) -> Self {
@@ -534,7 +534,10 @@ impl PlaybackSession {
                     Some(resolved) => resolved,
                     None => library.resolve_book(content_hash).await?,
                 };
-                let resolved = resolved.into_audiobook()?;
+                let resolved = match resolved {
+                    ResolvedBook::Audiobook(book) => book,
+                    ResolvedBook::Document(_) => return Err("expected an audiobook".into()),
+                };
                 #[cfg(not(target_arch = "wasm32"))]
                 let mut source = AudiobookSource::new(resolved.reader, resolved.path.into());
                 #[cfg(not(target_arch = "wasm32"))]
@@ -662,6 +665,7 @@ impl PlaybackSession {
             rate,
             observed_playing: false,
             observed_buffering: false,
+            shown: (Duration::ZERO, false, false, rate, None),
             error: None,
             sleep: None,
             position_updates,
@@ -710,7 +714,7 @@ impl PlaybackSession {
 
     /// Stop all producers, close the position queue, and await its final write.
     /// Used before deleting the originating library and during normal shutdown.
-    pub fn stop_and_flush(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>>>> {
+    pub fn stop_and_flush(&mut self) -> Pin<Box<dyn Future<Output = Result<(), String>>>> {
         self.stop_playback();
         #[cfg(not(target_os = "android"))]
         self.position_updates.close();
@@ -739,8 +743,14 @@ impl PlaybackSession {
         })
     }
 
+    /// The playback state as the dock displays it. The refresh loop notifies
+    /// only when this changes, so ticks that would redraw identical pixels
+    /// draw nothing.
+    fn shown_state(&self) -> ShownState {
+        (shown_position(self.position), self.observed_playing, self.observed_buffering, self.rate, self.sleep_label())
+    }
+
     pub(super) fn refresh_playback_state(&mut self) -> bool {
-        let previous_state = (self.position, self.observed_playing, self.observed_buffering, self.rate, self.sleep_label());
         #[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
         if let Some(audio) = &mut self.audio {
             audio.refresh_output();
@@ -780,8 +790,12 @@ impl PlaybackSession {
         }
         let slept = self.tick_sleep_timer();
         self.persist_position(has_error);
-        // The wall-clock countdown also changes while playback is paused.
-        has_error || slept || matches!(self.sleep, Some(SleepPlan::Until(_))) || previous_state != (self.position, self.observed_playing, self.observed_buffering, self.rate, self.sleep_label())
+        // Compared with what was last shown rather than with the start of this
+        // tick: the sleep countdown runs on the wall clock, even while paused.
+        let shown = self.shown_state();
+        let changed = shown != self.shown;
+        self.shown = shown;
+        has_error || slept || changed
     }
 
     pub fn is_buffering(&self) -> bool {
@@ -827,14 +841,18 @@ impl PlaybackSession {
         match self.sleep? {
             SleepPlan::Until(deadline) => {
                 let remaining = deadline.saturating_duration_since(Instant::now());
-                let label = if remaining > Duration::from_secs(60) { format!("{} min", remaining.as_secs().div_ceil(60)) } else { format_time(remaining) };
-                Some(label.into())
+                Some(format!("{} min", remaining.as_secs().div_ceil(60)).into())
             }
             SleepPlan::EndOfChapter(_) => Some("Chapter".into()),
         }
     }
 
-    pub(super) fn set_sleep(&mut self, plan: Option<SleepPlan>) {
+    pub(super) fn choose_sleep(&mut self, choice: SleepChoice, cx: &mut Context<Self>) {
+        self.set_sleep(choice.plan(self.active_chapter_index()));
+        cx.notify();
+    }
+
+    fn set_sleep(&mut self, plan: Option<SleepPlan>) {
         #[cfg(target_os = "android")]
         if let Some(audio) = &self.audio {
             let deadline = match plan {
@@ -955,16 +973,39 @@ impl PlaybackSession {
         }
     }
 
-    pub(super) fn previous_chapter(&mut self) {
-        let Some(book) = &self.book else { return };
-        let position = previous_chapter_position(&book.chapters, self.position);
-        self.seek_to(position);
+    /// The transport's seeks. Like `request_toggle`, each is a complete action:
+    /// it moves, opens the source if playback wants one, and redraws.
+    pub(super) fn skip(&mut self, seconds: f64, cx: &mut Context<Self>) {
+        self.seek_by(seconds);
+        self.finish_seek(cx);
     }
 
-    pub(super) fn next_chapter(&mut self) {
-        let Some(book) = &self.book else { return };
-        let position = next_chapter_position(&book.chapters, self.position, book.duration);
-        self.seek_to(position);
+    pub(super) fn previous_chapter(&mut self, cx: &mut Context<Self>) {
+        if let Some(position) = self.book.as_ref().map(|book| previous_chapter_position(&book.chapters, self.position)) {
+            self.seek_to(position);
+        }
+        self.finish_seek(cx);
+    }
+
+    pub(super) fn next_chapter(&mut self, cx: &mut Context<Self>) {
+        if let Some(position) = self.book.as_ref().map(|book| next_chapter_position(&book.chapters, self.position, book.duration)) {
+            self.seek_to(position);
+        }
+        self.finish_seek(cx);
+    }
+
+    /// Seeks to a fraction of the current chapter, as a scrub on the progress bar.
+    pub(super) fn seek_in_chapter(&mut self, fraction: f32, cx: &mut Context<Self>) {
+        let target = self.book.as_ref().and_then(|book| book.chapters.get(self.active_chapter_index())).map(|chapter| chapter_position_at_fraction(chapter.start, chapter.end, fraction));
+        if let Some(target) = target {
+            self.seek_to(target);
+        }
+        self.finish_seek(cx);
+    }
+
+    fn finish_seek(&mut self, cx: &mut Context<Self>) {
+        self.ensure_source(cx);
+        cx.notify();
     }
 
     pub fn is_playing(&self) -> bool {

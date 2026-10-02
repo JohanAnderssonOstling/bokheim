@@ -19,7 +19,7 @@ fn annotated_streaming_fixture(rotation: u16) -> Vec<u8> {
 
 #[test]
 fn ingestion_keeps_simple_annotations_in_rotated_cropped_display_coordinates() -> PdfResult<()> {
-    let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     for rotation in [0, 90] {
         let (_, metadata, _) = inspect_reader_metadata(Cursor::new(annotated_streaming_fixture(rotation)))?;
         assert!(metadata.valid_for(&metadata.checksum));
@@ -36,7 +36,7 @@ fn ingestion_keeps_simple_annotations_in_rotated_cropped_display_coordinates() -
 
 #[test]
 fn document_prepares_startup_then_only_requested_pages() -> PdfResult<()> {
-    let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     #[derive(Default)]
     struct Hook(std::sync::Mutex<Vec<Option<usize>>>);
     impl PdfPageSource for Hook {

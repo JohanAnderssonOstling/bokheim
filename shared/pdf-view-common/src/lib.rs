@@ -1027,7 +1027,7 @@ pub fn detect_rgba(rgba: &[u8], width: u32, height: u32, options: CropOptions) -
     }
     let background = page_background(rgba, width, height);
     let mut bounds = None::<(u32, u32, u32, u32)>;
-    rgba.chunks_exact(4).take(width as usize * height as usize).enumerate().for_each(|(index, pixel)| {
+    rgba.as_chunks::<4>().0.iter().take(width as usize * height as usize).enumerate().for_each(|(index, pixel)| {
         if !is_content_pixel(pixel, background, options.content_difference_threshold) {
             return;
         }

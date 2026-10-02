@@ -41,3 +41,11 @@ client-platform-native = { path = "../../../platforms/native" }
 library-registry = { path = "../../../app/crates/library-registry" }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
+
+[dev-dependencies]
+sync-common = { path = "../../../../shared/sync-common", features = ["test-support"] }
+
+[[test]]
+name = "versioned_state"
+path = "tests/versioned_state.rs"
+required-features = ["fixture-sql"]

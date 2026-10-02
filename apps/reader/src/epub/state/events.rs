@@ -1,5 +1,6 @@
 //! Projection of renderer events into EPUB reader state.
 
+use crate::invalidation::notify;
 use std::sync::Arc;
 
 use gpui::{Context, ScrollStrategy, Window};
@@ -34,7 +35,7 @@ impl ReaderView {
                 let title = title.clone().unwrap_or_else(|| self.book_title.clone());
                 if self.title != title {
                     self.title = title;
-                    crate::invalidation::notify(cx, Component::ReaderShell, "title_changed");
+                    notify(cx, Component::ReaderShell, "title_changed");
                 }
             }
             RendererEvent::TocChanged(_) | RendererEvent::HistoryAvailability { .. } => {}
@@ -50,7 +51,7 @@ impl ReaderView {
                             tree.set_selected_item(None, cx);
                         }
                     });
-                    crate::invalidation::notify(cx, Component::ReaderShell, "toc_position_changed");
+                    notify(cx, Component::ReaderShell, "toc_position_changed");
                 }
             }
             RendererEvent::SearchActiveChanged(active) => {
@@ -60,22 +61,22 @@ impl ReaderView {
                     } else {
                         self.search.clear();
                     }
-                    crate::invalidation::notify(cx, Component::ReaderShell, "search_visibility_changed");
+                    notify(cx, Component::ReaderShell, "search_visibility_changed");
                 }
             }
             RendererEvent::FontSizeChanged(font_size) => {
                 if ReaderSettings::update(cx, |preferences| preferences.font_size = *font_size) {
-                    crate::invalidation::notify(cx, Component::ReaderShell, "font_size_changed");
+                    notify(cx, Component::ReaderShell, "font_size_changed");
                 }
             }
             RendererEvent::ColumnWidthChanged(column_width) => {
                 if ReaderSettings::update(cx, |preferences| preferences.column_width = *column_width) {
-                    crate::invalidation::notify(cx, Component::ReaderShell, "column_width_changed");
+                    notify(cx, Component::ReaderShell, "column_width_changed");
                 }
             }
             RendererEvent::ScaleChanged(scale) => {
                 if ReaderSettings::update(cx, |preferences| preferences.scale = *scale) {
-                    crate::invalidation::notify(cx, Component::ReaderShell, "scale_changed");
+                    notify(cx, Component::ReaderShell, "scale_changed");
                 }
             }
             RendererEvent::ReadingProgress { fraction, location, total_locations, doc, doc_count, .. } => {
@@ -83,13 +84,13 @@ impl ReaderView {
                 // field once HtmlViewCore has been updated to emit it.
                 if self.progress.update(*fraction, 0.0, *location, *total_locations, *doc, *doc_count) {
                     self.record_current_reading_position();
-                    crate::invalidation::notify(cx, Component::ReaderShell, "reading_progress_changed");
+                    notify(cx, Component::ReaderShell, "reading_progress_changed");
                 }
             }
             RendererEvent::SelectionFinished { cfi_range, exact_text, .. } => {
                 if marks::set_selection(&mut self.selection, Selection { cfi_range: cfi_range.clone(), text: exact_text.clone() }) {
                     self.annotation_popup_anchor = Some(window.mouse_position());
-                    crate::invalidation::notify(cx, Component::ReaderShell, "selection_finished");
+                    notify(cx, Component::ReaderShell, "selection_finished");
                 }
             }
             RendererEvent::AnnotationActivated { id } => {
@@ -102,7 +103,7 @@ impl ReaderView {
                     LoadState::Loading | LoadState::Error(_) => None,
                 };
                 self.footnote = prepared.map(|prepared| (preview.clone(), prepared));
-                crate::invalidation::notify(cx, Component::ReaderShell, "footnote_opened");
+                notify(cx, Component::ReaderShell, "footnote_opened");
             }
             RendererEvent::ImageOpened { uri, bytes } => {
                 let extension = uri.rsplit('.').next().unwrap_or_default().split(['?', '#']).next().unwrap_or_default().to_ascii_lowercase();
@@ -118,13 +119,13 @@ impl ReaderView {
                     _ => gpui::ImageFormat::Png,
                 };
                 self.image_preview = Some((uri.clone(), Arc::new(gpui::Image::from_bytes(format, bytes.clone()))));
-                crate::invalidation::notify(cx, Component::ReaderShell, "image_preview_opened");
+                notify(cx, Component::ReaderShell, "image_preview_opened");
             }
             RendererEvent::MatchInfo { current, total } => {
                 let next = Some((*current, *total));
                 if self.search.match_position != next {
                     self.search.match_position = next;
-                    crate::invalidation::notify(cx, Component::ReaderShell, "search_match_changed");
+                    notify(cx, Component::ReaderShell, "search_match_changed");
                 }
             }
             RendererEvent::SearchResults(_) => {}

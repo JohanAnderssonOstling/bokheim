@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    App, Bounds, Context, DispatchPhase, Entity, Image, ImageFormat, IntoElement, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Render, SharedString, Styled, Window, canvas, div, prelude::*,
+    App, Bounds, ClickEvent, Context, DispatchPhase, Entity, Image, ImageFormat, IntoElement, MouseButton, MouseMoveEvent, Pixels, Render, SharedString, Styled, Window, canvas, div, prelude::*,
     px,
 };
 use web_time::Instant;
@@ -205,68 +205,59 @@ fn sleep_status(remaining: &str) -> String {
     if remaining == "Chapter" { "Until end of chapter".to_owned() } else { format!("{remaining} remaining") }
 }
 
-fn playback_speed_items(mut menu: PopupMenu, target: gpui::WeakEntity<AudiobookDock>, current_rate: f64) -> PopupMenu {
-    for rate in PLAYBACK_SPEEDS {
-        let target = target.clone();
-        menu = menu.item(
-            ui_components::menu_item(format_playback_rate(rate), move |_, _, cx| {
-                let _ = target.update(cx, |dock, cx| dock.set_rate(rate, cx));
+/// A playback menu's contents, shared by the wide dropdown and the compact
+/// sheet: an optional status line over its choices.
+struct PlaybackMenu<T> {
+    id: &'static str,
+    title: &'static str,
+    status: Option<String>,
+    choices: Vec<PlaybackChoice<T>>,
+}
+
+struct PlaybackChoice<T> {
+    id: SharedString,
+    label: SharedString,
+    checked: bool,
+    value: T,
+}
+
+fn speed_menu(current_rate: f64) -> PlaybackMenu<f64> {
+    let choices = PLAYBACK_SPEEDS.into_iter().map(|rate| PlaybackChoice { id: format!("speed-{rate}").into(), label: format_playback_rate(rate).into(), checked: same_rate(rate, current_rate), value: rate }).collect();
+    PlaybackMenu { id: "playback-speed", title: "Playback speed", status: None, choices }
+}
+
+fn sleep_menu(remaining: Option<&str>) -> PlaybackMenu<SleepChoice> {
+    let choices = SleepChoice::offered(remaining.is_some()).map(|choice| PlaybackChoice { id: choice.id(), label: choice.label(), checked: false, value: choice }).collect();
+    PlaybackMenu { id: "sleep", title: "Sleep timer", status: remaining.map(sleep_status), choices }
+}
+
+impl<T: Copy + 'static> PlaybackMenu<T> {
+    fn dropdown(self, mut menu: PopupMenu, choose: impl Fn(T, &mut App) + Clone + 'static) -> PopupMenu {
+        if let Some(status) = self.status {
+            menu = menu.item(ui_components::menu_section(status));
+        }
+        for choice in self.choices {
+            let choose = choose.clone();
+            menu = menu.item(ui_components::menu_item(choice.label, move |_, _, cx| choose(choice.value, cx)).checked(choice.checked));
+        }
+        menu
+    }
+
+    /// Choosing also closes the sheet, which is the dock's state, so the dock
+    /// supplies each row's handler.
+    fn sheet<H: Fn(&ClickEvent, &mut Window, &mut App) + 'static>(self, choose: impl Fn(T) -> H, dismiss: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static, theme: ui_components::BrowserTheme) -> gpui::AnyElement {
+        let id = self.id;
+        let rows = self.choices.into_iter().map(|choice| {
+            let choose = choose(choice.value);
+            ui_components::bottom_sheet_row(choice.id, choice.label, choice.checked, theme).on_click(move |event, window, cx| {
+                cx.stop_propagation();
+                choose(event, window, cx);
             })
-            .checked(same_rate(rate, current_rate)),
-        );
+        });
+        let rows = ui_components::column(0.0).id(SharedString::from(format!("{id}-rows"))).flex_1().min_h_0().overflow_y_scroll().children(self.status.map(|status| ui_components::bottom_sheet_section(status, theme))).children(rows);
+        let sheet = ui_components::bottom_sheet_surface(theme).id(SharedString::from(format!("{id}-sheet"))).child(ui_components::bottom_sheet_header(self.title, theme)).child(rows);
+        ui_components::bottom_sheet_overlay().child(ui_components::modal_scrim(SharedString::from(format!("{id}-scrim")), theme).on_click(dismiss)).child(sheet).into_any_element()
     }
-    menu
-}
-
-fn sleep_items(mut menu: PopupMenu, target: gpui::WeakEntity<AudiobookDock>, remaining: Option<SharedString>) -> PopupMenu {
-    if let Some(remaining) = &remaining {
-        menu = menu.item(ui_components::menu_section(sleep_status(remaining)));
-    }
-    for choice in SleepChoice::offered(remaining.is_some()) {
-        let target = target.clone();
-        menu = menu.item(ui_components::menu_item(choice.label(), move |_, _, cx| {
-            let _ = target.update(cx, |dock, cx| dock.choose_sleep(choice, cx));
-        }));
-    }
-    menu
-}
-
-fn playback_speed_sheet(target: gpui::WeakEntity<AudiobookDock>, current_rate: f64, theme: ui_components::BrowserTheme) -> gpui::AnyElement {
-    let rows = PLAYBACK_SPEEDS
-        .into_iter()
-        .map(|rate| {
-            let target = target.clone();
-            ui_components::bottom_sheet_row(SharedString::from(format!("speed-{rate}")), format_playback_rate(rate), same_rate(rate, current_rate), theme)
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    let _ = target.update(cx, |dock, cx| dock.set_rate(rate, cx));
-                })
-                .into_any_element()
-        })
-        .collect();
-    menu_sheet("playback-speed", "Playback speed", None, rows, move |cx| drop(target.update(cx, |dock, cx| dock.toggle_speed_menu(cx))), theme)
-}
-
-fn sleep_sheet(target: gpui::WeakEntity<AudiobookDock>, remaining: Option<SharedString>, theme: ui_components::BrowserTheme) -> gpui::AnyElement {
-    let rows = SleepChoice::offered(remaining.is_some())
-        .map(|choice| {
-            let target = target.clone();
-            ui_components::bottom_sheet_row(choice.id(), choice.label(), false, theme)
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    let _ = target.update(cx, |dock, cx| dock.choose_sleep(choice, cx));
-                })
-                .into_any_element()
-        })
-        .collect();
-    menu_sheet("sleep", "Sleep timer", remaining.as_deref().map(sleep_status), rows, move |cx| drop(target.update(cx, |dock, cx| dock.toggle_sleep_menu(cx))), theme)
-}
-
-/// A playback menu as a bottom sheet, for a compact window.
-fn menu_sheet(id: &'static str, title: &'static str, status: Option<String>, rows: Vec<gpui::AnyElement>, dismiss: impl Fn(&mut App) + 'static, theme: ui_components::BrowserTheme) -> gpui::AnyElement {
-    let rows = ui_components::column(0.0).id(SharedString::from(format!("{id}-rows"))).flex_1().min_h_0().overflow_y_scroll().children(status.map(|status| ui_components::bottom_sheet_section(status, theme))).children(rows);
-    let sheet = ui_components::bottom_sheet_surface(theme).id(SharedString::from(format!("{id}-sheet"))).child(ui_components::bottom_sheet_header(title, theme)).child(rows);
-    ui_components::bottom_sheet_overlay().child(ui_components::modal_scrim(SharedString::from(format!("{id}-scrim")), theme).on_click(move |_, _, cx| dismiss(cx))).child(sheet).into_any_element()
 }
 
 fn format_playback_rate(rate: f64) -> String {
@@ -356,6 +347,14 @@ fn sleep_elapsed(plan: SleepPlan, position: Duration, chapters: &[AudiobookChapt
 /// list of round numbers, so exact comparison is what is meant.
 fn same_rate(left: f64, right: f64) -> bool {
     (left - right).abs() < f64::EPSILON
+}
+
+/// Playback position as the dock shows it: whole minutes of the book. Every
+/// readout derives from this one value, so the dock changes at most once a
+/// minute while playing, all at once, rather than ticking every second (which
+/// on e-ink is a partial refresh each time).
+fn shown_position(position: Duration) -> Duration {
+    Duration::from_secs(position.as_secs() / 60 * 60)
 }
 
 fn format_time(duration: Duration) -> String {
@@ -503,6 +502,13 @@ mod tests {
     fn time_format_covers_minute_and_hour_forms() {
         assert_eq!(format_time(Duration::from_secs(9)), "0:09");
         assert_eq!(format_time(Duration::from_secs(3_725)), "1:02:05");
+    }
+
+    #[test]
+    fn shown_position_changes_once_a_minute() {
+        assert_eq!(shown_position(Duration::from_millis(59_999)), Duration::ZERO);
+        assert_eq!(shown_position(Duration::from_secs(60)), Duration::from_secs(60));
+        assert_eq!(shown_position(Duration::from_secs(3_725)), Duration::from_secs(3_720));
     }
 
     #[test]

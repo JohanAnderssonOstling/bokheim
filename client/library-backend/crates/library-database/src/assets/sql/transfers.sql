@@ -2,20 +2,6 @@
 -- `book_transfer` row. A rejection recorded after `rejected_after` still
 -- holds its upload back.
 
--- name: transfer_ready_uploads?
--- param: hashes: &str
--- Books whose local file work has finished for their current upload, or
--- that have no upload.
-SELECT transfer.content_hash FROM json_each(:hashes) requested
-JOIN book_transfer transfer ON transfer.content_hash=requested.value
-WHERE transfer.upload_prepared IS NOT NULL
-  AND (transfer.upload_id IS NULL OR transfer.upload_prepared=transfer.upload_id);
-
--- name: transfer_local_versions?
--- param: content_hash: &str
-SELECT dir_id, file_name, local_hash FROM book_dir JOIN book ON book.row_id=book_dir.book_row_id
-WHERE book.content_hash=:content_hash AND book.deleted_at IS NULL AND book_dir.deleted_at IS NULL ORDER BY dir_id,file_name;
-
 -- name: transfer_upload_intent?
 -- param: content_hash: &str
 SELECT upload_id, upload_checksum, upload_size FROM book_transfer WHERE content_hash=:content_hash AND upload_id IS NOT NULL;
@@ -53,16 +39,10 @@ ORDER BY requested.value;
 -- for a book the server already holds whose lifecycle has been published.
 -- The pending upload is not required: it is removed once the book's bytes
 -- are uploaded.
-SELECT requested.value,
-       COALESCE(transfer.server_has_book AND NOT transfer.server_has_cover
-           AND transfer.cover_state = 'ready'
-           AND NOT COALESCE(transfer.cover_rejected_at > :rejected_after, 0), 0)
-       AND NOT EXISTS(SELECT 1 FROM sync_outbox lifecycle
-                      WHERE lifecycle.state_kind = 'book_lifecycle'
-                        AND lifecycle.state_key = book.content_hash)
-FROM json_each(:hashes) requested
-LEFT JOIN book ON book.content_hash = requested.value AND book.deleted_at IS NULL
-LEFT JOIN book_transfer transfer ON transfer.content_hash = book.content_hash;
+SELECT requested.value, EXISTS(
+    SELECT 1 FROM uploadable_covers cover WHERE cover.content_hash=requested.value
+      AND NOT COALESCE(cover.cover_rejected_at > :rejected_after, 0))
+FROM json_each(:hashes) requested;
 
 -- name: transfer_pending_book_uploads?
 -- param: after: i64
@@ -82,20 +62,9 @@ ORDER BY transfer.upload_id LIMIT :limit;
 -- name: transfer_pending_cover_uploads?
 -- param: limit: i64
 -- param: rejected_after: i64
-SELECT book.content_hash
-FROM book
-JOIN book_transfer transfer ON transfer.content_hash = book.content_hash
-WHERE book.deleted_at IS NULL
-  AND transfer.cover_state = 'ready'
-  AND transfer.server_has_book AND NOT transfer.server_has_cover
-  AND NOT COALESCE(transfer.cover_rejected_at > :rejected_after, 0)
-  AND NOT EXISTS(
-      SELECT 1 FROM sync_outbox lifecycle
-      WHERE lifecycle.state_kind = 'book_lifecycle'
-        AND lifecycle.state_key = book.content_hash
-  )
-ORDER BY book.content_hash
-LIMIT :limit;
+SELECT content_hash FROM uploadable_covers
+WHERE NOT COALESCE(cover_rejected_at > :rejected_after, 0)
+ORDER BY content_hash LIMIT :limit;
 
 -- name: transfer_complete_upload!
 -- param: id: i64
@@ -103,11 +72,6 @@ LIMIT :limit;
 -- param: checksum: &str
 UPDATE book_transfer SET upload_id=NULL, upload_checksum=NULL, upload_size=NULL
 WHERE content_hash=:content_hash AND upload_id=:id AND upload_checksum=:checksum;
-
--- name: transfer_has_pending_file_work?
-SELECT EXISTS(SELECT 1 FROM local_directory_work)
-    OR EXISTS(SELECT 1 FROM local_file_work)
-    OR EXISTS(SELECT 1 FROM local_book_work);
 
 -- name: transfer_record_book_rejection!
 -- param: content_hash: &str
@@ -135,17 +99,13 @@ WHERE b.content_hash > :after AND b.content_hash != '' AND b.deleted_at IS NULL
   AND (:scope IS NULL OR b.content_hash IN (SELECT value FROM json_each(:scope)))
   AND COALESCE(transfer.cover_state NOT IN ('ready', 'pending'), 1)
   AND (COALESCE(transfer.server_has_cover, 0)
-       OR NOT EXISTS(SELECT 1 FROM book_dir placement WHERE placement.book_row_id = b.row_id AND placement.deleted_at IS NULL AND placement.is_downloaded = 1))
+       OR NOT EXISTS(SELECT 1 FROM library_book_presence presence WHERE presence.book_row_id=b.row_id AND presence.downloaded=1))
 ORDER BY b.content_hash LIMIT :limit;
 
--- name: transfer_live_placements?
--- param: content_hash: &str
-SELECT bd.dir_id,bd.file_name FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id WHERE b.content_hash=:content_hash AND b.deleted_at IS NULL AND bd.deleted_at IS NULL;
-
--- name: transfer_queue_restore!
+-- name: transfer_queue_materialization!
 -- param: content_hash: &str
 -- param: relative_path: &str
-INSERT OR IGNORE INTO local_file_work(operation,content_hash,relative_path) VALUES ('restore',:content_hash,:relative_path);
+INSERT OR IGNORE INTO local_file_work(operation,content_hash,relative_path) VALUES ('materialize',:content_hash,:relative_path);
 
 -- name: transfer_download_placement?
 -- param: content_hash: &str
@@ -163,11 +123,9 @@ ORDER BY book_download_at, content_hash;
 -- param: content_hash: &str
 SELECT
     EXISTS (
-        SELECT 1
-        FROM book_dir downloaded
-        WHERE downloaded.book_row_id = (SELECT row_id FROM book WHERE content_hash = :content_hash)
-          AND downloaded.deleted_at IS NULL
-          AND downloaded.is_downloaded = 1
+        SELECT 1 FROM library_book_presence presence
+        WHERE presence.book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash)
+          AND presence.downloaded=1
     ),
     EXISTS (
         SELECT 1
@@ -203,8 +161,8 @@ WHERE content_hash = :content_hash AND upload_id IS NOT NULL AND upload_rejected
 -- `live_dirs`: every live folder, from Rust.
 WITH live_dirs(id) AS (SELECT value FROM json_each(:live_dirs)), live_books AS (
     SELECT b.content_hash,
-        EXISTS(SELECT 1 FROM book_dir bd JOIN live_dirs d ON d.id=bd.dir_id
-            WHERE bd.book_row_id=b.row_id AND bd.deleted_at IS NULL AND bd.is_downloaded=1) AS local
+        EXISTS(SELECT 1 FROM library_book_presence presence
+            WHERE presence.book_row_id=b.row_id AND presence.downloaded=1) AS local
     FROM book b WHERE b.content_hash!='' AND EXISTS(
         SELECT 1 FROM book_dir bd JOIN live_dirs d ON d.id=bd.dir_id
         WHERE bd.book_row_id=b.row_id AND bd.deleted_at IS NULL)
@@ -214,7 +172,8 @@ OR EXISTS(
     SELECT 1 FROM live_books b
     LEFT JOIN book_transfer t ON t.content_hash=b.content_hash
     WHERE (b.local AND t.upload_id IS NOT NULL AND NOT COALESCE(t.upload_rejected_at>:rejected_after, 0))
-        OR (t.cover_state='ready' AND NOT t.server_has_cover AND NOT COALESCE(t.cover_rejected_at>:rejected_after, 0))
+        OR EXISTS(SELECT 1 FROM uploadable_covers cover WHERE cover.content_hash=b.content_hash
+                  AND NOT COALESCE(cover.cover_rejected_at>:rejected_after, 0))
         OR (COALESCE(t.cover_state NOT IN ('ready','pending'), 1) AND (NOT b.local OR COALESCE(t.server_has_cover, 0)))
 );
 
@@ -238,9 +197,3 @@ WHERE content_hash = :content_hash;
 -- name: remote_asset_hashes?
 -- param: kind: &str
 SELECT content_hash FROM book_transfer WHERE CASE :kind WHEN 'book' THEN server_has_book ELSE server_has_cover END;
-
--- name: rejected_upload_hashes?
--- param: kind: &str
--- param: cutoff: i64
-SELECT content_hash FROM book_transfer
-WHERE CASE :kind WHEN 'book' THEN upload_rejected_at ELSE cover_rejected_at END > :cutoff;

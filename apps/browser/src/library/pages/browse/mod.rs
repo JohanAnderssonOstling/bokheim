@@ -16,5 +16,8 @@ mod split;
 
 pub(crate) use folder_picker::{FolderPicker, FolderPickerEvent};
 pub(crate) use listing::{BrowseCrumb, BrowseKind};
-pub(crate) use page::{BrowsePage, OpenTrash};
+pub(crate) use page::BrowsePage;
 pub(crate) use split::BrowseSplitPlane;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests;

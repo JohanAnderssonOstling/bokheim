@@ -1,13 +1,9 @@
 //! Folder component projection v1. These rules are part of replica behavior.
 //! Character classes are explicit so compiler Unicode updates cannot change names.
-use crate::filenames::{MAX_FILE_NAME_BYTES, is_reserved, truncate_utf8};
+use crate::filenames::{is_reserved, truncate_utf8, MAX_FILE_NAME_BYTES};
 
 fn whitespace(c: char) -> bool {
     matches!(c, '\u{0009}'..='\u{000d}' | ' ' | '\u{0085}' | '\u{00a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}')
-}
-
-fn forbidden(c: char) -> bool {
-    matches!(c, '\u{0000}'..='\u{001f}' | '\u{007f}'..='\u{009f}' | '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
 }
 
 fn trim(value: &str) -> &str {
@@ -24,7 +20,7 @@ pub(crate) fn numbered(requested: &str, number: usize) -> String {
 }
 
 fn candidate(requested: &str, suffix: &str) -> String {
-    let sanitized = requested.trim_matches(whitespace).chars().map(|c| if forbidden(c) { '_' } else { c }).collect::<String>();
+    let sanitized = requested.trim_matches(whitespace).chars().map(|c| if matches!(c, '\u{0000}'..='\u{001f}' | '\u{007f}'..='\u{009f}' | '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') { '_' } else { c }).collect::<String>();
     let capped = truncate_utf8(trim(&sanitized), MAX_FILE_NAME_BYTES - suffix.len());
     // Truncation can expose trailing dots/spaces or a reserved name.
     let base = trim(&capped).trim_start_matches(|c| c == '.' || whitespace(c));

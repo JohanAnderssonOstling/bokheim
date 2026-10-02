@@ -1,5 +1,5 @@
 -- Reader annotations: identity and ordering stay normalized, all detail
--- lives in the JSON `detail` blob. Sync mutations are emitted by triggers.
+-- lives in the JSON `detail` blob. Projection writes these rows from canonical registers.
 
 -- name: get_annotations?
 -- param: content_hash: &str
@@ -40,10 +40,3 @@ ON CONFLICT(id) DO UPDATE SET
     detail=excluded.detail,
     modified_at=excluded.modified_at,
     deleted_at=excluded.deleted_at;
-
--- name: delete_annotation!
--- param: id: &str
--- param: modified_at: i64
-UPDATE annotation
-SET modified_at=:modified_at, deleted_at=:modified_at
-WHERE id=:id;

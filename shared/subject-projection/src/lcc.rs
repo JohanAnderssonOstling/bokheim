@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use super::compact_whitespace;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::OnceLock;
@@ -1053,7 +1054,7 @@ pub(super) fn lcc_match_keys(value: &str) -> Option<Vec<String>> {
     Some(keys)
 }
 
-pub(super) fn compare_lcc_key(left_letters: &str, left_number: f64, right_letters: &str, right_number: f64) -> std::cmp::Ordering {
+pub(super) fn compare_lcc_key(left_letters: &str, left_number: f64, right_letters: &str, right_number: f64) -> Ordering {
     left_letters.cmp(right_letters).then_with(|| left_number.total_cmp(&right_number))
 }
 
@@ -1061,7 +1062,7 @@ fn range_contains(range: &LccRange, call: &LccCall<'_>) -> bool {
     compare_lcc_key(&range.start_letters, range.start_number, &call.letters, call.number).is_le() && compare_lcc_key(&call.letters, call.number, &range.end_letters, range.end_number).is_le()
 }
 
-fn compare_matches(left: &LccRange, right: &LccRange, call: &LccCall<'_>) -> std::cmp::Ordering {
+fn compare_matches(left: &LccRange, right: &LccRange, call: &LccCall<'_>) -> Ordering {
     let left_exact = left.start_letters == call.letters && left.end_letters == call.letters;
     let right_exact = right.start_letters == call.letters && right.end_letters == call.letters;
     left.path.matches(" / ").count().cmp(&right.path.matches(" / ").count()).then_with(|| left_exact.cmp(&right_exact)).then_with(|| {

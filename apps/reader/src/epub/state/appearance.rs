@@ -1,5 +1,6 @@
 //! EPUB appearance preferences and matching renderer commands.
 
+use crate::invalidation::notify;
 use app_preferences::{COLUMN_COUNT_MAX, COLUMN_COUNT_MIN, FONT_SIZE_MAX, FONT_SIZE_MIN, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, LINE_WIDTH_MAX, LINE_WIDTH_MIN, READER_SPACING_MAX, READER_SPACING_MIN, ReaderFontFamily, ReaderTextAlignment};
 use gpui::{Context, Window};
 use html_view_core::RendererCommand;
@@ -93,7 +94,7 @@ impl ReaderView {
         }
         let command = command(ReaderSettings::preferences(cx));
         self.with_renderer(cx, |renderer, cx| renderer.apply(command, cx));
-        crate::invalidation::notify(cx, Component::ReaderShell, "preferences_changed");
+        notify(cx, Component::ReaderShell, "preferences_changed");
     }
 
     fn apply_style_override(&self, cx: &mut Context<Self>, update: impl FnOnce(&mut ReaderPreferences)) {
@@ -135,7 +136,7 @@ impl ReaderView {
         if cfg!(target_os = "android") {
             ReaderSettings::update(cx, |preferences| preferences.max_column_count = count);
             self.sync_mobile_column_width(f64::from(available_width), cx);
-            crate::invalidation::notify(cx, Component::ReaderShell, "mobile_column_count_changed");
+            notify(cx, Component::ReaderShell, "mobile_column_count_changed");
             return;
         }
         let width = self.fitted_column_width(f64::from(available_width), cx);
@@ -144,7 +145,7 @@ impl ReaderView {
             preferences.column_width = width;
         });
         self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::SetColumnWidth(width), cx));
-        crate::invalidation::notify(cx, Component::ReaderShell, "column_count_changed");
+        notify(cx, Component::ReaderShell, "column_count_changed");
     }
 
     pub(in crate::epub) fn adjust_column_width(&self, delta: f64, window: &Window, cx: &mut Context<Self>) {
@@ -189,27 +190,27 @@ impl ReaderView {
         let (_, _, available_width) = Self::horizontal_layout(window, cx, sidebar_visible);
         let width = self.fitted_column_width(f64::from(available_width), cx);
         self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::SetColumnWidth(width), cx));
-        crate::invalidation::notify(cx, Component::ReaderShell, "line_width_range_changed");
+        notify(cx, Component::ReaderShell, "line_width_range_changed");
     }
 
     pub(in crate::epub) fn adjust_horizontal_margin(&self, delta: f32, cx: &mut Context<Self>) {
         let value = (ReaderSettings::preferences(cx).horizontal_margin_px + delta).clamp(READER_SPACING_MIN, READER_SPACING_MAX);
         if ReaderSettings::update(cx, |preferences| preferences.horizontal_margin_px = value) {
-            crate::invalidation::notify(cx, Component::ReaderShell, "horizontal_margin_changed");
+            notify(cx, Component::ReaderShell, "horizontal_margin_changed");
         }
     }
 
     pub(in crate::epub) fn adjust_vertical_margin(&self, delta: f32, cx: &mut Context<Self>) {
         let value = (ReaderSettings::preferences(cx).vertical_margin_px + delta).clamp(READER_SPACING_MIN, READER_SPACING_MAX);
         if ReaderSettings::update(cx, |preferences| preferences.vertical_margin_px = value) {
-            crate::invalidation::notify(cx, Component::ReaderShell, "vertical_margin_changed");
+            notify(cx, Component::ReaderShell, "vertical_margin_changed");
         }
     }
 
     pub(in crate::epub) fn adjust_min_column_gap(&self, delta: f32, cx: &mut Context<Self>) {
         let value = (ReaderSettings::preferences(cx).min_column_gap_px + delta).clamp(READER_SPACING_MIN, READER_SPACING_MAX);
         if ReaderSettings::update(cx, |preferences| preferences.min_column_gap_px = value) {
-            crate::invalidation::notify(cx, Component::ReaderShell, "column_gap_changed");
+            notify(cx, Component::ReaderShell, "column_gap_changed");
         }
     }
 }

@@ -8,22 +8,11 @@ use gpui_component::menu::DropdownMenu as _;
 use gpui_component::{Icon, IconName};
 use ui_components as components;
 
-use library_model::{BrowseBookSort, BrowseChipSort, LibraryFileTypeFilter, LibraryFormatCount, LibraryLanguageCount};
+use super::page::BrowsePage;
+
+use library_model::{BrowseBookSort, BrowseChipSort, LibraryBrowseQuery, LibraryFileTypeFilter, LibraryFormatCount, LibraryLanguageCount};
 
 const LIBRARY_LANGUAGE_OPTIONS: [(&str, &str); 8] = [("eng", "English"), ("swe", "Swedish"), ("nor", "Norwegian"), ("dan", "Danish"), ("deu", "German"), ("fra", "French"), ("spa", "Spanish"), ("ita", "Italian")];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BrowseBookOrder {
-    Library(BrowseBookSort),
-}
-
-impl BrowseBookOrder {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Library(sort) => sort.label(),
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BrowseFormatFilter {
@@ -31,26 +20,95 @@ pub(crate) enum BrowseFormatFilter {
     Library(LibraryFileTypeFilter),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BrowseOptionsSelection {
-    chip_sort: Option<BrowseChipSort>,
-    book_sort: Option<BrowseBookOrder>,
-    formats: Vec<BrowseFormatFilter>,
-    languages: Vec<&'static str>,
-    hide_finished: bool,
-    include_direct_child_books: bool,
+    pub(crate) search: String,
+    pub(super) formats: Vec<BrowseFormatFilter>,
+    pub(super) chip_sort: Option<BrowseChipSort>,
+    pub(super) book_sort: Option<BrowseBookSort>,
+    pub(super) languages: Vec<&'static str>,
+    pub(super) hide_finished: bool,
+    pub(super) include_direct_child_books: bool,
 }
 
 impl BrowseOptionsSelection {
-    pub(crate) fn new(chip_sort: Option<BrowseChipSort>, book_sort: Option<BrowseBookOrder>, formats: Vec<BrowseFormatFilter>, languages: Vec<&'static str>, hide_finished: bool, include_direct_child_books: bool) -> Self {
-        Self { chip_sort, book_sort, formats, languages, hide_finished, include_direct_child_books }
+    pub(crate) fn for_controls(controls: &BrowseControls) -> Self {
+        Self {
+            search: String::new(),
+            formats: Vec::new(),
+            chip_sort: controls.collection_sorts.first().copied(),
+            book_sort: controls.book_sorts.first().copied(),
+            languages: Vec::new(),
+            hide_finished: false,
+            include_direct_child_books: false,
+        }
     }
+
+    pub(crate) fn backend_query(&self, location: library_model::BrowseLocation, include_search: bool) -> LibraryBrowseQuery {
+        let file_types = self
+            .formats
+            .iter()
+            .filter_map(|format| match format {
+                BrowseFormatFilter::Library(format) => Some(*format),
+                BrowseFormatFilter::Any => None,
+            })
+            .collect::<Vec<LibraryFileTypeFilter>>();
+        LibraryBrowseQuery {
+            location,
+            search: if include_search { self.search.clone() } else { String::new() },
+            file_types,
+            chip_sort: self.chip_sort.unwrap_or_default(),
+            book_sort: self.book_sort.unwrap_or_default(),
+            languages: self.languages.iter().map(|language| (*language).to_owned()).collect(),
+            hide_finished: self.hide_finished,
+            include_direct_child_books: self.include_direct_child_books,
+        }
+    }
+
+    /// Applies a choice from the sort and filter controls, reporting whether
+    /// it changed anything. A choice the controls do not offer is ignored.
+    pub(crate) fn apply(&mut self, event: BrowseOptionsEvent, controls: &BrowseControls) -> bool {
+        match event {
+            BrowseOptionsEvent::SelectChipSort(sort) => controls.collection_sorts.contains(&sort) && std::mem::replace(&mut self.chip_sort, Some(sort)) != Some(sort),
+            BrowseOptionsEvent::SelectBookSort(sort) => controls.book_sorts.contains(&sort) && std::mem::replace(&mut self.book_sort, Some(sort)) != Some(sort),
+            BrowseOptionsEvent::ToggleFormat(format) => toggle(&mut self.formats, (format != BrowseFormatFilter::Any).then_some(format), &controls.formats),
+            BrowseOptionsEvent::ToggleLanguage(language) => toggle(&mut self.languages, language, &controls.languages),
+            BrowseOptionsEvent::ToggleHideFinished => {
+                self.hide_finished = !self.hide_finished;
+                true
+            }
+            BrowseOptionsEvent::ToggleDirectChildBooks => {
+                self.include_direct_child_books = !self.include_direct_child_books;
+                true
+            }
+        }
+    }
+}
+
+/// Toggles `choice` in `selected`, or clears `selected` for `None`, the "any"
+/// row. Reports whether anything changed.
+fn toggle<T: Copy + PartialEq>(selected: &mut Vec<T>, choice: Option<T>, offered: &[T]) -> bool {
+    let Some(choice) = choice else {
+        let changed = !selected.is_empty();
+        selected.clear();
+        return changed;
+    };
+    if !offered.contains(&choice) {
+        return false;
+    }
+    match selected.iter().position(|item| *item == choice) {
+        Some(index) => {
+            selected.remove(index);
+        }
+        None => selected.push(choice),
+    }
+    true
 }
 
 #[derive(Clone, Copy)]
 pub(crate) enum BrowseOptionsEvent {
     SelectChipSort(BrowseChipSort),
-    SelectBookSort(BrowseBookOrder),
+    SelectBookSort(BrowseBookSort),
     ToggleFormat(BrowseFormatFilter),
     ToggleLanguage(Option<&'static str>),
     ToggleHideFinished,
@@ -72,7 +130,7 @@ pub(crate) struct BrowseControls {
     pub(crate) supports_reading_progress: bool,
     pub(crate) supports_direct_child_books: bool,
     pub(crate) collection_sorts: Vec<BrowseChipSort>,
-    pub(crate) book_sorts: Vec<BrowseBookOrder>,
+    pub(crate) book_sorts: Vec<BrowseBookSort>,
     pub(crate) formats: Vec<BrowseFormatFilter>,
     format_counts: Vec<(BrowseFormatFilter, u32)>,
     pub(crate) languages: Vec<&'static str>,
@@ -85,7 +143,7 @@ impl BrowseControls {
             supports_reading_progress: true,
             supports_direct_child_books: false,
             collection_sorts: BrowseChipSort::ALL.to_vec(),
-            book_sorts: BrowseBookSort::ALL.into_iter().map(BrowseBookOrder::Library).collect(),
+            book_sorts: BrowseBookSort::ALL.to_vec(),
             formats: Vec::new(),
             format_counts: Vec::new(),
             languages: Vec::new(),
@@ -177,14 +235,7 @@ impl SearchField {
 /// on wide windows. On a compact window the popup menu widget has no bottom
 /// sheet mode, so the trigger instead toggles `browse_options_sheet` below.
 /// `menu_anchor` is the menu's corner at the trigger.
-pub(crate) fn browse_options_control<P, SelectOption, OnToggleSheet>(
-    page: Entity<P>, controls: BrowseControls, selection: BrowseOptionsSelection, select_option: SelectOption, compact: bool, on_toggle_sheet: OnToggleSheet, menu_anchor: Anchor, theme: components::BrowserTheme,
-) -> AnyElement
-where
-    P: 'static,
-    SelectOption: Fn(&mut P, BrowseOptionsEvent, &mut Context<P>) + Clone + 'static,
-    OnToggleSheet: Fn(&mut P, &mut Context<P>) + 'static,
-{
+pub(super) fn browse_options_control(page: Entity<BrowsePage>, controls: BrowseControls, selection: BrowseOptionsSelection, compact: bool, menu_anchor: Anchor, theme: components::BrowserTheme) -> AnyElement {
     let active = selection.chip_sort != controls.collection_sorts.first().copied()
         || selection.book_sort != controls.book_sorts.first().copied()
         || !selection.formats.is_empty()
@@ -198,99 +249,29 @@ where
         .when(active, |button| button.border_color(theme.text_accent).text_color(theme.text_accent));
 
     if compact {
-        return trigger.on_click(move |_, _, cx| page.update(cx, |page, cx| on_toggle_sheet(page, cx))).into_any_element();
+        return trigger.on_click(move |_, _, cx| page.update(cx, |page, cx| page.toggle_browse_options_sheet(cx))).into_any_element();
     }
 
     trigger
         .dropdown_menu_with_anchor(menu_anchor, move |menu, _, _| {
             let mut menu = menu.scrollable(true);
-
-            if !controls.book_sorts.is_empty() {
-                menu = menu.item(components::menu_section("Sort books"));
-                for sort in controls.book_sorts.iter().copied() {
+            for (index, section) in controls.options(&selection).into_iter().enumerate() {
+                if index > 0 || section.title != Some("Sort books") {
+                    menu = menu.separator();
+                }
+                if let Some(title) = section.title {
+                    menu = menu.item(components::menu_section(title));
+                }
+                for option in section.options {
                     let page = page.clone();
-                    let select = select_option.clone();
                     menu = menu.item(
-                        components::menu_item(sort.label(), move |_, _, cx| {
-                            page.update(cx, |page, cx| select(page, BrowseOptionsEvent::SelectBookSort(sort), cx));
+                        components::menu_item(option.label, move |_, _, cx| {
+                            page.update(cx, |page, cx| page.select_option(option.event, cx));
                         })
-                        .checked(Some(sort) == selection.book_sort),
+                        .checked(option.checked),
                     );
                 }
             }
-            if !controls.collection_sorts.is_empty() {
-                menu = menu.separator().item(components::menu_section("Sort collections"));
-                for sort in controls.collection_sorts.iter().copied() {
-                    let page = page.clone();
-                    let select = select_option.clone();
-                    menu = menu.item(
-                        components::menu_item(sort.label(), move |_, _, cx| {
-                            page.update(cx, |page, cx| select(page, BrowseOptionsEvent::SelectChipSort(sort), cx));
-                        })
-                        .checked(Some(sort) == selection.chip_sort),
-                    );
-                }
-            }
-            if !controls.formats.is_empty() || !selection.formats.is_empty() {
-                menu = menu.separator().item(components::menu_section("Format"));
-                let formats = if controls.formats.is_empty() { vec![BrowseFormatFilter::Any] } else { controls.formats.clone() };
-                for format in formats {
-                    let checked = if format == BrowseFormatFilter::Any { selection.formats.is_empty() } else { selection.formats.contains(&format) };
-                    let page = page.clone();
-                    let select = select_option.clone();
-                    menu = menu.item(
-                        components::menu_item(controls.format_label(format), move |_, _, cx| {
-                            page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleFormat(format), cx));
-                        })
-                        .checked(checked),
-                    );
-                }
-            }
-            if !controls.languages.is_empty() || !selection.languages.is_empty() {
-                menu = menu.separator().item(components::menu_section("Language"));
-                let page_for_any = page.clone();
-                let select_any = select_option.clone();
-                menu = menu.item(
-                    components::menu_item("Any", move |_, _, cx| {
-                        page_for_any.update(cx, |page, cx| select_any(page, BrowseOptionsEvent::ToggleLanguage(None), cx));
-                    })
-                    .checked(selection.languages.is_empty()),
-                );
-                for (language, label) in LIBRARY_LANGUAGE_OPTIONS.into_iter().filter(|(language, _)| controls.languages.contains(language)) {
-                    let checked = selection.languages.contains(&language);
-                    let page = page.clone();
-                    let select = select_option.clone();
-                    menu = menu.item(
-                        components::menu_item(controls.language_label(language, label), move |_, _, cx| {
-                            page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleLanguage(Some(language)), cx));
-                        })
-                        .checked(checked),
-                    );
-                }
-            }
-
-            if controls.supports_reading_progress {
-                let page = page.clone();
-                let select = select_option.clone();
-                menu = menu.separator().item(
-                    components::menu_item("Hide finished", move |_, _, cx| {
-                        page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleHideFinished, cx));
-                    })
-                    .checked(selection.hide_finished),
-                );
-            }
-
-            if controls.supports_direct_child_books {
-                let page = page.clone();
-                let select = select_option.clone();
-                menu = menu.separator().item(
-                    components::menu_item("Include books from direct children", move |_, _, cx| {
-                        page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleDirectChildBooks, cx));
-                    })
-                    .checked(selection.include_direct_child_books),
-                );
-            }
-
             menu
         })
         .into_any_element()
@@ -300,92 +281,146 @@ where
 /// sections, events, and read of `controls`/`selection`, laid out as full-width
 /// rows in a bottom sheet instead of a small anchored popup, since the popup
 /// menu widget used above has no bottom-sheet mode of its own.
-pub(crate) fn browse_options_sheet<P, SelectOption, OnDismiss>(page: Entity<P>, controls: BrowseControls, selection: BrowseOptionsSelection, select_option: SelectOption, on_dismiss: OnDismiss, theme: components::BrowserTheme) -> AnyElement
-where
-    P: 'static,
-    SelectOption: Fn(&mut P, BrowseOptionsEvent, &mut Context<P>) + Clone + 'static,
-    OnDismiss: Fn(&mut P, &mut Context<P>) + Clone + 'static,
-{
+pub(super) fn browse_options_sheet(page: Entity<BrowsePage>, controls: BrowseControls, selection: BrowseOptionsSelection, theme: components::BrowserTheme) -> AnyElement {
     let mut rows = div().flex().flex_col();
 
-    if !controls.book_sorts.is_empty() {
-        rows = rows.child(components::bottom_sheet_section("Sort books", theme));
-        for sort in controls.book_sorts.iter().copied() {
+    for (index, section) in controls.options(&selection).into_iter().enumerate() {
+        if index > 0 || section.title != Some("Sort books") {
+            rows = rows.child(components::bottom_sheet_divider(theme));
+        }
+        if let Some(title) = section.title {
+            rows = rows.child(components::bottom_sheet_section(title, theme));
+        }
+        for option in section.options {
             let page = page.clone();
-            let select = select_option.clone();
-            rows = rows.child(components::bottom_sheet_row(format!("sheet-book-sort-{}", sort.label()), sort.label().to_owned(), Some(sort) == selection.book_sort, theme).on_click(move |_, _, cx| {
+            rows = rows.child(components::bottom_sheet_row(option.id, option.label, option.checked, theme).on_click(move |_, _, cx| {
                 cx.stop_propagation();
-                page.update(cx, |page, cx| select(page, BrowseOptionsEvent::SelectBookSort(sort), cx));
+                page.update(cx, |page, cx| page.select_option(option.event, cx));
             }));
         }
-    }
-    if !controls.collection_sorts.is_empty() {
-        rows = rows.child(components::bottom_sheet_divider(theme)).child(components::bottom_sheet_section("Sort collections", theme));
-        for sort in controls.collection_sorts.iter().copied() {
-            let page = page.clone();
-            let select = select_option.clone();
-            rows = rows.child(components::bottom_sheet_row(format!("sheet-chip-sort-{}", sort.label()), sort.label().to_owned(), Some(sort) == selection.chip_sort, theme).on_click(move |_, _, cx| {
-                cx.stop_propagation();
-                page.update(cx, |page, cx| select(page, BrowseOptionsEvent::SelectChipSort(sort), cx));
-            }));
-        }
-    }
-    if !controls.formats.is_empty() || !selection.formats.is_empty() {
-        rows = rows.child(components::bottom_sheet_divider(theme)).child(components::bottom_sheet_section("Format", theme));
-        let formats = if controls.formats.is_empty() { vec![BrowseFormatFilter::Any] } else { controls.formats.clone() };
-        for format in formats {
-            let checked = if format == BrowseFormatFilter::Any { selection.formats.is_empty() } else { selection.formats.contains(&format) };
-            let page = page.clone();
-            let select = select_option.clone();
-            rows = rows.child(components::bottom_sheet_row(format!("sheet-format-{}", format.label()), controls.format_label(format), checked, theme).on_click(move |_, _, cx| {
-                cx.stop_propagation();
-                page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleFormat(format), cx));
-            }));
-        }
-    }
-    if !controls.languages.is_empty() || !selection.languages.is_empty() {
-        rows = rows.child(components::bottom_sheet_divider(theme)).child(components::bottom_sheet_section("Language", theme));
-        let page_for_any = page.clone();
-        let select_any = select_option.clone();
-        rows = rows.child(components::bottom_sheet_row("sheet-language-any".to_owned(), "Any".to_owned(), selection.languages.is_empty(), theme).on_click(move |_, _, cx| {
-            cx.stop_propagation();
-            page_for_any.update(cx, |page, cx| select_any(page, BrowseOptionsEvent::ToggleLanguage(None), cx));
-        }));
-        for (language, label) in LIBRARY_LANGUAGE_OPTIONS.into_iter().filter(|(language, _)| controls.languages.contains(language)) {
-            let checked = selection.languages.contains(&language);
-            let page = page.clone();
-            let select = select_option.clone();
-            rows = rows.child(components::bottom_sheet_row(format!("sheet-language-{language}"), controls.language_label(language, label), checked, theme).on_click(move |_, _, cx| {
-                cx.stop_propagation();
-                page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleLanguage(Some(language)), cx));
-            }));
-        }
-    }
-    if controls.supports_reading_progress {
-        let page = page.clone();
-        let select = select_option.clone();
-        rows = rows.child(components::bottom_sheet_divider(theme)).child(components::bottom_sheet_row("sheet-hide-finished".to_owned(), "Hide finished".to_owned(), selection.hide_finished, theme).on_click(move |_, _, cx| {
-            cx.stop_propagation();
-            page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleHideFinished, cx));
-        }));
-    }
-    if controls.supports_direct_child_books {
-        let page = page.clone();
-        let select = select_option.clone();
-        rows = rows.child(components::bottom_sheet_divider(theme)).child(components::bottom_sheet_row("sheet-direct-child-books".to_owned(), "Include books from direct children".to_owned(), selection.include_direct_child_books, theme).on_click(move |_, _, cx| {
-            cx.stop_propagation();
-            page.update(cx, |page, cx| select(page, BrowseOptionsEvent::ToggleDirectChildBooks, cx));
-        }));
     }
 
     let header_dismiss_target = page.clone();
-    let header_dismiss = on_dismiss.clone();
     let header = components::bottom_sheet_header("Sort & filter", theme).child(
-        div().id("browse-options-sheet-close").cursor_pointer().text_color(theme.text_muted).child(Icon::new(IconName::Close).size(px(16.0))).on_click(move |_, _, cx| header_dismiss_target.update(cx, |page, cx| header_dismiss(page, cx))),
+        div()
+            .id("browse-options-sheet-close")
+            .cursor_pointer()
+            .text_color(theme.text_muted)
+            .child(Icon::new(IconName::Close).size(px(16.0)))
+            .on_click(move |_, _, cx| header_dismiss_target.update(cx, |page, cx| page.close_browse_options_sheet(cx))),
     );
 
     let sheet = components::bottom_sheet_surface(theme).id("browse-options-sheet").child(header).child(div().id("browse-options-sheet-rows").flex_1().min_h_0().overflow_y_scroll().child(rows));
 
-    let scrim_dismiss = on_dismiss;
-    components::bottom_sheet_overlay().child(components::modal_scrim("browse-options-sheet-scrim", theme).on_click(move |_, _, cx| page.update(cx, |page, cx| scrim_dismiss(page, cx)))).child(sheet).into_any_element()
+    components::bottom_sheet_overlay().child(components::modal_scrim("browse-options-sheet-scrim", theme).on_click(move |_, _, cx| page.update(cx, |page, cx| page.close_browse_options_sheet(cx)))).child(sheet).into_any_element()
+}
+
+/// Choices are data shared by desktop menus and mobile sheets, not operations.
+struct OptionRow {
+    id: String,
+    label: String,
+    checked: bool,
+    event: BrowseOptionsEvent,
+}
+struct OptionSection {
+    title: Option<&'static str>,
+    options: Vec<OptionRow>,
+}
+
+impl BrowseControls {
+    fn options(&self, selection: &BrowseOptionsSelection) -> Vec<OptionSection> {
+        use BrowseOptionsEvent::*;
+        let formats = if self.formats.is_empty() && !selection.formats.is_empty() { vec![BrowseFormatFilter::Any] } else { self.formats.clone() };
+        let languages =
+            (!self.languages.is_empty() || !selection.languages.is_empty()).then(|| std::iter::once(ToggleLanguage(None)).chain(self.languages.iter().map(|&language| ToggleLanguage(Some(language)))).collect()).unwrap_or_default();
+        [
+            (Some("Sort books"), self.book_sorts.iter().copied().map(SelectBookSort).collect::<Vec<_>>()),
+            (Some("Sort collections"), self.collection_sorts.iter().copied().map(SelectChipSort).collect()),
+            (Some("Format"), formats.into_iter().map(ToggleFormat).collect()),
+            (Some("Language"), languages),
+            (None, self.supports_reading_progress.then_some(ToggleHideFinished).into_iter().collect()),
+            (None, self.supports_direct_child_books.then_some(ToggleDirectChildBooks).into_iter().collect()),
+        ]
+        .into_iter()
+        .filter(|(_, events)| !events.is_empty())
+        .map(|(title, events)| OptionSection { title, options: events.into_iter().map(|event| self.option(event, selection)).collect() })
+        .collect()
+    }
+
+    fn option(&self, event: BrowseOptionsEvent, selection: &BrowseOptionsSelection) -> OptionRow {
+        use BrowseOptionsEvent::*;
+        let (id, label, checked) = match event {
+            SelectBookSort(sort) => (format!("sheet-book-sort-{}", sort.label()), sort.label().into(), Some(sort) == selection.book_sort),
+            SelectChipSort(sort) => (format!("sheet-chip-sort-{}", sort.label()), sort.label().into(), Some(sort) == selection.chip_sort),
+            ToggleFormat(format) => (format!("sheet-format-{}", format.label()), self.format_label(format), if format == BrowseFormatFilter::Any { selection.formats.is_empty() } else { selection.formats.contains(&format) }),
+            ToggleLanguage(None) => ("sheet-language-any".into(), "Any".into(), selection.languages.is_empty()),
+            ToggleLanguage(Some(language)) => {
+                let label = LIBRARY_LANGUAGE_OPTIONS.iter().find(|(value, _)| *value == language).map_or(language, |(_, label)| *label);
+                (format!("sheet-language-{language}"), self.language_label(language, label), selection.languages.contains(&language))
+            }
+            ToggleHideFinished => ("sheet-hide-finished".into(), "Hide finished".into(), selection.hide_finished),
+            ToggleDirectChildBooks => ("sheet-direct-child-books".into(), "Include books from direct children".into(), selection.include_direct_child_books),
+        };
+        OptionRow { id, label, checked, event }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_query_can_omit_search_without_changing_selection_or_filters() {
+        let mut selection = BrowseOptionsSelection::for_controls(&BrowseControls::library());
+        selection.search = "needle".into();
+        selection.formats = vec![BrowseFormatFilter::Library(LibraryFileTypeFilter::Book)];
+        selection.languages = vec!["swe"];
+        selection.hide_finished = true;
+        selection.include_direct_child_books = true;
+        let searched = selection.backend_query(library_model::BrowseLocation::Subject(1), true);
+        let hierarchy = selection.backend_query(library_model::BrowseLocation::Subject(2), false);
+        assert_eq!(searched.search, "needle");
+        assert!(hierarchy.search.is_empty());
+        assert_eq!(selection.search, "needle");
+        assert_eq!(hierarchy.location, library_model::BrowseLocation::Subject(2));
+        assert_eq!(hierarchy.file_types, searched.file_types);
+        assert_eq!(hierarchy.languages, searched.languages);
+        assert_eq!(hierarchy.book_sort, searched.book_sort);
+        assert_eq!(hierarchy.chip_sort, searched.chip_sort);
+        assert!(hierarchy.hide_finished);
+        assert!(hierarchy.include_direct_child_books);
+    }
+
+    #[test]
+    fn desktop_and_mobile_choices_keep_their_order_labels_and_checked_state() {
+        let mut controls = BrowseControls::library();
+        controls.formats = vec![BrowseFormatFilter::Any, BrowseFormatFilter::Library(LibraryFileTypeFilter::Book)];
+        controls.languages = vec!["eng", "swe"];
+        controls.supports_direct_child_books = true;
+        let mut selection = BrowseOptionsSelection::for_controls(&controls);
+        selection.languages = vec!["swe"];
+        selection.formats = vec![BrowseFormatFilter::Library(LibraryFileTypeFilter::Book)];
+        let sections = controls.options(&selection);
+        assert_eq!(sections.iter().map(|section| section.title).collect::<Vec<_>>(), vec![Some("Sort books"), Some("Sort collections"), Some("Format"), Some("Language"), None, None]);
+        assert_eq!(sections[2].options.iter().map(|row| (row.label.as_str(), row.checked)).collect::<Vec<_>>(), vec![("All", false), ("Books", true)]);
+        assert_eq!(sections[3].options.iter().map(|row| (row.label.as_str(), row.checked)).collect::<Vec<_>>(), vec![("Any", false), ("English", false), ("Swedish", true)]);
+        assert_eq!(sections[3].options[2].id, "sheet-language-swe");
+    }
+
+    #[test]
+    fn filters_can_be_cleared_when_a_refresh_removes_their_facets() {
+        let controls = BrowseControls::library();
+        let mut selection = BrowseOptionsSelection::for_controls(&controls);
+        selection.formats = vec![BrowseFormatFilter::Library(LibraryFileTypeFilter::Book)];
+        selection.languages = vec!["swe"];
+        let sections = controls.options(&selection);
+        let format = sections.iter().find(|section| section.title == Some("Format")).unwrap();
+        let language = sections.iter().find(|section| section.title == Some("Language")).unwrap();
+        assert_eq!(format.options.len(), 1);
+        assert_eq!(language.options.len(), 1);
+        assert!(selection.apply(format.options[0].event, &controls));
+        assert!(selection.apply(language.options[0].event, &controls));
+        assert!(selection.formats.is_empty());
+        assert!(selection.languages.is_empty());
+    }
 }

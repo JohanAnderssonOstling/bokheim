@@ -2,6 +2,7 @@
 
 use crate::{Database, DatabaseError};
 use include_sqlite_sql::include_sql;
+use rusqlite::OptionalExtension;
 use sync_common::ContentHash;
 
 // ---- reading ----
@@ -39,15 +40,19 @@ impl Database {
     /// transaction; `entry` travels with the position because that is when it
     /// changes, and is stored locally rather than synchronized.
     pub fn update_reading_position(&self, hash: &ContentHash, position: &str, progress: Option<f32>, entry: Option<&str>) -> Result<(), DatabaseError> {
-        let position = ReadingPosition::parse(position).map_err(DatabaseError::operation)?.as_str();
+        let position = ReadingPosition::parse(position).map_err(DatabaseError::operation)?;
         let progress = progress.map(ReadProgress::new).transpose().map_err(DatabaseError::operation)?;
-        let transaction = self.connection.unchecked_transaction()?;
-        transaction.reading_set_position(hash.as_str(), &position, progress.map(ReadProgress::value), crate::sync::unix_millis()?)?;
-        if let Some(entry) = entry.map(str::trim).filter(|entry| !entry.is_empty()) {
-            transaction.reading_upsert_toc_entry(hash.as_str(), entry)?;
-        }
-        crate::sync::apply::commit(transaction)?;
-        Ok(())
+        self.write(|transaction| {
+            let previous: Option<f32> = transaction.query_row("SELECT read_progress FROM book WHERE content_hash=?1", [hash.as_str()], |row| row.get(0)).optional()?.flatten();
+            crate::sync::apply::registers::record_local(
+                transaction,
+                library_replica::LibraryStateEntry::ReadingPosition { content_hash: *hash, value: library_replica::ReadingPositionState { location: position, progress: progress.map(ReadProgress::value).or(previous).unwrap_or(0.0) } },
+            )?;
+            if let Some(entry) = entry.map(str::trim).filter(|entry| !entry.is_empty()) {
+                transaction.reading_upsert_toc_entry(hash.as_str(), entry)?;
+            }
+            Ok(())
+        })
     }
 }
 

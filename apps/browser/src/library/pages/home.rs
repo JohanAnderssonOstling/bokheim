@@ -1,6 +1,6 @@
-//! Landing page: progress, recent activity, finished, and recently added.
+//! Landing page: recent activity, finished, and recently added.
 //!
-//! Four shelves rather than a page of its own — the rows, the cards, the cursor
+//! Three shelves rather than a page of its own — the rows, the cards, the cursor
 //! and the paging all come from [`ShelfPage`]; this file only decides which
 //! books each shelf holds.
 
@@ -39,10 +39,10 @@ impl ShelfSource for HomeShelves {
             // A book the reader has just opened is recently added as well, and
             // saying so twice on one screen wastes the row that exists to
             // surface what they have not seen yet.
-            let recent = data.most_progress.iter().chain(&in_progress).chain(&finished).map(|book| book.content_hash).collect::<HashSet<_>>();
+            let recent = in_progress.iter().chain(&finished).map(|book| book.content_hash).collect::<HashSet<_>>();
             data.recently_added.retain(|book| !recent.contains(&book.content_hash));
 
-            let rows = [("recently-read", "Recently read", in_progress), ("furthest-along", "Furthest along", data.most_progress), ("finished", "Finished", finished), ("recently-added", "Recently added", data.recently_added)];
+            let rows = [("recently-read", "Recently read", in_progress), ("finished", "Finished", finished), ("recently-added", "Recently added", data.recently_added)];
             // An empty section is not a section: a library with nothing finished
             // says so by having no Finished shelf, not by an empty row.
             Ok(rows.into_iter().filter(|(_, _, books)| !books.is_empty()).map(|(id, title, books)| ShelfRow { id: id.into(), title: title.into(), books }).collect())

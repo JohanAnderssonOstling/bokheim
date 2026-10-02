@@ -1,4 +1,7 @@
 //! Collect classifications from verified candidates without choosing an edition ISBN.
+
+use crate::identity_evidence::{edition_identity_evidence, verified_author_prefix_query};
+use crate::matching::NormalizedTitle;
 use crate::{
     matching::{author_credits, author_names_compatible, matching_author_count, title_qualifiers, title_substring_keys},
     Classification, ClassificationEvidence, ClassificationScheme, ClassificationSource, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus,
@@ -7,7 +10,7 @@ use std::collections::BTreeSet;
 pub const METHOD: &str = "verified_matching_edition_classifications";
 
 fn title_key(title: &str) -> String {
-    let mut key = crate::matching::NormalizedTitle::new(title).full;
+    let mut key = NormalizedTitle::new(title).full;
     // This known series label is not a volume, revision, or adaptation qualifier.
     for suffix in [" very short introductions", " a very short introduction"] {
         if let Some(base) = key.strip_suffix(suffix) {
@@ -20,8 +23,8 @@ fn title_key(title: &str) -> String {
 // Lookup can find an edition by a whole-word fragment of the local title.
 // Keep qualifier evidence: a subtitle must not conceal a different volume or adaptation.
 fn titles_compatible(local: &str, remote: &str) -> bool {
-    let local_title = crate::matching::NormalizedTitle::new(local);
-    let remote_title = crate::matching::NormalizedTitle::new(remote);
+    let local_title = NormalizedTitle::new(local);
+    let remote_title = NormalizedTitle::new(remote);
     if local_title.qualifiers != remote_title.qualifiers {
         return false;
     }
@@ -123,8 +126,8 @@ pub fn resolved_classifications(query: &EditionIdentityQuery, result: &EditionId
     if title.is_empty() {
         return vec![];
     }
-    let full_key = crate::matching::NormalizedTitle::new(&query.title).full;
-    let mut exact = result.candidates.iter().filter(|candidate| full_key == crate::matching::NormalizedTitle::new(&candidate.full_title()).full).collect::<Vec<_>>();
+    let full_key = NormalizedTitle::new(&query.title).full;
+    let mut exact = result.candidates.iter().filter(|candidate| full_key == NormalizedTitle::new(&candidate.full_title()).full).collect::<Vec<_>>();
     if exact.is_empty() {
         exact = result.candidates.iter().filter(|candidate| title == title_key(&candidate.full_title())).collect();
     }
@@ -214,22 +217,22 @@ mod tests {
         r.candidates[0].classifications = vec![code("DK41", ClassificationSource::Work)];
         r.candidates[1].authors = vec!["Paul Bushkovitch".into()];
         r.candidates[1].classifications = vec![code("DK37 .B86 2011", ClassificationSource::Work)];
-        let verified = crate::identity_evidence::verified_author_prefix_query(&q, &r).unwrap();
+        let verified = verified_author_prefix_query(&q, &r).unwrap();
         assert_eq!(verified.authors, vec!["Paul Bushkovitch"]);
         assert_eq!(resolved_classifications(&verified, &r)[0].notation, "DK37");
         assert!(r.matched.is_none());
         q.authors = vec!["Known Different Author".into()];
-        assert!(crate::identity_evidence::verified_author_prefix_query(&q, &r).is_none());
+        assert!(verified_author_prefix_query(&q, &r).is_none());
         q.authors.clear();
         q.title = "Paul Bushkovitch - A Different Book".into();
-        assert!(crate::identity_evidence::verified_author_prefix_query(&q, &r).is_none());
+        assert!(verified_author_prefix_query(&q, &r).is_none());
         q.title = "Paul Bushkovitch - A Concise History of Russia (Volume 2)".into();
-        assert!(crate::identity_evidence::verified_author_prefix_query(&q, &r).is_none());
+        assert!(verified_author_prefix_query(&q, &r).is_none());
         q.title = "History Series - A Concise History of Russia".into();
-        assert!(crate::identity_evidence::verified_author_prefix_query(&q, &r).is_none());
+        assert!(verified_author_prefix_query(&q, &r).is_none());
         q.title = "Paul Bushkovitch - A Concise History of Russia".into();
         r.candidates_truncated = true;
-        assert!(crate::identity_evidence::verified_author_prefix_query(&q, &r).is_none());
+        assert!(verified_author_prefix_query(&q, &r).is_none());
     }
     #[test]
     fn huntington_prefix_handles_initials_and_filename_subtitle_punctuation() {
@@ -242,7 +245,7 @@ mod tests {
             candidate.authors = vec!["Samuel P. Huntington".into()];
             candidate.classifications = vec![code("UA23 .H95 1957", ClassificationSource::Work)];
         }
-        let verified = crate::identity_evidence::verified_author_prefix_query(&q, &r).unwrap();
+        let verified = verified_author_prefix_query(&q, &r).unwrap();
         assert_eq!(resolved_classifications(&verified, &r)[0].notation, "UA23");
         assert!(r.matched.is_none());
     }
@@ -265,11 +268,11 @@ mod tests {
     }
     #[test]
     fn underscore_space_is_a_subtitle_separator() {
-        let evidence = crate::identity_evidence::edition_identity_evidence("Logic_ a very short introduction");
+        let evidence = edition_identity_evidence("Logic_ a very short introduction");
         assert_eq!(evidence.title, "Logic: a very short introduction");
         assert_eq!(evidence.author, None);
         assert_eq!(title_key(&evidence.title), title_key("Logic"));
-        assert_eq!(crate::identity_evidence::edition_identity_evidence("knuth_mathematical_writing").title, "knuth mathematical writing");
+        assert_eq!(edition_identity_evidence("knuth_mathematical_writing").title, "knuth mathematical writing");
     }
     #[test]
     fn filename_surname_disambiguates_knuth_without_inventing_an_author() {

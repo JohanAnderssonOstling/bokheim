@@ -8,14 +8,16 @@ mod browse;
 pub mod commands;
 mod directory;
 mod open;
-mod session;
+pub(crate) mod session;
 pub mod subscriptions;
-mod thumbnails;
+pub(crate) mod thumbnails;
+mod worker_state;
 mod workers;
 pub use open::LibraryOpenConfig;
-mod handle;
+pub mod handle;
+mod import;
 mod io;
-mod jobs;
+pub(crate) mod jobs;
 mod management;
 mod pending;
 mod reading;
@@ -23,26 +25,25 @@ mod resources;
 #[cfg(not(target_arch = "wasm32"))]
 pub use book_access::remote_file::AudioStreamControl;
 pub use book_access::remote_file::RemoteFile;
-mod audible_enrichment;
-mod book;
+pub(crate) mod book;
 #[cfg(target_arch = "wasm32")]
 #[path = "../browser_audiobook.rs"]
 pub mod browser_audiobook;
 #[cfg(not(target_arch = "wasm32"))]
 mod directory_import;
-mod enrichment;
-mod operations;
+pub(crate) mod enrichment;
+pub(crate) mod operations;
 mod playback;
-mod preparation;
+pub(crate) mod preparation;
 pub(crate) mod remote_access;
 mod transfer_status;
 
-use library_replica::filenames;
+pub(crate) use library_replica::filenames;
 
 pub use book::{AudiobookBook, DocumentBook, ResolvedBook};
 #[cfg(target_arch = "wasm32")]
 pub use browser_audiobook::{BrowserAudiobook, PlaybackLease};
-pub use commands::LibraryCommand;
+pub use commands::{ImportBookSource, LibraryCommand, PendingCommand, ReadyCommand, RuntimeCommand, SessionCommand, StagedImportMetadata};
 pub use directory::LibraryDirectory;
 pub use handle::{LibraryHandle, LibrarySession};
 pub use io::PreparedDirectoryImport;
@@ -54,7 +55,7 @@ pub use playback::{DirectPlayback, PlaybackLocation, PlaybackMetadata, PlaybackS
 pub use resources::LibraryRuntimeSpec;
 
 #[cfg(not(target_arch = "wasm32"))]
-mod import_native;
+pub(crate) mod import_native;
 #[cfg(target_arch = "wasm32")]
 mod import_web;
 #[cfg(target_arch = "wasm32")]

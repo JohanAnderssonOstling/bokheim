@@ -5,6 +5,7 @@
 //! themselves stay with each reader, because an EPUB annotation and a PDF
 //! annotation genuinely offer different actions.
 
+use std::cell::Cell;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, ClickEvent, Context, IntoElement, Window, div, px};
 use ui_components::WindowWidthClass;
@@ -32,13 +33,13 @@ pub(crate) struct ChromeState {
     /// reveal strip. Ignore that one synthetic/replayed move; otherwise the
     /// close click immediately opens the sidebar again.
     suppress_next_pointer_reveal: bool,
-    system_bars_visible: std::cell::Cell<Option<bool>>,
+    system_bars_visible: Cell<Option<bool>>,
     component: Component,
 }
 
 impl ChromeState {
     pub(crate) fn new(component: Component) -> Self {
-        Self { hidden: false, suppress_next_pointer_reveal: false, system_bars_visible: std::cell::Cell::new(None), component }
+        Self { hidden: false, suppress_next_pointer_reveal: false, system_bars_visible: Cell::new(None), component }
     }
 
     pub(crate) fn is_visible(&self) -> bool {

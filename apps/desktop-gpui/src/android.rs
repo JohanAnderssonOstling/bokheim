@@ -1,3 +1,6 @@
+use std::path::Path;
+use std::sync::Once;
+use std::sync::mpsc::TrySendError;
 use app::{AppDataLocation, host::BackendLaunch};
 use gpui_android::AndroidApp;
 use jni::EnvUnowned;
@@ -117,7 +120,7 @@ fn android_main(app: AndroidApp) {
             .map_err(|error| error.to_string())
     });
     gpui_platform::android_init(app.clone());
-    static PANIC_LOGGING: std::sync::Once = std::sync::Once::new();
+    static PANIC_LOGGING: Once = Once::new();
     PANIC_LOGGING.call_once(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
@@ -207,7 +210,7 @@ extern "system" fn Java_se_bokheim_reader_gpui_UpdateMetadata_nativeJson<'caller
 extern "system" fn Java_se_bokheim_reader_gpui_UpdateMigrationService_nativePrepare<'caller>(mut unowned_env: EnvUnowned<'caller>, _class: JObject<'caller>, job: JString<'caller>) {
     unowned_env.with_env(|env| -> jni::errors::Result<()> {
         let path = job.try_to_string(env)?;
-        if let Err(error) = linux_update_host::prepare_candidate(std::path::Path::new(&path), env!("CARGO_PKG_VERSION")) {
+        if let Err(error) = linux_update_host::prepare_candidate(Path::new(&path), env!("CARGO_PKG_VERSION")) {
             // No result file is produced on failure. The parent waits for helper
             // process death before reading it or touching a live database.
             log::error!("Android update candidate failed: {error}");
@@ -228,7 +231,7 @@ fn deliver_incoming_file(file: IncomingBookResult) {
     }
 }
 
-fn cleanup_abandoned_incoming_files(directory: &std::path::Path) {
+fn cleanup_abandoned_incoming_files(directory: &Path) {
     let cutoff = std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(24 * 60 * 60));
     let Ok(entries) = std::fs::read_dir(directory) else { return };
     for entry in entries.flatten() {
@@ -256,7 +259,7 @@ extern "system" fn Java_se_bokheim_reader_gpui_MainActivity_nativeOpenBook<'call
                 Some(Ok(())) => {}
                 Some(Err(error)) => {
                     let request = match error {
-                        std::sync::mpsc::TrySendError::Full(request) | std::sync::mpsc::TrySendError::Disconnected(request) => request,
+                        TrySendError::Full(request) | TrySendError::Disconnected(request) => request,
                     };
                     deliver_incoming_file(Err(format!("could not queue {}: incoming book queue is full or stopped", request.name)));
                 }

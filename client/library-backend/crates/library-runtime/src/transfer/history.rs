@@ -1,4 +1,4 @@
-use super::TransferStatus;
+use library_model::TransferStatus;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::io::{Error, ErrorKind, Write};
@@ -57,9 +57,9 @@ impl MessagePackTransferHistory {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{TransferOrigin, TransferState};
+    use library_model::{TransferOrigin, TransferState};
     use super::*;
-    use library_replica::TransferJobKind;
+    use library_model::TransferJobKind;
     use sync_common::ContentHash;
 
     fn status(id: usize) -> TransferStatus {

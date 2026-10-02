@@ -1,3 +1,5 @@
+use std::io::Error;
+use std::path::PathBuf;
 #[cfg(all(target_os = "android", feature = "android"))]
 mod android;
 #[cfg(all(target_os = "android", feature = "android"))]
@@ -76,7 +78,7 @@ fn platform_content<V: gpui::Render + 'static>(content: Entity<V>, _: &mut App) 
 /// Install and open the existing Bokheim browser/reader UI in the selected GPUI platform.
 pub struct IncomingBook {
     pub name: String,
-    pub path: std::path::PathBuf,
+    pub path: PathBuf,
 }
 pub type IncomingBookResult = Result<IncomingBook, String>;
 
@@ -85,13 +87,13 @@ fn stage_incoming_book(mut source: impl std::io::Read, path: &std::path::Path) -
     use std::io::Write as _;
     const RESERVED_BYTES: u64 = 128 * 1024 * 1024;
     let mut destination = std::fs::OpenOptions::new().create_new(true).write(true).open(path)?;
-    let directory = path.parent().ok_or_else(|| std::io::Error::other("incoming file has no parent directory"))?;
+    let directory = path.parent().ok_or_else(|| Error::other("incoming file has no parent directory"))?;
     let mut buffer = [0_u8; 64 * 1024];
     let mut bytes_until_check = 0_u64;
     loop {
         if bytes_until_check == 0 {
             if fs2::available_space(directory)? <= RESERVED_BYTES {
-                return Err(std::io::Error::other("not enough free storage to stage book"));
+                return Err(Error::other("not enough free storage to stage book"));
             }
             bytes_until_check = 8 * 1024 * 1024;
         }
@@ -324,7 +326,7 @@ pub fn open_ui(
 }
 
 #[cfg(all(feature = "desktop", not(feature = "mobile")))]
-fn open_extra_window(services: AppServices, backend: AppClient, playback_restore_path: Option<std::path::PathBuf>, target: browser_ui::NewWindowTarget, cx: &mut App) {
+fn open_extra_window(services: AppServices, backend: AppClient, playback_restore_path: Option<PathBuf>, target: browser_ui::NewWindowTarget, cx: &mut App) {
     let (app_id, icon) = desktop_window_identity();
     let bounds = Bounds::centered(None, size(px(1240.0), px(820.0)), cx);
     let result = cx.open_window(

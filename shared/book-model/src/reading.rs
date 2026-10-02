@@ -1,3 +1,4 @@
+use std::error::Error;
 use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -181,7 +182,7 @@ impl fmt::Display for InvalidReadingPosition {
     }
 }
 
-impl std::error::Error for InvalidReadingPosition {}
+impl Error for InvalidReadingPosition {}
 
 impl serde::Serialize for ReadingPosition {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -265,7 +266,7 @@ impl fmt::Display for InvalidEpubCfi {
     }
 }
 
-impl std::error::Error for InvalidEpubCfi {}
+impl Error for InvalidEpubCfi {}
 
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub struct ReadProgress(f32);
@@ -308,7 +309,7 @@ impl fmt::Display for InvalidReadProgress {
     }
 }
 
-impl std::error::Error for InvalidReadProgress {}
+impl Error for InvalidReadProgress {}
 
 #[cfg(test)]
 mod tests {

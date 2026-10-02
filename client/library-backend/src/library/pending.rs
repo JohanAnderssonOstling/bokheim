@@ -4,20 +4,21 @@
 //! until completion or library retirement; disposable reads stop with their
 //! caller. Directory imports finish the current file and inspect caller
 //! cancellation between files. No database transaction may span an await.
+
+use std::panic::AssertUnwindSafe;
 use crate::BackendError;
 use futures_util::{future::LocalBoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
 use std::{future::Future, rc::Rc};
 
 #[derive(Clone, Copy)]
-pub(super) enum OperationKind {
+pub(crate) enum OperationKind {
     Read,
     Import,
-    Maintenance,
 }
 
 /// A reply is resolved even if admission fails, a future panics, or its owner
 /// is dropped before the future is first polled.
-pub(super) struct PendingReply<T>(Option<async_channel::Sender<Result<T, BackendError>>>);
+pub(crate) struct PendingReply<T>(Option<async_channel::Sender<Result<T, BackendError>>>);
 
 impl<T> PendingReply<T> {
     pub fn new(sender: async_channel::Sender<Result<T, BackendError>>) -> Self {
@@ -45,16 +46,15 @@ impl<T> Drop for PendingReply<T> {
     }
 }
 
-pub(super) struct PendingOperations<C> {
+pub(crate) struct PendingOperations<C> {
     tasks: FuturesUnordered<LocalBoxFuture<'static, C>>,
     reads: Rc<tokio::sync::Semaphore>,
     imports: Rc<tokio::sync::Semaphore>,
-    maintenance: Rc<tokio::sync::Semaphore>,
 }
 
 impl<C: 'static> Default for PendingOperations<C> {
     fn default() -> Self {
-        Self { tasks: FuturesUnordered::new(), reads: Rc::new(tokio::sync::Semaphore::new(8)), imports: Rc::new(tokio::sync::Semaphore::new(1)), maintenance: Rc::new(tokio::sync::Semaphore::new(2)) }
+        Self { tasks: FuturesUnordered::new(), reads: Rc::new(tokio::sync::Semaphore::new(8)), imports: Rc::new(tokio::sync::Semaphore::new(1)) }
     }
 }
 
@@ -78,7 +78,6 @@ impl<C: 'static> PendingOperations<C> {
         let permits = match kind {
             OperationKind::Read => self.reads.clone(),
             OperationKind::Import => self.imports.clone(),
-            OperationKind::Maintenance => self.maintenance.clone(),
         };
         let abandoned = reply.sender();
         self.tasks.push(Box::pin(async move {
@@ -86,7 +85,7 @@ impl<C: 'static> PendingOperations<C> {
                 let _permit = permits.acquire().await.expect("operation permits are never closed");
                 operation.await
             };
-            let run = std::panic::AssertUnwindSafe(run).catch_unwind();
+            let run = AssertUnwindSafe(run).catch_unwind();
             let result = if matches!(kind, OperationKind::Read) {
                 tokio::select! {
                     biased;
@@ -103,7 +102,7 @@ impl<C: 'static> PendingOperations<C> {
 }
 
 /// One background lane: repeated wakes coalesce without replacing active work.
-pub(super) struct BackgroundJob<T> {
+pub(crate) struct BackgroundJob<T> {
     pub task: Option<LocalBoxFuture<'static, T>>,
     pub pending: bool,
 }
@@ -142,7 +141,7 @@ impl BackgroundJob<()> {
 
 /// Channel closure alone retains queued messages while a sender survives.
 /// Drain on every exit path, including panic and cancellation.
-pub(super) struct Inbox<T>(pub async_channel::Receiver<T>);
+pub(crate) struct Inbox<T>(pub async_channel::Receiver<T>);
 impl<T> Drop for Inbox<T> {
     fn drop(&mut self) {
         self.0.close();
@@ -262,7 +261,7 @@ mod tests {
         let (commands, receiver) = async_channel::unbounded();
         let (pending, response) = reply();
         commands.try_send(pending).unwrap_or_else(|_| panic!("inbox open"));
-        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let failed = std::panic::catch_unwind(AssertUnwindSafe(|| {
             let _inbox = Inbox(receiver);
             panic!("actor failed");
         }));

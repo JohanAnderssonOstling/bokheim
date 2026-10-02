@@ -1,19 +1,23 @@
 //! Book handling for Android private and shared storage.
+
+use std::fs::File;
+use std::io::{Error, ErrorKind};
+use std::sync::OnceLock;
 use std::path::{Path, PathBuf};
-static LEASE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static LEASE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 pub fn configure_lease_root(app_data: &Path) -> std::io::Result<()> {
     let root = app_data.join("book-leases");
     std::fs::create_dir_all(&root)?;
     let root = root.canonicalize()?;
     if LEASE_ROOT.get_or_init(|| root.clone()) != &root {
-        return Err(std::io::Error::other("Android book lock directory is already configured"));
+        return Err(Error::other("Android book lock directory is already configured"));
     }
     Ok(())
 }
 
 pub fn lease_root() -> std::io::Result<&'static Path> {
-    LEASE_ROOT.get().map(PathBuf::as_path).ok_or_else(|| std::io::Error::other("Android book lock directory is not configured"))
+    LEASE_ROOT.get().map(PathBuf::as_path).ok_or_else(|| Error::other("Android book lock directory is not configured"))
 }
 
 pub fn persist_book_noclobber(temporary: tempfile::TempPath, destination: &Path) -> Result<(), tempfile::PathPersistError> {
@@ -31,7 +35,7 @@ pub fn persist_book_noclobber(temporary: tempfile::TempPath, destination: &Path)
 }
 
 fn copy_after_persist_failure(mut failure: tempfile::PathPersistError, destination: &Path) -> Result<(), tempfile::PathPersistError> {
-    let result = std::fs::File::open(&failure.path).and_then(|mut source| copy_book_noclobber(&mut source, destination));
+    let result = File::open(&failure.path).and_then(|mut source| copy_book_noclobber(&mut source, destination));
     match result {
         Ok(()) => Ok(()), // Dropping the original TempPath removes the staging file.
         Err(error) => {
@@ -45,7 +49,7 @@ fn copy_book_noclobber(source: &mut impl std::io::Read, destination: &Path) -> s
     use std::io::Write as _;
     struct PendingCopy<'a> {
         path: &'a Path,
-        file: Option<std::fs::File>,
+        file: Option<File>,
         complete: bool,
     }
     impl Drop for PendingCopy<'_> {
@@ -67,7 +71,7 @@ fn copy_book_noclobber(source: &mut impl std::io::Read, destination: &Path) -> s
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         let count = match source.read(&mut buffer) {
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
             result => result?,
         };
         if count == 0 {
@@ -88,7 +92,7 @@ mod android_book_tests {
     fn denied_rename(directory: &Path) -> tempfile::PathPersistError {
         let mut source = tempfile::NamedTempFile::new_in(directory).unwrap();
         source.write_all(b"verified book").unwrap();
-        tempfile::PathPersistError { error: std::io::Error::from_raw_os_error(13), path: source.into_temp_path() }
+        tempfile::PathPersistError { error: Error::from_raw_os_error(13), path: source.into_temp_path() }
     }
 
     #[test]
@@ -122,7 +126,7 @@ mod android_book_tests {
         let destination = directory.path().join("book.epub");
         std::fs::write(&destination, b"existing user book").unwrap();
         let failure = copy_after_persist_failure(failure, &destination).unwrap_err();
-        assert_eq!(failure.error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(failure.error.kind(), ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(destination).unwrap(), b"existing user book");
         assert_eq!(std::fs::read(&failure.path).unwrap(), b"verified book");
     }
@@ -132,7 +136,7 @@ mod android_book_tests {
         struct FailedRead;
         impl std::io::Read for FailedRead {
             fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::from_raw_os_error(13))
+                Err(Error::from_raw_os_error(13))
             }
         }
         let directory = tempfile::tempdir().unwrap();

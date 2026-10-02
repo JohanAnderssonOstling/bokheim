@@ -1,7 +1,7 @@
 //! Stable synchronization protocol shared by clients and the sync service.
 //!
 //! Library payload bytes are intentionally opaque here. Their client-side
-//! schema and conversion live in `library-replica`.
+//! schema lives in `library-replica`.
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -9,13 +9,10 @@ use std::fmt;
 use std::num::NonZeroU64;
 
 pub mod api;
-pub mod book_batch;
 pub use protobuf_wire as transport;
 pub use wire;
-pub mod mutation_ids;
-pub use mutation_ids::{MutationId, MutationIdError};
 mod protocol;
-pub use protocol::{MutationIssue, PullBatchError, PushBatcher, PushResponseError, ValidatedPushResponse, validate_pull_batch, validate_push_response};
+pub use protocol::{validate_pull_batch, validate_push_response, MutationIssue, PullBatchError, PushBatcher, PushResponseError, ValidatedPushResponse};
 
 pub use content_address::ContentHash;
 
@@ -25,25 +22,18 @@ pub fn fixture_content_hash(value: u64) -> ContentHash {
     ContentHash::new(&format!("{value:064x}"))
 }
 
+/// Delivery fixture for values authored by the supplied replica. Forwarded
+/// values already have a non-nil original author and preserve it.
+#[cfg(any(test, feature = "test-support"))]
+pub fn fixture_delivery<T>(mut publication: Publication<T>, replica_id: ReplicaId, revision: LibraryRevision) -> Delivery<T> {
+    if publication.state.version.replica_id.is_nil() {
+        publication.state.version.replica_id = replica_id;
+    }
+    Delivery { state: publication.state, revision }
+}
+
 /// A non-negative Unix timestamp measured in milliseconds.
 pub type UnixMillis = u64;
-
-/// Mutation kinds whose envelope-level meaning is visible to the sync service.
-/// Payload schemas remain client-owned in `library-replica`.
-pub mod mutation_kind {
-    pub const ANNOTATION: &str = "annotation";
-    pub const BOOK_LIFECYCLE: &str = "book_lifecycle";
-    pub const BOOK_FACTS: &str = "book_facts";
-    pub const BOOK_TOC: &str = "book_toc";
-    pub const DIRECTORY_LIFECYCLE: &str = "directory_lifecycle";
-    pub const DIRECTORY_NAME: &str = "directory_name";
-    pub const DIRECTORY_PARENT: &str = "directory_parent";
-    pub const METADATA: &str = "metadata";
-    pub const PDF_READER_METADATA: &str = "pdf_reader_metadata";
-    pub const DESCRIPTION: &str = "description";
-    pub const PLACEMENT: &str = "placement";
-    pub const READING_POSITION: &str = "reading_position";
-}
 
 /// The replica that produced a synchronized mutation.
 pub type ReplicaId = uuid::Uuid;
@@ -120,100 +110,218 @@ sequence_type!(LibraryRevision);
 /// Payload interpretation remains client-owned, but every Rust component that
 /// selects a winner must compare this shared key. PostgreSQL mirrors this exact
 /// field order in `enforce_lww_order()` so the atomic upsert has the same law.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// A replica's sequence only increases, so `(replica_id, replica_seq)` names
+/// one authored change and needs no further tie-breaker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VersionKey {
+    #[serde(deserialize_with = "deserialize_storable_millis")]
     pub changed_at: UnixMillis,
-    pub conflict_rank: u8,
+    pub conflict_rank: ConflictRank,
     pub replica_id: ReplicaId,
-    pub replica_seq: u64,
-    pub mutation_id: MutationId,
+    pub replica_seq: ReplicaSeq,
 }
 
 impl VersionKey {
-    pub fn new(changed_at: UnixMillis, conflict_rank: u8, replica_id: ReplicaId, replica_seq: u64, mutation_id: MutationId) -> Self {
-        Self { changed_at, conflict_rank, replica_id, replica_seq, mutation_id }
-    }
-
-    pub fn from_wire(mutation: &WireMutation, replica_id: ReplicaId) -> Self {
-        if let Some(origin) = &mutation.origin {
-            return Self::new(mutation.changed_at, mutation.conflict_rank, origin.replica_id, origin.replica_seq.get(), origin.mutation_id);
-        }
-        Self::new(mutation.changed_at, mutation.conflict_rank, replica_id, mutation.replica_seq.get(), mutation.mutation_id)
+    pub fn new(changed_at: UnixMillis, conflict_rank: ConflictRank, replica_id: ReplicaId, replica_seq: ReplicaSeq) -> Self {
+        Self { changed_at, conflict_rank, replica_id, replica_seq }
     }
 }
+
+/// Timestamps are stored in signed 64-bit database columns.
+fn deserialize_storable_millis<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<UnixMillis, D::Error> {
+    let value = UnixMillis::deserialize(deserializer)?;
+    if value > i64::MAX as u64 {
+        return Err(serde::de::Error::custom("timestamp exceeds the signed 64-bit database limit"));
+    }
+    Ok(value)
+}
+
+/// Breaks an exact timestamp tie: destructive updates win, and a purge wins
+/// over a delete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(into = "u8", try_from = "u8")]
+pub enum ConflictRank {
+    Update = 0,
+    Delete = 1,
+    Purge = 2,
+}
+
+impl From<ConflictRank> for u8 {
+    fn from(rank: ConflictRank) -> Self {
+        rank as u8
+    }
+}
+
+impl TryFrom<u8> for ConflictRank {
+    type Error = ConflictRankError;
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Update),
+            1 => Ok(Self::Delete),
+            2 => Ok(Self::Purge),
+            _ => Err(ConflictRankError),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConflictRankError;
+
+impl fmt::Display for ConflictRankError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("conflict rank must be update, delete, or purge")
+    }
+}
+
+impl std::error::Error for ConflictRankError {}
 
 /// Compares versions known to have been produced by the same replica.
 ///
 /// Replica identity is constant in this case, so omitting it produces exactly
 /// the same ordering as [`VersionKey`] without requiring callers to manufacture
 /// an identity they do not otherwise need.
-pub fn compare_same_replica_versions(left: (UnixMillis, u8, ReplicaSeq, MutationId), right: (UnixMillis, u8, ReplicaSeq, MutationId)) -> Ordering {
+pub fn compare_same_replica_versions(left: (UnixMillis, ConflictRank, ReplicaSeq), right: (UnixMillis, ConflictRank, ReplicaSeq)) -> Ordering {
     left.cmp(&right)
 }
 
-/// A checkpoint over independently paged synchronization channels.
-/// A component advances only after that channel has been inspected.
+/// A pull checkpoint. Book lifecycles are delivered before every other value,
+/// and a field is delivered only at or below the lifecycle cursor, so a field
+/// never reaches a replica before its book. `field_revision` never exceeds
+/// `lifecycle_revision`.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SyncCursor {
     #[serde(default, deserialize_with = "deserialize_library_cursor")]
-    pub state_revision: Option<LibraryRevision>,
+    pub lifecycle_revision: Option<LibraryRevision>,
     #[serde(default, deserialize_with = "deserialize_library_cursor")]
-    pub reading_revision: Option<LibraryRevision>,
+    pub field_revision: Option<LibraryRevision>,
 }
 
-/// Mutation envelope transported and persisted by the sync service. `value`
-/// is an encoded protobuf `MutationValue`; the service forwards it opaquely so
-/// it need not depend on client domain models.
+/// A canonical value and its original last-writer-wins version.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Versioned<T> {
+    pub value: T,
+    pub version: VersionKey,
+}
+
+/// An immutable submission snapshot. The publisher's sequence identifies it
+/// within the publisher's requests; state.version always belongs to the
+/// original author.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct WireMutation {
-    pub mutation_id: MutationId,
-    pub kind: String,
-    pub entity_key: String,
-    #[serde(default)]
-    pub entity_subkey: String,
-    pub value: Vec<u8>,
-    pub conflict_rank: u8,
-    #[serde(default)]
-    pub blob_reference: Option<DeclaredBlobReference>,
-    pub changed_at: UnixMillis,
-    pub replica_seq: ReplicaSeq,
-    /// Original winner identity when forwarding retained state. Transport IDs
-    /// above remain local to the publisher and are used only for acknowledgements.
-    pub origin: Option<MutationOrigin>,
+#[serde(bound = "T: StatePayload")]
+pub struct Publication<T> {
+    pub publisher_seq: ReplicaSeq,
+    pub state: Versioned<T>,
 }
 
-impl WireMutation {
-    /// Logical owner of a book field, independent of upload requirements.
-    /// Lifecycle and directory cells are not owned fields.
-    pub fn book_field_owner(&self) -> Option<&str> {
-        use mutation_kind as kind;
-        match self.kind.as_str() {
-            kind::ANNOTATION => self.blob_reference.as_ref()?.content_hash.as_ref().map(ContentHash::as_str),
-            kind::BOOK_FACTS | kind::PLACEMENT | kind::READING_POSITION | kind::METADATA | kind::DESCRIPTION | kind::PDF_READER_METADATA | kind::BOOK_TOC => Some(&self.entity_key),
-            _ => None,
-        }
+/// The only representation needed by the service: an open state address, the
+/// book the value belongs to, and the opaque serialized domain value. A purge
+/// removes every value of its book; a book lifecycle holds the book's bytes
+/// unless its version is a purge.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OpaqueStateEntry {
+    pub address: StateAddress,
+    pub book: Option<ContentHash>,
+    pub bytes: Vec<u8>,
+}
+
+/// Client-owned serialization and envelope validation. This trait does not
+/// introduce a second domain model or require the service to link that model.
+pub trait StatePayload: Serialize + serde::de::DeserializeOwned + Sized {
+    fn recognizes_kind(_: &str) -> bool {
+        true
+    }
+    fn validate_version(&self, _: &VersionKey) -> Result<(), transport::WireError> {
+        Ok(())
+    }
+    fn serialize_entry<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error>;
+    fn deserialize_entry<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error>;
+}
+
+impl StatePayload for OpaqueStateEntry {
+    fn serialize_entry<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.serialize(serializer)
+    }
+    fn deserialize_entry<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Self::deserialize(deserializer)
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MutationOrigin {
-    pub replica_id: ReplicaId,
-    pub replica_seq: ReplicaSeq,
-    pub mutation_id: MutationId,
+/// Serialization of state payloads belongs at the wire boundary. Persisted
+/// values retain their canonical representation and historical binary layout.
+pub mod state_encoding {
+    use super::*;
+
+    pub fn serialize<T: StatePayload, S: serde::Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            value.serialize_entry(serializer)
+        } else {
+            value.serialize(serializer)
+        }
+    }
+    pub fn deserialize<'de, T: StatePayload, D: serde::Deserializer<'de>>(deserializer: D) -> Result<T, D::Error> {
+        if deserializer.is_human_readable() {
+            T::deserialize_entry(deserializer)
+        } else {
+            T::deserialize(deserializer)
+        }
+    }
+
+    /// Unknown kinds are retained by the relay and skipped by older domain clients.
+    pub fn decode_known<T: StatePayload>(state: &Versioned<OpaqueStateEntry>) -> Result<Option<Versioned<T>>, transport::WireError> {
+        if !T::recognizes_kind(&state.value.address.kind) {
+            return Ok(None);
+        }
+        transport::representation(state).map(Some)
+    }
+    pub fn decode_publication<T: StatePayload>(publication: &OpaquePublication) -> Result<Option<Publication<T>>, transport::WireError> {
+        if !T::recognizes_kind(&publication.state.value.address.kind) {
+            return Ok(None);
+        }
+        transport::representation(publication).map(Some)
+    }
 }
 
-/// Server-visible book prerequisite. Lifecycle declarations also own the
-/// reference count; declarations on other state kinds do not affect accounting.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DeclaredBlobReference {
-    pub present: bool,
-    pub content_hash: Option<ContentHash>,
+impl<T: StatePayload> Serialize for Versioned<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        self.value.validate_version(&self.version).map_err(serde::ser::Error::custom)?;
+        // The adapter serializes just the value field, without rebuilding a
+        // Versioned<OpaqueStateEntry> or copying version metadata.
+        struct Entry<'a, T>(&'a T);
+        impl<T: StatePayload> Serialize for Entry<'_, T> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                state_encoding::serialize(self.0, serializer)
+            }
+        }
+        let mut fields = serializer.serialize_struct("Versioned", 2)?;
+        fields.serialize_field("value", &Entry(&self.value))?;
+        fields.serialize_field("version", &self.version)?;
+        fields.end()
+    }
+}
+impl<'de, T: StatePayload> Deserialize<'de> for Versioned<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(bound = "T: StatePayload")]
+        struct Fields<T> {
+            #[serde(deserialize_with = "state_encoding::deserialize")]
+            value: T,
+            version: VersionKey,
+        }
+        let fields = Fields::<T>::deserialize(deserializer)?;
+        fields.value.validate_version(&fields.version).map_err(serde::de::Error::custom)?;
+        Ok(Self { value: fields.value, version: fields.version })
+    }
 }
 
+pub type OpaquePublication = Publication<OpaqueStateEntry>;
+pub type StateDelivery = Delivery<OpaqueStateEntry>;
+
+/// Server delivery metadata is independent of the state's winning version.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ServerMutation {
-    pub mutation: WireMutation,
-    pub replica_id: ReplicaId,
+#[serde(bound = "T: StatePayload")]
+pub struct Delivery<T> {
+    pub state: Versioned<T>,
     pub revision: LibraryRevision,
 }
 
@@ -221,20 +329,19 @@ pub struct ServerMutation {
 pub struct PushMutationsRequest {
     pub library_id: LibraryId,
     pub replica_id: ReplicaId,
-    pub mutations: Vec<WireMutation>,
+    pub mutations: Vec<OpaquePublication>,
 }
 
+/// Every submitted publication not listed as rejected was accepted.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PushMutationsResponse {
-    #[serde(default)]
-    pub accepted: Vec<MutationId>,
     #[serde(default)]
     pub rejected: Vec<MutationRejection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MutationRejection {
-    pub mutation_id: MutationId,
+    pub publisher_seq: ReplicaSeq,
     pub reason: MutationRejectionReason,
 }
 
@@ -243,23 +350,18 @@ pub struct MutationRejection {
 pub enum MutationRejectionReason {
     TimestampTooFarFuture,
     InvalidPayload,
-    MissingDependency,
 }
 
 impl MutationRejectionReason {
     pub fn is_transient(self) -> bool {
-        matches!(self, Self::TimestampTooFarFuture | Self::MissingDependency)
+        matches!(self, Self::TimestampTooFarFuture)
     }
 }
 
+/// Lifecycle mutations precede field mutations within a page.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PullStateResponse {
-    /// Explicit creation prerequisites, applied before mutations. These may be
-    /// behind the pull cursor and never advance it. Only live/Trash lifecycle
-    /// records are allowed; ordinary field values cannot create a book.
-    #[serde(default)]
-    pub book_creations: Vec<ServerMutation>,
-    pub mutations: Vec<ServerMutation>,
+    pub mutations: Vec<StateDelivery>,
     pub next_cursor: SyncCursor,
     pub has_more: bool,
 }
@@ -277,7 +379,7 @@ pub struct SyncExchangeRequest {
     pub library_id: LibraryId,
     pub replica_id: ReplicaId,
     #[serde(default)]
-    pub mutations: Vec<WireMutation>,
+    pub mutations: Vec<OpaquePublication>,
     #[serde(default)]
     pub cursor: SyncCursor,
 }
@@ -289,28 +391,13 @@ pub struct SyncExchangeResponse {
 }
 
 /// The stable identity of one independently merged synchronization register.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct StateCell {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StateAddress {
     pub kind: String,
     pub entity_key: String,
     #[serde(default)]
     pub entity_subkey: String,
 }
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct StateInventoryRequest {
-    pub library_id: LibraryId,
-    pub cells: Vec<StateCell>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct StateInventoryResponse {
-    pub missing: Vec<StateCell>,
-}
-
-/// Inventory is deliberately paged independently of mutation exchange so an
-/// open library never needs to build or transmit one unbounded request.
-pub const MAX_STATE_INVENTORY_CELLS: usize = 1_000;
 
 fn deserialize_library_cursor<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<LibraryRevision>, D::Error> {
     match Option::<u64>::deserialize(deserializer)? {
@@ -323,41 +410,48 @@ fn deserialize_library_cursor<'de, D: serde::Deserializer<'de>>(deserializer: D)
 mod tests {
     use super::*;
 
-    fn mutation_id(value: u128) -> MutationId {
-        MutationId::parse(&uuid::Uuid::from_u128(value).to_string()).unwrap()
+    fn seq(value: u64) -> ReplicaSeq {
+        ReplicaSeq::new(value).unwrap()
     }
 
     #[test]
     fn version_key_orders_every_tie_breaker_in_protocol_order() {
         let replica = uuid::Uuid::from_u128(10);
-        let base = VersionKey::new(10, 1, replica, 10, mutation_id(10));
+        let base = VersionKey::new(10, ConflictRank::Delete, replica, seq(10));
 
-        assert!(VersionKey::new(11, 0, uuid::Uuid::nil(), 1, mutation_id(1)) > base);
-        assert!(VersionKey::new(10, 2, uuid::Uuid::nil(), 1, mutation_id(1)) > base);
-        assert!(VersionKey::new(10, 1, uuid::Uuid::from_u128(11), 1, mutation_id(1)) > base);
-        assert!(VersionKey::new(10, 1, replica, 11, mutation_id(1)) > base);
-        assert!(VersionKey::new(10, 1, replica, 10, mutation_id(11)) > base);
+        assert!(VersionKey::new(11, ConflictRank::Update, uuid::Uuid::nil(), seq(1)) > base);
+        assert!(VersionKey::new(10, ConflictRank::Purge, uuid::Uuid::nil(), seq(1)) > base);
+        assert!(VersionKey::new(10, ConflictRank::Delete, uuid::Uuid::from_u128(11), seq(1)) > base);
+        assert!(VersionKey::new(10, ConflictRank::Delete, replica, seq(11)) > base);
+    }
+
+    #[test]
+    fn decoding_rejects_versions_outside_the_protocol() {
+        let valid = serde_json::to_value(VersionKey::new(10, ConflictRank::Purge, uuid::Uuid::nil(), seq(1))).unwrap();
+        assert_eq!(valid["conflict_rank"], serde_json::json!(2));
+        assert!(serde_json::from_value::<VersionKey>(valid.clone()).is_ok());
+        for (field, value) in [("conflict_rank", serde_json::json!(3)), ("replica_seq", serde_json::json!(0)), ("changed_at", serde_json::json!(u64::MAX))] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            assert!(serde_json::from_value::<VersionKey>(invalid).is_err(), "{field}");
+        }
     }
 
     #[test]
     fn same_replica_comparison_is_the_version_key_order_without_replica_identity() {
         let replica = uuid::Uuid::from_u128(10);
-        let left = (10, 1, ReplicaSeq::new(3).unwrap(), mutation_id(4));
-        let right = (10, 1, ReplicaSeq::new(3).unwrap(), mutation_id(5));
+        let left = (10, ConflictRank::Delete, seq(3));
+        let right = (10, ConflictRank::Delete, seq(4));
 
-        assert_eq!(compare_same_replica_versions(left, right), VersionKey::new(left.0, left.1, replica, left.2.get(), left.3).cmp(&VersionKey::new(right.0, right.1, replica, right.2.get(), right.3)));
+        assert_eq!(compare_same_replica_versions(left, right), VersionKey::new(left.0, left.1, replica, left.2).cmp(&VersionKey::new(right.0, right.1, replica, right.2)));
     }
 
     #[test]
     fn protocol_identifiers_use_their_canonical_strings_in_json_and_bincode_storage() {
         let content_hash = ContentHash::new(&"a".repeat(64));
-        let mutation_id = MutationId::parse("12345678-1234-5678-9234-567812345678").unwrap();
 
         assert_eq!(serde_json::to_value(&content_hash).unwrap(), serde_json::json!(content_hash.as_str()));
-        assert_eq!(serde_json::to_value(mutation_id).unwrap(), serde_json::json!(mutation_id.to_string()));
-
         assert_eq!(wire::encode(&content_hash).unwrap(), wire::encode(&content_hash.as_str()).unwrap());
-        assert_eq!(wire::encode(&mutation_id).unwrap(), wire::encode(&mutation_id.to_string()).unwrap());
     }
 
     #[test]
@@ -373,40 +467,28 @@ mod tests {
     }
 
     #[test]
-    fn recovery_origin_survives_transport_without_promoting_the_version() {
-        let original = MutationOrigin { replica_id: uuid::Uuid::from_u128(1), replica_seq: ReplicaSeq::new(2).unwrap(), mutation_id: MutationId::new() };
-        let mutation = WireMutation {
-            mutation_id: MutationId::new(),
-            kind: "directory_name".into(),
-            entity_key: "shelf".into(),
-            entity_subkey: String::new(),
-            value: vec![],
-            conflict_rank: 0,
-            blob_reference: None,
-            changed_at: 10,
-            replica_seq: ReplicaSeq::new(500).unwrap(),
-            origin: Some(original.clone()),
+    fn forwarding_preserves_original_version_separately_from_publication() {
+        let original = VersionKey::new(10, ConflictRank::Update, uuid::Uuid::from_u128(1), seq(2));
+        let publication = Publication {
+            publisher_seq: ReplicaSeq::new(500).unwrap(),
+            state: Versioned { version: original.clone(), value: OpaqueStateEntry { address: StateAddress { kind: "directory_name".into(), entity_key: "shelf".into(), entity_subkey: String::new() }, book: None, bytes: vec![] } },
         };
-        let decoded: WireMutation = transport::decode(&transport::encode(&mutation).unwrap(), transport::MAX_DECODED_REQUEST_BYTES).unwrap();
-        assert_eq!(decoded, mutation);
-        assert_eq!(VersionKey::from_wire(&decoded, uuid::Uuid::from_u128(999)), VersionKey::new(10, 0, original.replica_id, 2, original.mutation_id));
+        let decoded: OpaquePublication = transport::decode(&transport::encode(&publication).unwrap(), transport::MAX_DECODED_REQUEST_BYTES).unwrap();
+        assert_eq!(decoded, publication);
+        assert_eq!(decoded.state.version, original);
+        assert_ne!(decoded.publisher_seq, original.replica_seq);
     }
 
     #[test]
-    fn wire_mutation_preserves_an_absent_blob_reference_in_binary_encoding() {
-        let mutation = WireMutation {
-            origin: None,
-            mutation_id: MutationId::new(),
-            kind: "directory_name".to_owned(),
-            entity_key: "shelf".to_owned(),
-            entity_subkey: String::new(),
-            value: Vec::new(),
-            conflict_rank: 0,
-            blob_reference: None,
-            changed_at: 1,
-            replica_seq: ReplicaSeq::new(1).unwrap(),
+    fn wire_mutation_preserves_an_absent_book_in_binary_encoding() {
+        let mutation = crate::Publication {
+            publisher_seq: ReplicaSeq::new(1).unwrap(),
+            state: crate::Versioned {
+                version: crate::VersionKey::new(1, ConflictRank::Update, crate::ReplicaId::nil(), seq(1)),
+                value: crate::OpaqueStateEntry { address: crate::StateAddress { kind: "directory_name".to_owned(), entity_key: "shelf".to_owned(), entity_subkey: String::new() }, bytes: Vec::new(), book: None },
+            },
         };
         let encoded = wire::encode(&mutation).unwrap();
-        assert_eq!(wire::decode::<WireMutation>(&encoded, wire::MAX_DECODED_REQUEST_BYTES).unwrap(), mutation);
+        assert_eq!(wire::decode::<OpaquePublication>(&encoded, wire::MAX_DECODED_REQUEST_BYTES).unwrap(), mutation);
     }
 }

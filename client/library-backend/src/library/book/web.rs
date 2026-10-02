@@ -4,9 +4,6 @@ use super::*;
 use crate::book::{BookSource, ResolvedBookData};
 pub(crate) type Opened = (ResolvedBookData, BookLease);
 
-pub(super) fn supports_streaming(format: BookFormat) -> bool {
-    matches!(format, BookFormat::Epub | BookFormat::Pdf | BookFormat::M4b | BookFormat::Mp3Folder)
-}
 pub(super) async fn local(library: &LibrarySession, hash: ContentHash, info: &BookInfo) -> Result<Option<Opened>, BackendError> {
     let Some(file) = library.assets.playback_reader(&hash).await.map_err(BackendError::operation)? else { return Ok(None) };
     if matches!(info.format, BookFormat::M4b | BookFormat::Mp3Folder) {
@@ -16,7 +13,12 @@ pub(super) async fn local(library: &LibrarySession, hash: ContentHash, info: &Bo
         Some(checksum) => pdf_metadata(library, hash, checksum).await?,
         None => None,
     };
-    let (source, lease) = super::browser::register_local_reader(*library.id(), file).map_err(BackendError::operation)?;
+    use crate::library::book::browser::SOURCES;
+    let (source, lease) = client_platform_web::range_reader::register(file).map_err(BackendError::operation)?;
+    let capability = source.capability.clone();
+    SOURCES.with(|sources| sources.borrow_mut().insert(capability.clone(), (*library.id(), lease)));
+    let source = BookSource::Local { capability: source.capability, length: source.length };
+    let lease = BookLease::Local(capability);
     Ok(Some((ResolvedBookData { pdf_metadata, format: info.format, source }, lease)))
 }
 pub(super) async fn remote(library: &LibrarySession, hash: ContentHash, info: &BookInfo) -> Result<Opened, BackendError> {

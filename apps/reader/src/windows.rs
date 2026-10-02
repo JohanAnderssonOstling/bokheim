@@ -155,7 +155,7 @@ async fn load_book(
         use futures_util::future::{Either, select};
 
         report_stage(&updates, "Sending request to backend…");
-        let diagnostics = library.resolve_book_diagnostics();
+        let diagnostics = library.transport.diagnostics();
         let mut resolve = Box::pin(library.resolve_book(content_hash));
         loop {
             match select(resolve, Box::pin(diagnostics.recv())).await {

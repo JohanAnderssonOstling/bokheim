@@ -1,3 +1,4 @@
+use crate::lcc::lcc_endpoint;
 use crate::{UnifiedCodeResolution, UnifiedConceptDefinition, DEFAULT_UNIFIED_TAXONOMY_SQLITE};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::collections::BTreeSet;
@@ -5,8 +6,8 @@ use std::path::Path;
 
 fn split_lcc_range(selector: &str) -> Result<(&str, &str), String> {
     let (start, end) = selector.split_once("..").ok_or_else(|| format!("invalid LCC range {selector}"))?;
-    let start_ep = crate::lcc::lcc_endpoint(start, false).ok_or_else(|| format!("invalid LCC range start {start}"))?;
-    let end_ep = crate::lcc::lcc_endpoint(end, true).ok_or_else(|| format!("invalid LCC range end {end}"))?;
+    let start_ep = lcc_endpoint(start, false).ok_or_else(|| format!("invalid LCC range start {start}"))?;
+    let end_ep = lcc_endpoint(end, true).ok_or_else(|| format!("invalid LCC range end {end}"))?;
     if crate::lcc::compare_lcc_key(&start_ep.letters, start_ep.number, &end_ep.letters, end_ep.number).is_gt() {
         return Err(format!("invalid LCC range {selector}"));
     }

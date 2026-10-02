@@ -7,7 +7,6 @@ publish = false
 [dependencies]
 client-runtime = { path = "../../../client-runtime" }
 web-time = "1"
-library-database = { path = "../library-database" }
 library-model = { path = "../../../library-model" }
 library-replica = { path = "../library-replica" }
 book-access = { path = "../book-access" }
@@ -38,13 +37,7 @@ web-sys = { version = "0.3", features = ["Blob"] }
 reqwest = { workspace = true, default-features = false, features = ["stream"] }
 
 [dev-dependencies]
-book-model = { path = "../../../../shared/book-model" }
-library-database = { path = "../library-database", features = ["fixture-sql"] }
-serde_json = "1"
-test-support = { path = "../../../test-support", features = ["pdf-fixtures"] }
-async-channel = "2"
 zip.workspace = true
-lopdf = { version = "0.44", default-features = false }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tempfile = "3"
 

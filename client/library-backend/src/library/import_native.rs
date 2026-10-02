@@ -1,50 +1,46 @@
 //! Native file and granted-reader import entry points. Completion uses the shared workflow.
-use super::LibrarySession;
-use crate::BackendError;
-use crate::{ContentHash, DirId};
-use std::io::Read;
+
+pub(crate) use super::LibrarySession;
+use crate::asset_workflow::stage_import;
+pub(crate) use crate::BackendError;
+pub(crate) use crate::{ContentHash, DirId};
+pub(crate) use std::io::Read;
+use std::path::PathBuf;
 
 impl LibrarySession {
-    pub(crate) async fn import_book_reader_with_progress(&self, parent_id: &DirId, source: Box<dyn Read + Send>, file_name: String, direct: bool, progress: crate::asset_store::ImportProgressObserver) -> Result<ContentHash, BackendError> {
-        let mut import = self.validate_import(parent_id, &file_name)?;
-        let relative = self.prepare_import_path(*parent_id, import.file_name.clone()).await?;
-        let staged = if direct {
-            let occupied = self.db.shared_occupied_file_names(parent_id)?;
-            let (name, staged) = self.assets.copy_book_with_progress(relative, source, occupied, Some(progress.clone())).await.map_err(BackendError::operation)?;
-            import.file_name = name;
-            staged
-        } else {
-            self.assets.stage_book_with_progress(relative, source, Some(progress.clone())).await.map_err(BackendError::operation)?
-        };
-        self.finish_import_with_progress(import, staged, Some(progress)).await
-    }
-
     pub(crate) async fn import_book_reader_direct(&self, parent_id: &DirId, source: Box<dyn Read + Send>, file_name: String) -> Result<ContentHash, BackendError> {
         let mut import = self.validate_import(parent_id, &file_name)?;
-        let relative = self.prepare_import_path(*parent_id, import.file_name.clone()).await?;
-        let occupied = self.db.shared_occupied_file_names(parent_id)?;
-        let (name, copied) = self.assets.copy_book(relative, source, occupied).await.map_err(BackendError::operation)?;
+        let options = crate::asset_store::ImportOptions { direct: true, progress: None };
+        let (name, staged) = stage_import(&self.assets, &self.db, *parent_id, import.file_name.clone(), source, options).await.map_err(BackendError::operation)?;
         import.file_name = name;
-        self.finish_import(import, copied).await
+        self.finish_import(import, staged).await
     }
 
-    pub(super) async fn prepare_import_path(&self, parent: DirId, name: String) -> Result<String, BackendError> {
-        self.assets.prepare_import_path(&self.db, parent, name).await.map_err(BackendError::operation)
+    pub(crate) fn cleanup_import_storage(&self, _job: &str, _files: u32) -> Result<(), BackendError> {
+        // Native stored sources are consumed individually during import, so
+        // there is no indexed staging batch to retire after completion.
+        Ok(())
     }
 
-    pub async fn import_book_path(&self, parent_id: &DirId, file_name: String, path: &std::path::Path) -> Result<ContentHash, BackendError> {
-        let import = self.validate_import(parent_id, &file_name)?;
-        let relative = self.prepare_import_path(*parent_id, import.file_name.clone()).await?;
-        let source = std::fs::File::open(path)?;
-        let staged = self.assets.stage_book(relative, Box::new(source)).await.map_err(BackendError::operation)?;
-        std::fs::remove_file(path)?;
+    pub(crate) async fn import_stored_book(&self, parent_id: DirId, file_name: String, location: PathBuf, staged: Option<super::commands::StagedImportMetadata>) -> Result<ContentHash, BackendError> {
+        let import = self.validate_import(&parent_id, &file_name)?;
+        let source = std::fs::File::open(&location)?;
+        if let Some(staged) = staged {
+            if source.metadata()?.len() != staged.length {
+                return Err(BackendError::message("staged import length changed"));
+            }
+        }
+        // Native ingestion computes identity from the file rather than relying
+        // on the coordinator's optional staged identity.
+        let (_, staged) = stage_import(&self.assets, &self.db, parent_id, import.file_name.clone(), Box::new(source), Default::default()).await.map_err(BackendError::operation)?;
+        std::fs::remove_file(location)?;
         self.finish_import(import, staged).await
     }
 }
 
 /// Native import lifetime stays with its backend job, including in-flight writes.
 pub(crate) struct DirectoryImportActivity<'a> {
-    library: &'a LibrarySession,
+    pub(crate) library: &'a LibrarySession,
     pub(crate) id: uuid::Uuid,
 }
 

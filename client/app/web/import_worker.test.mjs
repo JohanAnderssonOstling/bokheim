@@ -58,9 +58,9 @@ function fixture() {
         requests.push(command);
         fail?.(command);
         for (let i = 0; i < 2; i++) assert.deepEqual(storage.files.get(`__libraries/${job.library}/imports/${id}/${i}`), new Uint8Array(await files[i].arrayBuffer()), 'Entire folder must be copied before any database request');
-        if (command.PrepareStagedDirectoryImport) return {directories: [[['Shelf'], '11111111-1111-1111-1111-111111111111'], [['Empty'], '22222222-2222-2222-2222-222222222222']], failures: []};
-        if (command.ImportStagedBook) {
-            const entry = command.ImportStagedBook;
+        if (command.Session?.Pending?.PrepareStagedDirectoryImport) return {directories: [[['Shelf'], '11111111-1111-1111-1111-111111111111'], [['Empty'], '22222222-2222-2222-2222-222222222222']], failures: []};
+        if (command.Session?.Pending?.ImportStagedBook) {
+            const entry = command.Session?.Pending?.ImportStagedBook;
             assert.equal(entry.hash, digest(storage.files.get(entry.physical)));
             assert.equal(entry.length, storage.files.get(entry.physical).length);
             assert.equal(entry.parent_id, '11111111-1111-1111-1111-111111111111');
@@ -72,11 +72,11 @@ function fixture() {
 test('copies and hashes the whole tree before metadata, emits both progress phases', async () => {
     const f = fixture();
     assert.deepEqual(await runImport(f.job, f.dependencies), []);
-    assert.deepEqual(f.requests[0].PrepareStagedDirectoryImport.directories, [['Shelf'], ['Empty']]);
-    const activity = f.requests[0].PrepareStagedDirectoryImport.activity;
+    assert.deepEqual(f.requests[0].Session?.Pending?.PrepareStagedDirectoryImport.directories, [['Shelf'], ['Empty']]);
+    const activity = f.requests[0].Session?.Pending?.PrepareStagedDirectoryImport.activity;
     assert.match(activity, /^[0-9a-f-]{36}$/);
     for (const request of f.requests) {
-        const update = request.AdvanceDirectoryImport || request.FinishDirectoryImport;
+        const update = request.Runtime?.AdvanceDirectoryImport || request.Runtime?.FinishDirectoryImport;
         if (update) assert.equal(update.activity, activity, 'progress and completion belong to the prepared activity');
     }
     assert.ok(f.progress.some(p => p.phase === 'copying' && p.copiedBytes === 14 && p.copiedFiles === 2));
@@ -93,7 +93,7 @@ test('noncanonical copied identities fail before any book metadata request', asy
     const failures = await runImport(f.job, f.dependencies);
     assert.equal(failures.length, 2);
     assert.deepEqual(failures.map(failure => [failure.kind, failure.path]), [['file', ['Shelf', 'a.epub']], ['file', ['Shelf', 'b.epub']]]);
-    assert.equal(f.requests.filter(command => command.ImportStagedBook).length, 0);
+    assert.equal(f.requests.filter(command => command.Session?.Pending?.ImportStagedBook).length, 0);
 });
 
 test('copy interruption inserts nothing; replacement retries unfinished file and skips completed copies', async () => {
@@ -115,40 +115,40 @@ test('copy interruption inserts nothing; replacement retries unfinished file and
 });
 test('a fully copied job resumes without source File objects; acknowledged books are skipped', async () => {
     const f = fixture();
-    f.setRequestFailure(command => { if (command.ImportStagedBook?.file_name === 'b.epub') throw Object.assign(Error('host lost'), {transport: true}); });
+    f.setRequestFailure(command => { if (command.Session?.Pending?.ImportStagedBook?.file_name === 'b.epub') throw Object.assign(Error('host lost'), {transport: true}); });
     await assert.rejects(runImport(f.job, f.dependencies), /host lost/);
-    const previousActivity = f.requests[0].PrepareStagedDirectoryImport.activity;
+    const previousActivity = f.requests[0].Session?.Pending?.PrepareStagedDirectoryImport.activity;
     f.setRequestFailure(null);
     f.requests.length = 0;
     await runImport({...f.job, files: []}, f.dependencies);
-    assert.notEqual(f.requests[0].PrepareStagedDirectoryImport.activity, previousActivity, 'recovery owns a new activity, so a late completion cannot finish it');
-    assert.deepEqual(f.requests.filter(r => r.ImportStagedBook).map(r => r.ImportStagedBook.file_name), ['b.epub']);
-    assert.deepEqual(f.requests[1].AdvanceDirectoryImport, {activity: f.requests[0].PrepareStagedDirectoryImport.activity, total: 2, succeeded: 1, failed: 0});
+    assert.notEqual(f.requests[0].Session?.Pending?.PrepareStagedDirectoryImport.activity, previousActivity, 'recovery owns a new activity, so a late completion cannot finish it');
+    assert.deepEqual(f.requests.filter(r => r.Session?.Pending?.ImportStagedBook).map(r => r.Session?.Pending?.ImportStagedBook.file_name), ['b.epub']);
+    assert.deepEqual(f.requests[1].Runtime?.AdvanceDirectoryImport, {activity: f.requests[0].Session?.Pending?.PrepareStagedDirectoryImport.activity, total: 2, succeeded: 1, failed: 0});
 });
 test('per-book failures continue and batched progress flushes before finishing', async t => {
     t.mock.method(performance, 'now', () => 0);
     const f = fixture();
-    f.setRequestFailure(command => { if (command.ImportStagedBook?.file_name === 'a.epub') throw Error('Invalid EPUB'); });
+    f.setRequestFailure(command => { if (command.Session?.Pending?.ImportStagedBook?.file_name === 'a.epub') throw Error('Invalid EPUB'); });
     const failures = await runImport(f.job, f.dependencies);
     assert.equal(failures.length, 1);
     assert.equal(failures[0].kind, 'file');
     assert.deepEqual(failures[0].path, ['Shelf', 'a.epub']);
     assert.equal(f.progress.at(-1).failed, 1);
     assert.equal(f.progress.at(-1).processed, 2);
-    const updates = f.requests.flatMap(command => command.AdvanceDirectoryImport ? [command.AdvanceDirectoryImport] : []);
+    const updates = f.requests.flatMap(command => command.Runtime?.AdvanceDirectoryImport ? [command.Runtime?.AdvanceDirectoryImport] : []);
     assert.equal(updates.length, 2, 'fast files share one final update after the initial total');
     assert.deepEqual(updates.reduce((sum, update) => ({total: sum.total + update.total, succeeded: sum.succeeded + update.succeeded, failed: sum.failed + update.failed}), {total: 0, succeeded: 0, failed: 0}), {total: 2, succeeded: 1, failed: 1});
-    assert.deepEqual(f.requests.at(-2), {FinishDirectoryImport: {activity: f.requests[0].PrepareStagedDirectoryImport.activity}});
+    assert.deepEqual(f.requests.at(-2), {Runtime: {FinishDirectoryImport: {activity: f.requests[0].Session?.Pending?.PrepareStagedDirectoryImport.activity}}});
 });
 
 test('longer imports report intermediate progress without repeating the final counts', async t => {
     let now = 0;
     t.mock.method(performance, 'now', () => now);
     const f = fixture();
-    f.setRequestFailure(command => { if (command.ImportStagedBook) now += 250; });
+    f.setRequestFailure(command => { if (command.Session?.Pending?.ImportStagedBook) now += 250; });
     await runImport(f.job, f.dependencies);
-    const activity = f.requests[0].PrepareStagedDirectoryImport.activity;
-    assert.deepEqual(f.requests.flatMap(command => command.AdvanceDirectoryImport ? [command.AdvanceDirectoryImport] : []), [
+    const activity = f.requests[0].Session?.Pending?.PrepareStagedDirectoryImport.activity;
+    assert.deepEqual(f.requests.flatMap(command => command.Runtime?.AdvanceDirectoryImport ? [command.Runtime?.AdvanceDirectoryImport] : []), [
         {activity, total: 2, succeeded: 0, failed: 0},
         {activity, total: 0, succeeded: 1, failed: 0},
         {activity, total: 0, succeeded: 1, failed: 0},
@@ -158,7 +158,7 @@ test('longer imports report intermediate progress without repeating the final co
 test('a torn checkpoint is discarded before retry and completion prevents replaying metadata', async () => {
     const f = fixture();
     f.setRequestFailure(command => {
-        if (command.ImportStagedBook?.file_name === 'b.epub') throw Object.assign(Error('host lost'), {transport: true});
+        if (command.Session?.Pending?.ImportStagedBook?.file_name === 'b.epub') throw Object.assign(Error('host lost'), {transport: true});
     });
     await assert.rejects(runImport(f.job, f.dependencies), /host lost/);
     const key = `__libraries/${f.job.library}/imports/${f.job.id}/journal`;
@@ -219,7 +219,7 @@ test('Rust destination planning reports missing parents while importing other fi
     assert.equal(failures.length, 1);
     assert.equal(failures[0].kind, 'file');
     assert.deepEqual(failures[0].path, ['Missing', 'a.epub']);
-    assert.deepEqual(f.requests.filter(command => command.ImportStagedBook).map(command => command.ImportStagedBook.file_name), ['b.epub']);
+    assert.deepEqual(f.requests.filter(command => command.Session?.Pending?.ImportStagedBook).map(command => command.Session?.Pending?.ImportStagedBook.file_name), ['b.epub']);
     assert.equal(f.progress.at(-1).failed, 1);
     assert.equal(f.progress.at(-1).processed, 2);
 });
@@ -231,13 +231,13 @@ test('an empty folder import still prepares directories and finishes its activit
     const job = {id: '12345678-1234-1234-1234-123456789012', library: '00000000-0000-0000-0000-000000000123', parent: '00000000-0000-0000-0000-000000000000', name: 'Empty', createRoot: true, directories: [[]], files: []};
     const failures = await runImport(job, {storage, progress: value => progress.push(value), request: async (_library, command) => {
         requests.push(command);
-        if (command.PrepareStagedDirectoryImport) return {directories: [[[], job.parent]], failures: []};
+        if (command.Session?.Pending?.PrepareStagedDirectoryImport) return {directories: [[[], job.parent]], failures: []};
     }});
     assert.deepEqual(failures, []);
-    assert.equal(requests[0].PrepareStagedDirectoryImport.name, 'Empty');
-    assert.deepEqual(requests[1].AdvanceDirectoryImport, {activity: requests[0].PrepareStagedDirectoryImport.activity, total: 0, succeeded: 0, failed: 0});
-    assert.deepEqual(requests[2], {FinishDirectoryImport: {activity: requests[0].PrepareStagedDirectoryImport.activity}});
-    assert.equal(requests[3].CleanupStagedImport.files, 0);
+    assert.equal(requests[0].Session?.Pending?.PrepareStagedDirectoryImport.name, 'Empty');
+    assert.deepEqual(requests[1].Runtime?.AdvanceDirectoryImport, {activity: requests[0].Session?.Pending?.PrepareStagedDirectoryImport.activity, total: 0, succeeded: 0, failed: 0});
+    assert.deepEqual(requests[2], {Runtime: {FinishDirectoryImport: {activity: requests[0].Session?.Pending?.PrepareStagedDirectoryImport.activity}}});
+    assert.equal(requests[3].Session?.Ready?.CleanupStagedImport.files, 0);
     assert.equal(progress.at(-1).phase, 'complete');
     assert.equal(progress.at(-1).totalFiles, 0);
 });

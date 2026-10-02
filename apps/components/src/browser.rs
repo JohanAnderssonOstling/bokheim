@@ -1,3 +1,5 @@
+use std::path::Path;
+use crate::{CONTENT_INSET, DISPLAY_FONT_FAMILY, NAVIGATION_MODAL_ROW_HEIGHT_REM, NAV_RAIL_ICON_SIZE_REM, NAV_RAIL_LABEL_SIZE, TOPBAR_HEIGHT_REM};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -34,8 +36,8 @@ pub fn nav_rail_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: imp
                 .items_center()
                 .justify_center()
                 .gap(px(SPACE_XXS))
-                .child(Icon::new(icon).size(gpui::rems(crate::NAV_RAIL_ICON_SIZE_REM)))
-                .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().text_size(gpui::rems(crate::NAV_RAIL_LABEL_SIZE)).font_features(crate::small_caps()).child(label)),
+                .child(Icon::new(icon).size(gpui::rems(NAV_RAIL_ICON_SIZE_REM)))
+                .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().text_size(gpui::rems(NAV_RAIL_LABEL_SIZE)).font_features(crate::small_caps()).child(label)),
         )
 }
 
@@ -60,7 +62,7 @@ pub fn bottom_navigation_item(id: impl Into<ElementId>, icon: impl Into<Icon>, l
             .items_center()
             .justify_center()
             .gap(px(SPACE_XXS))
-            .child(Icon::new(icon).size(gpui::rems(crate::NAV_RAIL_ICON_SIZE_REM)))
+            .child(Icon::new(icon).size(gpui::rems(NAV_RAIL_ICON_SIZE_REM)))
             .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().text_size(gpui::rems(TEXT_XS)).child(label)),
     )
 }
@@ -79,14 +81,14 @@ pub fn more_navigation_overlay() -> Div {
 /// any larger UI font.
 pub fn navigation_modal_list(item_count: usize, rem_size: Pixels, theme: BrowserTheme) -> Scrollable<Div> {
     let rem = f32::from(rem_size);
-    let rows = (item_count + 1) as f32 * crate::NAVIGATION_MODAL_ROW_HEIGHT_REM * rem;
+    let rows = (item_count + 1) as f32 * NAVIGATION_MODAL_ROW_HEIGHT_REM * rem;
     let gaps = item_count as f32 * SPACE_XS + SPACE_MD * 2.0;
     let height = (rows + gaps).min(crate::NAVIGATION_MODAL_MAX_HEIGHT_REM * rem);
     crate::modal_surface(theme).w(gpui::rems(crate::NAVIGATION_MODAL_WIDTH_REM)).max_w_full().h(px(height)).max_h_full().overflow_y_scrollbar()
 }
 
 pub fn more_navigation_header(theme: BrowserTheme) -> Div {
-    div().w_full().h(gpui::rems(crate::NAVIGATION_MODAL_ROW_HEIGHT_REM)).flex_none().flex().items_center().px(px(SPACE_SM)).text_size(gpui::rems(TEXT_MD)).text_color(theme.text).child("More")
+    div().w_full().h(gpui::rems(NAVIGATION_MODAL_ROW_HEIGHT_REM)).flex_none().flex().items_center().px(px(SPACE_SM)).text_size(gpui::rems(TEXT_MD)).text_color(theme.text).child("More")
 }
 
 pub fn more_navigation_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
@@ -94,7 +96,7 @@ pub fn more_navigation_item(id: impl Into<ElementId>, icon: impl Into<Icon>, lab
     crate::base_button(id)
         .ghost()
         .w_full()
-        .h(gpui::rems(crate::NAVIGATION_MODAL_ROW_HEIGHT_REM))
+        .h(gpui::rems(NAVIGATION_MODAL_ROW_HEIGHT_REM))
         .flex_none()
         .px(px(SPACE_SM))
         .justify_start()
@@ -163,7 +165,7 @@ pub fn library_section_content() -> Div {
 
 pub fn library_switcher_group(theme: BrowserTheme) -> Div {
     let _ = theme;
-    div().relative().w_full().h(gpui::rems(crate::TOPBAR_HEIGHT_REM)).flex_none().flex().items_center().gap(px(SPACE_SM))
+    div().relative().w_full().h(gpui::rems(TOPBAR_HEIGHT_REM)).flex_none().flex().items_center().gap(px(SPACE_SM))
 }
 
 /// The topbar carries neither fill nor underline. Its old `bg(theme.page_bg)`
@@ -172,7 +174,7 @@ pub fn library_switcher_group(theme: BrowserTheme) -> Div {
 /// actions already make obvious. See [`crate::nav_rail_destinations`].
 pub fn browser_topbar(theme: BrowserTheme) -> Div {
     let _ = theme;
-    div().w_full().h(gpui::rems(crate::TOPBAR_HEIGHT_REM)).flex_none().flex().flex_row().items_center().gap(px(SPACE_MD))
+    div().w_full().h(gpui::rems(TOPBAR_HEIGHT_REM)).flex_none().flex().flex_row().items_center().gap(px(SPACE_MD))
 }
 
 pub fn browser_topbar_left() -> Div {
@@ -187,7 +189,7 @@ pub fn mobile_back_button(theme: BrowserTheme) -> Button {
 /// is `None` on native mobile, where the OS back button/gesture already does
 /// the same thing — see `has_native_back_button`.
 pub fn mobile_navigation_heading(title: impl Into<SharedString>, back: Option<Button>) -> Div {
-    div().flex_1().min_w_0().flex().items_center().gap(px(SPACE_SM)).pl(px(crate::CONTENT_INSET)).children(back).child(div().flex_1().min_w_0().truncate().font_family(crate::DISPLAY_FONT_FAMILY).text_size(gpui::rems(crate::TEXT_MD)).child(title.into()))
+    div().flex_1().min_w_0().flex().items_center().gap(px(SPACE_SM)).pl(px(CONTENT_INSET)).children(back).child(div().flex_1().min_w_0().truncate().font_family(DISPLAY_FONT_FAMILY).text_size(gpui::rems(TEXT_MD)).child(title.into()))
 }
 
 pub fn mobile_navigation_bar(title: impl Into<SharedString>, back: Option<Button>, theme: BrowserTheme) -> Div {
@@ -203,7 +205,7 @@ pub fn mobile_navigation_bar(title: impl Into<SharedString>, back: Option<Button
 /// one for the content. `CONTENT_INSET` is the same token the breadcrumb's first
 /// crumb uses on the other side.
 pub fn browser_topbar_right() -> Div {
-    div().flex_none().min_w_0().flex().items_center().justify_end().gap(px(TOPBAR_ACTION_GAP)).pr(px(crate::CONTENT_INSET))
+    div().flex_none().min_w_0().flex().items_center().justify_end().gap(px(TOPBAR_ACTION_GAP)).pr(px(CONTENT_INSET))
 }
 
 /// A page that names itself rather than trailing a breadcrumb, with a muted
@@ -217,7 +219,7 @@ pub fn browser_page_title(title: impl Into<SharedString>, detail: impl Into<Shar
         .items_baseline()
         .gap(px(SPACE_SM))
         .text_size(gpui::rems(crate::TEXT_LG))
-        .child(div().flex_none().font_family(crate::DISPLAY_FONT_FAMILY).child(title.into()))
+        .child(div().flex_none().font_family(DISPLAY_FONT_FAMILY).child(title.into()))
         .child(div().min_w_0().text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(detail.into()))
 }
 
@@ -256,7 +258,7 @@ fn browser_actionable_empty_parts(title: SharedString, description: Option<Share
         .justify_center()
         .gap(px(SPACE_SM))
         .text_center()
-        .child(div().font_family(crate::DISPLAY_FONT_FAMILY).text_size(gpui::rems(TITLE_MD)).child(title))
+        .child(div().font_family(DISPLAY_FONT_FAMILY).text_size(gpui::rems(TITLE_MD)).child(title))
         .children(description.map(|description| div().text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(description)))
         .child(div().mt(px(SPACE_XS)).child(actions))
 }
@@ -338,11 +340,11 @@ pub fn library_switcher_trigger(label: impl Into<SharedString>, theme: BrowserTh
     crate::base_button("library-switcher-trigger")
         .ghost()
         .w_full()
-        .h(gpui::rems(crate::TOPBAR_HEIGHT_REM))
+        .h(gpui::rems(TOPBAR_HEIGHT_REM))
         .flex_none()
         .p_0()
         .overflow_hidden()
-        .text_size(gpui::rems(crate::NAV_RAIL_LABEL_SIZE))
+        .text_size(gpui::rems(NAV_RAIL_LABEL_SIZE))
         .font_weight(FontWeight::NORMAL)
         .text_color(theme.text_accent)
         .child(
@@ -354,7 +356,7 @@ pub fn library_switcher_trigger(label: impl Into<SharedString>, theme: BrowserTh
                 .items_center()
                 .justify_center()
                 .gap(px(SPACE_XXS))
-                .child(navigation_icon(NavigationIcon::BookOpen).size(gpui::rems(crate::NAV_RAIL_ICON_SIZE_REM)))
+                .child(navigation_icon(NavigationIcon::BookOpen).size(gpui::rems(NAV_RAIL_ICON_SIZE_REM)))
                 .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().font_features(crate::small_caps()).child(label)),
         )
 }
@@ -364,7 +366,7 @@ pub fn library_switcher_panel() -> Div {
 }
 
 pub fn library_switcher_header(title: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().h(gpui::rems(crate::NAVIGATION_MODAL_ROW_HEIGHT_REM)).w_full().flex().items_center().justify_between().pl(px(SPACE_SM)).pb(px(SPACE_XS)).text_size(gpui::rems(TEXT_MD)).text_color(theme.text).child(title.into())
+    div().h(gpui::rems(NAVIGATION_MODAL_ROW_HEIGHT_REM)).w_full().flex().items_center().justify_between().pl(px(SPACE_SM)).pb(px(SPACE_XS)).text_size(gpui::rems(TEXT_MD)).text_color(theme.text).child(title.into())
 }
 
 /// `cursor` is the keyboard's transient position — the same tier `contents_row`
@@ -392,7 +394,7 @@ pub fn library_switcher_item(id: impl Into<ElementId>, label: impl Into<SharedSt
         .when(selected, |button| button.bg(theme.accent).text_color(theme.accent_text))
         .flex_1()
         .min_w_0()
-        .h(gpui::rems(crate::NAVIGATION_MODAL_ROW_HEIGHT_REM))
+        .h(gpui::rems(NAVIGATION_MODAL_ROW_HEIGHT_REM))
         .px(px(SPACE_SM))
         .justify_start()
         .overflow_hidden()
@@ -542,7 +544,7 @@ pub fn browser_settings_header_button(id: impl Into<ElementId>, label: impl Into
 
 /// The name a settings group is read by.
 fn browser_settings_legend(title: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().w_full().text_size(gpui::rems(crate::TEXT_MD)).text_color(theme.text_muted).font_weight(FontWeight::SEMIBOLD).font_features(crate::small_caps()).child(title.into())
+    div().w_full().text_size(gpui::rems(TEXT_MD)).text_color(theme.text_muted).font_weight(FontWeight::SEMIBOLD).font_features(crate::small_caps()).child(title.into())
 }
 
 /// What went wrong, said inside the group it went wrong in.
@@ -632,14 +634,14 @@ pub fn browser_settings_path_button(id: impl Into<ElementId>, path: impl Into<Sh
 
 /// Abbreviate only a complete home-directory prefix; keep the actual path for
 /// opening the folder and for the tooltip.
-pub fn library_path_label(path: &std::path::Path) -> String {
+pub fn library_path_label(path: &Path) -> String {
     let (variable, alias) = if cfg!(target_os = "windows") { ("USERPROFILE", "\\") } else { ("HOME", "~") };
     if let Some(home) = std::env::var_os(variable).filter(|home| !home.is_empty()) {
         let home = std::path::PathBuf::from(home);
         if home.is_absolute()
             && let Ok(relative) = path.strip_prefix(&home)
         {
-            return if relative.as_os_str().is_empty() { alias.to_owned() } else { std::path::Path::new(alias).join(relative).display().to_string() };
+            return if relative.as_os_str().is_empty() { alias.to_owned() } else { Path::new(alias).join(relative).display().to_string() };
         }
     }
     path.display().to_string()

@@ -1,4 +1,6 @@
+use crate::{AccountSnapshot, LibraryCommand};
 use futures_util::{stream, StreamExt, TryStreamExt};
+use library_backend::{PendingCommand, ReadyCommand, SessionCommand};
 use serde::{Deserialize, Serialize};
 
 use crate::LibraryId;
@@ -234,7 +236,7 @@ impl AppBackend {
             self.state.registry.attach_remote(&library.library_id, &library.library_name).map_err(BackendError::operation)?;
             if renamed {
                 if let Ok(handle) = self.state.library_directory.get(&library.library_id) {
-                    handle.set_display_name(library.library_name.clone());
+                    let _ = handle.commands.try_send(library_backend::library::handle::LibraryActorCommand::Control(library_backend::library::handle::LibraryControl::Rename { name: library.library_name.clone(), refresh_remote: false }));
                 }
             }
             if self.state.library_directory.try_get(&library.library_id)?.is_none() {
@@ -258,17 +260,18 @@ impl AppBackend {
     pub(super) async fn library_list_state(&self, session: Option<&account_client::Session>, remote: Option<&std::collections::HashSet<LibraryId>>) -> Result<LibraryListState, BackendError> {
         let libraries = self.libraries()?;
         let started = web_time::Instant::now();
-        let sync_statuses = stream::iter(libraries.iter().cloned().map(|library| async move { self.library_sync_status(&library, session, remote).await }))
-            .buffered(4)
-            .try_collect()
-            .await?;
+        let sync_statuses = stream::iter(libraries.iter().cloned().map(|library| async move { self.library_sync_status(&library, session, remote).await })).buffered(4).try_collect().await?;
         log::debug!("account library statuses took {:?}", started.elapsed());
         Ok(LibraryListState { libraries, sync_statuses })
     }
 
     pub(super) async fn library_sync_status(&self, library: &LibraryEntry, session: Option<&account_client::Session>, remote: Option<&HashSet<LibraryId>>) -> Result<LibrarySyncStatus, BackendError> {
         if let Some(handle) = self.state.library_directory.try_get(library.library_id())? {
-            match handle.sync_status(session.cloned(), remote.map(|remote| remote.contains(library.library_id()))).await {
+            match handle
+                .dispatch(LibraryCommand::Session(SessionCommand::Ready(ReadyCommand::SyncStatus { signed_in: session.is_some(), remote_present: remote.map(|remote| remote.contains(library.library_id())) })))
+                .await
+                .and_then(client_runtime::reply::Reply::take::<LibrarySyncStatus>)
+            {
                 Ok(status) => return Ok(status),
                 Err(error) => log::warn!("Could not read sync status for library {}: {error}", library.library_id()),
             }
@@ -280,7 +283,7 @@ impl AppBackend {
 
     /// Direct account-and-library snapshot for a foreground view. Expensive
     /// account discovery happens only because that view asked for it.
-    pub(crate) async fn account_snapshot(&self) -> Result<crate::AccountSnapshot, BackendError> {
+    pub(crate) async fn account_snapshot(&self) -> Result<AccountSnapshot, BackendError> {
         let started = web_time::Instant::now();
         let account = self.account_status()?;
         let (state, storage_usage, server_storage_usage) = if self.current_account()?.is_some() {
@@ -290,7 +293,7 @@ impl AppBackend {
             (self.library_list_state(None, None).await?, None, None)
         };
         log::debug!("account snapshot took {:?}", started.elapsed());
-        Ok(crate::AccountSnapshot { account, storage_usage, sync_statuses: state.sync_statuses, server_storage_usage })
+        Ok(AccountSnapshot { account, storage_usage, sync_statuses: state.sync_statuses, server_storage_usage })
     }
 
     pub(crate) async fn local_storage_usage(&self) -> Result<Vec<LocalLibraryStorageUsage>, BackendError> {
@@ -300,7 +303,7 @@ impl AppBackend {
             let Ok(library) = self.state.library_directory.get(entry.library_id()) else {
                 return Ok::<_, BackendError>(None);
             };
-            Ok(library.local_storage_usage().await?.map(|used_bytes| LocalLibraryStorageUsage {
+            Ok(library.dispatch(LibraryCommand::Session(SessionCommand::Pending(PendingCommand::LocalStorageUsage))).await?.take::<Option<u64>>()?.map(|used_bytes| LocalLibraryStorageUsage {
                 library_id: *entry.library_id(),
                 library_name: entry.library_name().to_owned(),
                 used_bytes,

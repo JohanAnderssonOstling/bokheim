@@ -1,4 +1,5 @@
-//! Transfer workflow: planning, snapshot drivers, operation status.
+//! Transfer planning, snapshots, and conditional settlements.
+use library_model::BookUploadIntent;
 
 use crate::shared_sql::SharedSql;
 use crate::*;
@@ -15,13 +16,6 @@ use sync_common::ContentHash;
 pub struct BookUploadSnapshot {
     pub local_versions: Vec<(String, String, String)>,
     pub intent: Option<BookUploadIntent>,
-}
-
-#[derive(Clone, Debug)]
-pub struct BookUploadCompletion {
-    pub content_hash: ContentHash,
-    pub local_versions: Vec<(String, String, String)>,
-    pub intent: BookUploadIntent,
 }
 
 /// A rejected asset transfer whose persistence must be settled atomically.

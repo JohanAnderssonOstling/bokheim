@@ -1,3 +1,4 @@
+mod arc;
 mod progress;
 mod progress_circle;
 

@@ -1,57 +1,61 @@
-//! Import storage lifecycle. Browser objects are committed asynchronously before
-//! the metadata transaction; native files are published against its placements.
-use super::{AssetStore, AssetStoreError, PublishedStagedBook, StagedBook};
-use sync_common::{ContentHash, DirId};
+//! Import storage lifecycle. The caller retains the content lease and metadata commit.
+use super::{AssetStore, AssetStoreError, CopiedBook, ImportProgressObserver};
+use library_model::RelativeBookPath;
+
+#[derive(Default)]
+pub struct ImportOptions {
+    /// Native imports may write directly to a collision-free destination.
+    pub direct: bool,
+    pub progress: Option<ImportProgressObserver>,
+}
 
 impl AssetStore {
-    pub async fn stage_import(&self, db: &library_database::Database, parent: DirId, name: String, source: Box<dyn std::io::Read + Send>) -> Result<StagedBook, AssetStoreError> {
+    /// Prepare storage and stage bytes, returning the actual destination name.
+    pub async fn copy_import(&self, relative: RelativeBookPath, mut source: Box<dyn std::io::Read + Send>, occupied: Vec<String>, options: ImportOptions) -> Result<(String, CopiedBook), AssetStoreError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let relative = self.prepare_import_path(db, parent, name).await?;
-            self.stage_book(relative, source).await
+            let name = relative.file_name().to_owned();
+            if options.direct {
+                let mut occupied = occupied;
+                let store = self.clone();
+                return client_platform_runtime::executor::run_blocking(move || {
+                    use crate::asset_store::native::{placement_path, write_import_bytes, DirectBook, DIRECT_IMPORTS};
+                    let requested = relative.file_name();
+                    let directory = placement_path(&store.0, &relative).parent().expect("a book path has a folder").canonicalize()?;
+                    occupied.extend(std::fs::read_dir(&directory)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?);
+                    for name in library_replica::file_name_candidates(requested, occupied.iter().map(String::as_str)) {
+                        let path = directory.join(&name);
+                        let imports = DIRECT_IMPORTS.get_or_init(Default::default);
+                        if !imports.lock().unwrap().insert(path.clone()) {
+                            continue;
+                        }
+                        let direct = DirectBook { path: path.clone() };
+                        let file = match std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path) {
+                            Ok(file) => file,
+                            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                                continue;
+                            }
+                            Err(error) => return Err(AssetStoreError::operation(format!("could not create the imported book '{}': {error}", path.display()))),
+                        };
+                        // Wrap the final file only to clean it up on copy/inspection failure.
+                        // No temporary filename, rename, hard link, or second copy is involved.
+                        let cleanup = tempfile::TempPath::try_from_path(path)?;
+                        let mut file = tempfile::NamedTempFile::from_parts(file, cleanup);
+                        write_import_bytes(file.as_file_mut(), source.as_mut(), &directory, options.progress.as_ref())?;
+                        return Ok((name, CopiedBook { inner: super::imp::CopiedBook { temporary_path: file.into_temp_path(), direct: Some(direct) } }));
+                    }
+                    unreachable!("numeric name suffix space is unbounded")
+                })
+                .await
+                .map_err(AssetStoreError::operation)?;
+            }
+            Ok((name, self.stage_book(relative, source, options.progress).await?))
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = (db, parent, name);
-            self.stage_reader(source).await
+            let _ = (occupied, options);
+            let inner = super::imp::stage_book(&self.0, source.as_mut()).await?;
+            Ok((relative.file_name().to_owned(), super::StagedBook { inner }))
         }
-    }
-}
-
-/// Verified storage ready to participate in the caller's metadata transaction.
-/// The caller must hold its content lease through preparation and book.
-pub struct PreparedImport {
-    #[cfg(not(target_arch = "wasm32"))]
-    staged: StagedBook,
-}
-
-impl StagedBook {
-    pub async fn prepare_import(self) -> Result<PreparedImport, AssetStoreError> {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            Ok(PreparedImport { staged: self })
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            self.commit().await?;
-            Ok(PreparedImport {})
-        }
-    }
-}
-
-impl PreparedImport {
-    /// Connection-free filesystem book from caller-resolved snapshots.
-    /// The caller records the returned placement through the database commit.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn publish_snapshot(self, store: &AssetStore, relative_path: &str, occupied_names: &[String]) -> Result<PublishedStagedBook, AssetStoreError> {
-        self.staged.publish_snapshot(store, relative_path, occupied_names)
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl AssetStore {
-    pub async fn prepare_import_path(&self, db: &library_database::Database, parent: DirId, name: String) -> Result<String, AssetStoreError> {
-        self.placement().prepare_directory_with_database(db, parent).await?;
-        db.native_book_path(parent, &name).map_err(|error| AssetStoreError::operation(error))?.ok_or_else(|| AssetStoreError::operation("prepared directory no longer exists".to_owned()))
     }
 }

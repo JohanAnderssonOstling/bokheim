@@ -1,3 +1,4 @@
+use std::sync::OnceLock;
 use crate::core::AuthError;
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
@@ -107,7 +108,7 @@ pub(super) fn verify_password(password: &str, hash: &str) -> bool {
 
 /// Equalizes the missing-user and wrong-password work factors.
 pub(super) fn verify_password_dummy(password: &str) {
-    static DUMMY_HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    static DUMMY_HASH: OnceLock<String> = OnceLock::new();
     let hash = DUMMY_HASH.get_or_init(|| hash_password("dummy-password-for-timing").unwrap_or_default());
     if !hash.is_empty() {
         let _ = verify_password(password, hash);

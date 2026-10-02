@@ -1,5 +1,7 @@
 //! Native startup transaction. The host holds application ownership and UpdateLock.
 //! Durable backups precede mutations; recovery is repeatable after any interruption.
+
+use crate::native_files::{remove, replace, sync_file};
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -43,7 +45,7 @@ fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let mut f = File::create(&part).map_err(|e| e.to_string())?;
     f.write_all(bytes).and_then(|_| f.sync_all()).map_err(|e| e.to_string())?;
     drop(f);
-    crate::native_files::replace(&part, path)
+    replace(&part, path)
 }
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
     serde_json::from_reader(File::open(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
@@ -67,15 +69,15 @@ pub fn copy_database(source: &Path, destination: &Path) -> Result<(), String> {
         return Err("database checkpoint is busy".into());
     }
     drop(dst);
-    crate::native_files::sync_file(destination)?;
+    sync_file(destination)?;
     sync_dir(destination.parent().ok_or("database has no parent")?)
 }
 
 pub fn copy_file(source: &Path, destination: &Path) -> Result<(), String> {
     let part = destination.with_extension("update-writing");
     fs::copy(source, &part).map_err(|e| e.to_string())?;
-    crate::native_files::sync_file(&part)?;
-    crate::native_files::replace(&part, destination)
+    sync_file(&part)?;
+    replace(&part, destination)
 }
 
 fn identical(left: &Path, right: &Path) -> Result<bool, String> {
@@ -145,14 +147,14 @@ impl Journal {
                     copy_file(previous, &entry.destination)?;
                 }
             } else if entry.destination.try_exists().map_err(|e| e.to_string())? {
-                crate::native_files::remove(&entry.destination)?;
+                remove(&entry.destination)?;
             }
         }
         // Host clears only after its coordinator has recorded recovery too.
         sync_dir(root)
     }
     pub fn clear(root: &Path) -> Result<(), String> {
-        crate::native_files::remove(&root.join("activation.json"))
+        remove(&root.join("activation.json"))
     }
 }
 

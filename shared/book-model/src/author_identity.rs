@@ -1,3 +1,4 @@
+use std::fmt::{Display, Formatter};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -39,8 +40,8 @@ impl AgentAuthority {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AgentIdentityError(&'static str);
 
-impl std::fmt::Display for AgentIdentityError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for AgentIdentityError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.0)
     }
 }
@@ -76,8 +77,8 @@ macro_rules! string_identifier {
             }
         }
 
-        impl std::fmt::Display for $name {
-            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        impl Display for $name {
+            fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
                 formatter.write_str(self.as_str())
             }
         }

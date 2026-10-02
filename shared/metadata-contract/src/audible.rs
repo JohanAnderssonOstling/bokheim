@@ -120,9 +120,4 @@ pub enum AlignmentMethod {
 
 pub mod selection;
 
-pub const MAX_LOOKUP_REQUEST_BYTES: usize = 2 * 1024 * 1024;
-
 pub mod chapters;
-
-/// Bump whenever lookup or chapter policy requires reevaluating durable results.
-pub const POLICY_VERSION: &str = "audible_v2";

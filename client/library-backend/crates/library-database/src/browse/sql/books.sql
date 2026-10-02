@@ -5,17 +5,14 @@
 -- param: languages: &str
 -- param: normalized_query: &str
 SELECT book.row_id,
-       EXISTS(SELECT 1 FROM book_dir placement
-              WHERE placement.book_row_id=book.row_id AND placement.deleted_at IS NULL
-                AND placement.is_downloaded=1),
+       COALESCE((SELECT downloaded FROM library_book_presence WHERE book_row_id=book.row_id),0),
        instr(book.search_title,:normalized_query)>0 OR instr(book.search_author,:normalized_query)>0,
        book.read_progress
 FROM json_each(:book_ids) selected
 JOIN book ON book.row_id=selected.value
 WHERE book.deleted_at IS NULL
-  AND EXISTS(SELECT 1 FROM book_dir placement
-             WHERE placement.book_row_id=book.row_id AND placement.deleted_at IS NULL
-               AND (:downloaded_only=0 OR placement.is_downloaded=1))
+  AND EXISTS(SELECT 1 FROM library_book_presence presence
+             WHERE presence.book_row_id=book.row_id AND (:downloaded_only=0 OR presence.downloaded=1))
   AND (:file_types=0 OR (:file_types & book.format)!=0)
   AND (:languages='' OR EXISTS(SELECT 1 FROM book_language language
        WHERE language.book_row_id=book.row_id AND instr(:languages,',' || language.language || ',')>0));

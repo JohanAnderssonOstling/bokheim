@@ -318,19 +318,26 @@ async fn remote_file_pins_uploaded_revision_separately_from_book_identity() {
 }
 
 #[tokio::test]
-async fn pdf_bundle_transport_uses_one_authenticated_post_and_checks_revision() {
+async fn pdf_bundle_transport_uses_authenticated_gets_and_checks_revision() {
     let checksum = test_support::fixture_content_hash(991);
     let source = RemoteFile { hash: checksum, checksum, length: 16 };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let router = Router::new().route(
-        "/blob/ranges",
-        axum::routing::post(move |headers: HeaderMap, body: axum::body::Bytes| async move {
+        "/blob",
+        axum::routing::get(move |headers: HeaderMap| async move {
             assert_eq!(headers[header::AUTHORIZATION], "Bearer test");
-            assert_eq!(headers[header::CONTENT_TYPE], sync_common::transport::MEDIA_TYPE);
-            let request: sync_common::api::assets::BookRanges = sync_common::transport::decode(&body, 64 * 1024).unwrap();
-            assert_eq!(request.ranges, vec![(1, 2), (8, 3)]);
-            Response::builder().status(200).header(header::ETAG, format!("\"{checksum}\"")).body(Body::from(b"1289a".to_vec())).unwrap()
+            assert!(headers.contains_key(header::IF_RANGE));
+            let (bounds, bytes) = match headers[header::RANGE].to_str().unwrap() {
+                "bytes=1-2" => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    ("bytes 1-2/16", b"12".to_vec())
+                },
+                "bytes=8-10" => ("bytes 8-10/16", b"89a".to_vec()),
+                other => panic!("unexpected range: {other}"),
+            };
+            Response::builder().status(206).header(header::ETAG, format!("\"{checksum}\""))
+                .header(header::CONTENT_RANGE, bounds).body(Body::from(bytes)).unwrap()
         }),
     );
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
@@ -339,5 +346,27 @@ async fn pdf_bundle_transport_uses_one_authenticated_post_and_checks_revision() 
     let mut changed = source.clone();
     changed.checksum = test_support::fixture_content_hash(992);
     assert!(matches!(fetch_bundle(&reqwest::Client::new(), url, &changed, "test", vec![(1, 2), (8, 3)]).await, Err(RemoteFileError::Failed(_))));
+    server.abort();
+}
+
+#[test]
+fn bundles_reject_invalid_bounds_before_fetching() {
+    for ranges in [vec![], vec![(1, 0)], vec![(1, 5), (4, 2)], vec![(15, 2)], vec![(u64::MAX, 2)], vec![(0, 1); 129]] {
+        assert_eq!(bundle_byte_count(&ranges, 16), None);
+    }
+    assert_eq!(bundle_byte_count(&[(0, 4 * 1024 * 1024 + 1)], u64::MAX), None);
+    assert_eq!(bundle_byte_count(&[(1, 2), (8, 3)], 16), Some(5));
+}
+
+#[tokio::test]
+async fn bundles_split_large_ranges_into_bounded_gets() {
+    let (state, url, server) = fixture().await;
+    let checksum = test_support::fixture_content_hash(991);
+    let source = RemoteFile { hash: checksum, checksum, length: state.bytes.len() as u64 };
+    let length = MAX_RANGE_BYTES + 1;
+    assert_eq!(fetch_bundle(&reqwest::Client::new(), url, &source, "test-token", vec![(0, length)]).await.unwrap(), state.bytes[..length]);
+    let mut requests = state.requests.lock().unwrap().clone();
+    requests.sort_unstable();
+    assert_eq!(requests, vec![(0, MAX_RANGE_BYTES as u64 - 1), (MAX_RANGE_BYTES as u64, MAX_RANGE_BYTES as u64)]);
     server.abort();
 }

@@ -9,6 +9,8 @@
 //! as something *a library* is doing, and a list beneath the libraries made the
 //! reader match names between two lists to find that out.
 
+use std::collections::HashSet;
+use std::path::Path;
 use super::*;
 use crate::services::format_storage_bytes;
 use gpui_component::Disableable;
@@ -79,14 +81,14 @@ impl Render for AccountIdentityView {
 /// nothing above them should be rebuilt at that rate.
 pub(crate) struct LibrariesView {
     page: Entity<SyncPage>,
-    expanded: std::collections::HashSet<sync_common::LibraryId>,
+    expanded: HashSet<sync_common::LibraryId>,
     _updates: gpui::Subscription,
 }
 
 impl LibrariesView {
     pub(crate) fn new(page: Entity<SyncPage>, cx: &mut Context<Self>) -> Self {
         let updates = cx.observe(&page, |_, _, cx| cx.notify());
-        Self { page, expanded: std::collections::HashSet::new(), _updates: updates }
+        Self { page, expanded: HashSet::new(), _updates: updates }
     }
 }
 
@@ -484,7 +486,7 @@ impl SyncPage {
     /// is about this list — it decides where the next row in it will live — and
     /// a "Library storage" group of its own separated it from the only thing it
     /// refers to.
-    fn libraries_section(&self, page: &Entity<Self>, rows: &[LibraryRow], expanded: &std::collections::HashSet<sync_common::LibraryId>, view: Entity<LibrariesView>, compact: bool, theme: components::BrowserTheme) -> Div {
+    fn libraries_section(&self, page: &Entity<Self>, rows: &[LibraryRow], expanded: &HashSet<sync_common::LibraryId>, view: Entity<LibrariesView>, compact: bool, theme: components::BrowserTheme) -> Div {
         let mut libraries = components::browser_settings_fieldset("Libraries", theme);
 
         // The list is ruled off from the setting above it. Without that the
@@ -496,7 +498,7 @@ impl SyncPage {
         #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
         if let Some(path) = self.default_library_location.clone() {
             let page = page.clone();
-            let choose = components::browser_settings_path_button("default-library-location", components::library_path_label(std::path::Path::new(&path)), theme)
+            let choose = components::browser_settings_path_button("default-library-location", components::library_path_label(Path::new(&path)), theme)
                 .tooltip(path)
                 .on_click(move |_, _, cx| page.update(cx, |page, cx| page.choose_library_location(cx)));
             libraries = libraries.child(components::browser_settings_compact_row("Default location for new libraries", choose, theme));
@@ -528,28 +530,39 @@ impl SyncPage {
             let library_id = row.status.library_id;
             let is_expanded = expanded.contains(&library_id);
             let toggle_view = view.clone();
-            let toggle = components::outlined_icon_button(SharedString::from(format!("library-details-{library_id}")), if is_expanded { "Hide library details" } else { "Show library details" }, IconName::Ellipsis, theme)
-                .on_click(move |_, _, cx| toggle_view.update(cx, |view, cx| {
-                    if !view.expanded.insert(library_id) {
-                        view.expanded.remove(&library_id);
-                    }
-                    cx.notify();
-                }));
+            let toggle = components::outlined_icon_button(SharedString::from(format!("library-details-{library_id}")), if is_expanded { "Hide library details" } else { "Show library details" }, IconName::Ellipsis, theme).on_click(
+                move |_, _, cx| {
+                    toggle_view.update(cx, |view, cx| {
+                        if !view.expanded.insert(library_id) {
+                            view.expanded.remove(&library_id);
+                        }
+                        cx.notify();
+                    })
+                },
+            );
             #[cfg(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-            let path = row.local_path.as_ref().map(|path| components::library_path_label(std::path::Path::new(path)));
+            let path = row.local_path.as_ref().map(|path| components::library_path_label(Path::new(path)));
             #[cfg(not(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows"))))]
             let path: Option<String> = None;
-            let title = div().min_w_0().flex_1().flex().flex_col()
+            let title = div()
+                .min_w_0()
+                .flex_1()
+                .flex()
+                .flex_col()
                 .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(gpui::FontWeight::SEMIBOLD).text_size(gpui::rems(components::TEXT_SM)).text_color(theme.text).child(row.name.clone()))
                 .children(path.map(|path| div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(components::TEXT_XS)).text_color(theme.text_muted).child(path)));
             let size = div().flex_none().text_size(gpui::rems(components::TEXT_XS)).text_color(theme.text_muted).child(local_bytes.clone());
-            let state = div().min_w_0().flex().items_center().gap(px(6.0)).text_size(gpui::rems(components::TEXT_XS)).text_color(theme.text)
+            let state = div()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(gpui::rems(components::TEXT_XS))
+                .text_color(theme.text)
                 .child(div().w(px(8.0)).h(px(8.0)).rounded(px(4.0)).bg(status_color))
                 .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(status));
-            let meta = if compact { div().w_full().flex().items_center().gap(px(12.0)).child(size).child(state.flex_1()).child(toggle) }
-                else { div().flex_none().flex().items_center().gap(px(12.0)).child(size).child(state).child(toggle) };
-            let heading = if compact { div().w_full().flex().flex_col().gap(px(6.0)).child(title).child(meta) }
-                else { div().w_full().flex().items_center().gap(px(14.0)).child(title).child(meta) };
+            let meta = if compact { div().w_full().flex().items_center().gap(px(12.0)).child(size).child(state.flex_1()).child(toggle) } else { div().flex_none().flex().items_center().gap(px(12.0)).child(size).child(state).child(toggle) };
+            let heading = if compact { div().w_full().flex().flex_col().gap(px(6.0)).child(title).child(meta) } else { div().w_full().flex().items_center().gap(px(14.0)).child(title).child(meta) };
             let mut summary = div().w_full().px(px(components::SPACE_MD)).py(px(12.0)).flex().flex_col().gap(px(8.0)).child(heading).children(activity);
             if is_expanded {
                 let mut facts: Vec<(SharedString, gpui::AnyElement)> = Vec::new();
@@ -611,7 +624,6 @@ impl SyncPage {
         })
         .detach();
     }
-
 }
 
 impl Render for SyncPage {

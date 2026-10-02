@@ -3,7 +3,6 @@ use crate::BackendError;
 
 use super::{filenames, LibrarySession};
 use crate::{ContentHash, DirId};
-use library_model::{LibraryFolderDestination, LibraryTrashView};
 
 impl LibrarySession {
     pub async fn rename_directory(&self, directory_id: &DirId, requested_name: &str) -> Result<String, BackendError> {
@@ -33,7 +32,7 @@ impl LibrarySession {
     async fn move_library_directory(&self, directory_id: &DirId, requested_parent: Option<&DirId>, requested_name: Option<&str>) -> Result<String, BackendError> {
         let name = self.queue_directory_move(directory_id, requested_parent, requested_name)?;
         #[cfg(not(target_arch = "wasm32"))]
-        if let Err(error) = self.assets.placement().prepare_directory_with_database(&self.db, *directory_id).await {
+        if let Err(error) = crate::asset_workflow::prepare_directory(&self.assets, &self.db, *directory_id).await {
             log::warn!("directory rename will retry from the durable queue: {error}");
         }
         Ok(name)
@@ -48,15 +47,7 @@ impl LibrarySession {
         Ok(name)
     }
 
-    pub fn copy_book_to_directory(&self, content_hash: &ContentHash, source_id: &DirId, destination_id: &DirId) -> Result<String, BackendError> {
-        self.transfer_book_placement(content_hash, source_id, destination_id, false)
-    }
-
-    pub fn move_book_to_directory(&self, content_hash: &ContentHash, source_id: &DirId, destination_id: &DirId) -> Result<String, BackendError> {
-        self.transfer_book_placement(content_hash, source_id, destination_id, true)
-    }
-
-    fn transfer_book_placement(&self, hash: &ContentHash, source: &DirId, destination: &DirId, moving: bool) -> Result<String, BackendError> {
+    pub(super) fn transfer_book_placement(&self, hash: &ContentHash, source: &DirId, destination: &DirId, moving: bool) -> Result<String, BackendError> {
         let name = self.db.transfer_book_placement(hash, source, destination, moving)?;
         self.notify_contents_changed();
         Ok(name)
@@ -77,39 +68,9 @@ impl LibrarySession {
     }
 
     pub fn restore_book(&self, content_hash: &ContentHash) -> Result<(), BackendError> {
-        self.assets.ensure_restore_available().map_err(BackendError::operation)?;
-        #[cfg(not(target_arch = "wasm32"))]
-        let placement = self.assets.placement();
-        let mut choices = Vec::new();
-        for candidate in self.db.restore_book_plan(content_hash).map_err(BackendError::operation)? {
-            // First live directory walking up that still exists on disk; the
-            // root needs no check, matching the previous walk. Browser
-            // storage has no out-of-band deleter, so liveness alone decides.
-            let mut target = sync_common::ROOT_DIR_ID;
-            for ancestor in &candidate.ancestry {
-                if !ancestor.live {
-                    continue;
-                }
-                #[cfg(not(target_arch = "wasm32"))]
-                if !placement.directory_available(&ancestor.path) {
-                    continue;
-                }
-                target = ancestor.id;
-                break;
-            }
-            choices.push((candidate.original, target));
-        }
-        self.db.restore_book_commit(content_hash, &choices).map_err(BackendError::operation)?;
+        self.db.restore_book(content_hash)?;
         self.notify_contents_changed();
         Ok(())
-    }
-
-    pub(crate) fn trash(&self) -> Result<LibraryTrashView, BackendError> {
-        Ok(self.db.library_trash()?)
-    }
-
-    pub(crate) fn folder_destinations(&self) -> Result<Vec<LibraryFolderDestination>, BackendError> {
-        Ok(self.db.folder_destinations()?)
     }
 
     pub fn purge_book(&self, content_hash: &ContentHash) -> Result<(), BackendError> {

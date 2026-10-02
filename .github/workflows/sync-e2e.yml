@@ -10,7 +10,7 @@ permissions:
   statuses: write
 
 concurrency:
-  group: shared-tests-${{ github.sha }}
+  group: shared-tests-${{ github.sha }}-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -47,4 +47,13 @@ jobs:
           ref: 0d407738fd6ecfd6d6ea84f1a9ce0a488e3dfaf7
           path: HtmlViewCore
       - name: Run shared suite and report this commit
-        run: python3 scripts/ci/shared-tests.py --report "$REPORT_REPOSITORY"
+        run: |
+          # Independent platform runs reuse a successful result for this exact SHA.
+          if python3 scripts/ci/require-shared-tests.py "$REPORT_REPOSITORY" "$GITHUB_SHA"; then
+            exit 0
+          fi
+          # Keep optimized dependencies outside the checkout cleaned between jobs.
+          export CARGO_TARGET_DIR="$RUNNER_TOOL_CACHE/bokheim-shared-tests"
+          export SYNC_E2E_BACKEND_TARGET_DIR="$CARGO_TARGET_DIR"
+          export SYNC_E2E_SERVER_TARGET_DIR="$RUNNER_TOOL_CACHE/bokheim-sync-server"
+          python3 scripts/ci/shared-tests.py --report "$REPORT_REPOSITORY"

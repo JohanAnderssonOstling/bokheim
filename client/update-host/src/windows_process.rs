@@ -1,6 +1,9 @@
 //! Windows process handoff. The helper gate closes the gap between releasing
 //! desktop ownership and the trial acquiring it. Only that helper's child may
 //! bypass the gate; every live-file mutation additionally holds desktop ownership.
+
+use std::io::Error;
+use std::time::{SystemTime, UNIX_EPOCH};
 use crate::{activation, windows::WindowsHost, DiscoveryConfig};
 use fs2::FileExt;
 use std::os::windows::process::CommandExt;
@@ -109,7 +112,7 @@ fn validate_directory(data: &Path, directory: &Path) -> Result<PathBuf, String> 
 pub fn spawn_helper(data: &Path, installation: &Path) -> Result<(), String> {
     let helpers = data.join("updates/helpers");
     fs::create_dir_all(&helpers).map_err(error)?;
-    let unique = format!("{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+    let unique = format!("{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos());
     let directory = helpers.join(unique);
     fs::create_dir(&directory).map_err(error)?;
     let directory = canonical(&directory)?;
@@ -213,7 +216,7 @@ impl LaunchFailure {
 }
 struct Started { process: Child, directory: PathBuf }
 fn spawn_application(directory: &Path, executable: &Path, trial: Option<&str>) -> Result<Started, LaunchFailure> {
-    let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let directory = directory.join(format!("launch-{nonce}"));
     fs::create_dir(&directory).map_err(|e| LaunchFailure::NotRunning(error(e)))?;
     let mut child = Command::new(executable).creation_flags(0x08000000).arg("--bokheim-supervised-launch").arg(&directory)
@@ -249,13 +252,13 @@ impl ParentProcess {
     fn open(pid: u32) -> Result<Self, String> {
         // SYNCHRONIZE only; open before readiness to avoid PID reuse.
         let handle = unsafe { OpenProcess(0x00100000, 0, pid) };
-        if handle.is_null() { Err(error(std::io::Error::last_os_error())) } else { Ok(Self(handle)) }
+        if handle.is_null() { Err(error(Error::last_os_error())) } else { Ok(Self(handle)) }
     }
     fn wait(&self, timeout: Duration) -> Result<(), String> {
         match unsafe { WaitForSingleObject(self.0, timeout.as_millis().min(u32::MAX as u128 - 1) as u32) } {
             0 => Ok(()),
             258 => Err("original application did not exit before update".into()),
-            _ => Err(error(std::io::Error::last_os_error())),
+            _ => Err(error(Error::last_os_error())),
         }
     }
 }

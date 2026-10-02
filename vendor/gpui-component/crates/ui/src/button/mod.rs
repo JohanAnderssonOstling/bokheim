@@ -1,4 +1,5 @@
 mod button;
+mod caret;
 mod button_group;
 mod button_icon;
 mod dropdown_button;

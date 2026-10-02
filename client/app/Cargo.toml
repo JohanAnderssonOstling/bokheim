@@ -24,6 +24,8 @@ account-contract = { path = "../../shared/account-contract" }
 library-registry = { path = "crates/library-registry" }
 app-preferences = { path = "../preferences" }
 library-backend = { path = "../library-backend" }
+library-database = { path = "../library-backend/crates/library-database" }
+library-model = { path = "../library-model" }
 account-client = { path = "../account-client" }
 log = "0.4"
 env_logger = "0.11"
@@ -61,3 +63,6 @@ zip.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { version = "1.0", features = ["test-util"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+client-platform-android = { path = "../platforms/android" }

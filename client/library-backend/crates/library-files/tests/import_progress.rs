@@ -5,6 +5,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+fn path(value: &str) -> library_model::RelativeBookPath {
+    library_model::RelativeBookPath::parse(value).unwrap()
+}
+
 #[tokio::test]
 async fn copy_reports_bytes_and_stages_without_changing_contents() {
     let root = tempfile::tempdir().unwrap();
@@ -13,11 +17,13 @@ async fn copy_reports_bytes_and_stages_without_changing_contents() {
     let observed = stages.clone();
     let report: ImportProgressObserver = Arc::new(move |stage| observed.lock().unwrap().push(stage));
     let bytes = vec![7u8; 150_000];
-    let staged = store.stage_book_with_progress("/book.epub".into(), Box::new(std::io::Cursor::new(bytes.clone())), Some(report)).await.unwrap();
+    let staged = store.stage_book(path("/book.epub"), Box::new(std::io::Cursor::new(bytes.clone())), Some(report)).await.unwrap();
     let mut actual = Vec::new();
     staged.open_reader().unwrap().read_to_end(&mut actual).unwrap();
     assert_eq!(actual, bytes);
     let stages = stages.lock().unwrap();
     assert_eq!(stages.first(), Some(&ImportFileStage::Copying { copied_bytes: 0 }));
-    assert!(stages.ends_with(&[ImportFileStage::Copying { copied_bytes: 150_000 }, ImportFileStage::Saving, ImportFileStage::Identifying]));
+    assert!(stages.ends_with(&[ImportFileStage::Copying { copied_bytes: 150_000 }, ImportFileStage::Saving]));
+    assert!(!stages.contains(&ImportFileStage::Identifying));
 }
+

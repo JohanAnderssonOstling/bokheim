@@ -18,26 +18,6 @@ fn argument(input: &str) -> Option<&str> {
     }
 }
 
-fn timestamp(input: &str) -> Option<u64> {
-    let mut fields = input.split(':');
-    let minutes = fields.next()?.parse::<u64>().ok()?;
-    let seconds = fields.next()?.parse::<u64>().ok()?;
-    let frames = fields.next()?.parse::<u64>().ok()?;
-    if fields.next().is_some() || seconds >= 60 || frames >= 75 { return None; }
-    minutes.checked_mul(60)?.checked_add(seconds)?.checked_mul(1000)?.checked_add((frames * 1000 + 37) / 75)
-}
-
-fn track_for_file<'a>(tracks: &'a [AudiobookTrack], file: &str) -> Result<&'a AudiobookTrack, String> {
-    let file = file.replace('\\', "/");
-    if file.starts_with('/') || file.split('/').any(|part| part.is_empty() || part == "." || part == ".." || part.contains(':')) { return Err("unsafe CUE filename".into()); }
-    let exact = tracks.iter().filter(|track| track.name.eq_ignore_ascii_case(&file)).collect::<Vec<_>>();
-    let matches = if exact.is_empty() {
-        tracks.iter().filter(|track| track.name.rsplit('/').next().is_some_and(|name| name.eq_ignore_ascii_case(&file))).collect::<Vec<_>>()
-    } else { exact };
-    if matches.len() != 1 { return Err(format!("CUE filename does not identify one MP3: {file}")); }
-    Ok(matches[0])
-}
-
 pub(super) fn chapters(input: &str, tracks: &[AudiobookTrack]) -> Result<Vec<AudiobookChapterMetadata>, String> {
     let mut file = None::<String>;
     let mut current = None::<(Option<String>, Option<u64>)>;
@@ -69,7 +49,12 @@ pub(super) fn chapters(input: &str, tracks: &[AudiobookTrack]) -> Result<Vec<Aud
             "INDEX" if current.is_some() => {
                 let mut fields = rest.split_whitespace();
                 if fields.next() == Some("01") {
-                    current.as_mut().unwrap().1 = Some(timestamp(fields.next().ok_or("missing CUE INDEX 01 position")?).ok_or("invalid CUE INDEX 01")?);
+                    // mm:ss:ff, with 75 frames to the second.
+                    let mut parts = fields.next().ok_or("missing CUE INDEX 01 position")?.split(':').map(|part| part.parse::<u64>().ok());
+                    let (Some(Some(minutes)), Some(Some(seconds)), Some(Some(frames)), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else { return Err("invalid CUE INDEX 01".into()) };
+                    if seconds >= 60 || frames >= 75 { return Err("invalid CUE INDEX 01".into()); }
+                    let offset_ms = minutes.checked_mul(60).and_then(|value| value.checked_add(seconds)).and_then(|value| value.checked_mul(1000)).and_then(|value| value.checked_add((frames * 1000 + 37) / 75)).ok_or("invalid CUE INDEX 01")?;
+                    current.as_mut().unwrap().1 = Some(offset_ms);
                 }
             }
             _ => {},
@@ -81,7 +66,14 @@ pub(super) fn chapters(input: &str, tracks: &[AudiobookTrack]) -> Result<Vec<Aud
     if points.is_empty() { return Err("CUE has no INDEX 01 chapters".into()); }
     let mut starts = Vec::with_capacity(points.len());
     for (index, point) in points.into_iter().enumerate() {
-        let track = track_for_file(tracks, &point.file)?;
+        let file = point.file.replace('\\', "/");
+        if file.starts_with('/') || file.split('/').any(|part| part.is_empty() || part == "." || part == ".." || part.contains(':')) { return Err("unsafe CUE filename".into()); }
+        let exact = tracks.iter().filter(|track| track.name.eq_ignore_ascii_case(&file)).collect::<Vec<_>>();
+        let matches = if exact.is_empty() {
+            tracks.iter().filter(|track| track.name.rsplit('/').next().is_some_and(|name| name.eq_ignore_ascii_case(&file))).collect::<Vec<_>>()
+        } else { exact };
+        if matches.len() != 1 { return Err(format!("CUE filename does not identify one MP3: {file}")); }
+        let track = matches[0];
         let start = track.start_ms.checked_add(point.offset_ms).ok_or("CUE position overflow")?;
         if start >= track.end_ms || starts.last().is_some_and(|(_, previous): &(String, u64)| *previous >= start) {
             return Err("CUE chapter positions are outside the audio or out of order".into());

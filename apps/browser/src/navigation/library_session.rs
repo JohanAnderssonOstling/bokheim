@@ -1,17 +1,17 @@
 //! Persistent pages owned by one library session.
 
+use crate::services::library_add_trace::mark;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use app::AppClient;
-use app_preferences::LibraryView;
 use gpui::prelude::*;
 use gpui::{AnyView, App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, Render, Subscription, Window, div, px};
 use sync_common::{LibraryId, ROOT_DIR_ID};
 
 use super::LibraryRoute;
 use crate::library::BrowseCrumb;
-use crate::library::{AuthorsPage, BookDetailClosed, BrowseKind, BrowsePage, BrowseSplitPlane, HomePage, LibraryContext, LibraryUpdateBridge, OpenBook, OpenTrash, TrashPage};
+use crate::library::{AuthorsPage, BookDetailClosed, BrowseKind, BrowseSplitPlane, HomePage, LibraryContext, LibraryUpdateBridge, OpenBook, TrashPage};
 
 struct CachedPage {
     view: AnyView,
@@ -49,25 +49,12 @@ impl LibrarySession {
         self.library.updates().update(cx, |updates, cx| updates.set_importing(importing, cx));
     }
 
-    pub(super) fn set_library_view(&mut self, view: LibraryView, cx: &mut Context<Self>) {
-        if LibrarySession::is_browse_route(self.route) {
-            if let Some(plane) = self.browse_planes.get(&self.route) {
-                plane.update(cx, |plane, cx| plane.set_library_view(view == LibraryView::Detailed, cx));
-            }
-        }
-    }
-
     fn create_route_page(&self, route: LibraryRoute, cx: &mut Context<Self>) -> CachedPage {
         let library = self.library.clone();
-        let session = cx.entity().downgrade();
-        let open_trash: OpenTrash = Rc::new(move |_, cx| {
-            let _ = session.update_in(cx, |session, window, cx| session.navigate(LibraryRoute::Trash, window, cx));
-        });
         match route {
             LibraryRoute::Home => create_page(|cx| HomePage::new(library, cx), cx),
             LibraryRoute::Authors => create_page(|cx| AuthorsPage::new(library, cx), cx),
-            LibraryRoute::Folders => create_page(|cx| BrowsePage::new(BrowseKind::Folder, library, open_trash, cx), cx),
-            LibraryRoute::Subjects => create_page(|cx| BrowsePage::new(BrowseKind::Subject, library, open_trash, cx), cx),
+            LibraryRoute::Folders | LibraryRoute::Subjects => unreachable!("browse routes use split planes"),
             LibraryRoute::Trash => create_page(|cx| TrashPage::new(library, cx), cx),
         }
     }
@@ -90,11 +77,7 @@ impl LibrarySession {
             _ => unreachable!("only browse routes have browse planes"),
         };
         let library = self.library.clone();
-        let session = cx.entity().downgrade();
-        let open_trash: OpenTrash = Rc::new(move |_, cx| {
-            let _ = session.update_in(cx, |session, window, cx| session.navigate(LibraryRoute::Trash, window, cx));
-        });
-        let plane = cx.new(|cx| BrowseSplitPlane::new(kind, library, open_trash.clone(), cx));
+        let plane = cx.new(|cx| BrowseSplitPlane::new(kind, library, cx));
         self.browse_planes.insert(route, plane.clone());
         plane
     }
@@ -108,7 +91,7 @@ impl LibrarySession {
         self.browse_plane(LibraryRoute::Folders, cx).update(cx, |plane, cx| plane.open_folder(directory_id, title, cx));
     }
 
-    pub(super) fn open_subject(&mut self, location: String, label: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_subject(&mut self, location: library_model::BrowseLocation, label: String, window: &mut Window, cx: &mut Context<Self>) {
         self.navigate(LibraryRoute::Subjects, window, cx);
         self.browse_plane(LibraryRoute::Subjects, cx).update(cx, |plane, cx| plane.open_subject(location, label, cx));
     }
@@ -159,39 +142,40 @@ impl LibrarySession {
 impl Render for LibrarySession {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let library_id = *self.library.backend().id();
-        if crate::services::library_add_trace::mark(library_id, "selected_view_render") {
+        if mark(library_id, "selected_view_render") {
             window.on_next_frame(move |_, _| {
-                crate::services::library_add_trace::mark(library_id, "selected_frame_completed");
+                mark(library_id, "selected_frame_completed");
             });
         }
         let updates = self.library.updates();
         let updates = updates.read(cx);
         let uses_contents = matches!(self.route, LibraryRoute::Home | LibraryRoute::Authors | LibraryRoute::Folders | LibraryRoute::Subjects);
-        if !(uses_contents && self.route != LibraryRoute::Folders && !updates.loading() && updates.book_count() == Some(0) && !updates.scanning()) {
+        let content = if !(uses_contents && self.route != LibraryRoute::Folders && !updates.loading() && updates.book_count() == Some(0) && !updates.scanning()) {
             let view = if Self::is_browse_route(self.route) { self.browse_planes.get(&self.route).expect("browse plane must exist before render").clone().into_any_element() } else { self.page().view.clone().into_any_element() };
-            return ui_components::library_section_content().child(view).into_any_element();
-        }
-
-        let theme = ui_components::browser_theme(cx);
-        let session = cx.entity();
-        let actions = div().flex().items_center().gap(px(ui_components::SPACE_SM)).child(ui_components::primary_action_button("empty-library-add-book", "Add book", gpui_component::IconName::Plus, false).on_click(move |_, _, cx| {
-            session.update(cx, |session, cx| session.choose_book(cx));
-        }));
-        let heading = ui_components::uses_mobile_navigation(window)
-            .then(|| match self.route {
-                LibraryRoute::Authors => Some("Authors"),
-                LibraryRoute::Folders => Some("Folders"),
-                LibraryRoute::Subjects => Some("Subjects"),
-                _ => None,
-            })
-            .flatten()
-            .map(|title| {
-                let back = (!ui_components::has_native_back_button()).then(|| ui_components::mobile_back_button(theme).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::DismissSettings), cx)));
-                ui_components::mobile_navigation_bar(title, back, theme)
-            });
-        ui_components::library_section_content()
-            .children(heading)
-            .child(ui_components::remaining_space_column().child(ui_components::browser_actionable_empty("No books in this library", "Add a book to get started.", actions, theme).size_full()))
-            .into_any_element()
+            ui_components::library_section_content().child(view).into_any_element()
+        } else {
+            let theme = ui_components::browser_theme(cx);
+            let session = cx.entity();
+            let actions = div().flex().items_center().gap(px(ui_components::SPACE_SM)).child(ui_components::primary_action_button("empty-library-add-book", "Add book", gpui_component::IconName::Plus, false).on_click(move |_, _, cx| {
+                session.update(cx, |session, cx| session.choose_book(cx));
+            }));
+            let heading = ui_components::uses_mobile_navigation(window)
+                .then(|| match self.route {
+                    LibraryRoute::Authors => Some("Authors"),
+                    LibraryRoute::Folders => Some("Folders"),
+                    LibraryRoute::Subjects => Some("Subjects"),
+                    _ => None,
+                })
+                .flatten()
+                .map(|title| {
+                    let back = (!ui_components::has_native_back_button()).then(|| ui_components::mobile_back_button(theme).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::DismissSettings), cx)));
+                    ui_components::mobile_navigation_bar(title, back, theme)
+                });
+            ui_components::library_section_content()
+                .children(heading)
+                .child(ui_components::remaining_space_column().child(ui_components::browser_actionable_empty("No books in this library", "Add a book to get started.", actions, theme).size_full()))
+                .into_any_element()
+        };
+        ui_components::library_section_content().on_action(cx.listener(|session, _: &crate::OpenTrash, window, cx| session.navigate(LibraryRoute::Trash, window, cx))).child(content)
     }
 }

@@ -1,17 +1,22 @@
-use crate::library::book::browser;
-use crate::library::browser_audiobook;
-use crate::library::LibrarySession;
+pub(crate) use crate::library::book::browser;
+pub(crate) use crate::library::browser_audiobook;
+pub(crate) use crate::library::LibrarySession;
+use crate::BackendError;
 
-pub(super) async fn open_remote_audio(library: &LibrarySession, content_hash: crate::ContentHash) -> Result<Option<crate::library::PlaybackSource>, crate::BackendError> {
+pub(crate) async fn open_remote_audio(library: &LibrarySession, content_hash: crate::ContentHash) -> Result<Option<crate::library::PlaybackSource>, BackendError> {
     browser_audiobook::open_remote_audio(library, content_hash).await
 }
 
-pub(super) fn read_book_range(library: &LibrarySession, capability: &str, offset: u64, length: usize) -> Result<serde_bytes::ByteBuf, crate::BackendError> {
-    browser::read_local_range(*library.id(), capability, offset, length).map(serde_bytes::ByteBuf::from).map_err(crate::BackendError::operation)
-}
-
-pub(super) fn cleanup_staged_import(library: &LibrarySession, job: &str, files: u32) -> Result<(), crate::BackendError> {
-    uuid::Uuid::parse_str(job).map_err(crate::BackendError::operation)?;
-    let prefix = format!("__libraries/{}/imports/{job}/", library.id());
-    client_platform_web::web_storage::cleanup_staged_import(&prefix, files).map_err(crate::BackendError::operation)
+pub(crate) fn read_book_range(library: &LibrarySession, capability: &str, offset: u64, length: usize) -> Result<serde_bytes::ByteBuf, BackendError> {
+    browser::SOURCES
+        .with(|sources| {
+            let sources = sources.borrow();
+            let (owner, _) = sources.get(capability).ok_or("book source closed; reopen the book")?;
+            if owner != library.id() {
+                return Err("book belongs to another library".into());
+            }
+            client_platform_web::range_reader::read_range(capability, offset, length)
+        })
+        .map(serde_bytes::ByteBuf::from)
+        .map_err(BackendError::operation)
 }

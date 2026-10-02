@@ -1,3 +1,4 @@
+use std::io::{Error, ErrorKind};
 pub use library_registry::LibraryEntry;
 pub(crate) use library_registry::LibraryRegistry;
 use std::path::{Path, PathBuf};
@@ -53,17 +54,18 @@ impl BackendContext {
 
     pub(crate) fn open(app_data_dir: PathBuf, library_root: &Path) -> Result<Self, String> {
         let registry = LibraryRegistry::open_with_library_root(app_data_dir.to_string_lossy(), library_root.to_string_lossy()).map_err(|error| format!("failed to initialize library registry: {error}"))?;
-        crate::asset_store::configure_book_leases(&app_data_dir).map_err(|error| error.to_string())?;
+        #[cfg(target_os = "android")]
+        client_platform_android::book::configure_lease_root(&app_data_dir).map_err(|error| error.to_string())?;
         Ok(Self { registry })
     }
 
     pub(super) fn read_json<T: serde::de::DeserializeOwned>(&self, key: &str) -> std::io::Result<Option<T>> {
-        self.registry.read_value(key).map_err(|error| std::io::Error::other(error.to_string()))?.map(|bytes| serde_json::from_slice(&bytes).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))).transpose()
+        self.registry.read_value(key).map_err(|error| Error::other(error.to_string()))?.map(|bytes| serde_json::from_slice(&bytes).map_err(|error| Error::new(ErrorKind::InvalidData, error))).transpose()
     }
 
     pub(super) fn write_json(&self, key: &str, value: &impl serde::Serialize) -> std::io::Result<()> {
-        let bytes = serde_json::to_vec_pretty(value).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        self.registry.write_value(key, &bytes).map_err(|error| std::io::Error::other(error.to_string()))
+        let bytes = serde_json::to_vec_pretty(value).map_err(|error| Error::new(ErrorKind::InvalidData, error))?;
+        self.registry.write_value(key, &bytes).map_err(|error| Error::other(error.to_string()))
     }
 
     pub(crate) fn load_account_session(&self) -> std::io::Result<Option<account_client::Session>> {
@@ -75,7 +77,7 @@ impl BackendContext {
     }
 
     pub(crate) fn clear_account_session(&self) -> std::io::Result<()> {
-        self.registry.remove_value(ACCOUNT_SESSION_KEY).map_err(|error| std::io::Error::other(error.to_string()))
+        self.registry.remove_value(ACCOUNT_SESSION_KEY).map_err(|error| Error::other(error.to_string()))
     }
 }
 

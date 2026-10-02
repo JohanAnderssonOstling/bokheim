@@ -7,7 +7,7 @@
 //!
 //! This is deliberately not the HTML renderer. `html-view-gpui` is a paginating
 //! document engine — it owns a resource pipeline, an async host loop and a focus
-//! handle it claims on construction — and a grid holds two dozen cards at once.
+//! handle it claims on construction.
 //! A blurb needs three things from HTML: where the paragraphs end, what is
 //! emphasised, and what the entities say. That is what this reads, and it
 //! ignores the rest of the language rather than pretending to implement it.
@@ -18,9 +18,7 @@
 
 use std::ops::Range;
 
-use gpui::{
-    App, Bounds, ContentMask, Element, ElementId, FontStyle, FontWeight, GlobalElementId, HighlightStyle, InspectorElementId, IntoElement, LayoutId, Pixels, SharedString, Style, TextAlign, TextRun, TextStyle, TruncateFrom, Window, relative,
-};
+use gpui::{FontStyle, FontWeight, HighlightStyle};
 
 /// Emphasis carried by a run of the flattened text.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -135,121 +133,6 @@ pub(crate) fn rich_text(html: &str) -> (String, Vec<(Range<usize>, HighlightStyl
     }
     runs.retain(|(range, _)| range.start < range.end && range.end <= text.len());
     (text, runs)
-}
-
-/// A blurb that fills the box it is given, to the line.
-///
-/// GPUI's own text truncation is driven by a line *count* — `line_clamp` — and
-/// never by the height available, so a card that states a constant is guessing:
-/// the number of lines that fit changes with the drawn width of the cell, the
-/// reader's interface size, and whether the title above it took one line or two.
-/// Guess low and the box keeps a band of empty space it could have set; guess
-/// high and the last line is sliced through the middle.
-///
-/// So the count is not stated at all. This waits until prepaint, when the box it
-/// has to fill is finally known, and derives the clamp from it — which is what
-/// makes the blurb end on the last line that actually fits, with the ellipsis on
-/// it rather than below the fold.
-pub(crate) struct BlurbText {
-    text: SharedString,
-    highlights: Vec<(Range<usize>, HighlightStyle)>,
-}
-
-pub(crate) struct PreparedBlurb {
-    lines: Vec<gpui::WrappedLine>,
-    line_height: Pixels,
-}
-
-impl BlurbText {
-    pub(crate) fn new(text: impl Into<SharedString>, highlights: Vec<(Range<usize>, HighlightStyle)>) -> Self {
-        Self { text: text.into(), highlights }
-    }
-
-    /// The inherited style, cut into the runs the emphasis asks for. Anything
-    /// the blurb does not carry — colour, size, the face — comes from the card,
-    /// so a focused card recolours its blurb without this knowing about focus.
-    fn runs(&self, style: &TextStyle) -> Vec<TextRun> {
-        if self.highlights.is_empty() {
-            return vec![style.to_run(self.text.len())];
-        }
-        let mut runs = Vec::with_capacity(self.highlights.len() * 2 + 1);
-        let mut plain_from = 0;
-        for (range, highlight) in &self.highlights {
-            if range.start > plain_from {
-                runs.push(style.clone().to_run(range.start - plain_from));
-            }
-            runs.push(style.clone().highlight(*highlight).to_run(range.len()));
-            plain_from = range.end;
-        }
-        if plain_from < self.text.len() {
-            runs.push(style.clone().to_run(self.text.len() - plain_from));
-        }
-        runs
-    }
-}
-
-impl IntoElement for BlurbText {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
-impl Element for BlurbText {
-    type RequestLayoutState = ();
-    type PrepaintState = Option<PreparedBlurb>;
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
-    }
-
-    /// Takes the whole box and nothing more. The height is what the card's
-    /// column has left after the title and the author, which is exactly the
-    /// measure the clamp is wanted for.
-    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, Self::RequestLayoutState) {
-        let mut style = Style::default();
-        style.size.width = relative(1.0).into();
-        style.size.height = relative(1.0).into();
-        style.flex_grow = 1.0;
-        (window.request_layout(style, [], cx), ())
-    }
-
-    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut Self::RequestLayoutState, window: &mut Window, cx: &mut App) -> Self::PrepaintState {
-        let text_style = window.text_style();
-        let font_size = text_style.font_size.to_pixels(window.rem_size());
-        let line_height = text_style.line_height_in_pixels(window.rem_size());
-        if line_height <= Pixels::ZERO || bounds.size.width <= Pixels::ZERO {
-            return None;
-        }
-        let lines_that_fit = (f32::from(bounds.size.height) / f32::from(line_height)).floor() as usize;
-        if lines_that_fit == 0 {
-            return None;
-        }
-
-        let runs = self.runs(&text_style);
-        // Truncating before shaping is what puts the ellipsis *on* the last
-        // line rather than dropping the words that would not fit.
-        let mut wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
-        let (text, runs) = wrapper.truncate_wrapped_line(self.text.clone(), bounds.size.width, lines_that_fit, "…", &runs, TruncateFrom::End);
-        let lines = window.text_system().shape_text(text, font_size, &runs, Some(bounds.size.width), Some(lines_that_fit)).ok()?;
-        Some(PreparedBlurb { lines: lines.into_vec(), line_height })
-    }
-
-    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut Self::RequestLayoutState, prepaint: &mut Self::PrepaintState, window: &mut Window, cx: &mut App) {
-        let Some(prepared) = prepaint.take() else { return };
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            let mut origin = bounds.origin;
-            for line in &prepared.lines {
-                let _ = line.paint(origin, prepared.line_height, TextAlign::Left, None, window, cx);
-                origin.y += line.size(prepared.line_height).height;
-            }
-        });
-    }
 }
 
 /// Tags that end the line they are on. A blurb's structure is paragraphs and

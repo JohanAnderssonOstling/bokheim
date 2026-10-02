@@ -5,6 +5,7 @@
 //! send typed jobs to one application-owned backend thread.
 
 use crate::app::AppBackend;
+use crate::BackendError;
 use std::fmt;
 use sync_common::LibraryId;
 use tokio::sync::oneshot;
@@ -17,7 +18,6 @@ pub(crate) use native::Transport;
 mod protocol;
 pub use crate::library::LibraryCommand;
 pub(crate) mod requests;
-pub(crate) use crate::library::commands::library_requests;
 pub(crate) use crate::library::commands::LibraryReply;
 pub use requests::AppCommand;
 #[cfg(target_arch = "wasm32")]
@@ -43,10 +43,10 @@ pub mod coordinator_lifecycle;
 
 // Shared subscription API; transports own delivery and cancellation.
 impl Transport {
-    pub(crate) async fn notification_interest_transport(&self, browsing: bool) -> Result<async_channel::Receiver<()>, crate::BackendError> {
+    pub(crate) async fn notification_interest_transport(&self, browsing: bool) -> Result<async_channel::Receiver<()>, BackendError> {
         self.unit_subscription(AppCommand::SubscribeNotifications { browsing }).await
     }
-    pub(crate) async fn library_list_changes_transport(&self) -> Result<async_channel::Receiver<()>, crate::BackendError> {
+    pub(crate) async fn library_list_changes_transport(&self) -> Result<async_channel::Receiver<()>, BackendError> {
         self.unit_subscription(AppCommand::SubscribeLibraryList).await
     }
 }

@@ -27,9 +27,9 @@ pub use client_runtime::BackendError;
 /// through the application crate. New code should depend on `library-backend`.
 pub(crate) use library_backend::{asset_store, library, sync};
 pub use library_backend::{
-    BlobKey, BlobKind, BookDownloadStatus, BookPlacement, BookReader, BookSource, BoxedBookReader, ContentHash, DirId, DirectoryImport, DirectoryImportFile, DirectoryImportReader, DirectoryImportReaderFuture, DownloadProgress,
+    BookDownloadStatus, BookReader, BookSource, BoxedBookReader, ContentHash, DirId, DirectoryImport, DirectoryImportFile, DirectoryImportReader, DirectoryImportReaderFuture, DownloadProgress,
     DownloadProgressError, DownloadState, ImportFailure, ImportFailureKind, ImportProgress, ImportSource, ImportState, LibraryBrowseData, LibraryCommand, LibraryHandle, LibraryId, LibrarySession, LibrarySyncState, LibrarySyncStatus,
-    LibraryTransfers, RelativeBookPath, RelativeBookPathError, RelativeDirPath, RelativeDirPathError, ResolvedBookData, ScanProgress, TransferJobKind, TransferOrigin, TransferState, TransferStatus, ROOT_DIR_ID,
+    ResolvedBookData, ROOT_DIR_ID,
 };
 pub(crate) type DeviceAccountSession = library_backend::integration::LibraryAccountSession<app::BackendContext>;
 

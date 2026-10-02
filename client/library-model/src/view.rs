@@ -28,7 +28,7 @@ impl BookLocator {
     }
 
     pub fn content_hash(&self) -> ContentHash {
-        self.content_hash.clone()
+        self.content_hash
     }
 }
 
@@ -39,28 +39,6 @@ pub enum LibraryUpdate {
     Covers(Vec<ContentHash>),
     Download(crate::BookDownloadStatus),
     Scanning(bool),
-}
-
-/// Stable identity for a location in Bokheim's subject hierarchy.
-/// This is a taxonomy path, not a filesystem path.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SubjectPath(String);
-
-impl SubjectPath {
-    pub fn new(path: impl Into<String>) -> Self {
-        Self(path.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for SubjectPath {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
 }
 
 /// Limits hierarchical library browsing to one broad book family.
@@ -138,10 +116,27 @@ impl BrowseBookSort {
     }
 }
 
+/// A browsable node: a folder, or a route in the subject hierarchy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum BrowseLocation {
+    Folder(DirId),
+    Subject(i64),
+}
+
+impl std::fmt::Display for BrowseLocation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Folder(id) => write!(formatter, "folder:{id}"),
+            Self::Subject(route) => write!(formatter, "subject:{route}"),
+        }
+    }
+}
+
 /// One directly browsable child returned by a library hierarchy query.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowseRow {
-    pub id: String,
+    /// Labels and paths are display data.
+    pub id: BrowseLocation,
     pub name: String,
     /// Parent hierarchy for scoped search results; absent for direct children.
     pub path: Option<String>,
@@ -149,18 +144,10 @@ pub struct BrowseRow {
     pub downloaded_book_count: usize,
 }
 
-/// A titled segment of the flat browse child list. Ranges never include headers.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BrowseChipGroup {
-    pub parent: BrowseRow,
-    pub start: usize,
-    pub end: usize,
-}
-
-/// One directory in the canonical path to a folder browse location.
+/// One folder or subject in the displayed breadcrumb trail.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowsePathSegment {
-    pub id: String,
+    pub id: BrowseLocation,
     pub name: String,
 }
 
@@ -196,10 +183,13 @@ pub struct LibraryFormatCount {
     pub book_count: u32,
 }
 
+/// Synthetic root of the subject browse hierarchy.
+pub const ROOT_SUBJECT_ROUTE_ID: i64 = 0;
+
 /// Typed input shared by folder and subject browsing implementations.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryBrowseQuery {
-    pub location: String,
+    pub location: BrowseLocation,
     pub search: String,
     pub file_types: Vec<LibraryFileTypeFilter>,
     pub chip_sort: BrowseChipSort,
@@ -226,25 +216,6 @@ pub struct Dir {
     pub downloaded_book_count: usize,
 }
 
-/// One subject chip beside an author's name.
-///
-/// A leaf on its own frequently says nothing — "Communities", "20th century" —
-/// so the chip carries the parent it was reached through. A label can sit at
-/// several routes; `parent` is the one accounting for most of this author's
-/// books under that word, and is absent for a top-level subject.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuthorSubject {
-    pub label: String,
-    pub parent: Option<String>,
-}
-
-impl AuthorSubject {
-    pub fn new(label: String, parent: Option<String>) -> Self {
-        let parent = parent.map(|value| value.trim().to_owned()).filter(|value| !value.is_empty());
-        Self { label, parent }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AuthorSummary {
     pub id: AuthorId,
@@ -258,10 +229,6 @@ pub struct AuthorSummary {
     /// Capped by the query, so this is a prefix of the author's books rather
     /// than all of them.
     pub books: Vec<BookCardRow>,
-    /// What this author writes about: the subjects most of their books are
-    /// filed under, most-credited first and capped for display, which the
-    /// index draws as chips beside the name.
-    pub subjects: Vec<AuthorSubject>,
 }
 
 /// Everything a browsing card renders for one book.
@@ -272,14 +239,12 @@ pub struct BookCardRow {
     #[serde(default)]
     pub subtitle: Option<String>,
     pub author: String,
-    pub description: String,
     pub progress: f32,
     pub downloaded: bool,
     pub download_requested: bool,
     /// Canonical broad format used by filters, facets, and cover chips.
     pub format_category: LibraryFileTypeFilter,
     pub audiobook_duration_ms: Option<u64>,
-    pub audiobook_chapter_count: Option<usize>,
     /// Milliseconds since the Unix epoch when this book entered the library.
     /// Legacy rows without a timestamp use zero and sort after dated books.
     pub added_at: i64,
@@ -291,9 +256,6 @@ pub struct BookCardRow {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LibraryHomeView {
-    /// Unfinished books ordered by progress, highest first.
-    #[serde(default)]
-    pub most_progress: Vec<BookCardRow>,
     pub recently_read: Vec<BookCardRow>,
     pub recently_added: Vec<BookCardRow>,
 }
@@ -365,6 +327,12 @@ pub struct BookDetailCredit {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BookDetail {
     pub book: BookCardRow,
+    /// Navigation entry count for an audiobook, when its contents are known.
+    #[serde(default)]
+    pub audiobook_chapter_count: Option<usize>,
+    /// The publisher's blurb, as stored (HTML). Only the detail page shows it,
+    /// so browse queries never read it.
+    pub description: String,
     /// One live placement that can act as the source for copy/move actions.
     /// A detail screen is not itself scoped to a folder.
     pub source_directory_id: Option<String>,
@@ -373,9 +341,6 @@ pub struct BookDetail {
     /// link. The book itself is the trail's last crumb and is not repeated here.
     pub path: Vec<BrowsePathSegment>,
     pub authors: Vec<BookDetailAuthor>,
-    /// Canonical full paths. Frontends display their leaf and use the complete
-    /// value for navigation and accessible names.
-    pub subject_paths: Vec<String>,
     /// Narrators and translators, in the order the book credits them.
     pub credits: Vec<BookDetailCredit>,
     /// Where the reader is, named: "Against the Tide?" rather than a percentage
@@ -391,15 +356,6 @@ pub struct BookDetail {
     /// list that could never mark anything.
     pub current_target: Option<String>,
     pub toc: Vec<BookTocEntry>,
-    pub related: Vec<BookCardRow>,
-}
-
-/// One library search with title matches kept ahead of distinct author-only
-/// matches. A book that matches both is returned only in `title_matches`.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct LibrarySearchResult {
-    pub title_matches: Vec<BookCardRow>,
-    pub author_matches: Vec<BookCardRow>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -451,9 +407,9 @@ impl FolderSort {
 
 impl AuthorSummary {
     /// Authors file under their display name.
-    pub fn try_new(id: AuthorId, name: String, book_count: usize, books: Vec<BookCardRow>, subjects: Vec<AuthorSubject>) -> Result<Self, AuthorNameError> {
+    pub fn try_new(id: AuthorId, name: String, book_count: usize, books: Vec<BookCardRow>) -> Result<Self, AuthorNameError> {
         let name = AuthorName::parse(&name)?;
-        Ok(Self { id, name, book_count, books, subjects })
+        Ok(Self { id, name, book_count, books })
     }
     pub fn id(&self) -> AuthorId {
         self.id
@@ -466,9 +422,6 @@ impl AuthorSummary {
     }
     pub fn books(&self) -> &[BookCardRow] {
         &self.books
-    }
-    pub fn subjects(&self) -> &[AuthorSubject] {
-        &self.subjects
     }
 }
 
@@ -489,14 +442,14 @@ mod tests {
     #[test]
     fn author_summary_keeps_display_name_and_distinct_identity() {
         let id = agent_id_from_migration_seed(b"Kerstin Ekman");
-        let author = AuthorSummary::try_new(id, "Kerstin Ekman".to_owned(), 9, Vec::new(), Vec::new()).unwrap();
+        let author = AuthorSummary::try_new(id, "Kerstin Ekman".to_owned(), 9, Vec::new()).unwrap();
 
         assert_eq!(author.name().as_str(), "Kerstin Ekman", "the display name is what the reader sees");
 
         let first_id = agent_id_from_migration_seed(b"first Alex Smith");
         let second_id = agent_id_from_migration_seed(b"second Alex Smith");
-        let first = AuthorSummary::try_new(first_id, "Alex Smith".to_owned(), 1, Vec::new(), Vec::new()).unwrap();
-        let second = AuthorSummary::try_new(second_id, "Alex Smith".to_owned(), 2, Vec::new(), Vec::new()).unwrap();
+        let first = AuthorSummary::try_new(first_id, "Alex Smith".to_owned(), 1, Vec::new()).unwrap();
+        let second = AuthorSummary::try_new(second_id, "Alex Smith".to_owned(), 2, Vec::new()).unwrap();
 
         assert_eq!(first.name(), second.name());
         assert_ne!(first.id(), second.id());
@@ -506,7 +459,7 @@ mod tests {
 
     #[test]
     fn sorting_by_name_orders_by_the_display_name() {
-        let author = |display: &str| AuthorSummary::try_new(agent_id_from_migration_seed(display.as_bytes()), display.to_owned(), 1, Vec::new(), Vec::new()).unwrap();
+        let author = |display: &str| AuthorSummary::try_new(agent_id_from_migration_seed(display.as_bytes()), display.to_owned(), 1, Vec::new()).unwrap();
         let mut authors = vec![author("Kerstin Ekman"), author("Susanna Clarke"), author("Peter Englund")];
 
         AuthorSort::Name.sort(&mut authors);
@@ -517,9 +470,9 @@ mod tests {
     #[test]
     fn author_name_sort_is_case_insensitive_and_deterministic() {
         let mut authors = vec![
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"zelda"), "zelda".to_string(), 3, Vec::new(), Vec::new()).unwrap(),
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"Alice"), "Alice".to_string(), 1, Vec::new(), Vec::new()).unwrap(),
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"alice"), "alice".to_string(), 2, Vec::new(), Vec::new()).unwrap(),
+            AuthorSummary::try_new(agent_id_from_migration_seed(b"zelda"), "zelda".to_string(), 3, Vec::new()).unwrap(),
+            AuthorSummary::try_new(agent_id_from_migration_seed(b"Alice"), "Alice".to_string(), 1, Vec::new()).unwrap(),
+            AuthorSummary::try_new(agent_id_from_migration_seed(b"alice"), "alice".to_string(), 2, Vec::new()).unwrap(),
         ];
 
         AuthorSort::Name.sort(&mut authors);
@@ -529,9 +482,9 @@ mod tests {
     #[test]
     fn author_book_count_sort_uses_name_as_a_deterministic_tie_breaker() {
         let mut authors = vec![
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"Zelda"), "Zelda".to_string(), 2, Vec::new(), Vec::new()).unwrap(),
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"Alice"), "Alice".to_string(), 7, Vec::new(), Vec::new()).unwrap(),
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"Bob"), "Bob".to_string(), 2, Vec::new(), Vec::new()).unwrap(),
+            AuthorSummary::try_new(agent_id_from_migration_seed(b"Zelda"), "Zelda".to_string(), 2, Vec::new()).unwrap(),
+            AuthorSummary::try_new(agent_id_from_migration_seed(b"Alice"), "Alice".to_string(), 7, Vec::new()).unwrap(),
+            AuthorSummary::try_new(agent_id_from_migration_seed(b"Bob"), "Bob".to_string(), 2, Vec::new()).unwrap(),
         ];
 
         AuthorSort::BookCount.sort(&mut authors);

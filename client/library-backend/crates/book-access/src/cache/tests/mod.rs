@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+use std::time::Duration;
 use super::*;
 type BookCache = super::BookCache<TestStorage>;
 
@@ -7,9 +9,9 @@ fn source(id: u64, length: usize) -> RemoteFile {
 }
 
 async fn settled(cache: &BookCache) {
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(5), async {
         while cache.pending.load(Ordering::Acquire) != 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
@@ -243,7 +245,7 @@ async fn persistent_bundle_batches_holes_and_reopens_offline() {
 }
 
 #[derive(Clone, Debug)]
-struct TestStorage(Arc<std::sync::Mutex<rusqlite::Connection>>);
+struct TestStorage(Arc<Mutex<rusqlite::Connection>>);
 impl TestStorage {
     fn get(&self) -> Result<std::sync::MutexGuard<'_, rusqlite::Connection>, DatabaseError> {
         self.0.lock().map_err(DatabaseError::operation)
@@ -253,7 +255,7 @@ impl CacheStorage for TestStorage {
     fn open(path: &Path, initialize: fn(&rusqlite::Connection) -> rusqlite::Result<()>) -> Result<Self, DatabaseError> {
         let conn = rusqlite::Connection::open(path)?;
         initialize(&conn)?;
-        Ok(Self(Arc::new(std::sync::Mutex::new(conn))))
+        Ok(Self(Arc::new(Mutex::new(conn))))
     }
     fn command<T: super::super::storage::CacheSend + 'static>(
         &self, _priority: Priority, operation: impl FnOnce(&mut rusqlite::Connection) -> Result<T, DatabaseError> + super::super::storage::CacheSend + 'static,

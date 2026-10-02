@@ -126,7 +126,7 @@ impl MarkSession {
         if let Some(color) = color {
             annotation.color = color.to_owned();
         }
-        annotation.modified_at = now_millis();
+        annotation.state.modified_at = u64::try_from(now_millis()).expect("annotation timestamps must be nonnegative");
         self.update(annotation.clone(), what);
         Some(annotation)
     }
@@ -162,23 +162,11 @@ mod tests {
     const TEST_CONTENT_HASH: &str = concat!("00000000000000000000000000000000", "00000000000000000000000000000001");
 
     fn annotation(id: &str) -> ReaderAnnotation {
-        ReaderAnnotation {
-            id: id.to_owned(),
-            content_hash: sync_common::ContentHash::new(TEST_CONTENT_HASH),
-            anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/4!/4/2,/1:0,/1:8)".to_owned()),
-            exact_text: "a furrow".to_owned(),
-            style: AnnotationStyle::Highlight,
-            color: ui_components::READER_ANNOTATION_DEFAULT_COLOR.to_owned(),
-            note: String::new(),
-            created_at: 0,
-            modified_at: 0,
-            toc_ordinal: None,
-            progress: None,
-        }
+        ReaderAnnotation { id: id.to_owned(), state: book_model::AnnotationState { content_hash: sync_common::ContentHash::new(TEST_CONTENT_HASH), detail: book_model::AnnotationDetail { anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/4!/4/2,/1:0,/1:8)".to_owned()), exact_text: "a furrow".to_owned(), style: AnnotationStyle::Highlight, color: ui_components::READER_ANNOTATION_DEFAULT_COLOR.to_owned(), note: String::new(), created_at: 0, toc_ordinal: None, progress: None }, modified_at: 0, deleted: false } }
     }
 
     fn annotation_with_note(id: &str, note: &str) -> ReaderAnnotation {
-        ReaderAnnotation { note: note.to_owned(), ..annotation(id) }
+        { let mut annotation = annotation(id); annotation.state.detail.note = note.to_owned(); annotation }
     }
 
     #[test]

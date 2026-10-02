@@ -3,6 +3,8 @@
 //! These helpers only prepare lookup evidence. They do not mutate embedded
 //! book metadata or claim that a filename identifies an edition.
 
+use crate::matching::bibliographic_match_key;
+use crate::EditionIdentityQuery;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EditionIdentityEvidence {
     pub title: String,
@@ -32,10 +34,10 @@ fn overlapping_subtitles(value: &str) -> Option<String> {
     if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
         return None;
     }
-    let first = crate::matching::bibliographic_match_key(parts[1]);
+    let first = bibliographic_match_key(parts[1]);
     let later = title_without_parenthetical_segments(parts[2], true);
     // A repeated subtitle prefix can have a trailing publisher suffix.
-    let later = crate::matching::bibliographic_match_key(later.split(['-', '–', '—']).next()?.trim());
+    let later = bibliographic_match_key(later.split(['-', '–', '—']).next()?.trim());
     if later.split_whitespace().count() < 2 {
         return None;
     }
@@ -76,7 +78,7 @@ fn parse_identity_evidence(title: &str, filename: bool, anchor: Option<&str>) ->
         title
     } else if let [(start, end)] = candidates.as_slice() {
         format!("{}: {}", cleaned[..*start].replace('_', " "), cleaned[*end..].trim_start().replace('_', " "))
-    } else if candidates.len() > 1 && anchor.is_some_and(|anchor| !anchor.trim().is_empty() && crate::matching::bibliographic_match_key(&cleaned[..candidates[0].0]) == crate::matching::bibliographic_match_key(anchor)) {
+    } else if candidates.len() > 1 && anchor.is_some_and(|anchor| !anchor.trim().is_empty() && bibliographic_match_key(&cleaned[..candidates[0].0]) == bibliographic_match_key(anchor)) {
         let mut parts = Vec::new();
         let mut previous = 0;
         for (start, end) in &candidates {
@@ -249,7 +251,7 @@ fn title_without_parenthetical_segments(title: &str, keep_edition_notes: bool) -
     for (start, end) in delimited_segments(title) {
         outside.push_str(&title[previous..start]);
         let inside = &title[start + 1..end - 1];
-        let key = crate::matching::bibliographic_match_key(inside);
+        let key = bibliographic_match_key(inside);
         if key.split_whitespace().any(|word| crate::matching::is_title_qualifier_word(word) || (keep_edition_notes && matches!(word, "edition" | "ed" | "revised" | "revision" | "unabridged" | "translation" | "translated"))) {
             outside.push(' ');
             outside.push_str(&title[start..end]);
@@ -292,7 +294,7 @@ fn looks_like_person_name(value: &str) -> bool {
 /// Recover an author prefix only after a returned candidate corroborates both
 /// the name and the remaining title. This supplies verification evidence, not
 /// an edition ISBN or a replacement for known local author credits.
-pub fn verified_author_prefix_query(query: &crate::EditionIdentityQuery, result: &crate::EditionIdentityResult) -> Option<crate::EditionIdentityQuery> {
+pub fn verified_author_prefix_query(query: &EditionIdentityQuery, result: &crate::EditionIdentityResult) -> Option<EditionIdentityQuery> {
     use crate::matching::{author_credits, matching_author_count, NormalizedTitle};
     if query.query_id != result.query_id || result.candidates_truncated || !query.authors.is_empty() {
         return None;
@@ -336,11 +338,11 @@ pub fn filename_surname_title_matches(filename_title: &str, candidate_title: &st
         return false;
     }
     let title = edition_identity_evidence(&rest.replace('_', " ")).title;
-    let key = crate::matching::bibliographic_match_key(&title);
-    if key.is_empty() || key != crate::matching::bibliographic_match_key(candidate_title) {
+    let key = bibliographic_match_key(&title);
+    if key.is_empty() || key != bibliographic_match_key(candidate_title) {
         return false;
     }
-    let surname = crate::matching::bibliographic_match_key(surname);
+    let surname = bibliographic_match_key(surname);
     crate::matching::author_credits(authors).iter().any(|author| {
         crate::matching::author_match_keys(author).iter().any(|key| {
             let words = key.split_whitespace().filter(|word| crate::matching::author_suffix(word).is_none()).collect::<Vec<_>>();

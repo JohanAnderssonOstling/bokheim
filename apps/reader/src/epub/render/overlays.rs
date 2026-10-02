@@ -1,5 +1,6 @@
 //! EPUB annotation, footnote, and image overlays.
 
+use crate::invalidation::notify;
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, IntoElement, Window, px};
 use ui_components as components;
@@ -60,7 +61,7 @@ impl ReaderView {
                         .child(components::topbar_action_button("reader-footnote-open", "Go to note", gpui_component::IconName::ArrowRight, theme).on_click(cx.listener(|this, _, _, cx| this.navigate_from_footnote(cx))))
                         .child(components::topbar_action_button("reader-footnote-close", "Close", gpui_component::IconName::Close, theme).on_click(cx.listener(|this, _, _, cx| {
                             this.footnote = None;
-                            crate::invalidation::notify(cx, Component::ReaderShell, "footnote_closed");
+                            notify(cx, Component::ReaderShell, "footnote_closed");
                         }))),
                 )
                 .into_any_element(),
@@ -80,7 +81,7 @@ impl ReaderView {
                 .on_dismiss(move |_, cx| {
                     close_image.update(cx, |this, cx| {
                         this.image_preview = None;
-                        crate::invalidation::notify(cx, Component::ReaderShell, "image_preview_closed");
+                        notify(cx, Component::ReaderShell, "image_preview_closed");
                     })
                 })
                 .into_any_element(),

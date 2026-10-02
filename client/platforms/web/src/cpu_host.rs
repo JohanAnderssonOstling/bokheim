@@ -2,16 +2,13 @@
 
 use super::transport::{cpu_client, range::Server};
 use client_platform_runtime::executor::BoxedBackendFuture;
-use cpu_host::{BackendError, BookOperation, BookTask, BoxedCpuReader, CpuHost, CpuRequest, CpuResponse, InspectionCapabilities, Operation, ThumbnailBytes};
+use cpu_host::{BackendError, BookOperation, BookTask, BoxedCpuReader, CpuHost, CpuRequest, CpuResponse, Operation, ThumbnailBytes};
 use std::io::{Read, Seek, SeekFrom};
 use wasm_bindgen::JsValue;
 
 #[derive(Default)]
 pub struct WebHost;
 impl CpuHost for WebHost {
-    fn capabilities(&self) -> InspectionCapabilities {
-        InspectionCapabilities { mobi_pages: false }
-    }
     fn book(&self, task: BookTask, reader: BoxedCpuReader) -> BoxedBackendFuture<'_, Result<CpuResponse, BackendError>> {
         Box::pin(async move {
             let server = serve_reader(reader).map_err(BackendError::operation)?;

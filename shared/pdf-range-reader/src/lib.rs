@@ -1,5 +1,6 @@
 //! Materialize only the PDF objects needed for bibliographic inspection. Large
 //! image and attachment streams are never copied into the metadata document.
+
 mod dependencies;
 pub use dependencies::dependency_index;
 
@@ -593,7 +594,7 @@ fn stream_references(stream: &Stream) -> MetadataResult<(Xref, Dictionary)> {
     let bytes = stream.decompressed_content_with_limit(MAX_OBJECT)?;
     let mut position = 0;
     let mut xref = Xref::new(0, XrefType::CrossReferenceStream);
-    for pair in index.chunks_exact(2) {
+    for pair in index.as_chunks::<2>().0 {
         let first = u32::try_from(pair[0].as_i64()?)?;
         let count = u32::try_from(pair[1].as_i64()?)?;
         if count as usize > MAX_OBJECTS {
@@ -717,6 +718,7 @@ pub fn metadata(reader: impl Read + Seek) -> MetadataResult<Document> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
     use super::*;
     fn fixture() -> Vec<u8> {
         let mut document = Document::with_version("1.7");
@@ -735,7 +737,7 @@ mod tests {
         let mut bytes = fixture();
         let header_end = bytes.iter().position(|byte| *byte == b'\n').unwrap() + 1;
         bytes.splice(header_end..header_end, vec![b' '; 19119]);
-        let mut source = open(std::io::Cursor::new(bytes)).unwrap();
+        let mut source = open(Cursor::new(bytes)).unwrap();
         let root = source.document.trailer.get(b"Root").unwrap().as_reference().unwrap();
         assert_eq!(source.object(root).unwrap().as_dict().unwrap().get(b"Type").unwrap().as_name().unwrap(), b"Catalog");
         assert_eq!(source.offset_hint, Some(19119));
@@ -746,7 +748,7 @@ mod tests {
 
     #[test]
     fn validates_generation_and_original_offset_before_recovery_hint() {
-        let mut source = open(std::io::Cursor::new(fixture())).unwrap();
+        let mut source = open(Cursor::new(fixture())).unwrap();
         let root = source.document.trailer.get(b"Root").unwrap().as_reference().unwrap();
         let XrefEntry::Normal { offset, .. } = source.document.reference_table.get(root.0).unwrap() else { panic!() };
         let offset = u64::from(*offset);
@@ -763,9 +765,9 @@ mod tests {
     #[test]
     fn offset_recovery_is_bounded_and_rejects_duplicate_headers() {
         let mut bytes = fixture();
-        let root = open(std::io::Cursor::new(bytes.clone())).unwrap().document.trailer.get(b"Root").unwrap().as_reference().unwrap();
+        let root = open(Cursor::new(bytes.clone())).unwrap().document.trailer.get(b"Root").unwrap().as_reference().unwrap();
         bytes.extend_from_slice(format!("\n{} {} obj << /Type /Catalog >> endobj\n", root.0, root.1).as_bytes());
-        let mut source = open(std::io::Cursor::new(bytes)).unwrap();
+        let mut source = open(Cursor::new(bytes)).unwrap();
         assert!(source.object_at(0, root).unwrap_err().to_string().contains("no unique matching header"));
         source.offset_searches = MAX_OFFSET_SEARCHES;
         assert!(source.object_at(0, root).unwrap_err().to_string().contains("search limit"));

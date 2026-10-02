@@ -1,3 +1,4 @@
+use std::pin::Pin;
 use wasm_bindgen::prelude::*;
 const SHORT_WRITE: &str = "Short import write: browser storage is full";
 
@@ -56,8 +57,8 @@ impl OpenFile {
 /// A picker-owned browser source transferable to the import worker.
 /// JavaScript capabilities stay in this adapter rather than the import model.
 pub struct ImportSource(Option<Box<dyn FnOnce() -> JsValue + Send>>);
-pub type ImportReader = std::pin::Pin<Box<dyn futures_util::io::AsyncRead>>;
-pub type ImportReaderFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<ImportReader, String>>>>;
+pub type ImportReader = Pin<Box<dyn futures_util::io::AsyncRead>>;
+pub type ImportReaderFuture = Pin<Box<dyn std::future::Future<Output = Result<ImportReader, String>>>>;
 impl ImportSource {
     pub fn from_export(export: Option<Box<dyn FnOnce() -> JsValue + Send>>) -> Self {
         Self(export)

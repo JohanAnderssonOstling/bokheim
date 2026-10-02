@@ -1,5 +1,6 @@
 //! Cached pages shared by every library selection.
 
+use crate::services::UpdateControls;
 use gpui::{AnyView, AppContext, Context, Entity};
 
 use super::{BrowserShell, GlobalRoute, Libraries};
@@ -10,7 +11,7 @@ use crate::universal::sync::SyncPage;
 /// Owns the dependencies its pages are built from, so the shell only has to say
 /// which page it wants.
 pub(super) struct GlobalPages {
-    updates: Option<Entity<crate::services::UpdateControls>>,
+    updates: Option<Entity<UpdateControls>>,
     preferences: Entity<Preferences>,
     libraries: Entity<Libraries>,
     sync_page: Entity<SyncPage>,
@@ -22,7 +23,7 @@ impl GlobalPages {
     pub(super) fn apply_sync_event(&self, event: crate::SyncEvent, cx: &mut Context<BrowserShell>) {
         self.sync_page.update(cx, |page, cx| page.apply_event(event, cx));
     }
-    pub(super) fn new(updates: Option<Entity<crate::services::UpdateControls>>, preferences: Entity<Preferences>, libraries: Entity<Libraries>, sync_page: Entity<SyncPage>) -> Self {
+    pub(super) fn new(updates: Option<Entity<UpdateControls>>, preferences: Entity<Preferences>, libraries: Entity<Libraries>, sync_page: Entity<SyncPage>) -> Self {
         Self { updates, preferences, libraries, sync_page, settings: None }
     }
 

@@ -9,7 +9,7 @@ mod widgets;
 
 pub(crate) use self::pages::authors::AuthorsPage;
 pub(crate) use self::pages::browse::BrowseCrumb;
-pub(crate) use self::pages::browse::{BrowseKind, BrowsePage, BrowseSplitPlane, OpenTrash};
+pub(crate) use self::pages::browse::{BrowseKind, BrowseSplitPlane};
 pub(crate) use self::pages::home::HomePage;
 pub(crate) use self::pages::trash::TrashPage;
 pub(crate) use self::services::{BookDetailClosed, LibraryContext, LibraryUpdateBridge, OpenBook};

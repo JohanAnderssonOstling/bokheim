@@ -2,14 +2,9 @@
 
 use crate::library::LibrarySession;
 use crate::BackendError;
-use crate::ContentHash;
 use book_model::ReaderAnnotation;
 
 impl LibrarySession {
-    pub fn annotations(&self, content_hash: ContentHash) -> Result<Vec<ReaderAnnotation>, BackendError> {
-        self.db.annotations(content_hash).map_err(BackendError::operation)
-    }
-
     pub fn upsert_annotation(&self, annotation: &ReaderAnnotation) -> Result<(), BackendError> {
         self.db.upsert_annotation(annotation).map_err(BackendError::operation)?;
         Ok(())

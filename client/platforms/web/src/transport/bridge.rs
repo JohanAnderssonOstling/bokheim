@@ -1,4 +1,6 @@
 //! Database-worker endpoints for coordinator messages. Owns cancellation and ports.
+
+use std::rc::Weak;
 use super::protocol::BridgeEvent;
 use super::{byte_reply, error_message, field, object, BytesFuture, BytesOperation, Port};
 use futures_channel::oneshot;
@@ -19,7 +21,7 @@ struct Bridge {
     pending: super::pending::Pending<Cancel>,
 }
 thread_local! {static BRIDGE:RefCell<Option<Rc<Bridge>>>=const{RefCell::new(None)};}
-thread_local! {static ACTIVE_TRANSFERS:RefCell<HashMap<String, std::rc::Weak<Request>>>=RefCell::new(HashMap::new());}
+thread_local! {static ACTIVE_TRANSFERS:RefCell<HashMap<String, Weak<Request>>>=RefCell::new(HashMap::new());}
 fn bridge() -> Result<Rc<Bridge>, JsValue> {
     BRIDGE.with(|slot| {
         if let Some(bridge) = slot.borrow().as_ref() {
@@ -158,7 +160,7 @@ fn request(key: String, mut runner: Runner, progress: Option<Box<dyn Fn(f64)>>) 
         transfer.push(&bytes.buffer());
         js_sys::Reflect::set(&message, &"bytes".into(), &bytes)?;
     }
-    let state = Rc::new_cyclic(|weak: &std::rc::Weak<Request>| {
+    let state = Rc::new_cyclic(|weak: &Weak<Request>| {
         let message = weak.clone();
         let error = weak.clone();
         Request {
@@ -217,7 +219,7 @@ pub fn report_transfer_progress(key: &str, fraction: f64) {
         return;
     }
     ACTIVE_TRANSFERS.with(|active| {
-        let owner = active.borrow().get(key).and_then(std::rc::Weak::upgrade);
+        let owner = active.borrow().get(key).and_then(Weak::upgrade);
         if let Some(owner) = owner {
             if let Some(port) = owner.port.borrow().as_ref() {
                 let _ = port.raw.post_message(&object(&[("kind", "progress".into()), ("fraction", fraction.into())]));
@@ -256,7 +258,7 @@ impl BackgroundHost {
         let id = bridge.pending.next_id();
         let channel = MessageChannel::new()?;
         let (send, commands) = async_channel::bounded(1);
-        let state = Rc::new_cyclic(|weak: &std::rc::Weak<Background>| {
+        let state = Rc::new_cyclic(|weak: &Weak<Background>| {
             let message = weak.clone();
             let error = weak.clone();
             let port = Port::new(

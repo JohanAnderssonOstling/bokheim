@@ -13,10 +13,11 @@
 //! stays inside the page instead of escaping into the navigation rail, which
 //! has no way back. Moving focus scrolls the section it landed in into view.
 
+use crate::services::UpdateControls;
 use std::cell::Cell;
 use std::rc::Rc;
 
-use app_preferences::{BrowsingPreferencePatch, CoverText, LibraryView, UI_FONT_SIZE_MAX, UI_FONT_SIZE_MIN};
+use app_preferences::{BrowsingPreferencePatch, CoverText, UI_FONT_SIZE_MAX, UI_FONT_SIZE_MIN};
 use gpui::prelude::*;
 use gpui::{Bounds, Context, Entity, FocusHandle, Focusable, IntoElement, Pixels, Render, ScrollHandle, SharedString, Window, px};
 use ui_components as components;
@@ -66,7 +67,7 @@ struct SettingsSection {
 }
 
 pub(crate) struct SettingsPage {
-    updates: Option<Entity<crate::services::UpdateControls>>,
+    updates: Option<Entity<UpdateControls>>,
     _update_changes: Option<gpui::Subscription>,
     _library_changes: gpui::Subscription,
     preferences: Entity<Preferences>,
@@ -83,7 +84,7 @@ pub(crate) struct SettingsPage {
 }
 
 impl SettingsPage {
-    pub(crate) fn new(updates: Option<Entity<crate::services::UpdateControls>>, account: Entity<SyncPage>, preferences: Entity<Preferences>, active_library: Entity<Libraries>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(updates: Option<Entity<UpdateControls>>, account: Entity<SyncPage>, preferences: Entity<Preferences>, active_library: Entity<Libraries>, cx: &mut Context<Self>) -> Self {
         let update_changes = updates.as_ref().map(|updates| cx.observe(updates, |_, _, cx| cx.notify()));
         let libraries = cx.new(|cx| crate::universal::sync::LibrariesView::new(account.clone(), cx));
         let mut selected = active_library.read(cx).selected_id();
@@ -104,7 +105,6 @@ impl SettingsPage {
     /// decides which state needs attention; recoverable errors are never dialogs.
     fn update_row(&self, cx: &Context<Self>) -> Option<gpui::Div> {
         use crate::services::{UpdateAction, UpdateView};
-        use gpui_component::Disableable;
         let controls = self.updates.as_ref()?.read(cx);
         let (message, button) = match &controls.view {
             UpdateView::Hidden => return None,
@@ -116,11 +116,25 @@ impl SettingsPage {
             UpdateView::NeedsPermission => ("Permission needed".into(), Some(("Continue", UpdateAction::GrantPermission, false))),
             UpdateView::Activating => ("Updating your library…".into(), None),
         };
+        let message = if controls.worker_failed && button.is_some() { "Could not continue update. Try again.".to_owned() } else { message };
         let theme = components::browser_theme(cx);
         let mut row = gpui::div().w_full().px(px(components::SPACE_MD)).py(px(components::SPACE_SM)).min_h(px(56.0)).flex().flex_wrap().items_center().justify_between().gap(px(components::SPACE_SM)).child(message);
-        if let Some((label, action, disabled)) = button {
+        if let Some((label, action, preparing)) = button {
             let handler = controls.action.clone();
-            row = row.child(components::browser_settings_header_button("apply-update", label, true, theme).disabled(disabled).on_click(move |_, _, cx| handler(action.clone(), cx)));
+            let loading = preparing && !controls.worker_failed;
+            let label = if loading {
+                "Updating…"
+            } else if controls.worker_failed {
+                "Retry"
+            } else {
+                label
+            };
+            row = row.child(
+                components::browser_settings_header_button("apply-update", label, true, theme)
+                    .when(loading, |button| button.icon(gpui_component::IconName::LoaderCircle))
+                    .loading(loading)
+                    .on_click(move |_, _, cx| handler(action.clone(), cx)),
+            );
         }
         Some(self.section(UPDATES_SECTION, components::browser_settings_group(theme).child(row)))
     }
@@ -142,7 +156,6 @@ impl SettingsPage {
                 let appearance = showing.appearance_override().unwrap_or_else(|| components::theme::resolved_appearance(cx));
                 if appearance == app_preferences::ResolvedAppearance::Dark { "Dark".to_owned() } else { format!("{} light", showing.theme().label()) }
             }
-            BrowsingPreferencePatch::LibraryView(_) => showing.library_view().label().to_owned(),
             BrowsingPreferencePatch::UiFontSizePx(_) => format!("{}px", showing.ui_font_size_px()),
             BrowsingPreferencePatch::CoverText(_) => showing.cover_text().label().to_owned(),
             _ => String::new(),
@@ -161,7 +174,6 @@ impl SettingsPage {
             #[cfg(not(feature = "kobo"))]
             BrowsingPreferencePatch::Theme(_) => "Application theme",
             BrowsingPreferencePatch::Palette(_, _) => "Application theme",
-            BrowsingPreferencePatch::LibraryView(_) => "Book card style",
             BrowsingPreferencePatch::UiFontSizePx(_) => "UI font size",
             BrowsingPreferencePatch::CoverText(_) => "Cover text",
             _ => "Setting",
@@ -265,18 +277,6 @@ impl Render for SettingsPage {
         });
         let font_size = components::settings_stepper(decrease, format!("{current_font_size}px"), increase, theme);
 
-        let current_library_view = preferences.library_view();
-        let library_views = {
-            let mut choices = components::browser_settings_button_group(theme);
-            for (index, value) in [LibraryView::Covers, LibraryView::Detailed].into_iter().enumerate() {
-                let entity = entity.clone();
-                choices = choices.child(components::browser_settings_choice_button(format!("library-view-{index}"), value.label(), value == current_library_view, theme).on_click(move |_, _, cx| {
-                    entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::LibraryView(value), cx));
-                }));
-            }
-            choices
-        };
-
         let current_cover_text = preferences.cover_text();
         let cover_texts = {
             let mut choices = components::browser_settings_button_group(theme);
@@ -292,7 +292,7 @@ impl Render for SettingsPage {
         let appearance_settings = components::browser_settings_fieldset("Appearance", theme);
         #[cfg(not(feature = "kobo"))]
         let appearance_settings = appearance_settings.child(self.section(APPEARANCE_SECTION, components::browser_settings_compact_row("Application theme", application_themes, theme)));
-        let appearance_settings = appearance_settings.child(components::browser_settings_compact_row("Book card style", library_views, theme)).child(components::browser_settings_compact_row("Cover text", cover_texts, theme));
+        let appearance_settings = appearance_settings.child(components::browser_settings_compact_row("Cover text", cover_texts, theme));
         let appearance_settings = appearance_settings.child(self.section(FONT_SIZE_SECTION, components::browser_settings_compact_row("UI font size", font_size, theme)));
         // Every preference on this page lives in this group, so this is where a
         // preference that would not save reports.

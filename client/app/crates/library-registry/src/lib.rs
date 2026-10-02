@@ -3,6 +3,8 @@
 //! Registry and key/value behavior is identical on every target. Native code
 //! supplies real directory roots; the browser supplies SQLite VFS filenames.
 
+use std::error::Error;
+use std::io::ErrorKind;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -29,7 +31,7 @@ const SCHEMA: &str = r#"
     ) STRICT;
 "#;
 
-pub type RegistryResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+pub type RegistryResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LibraryEntry {
@@ -314,7 +316,7 @@ impl LibraryRegistry {
             for suffix in ["", "-wal", "-shm"] {
                 match std::fs::remove_file(format!("{database}{suffix}")) {
                     Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
                     Err(error) => return Err(error.into()),
                 }
             }
@@ -411,7 +413,7 @@ mod platform {
                     write_manifest(&LibraryEntry::new(*id, name, path.to_string_lossy())?)?;
                     return Ok(canonical_library_path(&path)?.to_string_lossy().into_owned());
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
                     if read_manifest(&path).ok().flatten().is_some_and(|(existing, _)| existing == *id) {
                         return Ok(canonical_library_path(&path)?.to_string_lossy().into_owned());
                     }
@@ -507,7 +509,7 @@ mod platform {
                 Ok(value) if value.file_type().is_symlink() => return Err(format!("refusing to remove symlinked library state file: {}", path.display()).into()),
                 Ok(value) if value.is_file() => fs::remove_file(path)?,
                 Ok(_) => return Err(format!("library state path is not a file: {}", path.display()).into()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
             }
         }
@@ -518,9 +520,9 @@ mod platform {
         let path = root.join(LIBRARY_MANIFEST_FILENAME);
         let contents = match fs::read_to_string(&path) {
             Ok(value) => value,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => match fs::read_to_string(root.join(METADATA_DIRECTORY).join("library.json")) {
+            Err(error) if error.kind() == ErrorKind::NotFound => match fs::read_to_string(root.join(METADATA_DIRECTORY).join("library.json")) {
                 Ok(value) => value,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
                 Err(error) => return Err(error.into()),
             },
             Err(error) => return Err(error.into()),
@@ -537,7 +539,7 @@ mod platform {
         let metadata = root.join(METADATA_DIRECTORY);
         match fs::create_dir(&metadata) {
             Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && metadata.is_dir() => {}
+            Err(error) if error.kind() == ErrorKind::AlreadyExists && metadata.is_dir() => {}
             Err(error) => return Err(error.into()),
         }
         write_manifest_file(entry, &root.join(METADATA_DIRECTORY).join("library.json"))?;
@@ -561,7 +563,7 @@ mod platform {
             file.write_all(b"\n")?;
             file.sync_all()?;
             fs::rename(&temporary, path)?;
-            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+            Ok::<_, Box<dyn Error + Send + Sync>>(())
         })();
         if result.is_err() {
             let _ = fs::remove_file(temporary);

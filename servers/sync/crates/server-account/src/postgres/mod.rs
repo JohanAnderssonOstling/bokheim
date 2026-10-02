@@ -1,6 +1,6 @@
 //! PostgreSQL adapter for Bokheim accounts, credentials, and sessions.
 
-mod activity;
+use std::sync::PoisonError;
 mod crypto;
 mod outbox;
 mod public_registration;
@@ -30,7 +30,6 @@ fn internal(error: impl std::fmt::Display) -> AuthError {
 
 pub struct PostgresAccountService {
     pool: PgPool,
-    activity: activity::AccountActivityRecorder,
     token_protector: crypto::TokenProtector,
     password_permits: Arc<tokio::sync::Semaphore>,
     identity_cache: IdentityCache,
@@ -65,7 +64,7 @@ impl IdentityCache {
     /// races the following database query changes this revision and prevents
     /// the stale query result from being inserted afterward.
     fn lookup(&self, token_hash: &str) -> (Option<AuthenticatedUser>, u64) {
-        let state = self.state.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = self.state.read().unwrap_or_else(PoisonError::into_inner);
         let now = Instant::now();
         let wall_now = Utc::now();
         let user = state.entries.get(token_hash).filter(|entry| entry.cache_expires_at > now && entry.token_expires_at > wall_now).map(|entry| entry.user.clone());
@@ -76,7 +75,7 @@ impl IdentityCache {
         if self.max_entries == 0 || self.ttl.is_zero() {
             return;
         }
-        let mut state = self.state.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
         if state.revision != revision {
             return;
         }
@@ -109,14 +108,14 @@ impl IdentityCache {
     }
 
     fn invalidate(&self, keep: impl Fn(&str, &CachedIdentity) -> bool) {
-        let mut state = self.state.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
         state.revision = state.revision.wrapping_add(1);
         state.entries.retain(|hash, entry| keep(hash, entry));
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.state.read().unwrap_or_else(std::sync::PoisonError::into_inner).entries.len()
+        self.state.read().unwrap_or_else(PoisonError::into_inner).entries.len()
     }
 }
 
@@ -128,7 +127,6 @@ impl PostgresAccountService {
     fn with_identity_cache(database: PostgresDatabase, token_key: AccountTokenKey, max_entries: usize, ttl: StdDuration) -> Self {
         let pool = database.pool().clone();
         Self {
-            activity: activity::AccountActivityRecorder::new(pool.clone()),
             pool,
             token_protector: crypto::TokenProtector::new(token_key),
             password_permits: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PASSWORD_OPERATIONS)),
@@ -251,19 +249,12 @@ fn email_taken(error: &sqlx::Error) -> bool {
 
 impl PostgresAccountService {
     pub async fn resolve_token(&self, token: &str) -> Result<AuthenticatedUser, AuthError> {
-        self.resolve_token_with_activity(token, true).await
-    }
-
-    async fn resolve_token_with_activity(&self, token: &str, record_activity: bool) -> Result<AuthenticatedUser, AuthError> {
         if !valid_urlsafe_secret(token, TOKEN_LEN) {
             return Err(AuthError::InvalidCredentials);
         }
         let token_hash = crypto::sha256_hex(token.as_bytes());
         let (cached, cache_revision) = self.identity_cache.lookup(&token_hash);
         if let Some(user) = cached {
-            if record_activity {
-                self.activity.record_authenticated(&user.user_id);
-            }
             return Ok(user);
         }
         let row: Option<(String, String, DateTime<Utc>, Option<String>)> = sqlx::query_as(
@@ -283,14 +274,7 @@ impl PostgresAccountService {
         };
         let user = AuthenticatedUser { user_id, email };
         self.identity_cache.insert_if_revision(cache_revision, token_hash, user.clone(), session_id, token_expires_at);
-        if record_activity {
-            self.activity.record_authenticated(&user.user_id);
-        }
         Ok(user)
-    }
-
-    pub fn record_sync_activity(&self, user_id: &str) {
-        self.activity.record_sync(user_id);
     }
 }
 
@@ -304,14 +288,6 @@ impl PostgresAccountService {
     }
 
     pub async fn login(&self, email: &str, password: &str) -> Result<IssuedSession, AuthError> {
-        self.login_with_admin_requirement(email, password, false).await
-    }
-
-    pub async fn login_admin(&self, email: &str, password: &str) -> Result<IssuedSession, AuthError> {
-        self.login_with_admin_requirement(email, password, true).await
-    }
-
-    async fn login_with_admin_requirement(&self, email: &str, password: &str, require_admin: bool) -> Result<IssuedSession, AuthError> {
         let Ok(email) = normalized_email(email) else {
             self.verify_password_dummy(if valid_password_size(password) { password.to_owned() } else { "invalid-password-size".to_string() }).await?;
             return Err(AuthError::InvalidCredentials);
@@ -320,16 +296,13 @@ impl PostgresAccountService {
             self.verify_password_dummy("invalid-password-size".to_string()).await?;
             return Err(AuthError::InvalidCredentials);
         }
-        let row: Option<(String, String, String, bool)> =
-            sqlx::query_as("SELECT id, email, password_hash, is_admin FROM users WHERE email = $1 AND password_hash IS NOT NULL").bind(&email).fetch_optional(&self.pool).await.map_err(internal)?;
-        let Some((user_id, stored_email, password_hash, is_admin)) = row else {
+        let row: Option<(String, String, String)> =
+            sqlx::query_as("SELECT id, email, password_hash FROM users WHERE email = $1 AND password_hash IS NOT NULL").bind(&email).fetch_optional(&self.pool).await.map_err(internal)?;
+        let Some((user_id, stored_email, password_hash)) = row else {
             self.verify_password_dummy(password.to_owned()).await?;
             return Err(AuthError::InvalidCredentials);
         };
         if !self.verify_password(password.to_owned(), password_hash).await? {
-            return Err(AuthError::InvalidCredentials);
-        }
-        if require_admin && !is_admin {
             return Err(AuthError::InvalidCredentials);
         }
         let mut transaction = self.pool.begin().await.map_err(internal)?;
@@ -533,24 +506,6 @@ impl PostgresAccountService {
 
     pub async fn ensure_configured_user(&self, email: &str, password: &str) -> Result<AuthenticatedUser, AuthError> {
         self.ensure_configured_user_impl(email, password).await
-    }
-
-    pub async fn ensure_configured_admin(&self, email: &str, password: &str) -> Result<AuthenticatedUser, AuthError> {
-        public_registration::validate_password(password)?;
-        let user = self.ensure_configured_user_impl(email, password).await?;
-        sqlx::query("UPDATE users SET is_admin=true WHERE id=$1").bind(&user.user_id).execute(&self.pool).await.map_err(internal)?;
-        Ok(user)
-    }
-
-    pub async fn resolve_admin_token(&self, token: &str) -> Result<AuthenticatedUser, AuthError> {
-        // Reading the operations dashboard is administration, not product
-        // engagement, and must not make an otherwise inactive account active.
-        let user = self.resolve_token_with_activity(token, false).await?;
-        let is_admin: bool = sqlx::query_scalar("SELECT is_admin FROM users WHERE id=$1").bind(&user.user_id).fetch_optional(&self.pool).await.map_err(internal)?.unwrap_or(false);
-        if !is_admin {
-            return Err(AuthError::Forbidden);
-        }
-        Ok(user)
     }
 
     pub async fn request_public_registration(&self, email: &str, password: &str) -> Result<(), AuthError> {

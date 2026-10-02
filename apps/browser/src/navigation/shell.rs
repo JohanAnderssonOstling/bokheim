@@ -4,9 +4,11 @@
 //! and per-library page state, and global pages own Settings.
 //! sidebar draws whichever route it is handed.
 
-use app_preferences::LibraryView;
+use crate::services::notify_error;
 use gpui::prelude::*;
 use gpui::{App, AppContext, Context, Entity, IntoElement, Render, Subscription, Window};
+#[cfg(not(target_arch = "wasm32"))]
+use library_backend::{ImportBookSource, LibraryCommand, PendingCommand, SessionCommand};
 use sync_common::LibraryId;
 #[cfg(not(target_arch = "wasm32"))]
 use sync_common::ROOT_DIR_ID;
@@ -27,7 +29,7 @@ pub struct BrowserShell {
     route: Route,
     content_footer: Option<gpui::AnyView>,
     pending_folder: Option<(LibraryId, sync_common::DirId, String)>,
-    pending_subject: Option<(LibraryId, String, String)>,
+    pending_subject: Option<(LibraryId, library_model::BrowseLocation, String)>,
     libraries: Entity<Libraries>,
     global_pages: GlobalPages,
     navigation: Entity<Sidebar>,
@@ -56,9 +58,6 @@ impl BrowserShell {
 
     pub(crate) fn clear_cached_book_details(&mut self, cx: &mut Context<Self>) {
         self.libraries.update(cx, |libraries, cx| libraries.clear_cached_book_details(cx));
-    }
-    pub(crate) fn set_library_view(&mut self, view: LibraryView, cx: &mut Context<Self>) {
-        self.libraries.update(cx, |libraries, cx| libraries.set_library_view(view, cx));
     }
     /// Builds the browser around the restored session and starts background subscriptions.
     pub fn new(services: AppServices, sync_state: Entity<crate::SyncState>, open_book: OpenBook, book_detail_closed: BookDetailClosed, preferences: Entity<Preferences>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -152,7 +151,7 @@ impl BrowserShell {
         cx.notify();
     }
 
-    pub(crate) fn open_subject(&mut self, library_id: LibraryId, location: String, label: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_subject(&mut self, library_id: LibraryId, location: library_model::BrowseLocation, label: String, window: &mut Window, cx: &mut Context<Self>) {
         self.pending_subject = Some((library_id, location, label));
         self.libraries.update(cx, |libraries, cx| libraries.select_library(library_id, cx));
         self.open_pending_subject(window, cx);
@@ -183,14 +182,20 @@ impl BrowserShell {
             let result = async {
                 let library = backend.library_for_import(library_id).await?;
                 let _progress = root.update_in(cx, |_, window, cx| crate::services::ImportProgressToast::start(library.clone(), window, cx)).ok();
-                let hash = library.import_owned_book(ROOT_DIR_ID, name, path.clone()).await?;
+                let hash = library
+                    .request::<app::ContentHash>(LibraryCommand::Session(SessionCommand::Pending(PendingCommand::ImportBook {
+                        parent_id: ROOT_DIR_ID,
+                        file_name: name,
+                        source: ImportBookSource::Stored { location: path.clone(), staged: None },
+                    })))
+                    .await?;
                 Ok::<_, String>(library_model::BookLocator::new(*library.id(), hash))
             }
             .await;
             let _ = std::fs::remove_file(&path);
             let _ = root.update_in(cx, |_, window, cx| match result {
                 Ok(locator) => open_book(locator, title, None, window, cx),
-                Err(error) => crate::services::notify_error("incoming-book-import-error", format!("Could not import downloaded book: {error}"), window, cx),
+                Err(error) => notify_error("incoming-book-import-error", format!("Could not import downloaded book: {error}"), window, cx),
             });
         })
         .detach();
@@ -198,7 +203,7 @@ impl BrowserShell {
 
     /// Reports a failure that occurred before an incoming file reached the library.
     pub fn incoming_import_failed(&mut self, error: String, window: &mut Window, cx: &mut Context<Self>) {
-        crate::services::notify_error("incoming-book-stage-error", format!("Could not stage incoming book: {error}"), window, cx);
+        notify_error("incoming-book-stage-error", format!("Could not stage incoming book: {error}"), window, cx);
     }
 
     /// Replaces the current page with the view represented by `route`.

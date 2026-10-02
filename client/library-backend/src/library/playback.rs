@@ -21,7 +21,9 @@ pub struct PlaybackMetadata {
     pub cover: Vec<u8>,
 }
 
-fn default_audio_format() -> book_model::BookFormat { book_model::BookFormat::M4b }
+fn default_audio_format() -> book_model::BookFormat {
+    book_model::BookFormat::M4b
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DirectPlayback {

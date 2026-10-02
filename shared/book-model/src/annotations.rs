@@ -1,3 +1,4 @@
+use std::fmt::Formatter;
 use crate::UnixMillis;
 use content_address::ContentHash;
 use serde::{Deserialize, Serialize};
@@ -59,34 +60,115 @@ impl PdfAnnotationAnchor {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq)]
 pub enum AnnotationAnchor {
     EpubCfi { cfi: String },
     Pdf { page_index: u32, rects: Vec<PdfAnnotationRect>, fallback_cfi: Option<String> },
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "AnnotationAnchor")]
-enum AnnotationAnchorBinary {
-    EpubCfi { cfi: String },
-    Pdf { page_index: u32, rects: Vec<PdfAnnotationRect>, fallback_cfi: Option<String> },
-}
-
-mod annotation_anchor_binary {
-    use super::{AnnotationAnchor, AnnotationAnchorBinary};
-    pub fn serialize<S: serde::Serializer>(value: &AnnotationAnchor, serializer: S) -> Result<S::Ok, S::Error> {
-        if serializer.is_human_readable() {
-            serde::Serialize::serialize(value, serializer)
-        } else {
-            AnnotationAnchorBinary::serialize(value, serializer)
+// The canonical anchor defines both its tagged JSON and historical binary
+// serialization directly. No parallel enum or conversion is involved.
+impl Serialize for AnnotationAnchor {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        match self {
+            Self::EpubCfi { cfi } => {
+                if !serializer.is_human_readable() {
+                    return serializer.serialize_newtype_variant("AnnotationAnchor", 0, "EpubCfi", cfi);
+                }
+                let mut fields = serializer.serialize_struct("AnnotationAnchor", 2)?;
+                fields.serialize_field("kind", "epub_cfi")?;
+                fields.serialize_field("cfi", cfi)?;
+                fields.end()
+            }
+            Self::Pdf { page_index, rects, fallback_cfi } => {
+                if !serializer.is_human_readable() {
+                    return serializer.serialize_newtype_variant("AnnotationAnchor", 1, "Pdf", &(page_index, rects, fallback_cfi));
+                }
+                let mut fields = serializer.serialize_struct("AnnotationAnchor", 4)?;
+                fields.serialize_field("kind", "pdf")?;
+                fields.serialize_field("page_index", page_index)?;
+                fields.serialize_field("rects", rects)?;
+                fields.serialize_field("fallback_cfi", fallback_cfi)?;
+                fields.end()
+            }
         }
     }
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<AnnotationAnchor, D::Error> {
+}
+impl<'de> Deserialize<'de> for AnnotationAnchor {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{EnumAccess, MapAccess, VariantAccess};
+        struct Anchor;
+        impl<'de> serde::de::Visitor<'de> for Anchor {
+            type Value = AnnotationAnchor;
+            fn expecting(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an annotation anchor")
+            }
+            fn visit_enum<A: EnumAccess<'de>>(self, access: A) -> Result<Self::Value, A::Error> {
+                let (tag, value) = access.variant::<u32>()?;
+                match tag {
+                    0 => Ok(AnnotationAnchor::EpubCfi { cfi: value.newtype_variant()? }),
+                    1 => {
+                        let (page_index, rects, fallback_cfi) = value.newtype_variant()?;
+                        Ok(AnnotationAnchor::Pdf { page_index, rects, fallback_cfi })
+                    }
+                    _ => Err(serde::de::Error::custom("invalid binary annotation anchor")),
+                }
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
+                let (mut kind, mut cfi, mut page_index, mut rects, mut fallback_cfi) = (None, None, None, None, None);
+                while let Some(key) = access.next_key::<String>()? {
+                    match key.as_str() {
+                        "kind" => {
+                            if kind.is_some() {
+                                return Err(serde::de::Error::duplicate_field("kind"));
+                            }
+                            kind = Some(access.next_value::<String>()?);
+                        }
+                        "cfi" => {
+                            if cfi.is_some() {
+                                return Err(serde::de::Error::duplicate_field("cfi"));
+                            }
+                            cfi = Some(access.next_value()?);
+                        }
+                        "page_index" => {
+                            if page_index.is_some() {
+                                return Err(serde::de::Error::duplicate_field("page_index"));
+                            }
+                            page_index = Some(access.next_value()?);
+                        }
+                        "rects" => {
+                            if rects.is_some() {
+                                return Err(serde::de::Error::duplicate_field("rects"));
+                            }
+                            rects = Some(access.next_value()?);
+                        }
+                        "fallback_cfi" => {
+                            if fallback_cfi.is_some() {
+                                return Err(serde::de::Error::duplicate_field("fallback_cfi"));
+                            }
+                            fallback_cfi = Some(access.next_value()?);
+                        }
+                        _ => {
+                            access.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+                match kind.as_deref().ok_or_else(|| serde::de::Error::missing_field("kind"))? {
+                    "epub_cfi" => Ok(AnnotationAnchor::EpubCfi { cfi: cfi.ok_or_else(|| serde::de::Error::missing_field("cfi"))? }),
+                    "pdf" => Ok(AnnotationAnchor::Pdf {
+                        page_index: page_index.ok_or_else(|| serde::de::Error::missing_field("page_index"))?,
+                        rects: rects.ok_or_else(|| serde::de::Error::missing_field("rects"))?,
+                        fallback_cfi: fallback_cfi.unwrap_or(None),
+                    }),
+                    other => Err(serde::de::Error::unknown_variant(other, &["epub_cfi", "pdf"])),
+                }
+            }
+        }
         if deserializer.is_human_readable() {
-            serde::Deserialize::deserialize(deserializer)
+            deserializer.deserialize_map(Anchor)
         } else {
-            AnnotationAnchorBinary::deserialize(deserializer)
+            deserializer.deserialize_enum("AnnotationAnchor", &["EpubCfi", "Pdf"], Anchor)
         }
     }
 }
@@ -112,88 +194,136 @@ impl AnnotationAnchor {
     }
 }
 
+/// Annotation content, shared by storage, readers, and synchronized state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AnnotationDetail {
+    pub anchor: AnnotationAnchor,
+    pub exact_text: String,
+    pub style: AnnotationStyle,
+    pub color: String,
+    pub note: String,
+    #[serde(deserialize_with = "deserialize_created_at")]
+    pub created_at: UnixMillis,
+    #[serde(default)]
+    pub toc_ordinal: Option<i64>,
+    #[serde(default)]
+    pub progress: Option<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct AnnotationState {
     pub content_hash: ContentHash,
-    #[serde(with = "annotation_anchor_binary")]
-    pub anchor: AnnotationAnchor,
-    pub exact_text: String,
-    pub style: AnnotationStyle,
-    pub color: String,
-    pub note: String,
-    pub created_at: UnixMillis,
+    pub detail: AnnotationDetail,
     pub modified_at: UnixMillis,
     pub deleted: bool,
-    /// Depth-first table-of-contents index locating the annotation for
-    /// reading-order display. Derived at write time; `None` sorts last.
-    #[serde(default)]
-    pub toc_ordinal: Option<i64>,
-    /// Position through the book on the shared 0–100 scale. Derived at
-    /// write time; `None` sorts after positioned rows.
-    #[serde(default)]
-    pub progress: Option<f32>,
 }
-
-impl AnnotationState {
-    /// Stored JSON detail blob, including the positioning fields. The row
-    /// columns are a cached projection of this blob for ordering.
-    pub fn detail_json(&self) -> Result<Vec<u8>, serde_json::Error> {
-        serde_json::to_vec(&StoredAnnotationDetail::from(self))
+impl std::ops::Deref for AnnotationState {
+    type Target = AnnotationDetail;
+    fn deref(&self) -> &Self::Target {
+        &self.detail
     }
-
-    pub fn from_detail(content_hash: ContentHash, detail: &[u8], modified_at: i64, deleted: bool) -> Result<Self, serde_json::Error> {
-        let detail = StoredAnnotationDetail::decode(detail)?;
-        Ok(Self {
-            content_hash,
-            anchor: detail.anchor,
-            exact_text: detail.exact_text,
-            style: detail.style,
-            color: detail.color,
-            note: detail.note,
-            created_at: detail.created_at.max(0) as u64,
-            modified_at: modified_at.max(0) as u64,
-            deleted,
-            toc_ordinal: detail.toc_ordinal,
-            progress: detail.progress,
-        })
+}
+impl std::ops::DerefMut for AnnotationState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.detail
     }
 }
 
-/// Opaque stored form of one annotation's detail. `modified_at` stays a row
-/// column (it changes on delete, when the blob is untouched); everything else
-/// the row projects for ordering also rides in the blob so sync decodes it.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct StoredAnnotationDetail {
-    pub anchor: AnnotationAnchor,
-    pub exact_text: String,
-    pub style: AnnotationStyle,
-    pub color: String,
-    pub note: String,
-    pub created_at: i64,
-    #[serde(default)]
-    pub toc_ordinal: Option<i64>,
-    #[serde(default)]
-    pub progress: Option<f32>,
+// Historical detail blobs used a signed creation timestamp and normalized
+// negative values to zero when rebuilding state. Keep that read compatibility.
+fn deserialize_created_at<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<UnixMillis, D::Error> {
+    if !deserializer.is_human_readable() {
+        return UnixMillis::deserialize(deserializer);
+    }
+    struct Timestamp;
+    impl<'de> serde::de::Visitor<'de> for Timestamp {
+        type Value = UnixMillis;
+        fn expecting(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            f.write_str("an annotation creation timestamp")
+        }
+        fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+            Ok(value)
+        }
+        fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+            Ok(value.max(0) as u64)
+        }
+    }
+    deserializer.deserialize_any(Timestamp)
 }
 
-impl StoredAnnotationDetail {
+impl AnnotationDetail {
     pub fn decode(bytes: &[u8]) -> Result<Self, serde_json::Error> {
         serde_json::from_slice(bytes)
     }
 }
-
-impl From<&AnnotationState> for StoredAnnotationDetail {
-    fn from(value: &AnnotationState) -> Self {
-        Self {
-            anchor: value.anchor.clone(),
-            exact_text: value.exact_text.clone(),
-            style: value.style.clone(),
-            color: value.color.clone(),
-            note: value.note.clone(),
-            created_at: i64::try_from(value.created_at).unwrap_or(i64::MAX),
-            toc_ordinal: value.toc_ordinal,
-            progress: value.progress,
+impl AnnotationState {
+    pub fn detail_json(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(&self.detail)
+    }
+    pub fn from_detail(content_hash: ContentHash, detail: &[u8], modified_at: i64, deleted: bool) -> Result<Self, serde_json::Error> {
+        Ok(Self { content_hash, detail: AnnotationDetail::decode(detail)?, modified_at: modified_at.max(0) as u64, deleted })
+    }
+    pub fn validate(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if self.created_at > i64::MAX as u64 || self.modified_at > i64::MAX as u64 {
+            return Err("annotation timestamps exceed the database range".into());
         }
+        if self.toc_ordinal.is_some_and(|ordinal| ordinal < 0) {
+            return Err("annotation TOC ordinal must be non-negative".into());
+        }
+        if self.progress.is_some_and(|progress| !progress.is_finite() || !(0.0..=100.0).contains(&progress)) {
+            return Err("annotation progress must be finite and between 0 and 100".into());
+        }
+        Ok(())
+    }
+}
+
+// Preserve the historical flat network/JSON schema and positional register
+// encoding while keeping the annotation's content defined in exactly one type.
+impl Serialize for AnnotationState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if !serializer.is_human_readable() {
+            return (&self.content_hash, &self.detail.anchor, &self.exact_text, &self.style, &self.color, &self.note, self.created_at, self.modified_at, self.deleted, self.toc_ordinal, self.progress).serialize(serializer);
+        }
+        #[derive(Serialize)]
+        struct Fields<'a> {
+            content_hash: &'a ContentHash,
+            #[serde(flatten)]
+            detail: &'a AnnotationDetail,
+            modified_at: UnixMillis,
+            deleted: bool,
+        }
+        Fields { content_hash: &self.content_hash, detail: &self.detail, modified_at: self.modified_at, deleted: self.deleted }.serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for AnnotationState {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if !deserializer.is_human_readable() {
+            let (content_hash, anchor, exact_text, style, color, note, created_at, modified_at, deleted, toc_ordinal, progress): (
+                ContentHash,
+                AnnotationAnchor,
+                String,
+                AnnotationStyle,
+                String,
+                String,
+                UnixMillis,
+                UnixMillis,
+                bool,
+                Option<i64>,
+                Option<f32>,
+            ) = Deserialize::deserialize(deserializer)?;
+            return Ok(Self { content_hash, detail: AnnotationDetail { anchor, exact_text, style, color, note, created_at, toc_ordinal, progress }, modified_at, deleted });
+        }
+        #[derive(Deserialize)]
+        struct Fields {
+            content_hash: ContentHash,
+            #[serde(flatten)]
+            detail: AnnotationDetail,
+            modified_at: UnixMillis,
+            #[serde(default)]
+            deleted: bool,
+        }
+        let fields = Fields::deserialize(deserializer)?;
+        Ok(Self { content_hash: fields.content_hash, detail: fields.detail, modified_at: fields.modified_at, deleted: fields.deleted })
     }
 }
 
@@ -225,16 +355,18 @@ mod tests {
     fn detail_blob_round_trips_positioning() {
         let state = AnnotationState {
             content_hash: ContentHash::new(&"a".repeat(64)),
-            anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/2)"),
-            exact_text: "Text".to_owned(),
-            style: AnnotationStyle::Underline,
-            color: "#fff".to_owned(),
-            note: "note".to_owned(),
-            created_at: 7,
+            detail: crate::AnnotationDetail {
+                anchor: AnnotationAnchor::epub_cfi("epubcfi(/6/2)"),
+                exact_text: "Text".to_owned(),
+                style: AnnotationStyle::Underline,
+                color: "#fff".to_owned(),
+                note: "note".to_owned(),
+                created_at: 7,
+                toc_ordinal: Some(5),
+                progress: Some(42.5),
+            },
             modified_at: 9,
             deleted: false,
-            toc_ordinal: Some(5),
-            progress: Some(42.5),
         };
         let decoded = AnnotationState::from_detail(state.content_hash.clone(), &state.detail_json().unwrap(), 9, false).unwrap();
         assert_eq!(decoded, state);

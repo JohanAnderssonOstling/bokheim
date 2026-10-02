@@ -48,7 +48,7 @@ pub fn read_unified_taxonomy_connection(connection: &Connection, source: &str) -
     for row in rows {
         let (concept_id, preferred_label) = row.map_err(|error| format!("failed to read taxonomy concept {source}: {error}"))?;
         let parent_ids = parents.remove(&concept_id).unwrap_or_default();
-        concepts.push(UnifiedConceptDefinition::new(concept_id.clone(), preferred_label, parent_ids, selectors.remove(&concept_id).unwrap_or_default()));
+        concepts.push(UnifiedConceptDefinition::new(concept_id, preferred_label, parent_ids, selectors.remove(&concept_id).unwrap_or_default()));
     }
     Ok(concepts)
 }

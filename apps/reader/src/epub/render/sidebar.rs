@@ -1,5 +1,6 @@
 //! EPUB contents, annotation, and settings sidebar tabs.
 
+use crate::invalidation::notify;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, IntoElement, Window};
 use library_backend::ReaderAnnotation;
@@ -13,7 +14,7 @@ impl ReaderView {
     fn render_sidebar_tabs(&self, active: SidebarTab, theme: components::BrowserTheme, cx: &mut Context<Self>) -> AnyElement {
         state_panel::reader_sidebar_tabs("reader-sidebar-tabs", &cx.entity(), active, true, theme, |tab, this, cx| {
             state_panel::select_tab(&mut this.sidebar, tab, cx);
-            crate::invalidation::notify(cx, Component::ReaderShell, "sidebar_tab_changed");
+            notify(cx, Component::ReaderShell, "sidebar_tab_changed");
         })
     }
 
@@ -25,7 +26,7 @@ impl ReaderView {
             #[cfg(feature = "kobo")]
             {
                 this.sidebar.close();
-                crate::invalidation::notify(cx, Component::ReaderShell, "toc_navigated");
+                notify(cx, Component::ReaderShell, "toc_navigated");
             }
         });
         components::reader_toc(theme).child(toc).into_any_element()

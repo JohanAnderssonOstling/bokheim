@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["random-ids"]
-random-ids = ["uuid/v4"]
 test-support = []
 
 [dependencies]

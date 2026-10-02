@@ -8,5 +8,5 @@
 //! Native filesystem scanning only; consumers gate usage to non-wasm targets.
 pub mod estimate;
 pub mod filesystem_scan;
+pub mod ingestion;
 
-pub use estimate::estimate_folders_cancellable;

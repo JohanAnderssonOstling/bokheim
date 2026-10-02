@@ -15,16 +15,9 @@ use super::{GlobalRoute, Libraries, LibraryRoute, Navigate, Route};
 /// The rail's destinations, in the order it draws them. The keyboard walks this
 /// same list, so a shortcut can never land somewhere other than the neighbour
 /// the reader can see.
-pub(crate) const RAIL_ROUTES: [Route; 5] =
-    [Route::Library(LibraryRoute::Home), Route::Library(LibraryRoute::Folders), Route::Library(LibraryRoute::Subjects), Route::Library(LibraryRoute::Authors), Route::Global(GlobalRoute::Settings)];
+pub(crate) const RAIL_ROUTES: [Route; 5] = [Route::Library(LibraryRoute::Home), Route::Library(LibraryRoute::Folders), Route::Library(LibraryRoute::Subjects), Route::Library(LibraryRoute::Authors), Route::Global(GlobalRoute::Settings)];
 
-const PRIMARY_ROUTES: [Route; 5] = [
-    Route::Library(LibraryRoute::Home),
-    Route::Library(LibraryRoute::Folders),
-    Route::Library(LibraryRoute::Subjects),
-    Route::Library(LibraryRoute::Authors),
-    Route::Global(GlobalRoute::Settings),
-];
+const PRIMARY_ROUTES: [Route; 5] = [Route::Library(LibraryRoute::Home), Route::Library(LibraryRoute::Folders), Route::Library(LibraryRoute::Subjects), Route::Library(LibraryRoute::Authors), Route::Global(GlobalRoute::Settings)];
 
 /// Where the keyboard is inside the open library switcher.
 ///

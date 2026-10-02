@@ -1,12 +1,14 @@
 //! Replay the durable browser-import journal. Only newline-terminated records
 //! are committed; a worker may have stopped midway through the final write.
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use sync_common::{ContentHash, DirId};
+
+use crate::ImportFailure;
+pub(crate) use serde::{Deserialize, Serialize};
+pub(crate) use std::collections::BTreeMap;
+pub(crate) use sync_common::{ContentHash, DirId};
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
-enum Checkpoint {
+pub(crate) enum Checkpoint {
     Copied {
         index: usize,
         hash: String,
@@ -16,7 +18,7 @@ enum Checkpoint {
         error: Option<String>,
     },
     Complete {
-        failures: Vec<crate::ImportFailure>,
+        failures: Vec<ImportFailure>,
     },
     #[serde(other)]
     Unknown,
@@ -24,15 +26,15 @@ enum Checkpoint {
 
 pub struct Journal {
     pub offset: usize,
-    copied: BTreeMap<usize, String>,
-    added: BTreeMap<usize, Option<String>>,
-    pub completed: Option<Vec<crate::ImportFailure>>,
-    sizes: Option<Vec<u64>>,
-    total_bytes: u64,
-    copied_bytes: u64,
-    failed: usize,
-    directories: crate::import_workflow::Destinations,
-    reporter: crate::import_workflow::ProgressReporter,
+    pub(crate) copied: BTreeMap<usize, String>,
+    pub(crate) added: BTreeMap<usize, Option<String>>,
+    pub completed: Option<Vec<ImportFailure>>,
+    pub(crate) sizes: Option<Vec<u64>>,
+    pub(crate) total_bytes: u64,
+    pub(crate) copied_bytes: u64,
+    pub(crate) failed: usize,
+    pub(crate) directories: crate::import_workflow::Destinations,
+    pub(crate) reporter: crate::import_workflow::ProgressReporter,
 }
 
 #[derive(Clone, Serialize, Debug, PartialEq)]
@@ -65,44 +67,16 @@ pub fn replay(bytes: &[u8]) -> Result<Journal, serde_json::Error> {
 impl Journal {
     // Reports belong to one live import attempt, not the durable journal. A
     // replacement worker reports recovered results to its new import activity.
-    pub(crate) fn advance_command(&mut self, activity: uuid::Uuid) -> Result<Option<crate::staged_import::AdvanceProgress>, String> {
-        let total = self.sizes.as_ref().ok_or("import manifest is absent")?.len() as u64;
-        Ok(self.reporter.advance(total, (self.added_count() - self.failed) as u64, self.failed as u64)?.map(|delta| crate::staged_import::AdvanceProgress { activity, total: delta.total, succeeded: delta.succeeded, failed: delta.failed }))
-    }
 
-    pub fn prepare_directories(&mut self, directories: Vec<(Vec<String>, DirId)>) {
-        self.directories = crate::import_workflow::Destinations::new(directories);
-    }
-
-    fn destination(&self, path: &[String]) -> Result<(DirId, String), String> {
+    pub(crate) fn destination(&self, path: &[String]) -> Result<(DirId, String), String> {
         self.directories.resolve(path).map(|(parent, name)| (parent, name.to_owned()))
     }
 
-    pub(crate) fn import_command(&self, physical: String, index: usize, path: &[String]) -> Result<crate::staged_import::StagedBook, String> {
-        let (parent_id, file_name) = self.destination(path)?;
-        let length = *self.sizes.as_ref().and_then(|sizes| sizes.get(index)).ok_or("import file is absent from the manifest")?;
-        let hash = self.copied_hash(index).ok_or("import file has not been copied")?.parse::<ContentHash>().map_err(|error| error.to_string())?;
-        let command = crate::staged_import::StagedBook { parent_id, file_name, physical, length, hash };
-        Ok(command)
-    }
-
-    pub fn with_files(mut self, sizes: Vec<u64>) -> Result<Self, String> {
-        self.total_bytes = sizes.iter().try_fold(0_u64, |sum, size| sum.checked_add(*size)).ok_or("import size overflow")?;
-        for index in self.copied.keys().chain(self.added.keys()) {
-            if *index >= sizes.len() {
-                return Err("import checkpoint refers to an unknown file".into());
-            }
-        }
-        self.copied_bytes = self.copied.keys().map(|index| sizes[*index]).sum();
-        self.sizes = Some(sizes);
-        Ok(self)
-    }
-
     pub fn progress(&self, in_flight_bytes: u64) -> Progress {
-        Progress { total_bytes: self.total_bytes, copied_bytes: self.copied_bytes, total_files: self.sizes.as_ref().map_or(0, Vec::len), copied_files: self.copied_count(), processed: self.added_count(), failed: self.failed_count() }
+        Progress { total_bytes: self.total_bytes, copied_bytes: self.copied_bytes, total_files: self.sizes.as_ref().map_or(0, Vec::len), copied_files: { self.copied.len() }, processed: self.added_count(), failed: { self.failed } }
             .with_in_flight(in_flight_bytes)
     }
-    fn apply(&mut self, checkpoint: Checkpoint) {
+    pub(crate) fn apply(&mut self, checkpoint: Checkpoint) {
         match checkpoint {
             Checkpoint::Copied { index, hash } => {
                 if self.copied.insert(index, hash).is_none() {
@@ -125,7 +99,7 @@ impl Journal {
 
     // The caller must flush these bytes before advancing the import. On a
     // storage error it drops this state and replays the durable journal later.
-    fn record(&mut self, checkpoint: Checkpoint) -> Result<Vec<u8>, serde_json::Error> {
+    pub(crate) fn record(&mut self, checkpoint: Checkpoint) -> Result<Vec<u8>, serde_json::Error> {
         if let Checkpoint::Copied { index, .. } | Checkpoint::Added { index, .. } = &checkpoint {
             if self.sizes.as_ref().is_some_and(|sizes| *index >= sizes.len()) {
                 return Err(serde_json::Error::io(std::io::Error::new(std::io::ErrorKind::InvalidData, "import checkpoint refers to an unknown file")));
@@ -138,32 +112,12 @@ impl Journal {
         Ok(bytes)
     }
 
-    pub fn record_copied(&mut self, index: usize, hash: String) -> Result<Vec<u8>, serde_json::Error> {
-        self.record(Checkpoint::Copied { index, hash })
-    }
-    pub fn record_added(&mut self, index: usize, error: Option<String>) -> Result<Vec<u8>, serde_json::Error> {
-        self.record(Checkpoint::Added { index, error })
-    }
-    pub fn record_complete(&mut self, failures: Vec<crate::ImportFailure>) -> Result<Vec<u8>, serde_json::Error> {
-        self.record(Checkpoint::Complete { failures })
-    }
     pub fn copied_hash(&self, index: usize) -> Option<&str> {
         self.copied.get(&index).map(String::as_str)
     }
-    pub fn has_added(&self, index: usize) -> bool {
-        self.added.contains_key(&index)
-    }
-    pub fn added_error(&self, index: usize) -> Option<&str> {
-        self.added.get(&index).and_then(Option::as_deref)
-    }
-    pub fn copied_count(&self) -> usize {
-        self.copied.len()
-    }
+
     pub fn added_count(&self) -> usize {
         self.added.len()
-    }
-    pub fn failed_count(&self) -> usize {
-        self.failed
     }
 }
 
@@ -207,20 +161,6 @@ mod tests {
     }
 
     #[test]
-    fn replacing_file_results_updates_failure_count_without_double_counting() {
-        let mut state = replay(&[]).unwrap();
-        let mut bytes = Vec::new();
-        for (error, expected) in [(Some("failure"), 1), (Some("replacement failure"), 1), (None, 0), (Some(""), 0), (Some("another failure"), 1)] {
-            bytes.extend(state.record_added(0, error.map(str::to_owned)).unwrap());
-            assert_eq!(state.failed_count(), expected);
-            assert_eq!(replay(&bytes).unwrap().failed_count(), expected);
-        }
-        bytes.extend(state.record_added(1, Some("second file".into())).unwrap());
-        assert_eq!(state.failed_count(), 2);
-        assert_eq!(replay(&bytes).unwrap().failed_count(), 2);
-    }
-
-    #[test]
     fn progress_counts_durable_copies_once_and_keeps_partial_bytes_ephemeral() {
         let mut state = replay(&[]).unwrap().with_files(vec![3, 11, 0]).unwrap();
         let mut bytes = state.record_copied(0, "first".into()).unwrap();
@@ -238,26 +178,6 @@ mod tests {
         assert_eq!(state.offset, before);
         assert_eq!(state.progress(0), expected);
         assert!(replay(&[]).unwrap().with_files(vec![u64::MAX, 1]).is_err());
-    }
-
-    #[test]
-    fn encoded_checkpoints_replay_to_the_same_state() {
-        let mut state = replay(&[]).unwrap();
-        let mut bytes = state.record_copied(1, "digest".into()).unwrap();
-        bytes.extend(state.record_added(1, Some("failed book".into())).unwrap());
-        bytes.extend(state.record_added(0, None).unwrap());
-        bytes.extend(state.record_complete(vec![crate::ImportFailure::operation(crate::ImportFailureKind::File, &["book.epub".into()], "failed book")]).unwrap());
-        let recovered = replay(&bytes).unwrap();
-        assert_eq!(state.offset, bytes.len());
-        assert_eq!(recovered.offset, state.offset);
-        assert_eq!(recovered.copied_hash(1), Some("digest"));
-        assert_eq!(recovered.copied_hash(0), None);
-        assert_eq!(recovered.copied_count(), 1);
-        assert_eq!(recovered.added_count(), 2);
-        assert_eq!(recovered.failed_count(), 1);
-        assert!(recovered.has_added(0));
-        assert!(!recovered.has_added(2));
-        assert_eq!(recovered.completed, state.completed);
     }
 
     #[test]

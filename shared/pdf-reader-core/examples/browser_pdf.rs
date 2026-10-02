@@ -1,4 +1,8 @@
 #![cfg(target_arch = "wasm32")]
+
+use std::io::{Error, SeekFrom};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use pdf_reader_core::{
     PageRenderKey, PdfDocumentSession,
     browser::{BrowserSession, document_count},
@@ -10,14 +14,14 @@ use wasm_bindgen::prelude::*;
 struct SparsePdf {
     bytes: Vec<u8>,
     position: u64,
-    reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    reads: Arc<AtomicUsize>,
 }
 impl std::io::Read for SparsePdf {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
         const SIZE: u64 = 64 * 1024 * 1024;
         let n = out.len().min((SIZE - self.position.min(SIZE)) as usize).min(997);
-        if self.reads.fetch_add(n, std::sync::atomic::Ordering::Relaxed) + n > 1024 * 1024 {
-            return Err(std::io::Error::other("PDF source exceeded 1 MiB read budget"));
+        if self.reads.fetch_add(n, Ordering::Relaxed) + n > 1024 * 1024 {
+            return Err(Error::other("PDF source exceeded 1 MiB read budget"));
         }
         let end_start = SIZE - self.bytes.len() as u64;
         for (i, byte) in out[..n].iter_mut().enumerate() {
@@ -35,13 +39,13 @@ impl std::io::Read for SparsePdf {
     }
 }
 impl std::io::Seek for SparsePdf {
-    fn seek(&mut self, from: std::io::SeekFrom) -> std::io::Result<u64> {
+    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
         let n = match from {
-            std::io::SeekFrom::Start(n) => i128::from(n),
-            std::io::SeekFrom::Current(n) => i128::from(self.position) + i128::from(n),
-            std::io::SeekFrom::End(n) => 64 * 1024 * 1024 + i128::from(n),
+            SeekFrom::Start(n) => i128::from(n),
+            SeekFrom::Current(n) => i128::from(self.position) + i128::from(n),
+            SeekFrom::End(n) => 64 * 1024 * 1024 + i128::from(n),
         };
-        self.position = u64::try_from(n).map_err(std::io::Error::other)?;
+        self.position = u64::try_from(n).map_err(Error::other)?;
         Ok(self.position)
     }
 }
@@ -62,7 +66,7 @@ pub async fn check_pdf(bytes: Vec<u8>) -> Result<String, JsValue> {
         .await;
         drop(cancelled);
         assert_eq!(document_count().await.map_err(|e| e.to_string())?, initial);
-        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reads = Arc::new(AtomicUsize::new(0));
         let counter = reads.clone();
         let session = BrowserSession::load(move || PdfDocumentSession::from_reader("browser fixture", SparsePdf { bytes, position: 0, reads: counter })).await.map_err(|e| e.to_string())?;
         assert_eq!(session.info().page_count(), 2);
@@ -85,7 +89,7 @@ pub async fn check_pdf(bytes: Vec<u8>) -> Result<String, JsValue> {
             assert!(text.contains(if page_index == 0 { "First searchable page" } else { "Second searchable page" }), "{text}");
             let zoomed = session.render(PageRenderKey::with_margin_trim(page_index, 900, false)).await.map_err(|e| e.to_string())?;
             let (_, _, _, _, zoomed_layout, _) = zoomed.into_parts();
-            assert!(std::sync::Arc::ptr_eq(&layout, &zoomed_layout), "zoom must reuse full-page text analysis across the worker boundary");
+            assert!(Arc::ptr_eq(&layout, &zoomed_layout), "zoom must reuse full-page text analysis across the worker boundary");
             for width in [600, 900] {
                 let trimmed = session.render(PageRenderKey::with_margin_trim(page_index, width, true)).await.map_err(|e| e.to_string())?;
                 let (_, _, _, _, trimmed_layout, _) = trimmed.into_parts();
@@ -109,7 +113,7 @@ pub async fn check_pdf(bytes: Vec<u8>) -> Result<String, JsValue> {
         assert_eq!(document_count().await.map_err(|e| e.to_string())?, initial);
         assert!(BrowserSession::load(|| PdfDocumentSession::from_bytes("invalid", b"not a PDF".to_vec())).await.is_err());
         assert_eq!(document_count().await.map_err(|e| e.to_string())?, initial);
-        assert!(reads.load(std::sync::atomic::Ordering::Relaxed) < 1024 * 1024);
+        assert!(reads.load(Ordering::Relaxed) < 1024 * 1024);
         Ok("PASS: sparse 64 MiB source with <1 MiB reads, open, two page rasters, text selection, search, shared-session disposal, cancellation, invalid PDF".into())
     }
     check(bytes).await.map_err(|e| JsValue::from_str(&e))

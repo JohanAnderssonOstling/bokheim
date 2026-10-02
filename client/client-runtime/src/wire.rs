@@ -5,18 +5,19 @@
 //! bytes across a shared worker boundary; native hosts pass them between the
 //! backend thread and the UI unchanged.
 
+use crate::BackendError;
 // Version 2 carries structured errors instead of plain error strings.
 const WIRE_HEADER: &[u8; 5] = b"BKHW\x02";
 
-pub fn encode_worker_message<T: serde::Serialize + ?Sized>(message: &T) -> Result<Vec<u8>, crate::BackendError> {
+pub fn encode_worker_message<T: serde::Serialize + ?Sized>(message: &T) -> Result<Vec<u8>, BackendError> {
     let mut bytes = WIRE_HEADER.to_vec();
-    message.serialize(&mut rmp_serde::Serializer::new(&mut bytes).with_struct_map()).map_err(crate::BackendError::operation)?;
+    message.serialize(&mut rmp_serde::Serializer::new(&mut bytes).with_struct_map()).map_err(BackendError::operation)?;
     Ok(bytes)
 }
 
-pub fn decode_worker_message<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, crate::BackendError> {
-    let payload = bytes.strip_prefix(WIRE_HEADER).ok_or_else(|| crate::BackendError::message("unsupported backend worker protocol"))?;
-    rmp_serde::from_slice(payload).map_err(crate::BackendError::operation)
+pub fn decode_worker_message<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, BackendError> {
+    let payload = bytes.strip_prefix(WIRE_HEADER).ok_or_else(|| BackendError::message("unsupported backend worker protocol"))?;
+    rmp_serde::from_slice(payload).map_err(BackendError::operation)
 }
 
 /// One encoded reply. Commands that carry bytes serialize them as `serde_bytes`
@@ -24,11 +25,11 @@ pub fn decode_worker_message<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Re
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct WorkerPayload(#[serde(with = "serde_bytes")] pub Vec<u8>);
 
-pub fn encode_reply<T: serde::Serialize>(value: T) -> Result<WorkerPayload, crate::BackendError> {
+pub fn encode_reply<T: serde::Serialize>(value: T) -> Result<WorkerPayload, BackendError> {
     encode_worker_message(&value).map(WorkerPayload)
 }
 
-pub fn decode_worker_payload<T: serde::de::DeserializeOwned>(payload: WorkerPayload) -> Result<T, crate::BackendError> {
+pub fn decode_worker_payload<T: serde::de::DeserializeOwned>(payload: WorkerPayload) -> Result<T, BackendError> {
     decode_worker_message(&payload.0)
 }
 

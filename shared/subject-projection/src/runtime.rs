@@ -1,3 +1,4 @@
+use crate::LccMatchReport;
 use super::lcc::{canonical_lcc_notation, compare_lcc_key, lcc_match_keys, parse_lcc_call};
 use super::runtime_index::{build_runtime, LccSelector};
 pub(super) use super::runtime_index::{compare_cutter_endpoint, compare_upper_cutters, cutter_components, normalize_source_label, UnifiedTaxonomyRuntime};
@@ -43,7 +44,7 @@ impl UnifiedTaxonomy {
 
     /// Returns candidates for one code, or independently resolved subjects for an explicit list.
     /// Resolved subjects, recovery methods and fragments that still need review.
-    pub fn lcc_match_report(&self, code: &str) -> crate::LccMatchReport {
+    pub fn lcc_match_report(&self, code: &str) -> LccMatchReport {
         lcc_match_report(&self.runtime, code)
     }
 
@@ -183,13 +184,13 @@ pub fn unified_lcc_has_numeric_coverage(code: &str) -> bool {
     index.lcc_ranges.iter().any(|range| range.start_letters == call.letters && range.end_letters == call.letters && range.start_number <= call.number && call.number <= range.end_number)
 }
 
-pub fn unified_lcc_match_report(code: &str) -> crate::LccMatchReport {
+pub fn unified_lcc_match_report(code: &str) -> LccMatchReport {
     lcc_match_report(&current(), code)
 }
 
-pub(super) fn lcc_match_report(runtime: &UnifiedTaxonomyRuntime, code: &str) -> crate::LccMatchReport {
+pub(super) fn lcc_match_report(runtime: &UnifiedTaxonomyRuntime, code: &str) -> LccMatchReport {
     if strict_matching_concepts(runtime, LCC_SYSTEM_ID, code).is_empty() && matching_candidates(runtime, LCC_SYSTEM_ID, code).len() > 1 {
-        return crate::LccMatchReport { original: code.to_owned(), assignments: Vec::new(), unresolved_fragments: vec![code.to_owned()] };
+        return LccMatchReport { original: code.to_owned(), assignments: Vec::new(), unresolved_fragments: vec![code.to_owned()] };
     }
     let mut report =
         crate::lcc_recovery::report(code, |part| strict_matching_concepts(runtime, LCC_SYSTEM_ID, part).into_iter().collect(), |letters| runtime.selectors.get(LCC_SYSTEM_ID).is_some_and(|index| index.lcc_subclasses.contains(letters)));

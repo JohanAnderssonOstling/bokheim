@@ -6,6 +6,9 @@
 //! `client-platform-web` provide the hosts; callers hold explicit host
 //! handles, and launchers may override the process-wide default.
 
+use std::io::{Cursor, Read, Seek};
+use std::path::Path;
+use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 
 use client_platform_runtime::executor::BoxedBackendFuture;
@@ -14,17 +17,17 @@ use std::sync::Arc;
 
 /// Byte reader handed to CPU work. A single trait keeps the object type legal;
 /// holders of book-access readers convert them with [`as_cpu_reader`].
-pub trait CpuReader: std::io::Read + std::io::Seek + Send + Sync + 'static {}
-impl<T: std::io::Read + std::io::Seek + Send + Sync + 'static> CpuReader for T {}
+pub trait CpuReader: Read + Seek + Send + Sync + 'static {}
+impl<T: Read + Seek + Send + Sync + 'static> CpuReader for T {}
 pub type BoxedCpuReader = Box<dyn CpuReader>;
 
 struct HostReader<R>(R);
-impl<R: std::io::Read> std::io::Read for HostReader<R> {
+impl<R: Read> Read for HostReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.0.read(buf)
     }
 }
-impl<R: std::io::Seek> std::io::Seek for HostReader<R> {
+impl<R: Seek> Seek for HostReader<R> {
     fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
         self.0.seek(pos)
     }
@@ -33,26 +36,14 @@ impl<R: std::io::Seek> std::io::Seek for HostReader<R> {
 /// Adapt an owned book reader (for example a book-access reader) for CPU work.
 /// The opened reader owns its bytes; callers must not hold placement leases
 /// across the conversion.
-pub fn as_cpu_reader<R: std::io::Read + std::io::Seek + Send + Sync + 'static>(reader: R) -> BoxedCpuReader {
+pub fn as_cpu_reader<R: Read + Seek + Send + Sync + 'static>(reader: R) -> BoxedCpuReader {
     Box::new(HostReader(reader))
-}
-
-#[derive(Clone, Copy)]
-pub struct InspectionCapabilities {
-    pub mobi_pages: bool,
-}
-impl InspectionCapabilities {
-    pub fn supports(self, format: book_model::BookFormat) -> bool {
-        use book_model::BookFormat;
-        matches!(format, BookFormat::Epub | BookFormat::Pdf) || (self.mobi_pages && format == BookFormat::Mobi)
-    }
 }
 
 /// Metadata and cover parsers request ranges from the storage owner.
 #[derive(Serialize, Deserialize)]
 pub enum BookTask {
     Inspect { source_name: String, format: book_model::BookFormat, checksum: Option<content_address::ContentHash> },
-    SubjectPages { source_name: String, format: book_model::BookFormat },
     Thumbnail { extension: String },
 }
 
@@ -60,7 +51,6 @@ pub enum BookTask {
 pub enum CpuResponse {
     Done,
     Inspection(book_metadata::InspectedBook),
-    SubjectEvidence(book_model::BookMetadata),
     Hash(String),
     Thumbnail(Option<ThumbnailBytes>),
     Bytes(#[serde(with = "serde_bytes")] Vec<u8>),
@@ -106,7 +96,7 @@ pub fn execute(request: CpuRequest) -> Result<CpuResponse, BackendError> {
             Ok(CpuResponse::Done)
         }
         CpuRequest::Cover { bytes } => {
-            let versions = thumbnail::generate_thumbnail_versions_from_image_bytes(&bytes).map_err(BackendError::operation)?;
+            let versions = (|| -> thumbnail::ThumbnailResult<_> { thumbnail::ThumbnailVersions::from_image(&thumbnail::decode_cover_image(&bytes, image::guess_format(&bytes)?)?) })().map_err(BackendError::operation)?;
             Ok(CpuResponse::Thumbnail(Some(versions.into())))
         }
         CpuRequest::Resize { width, bytes } => {
@@ -114,7 +104,7 @@ pub fn execute(request: CpuRequest) -> Result<CpuResponse, BackendError> {
             if ![thumbnail::BROWSE_THUMBNAIL_WIDTH, thumbnail::THUMBNAIL_WIDTH].contains(&width) {
                 return Err("unsupported thumbnail width".into());
             }
-            thumbnail::generate_thumbnail_at_width_from_image_bytes(&bytes, width).map(CpuResponse::Bytes).map_err(BackendError::operation)
+            (|| -> thumbnail::ThumbnailResult<_> { let format = image::guess_format(&bytes)?; thumbnail::encode_thumbnail_at_width(&thumbnail::decode_cover_image(&bytes, format)?, width) })().map(CpuResponse::Bytes).map_err(BackendError::operation)
         }
     }
 }
@@ -123,36 +113,40 @@ thread_local! {
     static HASHERS: std::cell::RefCell<std::collections::HashMap<String, blake3::Hasher>> = Default::default();
 }
 
-/// Worker-side book execution. MOBI page inspection is host-dependent, so this
-/// entry point rejects it; native hosts use [`execute_book_with_mobi`].
-pub fn execute_book<R: std::io::Read + std::io::Seek + Send + Sync + 'static>(task: BookTask, reader: R) -> Result<CpuResponse, BackendError> {
-    execute_book_with_mobi(task, reader, mobi_unsupported)
-}
 
-fn mobi_unsupported<R>(_: &std::path::Path, _: R) -> Result<book_model::BookMetadata, BackendError> {
-    Err("subject page inspection is not supported for this format".into())
-}
 
-/// Native MOBI page inspection, shared by the native host and native workers.
-pub fn local_mobi_pages<R: std::io::Read>(path: &std::path::Path, reader: R) -> Result<book_model::BookMetadata, BackendError> {
-    book_inspection::inspect_mobi_pages_reader(path, reader).map(|book| book.book).map_err(BackendError::operation)
-}
 
-pub fn execute_book_with_mobi<R: std::io::Read + std::io::Seek + Send + Sync + 'static>(task: BookTask, reader: R, mobi_pages: fn(&std::path::Path, R) -> Result<book_model::BookMetadata, BackendError>) -> Result<CpuResponse, BackendError> {
+
+pub fn execute_book_with_mobi<R: Read + Seek + Send + Sync + 'static>(
+    task: BookTask, mut reader: R, mobi_pages: fn(&Path, &[u8]) -> Result<book_model::BookMetadata, BackendError>,
+) -> Result<CpuResponse, BackendError> {
     match task {
-        BookTask::Inspect { source_name, format, checksum } => book_metadata::inspect_book_reader_with_checksum(std::path::Path::new(&source_name), format, reader, checksum).map(CpuResponse::Inspection).map_err(BackendError::operation),
-        BookTask::SubjectPages { source_name, format } => {
-            let path = std::path::Path::new(&source_name);
-            let book = match format {
-                book_model::BookFormat::Epub => book_inspection::inspect_epub_pages_reader(path, reader),
-                book_model::BookFormat::Pdf => book_inspection::inspect_pdf_pages_reader(path, reader).map(|b| b.metadata),
-                book_model::BookFormat::Mobi => return mobi_pages(path, reader).map(CpuResponse::SubjectEvidence),
-                _ => return Err("subject page inspection is not supported for this format".into()),
+        BookTask::Inspect { source_name, format, checksum } => {
+            let path = Path::new(&source_name);
+            if format != book_model::BookFormat::Mobi {
+                return book_metadata::inspect_book_reader_with_checksum(path, format, reader, checksum).map(CpuResponse::Inspection).map_err(BackendError::operation);
             }
-            .map_err(BackendError::operation)?;
-            Ok(CpuResponse::SubjectEvidence(book.book))
+            // Page evidence joins the file facts the metadata server is asked about.
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes).map_err(BackendError::operation)?;
+            let evidence = mobi_pages(path, &bytes).ok();
+            let mut inspected = book_metadata::inspect_book_reader_with_checksum(path, format, Cursor::new(bytes), checksum).map_err(BackendError::operation)?;
+            if let Some(evidence) = evidence {
+                let book = &mut inspected.metadata.book;
+                for identifier in evidence.identifiers {
+                    if !book.identifiers.contains(&identifier) {
+                        book.identifiers.push(identifier);
+                    }
+                }
+                for subject in evidence.subjects {
+                    if !book.subjects.contains(&subject) {
+                        book.subjects.push(subject);
+                    }
+                }
+            }
+            Ok(CpuResponse::Inspection(inspected))
         }
-        BookTask::Thumbnail { extension } => thumbnail::generate_thumbnail_versions_from_reader(&extension, reader).map(|versions| CpuResponse::Thumbnail(versions.map(ThumbnailBytes::from))).map_err(BackendError::operation),
+        BookTask::Thumbnail { extension } => thumbnail::generate_thumbnail_versions_with_pdf_renderer(&extension, reader, thumbnail::render_pdf_cover).map(|versions| CpuResponse::Thumbnail(versions.map(ThumbnailBytes::from))).map_err(BackendError::operation),
     }
 }
 
@@ -206,7 +200,6 @@ macro_rules! book_operations {
     )*};
 }
 book_operations! {
-    SubjectPages { source_name: String, format: book_model::BookFormat } => book_model::BookMetadata, CpuResponse::SubjectEvidence(evidence) => evidence;
     Inspect { source_name: String, format: book_model::BookFormat, checksum: Option<content_address::ContentHash> } => book_metadata::InspectedBook, CpuResponse::Inspection(inspection) => inspection;
     Thumbnail { extension: String } => Option<ThumbnailBytes>, CpuResponse::Thumbnail(versions) => versions;
 }
@@ -215,7 +208,6 @@ book_operations! {
 /// hosts forward it to the CPU worker. The trait stays object-safe so
 /// processes share one host; typed submissions are free functions below.
 pub trait CpuHost: Send + Sync + 'static {
-    fn capabilities(&self) -> InspectionCapabilities;
     fn book(&self, task: BookTask, reader: BoxedCpuReader) -> BoxedBackendFuture<'_, Result<CpuResponse, BackendError>>;
     fn request(&self, request: CpuRequest) -> BoxedBackendFuture<'_, Result<CpuResponse, BackendError>>;
     fn generate_thumbnail(&self, extension: String, reader: BoxedCpuReader) -> BoxedBackendFuture<'_, Result<Option<ThumbnailBytes>, BackendError>>;
@@ -240,17 +232,14 @@ pub async fn resize(host: &dyn CpuHost, bytes: Vec<u8>, width: u32) -> Result<Ve
 /// The CPU host is a process resource, like the executor: every library
 /// session in the process shares it. Launchers override it with
 /// [`set_cpu_host`]; otherwise the first caller installs the default.
-static HOST: std::sync::OnceLock<Arc<dyn CpuHost>> = std::sync::OnceLock::new();
+pub static HOST: OnceLock<Arc<dyn CpuHost>> = OnceLock::new();
 
 /// Override the process-wide host. Fails when a host is already installed.
 pub fn set_cpu_host(host: Arc<dyn CpuHost>) -> Result<(), Arc<dyn CpuHost>> {
     HOST.set(host)
 }
 
-/// The installed host, installing `default` first when none is set.
-pub fn cpu_host_or_init(default: impl FnOnce() -> Arc<dyn CpuHost>) -> Arc<dyn CpuHost> {
-    HOST.get_or_init(default).clone()
-}
+
 
 /// Remote BLAKE3 session over any host. Dropping an unfinished session
 /// releases the worker-side hasher.
@@ -333,14 +322,14 @@ mod tests {
     #[test]
     fn seekable_book_inspection_matches_direct_inspection() {
         let bytes = include_bytes!("../../../../app/tests/fixtures/storage-contract.epub").to_vec();
-        let actual = execute_book(BookTask::Inspect { source_name: "fixture.epub".into(), format: book_model::BookFormat::Epub, checksum: None }, std::io::Cursor::new(bytes.clone())).unwrap();
+        let actual = execute_book_with_mobi(BookTask::Inspect { source_name: "fixture.epub".into(), format: book_model::BookFormat::Epub, checksum: None }, Cursor::new(bytes.clone()), |_, _| Err("subject page inspection is not supported for this format".into())).unwrap();
         let expected = CpuResponse::Inspection(book_metadata::inspect_book_bytes("fixture.epub", book_model::BookFormat::Epub, bytes).unwrap());
         assert_eq!(rmp_serde::to_vec_named(&actual).unwrap(), rmp_serde::to_vec_named(&expected).unwrap());
     }
 
     #[test]
     fn resize_transports_a_real_jpeg_at_the_requested_display_size() {
-        let mut png = std::io::Cursor::new(Vec::new());
+        let mut png = Cursor::new(Vec::new());
         image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(400, 600, image::Rgb([120, 40, 20]))).write_to(&mut png, image::ImageFormat::Png).unwrap();
         let CpuResponse::Bytes(bytes) = roundtrip(CpuRequest::Resize { width: 300, bytes: png.into_inner() }) else { panic!("expected thumbnail") };
         assert_eq!(image::guess_format(&bytes).unwrap(), image::ImageFormat::Jpeg);

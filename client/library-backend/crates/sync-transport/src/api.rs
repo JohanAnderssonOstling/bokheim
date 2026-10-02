@@ -1,3 +1,4 @@
+use crate::PerformanceTrace;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
@@ -37,11 +38,11 @@ impl From<binary_http::Error> for TransportError {
 }
 
 pub(crate) async fn send<T: Serialize + ?Sized, R: DeserializeOwned>(request: reqwest::RequestBuilder, value: &T) -> Result<R, TransportError> {
-    let mut trace = crate::PerformanceTrace::new("binary_request", "encode_request_response_decode");
+    let mut trace = PerformanceTrace::new("binary_request", "encode_request_response_decode");
     send_with_trace(request, value, &mut trace).await
 }
 
-pub(crate) async fn send_with_trace<T: Serialize + ?Sized, R: DeserializeOwned>(request: reqwest::RequestBuilder, value: &T, trace: &mut crate::PerformanceTrace) -> Result<R, TransportError> {
+pub(crate) async fn send_with_trace<T: Serialize + ?Sized, R: DeserializeOwned>(request: reqwest::RequestBuilder, value: &T, trace: &mut PerformanceTrace) -> Result<R, TransportError> {
     let request = request.header("x-bokheim-trace-id", trace.id());
     let result = binary_http::send(request, value).await.map_err(Into::into);
     trace.finish(result.is_ok());

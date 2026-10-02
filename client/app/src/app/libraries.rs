@@ -1,5 +1,6 @@
 use super::core::*;
 use crate::library::LibraryRuntimeSpec;
+use library_backend::library::handle::{LibraryActorCommand, LibraryControl};
 use std::sync::Arc;
 
 impl AppBackend {
@@ -165,7 +166,10 @@ impl AppBackend {
             let entry = self.state.registry.attach_remote(library_id, name).map_err(BackendError::operation)?;
             self.state.registry.write_value(&format!("pending-library-rename/{library_id}"), entry.library_name().as_bytes()).map_err(BackendError::operation)?;
             if let Ok(handle) = self.state.library_directory.get(library_id) {
-                handle.rename(entry.library_name().to_owned());
+                let _ = handle.commands.try_send(LibraryActorCommand::Control(LibraryControl::Rename {
+                    name: entry.library_name().to_owned(),
+                    refresh_remote: true,
+                }));
             }
         }
         self.send_library_list_changed();
@@ -185,7 +189,13 @@ impl AppBackend {
     pub(super) fn open_registered_library(&self, library_id: &LibraryId) -> Result<(), BackendError> {
         let entry = self.library_entry(library_id)?;
         let (spec, reset_token) = self.library_runtime_spec(entry.storage_locator(), *library_id)?;
-        let opened = self.state.library_directory.ensure_open(spec, &self.state.executor)?;
+        let opened = (|| -> Result<bool, BackendError> {
+            let id = spec.config.id;
+            let mut handles = self.state.library_directory.handles.lock().map_err(|_| BackendError::message("library directory lock is poisoned"))?;
+            if handles.contains_key(&id) { return Ok(false); }
+            handles.insert(id, library_backend::LibraryHandle::open(spec, &self.state.executor)?);
+            Ok(true)
+        })()?;
         if opened {
             if let Some(token) = reset_token {
                 let reset_key = format!("cloud-storage-reset:{library_id}");
@@ -200,7 +210,10 @@ impl AppBackend {
         self.state.registry.queue_cloud_storage(&id, enabled).map_err(BackendError::operation)?;
         // The registry owns the durable policy; the session actor owns its
         // local cache, sync object, and any reconciliation it triggers.
-        library.set_asset_storage(enabled, true);
+        let _ = library.commands.try_send(LibraryActorCommand::Control(LibraryControl::SetAssetStorage {
+            enabled,
+            reset_cloud_presence: true,
+        }));
         self.state.account_scheduler.wake();
         Ok(())
     }

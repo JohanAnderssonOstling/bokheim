@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+use std::time::Instant;
+use crate::assets::BookUploadReservation;
 use crate::assets::{self, BookUploadAdmission};
 use crate::{sync_store, PostgresDatabase};
 use server_asset_store::{AssetError, AssetKind, AssetReader, FsAssetStore, StoredAsset};
@@ -33,11 +36,11 @@ pub struct AssetApplication {
 
 struct BookReservationCleanup {
     pool: PgPool,
-    reservation: Option<crate::assets::BookUploadReservation>,
+    reservation: Option<BookUploadReservation>,
 }
 
 impl BookReservationCleanup {
-    fn new(pool: PgPool, reservation: crate::assets::BookUploadReservation) -> Self {
+    fn new(pool: PgPool, reservation: BookUploadReservation) -> Self {
         Self { pool, reservation: Some(reservation) }
     }
 
@@ -136,14 +139,14 @@ impl AssetApplication {
         if blobs.len() > sync_common::api::assets::MAX_BLOB_MANIFEST_ENTRIES {
             return Err(AssetError::InvalidInput("book manifest is too large".into()));
         }
-        let mut identities = std::collections::HashSet::new();
-        let mut checksums = std::collections::HashSet::new();
+        let mut identities = HashSet::new();
+        let mut checksums = HashSet::new();
         if blobs.iter().any(|blob| !identities.insert(blob.content_hash) || !checksums.insert(blob.checksum)) {
             return Err(AssetError::InvalidInput("book manifest contains duplicate identities or checksums".into()));
         }
-        let phase_started = std::time::Instant::now();
+        let phase_started = Instant::now();
         let manifest_count = blobs.len();
-        let mut verified = std::collections::HashSet::new();
+        let mut verified = HashSet::new();
         let mut accepted = Vec::new();
         let mut rejected = Vec::new();
         // Only inspect previously verified immutable objects, outside the writer
@@ -162,7 +165,7 @@ impl AssetApplication {
             accepted.push(blob);
         }
         tracing::debug!(target: "sync_performance", phase = "manifest_inspect_files", count = manifest_count, elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
-        let phase_started = std::time::Instant::now();
+        let phase_started = Instant::now();
         let mut response = assets::negotiate_books(&self.pool, user_id, library_id, &accepted, &verified).await?;
         tracing::debug!(target: "sync_performance", phase = "manifest_database", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
         response.rejected.extend(rejected);
@@ -207,7 +210,7 @@ impl AssetApplication {
     pub async fn put_book_revision(&self, user_id: &str, library_id: &sync_common::LibraryId, identity: &ContentHash, checksum: &ContentHash, length: u64, reader: AssetReader) -> Result<(), AssetError> {
         self.require_library(user_id, library_id).await?;
         // Reserve and verify actual bytes even when an object is already owned.
-        let phase_started = std::time::Instant::now();
+        let phase_started = Instant::now();
         let admission = assets::reserve_book_upload(&self.pool, user_id, library_id, checksum, length).await?;
         tracing::debug!(target: "sync_performance", phase = "upload_reservation", library_id = %library_id, bytes = length, elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
         let mut cleanup = match &admission {
@@ -216,10 +219,10 @@ impl AssetApplication {
         };
         let result = async {
             let actual = self.store.put(user_id, AssetKind::Book, checksum, Some(length), reader).await?;
-            let phase_started = std::time::Instant::now();
+            let phase_started = Instant::now();
             if self.store.book_identity(checksum).await? != *identity { return Err(AssetError::HashMismatch); }
             tracing::debug!(target: "sync_performance", phase = "verify_book_identity", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
-            let phase_started = std::time::Instant::now();
+            let phase_started = Instant::now();
             let result = assets::finish_book_revision_upload(&self.pool, user_id, library_id, identity, checksum, &admission, actual).await;
             tracing::debug!(target: "sync_performance", phase = "commit_upload_accounting", ok = result.is_ok(), elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
             result
@@ -231,6 +234,23 @@ impl AssetApplication {
         }
         if let Some(cleanup) = &mut cleanup { cleanup.disarm(); }
         result
+    }
+
+    pub async fn put_thumbnail_pair(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &ContentHash, bytes: &[u8], browse_bytes: &[u8]) -> Result<(), AssetError> {
+        self.require_library(user_id, library_id).await?;
+        for variant in [bytes, browse_bytes] {
+            assets::validate_thumbnail_upload(&self.pool, user_id, library_id, hash, variant.len() as u64).await?;
+        }
+        self.store.put_thumbnail_pair(user_id, hash, bytes, browse_bytes).await?;
+        // Recheck ownership and lifecycle after publishing, just as for streamed uploads.
+        assets::validate_thumbnail_upload(&self.pool, user_id, library_id, hash, bytes.len() as u64).await
+    }
+
+    pub async fn thumbnail_pair(&self, user_id: &str, library_id: &sync_common::LibraryId, hash: &ContentHash) -> Result<Option<(Vec<u8>, Vec<u8>)>, AssetError> {
+        self.require_library(user_id, library_id).await?;
+        let Some(pair) = self.store.thumbnail_pair(user_id, hash).await? else { return Ok(None) };
+        assets::validate_thumbnail(&self.pool, user_id, library_id, hash, pair.0.len() as u64).await?;
+        Ok(Some(pair))
     }
 
     pub async fn put(&self, user_id: &str, library_id: &sync_common::LibraryId, kind: AssetKind, hash: &ContentHash, expected_len: Option<u64>, reader: AssetReader) -> Result<(), AssetError> {
@@ -269,6 +289,7 @@ impl AssetApplication {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::isolated_pool;
     use super::{consume_upload, AssetApplication};
     use crate::{assets, PostgresDatabase};
     use server_asset_store::{AssetError, AssetKind, AssetReader, FsAssetStore};
@@ -283,7 +304,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn mutable_book_revisions_keep_identity_verify_bytes_and_isolate_accounts() {
-        let pool = crate::test_support::isolated_pool("book_revisions", 4).await.expect("test database required");
+        let pool = isolated_pool("book_revisions", 4).await.expect("test database required");
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("book.m4b");
         std::fs::write(&path, include_bytes!("../../../../../client/app/tests/fixtures/embedded-cover.m4b")).unwrap();
@@ -364,7 +385,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn globally_stored_book_requires_authorized_claim_or_reference() {
-        let Some(pool) = crate::test_support::isolated_pool("asset_application_access", 4).await else { return };
+        let Some(pool) = isolated_pool("asset_application_access", 4).await else { return };
         let user_id = uuid::Uuid::new_v4().to_string();
         let library_id = uuid::Uuid::new_v4();
         sqlx::query("INSERT INTO users(id, email) VALUES ($1, $2)").bind(&user_id).bind(format!("asset-access-{}@example.com", uuid::Uuid::new_v4().simple())).execute(&pool).await.unwrap();

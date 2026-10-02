@@ -97,13 +97,13 @@ if ! openssl s_client -connect "${metadata_domain}:443" -servername "${metadata_
     exit 1
 fi
 
-# A malformed JSON object must reach the audiobook handler's typed extractor.
+# A malformed JSON object must reach the books handler's typed extractor.
 # This performs no upstream lookup and catches proxy omissions and stale binaries.
-audiobook_status=$(curl --proto '=https' --tlsv1.2 --silent --show-error --max-time 15 \
+books_status=$(curl --proto '=https' --tlsv1.2 --silent --show-error --max-time 15 \
     --output /dev/null --write-out '%{http_code}' -H 'Content-Type: application/json' \
-    --data '{}' "https://${metadata_domain}/v2/audiobooks/audible")
-if [[ ${audiobook_status} != 422 ]]; then
-    echo "public audiobook endpoint is unavailable: expected 422, got ${audiobook_status}" >&2
+    --data '{}' "https://${metadata_domain}/v3/books")
+if [[ ${books_status} != 422 ]]; then
+    echo "public books endpoint is unavailable: expected 422, got ${books_status}" >&2
     exit 1
 fi
 
@@ -112,9 +112,9 @@ preflight=$(curl --proto '=https' --tlsv1.2 --silent --show-error --max-time 15 
     --dump-header - --output /dev/null -X OPTIONS \
     -H 'Origin: https://app.bokheim.se' -H 'Access-Control-Request-Method: POST' \
     -H 'Access-Control-Request-Headers: content-type' \
-    "https://${metadata_domain}/v2/audiobooks/audible")
+    "https://${metadata_domain}/v3/books")
 if ! grep -Eqi '^access-control-allow-origin:[[:space:]]*\*' <<<"${preflight}"; then
-    echo "public audiobook endpoint is missing browser CORS support" >&2
+    echo "public books endpoint is missing browser CORS support" >&2
     exit 1
 fi
 

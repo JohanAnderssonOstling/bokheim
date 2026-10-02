@@ -10,6 +10,8 @@ blake3 = "1"
 book-identity = { path = "../../../../shared/book-identity", features = ["native-write"] }
 book-inspection = { path = "../book-inspection" }
 book-model = { path = "../../../../shared/book-model" }
+book-metadata = { path = "../book-metadata" }
+library-model = { path = "../../../library-model" }
 client-platform-runtime = { path = "../../../platforms/runtime" }
 cpu-host = { path = "../cpu-host" }
 futures-util = "0.3"
@@ -20,7 +22,7 @@ sync-common = { path = "../../../../shared/sync-common" }
 tempfile = "3"
 
 [dev-dependencies]
-book-metadata = { path = "../book-metadata" }
+serde_json = "1"
 client-runtime = { path = "../../../client-runtime" }
 lopdf = { version = "0.44", default-features = false }
 tempfile = "3"

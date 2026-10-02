@@ -1,29 +1,29 @@
-use super::history::HISTORY_LIMIT;
-use super::{MessagePackTransferHistory, TransferJob};
-use library_replica::TransferJobKind;
-use library_replica::{TransferOrigin, TransferState, TransferStatus};
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use sync_common::api::assets::MAX_THUMBNAIL_BATCH_ENTRIES;
-use tokio::sync::Notify;
+pub(crate) use super::history::HISTORY_LIMIT;
+pub(crate) use super::{MessagePackTransferHistory, TransferJob};
+pub(crate) use library_model::TransferJobKind;
+pub(crate) use library_model::{TransferOrigin, TransferState, TransferStatus};
+pub(crate) use std::collections::{BTreeMap, HashMap, VecDeque};
+pub(crate) use std::sync::atomic::{AtomicBool, Ordering};
+pub(crate) use std::sync::{Arc, Mutex};
+pub(crate) use std::time::Duration;
+pub(crate) use sync_common::api::assets::MAX_THUMBNAIL_BATCH_ENTRIES;
+pub(crate) use tokio::sync::Notify;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum QueueJobState {
+pub enum QueueJobState {
     Pending,
     Running,
 }
 
 #[derive(Clone, Debug)]
-struct QueueJob {
-    job: TransferJob,
-    generation: u64,
-    state: QueueJobState,
-    attempts: u32,
-    next_attempt_at: u64,
-    last_error: Option<String>,
-    updated_at: u64,
+pub struct QueueJob {
+    pub job: TransferJob,
+    pub generation: u64,
+    pub state: QueueJobState,
+    pub(crate) attempts: u32,
+    pub next_attempt_at: u64,
+    pub(crate) last_error: Option<String>,
+    pub(crate) updated_at: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -33,24 +33,24 @@ pub struct ClaimedTransferJob {
 }
 
 #[derive(Debug)]
-struct TransferBatch {
-    jobs: BTreeMap<u64, QueueJob>,
-    completed: u32,
-    attempts: u32,
-    created_at: u64,
-    updated_at: u64,
-    origin: TransferOrigin,
-    permanent_error: Option<String>,
-    failed_hash: Option<sync_common::ContentHash>,
-    last_job: Option<TransferJob>,
+pub struct TransferBatch {
+    pub jobs: BTreeMap<u64, QueueJob>,
+    pub(crate) completed: u32,
+    pub(crate) attempts: u32,
+    pub(crate) created_at: u64,
+    pub(crate) updated_at: u64,
+    pub(crate) origin: TransferOrigin,
+    pub(crate) permanent_error: Option<String>,
+    pub(crate) failed_hash: Option<sync_common::ContentHash>,
+    pub(crate) last_job: Option<TransferJob>,
 }
 
 impl TransferBatch {
-    fn new(now: u64, origin: TransferOrigin) -> Self {
+    pub(crate) fn new(now: u64, origin: TransferOrigin) -> Self {
         Self { jobs: BTreeMap::new(), completed: 0, attempts: 0, created_at: now, updated_at: now, origin, permanent_error: None, failed_hash: None, last_job: None }
     }
 
-    fn status(&self, kind: TransferJobKind) -> Option<TransferStatus> {
+    pub(crate) fn status(&self, kind: TransferJobKind) -> Option<TransferStatus> {
         let jobs = self.jobs.values();
         let first = jobs.clone().find(|job| job.last_error.is_some()).or_else(|| jobs.clone().next());
         let representative = first.map(|job| &job.job).or(self.last_job.as_ref())?;
@@ -82,30 +82,30 @@ impl TransferBatch {
 }
 
 #[derive(Debug, Default)]
-struct QueueState {
-    batches: HashMap<TransferJobKind, TransferBatch>,
-    history: VecDeque<TransferStatus>,
-    next_id: u64,
-    generation: u64,
-    planning: bool,
-    producers: HashMap<TransferJobKind, usize>,
-    final_plans: HashMap<TransferJobKind, u64>,
+pub struct QueueState {
+    pub batches: HashMap<TransferJobKind, TransferBatch>,
+    pub(crate) history: VecDeque<TransferStatus>,
+    pub(crate) next_id: u64,
+    pub generation: u64,
+    pub planning: bool,
+    pub producers: HashMap<TransferJobKind, usize>,
+    pub(crate) final_plans: HashMap<TransferJobKind, u64>,
 }
 
 #[derive(Default)]
 pub struct TransferQueue {
-    state: Mutex<QueueState>,
-    history: Option<Box<dyn super::HistoryPersistence>>,
-    history_error: Option<String>,
-    scheduler_running: AtomicBool,
-    authentication_paused: AtomicBool,
-    wake_scheduler: Notify,
+    pub state: Mutex<QueueState>,
+    pub(crate) history: Option<Box<dyn super::HistoryPersistence>>,
+    pub(crate) history_error: Option<String>,
+    pub(crate) scheduler_running: AtomicBool,
+    pub authentication_paused: AtomicBool,
+    pub wake_scheduler: Notify,
 }
 
 /// Keeps a batch open while local work can still produce transfers.
 pub struct TransferProducer {
-    queue: Arc<TransferQueue>,
-    kind: TransferJobKind,
+    pub queue: Arc<TransferQueue>,
+    pub kind: TransferJobKind,
 }
 
 impl TransferProducer {
@@ -139,33 +139,6 @@ impl std::fmt::Debug for TransferQueue {
 }
 
 impl TransferQueue {
-    pub fn begin_producer(self: &Arc<Self>, kind: TransferJobKind) -> TransferProducer {
-        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        *state.producers.entry(kind).or_default() += 1;
-        TransferProducer { queue: self.clone(), kind }
-    }
-
-    pub fn with_history(history: MessagePackTransferHistory) -> Self {
-        let entries = history.load().unwrap_or_else(|error| {
-            log::warn!("Could not load transfer history: {error}");
-            VecDeque::new()
-        });
-        let (history, history_error) = match super::history::writer::HistoryWriter::new(history) {
-            Ok(writer) => (Some(Box::new(writer) as Box<dyn super::HistoryPersistence>), None),
-            Err(error) => {
-                log::warn!("Could not start transfer history writer: {error}");
-                (None, Some(error.to_string()))
-            }
-        };
-        Self { state: Mutex::new(QueueState { history: entries, ..QueueState::default() }), history, history_error, ..Self::default() }
-    }
-
-    /// Restore completed history using a host-provided persistence mechanism.
-    pub fn with_persistence(mut entries: VecDeque<TransferStatus>, persistence: impl super::HistoryPersistence + 'static) -> Self {
-        entries.truncate(HISTORY_LIMIT);
-        Self { state: Mutex::new(QueueState { history: entries, ..QueueState::default() }), history: Some(Box::new(persistence)), ..Self::default() }
-    }
-
     pub fn reconcile(&self, desired: Vec<TransferJob>) {
         let generation = self.begin_reconcile();
         self.reconcile_page(generation, desired);
@@ -202,17 +175,7 @@ impl TransferQueue {
         self.wake_scheduler.notify_one();
     }
 
-    /// Close a cancelled producer without discarding already submitted work.
-    pub fn cancel_reconcile(&self, generation: u64) {
-        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.generation != generation || !state.planning {
-            return;
-        }
-        state.planning = false;
-        self.finalize_empty_batches(&mut state);
-    }
-
-    fn finalize_empty_batches(&self, state: &mut QueueState) {
+    pub fn finalize_empty_batches(&self, state: &mut QueueState) {
         if state.planning {
             return;
         }
@@ -241,7 +204,7 @@ impl TransferQueue {
         self.enqueue_page(None, desired);
     }
 
-    fn enqueue_page(&self, generation: Option<u64>, mut desired: Vec<TransferJob>) {
+    pub(crate) fn enqueue_page(&self, generation: Option<u64>, mut desired: Vec<TransferJob>) {
         desired.sort_by_key(TransferJob::priority);
         let now = unix_seconds();
         let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -274,21 +237,6 @@ impl TransferQueue {
         self.wake_scheduler.notify_one();
     }
 
-    /// Hashes of currently due jobs, without claiming anything. The session
-    /// snapshots transfer inputs for these before driving the queue.
-    pub fn due_hashes(&self) -> Vec<sync_common::ContentHash> {
-        let now = unix_seconds();
-        let state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut hashes = Vec::new();
-        for queued in state.batches.values().flat_map(|batch| batch.jobs.values()).filter(|queued| queued.state == QueueJobState::Pending && queued.next_attempt_at <= now) {
-            let hash = *queued.job.status_fields().1;
-            if !hashes.contains(&hash) {
-                hashes.push(hash);
-            }
-        }
-        hashes
-    }
-
     pub fn claim_due(&self) -> Option<ClaimedTransferJob> {
         let now = unix_seconds();
         let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -312,7 +260,7 @@ impl TransferQueue {
         claimed
     }
 
-    fn claim_due_from(state: &mut QueueState, now: u64) -> Option<ClaimedTransferJob> {
+    pub(crate) fn claim_due_from(state: &mut QueueState, now: u64) -> Option<ClaimedTransferJob> {
         let (id, queued) =
             state.batches.values_mut().flat_map(|batch| batch.jobs.iter_mut()).filter(|(_, queued)| queued.state == QueueJobState::Pending && queued.next_attempt_at <= now).min_by_key(|(id, queued)| (queued.job.priority(), **id))?;
         log::debug!(target: "sync_performance", "operation=transfer_claim job_id={} kind={:?} pending_seconds={} due_lag_seconds={} previous_failures={}", id, queued.job.batch_kind(), now.saturating_sub(queued.updated_at), now.saturating_sub(queued.next_attempt_at), queued.attempts);
@@ -388,11 +336,6 @@ impl TransferQueue {
             .min()
     }
 
-    pub fn resume_authentication(&self) {
-        self.authentication_paused.store(false, Ordering::Release);
-        self.wake_scheduler.notify_one();
-    }
-
     pub fn pause_authentication(&self) {
         self.authentication_paused.store(true, Ordering::Release);
         self.scheduler_running.store(false, Ordering::Release);
@@ -457,11 +400,11 @@ impl TransferQueue {
     }
 }
 
-fn find_job_mut(state: &mut QueueState, id: u64) -> Option<&mut QueueJob> {
+pub(crate) fn find_job_mut(state: &mut QueueState, id: u64) -> Option<&mut QueueJob> {
     state.batches.values_mut().find_map(|batch| batch.jobs.get_mut(&id))
 }
 
-fn completed_status(kind: TransferJobKind, batch: TransferBatch, representative: &TransferJob) -> TransferStatus {
+pub(crate) fn completed_status(kind: TransferJobKind, batch: TransferBatch, representative: &TransferJob) -> TransferStatus {
     let (_, content_hash) = representative.status_fields();
     let failed = batch.permanent_error.is_some();
     TransferStatus {
@@ -482,7 +425,7 @@ fn completed_status(kind: TransferJobKind, batch: TransferBatch, representative:
     }
 }
 
-fn unix_seconds() -> u64 {
+pub(crate) fn unix_seconds() -> u64 {
     web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_or(0, |duration| duration.as_secs())
 }
 
@@ -643,7 +586,11 @@ mod page_tests {
     #[test]
     fn thumbnail_upload_batch_spans_generation_and_drains_after_producer_finishes() {
         let queue = Arc::new(TransferQueue::default());
-        let producer = queue.begin_producer(TransferJobKind::UploadThumbnail);
+        let producer = {
+            let mut state = queue.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            *state.producers.entry(TransferJobKind::UploadThumbnail).or_default() += 1;
+            TransferProducer { queue: queue.clone(), kind: TransferJobKind::UploadThumbnail }
+        };
         let thumbnail = |value| TransferJob::upload_thumbnail(ContentHash::new(&format!("{value:064x}")), TransferOrigin::Background);
         queue.reconcile(vec![thumbnail(1)]);
         queue.complete(queue.claim_due().unwrap().id, None);
@@ -668,7 +615,11 @@ mod page_tests {
     #[test]
     fn generation_completion_waits_for_a_fresh_successful_plan() {
         let queue = Arc::new(TransferQueue::default());
-        let producer = queue.begin_producer(TransferJobKind::UploadThumbnail);
+        let producer = {
+            let mut state = queue.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            *state.producers.entry(TransferJobKind::UploadThumbnail).or_default() += 1;
+            TransferProducer { queue: queue.clone(), kind: TransferJobKind::UploadThumbnail }
+        };
         let generation = queue.begin_reconcile();
         queue.reconcile_page(generation, vec![TransferJob::upload_thumbnail(ContentHash::new(&format!("{:064x}", 1)), TransferOrigin::Background)]);
         queue.complete(queue.claim_due().unwrap().id, None);
@@ -676,7 +627,13 @@ mod page_tests {
         queue.finish_reconcile(generation);
         assert_eq!(queue.statuses().len(), 1, "a pass started during generation can miss its final writes");
         let generation = queue.begin_reconcile();
-        queue.cancel_reconcile(generation);
+        {
+            let mut state = queue.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.generation == generation && state.planning {
+                state.planning = false;
+                queue.finalize_empty_batches(&mut state);
+            }
+        }
         assert_eq!(queue.statuses().len(), 1, "failed planning must retry the final handoff");
         queue.reconcile(vec![]);
         assert!(queue.statuses().is_empty());
@@ -686,13 +643,23 @@ mod page_tests {
     #[test]
     fn ending_thumbnail_generation_closes_an_empty_batch_after_planning() {
         let queue = Arc::new(TransferQueue::default());
-        let producer = queue.begin_producer(TransferJobKind::UploadThumbnail);
+        let producer = {
+            let mut state = queue.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            *state.producers.entry(TransferJobKind::UploadThumbnail).or_default() += 1;
+            TransferProducer { queue: queue.clone(), kind: TransferJobKind::UploadThumbnail }
+        };
         let generation = queue.begin_reconcile();
         queue.reconcile_page(generation, vec![TransferJob::upload_thumbnail(ContentHash::new(&format!("{:064x}", 1)), TransferOrigin::Background)]);
         queue.complete(queue.claim_due().unwrap().id, None);
         drop(producer);
         assert_eq!(queue.statuses().len(), 1, "an open planner can still add uploads");
-        queue.cancel_reconcile(generation);
+        {
+            let mut state = queue.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.generation == generation && state.planning {
+                state.planning = false;
+                queue.finalize_empty_batches(&mut state);
+            }
+        }
         assert!(queue.statuses().is_empty());
         assert_eq!(queue.history()[0].completed_items, 1);
     }
@@ -714,7 +681,13 @@ mod page_tests {
         let generation = queue.begin_reconcile();
         queue.reconcile_page(generation, vec![job(3)]);
         queue.complete(queue.claim_due().unwrap().id, None);
-        queue.cancel_reconcile(generation);
+        {
+            let mut state = queue.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.generation == generation && state.planning {
+                state.planning = false;
+                queue.finalize_empty_batches(&mut state);
+            }
+        }
         assert!(queue.statuses().is_empty());
         assert_eq!(queue.history().len(), 2);
     }

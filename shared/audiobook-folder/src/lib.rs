@@ -3,6 +3,7 @@
 //! A device keeps ordinary MP3 files. The archive exists only for transfer
 //! and server storage; its entry order is the playback order.
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, Write};
@@ -61,11 +62,9 @@ impl Mp3Facts {
                 }
             }
         }
-        if artwork && self.artwork.is_none() {
-            if let Some(visual) = revision.visuals().iter().find(|visual| visual.usage == Some(StandardVisualKey::FrontCover)).or_else(|| revision.visuals().first()) {
-                if visual.data.len() as u64 <= MAX_COVER_BYTES { self.artwork = Some(visual.data.to_vec()); }
-            }
-        }
+        if artwork && self.artwork.is_none()
+            && let Some(visual) = revision.visuals().iter().find(|visual| visual.usage == Some(StandardVisualKey::FrontCover)).or_else(|| revision.visuals().first())
+                && visual.data.len() as u64 <= MAX_COVER_BYTES { self.artwork = Some(visual.data.to_vec()); }
     }
 }
 
@@ -89,9 +88,8 @@ pub fn inspect_mp3<R: symphonia::core::io::MediaSource + 'static>(reader: R, art
         .format(&hint, source, &FormatOptions::default(), &MetadataOptions::default())
         .map_err(io::Error::other)?;
     let mut facts = Mp3Facts::default();
-    if let Some(metadata) = probed.metadata.get() {
-        if let Some(revision) = metadata.current() { facts.absorb(revision, artwork); }
-    }
+    if let Some(metadata) = probed.metadata.get()
+        && let Some(revision) = metadata.current() { facts.absorb(revision, artwork); }
     let mut format = probed.format;
     if let Some(revision) = format.metadata().current() { facts.absorb(revision, artwork); }
     let track = format.default_track().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "MP3 has no audio track"))?;
@@ -234,9 +232,8 @@ fn read_track_numbers(path: &Path) -> io::Result<TrackNumbers> {
         .format(&hint, source, &FormatOptions::default(), &MetadataOptions::default())
         .map_err(io::Error::other)?;
     let mut numbers = TrackNumbers::default();
-    if let Some(metadata) = probed.metadata.get() {
-        if let Some(revision) = metadata.current() { absorb(&mut numbers, revision); }
-    }
+    if let Some(metadata) = probed.metadata.get()
+        && let Some(revision) = metadata.current() { absorb(&mut numbers, revision); }
     if let Some(revision) = probed.format.metadata().current() { absorb(&mut numbers, revision); }
     Ok(numbers)
 }
@@ -290,7 +287,7 @@ fn order_from_cue(folder: &Path, tracks: &mut Vec<Track>) -> io::Result<()> {
     Ok(())
 }
 
-fn identity_order(left: &str, right: &str) -> std::cmp::Ordering {
+fn identity_order(left: &str, right: &str) -> Ordering {
     fn group(name: &str) -> (u8, u32, &str, &str) {
         match name.split_once('/') {
             Some((disc, file)) if disc_number(disc).is_some() => (1, disc_number(disc).unwrap(), disc, file),
@@ -303,7 +300,7 @@ fn identity_order(left: &str, right: &str) -> std::cmp::Ordering {
         .then_with(|| natural_cmp(left_disc, right_disc)).then_with(|| natural_cmp(left_file, right_file))
 }
 
-fn natural_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+fn natural_cmp(left: &str, right: &str) -> Ordering {
     let mut a = left.chars().peekable();
     let mut b = right.chars().peekable();
     loop {
@@ -325,8 +322,8 @@ fn natural_cmp(left: &str, right: &str) -> std::cmp::Ordering {
                 }
             }
             (None, None) => return left.cmp(right),
-            (None, Some(_)) => return std::cmp::Ordering::Less,
-            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
         }
     }
 }

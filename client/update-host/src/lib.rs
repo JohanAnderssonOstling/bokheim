@@ -1,13 +1,15 @@
 #![cfg(any(target_os = "linux", target_os = "android", target_os = "windows"))]
 //! Native Linux lifecycle, independent of the GUI. All activation runs before workers.
+
+use std::env::consts::ARCH;
 use serde::{Deserialize, Serialize};
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use std::process::Command;
 use std::{
     fs::{self},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
-#[cfg(any(target_os = "linux", target_os = "android"))]
-use std::process::Command;
 use update_client::{
     activation::{self, Journal, Replacement, State},
     coordinator::{ArtifactKind, Coordinator, DeviceVersion, Phase, UpdateView, WaitReason},
@@ -52,9 +54,13 @@ pub fn device(version: &str, taxonomy: Option<&ActiveTaxonomy>) -> Result<Device
         schema: library_database::LIBRARY_SCHEMA_VERSION as u32,
         taxonomy_formats: vec![1],
         taxonomy_release: taxonomy.map(|t| t.release).unwrap_or(release.parse().map_err(|e| format!("{e}"))?),
-        target: if cfg!(target_os = "android") { format!("android-{}-apk", std::env::consts::ARCH) }
-            else if cfg!(target_os = "windows") { format!("windows-{}-zip", std::env::consts::ARCH) }
-            else { format!("linux-{}-appimage", std::env::consts::ARCH) },
+        target: if cfg!(target_os = "android") {
+            format!("android-{}-apk", ARCH)
+        } else if cfg!(target_os = "windows") {
+            format!("windows-{}-zip", ARCH)
+        } else {
+            format!("linux-{}-appimage", ARCH)
+        },
     })
 }
 
@@ -75,7 +81,21 @@ pub fn prepare_candidate(job_path: &Path, version: &str) -> Result<(), String> {
         subject_projection::installed::activate(&t.path)?;
     }
     for path in job.databases {
-        library_database::Database::prepare_update(&path).map_err(|e| e.to_string())?;
+        (|| -> Result<(), library_database::DatabaseError> {
+            let db = library_database::Database::open(&path)?;
+            db.initialize_library()?;
+            let integrity: String = db.connection.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+            if integrity != "ok" {
+                return Err(library_database::DatabaseError::message(integrity));
+            }
+            let violations: i64 = db.connection.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?;
+            if violations != 0 {
+                return Err(library_database::DatabaseError::message("migrated library has invalid relationships"));
+            }
+            db.connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+            Ok(())
+        })()
+        .map_err(|e| e.to_string())?;
     }
     activation::write_json(&job.result, &Prepared { device: device(version, taxonomy.as_ref())?, taxonomy })
 }
@@ -239,6 +259,11 @@ impl Host {
         self.coordinator.reload()?;
         self.coordinator.approve(now())
     }
+    /// Current durable state without starting discovery or download work.
+    pub fn view(&self) -> UpdateView {
+        self.coordinator.view(now())
+    }
+
     pub fn tick(&mut self) -> Result<UpdateView, String> {
         let lock = UpdateLock::acquire(&self.root)?;
         self.coordinator.reload()?;

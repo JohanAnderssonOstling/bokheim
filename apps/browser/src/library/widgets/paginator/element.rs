@@ -124,7 +124,8 @@ impl PaginatorElement {
             let state = paginator.read(cx);
             let answers = pressed_child.is_none_or(|index| state.selection().contains(&index));
             if let Some(handler) = state.on_context_menu.clone().filter(|_| answers) {
-                handler(pressed_child, event.position, window, cx);
+                let id = pressed_child.and_then(|index| state.child_id(index).cloned());
+                handler(id, event.position, window, cx);
             }
         });
     }
@@ -149,7 +150,8 @@ impl PaginatorElement {
                 let state = paginator.read(cx);
                 let answers = pressed_child.is_none_or(|index| state.selection().contains(&index));
                 if let Some(handler) = state.on_context_menu.clone().filter(|_| answers) {
-                    handler(pressed_child, event.position, window, cx);
+                    let id = pressed_child.and_then(|index| state.child_id(index).cloned());
+                    handler(id, event.position, window, cx);
                 }
             });
         }
@@ -165,8 +167,12 @@ impl PaginatorElement {
                 // Pressing something already selected begins a drag of the
                 // whole selection, so the selection has to survive the press.
                 Some(index) if paginator.selection().contains(&index) => {}
-                Some(_) => { paginator.clear_selection(cx); }
-                None => { paginator.begin_marquee(event.position, cx); }
+                Some(_) => {
+                    paginator.clear_selection(cx);
+                }
+                None => {
+                    paginator.begin_marquee(event.position, cx);
+                }
             });
         });
 
@@ -538,7 +544,9 @@ impl Element for PaginatorElement {
     }
 
     fn paint(&mut self, _id: Option<&GlobalElementId>, _inspector_id: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _layout: &mut Self::RequestLayoutState, prepaint: &mut Self::PrepaintState, window: &mut Window, cx: &mut App) {
-        if components::uses_mobile_navigation(window) && let Some(container) = prepaint.container.clone() {
+        if components::uses_mobile_navigation(window)
+            && let Some(container) = prepaint.container.clone()
+        {
             self.paint_secondary_input(prepaint.child_rects.clone(), container, window);
         }
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
@@ -616,14 +624,7 @@ impl GridRow {
     fn from_row(row: &MeasuredRow, origin_x: Pixels, top: Pixels, close_bottom: bool) -> Option<Self> {
         let first = row.items.first()?;
         let last = row.items.last()?;
-        Some(Self {
-            top,
-            bottom: top + row.height,
-            left: origin_x + first.x,
-            right: origin_x + last.x + last.width,
-            cell_lefts: row.items.iter().map(|item| origin_x + item.x).collect(),
-            close_bottom,
-        })
+        Some(Self { top, bottom: top + row.height, left: origin_x + first.x, right: origin_x + last.x + last.width, cell_lefts: row.items.iter().map(|item| origin_x + item.x).collect(), close_bottom })
     }
 
     fn paint(&self, color: gpui::Hsla, window: &mut Window) {

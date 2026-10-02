@@ -1,31 +1,32 @@
 use super::requests::dispatch_request;
 use super::*;
+use crate::BackendError;
 
-pub(crate) async fn storage_command<T: crate::executor::BackendOutput>(operation: impl FnOnce() -> Result<T, crate::BackendError> + crate::executor::BackendSend + 'static) -> Result<T, crate::BackendError> {
+pub(crate) async fn storage_command<T: crate::executor::BackendOutput>(operation: impl FnOnce() -> Result<T, BackendError> + crate::executor::BackendSend + 'static) -> Result<T, BackendError> {
     client_platform_runtime::storage_queue::run(client_platform_runtime::storage_queue::Priority::Interactive, operation).await?
 }
 
-pub async fn dispatch_worker_request(backend: AppBackend, request: AppWorkerRequest) -> Result<WorkerDispatchResult, crate::BackendError> {
+pub async fn dispatch_worker_request(backend: AppBackend, request: AppWorkerRequest) -> Result<WorkerDispatchResult, BackendError> {
     match request.command {
         WorkerCommand::App(command) => dispatch_request(backend, command).await?.into_wire(),
         WorkerCommand::Library { library_id, command } => {
-            let handle = backend.library_directory().get(&library_id).map_err(crate::BackendError::operation)?;
+            let handle = backend.library_directory().get(&library_id).map_err(BackendError::operation)?;
             Ok(WorkerDispatchResult::Response(handle.dispatch(command).await?.into_wire()?))
         }
         WorkerCommand::LibrarySubscription { library_id, subscription } => {
-            let handle = backend.library_directory().get(&library_id).map_err(crate::BackendError::operation)?;
+            let handle = backend.library_directory().get(&library_id).map_err(BackendError::operation)?;
             let (initial, events) = handle.subscribe(subscription).await?;
             Ok(WorkerDispatchResult::Subscription { initial: initial.into_wire()?, events: WorkerSubscription::Library(events) })
         }
     }
 }
 
-pub fn app_startup_state(backend: &AppBackend) -> Result<AppStartupState, crate::BackendError> {
+pub fn app_startup_state(backend: &AppBackend) -> Result<AppStartupState, BackendError> {
     Ok(AppStartupState {
-        libraries: backend.libraries().map_err(crate::BackendError::operation)?,
-        browsing_preferences: backend.browsing_preferences().map_err(crate::BackendError::operation)?,
-        account_status: backend.account_status().map_err(crate::BackendError::operation)?,
-        reader_preferences: backend.reader_preferences().map_err(crate::BackendError::operation)?,
+        libraries: backend.libraries().map_err(BackendError::operation)?,
+        browsing_preferences: backend.browsing_preferences().map_err(BackendError::operation)?,
+        account_status: backend.account_status().map_err(BackendError::operation)?,
+        reader_preferences: backend.reader_preferences().map_err(BackendError::operation)?,
     })
 }
 

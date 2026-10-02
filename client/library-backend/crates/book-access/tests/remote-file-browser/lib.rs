@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::{
     cell::{Cell, RefCell},
     io::{Read, Seek, SeekFrom},
@@ -60,7 +61,7 @@ pub fn close_file() {
 }
 
 thread_local! {
-    static EPUB: RefCell<Option<std::sync::Arc<epub_provider::EpubProvider>>> = const { RefCell::new(None) };
+    static EPUB: RefCell<Option<Arc<epub_provider::EpubProvider>>> = const { RefCell::new(None) };
 }
 #[wasm_bindgen]
 pub async fn open_epub(url: String) -> Result<(), JsValue> {
@@ -70,7 +71,7 @@ pub async fn open_epub(url: String) -> Result<(), JsValue> {
     let file = FILE.with(|slot| slot.borrow_mut().take()).ok_or("file not open")?;
     let provider = wasm_thread::spawn(move || epub_provider::EpubProvider::try_from_reader(file).map_err(|e| e.to_string())).join_async().await.map_err(|_| "EPUB parser worker panicked")??;
     if GENERATION.with(Cell::get) != generation { return Err("file closed while opening EPUB".into()); }
-    EPUB.with(|slot| *slot.borrow_mut() = Some(std::sync::Arc::new(provider)));
+    EPUB.with(|slot| *slot.borrow_mut() = Some(Arc::new(provider)));
     Ok(())
 }
 #[wasm_bindgen]

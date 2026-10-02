@@ -4,17 +4,23 @@
 //! writes are the only commands that must observe receive order; they are
 //! listed by [`AppCommand::is_settings_update`] and executed by
 //! [`execute_ordered`], which both transports reach through their ordered path.
+
+use library_backend::{LibraryCommand, ReadyCommand, SessionCommand};
+
+use std::path::PathBuf;
+
 use super::dispatch::storage_command;
 use super::*;
+use crate::BackendError;
 use client_runtime::reply::Reply;
-fn reply<T: crate::executor::BackendOutput + serde::Serialize>(value: T) -> Result<Reply, crate::BackendError> {
+fn reply<T: crate::executor::BackendOutput + serde::Serialize>(value: T) -> Result<Reply, BackendError> {
     Ok(Reply::new(value))
 }
 
-pub(crate) type RequestFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, crate::BackendError>>>>;
+pub(crate) type RequestFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, BackendError>>>>;
 
-fn message(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> crate::BackendError {
-    crate::BackendError::operation(error)
+fn message(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> BackendError {
+    BackendError::operation(error)
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -111,7 +117,7 @@ impl AppCommand {
 
 /// The body of every ordered command. Native dispatch runs it directly in
 /// receive order; the wire dispatcher queues the same call for storage.
-pub(crate) fn execute_ordered(backend: &AppBackend, command: AppCommand) -> Result<Reply, crate::BackendError> {
+pub(crate) fn execute_ordered(backend: &AppBackend, command: AppCommand) -> Result<Reply, BackendError> {
     match command {
         AppCommand::DefaultLibrarySaveLocation => reply(backend.default_library_save_location().map_err(message)?),
         AppCommand::SetDefaultLibrarySaveLocation { path } => reply(backend.set_default_library_save_location(path).map_err(message)?),
@@ -122,7 +128,7 @@ pub(crate) fn execute_ordered(backend: &AppBackend, command: AppCommand) -> Resu
             }
             reply(())
         }
-        command => Err(crate::BackendError::message(format!("{command:?} does not support ordered execution"))),
+        command => Err(BackendError::message(format!("{command:?} does not support ordered execution"))),
     }
 }
 
@@ -144,12 +150,12 @@ pub(super) fn dispatch_request(backend: AppBackend, command: AppCommand) -> Requ
 
             AppCommand::CreateLibraryWithAssetStorage { name, asset_storage_enabled } => storage_command(move || reply(backend.create_library_with_asset_storage(name, asset_storage_enabled).map_err(message)?)).await?,
             AppCommand::CreateLibrariesWithAssetStorage { locators, asset_storage_enabled } => {
-                storage_command(move || reply(backend.create_libraries_from_paths_with_asset_storage(locators.into_iter().map(std::path::PathBuf::from).collect(), asset_storage_enabled).map_err(message)?)).await?
+                storage_command(move || reply(backend.create_libraries_from_paths_with_asset_storage(locators.into_iter().map(PathBuf::from).collect(), asset_storage_enabled).map_err(message)?)).await?
             }
             AppCommand::CreateLibrary { name } => storage_command(move || reply(backend.create_library(name, None).map_err(message)?)).await?,
             AppCommand::SetLibraryAssetStorage { library_id, enabled } => storage_command(move || reply(backend.set_library_asset_storage(library_id, enabled).map_err(message)?)).await?,
             AppCommand::EnsureImportLibrary => storage_command(move || reply(backend.ensure_import_library().map_err(message)?)).await?,
-            AppCommand::CreateLibrariesFromPaths { locators } => storage_command(move || reply(backend.create_libraries_from_paths(locators.into_iter().map(std::path::PathBuf::from).collect()).map_err(message)?)).await?,
+            AppCommand::CreateLibrariesFromPaths { locators } => storage_command(move || reply(backend.create_libraries_from_paths(locators.into_iter().map(PathBuf::from).collect()).map_err(message)?)).await?,
             AppCommand::RenameLibrary { library_id, name } => storage_command(move || reply(backend.rename_library(&library_id, &name).map_err(message)?)).await?,
             AppCommand::DeleteLibrary { library_id } => reply(backend.delete_library(&library_id).await.map_err(message)?)?,
 
@@ -160,7 +166,20 @@ pub(super) fn dispatch_request(backend: AppBackend, command: AppCommand) -> Requ
 
             AppCommand::AccountSnapshot => reply(backend.account_snapshot().await.map_err(message)?)?,
             AppCommand::LocalStorageUsage => reply(backend.local_storage_usage().await.map_err(message)?)?,
-            AppCommand::Transfers => reply(backend.library_directory().transfer_snapshots().await.map_err(message)?)?,
+            AppCommand::Transfers => reply({
+                use futures_util::{stream, StreamExt, TryStreamExt};
+                let handles = backend.library_directory().all().map_err(message)?;
+                let mut snapshots: Vec<_> =
+                    stream::iter(handles.into_iter().map(|handle| async move {
+                        handle.dispatch(LibraryCommand::Session(SessionCommand::Ready(ReadyCommand::TransferSnapshot))).await.and_then(client_runtime::reply::Reply::take::<library_model::LibraryActivitySnapshot>)
+                    }))
+                    .buffered(4)
+                    .try_collect()
+                    .await
+                    .map_err(message)?;
+                snapshots.sort_by(|left, right| left.library_name.cmp(&right.library_name));
+                snapshots
+            })?,
             AppCommand::Login { email, password } => {
                 backend.login(&email, &password).await.map_err(message)?;
                 reply(backend.account_snapshot().await.map_err(message)?)?

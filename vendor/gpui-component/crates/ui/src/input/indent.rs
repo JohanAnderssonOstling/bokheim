@@ -222,10 +222,6 @@ impl InputState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // First, try to accept inline completion if present
-        if self.accept_inline_completion(window, cx) {
-            return;
-        }
         self.indent(false, window, cx);
     }
 

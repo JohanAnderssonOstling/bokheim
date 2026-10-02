@@ -1,4 +1,4 @@
--- Local book-path resolution and PDF metadata fingerprints.
+-- Local book-path resolution and cached PDF metadata.
 
 -- name: stored_pdf_metadata?
 -- param: content_hash: &str
@@ -6,10 +6,6 @@
 SELECT metadata
 FROM pdf_reader_metadata
 WHERE content_hash = :content_hash AND checksum = :checksum;
-
--- name: local_book_format?
--- param: content_hash: &str
-SELECT format FROM book WHERE content_hash = :content_hash;
 
 -- name: readable_placements?
 -- param: content_hash: &str
@@ -26,14 +22,6 @@ WHERE bd.book_row_id = (SELECT row_id FROM book WHERE content_hash = :content_ha
 -- Where the book's bytes were last materialized on disk.
 SELECT relative_path FROM local_file_projection WHERE content_hash = :content_hash;
 
--- name: book_live_placements?
--- param: content_hash: &str
--- The book's live placements; Rust turns each into a path.
-SELECT bd.dir_id, bd.file_name
-FROM book_dir bd
-JOIN book b ON b.row_id = bd.book_row_id
-WHERE b.content_hash = :content_hash AND b.deleted_at IS NULL AND bd.deleted_at IS NULL;
-
 -- name: local_book_projection_paths?
 SELECT p.relative_path
 FROM local_file_projection p
@@ -48,14 +36,12 @@ WHERE b.deleted_at IS NULL AND bd.deleted_at IS NULL;
 
 -- name: local_pdf_checksum ->
 -- param: content_hash: &str
--- param: fingerprint: &str
 -- param: dir_id: &str
 -- param: file_name: &str
 SELECT bd.checksum
 FROM book b
 JOIN book_dir bd ON bd.book_row_id = b.row_id
 WHERE b.content_hash = :content_hash
-  AND bd.local_hash = :fingerprint
   AND bd.dir_id = :dir_id
   AND bd.file_name = :file_name
   AND bd.checksum IS NOT NULL

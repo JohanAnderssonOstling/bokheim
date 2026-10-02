@@ -3,12 +3,12 @@
 -- The book's id when it is visible (not deleted or hidden, with a live
 -- placement), and its audiobook chapter count.
 SELECT book.row_id,
-       (SELECT toc.entry_count FROM book_toc toc
-        JOIN audiobook_metadata audio ON audio.content_hash=toc.content_hash
-        WHERE toc.content_hash=book.content_hash) AS audiobook_chapter_count
+       (SELECT entry_count FROM book_navigation
+        WHERE content_hash=book.content_hash AND duration_ms IS NOT NULL) AS audiobook_chapter_count
 FROM book
 WHERE book.content_hash=:content_hash AND book.deleted_at IS NULL
-  AND EXISTS(SELECT 1 FROM book_dir placement WHERE placement.book_row_id=book.row_id AND placement.deleted_at IS NULL);
+  AND EXISTS(SELECT 1 FROM library_book_presence presence
+             WHERE presence.book_row_id=book.row_id);
 
 -- name: book_detail_description?
 -- param: content_hash: &str

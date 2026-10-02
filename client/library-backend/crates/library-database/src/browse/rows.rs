@@ -1,21 +1,21 @@
 //! Decode database rows without masking malformed values.
-use library_model::BookCardRow;
-use sync_common::ContentHash;
 
-pub(crate) fn invalid_text_column(column: usize, message: impl Into<String>) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Text, Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, message.into())))
+use std::io::{Error, ErrorKind};
+pub(crate) use library_model::BookCardRow;
+pub(crate) use sync_common::ContentHash;
+
+pub fn invalid_text_column(column: usize, message: impl Into<String>) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Text, Box::new(Error::new(ErrorKind::InvalidData, message.into())))
 }
 
-pub(crate) fn invalid_integer_column(column: usize, message: impl Into<String>) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Integer, Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, message.into())))
+pub fn invalid_integer_column(column: usize, message: impl Into<String>) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Integer, Box::new(Error::new(ErrorKind::InvalidData, message.into())))
 }
 
 pub(crate) fn parse_uuid_column(value: String, column: usize) -> rusqlite::Result<uuid::Uuid> {
     uuid::Uuid::parse_str(&value).map_err(|error| invalid_text_column(column, error.to_string()))
 }
 
-/// Decodes a `load_book_cards` row. `source_directory` belongs to the folder
-/// query that chose the book, so its caller fills it in.
 pub(crate) fn read_book_card_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookCardRow> {
     let raw_content_hash: String = row.get("content_hash")?;
     let title: Option<String> = row.get("title")?;
@@ -29,7 +29,7 @@ pub(crate) fn read_book_card_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Bo
         progress: row.get::<_, Option<f32>>("progress")?.unwrap_or_default(),
         downloaded: row.get("downloaded")?,
         download_requested: row.get("download_requested")?,
-        format_category: super::options::file_type_of(row.get("format")?),
+        format_category: crate::browse::options::file_type_of(row.get("format")?),
         audiobook_duration_ms: duration_ms.map(u64::try_from).transpose().map_err(|e| invalid_integer_column(duration_column, e.to_string()))?,
         added_at: row.get::<_, Option<i64>>("added_at")?.unwrap_or_default(),
         source_directory: None,

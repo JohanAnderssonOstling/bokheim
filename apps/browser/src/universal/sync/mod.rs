@@ -5,6 +5,7 @@
 //! library list is reported upward so the root can update the shared
 //! [`Libraries`] rather than this page reaching into the navigation UI tree.
 
+use std::collections::HashSet;
 mod account;
 #[cfg(target_os = "android")]
 mod android_authentication;
@@ -49,7 +50,7 @@ pub struct SyncState {
     pub(crate) local_storage_usage: Vec<LocalLibraryStorageUsage>,
     pub(crate) server_storage_usage: Option<Vec<ServerLibraryStorageUsage>>,
     /// Shared with the activity display cache without copying transfer rows.
-    pub(crate) transfer_groups: Arc<Vec<app::LibraryTransfers>>,
+    pub(crate) transfer_groups: Arc<Vec<library_model::LibraryActivitySnapshot>>,
 }
 
 impl SyncState {
@@ -71,7 +72,7 @@ impl SyncState {
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub fn apply_transfer_snapshot(&mut self, groups: Vec<app::LibraryTransfers>, cx: &mut Context<Self>) {
+    pub fn apply_transfer_snapshot(&mut self, groups: Vec<library_model::LibraryActivitySnapshot>, cx: &mut Context<Self>) {
         self.transfer_groups = Arc::new(groups);
         cx.notify();
     }
@@ -101,7 +102,7 @@ pub enum SyncEvent {
     TransferRefreshWake,
     TransferRefreshRequested,
     TransferDisplayTick,
-    TransferSnapshot { generation: u64, result: Result<Vec<app::LibraryTransfers>, String> },
+    TransferSnapshot { generation: u64, result: Result<Vec<library_model::LibraryActivitySnapshot>, String> },
     TransferApplied { result: Result<(), String> },
     AssetStorageRequested { library_id: sync_common::LibraryId, enabled: bool },
     AssetStorageChanged { library_id: sync_common::LibraryId, enabled: bool, result: Result<(), String> },
@@ -124,7 +125,7 @@ pub(crate) struct SyncPage {
     state: Entity<SyncState>,
     active_library: Entity<Libraries>,
     identity: Entity<view::AccountIdentityView>,
-    asset_storage_pending: std::collections::HashSet<sync_common::LibraryId>,
+    asset_storage_pending: HashSet<sync_common::LibraryId>,
     /// Where a new library is created. It belongs to the library list rather
     /// than to a storage group of its own: it is the setting that decides where
     /// the next row in that list will live. `None` until the backend answers,
@@ -156,7 +157,7 @@ pub(crate) struct SyncPage {
     /// File sizes change independently of account notifications. Read them
     /// on entry, explicit refresh, and when the library set changes.
     local_usage_due: bool,
-    local_usage_libraries: std::collections::HashSet<sync_common::LibraryId>,
+    local_usage_libraries: HashSet<sync_common::LibraryId>,
     #[cfg(not(target_arch = "wasm32"))]
     local_usage_generation: u64,
     #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
@@ -226,7 +227,7 @@ impl SyncPage {
             state,
             active_library,
             identity,
-            asset_storage_pending: std::collections::HashSet::new(),
+            asset_storage_pending: HashSet::new(),
             #[cfg(all(feature = "filesystem-libraries", not(target_arch = "wasm32")))]
             default_library_location: None,
             activity_jobs,
@@ -328,7 +329,14 @@ impl SyncPage {
                 cx.notify();
             }
             SyncEvent::WebAuthenticated => self.schedule_refresh(cx),
-            SyncEvent::AccountRefreshRequested | SyncEvent::LocalStorageUsageRequested | SyncEvent::LocalStorageUsage { .. } | SyncEvent::LogoutRequested | SyncEvent::TransferRefreshRequested | SyncEvent::TransferSnapshot { .. } | SyncEvent::AssetStorageRequested { .. } | SyncEvent::Authenticate { .. } => {
+            SyncEvent::AccountRefreshRequested
+            | SyncEvent::LocalStorageUsageRequested
+            | SyncEvent::LocalStorageUsage { .. }
+            | SyncEvent::LogoutRequested
+            | SyncEvent::TransferRefreshRequested
+            | SyncEvent::TransferSnapshot { .. }
+            | SyncEvent::AssetStorageRequested { .. }
+            | SyncEvent::Authenticate { .. } => {
                 unreachable!("sync commands are handled by ApplicationRoot")
             }
         }

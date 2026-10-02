@@ -1,5 +1,6 @@
 //! Reader annotations: highlights, notes, and their anchors.
 
+use crate::sync::apply::registers::record_local;
 use crate::{Database, DatabaseError};
 use book_model::ReaderAnnotation;
 use include_sqlite_sql::include_sql;
@@ -18,35 +19,42 @@ impl Database {
 
     pub fn upsert_annotation(&self, value: &ReaderAnnotation) -> Result<(), DatabaseError> {
         value.validate(false).map_err(DatabaseError::operation)?;
-        let mut state = value.to_sync_state(false).map_err(DatabaseError::operation)?;
-        if let Some(existing) = self.annotation_by_id(&value.id)? {
-            state.created_at = u64::try_from(existing.created_at).unwrap_or(state.created_at);
-        }
-        let detail = state.detail_json().map_err(DatabaseError::operation)?;
-        let transaction = self.connection.unchecked_transaction()?;
-        transaction.upsert_annotation(&value.id, value.content_hash.as_str(), value.toc_ordinal, value.progress, &detail, value.modified_at, None)?;
-        crate::sync::apply::commit(transaction)?;
-        Ok(())
+        self.write(|transaction| {
+            let mut state = value.state.clone();
+            if let Some(existing) = {
+                let id: &str = &value.id;
+                let mut existing = None;
+                transaction.get_annotation_by_id(id, |row| {
+                    existing = Some(read_annotation(row)?);
+                    Ok(())
+                })?;
+                existing
+            } {
+                state.detail.created_at = existing.state.detail.created_at;
+            }
+            state.deleted = false;
+            if !transaction.query_row("SELECT EXISTS(SELECT 1 FROM book WHERE content_hash=?1)", [state.content_hash.as_str()], |row| row.get::<_, bool>(0))? {
+                return Err(DatabaseError::message("annotation book not found"));
+            }
+            record_local(transaction, library_replica::LibraryStateEntry::Annotation { annotation_id: value.id.clone(), value: state })?;
+            Ok(())
+        })
     }
 
     pub fn delete_annotation(&self, id: &str, modified_at: i64) -> Result<(), DatabaseError> {
         u64::try_from(modified_at).map_err(DatabaseError::operation)?;
-        let transaction = self.connection.unchecked_transaction()?;
-        let changed = transaction.delete_annotation(id, modified_at)?;
-        if changed == 0 {
-            return Err(DatabaseError::message("annotation not found"));
-        }
-        crate::sync::apply::commit(transaction)?;
-        Ok(())
-    }
-
-    fn annotation_by_id(&self, id: &str) -> Result<Option<ReaderAnnotation>, DatabaseError> {
-        let mut existing = None;
-        self.connection.get_annotation_by_id(id, |row| {
-            existing = Some(read_annotation(row)?);
+        self.write(|transaction| {
+            let mut existing = None;
+            transaction.get_annotation_by_id(id, |row| {
+                existing = Some(read_annotation(row)?);
+                Ok(())
+            })?;
+            let mut value = existing.ok_or_else(|| DatabaseError::message("annotation not found"))?.state;
+            value.modified_at = modified_at as u64;
+            value.deleted = true;
+            record_local(transaction, library_replica::LibraryStateEntry::Annotation { annotation_id: id.to_owned(), value })?;
             Ok(())
-        })?;
-        Ok(existing)
+        })
     }
 }
 

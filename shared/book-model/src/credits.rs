@@ -5,6 +5,7 @@
 //! policy that treats a whole [`BookMetadata`] value as a single
 //! last-writer-wins register lives with the mutation protocol, not here.
 
+use crate::{CollectionError, DateError, IdentifierError, LanguageTagError, SubjectError, ValueError};
 use crate::{BookDate, BookSubject, Identifier, LanguageTag, MarcRelatorCode};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -190,18 +191,70 @@ impl BookMetadata {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BookRecord {
+/// Book metadata shared by inspection, library state, and synchronization.
+/// Description is a separate value and is never cleared by a metadata update.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BookDetails {
     pub title: String,
     pub subtitle: Option<String>,
     pub contributors: Vec<Contributor>,
-    pub description: String,
     pub book: BookMetadata,
 }
 
-impl BookRecord {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookRecord {
+    pub metadata: BookDetails,
+    pub description: String,
+}
+
+impl std::ops::Deref for BookRecord {
+    type Target = BookDetails;
+    fn deref(&self) -> &Self::Target {
+        &self.metadata
+    }
+}
+impl std::ops::DerefMut for BookRecord {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.metadata
+    }
+}
+
+impl BookDetails {
     pub fn authors(&self) -> impl Iterator<Item = &Contributor> {
         self.contributors.iter().filter(|contributor| contributor.role_code() == MarcRelatorCode(*b"aut"))
+    }
+}
+
+// Preserve the existing flat JSON and positional binary formats. These adapters
+// borrow or deserialize the canonical fields; they do not define another value model.
+impl Serialize for BookRecord {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if !serializer.is_human_readable() {
+            return (&self.title, &self.subtitle, &self.contributors, &self.description, &self.book).serialize(serializer);
+        }
+        #[derive(Serialize)]
+        struct Fields<'a> {
+            #[serde(flatten)]
+            metadata: &'a BookDetails,
+            description: &'a str,
+        }
+        Fields { metadata: &self.metadata, description: &self.description }.serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for BookRecord {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if !deserializer.is_human_readable() {
+            let (title, subtitle, contributors, description, book) = Deserialize::deserialize(deserializer)?;
+            return Ok(Self { metadata: BookDetails { title, subtitle, contributors, book }, description });
+        }
+        #[derive(Deserialize)]
+        struct Fields {
+            #[serde(flatten)]
+            metadata: BookDetails,
+            description: String,
+        }
+        let fields = Fields::deserialize(deserializer)?;
+        Ok(Self { metadata: fields.metadata, description: fields.description })
     }
 }
 
@@ -300,38 +353,38 @@ impl fmt::Display for BookMetadataError {
 
 impl std::error::Error for BookMetadataError {}
 
-impl From<crate::IdentifierError> for BookMetadataError {
-    fn from(_: crate::IdentifierError) -> Self {
+impl From<IdentifierError> for BookMetadataError {
+    fn from(_: IdentifierError) -> Self {
         Self
     }
 }
 
-impl From<crate::CollectionError> for BookMetadataError {
-    fn from(_: crate::CollectionError) -> Self {
+impl From<CollectionError> for BookMetadataError {
+    fn from(_: CollectionError) -> Self {
         Self
     }
 }
 
-impl From<crate::SubjectError> for BookMetadataError {
-    fn from(_: crate::SubjectError) -> Self {
+impl From<SubjectError> for BookMetadataError {
+    fn from(_: SubjectError) -> Self {
         Self
     }
 }
 
-impl From<crate::DateError> for BookMetadataError {
-    fn from(_: crate::DateError) -> Self {
+impl From<DateError> for BookMetadataError {
+    fn from(_: DateError) -> Self {
         Self
     }
 }
 
-impl From<crate::ValueError> for BookMetadataError {
-    fn from(_: crate::ValueError) -> Self {
+impl From<ValueError> for BookMetadataError {
+    fn from(_: ValueError) -> Self {
         Self
     }
 }
 
-impl From<crate::LanguageTagError> for BookMetadataError {
-    fn from(_: crate::LanguageTagError) -> Self {
+impl From<LanguageTagError> for BookMetadataError {
+    fn from(_: LanguageTagError) -> Self {
         Self
     }
 }

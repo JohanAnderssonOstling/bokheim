@@ -1,11 +1,13 @@
 //! Additional lookup evidence, independent of the fields selected for display.
+
+use crate::resolution::clean_fallback_authors;
 use metadata_contract::EditionIdentityQuery;
 
 pub const MAX_FILENAME_QUERIES: usize = 4;
 pub fn queries(base: &EditionIdentityQuery, filenames: &[String]) -> Vec<EditionIdentityQuery> {
     let mut queries = Vec::new();
     for filename in filenames {
-        let mut parsed = book_model::BookRecord { title: String::new(), subtitle: None, contributors: vec![], description: String::new(), book: Default::default() };
+        let mut parsed = book_model::BookRecord { metadata: book_model::BookDetails { title: String::new(), subtitle: None, contributors: vec![], book: Default::default() }, description: String::new() };
         if crate::title_identity::normalize_with_filename(&mut parsed, filename).is_err() {
             continue;
         }
@@ -19,10 +21,10 @@ pub fn queries(base: &EditionIdentityQuery, filenames: &[String]) -> Vec<Edition
         for authors in parsed_authors.into_iter().chain(std::iter::once(base.authors.clone())) {
             let mut query = base.clone();
             query.title = title.clone();
-            query.authors = crate::resolution::clean_fallback_authors(&authors);
+            query.authors = clean_fallback_authors(&authors);
             query.book_year = query.book_year.or(year);
             let equivalent = |other: &EditionIdentityQuery| {
-                metadata_contract::matching::NormalizedTitle::new(&query.title).full == metadata_contract::matching::NormalizedTitle::new(&other.title).full && query.authors == crate::resolution::clean_fallback_authors(&other.authors)
+                metadata_contract::matching::NormalizedTitle::new(&query.title).full == metadata_contract::matching::NormalizedTitle::new(&other.title).full && query.authors == clean_fallback_authors(&other.authors)
             };
             if equivalent(base) || queries.iter().any(equivalent) {
                 continue;
@@ -84,7 +86,7 @@ mod tests {
         let queries = queries(&base, &[name.clone(), name]);
         assert_eq!(queries.len(), 2);
         assert_eq!(queries[1].title, "A Concise History of Spain");
-        assert_eq!(queries[1].authors, crate::resolution::clean_fallback_authors(&base.authors));
+        assert_eq!(queries[1].authors, clean_fallback_authors(&base.authors));
     }
 }
 

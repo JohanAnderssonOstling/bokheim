@@ -1,7 +1,11 @@
 use crate::library::commands::LibraryReply;
+use crate::library::LibraryCommand;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::library::{LibraryHandle, ReadyCommand, SessionCommand};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::BackendError;
 use crate::LibraryId;
+use crate::{ContentHash, DownloadState};
 
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc as Shared;
@@ -12,7 +16,7 @@ use std::sync::Arc as Shared;
 #[derive(Clone)]
 pub struct LibraryClient {
     library_id: LibraryId,
-    pub(super) transport: Shared<dyn super::ClientTransport>,
+    pub transport: Shared<dyn super::ClientTransport>,
 }
 impl LibraryClient {
     pub fn new(library_id: LibraryId, transport: impl super::ClientTransport + 'static) -> Self {
@@ -23,7 +27,7 @@ impl LibraryClient {
         &self.library_id
     }
 
-    pub(crate) async fn request<T: LibraryReply>(&self, command: crate::library::LibraryCommand) -> Result<T, String> {
+    pub async fn request<T: LibraryReply>(&self, command: LibraryCommand) -> Result<T, String> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.transport.handle().map_err(|error| error.to_string())?.dispatch(command).await.and_then(client_runtime::reply::Reply::take).map_err(|error| error.to_string())
@@ -38,8 +42,8 @@ impl LibraryClient {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let handle = self.transport.handle().map_err(|error| error.to_string())?;
-            let events = handle.subscribe_updates();
-            Ok((events, handle.scanning().await.map_err(|error| error.to_string())?))
+            let events = handle.subscriptions.subscribe_updates();
+            Ok((events, handle.dispatch(LibraryCommand::Session(SessionCommand::Ready(ReadyCommand::Scanning))).await.and_then(client_runtime::reply::Reply::take::<bool>).map_err(|error| error.to_string())?))
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -47,7 +51,7 @@ impl LibraryClient {
         }
     }
 
-    pub async fn download_changes(&self, content_hash: crate::ContentHash) -> Result<(async_channel::Receiver<crate::DownloadState>, crate::DownloadState), String> {
+    pub async fn download_changes(&self, content_hash: ContentHash) -> Result<(async_channel::Receiver<DownloadState>, DownloadState), String> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.transport.handle().map_err(|error| error.to_string())?.download_changes(content_hash).await.map_err(|error| error.to_string())
@@ -62,11 +66,11 @@ impl LibraryClient {
 /// Native hosts retain their worker lifetime while exposing the already-open library actor.
 #[cfg(not(target_arch = "wasm32"))]
 pub trait ClientTransport: Send + Sync {
-    fn handle(&self) -> Result<&crate::library::LibraryHandle, BackendError>;
+    fn handle(&self) -> Result<&LibraryHandle, BackendError>;
 }
 #[cfg(not(target_arch = "wasm32"))]
-impl ClientTransport for crate::library::LibraryHandle {
-    fn handle(&self) -> Result<&crate::library::LibraryHandle, BackendError> {
+impl ClientTransport for LibraryHandle {
+    fn handle(&self) -> Result<&LibraryHandle, BackendError> {
         Ok(self)
     }
 }
@@ -79,10 +83,10 @@ pub type TransportResult<'a, T> = BoxedBackendFuture<'a, Result<T, String>>;
 /// Browser hosts route library requests and subscriptions over their worker transport.
 #[cfg(target_arch = "wasm32")]
 pub trait ClientTransport {
-    fn request(&self, command: crate::library::LibraryCommand) -> TransportResult<'_, client_runtime::wire::WorkerPayload>;
+    fn request(&self, command: LibraryCommand) -> TransportResult<'_, client_runtime::wire::WorkerPayload>;
     fn updates(&self) -> TransportResult<'_, (async_channel::Receiver<library_model::LibraryUpdate>, bool)>;
-    fn download_changes(&self, content_hash: crate::ContentHash) -> TransportResult<'_, (async_channel::Receiver<crate::DownloadState>, crate::DownloadState)>;
-    fn subscribe_book(&self, content_hash: crate::ContentHash) -> TransportResult<'_, (async_channel::Receiver<()>, crate::ResolvedBookData)>;
+    fn download_changes(&self, content_hash: ContentHash) -> TransportResult<'_, (async_channel::Receiver<DownloadState>, DownloadState)>;
+    fn subscribe_book(&self, content_hash: ContentHash) -> TransportResult<'_, (async_channel::Receiver<()>, crate::ResolvedBookData)>;
     fn import_directory(&self, parent_id: crate::DirId, directory: crate::DirectoryImport, create_root: bool) -> TransportResult<'_, Vec<crate::ImportFailure>>;
     fn diagnostics(&self) -> async_channel::Receiver<String>;
 }

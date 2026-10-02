@@ -7,6 +7,7 @@
 //! this whole element, and a mobile reader reaches it through the bottom bar
 //! in `shell::page` instead.
 
+use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, FocusHandle, Window};
 use gpui_component::IconName;
@@ -106,8 +107,8 @@ pub(crate) fn reader_bottom_bar(
     contents_available: bool,
     search_active: bool,
     theme: components::BrowserTheme,
-    on_select: std::rc::Rc<dyn Fn(SidebarTab, &mut Window, &mut gpui::App)>,
-    on_search: std::rc::Rc<dyn Fn(&mut Window, &mut gpui::App)>,
+    on_select: Rc<dyn Fn(SidebarTab, &mut Window, &mut gpui::App)>,
+    on_search: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
 ) -> AnyElement {
     let mut bar = components::bottom_navigation(theme).id(id);
     bar = bar.child(components::bottom_navigation_item("reader-bottom-search", IconName::Search, "Search", search_active, theme).on_click(move |_, window, cx| on_search(window, cx)));

@@ -1,13 +1,16 @@
 //! Headless inspection for library jobs and local evidence audits; no network.
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+
+use std::error::Error;
+use std::fs::File;
+fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let pages = std::env::args().any(|arg| arg == "--pages");
     let keep_going = std::env::args().any(|arg| arg == "--keep-going");
     for name in std::env::args().skip(1).filter(|arg| arg != "--keep-going" && arg != "--pages") {
-        let result = (|| -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let result = (|| -> Result<(), Box<dyn Error + Send + Sync>> {
             let path = std::path::Path::new(&name);
             let book = match path.extension().and_then(|s| s.to_str()) {
-                Some("epub") if pages => book_inspection::inspect_epub_pages_reader(path, std::fs::File::open(path)?)?,
-                Some("pdf") if pages => book_inspection::inspect_pdf_pages_reader(path, std::fs::File::open(path)?)?.metadata,
+                Some("epub") if pages => book_inspection::inspect_epub_pages_reader(path, File::open(path)?)?,
+                Some("pdf") if pages => book_inspection::inspect_pdf_pages_reader(path, File::open(path)?)?.metadata,
                 Some("epub") => book_inspection::inspect_epub(path)?.metadata,
                 Some("pdf") => book_inspection::inspect_pdf(path)?.metadata,
                 _ => return Err("expected an EPUB or PDF path".into()),

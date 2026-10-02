@@ -14,7 +14,7 @@ pub fn materialize(content_hash: ContentHash, metadata: &BookRecord, format: Boo
     let extension = format.canonical_extension();
     let compact_hash = &content_hash.as_str()[..COMPACT_HASH_HEX_LEN];
     let title = sanitize_stem(&metadata.title);
-    let title = (!title.is_empty()).then_some(title).unwrap_or_else(|| compact_hash.to_owned());
+    let title = if !title.is_empty() { title } else { compact_hash.to_owned() };
     let author = metadata.authors().next().map(|author| sanitize_stem(author.name())).filter(|author| !author.is_empty());
     let year = metadata.book.dates.iter().find_map(|date| date.value().get(..4).filter(|year| year.bytes().all(|byte| byte.is_ascii_digit()))).map(str::to_owned);
 
@@ -34,11 +34,11 @@ pub fn materialize(content_hash: ContentHash, metadata: &BookRecord, format: Boo
     let final_rung = candidates.len() - 1;
     for (index, stem) in candidates.into_iter().enumerate() {
         let stem = if index == final_rung {
-            cap_with_suffix(&stem, &format!(" [{content_hash}]"), &extension)
+            cap_with_suffix(&stem, &format!(" [{content_hash}]"), extension)
         } else if stem.ends_with(&format!(" [{compact_hash}]")) {
-            cap_with_suffix(&stem, &format!(" [{compact_hash}]"), &extension)
+            cap_with_suffix(&stem, &format!(" [{compact_hash}]"), extension)
         } else {
-            cap(&stem, &extension)
+            truncate_utf8(&stem, MAX_FILE_NAME_BYTES.saturating_sub(extension.len() + 1))
         };
         let candidate = format!("{stem}.{extension}");
         if !occupied(&candidate) {
@@ -63,7 +63,11 @@ fn sanitize_stem(value: &str) -> String {
         }
     }
     let output = output.trim().trim_end_matches('.').trim().to_owned();
-    if is_reserved(&output) { String::new() } else { output }
+    if is_reserved(&output) {
+        String::new()
+    } else {
+        output
+    }
 }
 
 pub(crate) fn is_reserved(value: &str) -> bool {
@@ -89,9 +93,6 @@ pub fn validate_component(value: &str) -> Result<String, String> {
     Ok(value.to_owned())
 }
 
-fn cap(stem: &str, extension: &str) -> String {
-    truncate_utf8(stem, MAX_FILE_NAME_BYTES.saturating_sub(extension.len() + 1))
-}
 fn cap_with_suffix(stem: &str, suffix: &str, extension: &str) -> String {
     let title = stem.strip_suffix(suffix).unwrap_or(stem);
     format!("{}{}", truncate_utf8(title, MAX_FILE_NAME_BYTES.saturating_sub(extension.len() + 1 + suffix.len())), suffix)
@@ -113,7 +114,7 @@ mod tests {
     use book_model::BookRecord;
     use book_model::{BookDate, BookMetadata, Contributor, MarcRelatorCode};
     fn metadata(title: &str) -> BookRecord {
-        BookRecord { title: title.to_owned(), subtitle: None, contributors: vec![], description: String::new(), book: BookMetadata::default() }
+        BookRecord { metadata: book_model::BookDetails { title: title.to_owned(), subtitle: None, contributors: vec![], book: BookMetadata::default() }, description: String::new() }
     }
     fn hash(value: u64) -> ContentHash {
         ContentHash::new(&format!("{value:012x}{}", "0".repeat(64 - COMPACT_HASH_HEX_LEN)))

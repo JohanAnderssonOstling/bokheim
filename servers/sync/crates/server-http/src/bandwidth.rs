@@ -1,3 +1,5 @@
+use std::io::Error;
+use std::sync::Arc;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -64,7 +66,7 @@ impl TransferGovernor {
 
 #[derive(Clone)]
 struct DirectionGovernor {
-    inner: std::sync::Arc<DirectionInner>,
+    inner: Arc<DirectionInner>,
 }
 
 struct DirectionInner {
@@ -78,14 +80,14 @@ struct DirectionInner {
 impl DirectionGovernor {
     fn new(rate_bytes_per_second: u64, burst_bytes: u64) -> Self {
         let (sender, receiver) = mpsc::channel(MAX_PENDING_GRANTS);
-        Self { inner: std::sync::Arc::new(DirectionInner { sender, receiver: Mutex::new(Some(receiver)), started: AtomicBool::new(false), rate_bytes_per_second, burst_bytes: burst_bytes.max(FAIR_QUANTUM_BYTES as u64) }) }
+        Self { inner: Arc::new(DirectionInner { sender, receiver: Mutex::new(Some(receiver)), started: AtomicBool::new(false), rate_bytes_per_second, burst_bytes: burst_bytes.max(FAIR_QUANTUM_BYTES as u64) }) }
     }
 
     fn ensure_started(&self) -> std::io::Result<()> {
         if self.inner.rate_bytes_per_second == 0 || self.inner.started.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
-        let receiver = self.inner.receiver.lock().map_err(|_| std::io::Error::other("bandwidth scheduler lock is poisoned"))?.take().ok_or_else(|| std::io::Error::other("bandwidth scheduler receiver is unavailable"))?;
+        let receiver = self.inner.receiver.lock().map_err(|_| Error::other("bandwidth scheduler lock is poisoned"))?.take().ok_or_else(|| Error::other("bandwidth scheduler receiver is unavailable"))?;
         let rate = self.inner.rate_bytes_per_second;
         let burst = self.inner.burst_bytes;
         tokio::spawn(async move { run_scheduler(receiver, rate, burst).await });
@@ -101,8 +103,8 @@ impl DirectionGovernor {
         while remaining > 0 {
             let chunk = remaining.min(FAIR_QUANTUM_BYTES);
             let (granted, reply) = oneshot::channel();
-            self.inner.sender.send(GrantRequest { user_id: user_id.to_string(), bytes: chunk, granted }).await.map_err(|_| std::io::Error::other("bandwidth scheduler stopped"))?;
-            reply.await.map_err(|_| std::io::Error::other("bandwidth scheduler dropped a grant"))?;
+            self.inner.sender.send(GrantRequest { user_id: user_id.to_string(), bytes: chunk, granted }).await.map_err(|_| Error::other("bandwidth scheduler stopped"))?;
+            reply.await.map_err(|_| Error::other("bandwidth scheduler dropped a grant"))?;
             remaining -= chunk;
         }
         Ok(())

@@ -1,6 +1,12 @@
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
+use crate::executor::spawn_detached;
+use crate::web::WebConnection;
+use crate::{BackendError, ContentHash, DownloadState, ImportProgress, LibraryId};
 #[derive(Clone)]
 pub(crate) struct Transport {
-    remote: std::rc::Rc<WebWorkerClient>,
+    remote: Rc<WebWorkerClient>,
 }
 
 use super::*;
@@ -29,44 +35,44 @@ impl Drop for WebPendingRequest<'_> {
 
 pub(crate) struct WebWorkerClient {
     _session: Session,
-    _connection: crate::web::WebConnection,
+    _connection: WebConnection,
     port: SessionSender,
-    failure: std::rc::Rc<std::cell::RefCell<Option<crate::BackendError>>>,
-    recovering: std::rc::Rc<std::cell::Cell<bool>>,
-    subscription_commands: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<u64, Vec<u8>>>>,
-    pending: std::rc::Rc<Pending<oneshot::Sender<Result<WorkerPayload, crate::BackendError>>>>,
-    subscriptions: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<u64, async_channel::Sender<WorkerPayload>>>>,
-    diagnostics: std::rc::Rc<std::cell::RefCell<Vec<async_channel::Sender<String>>>>,
+    failure: Rc<RefCell<Option<BackendError>>>,
+    recovering: Rc<Cell<bool>>,
+    subscription_commands: Rc<RefCell<HashMap<u64, Vec<u8>>>>,
+    pending: Rc<Pending<oneshot::Sender<Result<WorkerPayload, BackendError>>>>,
+    subscriptions: Rc<RefCell<HashMap<u64, async_channel::Sender<WorkerPayload>>>>,
+    diagnostics: Rc<RefCell<Vec<async_channel::Sender<String>>>>,
 }
 
 impl Transport {
-    pub(crate) async fn connect_web_transport(config: crate::web::WebConfiguration) -> Result<(Self, AppStartupState), crate::BackendError> {
-        let connection = crate::web::WebConnection::connect(config).await?;
+    pub(crate) async fn connect_web_transport(config: crate::web::WebConfiguration) -> Result<(Self, AppStartupState), BackendError> {
+        let connection = WebConnection::connect(config).await?;
         Self::finish_web_connection(connection).await
     }
 
-    async fn finish_web_connection(connection: crate::web::WebConnection) -> Result<(Self, AppStartupState), crate::BackendError> {
+    async fn finish_web_connection(connection: WebConnection) -> Result<(Self, AppStartupState), BackendError> {
         let port = SessionSender::new(connection.worker.clone(), connection.port());
 
-        let pending = std::rc::Rc::new(Pending::<oneshot::Sender<Result<WorkerPayload, crate::BackendError>>>::default());
+        let pending = Rc::new(Pending::<oneshot::Sender<Result<WorkerPayload, BackendError>>>::default());
         let (startup_sender, startup_receiver) = oneshot::channel();
-        let startup_sender = std::rc::Rc::new(std::cell::RefCell::new(Some(startup_sender)));
-        let failure = std::rc::Rc::new(std::cell::RefCell::new(None::<crate::BackendError>));
-        let recovering = std::rc::Rc::new(std::cell::Cell::new(false));
-        let subscription_commands = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::<u64, Vec<u8>>::new()));
+        let startup_sender = Rc::new(RefCell::new(Some(startup_sender)));
+        let failure = Rc::new(RefCell::new(None::<BackendError>));
+        let recovering = Rc::new(Cell::new(false));
+        let subscription_commands = Rc::new(RefCell::new(HashMap::<u64, Vec<u8>>::new()));
         let response_pending = pending.clone();
-        let subscriptions = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::<u64, async_channel::Sender<WorkerPayload>>::new()));
+        let subscriptions = Rc::new(RefCell::new(HashMap::<u64, async_channel::Sender<WorkerPayload>>::new()));
         let response_subscriptions = subscriptions.clone();
-        let diagnostics = std::rc::Rc::new(std::cell::RefCell::new(Vec::<async_channel::Sender<String>>::new()));
+        let diagnostics = Rc::new(RefCell::new(Vec::<async_channel::Sender<String>>::new()));
         let response_diagnostics = diagnostics.clone();
-        let fail: std::rc::Rc<dyn Fn(crate::BackendError)> = {
+        let fail: Rc<dyn Fn(BackendError)> = {
             let failure = failure.clone();
             let startup = startup_sender.clone();
             let pending = pending.clone();
             let subscriptions = subscriptions.clone();
             let diagnostics = diagnostics.clone();
             let port = port.clone();
-            std::rc::Rc::new(move |error| {
+            Rc::new(move |error| {
                 if failure.borrow().is_some() {
                     return;
                 }
@@ -107,7 +113,7 @@ impl Transport {
                     if message_recovering.replace(false) {
                         for bytes in message_commands.borrow().values() {
                             if let Err(error) = message_port.send(bytes) {
-                                message_failure(crate::BackendError::operation(error).context("Could not restore database subscription"));
+                                message_failure(BackendError::operation(error).context("Could not restore database subscription"));
                                 return;
                             }
                         }
@@ -136,7 +142,7 @@ impl Transport {
                                         let _ = sender.try_send(update);
                                     }
                                 }
-                                Err(error) => message_failure(crate::BackendError::operation(error).context("Could not restore database subscription")),
+                                Err(error) => message_failure(BackendError::operation(error).context("Could not restore database subscription")),
                             }
                         }
                     }
@@ -161,7 +167,7 @@ impl Transport {
                 return Err("backend worker stopped during startup".into());
             }
         };
-        Ok((Self { remote: std::rc::Rc::new(WebWorkerClient { _connection: connection, port, failure, recovering, subscription_commands, pending, subscriptions, diagnostics, _session: session }) }, startup))
+        Ok((Self { remote: Rc::new(WebWorkerClient { _connection: connection, port, failure, recovering, subscription_commands, pending, subscriptions, diagnostics, _session: session }) }, startup))
     }
 
     pub(crate) fn web_diagnostics(&self) -> async_channel::Receiver<String> {
@@ -170,7 +176,7 @@ impl Transport {
         receiver
     }
 
-    fn send_web_request(&self, command: WorkerCommand, events: Option<async_channel::Sender<WorkerPayload>>) -> Result<(u64, oneshot::Receiver<Result<WorkerPayload, crate::BackendError>>), crate::BackendError> {
+    fn send_web_request(&self, command: WorkerCommand, events: Option<async_channel::Sender<WorkerPayload>>) -> Result<(u64, oneshot::Receiver<Result<WorkerPayload, BackendError>>), BackendError> {
         if let Some(error) = self.remote.failure.borrow().as_ref() {
             return Err(error.clone());
         }
@@ -192,18 +198,18 @@ impl Transport {
             self.remote.pending.take(id);
             self.remote.subscriptions.borrow_mut().remove(&id);
             self.remote.subscription_commands.borrow_mut().remove(&id);
-            return Err(crate::BackendError::operation(error).context("failed to send backend request"));
+            return Err(BackendError::operation(error).context("failed to send backend request"));
         }
         Ok((id, receiver))
     }
 
-    pub(crate) async fn request_value(&self, command: AppCommand) -> Result<WorkerPayload, crate::BackendError> {
+    pub(crate) async fn request_value(&self, command: AppCommand) -> Result<WorkerPayload, BackendError> {
         let (id, receiver) = self.send_web_request(WorkerCommand::App(command), None)?;
         let _pending = WebPendingRequest { client: &self.remote, id, subscription: false };
         receiver.await.map_err(|_| "backend worker stopped during request".to_owned())?
     }
 
-    async fn subscribe_value(&self, command: WorkerCommand) -> Result<(u64, WorkerPayload, async_channel::Receiver<WorkerPayload>), crate::BackendError> {
+    async fn subscribe_value(&self, command: WorkerCommand) -> Result<(u64, WorkerPayload, async_channel::Receiver<WorkerPayload>), BackendError> {
         let coalesce = matches!(command, WorkerCommand::App(AppCommand::SubscribeLibraryList));
         let (event_sender, event_receiver) = if coalesce { async_channel::bounded(1) } else { async_channel::unbounded() };
         let (id, response_receiver) = self.send_web_request(command, Some(event_sender))?;
@@ -227,23 +233,23 @@ impl Transport {
 }
 
 impl Transport {
-    pub(crate) async fn request<T: LibraryReply>(&self, command: AppCommand) -> Result<T, crate::BackendError> {
+    pub(crate) async fn request<T: LibraryReply>(&self, command: AppCommand) -> Result<T, BackendError> {
         decode_worker_payload(self.request_value(command).await?)
     }
 
-    pub(crate) async fn library_updates_transport(&self, library_id: LibraryId) -> Result<(async_channel::Receiver<library_backend::LibraryUpdate>, bool), crate::BackendError> {
+    pub(crate) async fn library_updates_transport(&self, library_id: LibraryId) -> Result<(async_channel::Receiver<library_backend::LibraryUpdate>, bool), BackendError> {
         self.worker_typed_subscription(WorkerCommand::LibrarySubscription { library_id, subscription: LibrarySubscription::Updates }).await
     }
 
-    pub(crate) async fn book_download_changes(&self, library_id: LibraryId, content_hash: crate::ContentHash) -> Result<(async_channel::Receiver<crate::DownloadState>, crate::DownloadState), crate::BackendError> {
+    pub(crate) async fn book_download_changes(&self, library_id: LibraryId, content_hash: ContentHash) -> Result<(async_channel::Receiver<DownloadState>, DownloadState), BackendError> {
         self.worker_typed_subscription(WorkerCommand::LibrarySubscription { library_id, subscription: LibrarySubscription::BookDownload { content_hash } }).await
     }
 
-    pub(crate) async fn book_subscription(&self, library_id: crate::LibraryId, content_hash: crate::ContentHash) -> Result<(async_channel::Receiver<()>, ResolvedBookData), crate::BackendError> {
+    pub(crate) async fn book_subscription(&self, library_id: LibraryId, content_hash: ContentHash) -> Result<(async_channel::Receiver<()>, ResolvedBookData), BackendError> {
         self.worker_typed_subscription(WorkerCommand::LibrarySubscription { library_id, subscription: LibrarySubscription::Book { content_hash } }).await
     }
 
-    async fn worker_typed_subscription<Event: serde::de::DeserializeOwned + Send + 'static, Reply: serde::de::DeserializeOwned>(&self, command: WorkerCommand) -> Result<(async_channel::Receiver<Event>, Reply), crate::BackendError> {
+    async fn worker_typed_subscription<Event: serde::de::DeserializeOwned + Send + 'static, Reply: serde::de::DeserializeOwned>(&self, command: WorkerCommand) -> Result<(async_channel::Receiver<Event>, Reply), BackendError> {
         let (subscription_id, initial, receiver) = self.subscribe_value(command).await?;
         let initial = match decode_worker_payload(initial) {
             Ok(initial) => initial,
@@ -254,7 +260,7 @@ impl Transport {
         };
         let (sender, updates) = async_channel::unbounded();
         let subscription_backend = self.clone();
-        crate::executor::spawn_detached(async move {
+        spawn_detached(async move {
             while let Some(value) = next_subscription_value(&receiver, &sender).await {
                 let Ok(update) = decode_worker_payload(value) else { continue };
                 if sender.send(update).await.is_err() {
@@ -266,11 +272,11 @@ impl Transport {
         Ok((updates, initial))
     }
 
-    pub(super) async fn unit_subscription(&self, command: AppCommand) -> Result<async_channel::Receiver<()>, crate::BackendError> {
+    pub(super) async fn unit_subscription(&self, command: AppCommand) -> Result<async_channel::Receiver<()>, BackendError> {
         let (subscription_id, _initial, receiver) = self.subscribe_value(WorkerCommand::App(command)).await?;
         let (sender, updates) = async_channel::bounded(1);
         let subscription_backend = self.clone();
-        crate::executor::spawn_detached(async move {
+        spawn_detached(async move {
             while next_subscription_value(&receiver, &sender).await.is_some() {
                 if matches!(sender.try_send(()), Err(async_channel::TrySendError::Closed(()))) {
                     break;
@@ -291,11 +297,17 @@ async fn next_subscription_value<T>(receiver: &async_channel::Receiver<WorkerPay
     }
 }
 
-fn restored_subscription_updates(command: &[u8], result: Result<WorkerPayload, crate::BackendError>) -> Result<Vec<WorkerPayload>, crate::BackendError> {
+fn restored_subscription_updates(command: &[u8], result: Result<WorkerPayload, BackendError>) -> Result<Vec<WorkerPayload>, BackendError> {
     let initial = result?;
     let request: AppWorkerClientMessage = decode_worker_message(command)?;
     if let AppWorkerClientMessage::Request(AppWorkerRequest { command: WorkerCommand::LibrarySubscription { subscription, .. }, .. }) = request {
-        subscription.restored_updates(initial)
+        match subscription {
+            LibrarySubscription::Updates => {
+                let scanning = client_runtime::wire::decode_worker_payload::<bool>(initial)?;
+                [library_model::LibraryUpdate::Contents, library_model::LibraryUpdate::Scanning(scanning)].into_iter().map(client_runtime::wire::encode_reply).collect()
+            }
+            _ => Ok(vec![initial]),
+        }
     } else {
         // Application subscriptions use their initial reply to signal a refresh.
         Ok(vec![initial])
@@ -303,7 +315,7 @@ fn restored_subscription_updates(command: &[u8], result: Result<WorkerPayload, c
 }
 
 impl WebWorkerClient {
-    pub(crate) fn import_updates(&self) -> tokio::sync::watch::Receiver<std::collections::BTreeMap<String, crate::ImportProgress>> {
+    pub(crate) fn import_updates(&self) -> tokio::sync::watch::Receiver<BTreeMap<String, ImportProgress>> {
         self._connection.import_updates()
     }
     pub(crate) fn retry_import(&self, id: &str) {
@@ -312,7 +324,7 @@ impl WebWorkerClient {
 }
 
 impl Transport {
-    pub(crate) async fn library_request(&self, library_id: LibraryId, command: crate::library::LibraryCommand) -> Result<WorkerPayload, crate::BackendError> {
+    pub(crate) async fn library_request(&self, library_id: LibraryId, command: crate::library::LibraryCommand) -> Result<WorkerPayload, BackendError> {
         let command = WorkerCommand::Library { library_id, command: command };
         let (id, receiver) = self.send_web_request(command, None)?;
         let _pending = WebPendingRequest { client: &self.remote, id, subscription: false };
@@ -323,12 +335,12 @@ impl Transport {
 }
 
 impl AppClient {
-    pub async fn connect_web(config: crate::host::web::WebConfiguration) -> Result<(Self, AppStartupState), crate::BackendError> {
+    pub async fn connect_web(config: crate::host::web::WebConfiguration) -> Result<(Self, AppStartupState), BackendError> {
         let (transport, startup) = Transport::connect_web_transport(config).await?;
         Ok((Self { transport }, startup))
     }
 
-    pub fn import_updates(&self) -> tokio::sync::watch::Receiver<std::collections::BTreeMap<String, crate::ImportProgress>> {
+    pub fn import_updates(&self) -> tokio::sync::watch::Receiver<BTreeMap<String, ImportProgress>> {
         self.transport.remote.import_updates()
     }
 
@@ -338,7 +350,7 @@ impl AppClient {
 }
 
 impl Transport {
-    pub(crate) async fn import_selected_directory(&self, library_id: crate::LibraryId, parent_id: crate::DirId, directory: crate::DirectoryImport, create_root: bool) -> Result<Vec<crate::ImportFailure>, crate::BackendError> {
-        self.remote._connection.import_selected_directory(library_id, parent_id, directory, create_root).await.map_err(crate::BackendError::operation)
+    pub(crate) async fn import_selected_directory(&self, library_id: LibraryId, parent_id: crate::DirId, directory: crate::DirectoryImport, create_root: bool) -> Result<Vec<crate::ImportFailure>, BackendError> {
+        self.remote._connection.import_selected_directory(library_id, parent_id, directory, create_root).await.map_err(BackendError::operation)
     }
 }

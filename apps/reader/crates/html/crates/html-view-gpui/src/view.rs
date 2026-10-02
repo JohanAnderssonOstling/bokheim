@@ -1,3 +1,4 @@
+use core::panic::Location;
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -8,7 +9,7 @@ use web_time::Instant;
 
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, DispatchPhase, Element, ElementId, Entity, EventEmitter, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, ImageFormat, InspectorElementId, IntoElement, KeyContext,
-    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, Render, RenderImage, ScrollDelta, ScrollWheelEvent, Style, Window, relative,
+    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, Render, ScrollDelta, ScrollWheelEvent, Style, Window, relative,
 };
 use html_view_core::{BlockingJob, BlockingJobSpawner, DisplayCacheKey, InteractionPalette, PointerDownOptions, RendererCommand, RendererEvent, RendererHost, RendererSession, SelectionMode, TocEntry};
 use image::RgbaImage;
@@ -78,7 +79,7 @@ impl Element for HtmlNoteElement {
         None
     }
 
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+    fn source_location(&self) -> Option<&'static Location<'static>> {
         None
     }
 
@@ -381,7 +382,7 @@ impl Element for HtmlDocumentElement {
         Some(ElementId::View(self.view.entity_id()))
     }
 
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+    fn source_location(&self) -> Option<&'static Location<'static>> {
         None
     }
 
@@ -621,13 +622,13 @@ impl HtmlView {
 
     /// Follows the document's link history, reporting whether it moved.
     pub fn navigate_history_back(&mut self, _cx: &mut Context<Self>) -> bool {
-        let moved = self.renderer.navigate_history_back();
-        moved
+        
+        self.renderer.navigate_history_back()
     }
 
     pub fn navigate_history_forward(&mut self, _cx: &mut Context<Self>) -> bool {
-        let moved = self.renderer.navigate_history_forward();
-        moved
+        
+        self.renderer.navigate_history_forward()
     }
 
     pub fn change_root_font_size(&mut self, delta: f32, _cx: &mut Context<Self>) {

@@ -1,4 +1,6 @@
 //! One playback owner and one ordered restoration writer per application.
+
+use std::task::Waker;
 use app::AppClient;
 use futures_util::{
     FutureExt,
@@ -804,7 +806,7 @@ mod tests {
                     controller.update(cx, |controller, cx| controller.close(cx));
                 }
                 let mut shutdown = controller.update(cx, |controller, cx| controller.begin_shutdown(cx)).expect("shutdown must join the outstanding producer");
-                let mut poll = std::task::Context::from_waker(std::task::Waker::noop());
+                let mut poll = std::task::Context::from_waker(Waker::noop());
                 assert!(shutdown.as_mut().poll(&mut poll).is_pending());
                 done.try_send(outcome.clone()).unwrap();
                 assert_eq!(shutdown.await, outcome);
@@ -821,7 +823,7 @@ mod tests {
         let removal = controller.update(cx, |controller, cx| controller.finish_active_removal(Box::pin(async move { positions.recv().await.unwrap() }), cx));
         drop(removal);
         let mut shutdown = controller.update(cx, |controller, cx| controller.begin_shutdown(cx)).unwrap();
-        let mut poll = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut poll = std::task::Context::from_waker(Waker::noop());
         assert!(shutdown.as_mut().poll(&mut poll).is_pending());
         done.try_send(Ok(())).unwrap();
         shutdown.await.unwrap();
@@ -843,7 +845,7 @@ mod tests {
             assert_eq!(controller.pending_positions.len(), 1, "completed producers must not accumulate across replacements");
         });
         let mut shutdown = controller.update(cx, |controller, cx| controller.begin_shutdown(cx)).unwrap();
-        let mut poll = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut poll = std::task::Context::from_waker(Waker::noop());
         assert!(shutdown.as_mut().poll(&mut poll).is_pending());
         done.try_send(Ok(())).unwrap();
         shutdown.await.unwrap();
@@ -861,7 +863,7 @@ mod tests {
             let other = sync_common::LibraryId::from_u128(999);
             assert_eq!(controller.update(cx, |controller, cx| controller.prepare_removal(other, cx)).await, Ok(()));
             let mut removal = controller.update(cx, |controller, cx| controller.prepare_removal(library, cx));
-            let mut poll = std::task::Context::from_waker(std::task::Waker::noop());
+            let mut poll = std::task::Context::from_waker(Waker::noop());
             assert!(removal.as_mut().poll(&mut poll).is_pending());
             done.try_send(outcome.clone()).unwrap();
             assert_eq!(removal.await, outcome);
@@ -914,7 +916,7 @@ mod tests {
             assert!(controller.opening.is_none());
             assert_eq!(controller.generation, 1);
         });
-        let mut poll = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut poll = std::task::Context::from_waker(Waker::noop());
         assert!(preparation.as_mut().poll(&mut poll).is_pending());
         assert!(matches!(writes.recv().await.unwrap(), Save::Replace(None)));
         let Save::Flush(done) = writes.recv().await.unwrap() else {

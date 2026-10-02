@@ -2,8 +2,6 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 
-mod derive_into_plot;
-
 /// Input for icon_name! macro: EnumName, "path", [optional derives]
 struct IconNameInput {
     enum_name: syn::Ident,
@@ -39,11 +37,6 @@ impl Parse for IconNameInput {
             derives,
         })
     }
-}
-
-#[proc_macro_derive(IntoPlot)]
-pub fn derive_into_plot(input: TokenStream) -> TokenStream {
-    derive_into_plot::derive_into_plot(input)
 }
 
 /// Convert an SVG filename to PascalCase identifier.

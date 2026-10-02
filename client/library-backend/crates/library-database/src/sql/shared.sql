@@ -16,22 +16,6 @@ SELECT remote_library_name FROM sync_metadata WHERE singleton = 1;
 SELECT server_library_created FROM sync_metadata WHERE singleton = 1;
 
 
--- name: shared_audiobook_upsert_toc!
--- param: content_hash: &str
--- param: entry_count: i64
--- param: toc_json: &str
-INSERT INTO book_toc(content_hash,entry_count,toc_json)
-VALUES(:content_hash,:entry_count,:toc_json)
-ON CONFLICT(content_hash) DO UPDATE SET
-    entry_count=excluded.entry_count,
-    toc_json=excluded.toc_json;
-
-
--- name: shared_enrichment_mark_description_scanned!
--- param: content_hash: &str
-UPDATE book SET description_scanned = 1
-WHERE content_hash = :content_hash AND description_scanned IS NOT 1;
-
 -- Thumbnail recovery and remote availability.
 
 
@@ -92,9 +76,9 @@ INSERT OR REPLACE INTO local_directory_work(dir_id) VALUES(:dir_id);
 INSERT OR IGNORE INTO local_file_work(operation,content_hash,relative_path) VALUES(:operation,:content_hash,:relative_path);
 
 
--- name: shared_cancel_book_restore!
+-- name: shared_cancel_book_materialization!
 -- param: content_hash: &str
-DELETE FROM local_file_work WHERE content_hash=:content_hash AND operation='restore';
+DELETE FROM local_file_work WHERE content_hash=:content_hash AND operation='materialize';
 
 
 -- name: shared_purge_book_identifier!
@@ -108,12 +92,12 @@ INSERT INTO local_purge_work(content_hash) VALUES(:content_hash)
 ON CONFLICT(content_hash) DO UPDATE SET id=excluded.id;
 
 
--- name: shared_cursor_state_select?
-SELECT CAST(last_pull_state_seq AS TEXT) FROM sync_metadata WHERE singleton = 1;
+-- name: shared_cursor_lifecycle_select?
+SELECT CAST(last_pull_lifecycle_seq AS TEXT) FROM sync_metadata WHERE singleton = 1;
 
 
--- name: shared_cursor_reading_select?
-SELECT CAST(last_pull_reading_seq AS TEXT) FROM sync_metadata WHERE singleton = 1;
+-- name: shared_cursor_field_select?
+SELECT CAST(last_pull_field_seq AS TEXT) FROM sync_metadata WHERE singleton = 1;
 
 
 -- name: shared_apply_remote_book_purged_select?
@@ -123,11 +107,9 @@ SELECT row_id FROM book WHERE content_hash=:content_hash;
 
 -- name: shared_authors_insert_author_identity!
 -- param: stable_id: &str
--- param: preferred_name: &str
 -- param: normalized_name: &str
--- param: created_at: i64
-INSERT INTO author_identity(stable_id, preferred_name, normalized_name, is_provisional, created_at)
-VALUES(:stable_id, :preferred_name, :normalized_name, 1, :created_at);
+INSERT INTO author_identity(stable_id, normalized_name)
+VALUES(:stable_id, :normalized_name);
 
 
 -- name: shared_transfer_complete_download!
@@ -161,19 +143,6 @@ WHERE dir_id = :dir_id AND book_row_id = (SELECT row_id FROM book WHERE content_
 UPDATE book_transfer SET upload_rejected_reason = NULL, upload_rejected_at = NULL WHERE content_hash = :content_hash;
 
 
--- name: shared_update_canonical_metadata!
--- param: content_hash: &str
--- param: metadata: &[u8]
-UPDATE book SET book_metadata=:metadata WHERE content_hash=:content_hash AND book_metadata IS NOT :metadata;
-
--- name: shared_book_metadata?
--- param: content_hash: &str
-SELECT book_metadata FROM book WHERE content_hash=:content_hash;
-
--- name: shared_book_subjects?
--- param: content_hash: &str
-SELECT name,source,authority,code FROM book_subject WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash) ORDER BY position;
-
 -- name: shared_request_book_download!
 -- param: content_hash: &str
 -- param: origin: &str
@@ -184,3 +153,25 @@ SELECT content_hash, :origin, :requested_at FROM book WHERE content_hash = :cont
 ON CONFLICT(content_hash) DO UPDATE SET
     book_download = CASE WHEN excluded.book_download = 'user_initiated' OR book_download IS NULL THEN excluded.book_download ELSE book_download END,
     book_download_at = COALESCE(book_download_at, excluded.book_download_at);
+
+-- name: shared_book_format?
+-- param: content_hash: &str
+SELECT format FROM book WHERE content_hash = :content_hash;
+
+-- name: shared_audiobook_recording_evidence?
+-- param: content_hash: &str
+SELECT recording_json FROM book_local_state WHERE content_hash = :content_hash AND recording_json IS NOT NULL;
+
+-- name: shared_book_name_conflict ->
+-- param: dir_id: &str
+-- param: file_name_key: &str
+-- param: content_hash: &str
+SELECT EXISTS(SELECT 1 FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id WHERE bd.dir_id=:dir_id AND portable_name_key(bd.file_name)=:file_name_key AND b.content_hash!=:content_hash AND bd.deleted_at IS NULL);
+
+-- name: shared_live_book_placements?
+-- param: content_hash: &str
+-- The book's live placements; Rust turns each into a path.
+SELECT bd.dir_id, bd.file_name
+FROM book_dir bd
+JOIN book b ON b.row_id = bd.book_row_id
+WHERE b.content_hash = :content_hash AND b.deleted_at IS NULL AND bd.deleted_at IS NULL;

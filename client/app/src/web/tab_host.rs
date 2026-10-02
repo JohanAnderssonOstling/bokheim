@@ -1,4 +1,6 @@
 //! Application worker roles and typed import state over browser transport.
+
+use crate::{ImportFailure, ImportFailureKind, ImportState};
 use super::{error_message, field, object};
 pub use client_platform_web::transport::tab::WebConfiguration;
 use client_platform_web::transport::tab::{TabConnection, WorkerSpec};
@@ -56,7 +58,7 @@ impl WebConnection {
         .await?;
         Ok(Self { worker: transport.worker().clone(), transport, imports })
     }
-    pub(crate) async fn import_directory(&self, manifest: &str, files: Array) -> Result<Vec<crate::ImportFailure>, String> {
+    pub(crate) async fn import_directory(&self, manifest: &str, files: Array) -> Result<Vec<ImportFailure>, String> {
         let result = submit_directory_import(&self.transport.control(), manifest, &files).await.map_err(|error| error_message(&error))?;
         serde_json::from_str(&result.as_string().ok_or("Invalid import result")?).map_err(|error| error.to_string())
     }
@@ -67,9 +69,9 @@ impl WebConnection {
         log::warn!("Import {id} failed: {error}");
         // Coordinator-owned jobs can resume. Pre-submission failures need new capabilities.
         let state = if self.imports.borrow().contains_key(id) {
-            crate::ImportState::Paused { reason: crate::ImportFailure::operation(crate::ImportFailureKind::Interrupted, &[], error) }
+            ImportState::Paused { reason: ImportFailure::operation(ImportFailureKind::Interrupted, &[], error) }
         } else {
-            crate::ImportState::Rejected { reason: crate::ImportFailure::operation(crate::ImportFailureKind::Submission, &[], error) }
+            ImportState::Rejected { reason: ImportFailure::operation(ImportFailureKind::Submission, &[], error) }
         };
         let progress = ImportProgress { id: id.to_owned(), name: name.to_owned(), state, failures: Vec::new() };
         self.imports.send_modify(|imports| {
@@ -85,7 +87,7 @@ impl WebConnection {
 }
 
 impl WebConnection {
-    pub(crate) async fn import_selected_directory(&self, library_id: crate::LibraryId, parent_id: crate::DirId, directory: crate::DirectoryImport, create_root: bool) -> Result<Vec<crate::ImportFailure>, String> {
+    pub(crate) async fn import_selected_directory(&self, library_id: crate::LibraryId, parent_id: crate::DirId, directory: crate::DirectoryImport, create_root: bool) -> Result<Vec<ImportFailure>, String> {
         let id = uuid::Uuid::new_v4().to_string();
         let name = directory.name.clone();
         let result = async {

@@ -22,22 +22,20 @@ pub enum LibraryEvent {
 pub type LibraryEventSender = async_channel::Sender<LibraryEvent>;
 pub type LibraryEventReceiver = async_channel::Receiver<LibraryEvent>;
 
-pub fn library_event_channel() -> (LibraryEventSender, LibraryEventReceiver) {
-    async_channel::unbounded()
-}
+
 
 /// UI subscriptions live with the session, never in global application state.
 #[derive(Clone, Default)]
 pub struct LibraryEventSubscriptions {
-    subscribers: Arc<Mutex<LibraryEventSubscribers>>,
+    pub subscribers: Arc<Mutex<LibraryEventSubscribers>>,
 }
 
 #[derive(Default)]
-struct LibraryEventSubscribers {
-    closed: bool,
+pub struct LibraryEventSubscribers {
+    pub closed: bool,
     updates: Vec<async_channel::Sender<LibraryUpdate>>,
-    downloads: Vec<(ContentHash, async_channel::Sender<DownloadState>)>,
-    latest_downloads: HashMap<ContentHash, DownloadState>,
+    pub downloads: Vec<(ContentHash, async_channel::Sender<DownloadState>)>,
+    pub latest_downloads: HashMap<ContentHash, DownloadState>,
 }
 
 impl LibraryEventSubscriptions {
@@ -73,31 +71,11 @@ impl LibraryEventSubscriptions {
         receiver
     }
 
-    /// The durable baseline is read before this lock. An event published in
-    /// between replaces it; an event published after registration goes to the
-    /// receiver. Thus the initial value cannot be newer than a queued event.
-    pub fn subscribe_download_with_initial(&self, content_hash: ContentHash, durable: DownloadState) -> (async_channel::Receiver<DownloadState>, DownloadState) {
-        let (sender, receiver) = async_channel::unbounded();
-        let mut subscribers = self.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let initial = subscribers.latest_downloads.get(&content_hash).cloned().unwrap_or(durable);
-        if !subscribers.closed {
-            subscribers.downloads.retain(|(_, sender)| !sender.is_closed());
-            subscribers.downloads.push((content_hash, sender));
-        }
-        (receiver, initial)
-    }
+    
 
-    pub fn current_download(&self, content_hash: &ContentHash) -> Option<DownloadState> {
-        self.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).latest_downloads.get(content_hash).cloned()
-    }
+    
 
-    /// A new explicit request after local eviction starts a new lifecycle.
-    pub fn forget_terminal_download(&self, content_hash: &ContentHash) {
-        let mut subscribers = self.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if matches!(subscribers.latest_downloads.get(content_hash), Some(DownloadState::Downloaded)) {
-            subscribers.latest_downloads.remove(content_hash);
-        }
-    }
+    
 
     pub fn publish(&self, event: LibraryEvent, busy: bool) {
         let mut subscribers = self.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -167,7 +145,7 @@ mod tests {
         subscriptions.publish(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Queued }, false);
         subscriptions.publish(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Downloaded }, false);
         subscriptions.publish(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Queued }, false);
-        assert_eq!(subscriptions.current_download(&hash), Some(DownloadState::Downloaded));
+        assert_eq!(subscriptions.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).latest_downloads.get(&hash).cloned(), Some(DownloadState::Downloaded));
         assert_eq!(book.try_recv().unwrap(), DownloadState::Queued);
         assert_eq!(book.try_recv().unwrap(), DownloadState::Downloaded);
         assert!(book.try_recv().is_err());
@@ -183,11 +161,12 @@ mod tests {
         let book = subscriptions.subscribe_download(hash);
         subscriptions.publish(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Downloading(library_model::DownloadProgress::ZERO) }, false);
         subscriptions.publish(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Queued }, false);
-        assert_eq!(subscriptions.current_download(&hash), Some(DownloadState::Queued));
+        assert_eq!(subscriptions.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).latest_downloads.get(&hash).cloned(), Some(DownloadState::Queued));
         subscriptions.publish(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Downloaded }, false);
-        subscriptions.forget_terminal_download(&hash);
+        { let mut subscribers = subscriptions.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(subscribers.latest_downloads.get(&hash), Some(DownloadState::Downloaded)) { subscribers.latest_downloads.remove(&hash); } }
         subscriptions.publish(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Queued }, false);
-        assert_eq!(subscriptions.current_download(&hash), Some(DownloadState::Queued));
+        assert_eq!(subscriptions.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).latest_downloads.get(&hash).cloned(), Some(DownloadState::Queued));
         assert_eq!(book.try_recv().unwrap(), DownloadState::Downloading(library_model::DownloadProgress::ZERO));
         assert_eq!(book.try_recv().unwrap(), DownloadState::Queued);
         assert_eq!(book.try_recv().unwrap(), DownloadState::Downloaded);
@@ -200,7 +179,16 @@ mod tests {
         let hash = ContentHash::new(&format!("{:064x}", 9));
         let durable_before_event = DownloadState::NotDownloaded;
         subscriptions.publish(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Queued }, false);
-        let (events, initial) = subscriptions.subscribe_download_with_initial(hash, durable_before_event);
+        let (events, initial) = { let content_hash = hash; let durable = durable_before_event; {
+        let (sender, receiver) = async_channel::unbounded();
+        let mut subscribers = subscriptions.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let initial = subscribers.latest_downloads.get(&content_hash).cloned().unwrap_or(durable);
+        if !subscribers.closed {
+            subscribers.downloads.retain(|(_, sender)| !sender.is_closed());
+            subscribers.downloads.push((content_hash, sender));
+        }
+        (receiver, initial)
+    } };
         assert_eq!(initial, DownloadState::Queued);
         assert!(events.try_recv().is_err());
         subscriptions.publish(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Downloaded }, false);

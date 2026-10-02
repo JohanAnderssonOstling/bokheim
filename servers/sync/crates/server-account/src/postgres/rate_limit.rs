@@ -17,7 +17,6 @@ fn limits(attempt: AuthAttempt) -> Limits {
         AuthAttempt::VerifyEmail => Limits { label: "verify", window_seconds: 3600, network_attempts: 60, subject_attempts: Some(5) },
         AuthAttempt::RequestPasswordReset => Limits { label: "reset_request", window_seconds: 3600, network_attempts: 20, subject_attempts: Some(3) },
         AuthAttempt::ResetPassword => Limits { label: "reset", window_seconds: 3600, network_attempts: 60, subject_attempts: None },
-        AuthAttempt::AdminRead => Limits { label: "admin_read", window_seconds: 60, network_attempts: 240, subject_attempts: Some(120) },
     }
 }
 

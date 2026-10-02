@@ -2,21 +2,21 @@
 //! one horizontal paginator, with entries first. The card owns the keyboard
 //! within either kind of item and releases it at the outer edge.
 
-use std::cell::Cell;
+use crate::library::widgets::PaginatorState;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, IntoElement, MouseButton, Render, SharedString, Subscription, WeakEntity, Window, div};
+use gpui::{AnyElement, App, Context, Entity, IntoElement, KeyDownEvent, Render, SharedString, Subscription, WeakEntity, Window, div};
 use gpui_component::IconName;
 use library_model::BrowseRow;
 use sync_common::DirId;
 use ui_components as components;
 
 use super::folder_actions::FolderTargets;
-use super::layout::{DragPreviewItem, folder_drag_source, folder_drop_target};
-use super::listing::BrowseSection;
+use super::layout::{DragPreviewItem, child_frame, download_mark};
+use super::listing::{BrowseItem, BrowseKind, BrowseSection};
 use super::page::BrowsePage;
-use crate::library::widgets::{BookCardView, CursorMove, Paginator, PaginatorAxis, PaginatorChild, PaginatorGroup, browse_section_item_policy};
+use crate::library::widgets::{BookCardInteraction, BookCardPresentation, BookCardView, CursorMove, Paginator, PaginatorAxis, PaginatorChild, PaginatorGroup, browse_section_item_policy};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SectionRail {
@@ -35,35 +35,56 @@ pub(super) struct SectionCard {
     subjects: Vec<BrowseRow>,
     subject_cursor: Option<usize>,
     flow: Entity<Paginator>,
-    pager: Entity<SectionPager>,
-    focused_subject: Rc<Cell<Option<usize>>>,
+    parent: BrowseRow,
+    _flow_subscription: Subscription,
     book_entities: Vec<Entity<BookCardView>>,
     /// The part holding the keyboard, if the card has it at all.
     rail: Option<SectionRail>,
 }
 
 impl SectionCard {
-    pub(super) fn new(page: WeakEntity<BrowsePage>, id: String, child_icon: components::NavigationIcon, section: &BrowseSection, cx: &mut Context<Self>) -> Self {
-        let folder = (child_icon == components::NavigationIcon::Folder).then(|| DirId::parse_str(&section.parent.id).ok()).flatten();
-        let color_key = if folder.is_some() { &section.parent.name } else { &section.parent.id };
-        let band_index = components::section_card_band_index(child_icon, color_key);
-        let focused_subject = Rc::new(Cell::new(None));
-        let groups = mixed_groups(&id, page.clone(), section, folder, child_icon, focused_subject.clone());
+    pub(super) fn new(page: WeakEntity<BrowsePage>, id: String, kind: BrowseKind, section: &BrowseSection, cx: &mut Context<Self>) -> Self {
+        let child_icon = kind.child_icon();
+        let folder = if let library_model::BrowseLocation::Folder(id) = section.parent.id { Some(id) } else { None };
+        let groups = mixed_groups(&id, page.clone(), section, folder, child_icon, cx.entity().downgrade(), cx);
         let flow = cx.new(|_| Paginator::new(format!("{id}-contents"), groups).flow_axis(PaginatorAxis::Horizontal).max_rows(1).horizontal_only());
-        let card = cx.entity().downgrade();
-        let pager = cx.new(|cx| SectionPager::new(id.clone(), card, flow.clone(), cx));
-        Self { page, id, child_icon, band_index, folder, subjects: section.children.clone(), subject_cursor: None, flow, pager, focused_subject, book_entities: section.books.clone(), rail: None }
+        let subscription = cx.observe(&flow, |_, _, cx| cx.notify());
+        let mut card = Self {
+            page,
+            id,
+            child_icon,
+            band_index: 0,
+            folder,
+            subjects: section.children.clone(),
+            subject_cursor: None,
+            flow,
+            parent: section.parent.clone(),
+            _flow_subscription: subscription,
+            book_entities: section.books.clone(),
+            rail: None,
+        };
+        card.update_band();
+        card
+    }
+
+    fn update_band(&mut self) {
+        let key = match self.parent.id {
+            library_model::BrowseLocation::Folder(_) => self.parent.name.clone(),
+            library_model::BrowseLocation::Subject(route) => route.to_string(),
+        };
+        self.band_index = components::section_card_band_index(self.child_icon, &key);
     }
 
     /// Installs a refreshed section in place, keeping each part's position.
     pub(super) fn set_section(&mut self, section: &BrowseSection, cx: &mut Context<Self>) {
-        let color_key = if self.folder.is_some() { &section.parent.name } else { &section.parent.id };
-        self.band_index = components::section_card_band_index(self.child_icon, color_key);
-        let groups = mixed_groups(&self.id, self.page.clone(), section, self.folder, self.child_icon, self.focused_subject.clone());
+        self.parent = section.parent.clone();
+        self.update_band();
+        let groups = mixed_groups(&self.id, self.page.clone(), section, self.folder, self.child_icon, cx.entity().downgrade(), cx);
         self.flow.update(cx, |paginator, cx| paginator.refresh_groups(groups, cx));
+        let previous_subject = self.subject_cursor.and_then(|index| self.subjects.get(index)).map(|row| row.id.clone());
         self.subjects = section.children.clone();
         self.book_entities = section.books.clone();
-        self.subject_cursor = self.subject_cursor.map(|cursor| cursor.min(self.subjects.len().saturating_sub(1)));
+        self.subject_cursor = previous_subject.as_ref().and_then(|id| self.subjects.iter().position(|row| &row.id == id));
         if self.rail.is_some_and(|rail| !self.has_items(rail)) {
             self.rail = None;
         }
@@ -78,16 +99,8 @@ impl SectionCard {
         !self.book_entities.is_empty()
     }
 
-    pub(super) fn pager(&self) -> Entity<SectionPager> {
-        self.pager.clone()
-    }
-
-    pub(super) fn band_index(&self) -> usize {
-        self.band_index
-    }
-
-    pub(super) fn direct_book_count(&self) -> usize {
-        self.book_entities.len()
+    pub(super) fn present(card: Entity<Self>, focused: bool, marquee: bool) -> gpui::ViewElement<SectionCardElement> {
+        gpui::ViewElement::new(SectionCardElement { card, focused, marquee })
     }
 
     fn subject_columns(&self) -> usize {
@@ -165,7 +178,7 @@ impl SectionCard {
     /// Moves within the focused part. Returns false when the move runs off the
     /// card, for the page to continue it in the outer listing.
     pub(super) fn move_cursor(&mut self, movement: CursorMove, cx: &mut Context<Self>) -> bool {
-        let Some(rail) = self.rail else { return false };
+        let Some(rail) = self.rail else { return self.enter(movement, cx) };
         let moved = match rail {
             SectionRail::Subjects => {
                 let previous_column = self.subject_cursor.map(|cursor| cursor / components::SECTION_CARD_SUBJECT_ROWS_PER_COLUMN);
@@ -208,7 +221,10 @@ impl SectionCard {
     /// Tab walks from the subjects to the covers and Shift-Tab back. Past
     /// either end the card lets go of the keyboard and returns false, leaving
     /// the key to the ordinary focus chain.
-    pub(super) fn tab(&mut self, shift: bool, cx: &mut Context<Self>) -> bool {
+    fn tab(&mut self, shift: bool, cx: &mut Context<Self>) -> bool {
+        if self.rail.is_none() {
+            return self.enter(if shift { CursorMove::Up } else { CursorMove::Down }, cx);
+        }
         let next = match (self.rail, shift) {
             (Some(SectionRail::Subjects), false) if self.has_books() => Some(SectionRail::Books),
             (Some(SectionRail::Books), true) if self.has_subjects() => Some(SectionRail::Subjects),
@@ -220,6 +236,25 @@ impl SectionCard {
                 self.leave(cx);
                 false
             }
+        }
+    }
+
+    /// Section-specific keys stay here; the page only handles movement out.
+    pub(super) fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> Option<bool> {
+        let modifiers = event.keystroke.modifiers;
+        let plain = modifiers == gpui::Modifiers::default();
+        let shift_only = modifiers == gpui::Modifiers { shift: true, ..gpui::Modifiers::default() };
+        match event.keystroke.key.as_str() {
+            "tab" if plain || shift_only => self.tab(shift_only, cx).then_some(true),
+            "enter" if plain && self.is_focused() => Some(match self.activation(cx) {
+                Some(activate) => {
+                    window.defer(cx, move |window, cx| activate(window, cx));
+                    true
+                }
+                None => false,
+            }),
+            "pageup" | "pagedown" if plain && self.is_focused() => Some(self.turn_page(event.keystroke.key == "pagedown", cx)),
+            _ => None,
         }
     }
 
@@ -265,132 +300,116 @@ impl SectionCard {
     /// The subjects draw their own cursor; book cards are entities and are
     /// told.
     fn sync(&mut self, cx: &mut Context<Self>) {
-        self.focused_subject.set((self.rail == Some(SectionRail::Subjects)).then_some(self.subject_cursor).flatten());
-        let book_cursor = (self.rail == Some(SectionRail::Books)).then(|| self.flow.read(cx).cursor()).flatten().and_then(|cursor| cursor.checked_sub(self.subject_columns()));
-        for (index, book) in self.book_entities.iter().enumerate() {
-            book.update(cx, |book, cx| book.set_focused(book_cursor == Some(index), cx));
-        }
         self.flow.update(cx, |_, cx| cx.notify());
         cx.notify();
     }
+}
 
-    fn render_contents(&self) -> AnyElement {
-        self.flow.clone().into_any_element()
+pub(super) struct SectionCardElement {
+    card: Entity<SectionCard>,
+    focused: bool,
+    marquee: bool,
+}
+
+impl gpui::View for SectionCardElement {
+    fn entity_id(&self) -> Option<gpui::EntityId> {
+        Some(self.card.entity_id())
+    }
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        self.card.update(cx, |card, cx| card.render_card(self.focused, self.marquee, window, cx))
     }
 }
 
-pub(super) struct SectionPager {
-    id: String,
-    card: WeakEntity<SectionCard>,
-    flow: Entity<Paginator>,
-    _flow_subscription: Subscription,
-}
-
-impl SectionPager {
-    fn new(id: String, card: WeakEntity<SectionCard>, flow: Entity<Paginator>, cx: &mut Context<Self>) -> Self {
-        let subscription = cx.observe(&flow, |_, _, cx| cx.notify());
-        Self { id, card, flow, _flow_subscription: subscription }
-    }
-}
-
-impl Render for SectionPager {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl SectionCard {
+    fn render_card(&self, focused: bool, marquee: bool, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = components::browser_theme(cx);
         let flow = self.flow.read(cx);
-        let previous = flow.has_previous();
-        let next = flow.has_next();
         let arrow = |id: &str, label: &str, icon: IconName, enabled: bool, forward: bool| {
-            let card = self.card.clone();
-            components::section_card_cover_arrow(format!("{}-{id}", self.id), label.to_owned(), icon, enabled)
-                .opacity(if enabled { 1.0 } else { 0.35 })
-                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(move |_, _, cx| {
+            components::section_card_cover_arrow(format!("{}-{id}", self.id), label.to_owned(), icon, enabled).opacity(if enabled { 1.0 } else { 0.35 }).on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(
+                cx.listener(move |card, _, _, cx| {
                     cx.stop_propagation();
                     if enabled {
-                        let _ = card.update(cx, |card, cx| card.turn_page(forward, cx));
+                        card.turn_page(forward, cx);
                     }
-                })
+                }),
+            )
         };
-        div()
+        let arrows = div()
             .flex_none()
             .flex()
             .items_center()
             .gap(gpui::px(4.0))
             .text_size(gpui::rems(0.875))
             .text_color(gpui::rgb(0xf2efe8))
-            .child(arrow("previous-contents", "Previous entries or books", IconName::ArrowLeft, previous, false))
-            .child(arrow("next-contents", "Next entries or books", IconName::ArrowRight, next, true))
+            .child(arrow("previous-contents", "Previous entries or books", IconName::ArrowLeft, flow.has_previous(), false))
+            .child(arrow("next-contents", "Next entries or books", IconName::ArrowRight, flow.has_next(), true));
+        let heading = components::section_card_heading(format!("browse-card-title-{}", self.parent.id), self.parent.name.clone(), self.book_entities.len(), arrows.into_any_element(), focused, marquee)
+            .debug_selector(|| format!("browse-card-title-{}", self.parent.id));
+        components::section_card_frame(theme)
+            .child(components::section_card_band(self.band_index, heading))
+            .child(components::section_card_body().id(format!("{}-body", self.id)).mx(gpui::px(-components::BOOK_CARD_PADDING)).child(self.flow.clone()).on_click(|_, _, cx| cx.stop_propagation()))
+            .into_any_element()
     }
 }
 
 impl Render for SectionCard {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_contents()
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_card(false, false, window, cx)
     }
 }
 
 /// Child-entry columns come first in the same horizontal paginator as the
 /// covers. A later page contains only covers once every entry has passed.
-fn mixed_groups(id: &str, page: WeakEntity<BrowsePage>, section: &BrowseSection, folder: Option<DirId>, child_icon: components::NavigationIcon, focused_subject: Rc<Cell<Option<usize>>>) -> Vec<PaginatorGroup> {
+fn mixed_groups(id: &str, page: WeakEntity<BrowsePage>, section: &BrowseSection, folder: Option<DirId>, child_icon: components::NavigationIcon, card: WeakEntity<SectionCard>, cx: &App) -> Vec<PaginatorGroup> {
     let mut children = Vec::new();
     let subject_columns = section.children.len().div_ceil(components::SECTION_CARD_SUBJECT_ROWS_PER_COLUMN);
     for (column_index, column) in section.children.chunks(components::SECTION_CARD_SUBJECT_ROWS_PER_COLUMN).enumerate() {
         let column = column.to_vec();
         let before_direct_books = column_index + 1 == subject_columns && !section.books.is_empty();
+        let item_id = format!("column:{}", column[0].id);
         let page = page.clone();
-        let focus = focused_subject.clone();
+        let subject_card = card.clone();
         let id = id.to_owned();
-        children.push(PaginatorChild::new(move |_, _, cx| {
-            let theme = components::browser_theme(cx);
-            let rows = column.iter().enumerate().map(|(row_index, subject)| {
-                let index = column_index * components::SECTION_CARD_SUBJECT_ROWS_PER_COLUMN + row_index;
-                let location = subject.id.clone();
-                let open_page = page.clone();
-                let menu_page = page.clone();
-                let menu_location = location.clone();
-                let mut row = components::section_card_subject(format!("{id}-subject-{index}"), child_icon, subject.name.clone(), subject.book_count, focus.get() == Some(index), theme).on_click(move |_, window, cx| {
-                    let _ = open_page.update(cx, |page, cx| page.open_child(location.clone(), window, cx));
-                }).on_mouse_down(MouseButton::Right, |_, _, cx| {
-                    cx.stop_propagation();
-                }).on_aux_click(move |event, window, cx| {
-                    if event.is_secondary() {
-                        let _ = menu_page.update(cx, |page, cx| page.open_section_child_menu(&menu_location, event.position(), window, cx));
-                        cx.stop_propagation();
-                    }
-                });
-                if let Some(folder) = folder
-                    && let Ok(subfolder) = DirId::parse_str(&subject.id)
-                {
-                    let targets = FolderTargets { folders: vec![subfolder], folder_parents: Default::default(), books: Vec::new(), source: folder };
-                    let preview = DragPreviewItem::Folder { icon: components::NavigationIcon::Folder, label: SharedString::from(subject.name.clone()), path: None };
-                    row = folder_drop_target(folder_drag_source(row, targets, vec![preview], false), subfolder, SharedString::from(subject.name.clone()), true, page.clone(), theme);
-                }
-                row.into_any_element()
-            }).collect();
-            components::section_card_subject_rows(rows)
-                .when(before_direct_books, |rows| rows.pr(gpui::px(components::SECTION_CARD_COLUMN_GAP)))
-                .into_any_element()
-        }));
+        children.push(
+            PaginatorChild::new(move |_, _, cx| {
+                let theme = components::browser_theme(cx);
+                let rows = column
+                    .iter()
+                    .enumerate()
+                    .map(|(row_index, subject)| {
+                        let index = column_index * components::SECTION_CARD_SUBJECT_ROWS_PER_COLUMN + row_index;
+                        let focused = subject_card.upgrade().is_some_and(|card| {
+                            let card = card.read(cx);
+                            card.rail == Some(SectionRail::Subjects) && card.subject_cursor == Some(index)
+                        });
+                        let row = components::section_card_subject(format!("{id}-subject-{index}"), child_icon, subject.name.clone(), subject.book_count, focused, theme)
+                            .debug_selector(|| format!("browse-section-subject-{}", subject.id))
+                            .children(download_mark(subject, page.clone(), theme));
+                        let item = BrowseItem::Child { row: subject.clone(), parent: folder };
+                        let row = child_frame(row, subject, page.clone(), folder, vec![item], false, child_icon, theme, cx).on_mouse_down(gpui::MouseButton::Right, |_, _, cx| cx.stop_propagation());
+                        row.into_any_element()
+                    })
+                    .collect();
+                components::section_card_subject_rows(rows).px(gpui::px(components::BOOK_CARD_PADDING)).when(before_direct_books, |rows| rows.pr(gpui::px(components::SECTION_CARD_COLUMN_GAP))).into_any_element()
+            })
+            .with_id(item_id),
+        );
     }
-    for (index, book) in section.books.iter().enumerate() {
-        let rendered = book.clone();
-        let activated = book.clone();
-        let prefetched = book.clone();
-        children.push(PaginatorChild::new(move |_, _, cx| {
-            // Identified because a drag source has to be a stateful element,
-            // and each by its place: a drag's state is kept per id, so covers
-            // sharing one would hand a press on one cover to another.
-            let frame = div().id(("book", index)).w_full().h_full().min_w_0().child(rendered.clone())
-                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation());
-            match folder {
-                Some(folder) => {
-                    let targets = FolderTargets { folders: Vec::new(), folder_parents: Default::default(), books: vec![rendered.read(cx).content_hash()], source: folder };
-                    folder_drag_source(frame, targets, vec![DragPreviewItem::Book(rendered.clone())], false).into_any_element()
-                }
-                None => frame.into_any_element(),
-            }
-        })
-            .with_activate(move |window, cx| BookCardView::activate(&activated, window, cx))
-            .with_prepare(move |window, cx| BookCardView::prefetch_for_window(&prefetched, window, cx)));
+    for book in &section.books {
+        let card = card.clone();
+        let dragged = book.clone();
+        let drag = folder.map(|folder| {
+            Rc::new(move |_: &PaginatorState, _: &SharedString, cx: &App| {
+                FolderTargets::from_items(&[BrowseItem::Book(dragged.clone())], folder, cx).map(|targets| (targets, vec![DragPreviewItem::Book(dragged.clone())]))
+            }) as Rc<dyn Fn(&PaginatorState, &SharedString, &App) -> Option<(FolderTargets, Vec<DragPreviewItem>)>>
+        });
+        children.push(super::layout::book_child(
+            book.clone(),
+            BookCardPresentation::Section,
+            move |state, id, cx| BookCardInteraction { focused: state.is_focused(id) && card.upgrade().is_some_and(|card| card.read(cx).rail == Some(SectionRail::Books)), ..Default::default() },
+            drag,
+            cx,
+        ));
     }
     vec![PaginatorGroup::new(browse_section_item_policy(), children)]
 }

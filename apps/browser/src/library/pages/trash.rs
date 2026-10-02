@@ -1,5 +1,7 @@
 //! Library Trash. Deleted items remain recoverable here until explicitly purged.
 
+use library_backend::{LibraryCommand, ReadyCommand, SessionCommand};
+
 use gpui::prelude::*;
 use gpui::{Context, FocusHandle, Focusable, IntoElement, Render, SharedString, Subscription, Window, div, px};
 use gpui_component::IconName;
@@ -30,7 +32,7 @@ impl TrashPage {
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
         let generation = self.request.begin();
         let library = self.ui.backend().clone();
-        let load = async move { library.trash().await };
+        let load = async move { library.request::<library_model::LibraryTrashView>(LibraryCommand::Session(SessionCommand::Ready(ReadyCommand::Trash))).await };
         let task = cx.spawn(async move |page, cx| {
             let result = load.await;
             cx.defer_update(page, move |page, cx| {

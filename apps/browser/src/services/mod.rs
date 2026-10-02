@@ -1,6 +1,7 @@
 //! Explicit service boundaries for browser UI code.
 
 mod app;
+mod update_prompt;
 pub(crate) mod updates;
 pub use updates::{UpdateAction, UpdateActionHandler, UpdateControls, UpdateView};
 mod format;

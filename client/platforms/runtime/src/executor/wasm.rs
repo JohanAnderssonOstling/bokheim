@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use super::task::{owned_task, BackendTask};
 use super::{BackendExecutorError, BackendFuture, BackendOutput, BackendSend, BackendTimeout};
 use std::future::Future;
@@ -7,7 +8,7 @@ use wasm_bindgen::{closure::Closure, JsCast};
 // Each database worker is an isolated WASM instance. Failed startup keeps this
 // gate closed until the worker is terminated; dropping a permit never releases it.
 thread_local! {
-    static STARTUP_GATE: std::cell::RefCell<Option<tokio::sync::watch::Receiver<bool>>> = const { std::cell::RefCell::new(None) };
+    static STARTUP_GATE: RefCell<Option<tokio::sync::watch::Receiver<bool>>> = const { RefCell::new(None) };
 }
 
 pub struct StartupPermit(tokio::sync::watch::Sender<bool>);

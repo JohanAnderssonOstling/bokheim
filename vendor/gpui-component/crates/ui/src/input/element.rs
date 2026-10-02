@@ -747,40 +747,6 @@ impl TextElement {
         paths
     }
 
-    fn layout_hover_highlight(
-        &self,
-        last_layout: &LastLayout,
-        bounds: &Bounds<Pixels>,
-        cx: &mut App,
-    ) -> Option<Path<Pixels>> {
-        let state = self.state.read(cx);
-        let hover_popover = state.hover_popover.clone();
-
-        let Some(symbol_range) = hover_popover.map(|popover| popover.read(cx).symbol_range.clone())
-        else {
-            return None;
-        };
-
-        Self::layout_match_range(symbol_range, last_layout, bounds)
-    }
-
-    fn layout_document_colors(
-        &self,
-        document_colors: &[(Range<usize>, Hsla)],
-        last_layout: &LastLayout,
-        bounds: &Bounds<Pixels>,
-        _cx: &mut App,
-    ) -> Vec<(Path<Pixels>, Hsla)> {
-        let mut paths = vec![];
-        for (range, color) in document_colors.iter() {
-            if let Some(path) = Self::layout_match_range(range.clone(), last_layout, bounds) {
-                paths.push((path, *color));
-            }
-        }
-
-        paths
-    }
-
     fn layout_selections(
         &self,
         last_layout: &LastLayout,
@@ -994,91 +960,6 @@ impl TextElement {
         );
 
         Some(WhitespaceIndicators { space, tab })
-    }
-
-    /// Compute inline completion ghost lines for rendering.
-    ///
-    /// Returns (first_line, ghost_lines) where:
-    /// - first_line: Shaped text for the first line (goes after cursor on same line)
-    /// - ghost_lines: Shaped lines for subsequent lines (shift content down)
-    fn layout_inline_completion(
-        state: &InputState,
-        visible_range: &Range<usize>,
-        font_size: Pixels,
-        window: &mut Window,
-        cx: &App,
-    ) -> (Option<ShapedLine>, Vec<ShapedLine>) {
-        // Must be focused to show inline completion
-        if !state.focus_handle.is_focused(window) {
-            return (None, vec![]);
-        }
-
-        let Some(completion_item) = state.inline_completion.item.as_ref() else {
-            return (None, vec![]);
-        };
-
-        // Get cursor row from cursor position
-        let cursor_row = state.cursor_position().line as usize;
-
-        // Only show if cursor row is visible
-        if cursor_row < visible_range.start || cursor_row >= visible_range.end {
-            return (None, vec![]);
-        }
-
-        let completion_text = &completion_item.insert_text;
-        let completion_color = cx.theme().muted_foreground.opacity(0.5);
-
-        let text_style = window.text_style();
-        let font = text_style.font();
-
-        let lines: Vec<&str> = completion_text.split('\n').collect();
-        if lines.is_empty() {
-            return (None, vec![]);
-        }
-
-        // Shape first line (goes after cursor)
-        let first_text: SharedString = lines[0].to_string().into();
-        let first_line = if !first_text.is_empty() {
-            let first_run = TextRun {
-                len: first_text.len(),
-                font: font.clone(),
-                color: completion_color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            Some(
-                window
-                    .text_system()
-                    .shape_line(first_text, font_size, &[first_run], None),
-            )
-        } else {
-            None
-        };
-
-        // Shape ghost lines (lines 2+ that shift content down)
-        let ghost_lines: Vec<ShapedLine> = lines[1..]
-            .iter()
-            .map(|line_text| {
-                let text: SharedString = line_text.to_string().into();
-                let len = text.len().max(1); // Ensure at least 1 for empty lines
-                let run = TextRun {
-                    len,
-                    font: font.clone(),
-                    color: completion_color,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                };
-                // Use space for empty lines so they take up height
-                let shaped_text = if text.is_empty() { " ".into() } else { text };
-                window
-                    .text_system()
-                    .shape_line(shaped_text, font_size, &[run], None)
-            })
-            .collect();
-
-        (first_line, ghost_lines)
     }
 
     /// Return (line_number_width, line_number_len)
@@ -1342,12 +1223,8 @@ impl TextElement {
         let text = &state.text;
         let is_multi_line = state.mode.is_multi_line();
 
-        let (mut highlighter, diagnostics) = match &state.mode {
-            InputMode::CodeEditor {
-                highlighter,
-                diagnostics,
-                ..
-            } => (highlighter.borrow_mut(), diagnostics),
+        let mut highlighter = match &state.mode {
+            InputMode::CodeEditor { highlighter, .. } => highlighter.borrow_mut(),
             _ => {
                 return (!state.masked)
                     .then(|| {
@@ -1426,25 +1303,6 @@ impl TextElement {
             flush_range(start_line, line, false, &mut styles);
         }
 
-        let diagnostic_styles = diagnostics.styles_for_range(&visible_byte_range, cx);
-
-        // Range semantic tokens, resolved from the LSP provider's cached
-        // result through the active highlight theme so it shares the same
-        // colour vocabulary as the tree-sitter path. Empty Vec when no
-        // provider is set, so `combine_highlights` short-circuits.
-        let custom_styles = state.lsp.semantic_tokens_for_range(
-            text,
-            &visible_byte_range,
-            &cx.theme().highlight_theme,
-        );
-
-        // hover definition style
-        if let Some(hover_style) = self.layout_hover_definition(cx) {
-            styles.push(hover_style);
-        }
-
-        // Compose tree-sitter, semantic, application, then diagnostic styles.
-        styles = gpui::combine_highlights(custom_styles, styles).collect();
         if !state.masked {
             styles = compose_decoration_collections(
                 styles,
@@ -1453,7 +1311,6 @@ impl TextElement {
             )
             .unwrap_or_default();
         }
-        styles = gpui::combine_highlights(diagnostic_styles, styles).collect();
 
         Some(styles)
     }
@@ -1473,20 +1330,11 @@ pub(super) struct PrepaintState {
     /// row index (zero based), no wrap, same line as the cursor.
     current_row: Option<usize>,
     selection_path: Option<Path<Pixels>>,
-    hover_highlight_path: Option<Path<Pixels>>,
     search_match_paths: Vec<(Path<Pixels>, bool)>,
-    document_color_paths: Vec<(Path<Pixels>, Hsla)>,
-    hover_definition_hitbox: Option<Hitbox>,
     indent_guides_path: Option<Path<Pixels>>,
     bounds: Bounds<Pixels>,
     /// Fold icon layout data
     fold_icon_layout: FoldIconLayout,
-    // Inline completion rendering data
-    /// Shaped ghost lines to paint after cursor row (completion lines 2+)
-    ghost_lines: Vec<ShapedLine>,
-    /// First line of inline completion (painted after cursor on same line)
-    ghost_first_line: Option<ShapedLine>,
-    ghost_lines_height: Pixels,
 }
 
 impl PrepaintState {
@@ -1755,10 +1603,6 @@ impl Element for TextElement {
             .into_vec()
         };
 
-        let document_colors = state
-            .lsp
-            .document_colors_for_range(&text, &last_layout.visible_range);
-
         // Create shaped lines for whitespace indicators before layout
         let whitespace_indicators =
             Self::layout_whitespace_indicators(&state, text_size, &text_style, window, cx);
@@ -1769,7 +1613,7 @@ impl Element for TextElement {
             &last_layout,
             text_size,
             &runs,
-            &document_colors,
+            &[],
             whitespace_indicators,
             window,
         );
@@ -1799,16 +1643,6 @@ impl Element for TextElement {
         }
         last_layout.lines = Rc::new(lines);
 
-        let (ghost_first_line, ghost_lines) = Self::layout_inline_completion(
-            state,
-            &last_layout.visible_range,
-            text_size,
-            window,
-            cx,
-        );
-        let ghost_line_count = ghost_lines.len();
-        let ghost_lines_height = ghost_line_count as f32 * line_height;
-
         let total_wrapped_lines = state.display_map.wrap_row_count();
         let empty_bottom_height = empty_bottom_height(
             state.mode.is_code_editor(),
@@ -1817,18 +1651,14 @@ impl Element for TextElement {
             line_height,
         );
 
-        // Empty bottom and ghost lines both describe extra height past the
-        // last content row, so take the max rather than summing — summing
-        // left a band of empty space the cursor could never reach.
         let mut scroll_size = size(
             if longest_line_width + line_number_width + RIGHT_MARGIN > bounds.size.width {
                 longest_line_width + line_number_width + RIGHT_MARGIN
             } else {
                 longest_line_width
             },
-            (total_wrapped_lines as f32 * line_height
-                + empty_bottom_height.max(ghost_lines_height))
-            .max(bounds.size.height),
+            (total_wrapped_lines as f32 * line_height + empty_bottom_height)
+                .max(bounds.size.height),
         );
 
         // TODO: should be add some gap to right, to convenient to focus on boundary position
@@ -1880,9 +1710,6 @@ impl Element for TextElement {
 
         let search_match_paths = self.layout_search_matches(&last_layout, &mut bounds, cx);
         let selection_path = self.layout_selections(&last_layout, &mut bounds, window, cx);
-        let hover_highlight_path = self.layout_hover_highlight(&last_layout, &mut bounds, cx);
-        let document_color_paths =
-            self.layout_document_colors(&document_colors, &last_layout, &bounds, cx);
 
         let state = self.state.read(cx);
         let line_numbers = if state.mode.line_number() {
@@ -1935,7 +1762,6 @@ impl Element for TextElement {
             None
         };
 
-        let hover_definition_hitbox = self.layout_hover_definition_hitbox(state, window, cx);
         let indent_guides_path =
             self.layout_indent_guides(state, &bounds, &last_layout, &text_style, window);
         state
@@ -1960,14 +1786,8 @@ impl Element for TextElement {
             current_row,
             selection_path,
             search_match_paths,
-            hover_highlight_path,
-            hover_definition_hitbox,
-            document_color_paths,
             indent_guides_path,
             fold_icon_layout,
-            ghost_first_line,
-            ghost_lines,
-            ghost_lines_height,
         }
     }
 
@@ -2035,11 +1855,6 @@ impl Element for TextElement {
             .style
             .editor_active_line
             .map(|color| if disabled { color.opacity(0.5) } else { color });
-        let editor_background = if disabled {
-            cx.theme().editor_background().opacity(0.5)
-        } else {
-            cx.theme().editor_background()
-        };
 
         // Paint active line
         let mut offset_y = px(0.);
@@ -2086,23 +1901,10 @@ impl Element for TextElement {
             if let Some(path) = prepaint.selection_path.take() {
                 window.paint_path(path, cx.theme().selection);
             }
-
-            // Paint hover highlight
-            if let Some(path) = prepaint.hover_highlight_path.take() {
-                window.paint_path(path, secondary_selection);
-            }
         }
 
-        // Paint document colors
-        for (path, color) in prepaint.document_color_paths.iter() {
-            let color = if disabled { color.opacity(0.5) } else { *color };
-            window.paint_path(path.clone(), color);
-        }
-
-        // Paint text with inline completion ghost line support
+        // Paint text
         let mut offset_y = invisible_top_padding;
-        let ghost_lines = &prepaint.ghost_lines;
-        let has_ghost_lines = !ghost_lines.is_empty();
 
         // Keep scrollbar offset always be positive，Start from the left position
         let scroll_offset = if text_align == TextAlign::Right {
@@ -2116,15 +1918,8 @@ impl Element for TextElement {
         };
 
         // Track the y-position of the cursor row for positioning the first line suffix
-        let mut cursor_row_y = None;
 
-        for (line, &buffer_line) in prepaint
-            .last_layout
-            .lines
-            .iter()
-            .zip(prepaint.last_layout.visible_buffer_lines.iter())
-        {
-            let row = buffer_line;
+        for line in prepaint.last_layout.lines.iter() {
             let line_y = origin.y + offset_y;
             let p = point(
                 origin.x + prepaint.last_layout.line_number_width + (scroll_offset),
@@ -2141,40 +1936,6 @@ impl Element for TextElement {
                 cx,
             );
             offset_y += line.size(line_height).height;
-
-            if Some(row) == prepaint.current_row {
-                cursor_row_y = Some(line_y);
-            }
-
-            // After the cursor row, paint ghost lines (which shifts subsequent content down)
-            if has_ghost_lines && Some(row) == prepaint.current_row {
-                let ghost_x = origin.x + prepaint.last_layout.line_number_width;
-
-                for ghost_line in ghost_lines {
-                    let ghost_p = point(ghost_x, origin.y + offset_y);
-
-                    // Paint semi-transparent background for ghost line
-                    let ghost_bounds = Bounds::new(
-                        ghost_p,
-                        size(
-                            bounds.size.width - prepaint.last_layout.line_number_width,
-                            line_height,
-                        ),
-                    );
-                    window.paint_quad(fill(ghost_bounds, editor_background));
-
-                    // Paint ghost line text
-                    _ = ghost_line.paint(
-                        ghost_p,
-                        line_height,
-                        text_align,
-                        Some(prepaint.last_layout.content_width),
-                        window,
-                        cx,
-                    );
-                    offset_y += line_height;
-                }
-            }
         }
 
         // Paint blinking cursor
@@ -2195,7 +1956,7 @@ impl Element for TextElement {
                         origin: input_bounds.origin,
                         size: size(
                             prepaint.last_layout.line_number_width - LINE_NUMBER_RIGHT_MARGIN,
-                            input_bounds.size.height + prepaint.ghost_lines_height,
+                            input_bounds.size.height,
                         ),
                     },
                     gutter_bg,
@@ -2232,11 +1993,6 @@ impl Element for TextElement {
                     _ = line.paint(p, line_height, TextAlign::Left, None, window, cx);
                     offset_y += line_height;
                 }
-
-                // Add ghost line height after cursor row for line numbers alignment
-                if !prepaint.ghost_lines.is_empty() && prepaint.current_row == Some(buffer_line) {
-                    offset_y += prepaint.ghost_lines_height;
-                }
             }
         }
 
@@ -2260,29 +2016,6 @@ impl Element for TextElement {
 
             cx.notify();
         });
-
-        if let Some(hitbox) = prepaint.hover_definition_hitbox.as_ref() {
-            window.set_cursor_style(gpui::CursorStyle::PointingHand, &hitbox);
-        }
-
-        // Paint inline completion first line suffix (after cursor on same line)
-        if focused {
-            if let Some(first_line) = &prepaint.ghost_first_line {
-                if let (Some(cursor_bounds), Some(cursor_row_y)) =
-                    (prepaint.cursor_bounds_with_scroll(), cursor_row_y)
-                {
-                    let first_line_x = cursor_bounds.origin.x + cursor_bounds.size.width;
-                    let p = point(first_line_x, cursor_row_y);
-
-                    // Paint background to cover any existing text
-                    let bg_bounds = Bounds::new(p, size(first_line.width + px(4.), line_height));
-                    window.paint_quad(fill(bg_bounds, editor_background));
-
-                    // Paint first line completion text
-                    _ = first_line.paint(p, line_height, text_align, None, window, cx);
-                }
-            }
-        }
 
         self.paint_mouse_listeners(window, cx);
     }

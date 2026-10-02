@@ -8,15 +8,15 @@ use std::error::Error;
 use std::io;
 use std::io::Write;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sync_common::api::assets::{BlobManifestEntry, BlobManifestRequest, BlobManifestResponse};
 use sync_common::api::libraries::LibraryNameRequest;
 use sync_common::fixture_content_hash;
 use sync_common::{
-    ContentHash, DeclaredBlobReference, LibraryId, MutationId, PullStateResponse, ReplicaId, ReplicaSeq, StateCell, StateInventoryRequest, StateInventoryResponse, SyncExchangeRequest, SyncExchangeResponse, WireMutation, MAX_PUSH_MUTATIONS,
-    MAX_STATE_INVENTORY_CELLS,
+    ContentHash, LibraryId, MAX_PUSH_MUTATIONS, OpaquePublication, PullStateResponse, ReplicaId, ReplicaSeq,
+    SyncExchangeRequest, SyncExchangeResponse,
 };
 use tokio::sync::{Barrier, Semaphore};
 use tokio::task::JoinSet;
@@ -49,7 +49,7 @@ struct BlobFixture {
 }
 
 type CellKey = (String, String, String);
-type ReplicaProjection = BTreeMap<CellKey, (ReplicaId, WireMutation)>;
+type ReplicaProjection = BTreeMap<CellKey, (ReplicaId, sync_common::Versioned<sync_common::OpaqueStateEntry>)>;
 
 struct ProjectedReplica {
     replica_id: ReplicaId,
@@ -96,23 +96,19 @@ fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 
-fn wire_mutation(kind: &str, entity_key: impl Into<String>, entity_subkey: impl Into<String>, sequence: u64, changed_at: u64) -> Result<WireMutation, AnyError> {
-    // A lifecycle mutation must declare whether it references a blob, because
-    // that declaration is all the service knows about the book's bytes. This
-    // workload measures relay throughput against synthetic keys and stores no
-    // bytes, so it declares that it holds no reference.
-    let blob_reference = (kind == sync_common::mutation_kind::BOOK_LIFECYCLE).then_some(DeclaredBlobReference { present: false, content_hash: None });
-    Ok(WireMutation {
-        origin: None,
-        mutation_id: MutationId::new(),
-        kind: kind.to_owned(),
-        entity_key: entity_key.into(),
-        entity_subkey: entity_subkey.into(),
-        value: Vec::new(),
-        conflict_rank: 0,
-        blob_reference,
-        changed_at,
-        replica_seq: ReplicaSeq::new(sequence)?,
+fn wire_mutation(replica_id: ReplicaId, kind: &str, entity_key: impl Into<String>, entity_subkey: impl Into<String>, sequence: u64, changed_at: u64) -> Result<OpaquePublication, AnyError> {
+    // A lifecycle must name its book for quota accounting. This workload
+    // measures relay throughput against synthetic keys, so each key names a
+    // synthetic book derived from it.
+    let entity_key: String = entity_key.into();
+    let book = (kind == "book_lifecycle").then(|| ContentHash::new(blake3::hash(entity_key.as_bytes()).to_hex().as_str()));
+
+    Ok(sync_common::Publication {
+        publisher_seq: ReplicaSeq::new(sequence)?,
+        state: sync_common::Versioned {
+            version: sync_common::VersionKey::new(changed_at, sync_common::ConflictRank::Update, replica_id, ReplicaSeq::new(sequence)?),
+            value: sync_common::OpaqueStateEntry { address: sync_common::StateAddress { kind: kind.to_owned(), entity_key, entity_subkey: entity_subkey.into() }, bytes: Vec::new(), book },
+        },
     })
 }
 
@@ -265,8 +261,8 @@ async fn pull_page(client: &Client, base: &Url, identity: &Identity, library_id:
 
 fn apply_projection(cells: &mut ReplicaProjection, pull: &PullStateResponse) {
     for change in &pull.mutations {
-        let mutation = &change.mutation;
-        cells.insert((mutation.kind.clone(), mutation.entity_key.clone(), mutation.entity_subkey.clone()), (change.replica_id, mutation.clone()));
+        let mutation = &change.state;
+        cells.insert((mutation.value.address.kind.clone(), mutation.value.address.entity_key.clone(), mutation.value.address.entity_subkey.clone()), (change.state.version.replica_id, mutation.clone()));
     }
 }
 
@@ -304,18 +300,18 @@ async fn run_replica_convergence_guard(client: &Client, base: &Url, identity: &I
             barrier.wait().await;
             for round in 0..rounds {
                 let first_sequence = (round * 2 + 1) as u64;
-                let mut reading = wire_mutation("reading_position", "shared-reading", "", first_sequence, clock)?;
-                reading.value = format!("replica-{worker}-round-{round}").into_bytes();
+                let mut reading = wire_mutation(replica_id, "reading_position", "shared-reading", "", first_sequence, clock)?;
+                reading.state.value.bytes = format!("replica-{worker}-round-{round}").into_bytes();
                 let mutations = if round % 2 == 0 {
                     vec![reading]
                 } else {
-                    let mut metadata = wire_mutation("directory_name", format!("replica-{worker}"), "", first_sequence + 1, clock)?;
-                    metadata.value = format!("round-{round}").into_bytes();
+                    let mut metadata = wire_mutation(replica_id, "directory_name", format!("replica-{worker}"), "", first_sequence + 1, clock)?;
+                    metadata.state.value.bytes = format!("round-{round}").into_bytes();
                     vec![reading, metadata]
                 };
                 let request = SyncExchangeRequest { library_id, replica_id, mutations, cursor: projected.cursor };
                 let (response, _, _): (SyncExchangeResponse, _, _) = post_api(&client, endpoint(&base, "api/sync/exchange")?, &identity, &request).await?;
-                if !response.push.rejected.is_empty() || response.push.accepted.len() != request.mutations.len() {
+                if !response.push.rejected.is_empty(){
                     return Err::<ProjectedReplica, AnyError>(io::Error::other("convergence exchange did not acknowledge every mutation").into());
                 }
                 apply_projection(&mut projected.cells, &response.pull);
@@ -356,19 +352,19 @@ async fn run_library_ingest(client: &Client, base: &Url, identity: &Identity, bo
     let mut sequence = 1_u64;
     for index in 1..=directory_count {
         let dir_id = format!("ingest-dir-{index}");
-        mutations.push(wire_mutation("directory_name", dir_id.as_str(), "", sequence, clock)?);
+        mutations.push(wire_mutation(replica_id, "directory_name", dir_id.as_str(), "", sequence, clock)?);
         sequence += 1;
-        mutations.push(wire_mutation("directory_parent", dir_id.as_str(), "", sequence, clock)?);
+        mutations.push(wire_mutation(replica_id, "directory_parent", dir_id.as_str(), "", sequence, clock)?);
         sequence += 1;
-        mutations.push(wire_mutation("directory_lifecycle", dir_id.as_str(), "", sequence, clock)?);
+        mutations.push(wire_mutation(replica_id, "directory_lifecycle", dir_id.as_str(), "", sequence, clock)?);
         sequence += 1;
     }
     for index in 1..=book_count {
         let content_hash = index.to_string();
         let dir_id = format!("ingest-dir-{}", (index - 1) % directory_count + 1);
-        mutations.push(wire_mutation("book_lifecycle", content_hash.clone(), "", sequence, clock)?);
+        mutations.push(wire_mutation(replica_id, "book_lifecycle", content_hash.clone(), "", sequence, clock)?);
         sequence += 1;
-        mutations.push(wire_mutation("placement", content_hash, dir_id.as_str(), sequence, clock)?);
+        mutations.push(wire_mutation(replica_id, "placement", content_hash, dir_id.as_str(), sequence, clock)?);
         sequence += 1;
     }
 
@@ -381,8 +377,8 @@ async fn run_library_ingest(client: &Client, base: &Url, identity: &Identity, bo
         let request_started = Instant::now();
         let (response, sent_bytes, _response_bytes): (SyncExchangeResponse, _, _) = post_api(client, endpoint(base, "api/sync/exchange")?, identity, &request).await?;
         request_bytes += sent_bytes;
-        if !response.push.rejected.is_empty() || response.push.accepted.len() != page.len() {
-            return Err(io::Error::other(format!("library ingest acknowledged {} mutations and rejected {} of {}", response.push.accepted.len(), response.push.rejected.len(), page.len())).into());
+        if !response.push.rejected.is_empty(){
+            return Err(io::Error::other(format!("library ingest acknowledged {} mutations and rejected {} of {}", page.len().saturating_sub(response.push.rejected.len()), response.push.rejected.len(), page.len())).into());
         }
         push_samples.push(request_started.elapsed());
     }
@@ -427,90 +423,12 @@ async fn run_library_ingest(client: &Client, base: &Url, identity: &Identity, bo
     Ok(())
 }
 
-fn inventory_cells(count: usize, key_offset: usize) -> Vec<StateCell> {
-    (0..count).map(|index| StateCell { kind: "metadata".to_owned(), entity_key: format!("inventory-cell-{}", key_offset + index), entity_subkey: String::new() }).collect()
-}
-
-async fn run_inventory_case(client: &Client, base: &Url, identity: &Identity, library_id: LibraryId, label: &str, cells: &[StateCell], expected_missing: &[StateCell], repetitions: usize) -> Result<(), AnyError> {
-    let expected: std::collections::HashSet<_> = expected_missing.iter().cloned().collect();
-    let phase_started = Instant::now();
-    let mut cycle_samples = Vec::with_capacity(repetitions);
-    let mut request_samples = Vec::new();
-    let mut request_bytes = 0_usize;
-    let mut response_bytes = 0_usize;
-    for _ in 0..repetitions {
-        let cycle_started = Instant::now();
-        let mut observed = std::collections::HashSet::new();
-        for page in cells.chunks(MAX_STATE_INVENTORY_CELLS) {
-            let request = StateInventoryRequest { library_id, cells: page.to_vec() };
-            let request_started = Instant::now();
-            let (response, sent, received): (StateInventoryResponse, _, _) = post_api(client, endpoint(base, "api/sync/inventory")?, identity, &request).await?;
-            request_samples.push(request_started.elapsed());
-            request_bytes += sent;
-            response_bytes += received;
-            for cell in response.missing {
-                if !page.contains(&cell) || !observed.insert(cell) {
-                    return Err(io::Error::other(format!("{label} inventory returned an unrequested or duplicate cell")).into());
-                }
-            }
-        }
-        if observed != expected {
-            return Err(io::Error::other(format!("{label} inventory returned {} missing cells; expected {}", observed.len(), expected.len())).into());
-        }
-        cycle_samples.push(cycle_started.elapsed());
-    }
-    let wall = phase_started.elapsed();
-    report_latencies(&format!("inventory {label} cycle"), &cycle_samples, wall);
-    report_latencies(&format!("inventory {label} request"), &request_samples, wall);
-    println!(
-        "inventory {label}: cells={} missing={} repetitions={repetitions} pages/cycle={} request={:.2}MiB response={:.2}MiB",
-        cells.len(),
-        expected.len(),
-        cells.len().div_ceil(MAX_STATE_INVENTORY_CELLS),
-        request_bytes as f64 / (1024.0 * 1024.0),
-        response_bytes as f64 / (1024.0 * 1024.0),
-    );
-    Ok(())
-}
-
-async fn run_inventory_profile(client: &Client, base: &Url, identity: &Identity, cell_count: usize, repetitions: usize) -> Result<(), AnyError> {
-    let library_id = Uuid::new_v4();
-    create_library(client, base, identity, &library_id).await?;
-    let replica_id = Uuid::new_v4();
-    let cells = inventory_cells(cell_count, 0);
-    let clock = now_ms();
-    let seed_started = Instant::now();
-    for (page_index, page) in cells.chunks(MAX_PUSH_MUTATIONS).enumerate() {
-        let mutations =
-            page.iter().enumerate().map(|(index, cell)| wire_mutation(&cell.kind, cell.entity_key.clone(), cell.entity_subkey.clone(), (page_index * MAX_PUSH_MUTATIONS + index + 1) as u64, clock)).collect::<Result<Vec<_>, _>>()?;
-        let request = SyncExchangeRequest { library_id, replica_id, mutations, cursor: sync_common::SyncCursor::default() };
-        let (response, _, _): (SyncExchangeResponse, _, _) = post_api(client, endpoint(base, "api/sync/exchange")?, identity, &request).await?;
-        if !response.push.rejected.is_empty() || response.push.accepted.len() != page.len() {
-            return Err(io::Error::other("inventory profile could not seed every server cell").into());
-        }
-    }
-    println!("inventory seed: cells={cell_count} wall={:.3}s", seed_started.elapsed().as_secs_f64());
-
-    run_inventory_case(client, base, identity, library_id, "all-present", &cells, &[], repetitions).await?;
-
-    let mut one_missing = cells.clone();
-    one_missing[cell_count - 1] = inventory_cells(1, cell_count)[0].clone();
-    run_inventory_case(client, base, identity, library_id, "one-missing", &one_missing, &one_missing[cell_count - 1..], repetitions).await?;
-
-    let missing_count = cell_count.div_ceil(100);
-    let mut percent_missing = cells;
-    let replacements = inventory_cells(missing_count, cell_count + 1);
-    percent_missing[cell_count - missing_count..].clone_from_slice(&replacements);
-    run_inventory_case(client, base, identity, library_id, "one-percent-missing", &percent_missing, &replacements, repetitions).await?;
-    Ok(())
-}
-
-fn changes(worker: usize, request_index: usize, workload: Workload, id_offset: u64, clock: u64) -> Vec<WireMutation> {
+fn changes(replica_id: ReplicaId, worker: usize, request_index: usize, workload: Workload, id_offset: u64, clock: u64) -> Vec<OpaquePublication> {
     (0..workload.events_per_request)
         .map(|event_index| {
             let local = request_index * workload.events_per_request + event_index + 1;
             let globally_unique = worker * workload.requests_per_worker * workload.events_per_request + local;
-            wire_mutation("book_lifecycle", (id_offset + globally_unique as u64).to_string(), "", local as u64, clock).expect("bounded workload creates valid mutations")
+            wire_mutation(replica_id, "book_lifecycle", (id_offset + globally_unique as u64).to_string(), "", local as u64, clock).expect("bounded workload creates valid mutations")
         })
         .collect()
 }
@@ -531,11 +449,12 @@ async fn run_pushes(label: &str, client: &Client, base: &Url, identity: &Identit
             let mut samples = Vec::with_capacity(workload.requests_per_worker);
             barrier.wait().await;
             for request_index in 0..workload.requests_per_worker {
-                let request = SyncExchangeRequest { library_id: library_id.clone(), replica_id: replica_id.clone(), mutations: changes(worker, request_index, workload, id_offset, clock), cursor: sync_common::SyncCursor::default() };
+                let request =
+                    SyncExchangeRequest { library_id: library_id.clone(), replica_id: replica_id.clone(), mutations: changes(replica_id, worker, request_index, workload, id_offset, clock), cursor: sync_common::SyncCursor::default() };
                 let request_started = Instant::now();
                 let (response, _, _): (SyncExchangeResponse, _, _) = post_api(&client, endpoint(&base, "api/sync/exchange")?, &identity, &request).await?;
-                if !response.push.rejected.is_empty() || response.push.accepted.len() != workload.events_per_request {
-                    return Err(io::Error::other(format!("push acknowledged {} mutations and rejected {} of {}", response.push.accepted.len(), response.push.rejected.len(), workload.events_per_request)).into());
+                if !response.push.rejected.is_empty(){
+                    return Err(io::Error::other(format!("push acknowledged {} mutations and rejected {} of {}", workload.events_per_request.saturating_sub(response.push.rejected.len()), response.push.rejected.len(), workload.events_per_request)).into());
                 }
                 samples.push(request_started.elapsed());
             }
@@ -574,13 +493,13 @@ async fn run_position_pushes(label: &str, client: &Client, base: &Url, identity:
                 let request = SyncExchangeRequest {
                     library_id: library_id.clone(),
                     replica_id: replica_id.clone(),
-                    mutations: vec![wire_mutation("reading_position", content_hash.to_string(), "", sequence as u64, clock)?],
+                    mutations: vec![wire_mutation(replica_id, "reading_position", content_hash.to_string(), "", sequence as u64, clock)?],
                     cursor: sync_common::SyncCursor::default(),
                 };
                 let request_started = Instant::now();
                 let (response, _, _): (SyncExchangeResponse, _, _) = post_api(&client, endpoint(&base, "api/sync/exchange")?, &identity, &request).await?;
-                if !response.push.rejected.is_empty() || response.push.accepted.len() != 1 {
-                    return Err(io::Error::other(format!("position push acknowledged {} mutations and rejected {}", response.push.accepted.len(), response.push.rejected.len())).into());
+                if !response.push.rejected.is_empty(){
+                    return Err(io::Error::other(format!("position push acknowledged {} mutations and rejected {}", 1_usize.saturating_sub(response.push.rejected.len()), response.push.rejected.len())).into());
                 }
                 samples.push(request_started.elapsed());
             }
@@ -625,10 +544,11 @@ async fn run_position_sync_cycles(client: &Client, base: &Url, identity: &Identi
             barrier.wait().await;
             for request_index in 0..workload.requests_per_worker {
                 let sequence = request_index + 1;
-                let request = SyncExchangeRequest { library_id: library_id.clone(), replica_id: replica_id.clone(), mutations: vec![wire_mutation("reading_position", content_hash.to_string(), "", sequence as u64, clock)?], cursor };
+                let request =
+                    SyncExchangeRequest { library_id: library_id.clone(), replica_id: replica_id.clone(), mutations: vec![wire_mutation(replica_id, "reading_position", content_hash.to_string(), "", sequence as u64, clock)?], cursor };
                 let cycle_started = Instant::now();
                 let (exchanged, _, _): (SyncExchangeResponse, _, _) = post_api(&client, endpoint(&base, "api/sync/exchange")?, &identity, &request).await?;
-                if !exchanged.push.rejected.is_empty() || exchanged.push.accepted.len() != 1 {
+                if !exchanged.push.rejected.is_empty() {
                     return Err(io::Error::other("position exchange was not acknowledged exactly once").into());
                 }
                 let pulled = exchanged.pull;
@@ -685,17 +605,17 @@ async fn run_remote_position_pull_cycles(client: &Client, base: &Url, identity: 
                 let push = SyncExchangeRequest {
                     library_id: library_id.clone(),
                     replica_id: writer_id.clone(),
-                    mutations: vec![wire_mutation("reading_position", content_hash.to_string(), "", sequence as u64, clock)?],
+                    mutations: vec![wire_mutation(writer_id, "reading_position", content_hash.to_string(), "", sequence as u64, clock)?],
                     cursor: sync_common::SyncCursor::default(),
                 };
                 let (acknowledged, _, _): (SyncExchangeResponse, _, _) = post_api(&client, endpoint(&base, "api/sync/exchange")?, &identity, &push).await?;
-                if acknowledged.push.accepted.len() != 1 || !acknowledged.push.rejected.is_empty() {
+                if !acknowledged.push.rejected.is_empty() {
                     return Err(io::Error::other("remote position writer was not acknowledged exactly once").into());
                 }
 
                 let pull_started = Instant::now();
                 let (pulled, _) = pull_page(&client, &base, &identity, library_id.clone(), reader_id.clone(), cursor).await?;
-                if pulled.has_more || pulled.mutations.len() != 1 || pulled.mutations[0].mutation.kind != "reading_position" {
+                if pulled.has_more || pulled.mutations.len() != 1 || pulled.mutations[0].state.value.address.kind != "reading_position" {
                     return Err(io::Error::other(format!("remote position pull observed {} mutations with has_more={}", pulled.mutations.len(), pulled.has_more)).into());
                 }
                 cursor = pulled.next_cursor;
@@ -1007,8 +927,8 @@ async fn run_upload_pipeline_profile(client: &Client, base: &Url, identity: &Ide
 async fn main() -> Result<(), AnyError> {
     let base = loopback_url()?;
     let mode = std::env::var("BOKHEIM_STRESS_MODE").unwrap_or_else(|_| "full".to_owned());
-    if !matches!(mode.as_str(), "full" | "metadata" | "position" | "ingest" | "inventory" | "assets" | "uploads" | "register" | "verify" | "token") {
-        return Err(io::Error::new(std::io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_MODE must be full, metadata, position, ingest, inventory, assets, uploads, register, verify, or token").into());
+    if !matches!(mode.as_str(), "full" | "metadata" | "position" | "ingest" | "assets" | "uploads" | "register" | "verify" | "token") {
+        return Err(io::Error::new(std::io::ErrorKind::InvalidInput, "BOKHEIM_STRESS_MODE must be full, metadata, position, ingest, assets, uploads, register, verify, or token").into());
     }
     let workload = Workload {
         workers: bounded_env("BOKHEIM_STRESS_WORKERS", 16, 128)?,
@@ -1038,13 +958,6 @@ async fn main() -> Result<(), AnyError> {
         let directory_count = bounded_env("BOKHEIM_INGEST_DIRECTORIES", 153, 100_000)?;
         run_library_ingest(&client, &base, &identity, book_count, directory_count).await?;
         println!("stress correctness checks passed for mode=ingest");
-        return Ok(());
-    }
-    if mode == "inventory" {
-        let cell_count = bounded_env("BOKHEIM_INVENTORY_CELLS", 10_000, 1_000_000)?;
-        let repetitions = bounded_env("BOKHEIM_INVENTORY_REPETITIONS", 5, 100)?;
-        run_inventory_profile(&client, &base, &identity, cell_count, repetitions).await?;
-        println!("stress correctness checks passed for mode=inventory");
         return Ok(());
     }
     if mode == "assets" {

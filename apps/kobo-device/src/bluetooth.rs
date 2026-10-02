@@ -1,5 +1,6 @@
 //! Bluetooth adapter control through the Kobo firmware's BlueZ service.
 
+use std::path::Path;
 use std::io::{self, Read};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -100,11 +101,11 @@ fn status() -> io::Result<Status> {
 }
 
 fn hardware_present() -> bool {
-    cfg!(target_arch = "arm") && std::path::Path::new("/sbin/rtk_hciattach").is_file() && std::path::Path::new("/dev/ttymxc1").exists() && std::path::Path::new("/sys/module/8723ds").exists()
+    cfg!(target_arch = "arm") && Path::new("/sbin/rtk_hciattach").is_file() && Path::new("/dev/ttymxc1").exists() && Path::new("/sys/module/8723ds").exists()
 }
 
 fn ensure_controller() -> io::Result<()> {
-    if std::path::Path::new("/sys/class/bluetooth/hci0").exists() {
+    if Path::new("/sys/class/bluetooth/hci0").exists() {
         return Ok(());
     }
 
@@ -128,7 +129,7 @@ fn ensure_controller() -> io::Result<()> {
         .map_err(|error| io::Error::new(error.kind(), format!("Could not initialize Bluetooth controller: {error}")))?;
 
     for _ in 0..40 {
-        if std::path::Path::new("/sys/class/bluetooth/hci0").exists() {
+        if Path::new("/sys/class/bluetooth/hci0").exists() {
             let _ = run_external(Command::new("/bin/hciconfig").arg("hci0").arg("up"), Duration::from_secs(3), "bring Bluetooth controller up");
             return Ok(());
         }

@@ -1,44 +1,13 @@
-use book_model::{BookFormat, BookMetadata, BookRecord, Contributor, ReadingPosition, UnixMillis};
+use book_model::{BookFormat, ReadingPosition, UnixMillis};
 use serde::{Deserialize, Serialize};
 
 use unicode_normalization::UnicodeNormalization;
-#[path = "lowercase_v1.rs"]
-mod lowercase_v1;
 
 /// Portable sibling-name identity used for folders and materialized files.
 /// Display casing and accents are retained separately; comparison uses
 /// compatibility normalization plus locale-independent lowercase mapping.
 pub fn portable_name_key(value: &str) -> String {
-    let mut key = String::with_capacity(value.len());
-    for character in value.nfkc() {
-        match lowercase_v1::LOWERCASE.binary_search_by_key(&character, |(upper, _)| *upper) {
-            Ok(index) => key.push_str(lowercase_v1::LOWERCASE[index].1),
-            Err(_) => key.push(character),
-        }
-    }
-    key
-}
-
-/// The metadata sync register. Descriptions belong to a different register,
-/// so this type cannot represent a description update or accidental clear.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SyncBookMetadata {
-    pub title: String,
-    pub subtitle: Option<String>,
-    pub contributors: Vec<Contributor>,
-    pub book: BookMetadata,
-}
-
-impl SyncBookMetadata {
-    pub fn subtitle(&self) -> Option<&str> {
-        self.subtitle.as_deref()
-    }
-}
-
-impl From<BookRecord> for SyncBookMetadata {
-    fn from(value: BookRecord) -> Self {
-        Self { title: value.title, subtitle: value.subtitle, contributors: value.contributors, book: value.book }
-    }
+    value.nfkc().flat_map(char::to_lowercase).collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

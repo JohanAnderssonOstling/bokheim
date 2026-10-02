@@ -1,3 +1,5 @@
+use std::fs::File;
+use std::io::BufWriter;
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::io::Write;
@@ -41,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let concept_by_path = subject_projection::unified_taxonomy_routes().into_iter().map(|route| (route.path().to_owned(), route.concept_id().to_owned())).collect::<HashMap<_, _>>();
     // A complete cache can contain millions of codes: stream match rows rather
     // than retaining a second copy of every matched path in memory.
-    let mut match_writer = match_output.map(std::fs::File::create).transpose()?.map(|file| csv::WriterBuilder::new().delimiter(b'\t').from_writer(std::io::BufWriter::new(file)));
+    let mut match_writer = match_output.map(File::create).transpose()?.map(|file| csv::WriterBuilder::new().delimiter(b'\t').from_writer(BufWriter::new(file)));
     if let Some(file) = &mut match_writer {
         file.write_record(["scheme", "notation", "uses", "concept_id", "path"])?;
     }
@@ -87,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ranked = counts.into_iter().collect::<Vec<_>>();
     ranked.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
     if let Some(output) = output {
-        let mut file = std::io::BufWriter::new(std::fs::File::create(output)?);
+        let mut file = BufWriter::new(File::create(output)?);
         writeln!(file, "concept_id\tdirect_hits\tpath")?;
         for (path, count) in &ranked {
             if let Some(concept_id) = concept_by_path.get(path) {

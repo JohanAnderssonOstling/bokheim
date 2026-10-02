@@ -171,7 +171,7 @@ fn render_image(image: &PenikoImage, target_width: u32, target_height: u32) -> O
         return None;
     }
     let mut bytes = image.data.data().to_vec();
-    for pixel in bytes.chunks_exact_mut(4) {
+    for pixel in bytes.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     let buffer = RgbaImage::from_raw(image.width, image.height, bytes)?;

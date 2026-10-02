@@ -1,4 +1,6 @@
 //! Account-wide asset retention, independent of library metadata lifecycle.
+
+use crate::PostgresDatabase;
 use crate::{assets, PostgresSyncRepository, SyncError};
 use sync_common::{LibraryId, ContentHash, api::libraries::LibraryCloudStorage};
 
@@ -38,6 +40,7 @@ impl PostgresSyncRepository {
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::isolated_pool;
     use super::*;
     use server_asset_store::AssetError;
     use crate::assets::BookUploadAdmission;
@@ -46,12 +49,12 @@ mod tests {
     #[tokio::test]
     async fn cloud_storage_releases_quota_preserves_shared_books_and_blocks_late_uploads() {
         let pool = crate::test_support::isolated_pool("cloud_storage", 6).await.expect("SYNC_E2E_DATABASE_URL is required");
-        let database = crate::PostgresDatabase::from_pool(pool.clone());
+        let database = PostgresDatabase::from_pool(pool.clone());
         crate::verify_schema(&database).await.unwrap();
         let repo = PostgresSyncRepository::new(database.clone());
         let user = uuid::Uuid::new_v4().to_string();
         sqlx::query(include_str!("sql/cloud_storage/test_seed_user.sql")).bind(&user).bind(format!("{user}@example.com")).execute(&pool).await.unwrap();
-        crate::assets::configure_user_storage_quota(&crate::PostgresDatabase::from_pool(pool.clone()), &user, 1000).await.unwrap();
+        crate::assets::configure_user_storage_quota(&PostgresDatabase::from_pool(pool.clone()), &user, 1000).await.unwrap();
         let a = LibraryId::new_v4(); let b = LibraryId::new_v4();
         for id in [a,b] { repo.create_library(&user, &sync_common::api::libraries::LibraryNameRequest { library_id: id, library_name: "Books".into() }).await.unwrap(); }
         let hash = ContentHash::new(&"a".repeat(64));

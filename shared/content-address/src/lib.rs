@@ -35,11 +35,19 @@ impl FromStr for ContentHash {
     type Err = InvalidContentHash;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')) {
+        Self::try_from(value.as_bytes())
+    }
+}
+
+impl TryFrom<&[u8]> for ContentHash {
+    type Error = InvalidContentHash;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        if value.len() != 64 || !value.iter().all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')) {
             return Err(InvalidContentHash);
         }
         let mut bytes = [0_u8; 64];
-        bytes.copy_from_slice(value.as_bytes());
+        bytes.copy_from_slice(value);
         Ok(Self(bytes))
     }
 }
@@ -78,6 +86,15 @@ mod tests {
     fn rejects_noncanonical_and_path_like_hashes() {
         for value in ["a".repeat(63), "a".repeat(65), "A".repeat(64), format!("/{}", "a".repeat(63)), format!("../{}", "a".repeat(61)), format!("é{}", "a".repeat(62))] {
             assert!(value.parse::<ContentHash>().is_err(), "accepted invalid content hash {value:?}");
+        }
+    }
+
+    #[test]
+    fn byte_input_uses_the_same_validation_as_text() {
+        let canonical = [b'a'; 64];
+        assert_eq!(ContentHash::try_from(canonical.as_slice()).unwrap(), ContentHash::new(std::str::from_utf8(&canonical).unwrap()));
+        for invalid in [vec![b'a'; 63], vec![b'a'; 65], vec![b'A'; 64], vec![0xff; 64], vec![b'/'; 64]] {
+            assert!(ContentHash::try_from(invalid.as_slice()).is_err());
         }
     }
 

@@ -2042,6 +2042,7 @@ fn normalized_rect_contains(rect: NormalizedRect, point: (f32, f32)) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, PoisonError};
     use super::*;
 
     #[test]
@@ -2148,7 +2149,7 @@ mod tests {
         assert_eq!(fit_page_flow_column_height(PdfZoomMode::FitWidth { columns: 2 }, 2, 1_600.0, plan.columns()), 1_600.0);
     }
 
-    static PDF_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static PDF_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn interaction_fixture() -> Vec<u8> {
         use lopdf::{Document, Object, Stream, dictionary};
@@ -2170,7 +2171,7 @@ mod tests {
 
     #[test]
     fn lazy_annotation_suppression_preserves_external_annotations() {
-        let _guard = PDF_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = PDF_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         use lopdf::{Document, Object, Stream, dictionary};
         for (name, visible) in [("external:highlight", true), ("bokheim:highlight", false)] {
             let mut document = Document::load_mem(&interaction_fixture()).unwrap();
@@ -2200,7 +2201,7 @@ mod tests {
 
     #[gpui::test]
     fn cached_navigation_and_zoom_preserve_pages_without_rebuilding(cx: &mut gpui::TestAppContext) {
-        let _guard = PDF_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = PDF_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         cx.update(gpui_component::init);
         let window = cx.add_window(|window, cx| {
             let mut view = PdfView::from_bytes("test.pdf".into(), interaction_fixture(), 0, window, cx);
@@ -2252,7 +2253,7 @@ mod tests {
 
     #[gpui::test]
     fn selection_uses_display_geometry_without_a_document_session(cx: &mut gpui::TestAppContext) {
-        let _guard = PDF_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = PDF_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         cx.update(gpui_component::init);
         let window = cx.add_window(|window, cx| PdfView::from_bytes("test.pdf".into(), interaction_fixture(), 0, window, cx));
         cx.run_until_parked();
@@ -2274,7 +2275,7 @@ mod tests {
 
     #[gpui::test]
     fn navigation_offsets_are_reused_until_geometry_changes(cx: &mut gpui::TestAppContext) {
-        let _guard = PDF_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = PDF_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         cx.update(gpui_component::init);
         let window = cx.add_window(|window, cx| PdfView::from_bytes("test.pdf".into(), interaction_fixture(), 0, window, cx));
         cx.run_until_parked();
@@ -2322,7 +2323,7 @@ mod tests {
 
     #[gpui::test]
     fn streamed_search_preserves_page_slices_navigation_and_cancellation(cx: &mut gpui::TestAppContext) {
-        let _guard = PDF_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = PDF_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         use lopdf::{Document, Object};
         let mut fixture = Document::load_mem(&interaction_fixture()).unwrap();
         let page_id = *fixture.get_pages().values().next().unwrap();
@@ -2373,7 +2374,7 @@ mod tests {
 
     #[gpui::test]
     fn searching_during_render_finishes_with_the_latest_query(cx: &mut gpui::TestAppContext) {
-        let _guard = PDF_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = PDF_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         cx.update(gpui_component::init);
         let window = cx.add_window(|window, cx| PdfView::from_bytes("test.pdf".into(), interaction_fixture(), 0, window, cx));
         cx.run_until_parked();

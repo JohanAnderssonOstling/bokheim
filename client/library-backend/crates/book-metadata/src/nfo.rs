@@ -2,11 +2,6 @@
 
 use crate::{author_credit, recording_book, AudiobookMetadata, MetadataResult};
 
-fn value(raw: &str) -> Option<&str> {
-    let value = raw.trim();
-    (!value.is_empty()).then_some(value)
-}
-
 fn year(raw: &str) -> Option<i32> {
     let raw = raw.trim();
     (raw.len() == 4 && raw.bytes().all(|byte| byte.is_ascii_digit()))
@@ -41,7 +36,8 @@ pub(super) fn apply(input: &str, audio: &mut AudiobookMetadata) -> MetadataResul
             continue;
         }
         let Some((key, raw)) = line.split_once(':') else { continue };
-        let Some(raw) = value(raw) else { continue };
+        let raw = raw.trim();
+        if raw.is_empty() { continue; }
         match key.trim().to_ascii_lowercase().as_str() {
             "title" => audio.title = raw.to_owned(),
             "subtitle" => audio.recording.subtitle = Some(raw.to_owned()),

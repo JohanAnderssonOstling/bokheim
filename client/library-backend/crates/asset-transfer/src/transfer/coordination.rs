@@ -2,65 +2,47 @@
 //! native execution is owned by the application's transfer queue.
 use super::worker::TransferWorker;
 use crate::ClaimedTransferJob;
-use crate::{TransferError, TransferJob, TransferOperation};
+use crate::{TransferError, TransferOperation};
+#[cfg(target_arch = "wasm32")]
+use crate::TransferJob;
 #[cfg(not(target_arch = "wasm32"))]
-use futures_util::StreamExt;
+use crate::runner::TransferHost;
 use library_database::{TransferOutcome, TransferSnapshot};
 #[cfg(target_arch = "wasm32")]
 use library_model::{DownloadProgress, DownloadState};
 #[cfg(target_arch = "wasm32")]
-use library_replica::BlobKind;
+use library_model::BlobKind;
 #[cfg(target_arch = "wasm32")]
 use library_runtime::events::LibraryEvent;
 
 #[cfg(not(target_arch = "wasm32"))]
 impl TransferWorker {
-    pub(super) async fn upload_claimed_books_with_refresh(&self, snapshot: &TransferSnapshot, claimed: &[ClaimedTransferJob], out: &mut TransferOutcome) -> Result<Vec<Result<(), TransferError>>, TransferError> {
+    pub(super) async fn upload_claimed_books_with_refresh(&self, _snapshot: &TransferSnapshot, claimed: &[ClaimedTransferJob], _out: &mut TransferOutcome) -> Result<Vec<Result<(), TransferError>>, TransferError> {
         if !self.asset_storage_enabled() {
             return Ok(claimed.iter().map(|_| Ok(())).collect());
         }
         let _interest = self.notification_interest.work();
-        let intents = claimed
-            .iter()
-            .map(|item| match &item.job.operation {
-                TransferOperation::UploadBlob { intent: Some(intent), negotiated: true, .. } => Ok(intent.clone()),
-                _ => Err(TransferError::retryable("invalid upload batch job")),
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if intents.iter().any(|intent| intent.size_bytes > sync_common::book_batch::MAX_BOOK_BYTES) {
-            // The batch endpoint cannot carry these books. Each upload owns a
-            // fresh snapshot and commits as soon as its HTTP request finishes,
-            // so progress does not wait for the rest of the claimed group.
-            let results = futures_util::stream::iter(claimed.iter().map(|item| {
-                let job = item.job.clone();
-                async move {
-                    let guard = self.refresh_guard(super::RefreshScope::Planned)?;
-                    match self.execute_owned_job(job.clone()).await {
-                        Err(TransferError::AuthenticationRequired) => {
-                            self.refresh_after_auth(guard).await?;
-                            self.execute_owned_job(job).await
-                        }
-                        result => result,
+        if claimed.iter().any(|item| !matches!(&item.job.operation, TransferOperation::UploadBlob { intent: Some(_), negotiated: true, .. })) {
+            return Err(TransferError::retryable("invalid individual upload job"));
+        }
+        // Every book owns a fresh snapshot and commits as soon as its PUT
+        // finishes, independently of the other uploads in the group.
+        let results = crate::concurrent_uploads::run_uploads(claimed.iter().map(|item| {
+            let job = item.job.clone();
+            async move {
+                let guard = self.refresh_guard(super::RefreshScope::Planned)?;
+                let result = match self.execute_owned_job(job.clone()).await {
+                    Err(TransferError::AuthenticationRequired) => {
+                        self.refresh_after_auth(guard).await?;
+                        self.execute_owned_job(job).await
                     }
-                }
-            }))
-            .buffered(crate::runner::MAX_CONCURRENT_LARGE_UPLOADS)
-            .collect()
-            .await;
-            return Ok(results);
-        }
-        let guard = self.refresh_guard(super::RefreshScope::Planned)?;
-        let result = self.book_transfers().upload_batch(snapshot, &intents, out).await;
-        if !matches!(result, Err(TransferError::AuthenticationRequired)) {
-            return result;
-        }
-        self.refresh_after_auth(guard).await?;
-        self.book_transfers().upload_batch(snapshot, &intents, out).await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn handle_job(&self, job: TransferJob) -> Result<(), TransferError> {
-        self.execute_owned_job(job).await
+                    result => result,
+                };
+                self.changed();
+                result
+            }
+        })).await;
+        Ok(results)
     }
 }
 

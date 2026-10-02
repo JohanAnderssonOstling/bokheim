@@ -1,7 +1,7 @@
 //! Title normalization shared by inspection and library ingestion.
-use crate::BookRecord;
+use crate::BookDetails;
 
-impl BookRecord {
+impl BookDetails {
     pub fn subtitle(&self) -> Option<&str> {
         self.subtitle.as_deref()
     }
@@ -37,8 +37,9 @@ impl BookRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BookRecord;
     fn book(title: &str) -> BookRecord {
-        BookRecord { title: title.into(), subtitle: None, contributors: vec![], description: String::new(), book: Default::default() }
+        BookRecord { metadata: crate::BookDetails { title: title.into(), subtitle: None, contributors: vec![], book: Default::default() }, description: String::new() }
     }
     #[test]
     fn colon_split_preserves_evidence_and_is_idempotent() {

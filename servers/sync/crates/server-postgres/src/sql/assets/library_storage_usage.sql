@@ -4,7 +4,7 @@
 -- and content hash), but the same book may be referenced from several
 -- libraries. Summing per library would therefore double count shared books and
 -- overrun the quota, so each charged blob is attributed to exactly one library:
--- the lowest library id that still holds a present book_lifecycle reference to
+-- the lowest library id that still holds an unpurged book_lifecycle reference to
 -- it. The choice is arbitrary but stable, so a book does not move between
 -- libraries in the breakdown from one reading to the next.
 --
@@ -21,7 +21,7 @@ WITH referenced AS (
      AND library.cloud_storage_enabled
     LEFT JOIN user_book_revision AS revision ON revision.user_id=$1 AND revision.content_hash=state.content_hash
     WHERE state.kind = 'book_lifecycle'
-      AND state.present
+      AND state.version_rank <> 2
       AND state.content_hash IS NOT NULL
     UNION
     SELECT claim.library_id, claim.blob_hash FROM library_blob_claim claim

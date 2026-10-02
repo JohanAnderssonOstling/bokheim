@@ -1,4 +1,5 @@
 use super::*;
+use crate::{AccountStatus, BackendError};
 pub use library_backend::ThumbnailResolution;
 
 pub use client_runtime::wire::{decode_worker_message, decode_worker_payload, encode_reply, encode_worker_message, WorkerPayload};
@@ -7,16 +8,16 @@ pub use client_runtime::wire::{decode_worker_message, decode_worker_payload, enc
 pub struct AppStartupState {
     pub libraries: Vec<crate::LibraryEntry>,
     pub browsing_preferences: app_preferences::BrowsingPreferences,
-    pub account_status: crate::AccountStatus,
+    pub account_status: AccountStatus,
     pub reader_preferences: app_preferences::ReaderPreferences,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub enum AppWorkerStartupMessage {
     Ready { startup: AppStartupState },
-    Failed { error: crate::BackendError },
+    Failed { error: BackendError },
     Diagnostic { message: String },
-    Response { id: u64, result: Result<WorkerPayload, crate::BackendError> },
+    Response { id: u64, result: Result<WorkerPayload, BackendError> },
     Event { id: u64, payload: WorkerPayload },
 }
 
@@ -40,7 +41,17 @@ pub use library_backend::library::subscriptions::{LibraryEvents, LibrarySubscrip
 impl WorkerCommand {
     pub(crate) fn is_book_subscription(&self) -> bool {
         match self {
-            Self::LibrarySubscription { subscription, .. } => subscription.is_book(),
+            Self::LibrarySubscription { subscription, .. } => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    matches!(subscription, LibrarySubscription::Book { .. })
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let _ = subscription;
+                    false
+                }
+            }
             // Accept the earlier flat application command at the wire boundary.
             Self::App(command) => command.is_book_subscription(),
             Self::Library { .. } => false,
@@ -78,7 +89,7 @@ pub use library_backend::{BookSource, ResolvedBookData};
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct AccountSnapshot {
-    pub account: crate::AccountStatus,
+    pub account: AccountStatus,
     pub storage_usage: Option<crate::AccountStorageUsage>,
     pub sync_statuses: Vec<crate::LibrarySyncStatus>,
     pub server_storage_usage: Option<Vec<crate::ServerLibraryStorageUsage>>,
@@ -104,7 +115,7 @@ pub enum WorkerDispatchResult<Value = WorkerPayload> {
 }
 
 impl WorkerDispatchResult<client_runtime::reply::Reply> {
-    pub(crate) fn into_wire(self) -> Result<WorkerDispatchResult, crate::BackendError> {
+    pub(crate) fn into_wire(self) -> Result<WorkerDispatchResult, BackendError> {
         Ok(match self {
             Self::Response(value) => WorkerDispatchResult::Response(value.into_wire()?),
             Self::Subscription { initial, events } => WorkerDispatchResult::Subscription { initial: initial.into_wire()?, events },

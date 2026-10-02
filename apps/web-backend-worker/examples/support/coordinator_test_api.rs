@@ -1,9 +1,11 @@
 #![cfg(target_arch = "wasm32")]
+
+use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub async fn synchronize(bytes: Vec<u8>, storage: js_sys::Function) -> Result<Vec<u8>, JsValue> {
-    app::host::sync_contract::run(&bytes, std::rc::Rc::new(move |bytes| js_bytes(storage.call1(&JsValue::NULL, &js_sys::Uint8Array::from(bytes.as_slice()))))).await.map_err(|error| JsValue::from_str(&error))
+    app::host::sync_contract::run(&bytes, Rc::new(move |bytes| js_bytes(storage.call1(&JsValue::NULL, &js_sys::Uint8Array::from(bytes.as_slice()))))).await.map_err(|error| JsValue::from_str(&error))
 }
 
 #[wasm_bindgen(js_name = backgroundTiming)]
@@ -91,7 +93,7 @@ pub fn start_coordinator(create_worker: Option<js_sys::Function>, close: Option<
 
 #[wasm_bindgen(js_name = syncRequest)]
 pub fn sync_request(key: String, bytes: js_sys::Uint8Array, storage: js_sys::Function) -> Result<js_sys::Promise, JsValue> {
-    app::host::web::bridge::sync_request(key, bytes.to_vec(), std::rc::Rc::new(move |bytes| js_bytes(storage.call1(&JsValue::NULL, &js_sys::Uint8Array::from(bytes.as_slice()))))).map(bytes_promise)
+    app::host::web::bridge::sync_request(key, bytes.to_vec(), Rc::new(move |bytes| js_bytes(storage.call1(&JsValue::NULL, &js_sys::Uint8Array::from(bytes.as_slice()))))).map(bytes_promise)
 }
 #[wasm_bindgen(js_name = transferRequest)]
 pub fn transfer_request(key: String, run: js_sys::Function) -> Result<js_sys::Promise, JsValue> {

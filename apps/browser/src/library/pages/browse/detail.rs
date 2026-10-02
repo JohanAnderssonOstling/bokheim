@@ -1,16 +1,16 @@
 //! One book's page.
 //!
-//! A location like any other: the browse page navigates to `book:<hash>`, the
-//! crumb for it is the title, and leaving is the same `open_path` that leaves a
-//! folder. Nothing here knows about Back, because nothing here has to.
+//! Its owner keeps the browse view mounted in memory and caches this entity
+//! when returning to it, preserving its contents and decoded cover.
 //!
 //! It opens already drawn. The card that was clicked holds the whole
 //! `BookCardRow` and a decoded cover, and both are handed over at construction,
 //! so the top of the page paints in the same frame as the click with the same
 //! image the grid was showing. The request that follows fills in only what a
-//! card never knew: the credits, the subjects, the contents, and which entry
+//! card never knew: the credits, the contents, and which entry
 //! the reader is inside.
 
+use crate::services::notify_error;
 use std::collections::{HashMap, HashSet};
 
 use gpui::prelude::*;
@@ -27,7 +27,41 @@ use crate::library::widgets::{LoadedCover, cover_aspect_ratio, loaded_cover_from
 
 /// Leaves a discarded book's page for the folder it was opened from. Owned by
 /// the browse page, which is what knows how to leave the detail location.
-pub(crate) type CloseBookDetail = std::rc::Rc<dyn Fn(&mut gpui::App)>;
+pub(super) struct CloseBookDetail;
+
+/// Visibility and caching form one state: a visible page always exists.
+pub(super) enum DetailNavigation {
+    Browse(Option<Entity<BookDetailPage>>),
+    Book(Entity<BookDetailPage>),
+}
+
+impl Default for DetailNavigation {
+    fn default() -> Self {
+        Self::Browse(None)
+    }
+}
+impl DetailNavigation {
+    pub(super) fn cached(&self) -> Option<&Entity<BookDetailPage>> {
+        match self {
+            Self::Browse(page) => page.as_ref(),
+            Self::Book(page) => Some(page),
+        }
+    }
+    pub(super) fn visible(&self) -> Option<&Entity<BookDetailPage>> {
+        match self {
+            Self::Book(page) => Some(page),
+            Self::Browse(_) => None,
+        }
+    }
+    pub(super) fn close(&mut self) -> bool {
+        if self.visible().is_none() {
+            return false;
+        }
+        let Self::Book(page) = std::mem::take(self) else { unreachable!() };
+        *self = Self::Browse(Some(page));
+        true
+    }
+}
 
 const BOOK_DETAIL_SIDEBAR_BREAKPOINT: f32 = 760.0;
 const BOOK_DETAIL_THREE_COLUMN_BREAKPOINT: f32 = 1200.0;
@@ -35,7 +69,6 @@ const BOOK_DETAIL_THREE_COLUMN_BREAKPOINT: f32 = 1200.0;
 pub(crate) struct BookDetailPage {
     ui: LibraryContext,
     content_hash: ContentHash,
-    close_detail: CloseBookDetail,
     /// What the grid knew, replaced by the request's own copy when it lands.
     /// The two agree about almost everything; the point of starting from the
     /// card is that there is no moment where the page has nothing to say.
@@ -53,8 +86,10 @@ pub(crate) struct BookDetailPage {
     _download_updates: gpui::Subscription,
 }
 
+impl gpui::EventEmitter<CloseBookDetail> for BookDetailPage {}
+
 impl BookDetailPage {
-    pub(crate) fn create(book: BookCardRow, cover: Option<LoadedCover>, ui: LibraryContext, close_detail: CloseBookDetail, cx: &mut impl AppContext) -> Entity<Self> {
+    pub(crate) fn create(book: BookCardRow, cover: Option<LoadedCover>, ui: LibraryContext, cx: &mut impl AppContext) -> Entity<Self> {
         let content_hash = book.content_hash;
         cx.new(|cx| {
             ui.updates().update(cx, |updates, cx| updates.track_download(content_hash, book.downloaded, book.download_requested, cx));
@@ -69,7 +104,6 @@ impl BookDetailPage {
             let mut page = Self {
                 ui,
                 content_hash,
-                close_detail,
                 book,
                 detail: None,
                 error: None,
@@ -160,7 +194,7 @@ impl BookDetailPage {
             let _ = page.update_in(cx, |page, window, cx| {
                 page.download_requested_by_page = false;
                 if let Err(error) = result {
-                    crate::services::notify_error("book-download-error", format!("Could not download book: {error}"), window, cx);
+                    notify_error("book-download-error", format!("Could not download book: {error}"), window, cx);
                 }
                 cx.notify();
             });
@@ -181,8 +215,7 @@ impl BookDetailPage {
     /// discarded page closes onto its folder, while a book that stays in the
     /// library reloads the detail instead.
     fn confirm_page_action(
-        target: Entity<Self>, title: String, detail: String, choices: [&str; 2], error_id: &'static str, error_prefix: String, close: CloseBookDetail, operation: impl std::future::Future<Output = Result<bool, String>> + 'static,
-        window: &mut Window, cx: &mut App,
+        target: Entity<Self>, title: String, detail: String, choices: [&str; 2], error_id: &'static str, error_prefix: String, operation: impl std::future::Future<Output = Result<bool, String>> + 'static, window: &mut Window, cx: &mut App,
     ) {
         let answer = window.prompt(PromptLevel::Warning, &title, Some(&detail), &choices, cx);
         target.update(cx, |_, cx| {
@@ -193,14 +226,14 @@ impl BookDetailPage {
                 match operation.await {
                     Ok(discard) => {
                         if discard {
-                            let _ = page.update_in(cx, |_, _, cx| close(cx));
+                            let _ = page.update(cx, |_, cx| cx.emit(CloseBookDetail));
                         } else {
                             let _ = page.update(cx, |page, cx| page.load(cx));
                         }
                     }
                     Err(error) => {
                         let _ = page.update_in(cx, |_, window, cx| {
-                            crate::services::notify_error(error_id, format!("{error_prefix}: {error}"), window, cx);
+                            notify_error(error_id, format!("{error_prefix}: {error}"), window, cx);
                         });
                     }
                 }
@@ -334,7 +367,7 @@ impl Render for BookDetailPage {
         if let Some(duration) = book.audiobook_duration_ms {
             facts.push(SharedString::from(spoken_duration(duration)));
         }
-        if let Some(chapters) = book.audiobook_chapter_count {
+        if let Some(chapters) = detail.as_ref().and_then(|detail| detail.audiobook_chapter_count) {
             facts.push(SharedString::from(format!("{chapters} chapters")));
         }
         if !facts.is_empty() {
@@ -379,7 +412,6 @@ impl Render for BookDetailPage {
             // still act as the source of a folder removal.
             let source = book.source_directory.or_else(|| detail.as_ref().and_then(|detail| detail.source_directory_id.as_deref()).and_then(|id| DirId::parse_str(id).ok()));
             let backend = self.ui.backend().clone();
-            let close = self.close_detail.clone();
             actions = actions.child(trigger.dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
                 if downloaded {
                     let library = backend.clone();
@@ -392,7 +424,7 @@ impl Render for BookDetailPage {
                                 cx.spawn(async move |page, cx| {
                                     if let Err(error) = operation.await {
                                         let _ = page.update_in(cx, |_, window, cx| {
-                                            crate::services::notify_error("book-evict-error", format!("Could not remove download: {error}"), window, cx);
+                                            notify_error("book-evict-error", format!("Could not remove download: {error}"), window, cx);
                                         });
                                     }
                                 })
@@ -404,7 +436,6 @@ impl Render for BookDetailPage {
                 if let Some(source_id) = source {
                     let library = backend.clone();
                     let remove_page = action_page.clone();
-                    let remove_close = close.clone();
                     let remove_detail = format!("“{title}” stays in its other folders. If this is its last folder, it moves to Trash.");
                     menu = menu.item(components::menu_item_with_icon("Remove from folder", components::navigation_icon(components::NavigationIcon::Folder), move |_, window, cx| {
                         let library = library.clone();
@@ -416,7 +447,6 @@ impl Render for BookDetailPage {
                             ["Remove", "Cancel"],
                             "book-remove-error",
                             "Could not remove book from folder".to_owned(),
-                            remove_close.clone(),
                             operation,
                             window,
                             cx,
@@ -425,7 +455,6 @@ impl Render for BookDetailPage {
                 }
                 let library = backend.clone();
                 let trash_page = action_page.clone();
-                let trash_close = close.clone();
                 let trash_detail = format!("“{title}” will be moved to Trash.");
                 menu = menu.item(components::menu_item_with_icon("Move to Trash", components::navigation_icon(components::NavigationIcon::Trash2), move |_, window, cx| {
                     let library = library.clone();
@@ -437,7 +466,6 @@ impl Render for BookDetailPage {
                         ["Move to Trash", "Cancel"],
                         "book-trash-error",
                         "Could not move book to Trash".to_owned(),
-                        trash_close.clone(),
                         operation,
                         window,
                         cx,
@@ -453,43 +481,23 @@ impl Render for BookDetailPage {
             }
         }
 
-        // The chips close the block: they are where the reader goes *next*, not
-        // what they came here to do.
-        let subject_paths = detail.as_ref().map(|detail| detail.subject_paths.as_slice()).unwrap_or_default();
-        let subjects = if !subject_paths.is_empty() {
-            let mut subjects = components::book_detail_subjects();
-            for path in subject_paths {
-                let mut segments = path.rsplit(" / ");
-                let leaf = segments.next().unwrap_or(path.as_str());
-                let parent = segments.next().map(|parent| SharedString::from(parent.to_owned()));
-                subjects = subjects.child(components::subject_chip(parent, SharedString::from(leaf.to_owned()), theme));
-            }
-            Some(subjects)
-        } else {
-            None
-        };
-
         // What is in the book before what the book is: a reader who has opened
         // this page has already decided to read it. A section with nothing in it
         // is left out rather than headed and empty — an absent blurb is the
         // publisher's silence, and saying so takes more room than it is worth.
-        let contents = detail.as_ref().filter(|detail| !detail.toc.is_empty()).map(|detail| {
-            components::book_detail_section()
-                .max_w(gpui::rems(components::BOOK_DETAIL_CONTENTS_WIDTH_REM))
-                .child(components::book_detail_heading("Contents", theme))
-                .child(self.render_contents(detail, audiobook, theme, cx))
-        });
+        let contents = detail
+            .as_ref()
+            .filter(|detail| !detail.toc.is_empty())
+            .map(|detail| components::book_detail_section().max_w(gpui::rems(components::BOOK_DETAIL_CONTENTS_WIDTH_REM)).child(components::book_detail_heading("Contents", theme)).child(self.render_contents(detail, audiobook, theme, cx)));
         // Asked of the words rather than of the markup: a description that is
         // only tags has nothing to head.
-        let description = components::book_detail_description(&book.description, theme).map(|description| {
-            components::book_detail_section()
-                .max_w(gpui::rems(components::BOOK_DETAIL_DESCRIPTION_WIDTH_REM))
-                .child(components::book_detail_heading("Description", theme))
-                .child(description)
-        });
+        let description = detail
+            .as_ref()
+            .and_then(|detail| components::book_detail_description(&detail.description, theme))
+            .map(|description| components::book_detail_section().max_w(gpui::rems(components::BOOK_DETAIL_DESCRIPTION_WIDTH_REM)).child(components::book_detail_heading("Description", theme)).child(description));
 
         let content = if desktop_layout && (contents.is_some() || description.is_some()) {
-            let sidebar = components::book_detail_sidebar().child(cover).child(headline.flex_none()).children(subjects);
+            let sidebar = components::book_detail_sidebar().child(cover).child(headline.flex_none());
             if viewport_width >= BOOK_DETAIL_THREE_COLUMN_BREAKPOINT && contents.is_some() && description.is_some() {
                 components::book_detail_wide_measure()
                     .child(
@@ -518,12 +526,12 @@ impl Render for BookDetailPage {
             if let Some(description) = description {
                 sections = sections.child(description);
             }
-            let introduction = div().w_full().min_w_0().flex().flex_col().gap(gpui::px(components::SPACE_SM)).child(hero).children(subjects);
+            let introduction = div().w_full().min_w_0().flex().flex_col().gap(gpui::px(components::SPACE_SM)).child(hero);
             components::book_detail_measure().child(introduction).child(sections).into_any_element()
         };
         let body = components::book_detail_page().track_focus(&self.focus).child(content).overflow_y_scrollbar().into_any_element();
 
-        // A failed request loses the credits, the subjects and the contents —
+        // A failed request loses the credits and the contents —
         // not the book. Everything the card already knew is on screen and stays
         // there, with the banner over it saying what is missing.
         match self.error.clone() {
@@ -563,16 +571,20 @@ impl BookDetailPage {
             }
         }
         visit(&detail.toc, &mut ordered);
-        let read_targets: HashSet<&str> = ordered
-            .iter()
-            .position(|entry| marked == Some(entry.target.as_str()))
-            .map(|current| ordered[..current].iter().filter(|entry| entry.children.is_empty()).map(|entry| entry.target.as_str()).collect())
-            .unwrap_or_default();
+        let read_targets: HashSet<&str> =
+            ordered.iter().position(|entry| marked == Some(entry.target.as_str())).map(|current| ordered[..current].iter().filter(|entry| entry.children.is_empty()).map(|entry| entry.target.as_str()).collect()).unwrap_or_default();
 
         let page = cx.entity();
         let mut panel = components::contents_panel(theme);
         for (index, DrawnEntry { entry, depth }) in drawn.into_iter().enumerate() {
-            let row = components::ContentsRow { depth, has_children: !entry.children.is_empty(), expanded: self.expanded.contains(&entry.target), marked: marked == Some(entry.target.as_str()), read: read_targets.contains(entry.target.as_str()), focused: false };
+            let row = components::ContentsRow {
+                depth,
+                has_children: !entry.children.is_empty(),
+                expanded: self.expanded.contains(&entry.target),
+                marked: marked == Some(entry.target.as_str()),
+                read: read_targets.contains(entry.target.as_str()),
+                focused: false,
+            };
             // The chevron opens the entry and the row goes to it, so the two
             // clicks have to be separable — which is why the toggle is handed to
             // the disclosure rather than wrapped around it.
@@ -642,5 +654,27 @@ mod tests {
         assert_eq!(spoken_duration(90_000), "1 min");
         assert_eq!(spoken_duration(3_600_000), "1 h");
         assert_eq!(spoken_duration(45_660_000), "12 h 41 min");
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod navigation_tests {
+    use super::super::tests as fixtures;
+    use super::{BookDetailPage, DetailNavigation};
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn closing_and_reopening_details_retains_the_exact_cached_page(cx: &mut TestAppContext) {
+        let page = cx.update(|cx| BookDetailPage::create(fixtures::book(), None, fixtures::context(cx), cx));
+        let mut navigation = DetailNavigation::Book(page.clone());
+        assert!(navigation.close());
+        assert!(navigation.visible().is_none());
+        assert_eq!(navigation.cached(), Some(&page));
+        navigation = DetailNavigation::Book(navigation.cached().unwrap().clone());
+        assert_eq!(navigation.visible(), Some(&page));
+        assert!(navigation.close());
+        assert!(!navigation.close());
+        navigation = DetailNavigation::default();
+        assert!(navigation.cached().is_none());
     }
 }

@@ -1,7 +1,6 @@
-use crate::api::{send, SyncCredentials, TransportError};
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-use sync_common::{LibraryId, ReplicaId, StateInventoryRequest, StateInventoryResponse, SyncCursor, SyncExchangeRequest, SyncExchangeResponse};
+use std::error::Error;
+use crate::api::{SyncCredentials, TransportError};
+use sync_common::{LibraryId, ReplicaId, SyncCursor, SyncExchangeRequest, SyncExchangeResponse};
 
 /// Control-flow relevant failures from synchronization endpoints. Account
 /// Account APIs retain their own errors; sync callers should never need to inspect an HTTP
@@ -23,8 +22,8 @@ impl std::fmt::Display for SyncRequestError {
     }
 }
 
-impl std::error::Error for SyncRequestError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl Error for SyncRequestError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Other(error) => Some(error),
             Self::AuthenticationRequired | Self::CursorRejected => None,
@@ -43,25 +42,12 @@ impl From<TransportError> for SyncRequestError {
 }
 
 pub async fn exchange_changes(
-    client: &reqwest::Client, credentials: &SyncCredentials, library_id: LibraryId, replica_id: ReplicaId, mutations: Vec<sync_common::WireMutation>, cursor: SyncCursor,
+    client: &reqwest::Client, credentials: &SyncCredentials, library_id: LibraryId, replica_id: ReplicaId, mutations: Vec<sync_common::OpaquePublication>, cursor: SyncCursor,
 ) -> Result<SyncExchangeResponse, SyncRequestError> {
     let request = SyncExchangeRequest { library_id, replica_id, mutations, cursor };
     let mut trace = crate::PerformanceTrace::new("exchange_http", "encode_request_response_decode");
     log::debug!(target: "sync_performance", "trace_id={} library_id={} push_count={} cursor={:?}", trace.id(), request.library_id, request.mutations.len(), request.cursor);
     Ok(crate::api::send_with_trace(client.post(credentials.endpoint("api/sync/exchange")).bearer_auth(credentials.access_token()), &request, &mut trace).await?)
-}
-
-pub async fn compare_state_inventory(client: &reqwest::Client, credentials: &SyncCredentials, library_id: LibraryId, cells: Vec<sync_common::StateCell>) -> Result<Option<StateInventoryResponse>, SyncRequestError> {
-    let request = StateInventoryRequest { library_id, cells };
-    match post(client, credentials, "api/sync/inventory", &request).await {
-        Ok(response) => Ok(Some(response)),
-        Err(TransportError::BadStatus(reqwest::StatusCode::NOT_FOUND, _)) => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
-async fn post<T: Serialize, R: DeserializeOwned>(client: &reqwest::Client, credentials: &SyncCredentials, path: &str, value: &T) -> Result<R, TransportError> {
-    send(client.post(credentials.endpoint(path)).bearer_auth(credentials.access_token()), value).await
 }
 
 #[cfg(test)]
@@ -86,32 +72,19 @@ mod tests {
         assert!(matches!(SyncRequestError::from(TransportError::BadStatus(reqwest::StatusCode::TOO_MANY_REQUESTS, String::new())), SyncRequestError::Other(_)));
     }
 
-    #[tokio::test]
-    async fn missing_inventory_endpoint_is_an_absent_capability() {
-        let app = Router::new().route("/api/sync/inventory", post(|| async { axum::http::StatusCode::NOT_FOUND }));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-
-        let response = compare_state_inventory(&reqwest::Client::new(), &session(address), test_support::fixture_library_id("library"), Vec::new()).await;
-
-        assert!(matches!(response, Ok(None)));
-        server.abort();
-    }
-
-    fn mutations(count: usize) -> Vec<sync_common::WireMutation> {
+    fn mutations(count: usize) -> Vec<sync_common::OpaquePublication> {
         (1..=count)
-            .map(|sequence| sync_common::WireMutation {
-                origin: None,
-                mutation_id: sync_common::MutationId::new(),
-                kind: sync_common::mutation_kind::BOOK_LIFECYCLE.to_owned(),
-                entity_key: fixture_content_hash(sequence as u64).to_string(),
-                entity_subkey: String::new(),
-                value: vec![sequence as u8; 1024],
-                conflict_rank: 0,
-                blob_reference: Some(sync_common::DeclaredBlobReference { present: true, content_hash: Some(fixture_content_hash(sequence as u64)) }),
-                changed_at: 1,
-                replica_seq: sync_common::ReplicaSeq::new(sequence as u64).unwrap(),
+            .map(|sequence| {
+
+                let seq = sync_common::ReplicaSeq::new(sequence as u64).unwrap();
+                let hash = fixture_content_hash(sequence as u64);
+                sync_common::Publication {
+                    publisher_seq: seq,
+                    state: sync_common::Versioned {
+                        version: sync_common::VersionKey::new(1, sync_common::ConflictRank::Update, sync_common::ReplicaId::nil(), seq),
+                        value: sync_common::OpaqueStateEntry { address: sync_common::StateAddress { kind: "book_lifecycle".to_owned(), entity_key: hash.to_string(), entity_subkey: String::new() }, bytes: vec![sequence as u8; 1024], book: Some(hash) },
+                    },
+                }
             })
             .collect()
     }
@@ -134,8 +107,8 @@ mod tests {
                     binary.store(headers.get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).is_some_and(|value| value.starts_with(sync_common::transport::MEDIA_TYPE_BASE)), Ordering::SeqCst);
                     let request: SyncExchangeRequest = sync_common::transport::decode(&body, sync_common::transport::MAX_DECODED_REQUEST_BYTES).unwrap();
                     let response = SyncExchangeResponse {
-                        push: PushMutationsResponse { accepted: request.mutations.iter().map(|mutation| mutation.mutation_id).collect(), rejected: Vec::new() },
-                        pull: PullStateResponse { book_creations: Vec::new(), mutations: Vec::new(), next_cursor: SyncCursor::default(), has_more: false },
+                        push: PushMutationsResponse { rejected: Vec::new() },
+                        pull: PullStateResponse { mutations: Vec::new(), next_cursor: SyncCursor::default(), has_more: false },
                     };
                     let encoded = sync_common::transport::encode(&response).unwrap();
                     let mut response = encoded.into_response();
@@ -152,7 +125,7 @@ mod tests {
         let response = exchange_changes(&reqwest::Client::new(), &session(address), test_support::fixture_library_id("library"), test_support::fixture_replica_id("replica"), changes, SyncCursor::default()).await.unwrap();
 
         assert!(observed_binary.load(Ordering::SeqCst));
-        assert_eq!(response.push.accepted.len(), 100);
+        assert!(response.push.rejected.is_empty());
         server.abort();
     }
 
@@ -188,7 +161,7 @@ mod tests {
         let app = Router::new().route(
             "/api/sync/exchange",
             post(|| async {
-                Json(SyncExchangeResponse { push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() }, pull: PullStateResponse { book_creations: Vec::new(), mutations: Vec::new(), next_cursor: SyncCursor::default(), has_more: false } })
+                Json(SyncExchangeResponse { push: PushMutationsResponse { rejected: Vec::new() }, pull: PullStateResponse { mutations: Vec::new(), next_cursor: SyncCursor::default(), has_more: false } })
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

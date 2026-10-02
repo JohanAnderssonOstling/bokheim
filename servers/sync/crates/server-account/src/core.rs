@@ -45,7 +45,6 @@ pub enum AuthAttempt {
     VerifyEmail,
     RequestPasswordReset,
     ResetPassword,
-    AdminRead,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,8 +68,6 @@ pub enum AuthError {
     InvalidCredentials,
     #[error("email already taken")]
     EmailTaken,
-    #[error("forbidden")]
-    Forbidden,
     #[error("password must be at least {min_characters} characters and at most {max_bytes} bytes")]
     InvalidPassword { min_characters: usize, max_bytes: usize },
     #[error("email address is invalid")]

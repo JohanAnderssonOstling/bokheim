@@ -1,7 +1,10 @@
 //! Browser file and worker adapters for the platform-independent staged workflow.
+
+use crate::library::{ImportBookSource, LibraryCommand, PendingCommand, ReadyCommand, RuntimeCommand, SessionCommand, StagedImportMetadata};
+
+use crate::{BackendError, ImportFailure};
 pub mod queue;
 
-use crate::library::commands::library_requests;
 use client_platform_web::transport::import_io::{ImportIo, OpenFile};
 use import_pipeline::{
     import_journal::{self, Progress},
@@ -16,11 +19,11 @@ fn error(value: impl ToString) -> JsValue {
 fn from_js(value: JsValue) -> Error {
     Error {
         storage_full: client_platform_web::transport::import_io::storage_full(&value),
-        source: crate::BackendError::message(client_platform_web::transport::import_io::error_text(&value)),
+        source: BackendError::message(client_platform_web::transport::import_io::error_text(&value)),
         transport: client_platform_web::transport::field(&value, "transport").as_bool().unwrap_or(false),
     }
 }
-fn from_backend(source: crate::BackendError) -> Error {
+fn from_backend(source: BackendError) -> Error {
     let report = source.report();
     let storage_full = report.causes.iter().any(|cause| match cause {
         client_runtime::ErrorCause::Sqlite { extended_code } => *extended_code & 0xff == 13,
@@ -29,20 +32,7 @@ fn from_backend(source: crate::BackendError) -> Error {
     }) || ["QuotaExceededError", "database or disk is full", "browser storage is full", "Incomplete asset write"].iter().any(|marker| report.message.contains(marker));
     Error { transport: source.is_transport(), source, storage_full }
 }
-fn to_js(value: Error) -> JsValue {
-    if value.transport || value.storage_full {
-        let error = js_sys::Error::new(&value.source.to_string());
-        if value.transport {
-            let _ = js_sys::Reflect::set(&error, &"transport".into(), &true.into());
-        }
-        if value.storage_full {
-            let _ = js_sys::Reflect::set(&error, &"storageFull".into(), &true.into());
-        }
-        error.into()
-    } else {
-        error(value.source)
-    }
-}
+
 pub type ProgressSink = Rc<dyn Fn(JsValue) -> Result<(), JsValue>>;
 
 struct Reporter {
@@ -51,7 +41,7 @@ struct Reporter {
     name: String,
 }
 impl Reporter {
-    fn emit(&self, phase: staged_import::Phase, counts: Progress, current_file: Option<&str>, failures: Option<&[crate::ImportFailure]>) -> Result<(), JsValue> {
+    fn emit(&self, phase: staged_import::Phase, counts: Progress, current_file: Option<&str>, failures: Option<&[ImportFailure]>) -> Result<(), JsValue> {
         let phase = match phase {
             staged_import::Phase::Copying => "copying",
             staged_import::Phase::Adding => "adding",
@@ -81,7 +71,7 @@ impl Reporter {
 struct BrowserFile(OpenFile);
 struct BrowserIo(ImportIo);
 pub trait ImportClient {
-    fn request<T: crate::executor::BackendOutput + serde::de::DeserializeOwned>(&self, command: crate::library::LibraryCommand) -> impl std::future::Future<Output = Result<T, crate::BackendError>>;
+    fn request<T: crate::executor::BackendOutput + serde::de::DeserializeOwned>(&self, command: crate::library::LibraryCommand) -> impl std::future::Future<Output = Result<T, BackendError>>;
 }
 struct BrowserClient<'a, C>(&'a C);
 
@@ -117,26 +107,40 @@ impl staged_import::Storage for BrowserIo {
 impl<C: ImportClient> staged_import::Library for BrowserClient<'_, C> {
     async fn prepare(&self, activity: uuid::Uuid, manifest: &Manifest) -> Result<staged_import::PreparedImport, Error> {
         self.0
-            .request(library_requests::PrepareStagedDirectoryImport { activity, job: manifest.id.clone(), parent_id: manifest.parent, name: manifest.create_root.then(|| manifest.name.clone()), directories: manifest.directories.clone() })
+            .request(LibraryCommand::Session(SessionCommand::Pending(PendingCommand::PrepareStagedDirectoryImport {
+                activity,
+                job: manifest.id.clone(),
+                parent_id: manifest.parent,
+                name: manifest.create_root.then(|| manifest.name.clone()),
+                directories: manifest.directories.clone(),
+            })))
             .await
             .map(|prepared: crate::library::PreparedDirectoryImport| staged_import::PreparedImport { directories: prepared.directories, failures: prepared.failures })
             .map_err(from_backend)
     }
     async fn import(&self, book: staged_import::StagedBook) -> Result<(), Error> {
-        self.0.request(library_requests::ImportStagedBook { parent_id: book.parent_id, file_name: book.file_name, physical: book.physical, length: book.length, hash: book.hash }).await.map(|_: crate::ContentHash| ()).map_err(from_backend)
+        self.0
+            .request(LibraryCommand::Session(SessionCommand::Pending(PendingCommand::ImportBook {
+                parent_id: book.parent_id,
+                file_name: book.file_name,
+                source: ImportBookSource::Stored { location: book.physical.into(), staged: Some(StagedImportMetadata { length: book.length, hash: book.hash }) },
+            })))
+            .await
+            .map(|_: crate::ContentHash| ())
+            .map_err(from_backend)
     }
     async fn advance(&self, progress: staged_import::AdvanceProgress) -> Result<(), Error> {
-        self.0.request(library_requests::AdvanceDirectoryImport { activity: progress.activity, total: progress.total, succeeded: progress.succeeded, failed: progress.failed }).await.map_err(from_backend)
+        self.0.request(LibraryCommand::Runtime(RuntimeCommand::AdvanceDirectoryImport { activity: progress.activity, total: progress.total, succeeded: progress.succeeded, failed: progress.failed })).await.map_err(from_backend)
     }
     async fn finish(&self, activity: uuid::Uuid) -> Result<(), Error> {
-        self.0.request(library_requests::FinishDirectoryImport { activity }).await.map_err(from_backend)
+        self.0.request(LibraryCommand::Runtime(RuntimeCommand::FinishDirectoryImport { activity })).await.map_err(from_backend)
     }
     async fn cleanup(&self, job: String, files: u32) -> Result<(), Error> {
-        self.0.request(library_requests::CleanupStagedImport { job, files }).await.map_err(from_backend)
+        self.0.request(LibraryCommand::Session(SessionCommand::Ready(ReadyCommand::CleanupImport { job, files }))).await.map_err(from_backend)
     }
 }
 
-pub fn failures_value(values: &[crate::ImportFailure]) -> Result<JsValue, JsValue> {
+pub fn failures_value(values: &[ImportFailure]) -> Result<JsValue, JsValue> {
     js_sys::JSON::parse(&serde_json::to_string(values).map_err(error)?)
 }
 pub fn recover(manifest: &[u8], journal: &[u8]) -> Result<JsValue, JsValue> {
@@ -146,14 +150,29 @@ pub fn recover(manifest: &[u8], journal: &[u8]) -> Result<JsValue, JsValue> {
     let manifest: Manifest = serde_json::from_slice(manifest).map_err(error)?;
     js_sys::JSON::parse(&serde_json::to_string(&manifest).map_err(error)?)
 }
-pub async fn run<C: ImportClient>(job: JsValue, io: ImportIo, client: &C, progress: ProgressSink) -> Result<Vec<crate::ImportFailure>, JsValue> {
+pub async fn run<C: ImportClient>(job: JsValue, io: ImportIo, client: &C, progress: ProgressSink) -> Result<Vec<ImportFailure>, JsValue> {
     let manifest: Manifest = serde_json::from_str(&String::from(js_sys::JSON::stringify(&job)?)).map_err(error)?;
     staged_import::run(manifest, BrowserIo(io), &BrowserClient(client), move |update| {
         let reporter = Reporter { progress: progress.clone(), id: update.id, name: update.name };
         reporter.emit(update.phase, update.counts, update.current_file.as_deref(), update.failures.as_deref()).map_err(from_js)
     })
     .await
-    .map_err(to_js)
+    .map_err(
+        (|value: Error| -> JsValue {
+            if value.transport || value.storage_full {
+                let error = js_sys::Error::new(&value.source.to_string());
+                if value.transport {
+                    let _ = js_sys::Reflect::set(&error, &"transport".into(), &true.into());
+                }
+                if value.storage_full {
+                    let _ = js_sys::Reflect::set(&error, &"storageFull".into(), &true.into());
+                }
+                error.into()
+            } else {
+                error(value.source)
+            }
+        }),
+    )
 }
 pub fn submission(id: &str, library_id: crate::LibraryId, parent_id: crate::DirId, directory: crate::DirectoryImport, create_root: bool) -> Result<(String, js_sys::Array), String> {
     let files = js_sys::Array::new();

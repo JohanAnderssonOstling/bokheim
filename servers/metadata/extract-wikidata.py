@@ -2,7 +2,7 @@
 """Resumable projection of indexed Wikidata JSON into compressed JSONL chunks.
 
 Extraction only: output is staged evidence, not a live metadata-service index.
-Dependencies: indexed_bzip2, orjson, and the zstd command. No raw dump is stored.
+Dependencies: indexed_bzip2 and the zstd command. No raw dump is stored.
 """
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ import subprocess
 import time
 
 import indexed_bzip2
-import orjson
 
 VERSION = 2
 # Preserve complete selected statements, including rank, qualifiers and references.
@@ -60,7 +59,7 @@ def sync_directory(path):
 def atomic_json(path, value):
     temporary = path.with_name(path.name + '.part')
     with temporary.open('wb') as f:
-        f.write(orjson.dumps(value, option=orjson.OPT_SORT_KEYS))
+        f.write(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8'))
         f.write(b'\n')
         f.flush()
         os.fsync(f.fileno())
@@ -101,7 +100,7 @@ def project(record):
 
 
 def load_index(source, path):
-    index = orjson.loads(path.read_bytes())
+    index = json.loads(path.read_bytes())
     if index.get('version') != 1 or index.get('source') != fingerprint(source):
         raise ValueError('seek index does not match source dump')
     return index
@@ -136,7 +135,7 @@ def write_chunk(decoded, directory, start, end, expected_offset=None):
                 line = line.strip().rstrip(b',')
                 if not line or line in (b'[', b']'):
                     continue
-                record = orjson.loads(line)
+                record = json.loads(line)
                 kept = project(record)
                 if kept.get('type') == 'property':
                     types = {s.get('mainsnak',{}).get('datavalue',{}).get('value',{}).get('id')
@@ -152,7 +151,7 @@ def write_chunk(decoded, directory, start, end, expected_offset=None):
                     print(json.dumps(heartbeat, separators=(',', ':')), flush=True)
                 first = first or kept['id']
                 last = kept['id']
-                data = orjson.dumps(kept) + b'\n'
+                data = json.dumps(kept, ensure_ascii=False, separators=(',', ':')).encode('utf-8') + b'\n'
                 output_bytes += len(data)
                 buffer.extend(data)
                 if len(buffer) >= 1024 * 1024:
@@ -209,7 +208,7 @@ def extract(source, index_path, directory, *, start=0, stop=None, chunk_records=
                         projection='selected claims and all external-ID/string claims; all entity labels, aliases, descriptions; Wikipedia sitelinks')
         manifest_path = directory / 'manifest.json'
         if manifest_path.exists():
-            if orjson.loads(manifest_path.read_bytes()) != manifest:
+            if json.loads(manifest_path.read_bytes()) != manifest:
                 raise ValueError('output manifest differs from requested extraction')
         else:
             if list(directory.glob('entities-*')):
@@ -223,7 +222,7 @@ def extract(source, index_path, directory, *, start=0, stop=None, chunk_records=
             marker = path.with_suffix('.meta.json')
             if not marker.exists():
                 break
-            meta = orjson.loads(marker.read_bytes())
+            meta = json.loads(marker.read_bytes())
             if meta['start'] != cursor or meta['end'] != end or meta['counts']['records'] != end - cursor or meta['file'] != path.name:
                 raise ValueError('invalid committed chunk metadata')
             if path.stat().st_size != meta['compressed_bytes'] or file_hash(path) != meta['sha256']:

@@ -1,3 +1,4 @@
+use std::sync::Mutex;
 use super::task::{owned_local_task, owned_task, BackendTask};
 use super::{BackendExecutorError, BackendFuture, BackendOutput, BackendSend, BackendTimeout};
 use std::future::Future;
@@ -5,7 +6,7 @@ use std::sync::Arc;
 
 // Startup trials may inspect local state, but background sync/import must not
 // publish side effects before the host commits the new generation.
-static STARTUP_GATE: std::sync::Mutex<Option<tokio::sync::watch::Receiver<bool>>> = std::sync::Mutex::new(None);
+static STARTUP_GATE: Mutex<Option<tokio::sync::watch::Receiver<bool>>> = Mutex::new(None);
 
 pub struct StartupPermit(tokio::sync::watch::Sender<bool>);
 impl StartupPermit {

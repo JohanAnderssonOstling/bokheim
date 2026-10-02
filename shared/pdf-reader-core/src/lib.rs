@@ -93,7 +93,7 @@ struct PageAnalysis {
 
 impl PageAnalysis {
     fn byte_len(&self) -> usize {
-        std::mem::size_of::<Self>() + self.text.geometry.characters().len() * std::mem::size_of::<TextCharacter>() + self.images.capacity() * std::mem::size_of::<NormalizedRect>()
+        std::mem::size_of::<Self>() + std::mem::size_of_val(self.text.geometry.characters()) + self.images.capacity() * std::mem::size_of::<NormalizedRect>()
     }
 }
 
@@ -255,8 +255,8 @@ pub fn inspect_page_images(reader: impl Read + Seek + 'static, pages: &[usize], 
             let _pdfium = runtime::lock();
             let Ok(page) = document.pages().get(index) else { continue };
             let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(2200).set_maximum_width(2600).set_maximum_height(3200)).map_err(|error| PdfError::new(format!("rendering inspection page {number}: {error}")))?;
-            let image = RenderedPdfImage { rgba: bitmap.as_rgba_bytes(), pixel_width: bitmap.width() as u32, pixel_height: bitmap.height() as u32, source: RenderedPdfImageSource::RenderedPage };
-            image
+            
+            RenderedPdfImage { rgba: bitmap.as_rgba_bytes(), pixel_width: bitmap.width() as u32, pixel_height: bitmap.height() as u32, source: RenderedPdfImageSource::RenderedPage }
         };
         // OCR and image processing operate on owned pixels outside PDFium.
         if !visit(number, image) {
@@ -531,7 +531,7 @@ impl PdfDocumentInfo {
 }
 
 fn page_is_skippable(page: &PdfPage<'_>) -> bool {
-    if page.annotations().len() != 0 || page.objects().iter().any(|object| object.as_text_object().is_none()) {
+    if !page.annotations().is_empty() || page.objects().iter().any(|object| object.as_text_object().is_none()) {
         return false;
     }
     let Ok(text) = page.text() else { return false };
@@ -1058,11 +1058,12 @@ fn shared_pdfium() -> PdfResult<&'static Pdfium> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, PoisonError};
     use super::*;
     use std::io::Cursor;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    static PDFIUM_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static PDFIUM_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn fixture_path(label: &str) -> PdfResult<PathBuf> {
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| PdfError::new(error.to_string()))?.as_nanos();
@@ -1084,7 +1085,7 @@ mod tests {
 
     #[test]
     fn blank_page_classification_keeps_pages_with_other_text() -> PdfResult<()> {
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let path = fixture_path("blank-pages")?;
         {
             let pdfium = shared_pdfium()?;
@@ -1109,7 +1110,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn concurrent_extraction_and_reader_operations_share_pdfium_access() -> PdfResult<()> {
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let path = fixture_path("sequential-extraction")?;
         create_fixture_pdf(&path)?;
         let bytes = fs::read(&path).map_err(|error| PdfError::new(error.to_string()))?;
@@ -1144,7 +1145,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn extracted_image_processing_does_not_hold_pdfium_access() -> PdfResult<()> {
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let path = fixture_path("image-processing")?;
         create_fixture_pdf(&path)?;
         let bytes = fs::read(&path).map_err(|error| PdfError::new(error.to_string()))?;
@@ -1165,7 +1166,7 @@ mod tests {
 
     #[test]
     fn ingestion_metadata_round_trips_and_rejects_a_different_revision() -> PdfResult<()> {
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let path = fixture_path("ingestion")?;
         create_fixture_pdf(&path)?;
         let bytes = fs::read(&path).map_err(|e| PdfError::new(e.to_string()))?;
@@ -1223,7 +1224,7 @@ mod tests {
 
     #[test]
     fn cover_ignores_stored_thumbnail_and_visible_annotations() -> PdfResult<()> {
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let bytes = include_bytes!("../tests/fixtures/cover-annotations.pdf").to_vec();
         let rendered = render_first_page_image_from_reader(Cursor::new(bytes), 100)?;
         assert_eq!(rendered.source(), RenderedPdfImageSource::RenderedPage);
@@ -1282,7 +1283,7 @@ mod tests {
 
     #[test]
     fn concurrent_background_inspections_keep_documents_valid() -> PdfResult<()> {
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let path = fixture_path("concurrent-inspection")?;
         create_fixture_pdf(&path)?;
         std::thread::scope(|scope| {
@@ -1303,7 +1304,7 @@ mod tests {
 
     #[test]
     fn prepared_pdfium_session_opens_once_renders_searches_and_selects() -> PdfResult<()> {
-        let _pdfium_guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pdfium_guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let path = fixture_path("reader")?;
         create_fixture_pdf(&path)?;
         let session = PdfDocumentSession::open(&path)?;
@@ -1336,7 +1337,7 @@ mod tests {
 
     #[test]
     fn direct_crop_matches_full_raster_and_display_pixels_preserve_colors() -> PdfResult<()> {
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let path = fixture_path("direct-crop")?;
         create_fixture_pdf(&path)?;
         let document = shared_pdfium()?.load_pdf_from_byte_vec(fs::read(&path).unwrap(), None).unwrap();
@@ -1366,7 +1367,7 @@ mod tests {
 
     #[test]
     fn lightweight_page_dimensions_match_loaded_rotated_pages() -> PdfResult<()> {
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let mut document = shared_pdfium()?.create_new_pdf().map_err(|error| PdfError::new(error.to_string()))?;
         let mut expected = Vec::new();
         for rotation in [PdfPageRenderRotation::None, PdfPageRenderRotation::Degrees90, PdfPageRenderRotation::Degrees180, PdfPageRenderRotation::Degrees270] {
@@ -1381,7 +1382,7 @@ mod tests {
 
     #[test]
     fn page_analysis_is_reused_across_zoom_and_trim_without_changing_output() -> PdfResult<()> {
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let path = fixture_path("analysis-cache")?;
         create_fixture_pdf(&path)?;
         TEXT_EXTRACTION_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -1442,7 +1443,7 @@ mod tests {
 
     #[test]
     fn first_page_image_skips_document_wide_reader_analysis() -> PdfResult<()> {
-        let _pdfium_guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pdfium_guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let path = fixture_path("first-page-image")?;
         create_fixture_pdf(&path)?;
         ANALYZED_PAGE_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -1480,7 +1481,7 @@ mod tests {
     #[test]
     fn streamed_pdf_first_page_skips_later_page_image_content() -> PdfResult<()> {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let image_size = 2048 * 2048;
         let first = b"BT /F1 18 Tf 72 720 Td (Streamed first page) Tj ET";
         let second = b"q 400 0 0 400 72 200 cm /Im1 Do Q BT /F1 18 Tf 72 720 Td (Later page) Tj ET";
@@ -1552,7 +1553,7 @@ mod tests {
 
     #[test]
     fn reader_short_reads_are_completed_before_pdfium_parses_them() -> PdfResult<()> {
-        let _pdfium_guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _pdfium_guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let path = fixture_path("short-reads")?;
         create_fixture_pdf(&path)?;
         let bytes = fs::read(&path).map_err(|error| PdfError::new(error.to_string()))?;

@@ -1,5 +1,7 @@
 //! Recompute all assignments from stored evidence, including previously unmatched books.
+use crate::sync::apply::{project_book, write_subject_projection};
 use crate::{Database, DatabaseError};
+use book_model::{BookMetadata, BookSubject};
 use rusqlite::OptionalExtension;
 
 pub(crate) fn revision(db: &rusqlite::Connection) -> Result<String, DatabaseError> {
@@ -10,50 +12,36 @@ pub(crate) fn revision(db: &rusqlite::Connection) -> Result<String, DatabaseErro
 impl Database {
     pub(crate) fn refresh_taxonomy_assignments(&self) -> Result<(), DatabaseError> {
         let revision = revision(&self.connection)?;
-        self.connection.execute_batch("CREATE TABLE IF NOT EXISTS local_taxonomy_projection(id INTEGER PRIMARY KEY CHECK(id=1), revision TEXT NOT NULL)")?;
-        let old: Option<String> = self.connection.query_row("SELECT revision FROM local_taxonomy_projection WHERE id=1", [], |r| r.get(0)).optional()?;
+        let old: Option<String> = self.connection.query_row("SELECT taxonomy_revision FROM library_local_state WHERE singleton=1", [], |r| r.get(0))?;
         if old.as_deref() == Some(&revision) {
             return Ok(());
         }
-        let tx = self.connection.unchecked_transaction()?;
-        crate::transactions::with_remote_origin(&tx, |origin| {
-            origin.mark(&tx)?;
-            let tx = &tx;
+        self.write(|tx| {
             // Keyset batches keep memory bounded without excluding unmatched books.
             let mut cursor = 0i64;
             loop {
-                let rows = tx.prepare("SELECT row_id,book_metadata FROM book WHERE row_id>?1 ORDER BY row_id LIMIT 128")?.query_map([cursor], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+                let rows = tx.prepare("SELECT row_id FROM book WHERE row_id>?1 ORDER BY row_id LIMIT 128")?.query_map([cursor], |r| r.get::<_, i64>(0))?.collect::<Result<Vec<_>, _>>()?;
                 if rows.is_empty() {
                     break;
                 }
-                for (id, raw) in rows {
-                    let metadata = crate::sync::decode_book_metadata(&raw)?;
-                    let projected = crate::sync::apply::project_book(&metadata, raw)?;
-                    crate::sync::apply::write_subject_projection(tx, id, &projected)?;
+                for id in rows {
+                    let subjects = tx
+                        .prepare("SELECT name,source,authority,code FROM book_subject WHERE book_row_id=?1 ORDER BY position")?
+                        .query_map([id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?)))?
+                        .map(|row| {
+                            let (name, source, authority, code) = row?;
+                            BookSubject::new(None, name, source, authority, code).map_err(DatabaseError::operation)
+                        })
+                        .collect::<Result<Vec<_>, DatabaseError>>()?;
+                    let metadata = BookMetadata { subjects, ..BookMetadata::default() };
+                    let projected = project_book(&metadata)?;
+                    write_subject_projection(tx, id, &projected)?;
                     cursor = id;
                 }
             }
-            tx.execute("INSERT INTO local_taxonomy_projection VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision", [&revision])?;
+            tx.execute("UPDATE library_local_state SET taxonomy_revision=?1 WHERE singleton=1", [&revision])?;
             Ok(())
-        })?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Prepare an isolated database copy before a host promotes an approved update.
-    pub fn prepare_update(path: &std::path::Path) -> Result<(), DatabaseError> {
-        let db = Self::open(path)?;
-        db.initialize_library()?;
-        let integrity: String = db.connection.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
-        if integrity != "ok" {
-            return Err(DatabaseError::message(integrity));
-        }
-        let violations: i64 = db.connection.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?;
-        if violations != 0 {
-            return Err(DatabaseError::message("migrated library has invalid relationships"));
-        }
-        db.connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
-        Ok(())
+        })
     }
 }
 
@@ -64,14 +52,15 @@ mod tests {
     fn refresh_removes_stale_assignments_without_changing_canonical_data_and_is_idempotent() {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
-        let raw = sync_common::wire::encode(&book_model::BookMetadata::default()).unwrap();
-        db.connection.execute("INSERT INTO book(row_id,content_hash,book_metadata) VALUES(1,?1,?2)", rusqlite::params!["a".repeat(64), raw]).unwrap();
+        db.connection.execute("INSERT INTO book(row_id,content_hash) VALUES(1,?1)", ["a".repeat(64)]).unwrap();
+        db.connection.execute("INSERT INTO book_subject(book_row_id,position,name,source,authority,code) VALUES(1,0,'Unmatched subject','file','unknown-authority','unknown-code')", []).unwrap();
         db.connection.execute("INSERT INTO book_unified_concept VALUES(1,123456,1)", []).unwrap();
-        db.connection.execute("DELETE FROM local_taxonomy_projection", []).unwrap();
+        db.connection.execute("UPDATE library_local_state SET taxonomy_revision=NULL WHERE singleton=1", []).unwrap();
         let outbox: i64 = db.connection.query_row("SELECT count(*) FROM sync_outbox", [], |r| r.get(0)).unwrap();
         db.refresh_taxonomy_assignments().unwrap();
         assert_eq!(db.connection.query_row("SELECT count(*) FROM book_unified_concept", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-        assert_eq!(db.connection.query_row("SELECT book_metadata FROM book", [], |r| r.get::<_, Vec<u8>>(0)).unwrap(), raw);
+        let subject: (String, String, String, String) = db.connection.query_row("SELECT name,source,authority,code FROM book_subject", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
+        assert_eq!(subject, ("Unmatched subject".into(), "file".into(), "unknown-authority".into(), "unknown-code".into()));
         assert_eq!(db.connection.query_row("SELECT count(*) FROM sync_outbox", [], |r| r.get::<_, i64>(0)).unwrap(), outbox);
         let changes = db.connection.total_changes();
         db.refresh_taxonomy_assignments().unwrap();
@@ -81,13 +70,13 @@ mod tests {
     fn failure_rolls_back_every_assignment_and_revision() {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
-        let raw = sync_common::wire::encode(&book_model::BookMetadata::default()).unwrap();
-        db.connection.execute("INSERT INTO book(row_id,content_hash,book_metadata) VALUES(1,?1,?2)", rusqlite::params!["a".repeat(64), raw]).unwrap();
+        db.connection.execute("INSERT INTO book(row_id,content_hash) VALUES(1,?1)", ["a".repeat(64)]).unwrap();
         db.connection.execute("INSERT INTO book_unified_concept VALUES(1,123456,1)", []).unwrap();
-        db.connection.execute("INSERT INTO book(row_id,content_hash,book_metadata) VALUES(2,?1,X'FF')", ["b".repeat(64)]).unwrap();
-        db.connection.execute("DELETE FROM local_taxonomy_projection", []).unwrap();
+        db.connection.execute("INSERT INTO book(row_id,content_hash) VALUES(2,?1)", ["b".repeat(64)]).unwrap();
+        db.connection.execute("INSERT INTO book_subject(book_row_id,position,name,source) VALUES(2,0,?1,'dc:subject')", ["x".repeat(4097)]).unwrap();
+        db.connection.execute("UPDATE library_local_state SET taxonomy_revision=NULL WHERE singleton=1", []).unwrap();
         assert!(db.refresh_taxonomy_assignments().is_err());
         assert_eq!(db.connection.query_row("SELECT count(*) FROM book_unified_concept", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-        assert_eq!(db.connection.query_row("SELECT count(*) FROM local_taxonomy_projection", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(db.connection.query_row("SELECT count(*) FROM library_local_state WHERE taxonomy_revision IS NOT NULL", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
     }
 }

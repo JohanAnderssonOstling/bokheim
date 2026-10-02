@@ -1,17 +1,19 @@
+use std::fmt::Formatter;
+use std::io::Error;
 use crate::ServerUrl;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
 pub enum AuthError {
     Network(reqwest::Error),
-    Io(std::io::Error),
+    Io(Error),
     InvalidData(String),
     BadStatus(reqwest::StatusCode, String),
     Binding(String),
 }
 
 impl std::fmt::Display for AuthError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Network(error) => write!(formatter, "network error: {error}"),
             Self::Io(error) => write!(formatter, "io error: {error}"),
@@ -50,8 +52,8 @@ impl From<binary_http::Error> for AuthError {
     }
 }
 
-impl From<std::io::Error> for AuthError {
-    fn from(error: std::io::Error) -> Self {
+impl From<Error> for AuthError {
+    fn from(error: Error) -> Self {
         Self::Io(error)
     }
 }
@@ -82,7 +84,7 @@ struct StoredSession {
 }
 
 impl std::fmt::Debug for Session {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Session")
             .field("server_url", &self.server_url)

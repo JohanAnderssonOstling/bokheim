@@ -1,4 +1,8 @@
 //! Application-owned transport and lifetime adapters for the library client.
+
+use crate::BackendError;
+#[cfg(target_arch = "wasm32")]
+use crate::{ContentHash, DownloadState};
 use crate::{AppClient, LibraryId};
 use library_backend::client::{ClientTransport, LibraryClient};
 
@@ -24,12 +28,12 @@ struct Connection {
     #[cfg(target_arch = "wasm32")]
     library_id: LibraryId,
     #[cfg(not(target_arch = "wasm32"))]
-    handle: Result<library_backend::LibraryHandle, crate::BackendError>,
+    handle: Result<library_backend::LibraryHandle, BackendError>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ClientTransport for Connection {
-    fn handle(&self) -> Result<&library_backend::LibraryHandle, crate::BackendError> {
+    fn handle(&self) -> Result<&library_backend::LibraryHandle, BackendError> {
         self.handle.as_ref().map_err(Clone::clone)
     }
 }
@@ -44,10 +48,10 @@ impl ClientTransport for Connection {
     fn updates(&self) -> TransportResult<'_, (async_channel::Receiver<library_backend::LibraryUpdate>, bool)> {
         Box::pin(async move { self.app.transport.library_updates_transport(self.library_id).await.map_err(|error| error.to_string()) })
     }
-    fn download_changes(&self, content_hash: crate::ContentHash) -> TransportResult<'_, (async_channel::Receiver<crate::DownloadState>, crate::DownloadState)> {
+    fn download_changes(&self, content_hash: ContentHash) -> TransportResult<'_, (async_channel::Receiver<DownloadState>, DownloadState)> {
         Box::pin(async move { self.app.transport.book_download_changes(self.library_id, content_hash).await.map_err(|error| error.to_string()) })
     }
-    fn subscribe_book(&self, content_hash: crate::ContentHash) -> TransportResult<'_, (async_channel::Receiver<()>, crate::ResolvedBookData)> {
+    fn subscribe_book(&self, content_hash: ContentHash) -> TransportResult<'_, (async_channel::Receiver<()>, crate::ResolvedBookData)> {
         Box::pin(async move { self.app.transport.book_subscription(self.library_id, content_hash).await.map_err(|error| error.to_string()) })
     }
     fn import_directory(&self, parent_id: crate::DirId, directory: crate::DirectoryImport, create_root: bool) -> TransportResult<'_, Vec<crate::ImportFailure>> {

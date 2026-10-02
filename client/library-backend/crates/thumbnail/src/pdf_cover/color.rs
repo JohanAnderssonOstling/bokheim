@@ -13,26 +13,6 @@ impl Space {
             Self::Indexed(_) => 1,
         }
     }
-    pub(super) fn map_samples(&self, samples: &mut [u8], bits: i64, mapping: Option<&[f64]>) -> Option<()> {
-        let indexed = matches!(self, Self::Indexed(_));
-        let channels = self.channels();
-        if (indexed && bits > 8) || mapping.is_some_and(|values| values.len() != channels * 2) {
-            return None;
-        }
-        if !indexed && mapping.is_none() {
-            return Some(());
-        }
-        let default_max = if indexed { ((1_u32 << bits) - 1) as f64 } else { 1. };
-        let scale = if indexed { 1. } else { 255. };
-        for pixel in samples.chunks_exact_mut(channels) {
-            for (i, sample) in pixel.iter_mut().enumerate() {
-                let (min, max) = mapping.map_or((0., default_max), |values| (values[2 * i], values[2 * i + 1]));
-                let value = min + f64::from(*sample) / 255. * (max - min);
-                *sample = (value * scale).round().clamp(0., 255.) as u8;
-            }
-        }
-        Some(())
-    }
     pub(super) fn icc(bytes: &[u8], channels: usize) -> Option<Self> {
         if bytes.len() > 4 * 1024 * 1024 {
             return None;

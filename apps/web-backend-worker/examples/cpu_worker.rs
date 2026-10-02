@@ -20,7 +20,7 @@ fn execute_with_source(bytes: &[u8], source: JsValue) -> Result<Vec<u8>, JsValue
         match request {
             app::host::cpu::CpuRequest::Book { task } => {
                 let reader = app::host::web::book_source::Reader::new(source).map_err(app::BackendError::operation)?;
-                app::host::cpu::execute_book(task, Box::new(reader))
+                app::host::cpu::execute_book_with_mobi(task, Box::new(reader), |_, _| Err("subject page inspection is not supported for this format".into()))
             }
             request => app::host::cpu::execute(request),
         }

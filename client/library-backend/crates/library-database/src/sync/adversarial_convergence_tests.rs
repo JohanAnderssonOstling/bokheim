@@ -1,11 +1,14 @@
 //! Adversarial release regressions for recovery and safe folder projection.
-use super::convergence_tests::{change, db, hash, present, pull};
-use library_replica::{BookLifecycleState, DirectoryLifecycleState, MutationBody};
-use sync_common::{LibraryRevision, ROOT_DIR_ID, ServerMutation};
 
-fn folder(id: u128, name: &str) -> Vec<ServerMutation> {
+use std::time::{SystemTime, UNIX_EPOCH};
+use crate::Database;
+use super::convergence_tests::{change, db, hash, present, pull};
+use library_replica::{BookLifecycleState, DirectoryLifecycleState, LibraryStateEntry};
+use sync_common::{LibraryRevision, ROOT_DIR_ID, StateDelivery};
+
+fn folder(id: u128, name: &str) -> Vec<StateDelivery> {
     let dir_id = uuid::Uuid::from_u128(id);
-    [MutationBody::DirectoryName { dir_id, name: name.into() }, MutationBody::DirectoryParent { dir_id, parent_id: ROOT_DIR_ID }, MutationBody::DirectoryLifecycle { dir_id, value: DirectoryLifecycleState::Present }]
+    [LibraryStateEntry::DirectoryName { dir_id, name: name.into() }, LibraryStateEntry::DirectoryParent { dir_id, parent_id: ROOT_DIR_ID }, LibraryStateEntry::DirectoryLifecycle { dir_id, value: DirectoryLifecycleState::Present }]
         .into_iter()
         .enumerate()
         .map(|(index, body)| change(body, 100, id as u64 * 10 + index as u64 + 1))
@@ -17,12 +20,12 @@ fn stale_recovery_must_not_override_a_known_purge() {
     let stale = db();
     let current = db();
     let addition = present(100, 1);
-    let purge = change(MutationBody::BookLifecycle { content_hash: hash(), value: BookLifecycleState::Purged }, 100, 2);
+    let purge = change(LibraryStateEntry::BookLifecycle { content_hash: hash(), value: BookLifecycleState::Purged }, 100, 2);
     pull(&stale, &[addition.clone()]);
     pull(&current, &[addition, purge]);
     stale.sync_enqueue_missing_state_cells(&stale.sync_inventory_page(None).unwrap()).unwrap();
     let publications = stale.sync_publishable_mutations().unwrap();
-    let replay = publications.iter().map(|m| ServerMutation { mutation: m.to_wire().unwrap(), replica_id: uuid::Uuid::from_u128(51), revision: LibraryRevision::new(3).unwrap() }).collect::<Vec<_>>();
+    let replay = publications.iter().map(|m| sync_common::fixture_delivery(sync_common::transport::representation::<_, sync_common::OpaquePublication>(&(m)).unwrap(), uuid::Uuid::from_u128(51), LibraryRevision::new(3).unwrap())).collect::<Vec<_>>();
     pull(&current, &replay);
     let purged: bool = current.connection.query_row("SELECT NOT EXISTS(SELECT 1 FROM book WHERE content_hash=?1)", [hash().as_str()], |row| row.get(0)).unwrap();
     assert!(purged, "recovery alone revived a purged book: {publications:?}");
@@ -34,7 +37,7 @@ fn retrying_import_after_name_repair_must_accept_unchanged_intent() {
     let local = uuid::Uuid::from_u128(1);
     replica.create_directory_with_id(&local, &ROOT_DIR_ID, &"Shelf".into()).unwrap();
     pull(&replica, &folder(2, "Shelf"));
-    let names: (String, String) = replica.connection.query_row("SELECT name,intent_name FROM dir WHERE id=?1", [local.to_string()], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    let names: (String, String) = replica.connection.query_row("SELECT name,canonical_name FROM dir WHERE id=?1", [local.to_string()], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
     assert_eq!(names, ("Shelf 2".into(), "Shelf".into()));
     replica.create_directory_with_id(&local, &ROOT_DIR_ID, &"Shelf".into()).expect("retry must compare import intent, not a repaired display name");
 }
@@ -57,7 +60,7 @@ fn pending_remote_winner_must_not_change_its_tombstone_time_when_preparing_a_req
     // A pending recovery already exists when the winning purge arrives.
     pull(&replica, &[present(90, 1)]);
     replica.sync_enqueue_missing_state_cells(&replica.sync_inventory_page(None).unwrap()).unwrap();
-    pull(&replica, &[change(MutationBody::BookLifecycle { content_hash: hash(), value: BookLifecycleState::Purged }, 100, 2)]);
+    pull(&replica, &[change(LibraryStateEntry::BookLifecycle { content_hash: hash(), value: BookLifecycleState::Purged }, 100, 2)]);
     let before = super::apply::registers::canonical_body(&replica.connection, "book_lifecycle", hash().as_str(), "").unwrap();
     replica.sync_publishable_mutations().unwrap();
     let after = super::apply::registers::canonical_body(&replica.connection, "book_lifecycle", hash().as_str(), "").unwrap();
@@ -68,7 +71,7 @@ fn pending_remote_winner_must_not_change_its_tombstone_time_when_preparing_a_req
 #[test]
 fn a_remote_folder_must_not_expose_a_parent_traversal_component() {
     let replica = db();
-    let response = sync_common::PullStateResponse { book_creations: Vec::new(), mutations: folder(1, ".."), next_cursor: sync_common::SyncCursor::default(), has_more: false };
+    let response = sync_common::PullStateResponse { mutations: folder(1, ".."), next_cursor: sync_common::SyncCursor::default(), has_more: false };
     let result = replica.sync_commit_pull_response(&[], &response);
     if result.is_ok() {
         let names = replica.connection.prepare("SELECT name FROM dir WHERE deleted_at IS NULL AND id!=?1").unwrap().query_map([ROOT_DIR_ID.to_string()], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
@@ -77,7 +80,6 @@ fn a_remote_folder_must_not_expose_a_parent_traversal_component() {
     // Either rejecting the invalid mutation or projecting a deterministic safe
     // component is acceptable. Exposing '..' as a live folder name is not.
 }
-
 
 #[test]
 fn separate_import_jobs_with_the_same_folder_name_reach_collision_projection() {
@@ -94,10 +96,10 @@ fn separate_import_jobs_with_the_same_folder_name_reach_collision_projection() {
         let mutations = replica.sync_publishable_mutations().unwrap();
         assert_eq!(mutations.len(), 6);
         for mutation in mutations {
-            match mutation.body {
-                MutationBody::DirectoryName { name, .. } => assert_eq!(name, "Shelf"),
-                MutationBody::DirectoryLifecycle { value, .. } => assert_eq!(value, DirectoryLifecycleState::Present),
-                MutationBody::DirectoryParent { parent_id, .. } => assert_eq!(parent_id, ROOT_DIR_ID),
+            match mutation.state.value {
+                LibraryStateEntry::DirectoryName { name, .. } => assert_eq!(name, "Shelf"),
+                LibraryStateEntry::DirectoryLifecycle { value, .. } => assert_eq!(value, DirectoryLifecycleState::Present),
+                LibraryStateEntry::DirectoryParent { parent_id, .. } => assert_eq!(parent_id, ROOT_DIR_ID),
                 other => panic!("unexpected publication: {other:?}"),
             }
         }
@@ -126,12 +128,11 @@ fn colliding_directory_creation_rolls_back_when_projection_fails() {
 fn import_retry_can_complete_a_directory_received_in_a_partial_pull_page() {
     let replica = db();
     let id = uuid::Uuid::from_u128(1);
-    pull(&replica, &[change(MutationBody::DirectoryName { dir_id: id, name: "Shelf".into() }, 100, 1)]);
+    pull(&replica, &[change(LibraryStateEntry::DirectoryName { dir_id: id, name: "Shelf".into() }, 100, 1)]);
     let result = replica.create_directory_with_id(&id, &ROOT_DIR_ID, &"Shelf".into());
     assert!(result.is_ok(), "an identical name received before parent/lifecycle must not prevent resuming the import: {result:?}");
     assert_eq!(replica.directory_relative_path_string(&id).unwrap(), Some("Shelf".into()));
 }
-
 
 #[test]
 fn old_recovery_ack_does_not_remove_a_new_local_folder_edit() {
@@ -140,20 +141,20 @@ fn old_recovery_ack_does_not_remove_a_new_local_folder_edit() {
     replica.sync_enqueue_missing_state_cells(&replica.sync_inventory_page(None).unwrap()).unwrap();
     let recovered = replica.sync_publishable_mutations().unwrap();
     replica.move_directory(&uuid::Uuid::from_u128(1), None, Some("Edited")).unwrap();
-    replica.sync_acknowledge_mutations(&recovered.iter().map(|m| m.mutation_id).collect::<Vec<_>>()).unwrap();
+    replica.sync_acknowledge_mutations(&recovered.iter().map(|m| m.publisher_seq).collect::<Vec<_>>()).unwrap();
     let pending = replica.sync_publishable_mutations().unwrap();
     assert_eq!(pending.len(), 1);
-    assert!(matches!(&pending[0].body, MutationBody::DirectoryName { name, .. } if name == "Edited"));
-    assert!(pending[0].origin.is_none(), "a user edit must get its own version rather than forward the recovered version");
+    assert!(matches!(&pending[0].state.value, LibraryStateEntry::DirectoryName { name, .. } if name == "Edited"));
+    assert!(pending[0].state.version.replica_seq == pending[0].publisher_seq, "a user edit must get its own version rather than forward the recovered version");
 }
 
 #[test]
 fn restore_must_not_resurrect_a_partially_received_purged_directory() {
     let replica = db();
     let id = uuid::Uuid::from_u128(101);
-    pull(&replica, &[change(MutationBody::DirectoryLifecycle { dir_id: id, value: DirectoryLifecycleState::Purged }, 100, 1)]);
+    pull(&replica, &[change(LibraryStateEntry::DirectoryLifecycle { dir_id: id, value: DirectoryLifecycleState::Purged }, 100, 1)]);
     let result = replica.restore_directory(&id, None);
-    pull(&replica, &[change(MutationBody::DirectoryName { dir_id: id, name: "Purged folder".into() }, 100, 2), change(MutationBody::DirectoryParent { dir_id: id, parent_id: ROOT_DIR_ID }, 100, 3)]);
+    pull(&replica, &[change(LibraryStateEntry::DirectoryName { dir_id: id, name: "Purged folder".into() }, 100, 2), change(LibraryStateEntry::DirectoryParent { dir_id: id, parent_id: ROOT_DIR_ID }, 100, 3)]);
     assert_eq!(replica.directory_relative_path_string(&id).unwrap(), None, "restore returned {result:?} and revived a known purge when missing creation state arrived");
     assert!(replica.sync_publishable_mutations().unwrap().is_empty());
 }
@@ -162,7 +163,7 @@ fn restore_must_not_resurrect_a_partially_received_purged_directory() {
 fn restoring_a_partial_directory_must_not_report_success_without_a_path() {
     let replica = db();
     let id = uuid::Uuid::from_u128(102);
-    pull(&replica, &[change(MutationBody::DirectoryLifecycle { dir_id: id, value: DirectoryLifecycleState::Deleted }, 100, 1)]);
+    pull(&replica, &[change(LibraryStateEntry::DirectoryLifecycle { dir_id: id, value: DirectoryLifecycleState::Deleted }, 100, 1)]);
     let result = replica.restore_directory(&id, None);
     if result.is_ok() {
         assert!(replica.directory_relative_path_string(&id).unwrap().is_some(), "restore returned {result:?} but the folder is still unreachable");
@@ -173,10 +174,10 @@ fn restoring_a_partial_directory_must_not_report_success_without_a_path() {
 fn empty_trash_must_not_purge_a_folder_whose_lifecycle_has_not_arrived() {
     let replica = db();
     let id = uuid::Uuid::from_u128(103);
-    pull(&replica, &[change(MutationBody::DirectoryName { dir_id: id, name: "Live folder".into() }, 100, 1)]);
+    pull(&replica, &[change(LibraryStateEntry::DirectoryName { dir_id: id, name: "Live folder".into() }, 100, 1)]);
     let shown_in_trash = replica.library_trash().unwrap().folders.iter().any(|folder| folder.id == id);
     replica.empty_trash().unwrap();
-    pull(&replica, &[change(MutationBody::DirectoryParent { dir_id: id, parent_id: ROOT_DIR_ID }, 100, 2), change(MutationBody::DirectoryLifecycle { dir_id: id, value: DirectoryLifecycleState::Present }, 100, 3)]);
+    pull(&replica, &[change(LibraryStateEntry::DirectoryParent { dir_id: id, parent_id: ROOT_DIR_ID }, 100, 2), change(LibraryStateEntry::DirectoryLifecycle { dir_id: id, value: DirectoryLifecycleState::Present }, 100, 3)]);
     assert_eq!(replica.directory_relative_path_string(&id).unwrap(), Some("Live folder".into()), "emptying Trash must not author a purge for missing lifecycle state; placeholder shown in Trash: {shown_in_trash}");
 }
 
@@ -193,9 +194,9 @@ fn import_completion_preserves_received_versions_for_every_partial_shape() {
         let versions = || {
             replica
                 .connection
-                .prepare("SELECT state_kind,changed_at,replica_id,replica_seq,mutation_id,body FROM sync_state_version ORDER BY state_kind")
+                .prepare("SELECT state_kind,changed_at,replica_id,replica_seq,body FROM sync_state_version ORDER BY state_kind")
                 .unwrap()
-                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, String>(4)?, row.get::<_, Vec<u8>>(5)?)))
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, Vec<u8>>(4)?)))
                 .unwrap()
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap()
@@ -219,10 +220,10 @@ fn import_completion_preserves_received_versions_for_every_partial_shape() {
 fn import_rejects_partial_conflicts_and_tombstones_without_publication() {
     let id = uuid::Uuid::from_u128(105);
     for body in [
-        MutationBody::DirectoryName { dir_id: id, name: "Other".into() },
-        MutationBody::DirectoryParent { dir_id: id, parent_id: uuid::Uuid::from_u128(999) },
-        MutationBody::DirectoryLifecycle { dir_id: id, value: DirectoryLifecycleState::Deleted },
-        MutationBody::DirectoryLifecycle { dir_id: id, value: DirectoryLifecycleState::Purged },
+        LibraryStateEntry::DirectoryName { dir_id: id, name: "Other".into() },
+        LibraryStateEntry::DirectoryParent { dir_id: id, parent_id: uuid::Uuid::from_u128(999) },
+        LibraryStateEntry::DirectoryLifecycle { dir_id: id, value: DirectoryLifecycleState::Deleted },
+        LibraryStateEntry::DirectoryLifecycle { dir_id: id, value: DirectoryLifecycleState::Purged },
     ] {
         let replica = db();
         pull(&replica, &[change(body, 100, 1)]);
@@ -235,10 +236,10 @@ fn import_rejects_partial_conflicts_and_tombstones_without_publication() {
 fn partial_restore_can_be_retried_after_creation_state_arrives() {
     let replica = db();
     let id = uuid::Uuid::from_u128(106);
-    pull(&replica, &[change(MutationBody::DirectoryLifecycle { dir_id: id, value: DirectoryLifecycleState::Deleted }, 100, 1)]);
+    pull(&replica, &[change(LibraryStateEntry::DirectoryLifecycle { dir_id: id, value: DirectoryLifecycleState::Deleted }, 100, 1)]);
     assert!(replica.restore_directory(&id, None).is_err());
     assert!(replica.sync_publishable_mutations().unwrap().is_empty());
-    pull(&replica, &[change(MutationBody::DirectoryName { dir_id: id, name: "Shelf".into() }, 100, 2), change(MutationBody::DirectoryParent { dir_id: id, parent_id: ROOT_DIR_ID }, 100, 3)]);
+    pull(&replica, &[change(LibraryStateEntry::DirectoryName { dir_id: id, name: "Shelf".into() }, 100, 2), change(LibraryStateEntry::DirectoryParent { dir_id: id, parent_id: ROOT_DIR_ID }, 100, 3)]);
     assert_eq!(replica.restore_directory(&id, None).unwrap(), "Shelf");
     assert_eq!(replica.directory_relative_path_string(&id).unwrap(), Some("Shelf".into()));
 }
@@ -247,7 +248,7 @@ fn partial_restore_can_be_retried_after_creation_state_arrives() {
 fn individual_purge_rejects_a_placeholder_without_a_deletion() {
     let replica = db();
     let id = uuid::Uuid::from_u128(107);
-    pull(&replica, &[change(MutationBody::DirectoryName { dir_id: id, name: "Shelf".into() }, 100, 1)]);
+    pull(&replica, &[change(LibraryStateEntry::DirectoryName { dir_id: id, name: "Shelf".into() }, 100, 1)]);
     assert!(!replica.library_trash().unwrap().folders.iter().any(|folder| folder.id == id));
     assert!(replica.purge_directory(&id).is_err());
     assert!(replica.sync_publishable_mutations().unwrap().is_empty());
@@ -261,13 +262,13 @@ fn restoring_a_folder_with_nested_books_queues_resolvable_file_work() {
     let child = uuid::Uuid::from_u128(202);
     replica.create_directory_with_id(&parent, &ROOT_DIR_ID, &"Parent".into()).unwrap();
     replica.create_directory_with_id(&child, &parent, &"Child".into()).unwrap();
-    pull(&replica, &[present(100, 1), change(MutationBody::Placement { dir_id: child, content_hash: hash(), present: true, origin_folder_id: None }, 100, 2)]);
+    pull(&replica, &[present(100, 1), change(LibraryStateEntry::Placement { dir_id: child, content_hash: hash(), present: true, origin_folder_id: None }, 100, 2)]);
     replica.trash_directory(&parent).unwrap();
     assert_eq!(replica.directory_relative_path_string(&child).unwrap(), None);
     let result = replica.restore_directory(&parent, None);
     assert!(result.is_ok(), "restoring a parent must rebuild child paths before queuing restored files: {result:?}");
     assert_eq!(replica.directory_relative_path_string(&child).unwrap(), Some("Parent/Child".into()));
-    let jobs = replica.native_file_work().unwrap().into_iter().filter(|work| work.operation == "restore").collect::<Vec<_>>();
+    let jobs = replica.native_file_work().unwrap().into_iter().filter(|work| work.operation == "materialize").collect::<Vec<_>>();
     assert!(!jobs.is_empty());
     for job in jobs {
         let snapshot = replica.native_file_work_snapshot(job).unwrap().unwrap();
@@ -284,8 +285,8 @@ fn book_restore_rejects_duplicate_choices_that_omit_an_original_placement() {
         &replica,
         &[
             present(100, 1),
-            change(MutationBody::Placement { dir_id: ROOT_DIR_ID, content_hash: hash(), present: true, origin_folder_id: None }, 100, 2),
-            change(MutationBody::Placement { dir_id: folder, content_hash: hash(), present: true, origin_folder_id: None }, 100, 3),
+            change(LibraryStateEntry::Placement { dir_id: ROOT_DIR_ID, content_hash: hash(), present: true, origin_folder_id: None }, 100, 2),
+            change(LibraryStateEntry::Placement { dir_id: folder, content_hash: hash(), present: true, origin_folder_id: None }, 100, 3),
         ],
     );
     replica.trash_book(&hash()).unwrap();
@@ -309,8 +310,8 @@ fn review_restore_plan_excludes_placements_removed_before_the_book_was_trashed()
         &replica,
         &[
             present(100, 1),
-            change(MutationBody::Placement { dir_id: old, content_hash: hash(), present: false, origin_folder_id: None }, 100, 2),
-            change(MutationBody::Placement { dir_id: current, content_hash: hash(), present: true, origin_folder_id: None }, 200, 3),
+            change(LibraryStateEntry::Placement { dir_id: old, content_hash: hash(), present: false, origin_folder_id: None }, 100, 2),
+            change(LibraryStateEntry::Placement { dir_id: current, content_hash: hash(), present: true, origin_folder_id: None }, 200, 3),
         ],
     );
     replica.trash_book(&hash()).unwrap();
@@ -333,9 +334,9 @@ fn review_restore_plan_prefers_remaining_live_placements_over_old_removals() {
     // A lifecycle page can arrive before the placement-removal page. A later
     // independent removal must not outweigh a still-present placement either.
     pull(&replica, &[
-        change(MutationBody::BookLifecycle { content_hash: hash(), value: BookLifecycleState::Deleted { origin_folder_id: None } }, 400, 1),
-        change(MutationBody::Placement { dir_id: old, content_hash: hash(), present: false, origin_folder_id: None }, 300, 2),
-        change(MutationBody::Placement { dir_id: current, content_hash: hash(), present: true, origin_folder_id: None }, 200, 3),
+        change(LibraryStateEntry::BookLifecycle { content_hash: hash(), value: BookLifecycleState::Deleted { origin_folder_id: None } }, 400, 1),
+        change(LibraryStateEntry::Placement { dir_id: old, content_hash: hash(), present: false, origin_folder_id: None }, 300, 2),
+        change(LibraryStateEntry::Placement { dir_id: current, content_hash: hash(), present: true, origin_folder_id: None }, 200, 3),
     ]);
     assert_eq!(replica.restore_book_plan(&hash()).unwrap().iter().map(|p| p.original).collect::<Vec<_>>(), vec![current]);
 }
@@ -349,12 +350,11 @@ fn review_restore_plan_keeps_live_ancestors_of_suppressed_directories() {
     replica.create_directory_with_id(&grandparent, &ROOT_DIR_ID, &"Live".into()).unwrap();
     replica.create_directory_with_id(&parent, &grandparent, &"Deleted".into()).unwrap();
     replica.create_directory_with_id(&child, &parent, &"Child".into()).unwrap();
-    pull(&replica, &[present(100, 1), change(MutationBody::Placement { dir_id: child, content_hash: hash(), present: true, origin_folder_id: None }, 100, 2)]);
+    pull(&replica, &[present(100, 1), change(LibraryStateEntry::Placement { dir_id: child, content_hash: hash(), present: true, origin_folder_id: None }, 100, 2)]);
     replica.trash_directory(&parent).unwrap();
     let plan = replica.restore_book_plan(&hash()).unwrap();
     assert!(plan[0].ancestry.iter().any(|a| a.id == grandparent && a.live), "restore planning lost the original live ancestor: {plan:?}");
     assert_eq!(plan[0].ancestry.iter().map(|a| a.id).collect::<Vec<_>>(), vec![child, parent, grandparent]);
-    assert_eq!(plan[0].ancestry.last().unwrap().path, "Live");
     replica.restore_book_commit(&hash(), &[(child, grandparent)]).unwrap();
     let target_live: bool = replica.connection.query_row("SELECT deleted_at IS NULL FROM book_dir WHERE dir_id=?1", [grandparent.to_string()], |r| r.get(0)).unwrap();
     assert!(target_live, "the live ancestor offered by the plan must be a valid restore destination");
@@ -365,7 +365,7 @@ fn review_restore_plan_keeps_live_ancestors_of_suppressed_directories() {
 fn review_restore_placement_rejects_a_purged_book() {
     let replica = db();
     pull(&replica, &[present(100, 1)]);
-    pull(&replica, &[change(MutationBody::BookLifecycle { content_hash: hash(), value: BookLifecycleState::Purged }, 200, 2)]);
+    pull(&replica, &[change(LibraryStateEntry::BookLifecycle { content_hash: hash(), value: BookLifecycleState::Purged }, 200, 2)]);
     let result = replica.restore_book_placement(&hash(), &ROOT_DIR_ID);
     assert!(result.is_err(), "restoring a purged book placement must not report success without a visible placement: {result:?}");
     assert!(replica.sync_publishable_mutations().unwrap().is_empty());
@@ -374,31 +374,19 @@ fn review_restore_placement_rejects_a_purged_book() {
 #[test]
 fn review_invalid_annotation_cannot_poison_later_reimport_while_purged() {
     let replica = db();
-    pull(&replica, &[change(MutationBody::BookLifecycle { content_hash: hash(), value: BookLifecycleState::Purged }, 100, 1)]);
+    pull(&replica, &[change(LibraryStateEntry::BookLifecycle { content_hash: hash(), value: BookLifecycleState::Purged }, 100, 1)]);
     let bad = change(
-        MutationBody::Annotation {
+        LibraryStateEntry::Annotation {
             annotation_id: "invalid-position".into(),
-            value: book_model::AnnotationState {
-                content_hash: hash(),
-                anchor: book_model::AnnotationAnchor::epub_cfi("epubcfi(/6/2)"),
-                exact_text: "Text".into(),
-                style: book_model::AnnotationStyle::Underline,
-                color: "#fff".into(),
-                note: String::new(),
-                created_at: 10,
-                modified_at: 20,
-                deleted: false,
-                toc_ordinal: Some(-1),
-                progress: Some(10.0),
-            },
+            value: book_model::AnnotationState { content_hash: hash(), detail: book_model::AnnotationDetail { anchor: book_model::AnnotationAnchor::epub_cfi("epubcfi(/6/2)"), exact_text: "Text".into(), style: book_model::AnnotationStyle::Underline, color: "#fff".into(), note: String::new(), created_at: 10, toc_ordinal: Some(-1), progress: Some(10.0) }, modified_at: 20, deleted: false },
         },
         200,
         2,
     );
-    let page = sync_common::PullStateResponse { book_creations: Vec::new(), mutations: vec![bad], next_cursor: Default::default(), has_more: false };
+    let page = sync_common::PullStateResponse { mutations: vec![bad], next_cursor: Default::default(), has_more: false };
     let accepted = replica.sync_commit_pull_response(&[], &page);
     if accepted.is_ok() {
-        let reimport = sync_common::PullStateResponse { book_creations: vec![present(300, 3)], mutations: vec![present(300, 3)], next_cursor: Default::default(), has_more: false };
+        let reimport = sync_common::PullStateResponse { mutations: vec![present(300, 3)], next_cursor: Default::default(), has_more: false };
         let result = replica.sync_commit_pull_response(&[], &reimport);
         assert!(result.is_ok(), "an annotation accepted while purged poisoned reimport: {result:?}");
     }
@@ -428,11 +416,11 @@ fn review_restore_plan_does_not_revive_an_old_removal_from_a_faster_clock() {
     replica.create_directory_with_id(&current, &ROOT_DIR_ID, &"Current".into()).unwrap();
     // Two minutes of device clock skew is within the server's accepted range.
     // This removal has already arrived before the user trashes the book.
-    let ahead = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 120_000;
+    let ahead = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64 + 120_000;
     pull(&replica, &[
         present(100, 1),
-        change(MutationBody::Placement { dir_id: old, content_hash: hash(), present: false, origin_folder_id: None }, ahead, 2),
-        change(MutationBody::Placement { dir_id: current, content_hash: hash(), present: true, origin_folder_id: None }, 200, 3),
+        change(LibraryStateEntry::Placement { dir_id: old, content_hash: hash(), present: false, origin_folder_id: None }, ahead, 2),
+        change(LibraryStateEntry::Placement { dir_id: current, content_hash: hash(), present: true, origin_folder_id: None }, 200, 3),
     ]);
     replica.trash_book(&hash()).unwrap();
     let plan = replica.restore_book_plan(&hash()).unwrap();
@@ -446,11 +434,11 @@ fn review_restore_plan_keeps_every_placement_removed_by_one_trash_operation() {
     let second = uuid::Uuid::from_u128(404);
     replica.create_directory_with_id(&first, &ROOT_DIR_ID, &"First".into()).unwrap();
     replica.create_directory_with_id(&second, &ROOT_DIR_ID, &"Second".into()).unwrap();
-    let ahead = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 120_000;
+    let ahead = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64 + 120_000;
     pull(&replica, &[
         present(100, 1),
-        change(MutationBody::Placement { dir_id: first, content_hash: hash(), present: true, origin_folder_id: None }, 200, 2),
-        change(MutationBody::Placement { dir_id: second, content_hash: hash(), present: true, origin_folder_id: None }, ahead, 3),
+        change(LibraryStateEntry::Placement { dir_id: first, content_hash: hash(), present: true, origin_folder_id: None }, 200, 2),
+        change(LibraryStateEntry::Placement { dir_id: second, content_hash: hash(), present: true, origin_folder_id: None }, ahead, 3),
     ]);
     replica.trash_book(&hash()).unwrap();
     let plan = replica.restore_book_plan(&hash()).unwrap();
@@ -466,14 +454,14 @@ fn book_trash_preserves_placement_versions_and_restore_moves_only_selected_origi
     replica.create_directory_with_id(&second, &ROOT_DIR_ID, &"Second".into()).unwrap();
     pull(&replica, &[
         present(100, 1),
-        change(MutationBody::Placement { dir_id: first, content_hash: hash(), present: true, origin_folder_id: None }, 200, 2),
-        change(MutationBody::Placement { dir_id: second, content_hash: hash(), present: true, origin_folder_id: None }, 300, 3),
+        change(LibraryStateEntry::Placement { dir_id: first, content_hash: hash(), present: true, origin_folder_id: None }, 200, 2),
+        change(LibraryStateEntry::Placement { dir_id: second, content_hash: hash(), present: true, origin_folder_id: None }, 300, 3),
     ]);
     let version = |dir: sync_common::DirId| super::apply::registers::canonical_body(&replica.connection, "placement", hash().as_str(), &dir.to_string()).unwrap();
     let before = [version(first), version(second)];
     replica.trash_book(&hash()).unwrap();
     assert_eq!([version(first), version(second)], before, "trash must not author placement changes");
-    assert!(replica.sync_publishable_mutations().unwrap().iter().all(|m| !matches!(m.body, MutationBody::Placement { present: false, .. })));
+    assert!(replica.sync_publishable_mutations().unwrap().iter().all(|m| !matches!(m.state.value, LibraryStateEntry::Placement { present: false, .. })));
     assert!(replica.local_book_paths().unwrap().is_empty(), "retained placements of a trashed book are not live files");
     replica.restore_book_commit(&hash(), &[(first, ROOT_DIR_ID), (second, second)]).unwrap();
     let live: Vec<String> = replica.connection.prepare("SELECT dir_id FROM book_dir WHERE deleted_at IS NULL ORDER BY dir_id").unwrap()
@@ -482,44 +470,22 @@ fn book_trash_preserves_placement_versions_and_restore_moves_only_selected_origi
     assert_eq!(version(second), before[1], "a retained placement needs no new version on restore");
 }
 
-#[cfg(feature = "scanner")]
-#[test]
-fn scanner_excludes_retained_placements_of_trashed_books() {
-    let replica = db();
-    replica.seed_book(&hash(), Some("book"), 1, book_model::BookFormat::Epub);
-    replica.add_book_placement(&ROOT_DIR_ID, &hash(), "book.epub", "123", true);
-    assert_eq!(replica.scan_snapshot().unwrap().placements.len(), 1);
-    assert_eq!(replica.transfer_snapshot(&[hash()]).unwrap().asset_for(&hash()).unwrap().upload.local_versions.len(), 1);
-    replica.trash_book(&hash()).unwrap();
-    assert!(replica.book_upload_snapshot(&hash()).unwrap().local_versions.is_empty());
-    assert!(replica.transfer_snapshot(&[hash()]).unwrap().asset_for(&hash()).unwrap().upload.local_versions.is_empty());
-    let snapshot = replica.scan_snapshot().unwrap();
-    assert!(snapshot.books.is_empty());
-    assert!(snapshot.placements.is_empty());
-    assert_eq!(snapshot.tombstoned_files, vec![(ROOT_DIR_ID, "book.epub".into())]);
-    assert_eq!(replica.restore_book_plan(&hash()).unwrap()[0].original, ROOT_DIR_ID);
-}
-
-fn take_publications(replica: &crate::Database) -> Vec<ServerMutation> {
+fn take_publications(replica: &Database) -> Vec<StateDelivery> {
     let id: String = replica.connection.query_row("SELECT replica_id FROM sync_metadata", [], |r| r.get(0)).unwrap();
     let pending = replica.sync_publishable_mutations().unwrap();
     let events = pending
         .iter()
         .enumerate()
-        .map(|(index, m)| ServerMutation {
-            mutation: m.to_wire().unwrap(),
-            replica_id: uuid::Uuid::parse_str(&id).unwrap(),
-            revision: LibraryRevision::new(index as u64 + 1).unwrap(),
-        })
+        .map(|(index, m)| sync_common::fixture_delivery(sync_common::transport::representation::<_, sync_common::OpaquePublication>(&(m)).unwrap(), uuid::Uuid::parse_str(&id).unwrap(), LibraryRevision::new(index as u64 + 1).unwrap()))
         .collect();
-    replica.sync_acknowledge_mutations(&pending.iter().map(|m| m.mutation_id).collect::<Vec<_>>()).unwrap();
+    replica.sync_acknowledge_mutations(&pending.iter().map(|m| m.publisher_seq).collect::<Vec<_>>()).unwrap();
     events
 }
 
-fn membership_snapshot(replica: &crate::Database) -> Vec<Vec<rusqlite::types::Value>> {
+fn membership_snapshot(replica: &Database) -> Vec<Vec<rusqlite::types::Value>> {
     let mut rows = Vec::new();
     for sql in [
-        "SELECT state_kind,state_key,state_subkey,changed_at,conflict_rank,replica_id,replica_seq,mutation_id,body FROM sync_state_version ORDER BY state_kind,state_key,state_subkey",
+        "SELECT state_kind,state_key,state_subkey,changed_at,conflict_rank,replica_id,replica_seq,body FROM sync_state_version ORDER BY state_kind,state_key,state_subkey",
         "SELECT content_hash,deleted_at IS NOT NULL,trash_origin_dir_id FROM book ORDER BY content_hash",
         "SELECT b.content_hash,bd.dir_id,bd.deleted_at IS NOT NULL FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id ORDER BY b.content_hash,bd.dir_id",
         "SELECT id,parent_id,deleted_at IS NOT NULL FROM dir ORDER BY id",
@@ -531,13 +497,13 @@ fn membership_snapshot(replica: &crate::Database) -> Vec<Vec<rusqlite::types::Va
     rows
 }
 
-fn membership_seed(two_placements: bool) -> Vec<ServerMutation> {
+fn membership_seed(two_placements: bool) -> Vec<StateDelivery> {
     let mut seed = folder(501, "Source");
     seed.extend(folder(502, "Destination"));
     seed.push(present(100, 6000));
     for id in if two_placements { vec![501, 502] } else { vec![501] } {
         seed.push(change(
-            MutationBody::Placement {
+            LibraryStateEntry::Placement {
                 dir_id: uuid::Uuid::from_u128(id),
                 content_hash: hash(),
                 present: true,
@@ -631,8 +597,8 @@ fn concurrent_removal_survives_book_restore_and_rejects_a_stale_restore_plan() {
         } else {
             a.restore_book_commit(&hash(), &choices).unwrap();
         }
+        assert!(a.sync_publishable_mutations().unwrap().iter().all(|m| !matches!(m.state.value, LibraryStateEntry::Placement { .. }) || m.state.version.replica_seq != m.publisher_seq), "ordinary restore must not author placements");
         let restore = take_publications(&a);
-        assert!(restore.iter().all(|m| m.mutation.kind != "placement" || m.mutation.origin.is_some()), "ordinary restore must not author placements");
         pull(&a, &removal);
         pull(&b, &trash);
         pull(&b, &restore);
@@ -654,17 +620,17 @@ fn concurrent_removal_survives_book_restore_and_rejects_a_stale_restore_plan() {
 fn ordinary_restore_preserves_retained_local_file_metadata() {
     let replica = db();
     pull(&replica, &membership_seed(false));
-    replica.connection.execute("UPDATE book_dir SET local_hash='retained-checksum',last_scan=123", []).unwrap();
+    replica.connection.execute("UPDATE book_dir SET local_hash='retained-checksum'", []).unwrap();
     replica.trash_book(&hash()).unwrap();
     let source = uuid::Uuid::from_u128(501);
     replica.restore_book_commit(&hash(), &[(source, source)]).unwrap();
-    let retained: (String, i64) = replica.connection.query_row("SELECT local_hash,last_scan FROM book_dir", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-    assert_eq!(retained, ("retained-checksum".into(), 123));
+    let retained: String = replica.connection.query_row("SELECT local_hash FROM book_dir", [], |r| r.get(0)).unwrap();
+    assert_eq!(retained, "retained-checksum");
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn trash_book_with_suppressed_membership_cleans_only_materialized_paths() {
+fn trash_book_with_suppressed_membership_does_not_queue_file_work() {
     for remembered in [false, true] {
         let replica = db();
         pull(&replica, &membership_seed(true));
@@ -674,15 +640,14 @@ fn trash_book_with_suppressed_membership_cleans_only_materialized_paths() {
         }
         // Another device deletes the folder while our book remains present.
         // Its retained membership is valid even though it has no visible path.
-        pull(&replica, &[change(MutationBody::DirectoryLifecycle { dir_id: hidden, value: DirectoryLifecycleState::Deleted }, 200, 9000)]);
+        pull(&replica, &[change(LibraryStateEntry::DirectoryLifecycle { dir_id: hidden, value: DirectoryLifecycleState::Deleted }, 200, 9000)]);
         let before = super::apply::registers::canonical_body(&replica.connection, "placement", hash().as_str(), &hidden.to_string()).unwrap();
         replica.trash_book(&hash()).unwrap();
         assert_eq!(super::apply::registers::canonical_body(&replica.connection, "placement", hash().as_str(), &hidden.to_string()).unwrap(), before);
         assert!(replica.local_book_paths().unwrap().is_empty());
-        let paths: Vec<String> = replica.connection.prepare("SELECT relative_path FROM local_file_work WHERE operation='trash' ORDER BY relative_path").unwrap()
+        let paths: Vec<String> = replica.connection.prepare("SELECT relative_path FROM local_file_work WHERE operation='remove' ORDER BY relative_path").unwrap()
             .query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
-        assert_eq!(paths.len(), if remembered { 2 } else { 1 });
-        assert_eq!(paths.contains(&"Before move/book.epub".into()), remembered);
+        assert!(paths.is_empty());
         assert_eq!(replica.restore_book_plan(&hash()).unwrap().len(), 2);
     }
 }
@@ -706,70 +671,19 @@ fn concurrent_removal_of_all_placements_restores_with_explicit_root_intent() {
     a.restore_book_commit(&hash(), &[(ROOT_DIR_ID, ROOT_DIR_ID)]).unwrap();
     assert_eq!(a.local_book_paths().unwrap().len(), 1);
     let published = a.sync_publishable_mutations().unwrap();
-    assert!(published.iter().any(|m| matches!(m.body, MutationBody::Placement { dir_id, present: true, .. } if dir_id == ROOT_DIR_ID) && m.origin.is_none()));
+    assert!(published.iter().any(|m| matches!(m.state.value, LibraryStateEntry::Placement { dir_id, present: true, .. } if dir_id == ROOT_DIR_ID) && m.state.version.replica_seq == m.publisher_seq));
     for dir in [501, 502] {
         assert!(a.connection.query_row("SELECT deleted_at IS NOT NULL FROM book_dir WHERE dir_id=?1", [uuid::Uuid::from_u128(dir).to_string()], |r| r.get::<_, bool>(0)).unwrap());
     }
 }
 
 #[test]
-fn stale_restore_plan_after_purge_readd_respects_current_state_and_hash_identity() {
-    for new_book_trashed in [false, true] {
-        for same_placements in [false, true] {
-            let replica = db();
-            pull(&replica, &membership_seed(false));
-            replica.trash_book(&hash()).unwrap();
-            let choices = replica.restore_book_plan(&hash()).unwrap().iter().map(|p| (p.original, ROOT_DIR_ID)).collect::<Vec<_>>();
-            replica.purge_book(&hash()).unwrap();
-            replica.seed_book(&hash(), Some("Readded"), 1, book_model::BookFormat::Epub);
-            let destination = uuid::Uuid::from_u128(if same_placements { 501 } else { 502 });
-            replica.restore_book_placement(&hash(), &destination).unwrap();
-            if new_book_trashed { replica.trash_book(&hash()).unwrap(); }
-            let before = membership_snapshot(&replica);
-            let result = replica.restore_book_commit(&hash(), &choices);
-            if new_book_trashed && same_placements {
-                // Identity is the content hash; old intent may apply to a readd.
-                result.unwrap();
-                assert_eq!(replica.local_book_paths().unwrap().len(), 1);
-            } else {
-                assert!(result.is_err());
-                assert_eq!(membership_snapshot(&replica), before, "stale restore must fail atomically");
-            }
-        }
-    }
-}
-
-#[test]
-fn purging_a_folder_deletes_its_placement_and_preserves_other_live_copies() {
-    let replica = db();
-    let fresh = db();
-    let seed = membership_seed(true);
-    let folder = uuid::Uuid::from_u128(501);
-    let deletion = change(MutationBody::DirectoryLifecycle { dir_id: folder, value: DirectoryLifecycleState::Deleted }, 200, 9001);
-    for device in [&replica, &fresh] { pull(device, &seed); pull(device, &[deletion.clone()]); take_publications(device); }
-    let before = super::apply::registers::canonical_body(&replica.connection, "placement", hash().as_str(), &folder.to_string()).unwrap();
-    replica.purge_directory(&folder).unwrap();
-    assert_eq!(replica.book_count(&hash()), 1);
-    assert_eq!(replica.local_book_paths().unwrap().len(), 1);
-    assert_eq!(super::apply::registers::canonical_body(&replica.connection, "placement", hash().as_str(), &folder.to_string()).unwrap(), before);
-    let events = take_publications(&replica);
-    pull(&fresh, &events);
-    pull(&fresh, &events);
-    assert_eq!(membership_snapshot(&fresh), membership_snapshot(&replica));
-    replica.trash_book(&hash()).unwrap();
-    let choices = replica.restore_book_plan(&hash()).unwrap().iter().map(|p| (p.original, if p.original == folder { ROOT_DIR_ID } else { p.original })).collect::<Vec<_>>();
-    replica.restore_book_commit(&hash(), &choices).unwrap();
-    assert_eq!(replica.local_book_paths().unwrap().len(), 1);
-    assert_eq!(replica.connection.query_row("SELECT count(*) FROM book_dir WHERE dir_id=?1", [folder.to_string()], |row| row.get::<_, i64>(0)).unwrap(), 0);
-}
-
-#[test]
 fn fallback_restore_converges_with_concurrent_restores_and_removals() {
     for concurrent_removal in [false, true] {
         let mut seed = membership_seed(true);
-        seed.push(change(MutationBody::BookLifecycle { content_hash: hash(), value: BookLifecycleState::Deleted { origin_folder_id: None } }, 200, 10000));
+        seed.push(change(LibraryStateEntry::BookLifecycle { content_hash: hash(), value: BookLifecycleState::Deleted { origin_folder_id: None } }, 200, 10000));
         for id in [501, 502] {
-            seed.push(change(MutationBody::Placement { dir_id: uuid::Uuid::from_u128(id), content_hash: hash(), present: false, origin_folder_id: None }, 200, 10000 + id as u64));
+            seed.push(change(LibraryStateEntry::Placement { dir_id: uuid::Uuid::from_u128(id), content_hash: hash(), present: false, origin_folder_id: None }, 200, 10000 + id as u64));
         }
         let a = db();
         let b = db();
@@ -802,7 +716,7 @@ fn fallback_restore_revalidates_membership_and_handles_a_book_with_no_placement_
     replica.trash_book(&hash()).unwrap();
     assert_eq!(replica.restore_book_plan(&hash()).unwrap()[0].original, ROOT_DIR_ID);
     pull(&replica, &membership_seed(false)[..6]); // Known folders, no book edits.
-    pull(&replica, &[change(MutationBody::Placement { dir_id: uuid::Uuid::from_u128(501), content_hash: hash(), present: true, origin_folder_id: None }, 300, 30000)]);
+    pull(&replica, &[change(LibraryStateEntry::Placement { dir_id: uuid::Uuid::from_u128(501), content_hash: hash(), present: true, origin_folder_id: None }, 300, 30000)]);
     let before = membership_snapshot(&replica);
     assert!(replica.restore_book_commit(&hash(), &[(ROOT_DIR_ID, ROOT_DIR_ID)]).is_err());
     assert_eq!(membership_snapshot(&replica), before);

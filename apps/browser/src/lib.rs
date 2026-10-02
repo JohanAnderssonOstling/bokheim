@@ -4,6 +4,7 @@
 //! [`navigation::Libraries`] owns library lifecycle and per-library
 //! pages, and global pages remain stable across library selection.
 
+use std::sync::Arc;
 mod library;
 mod model;
 mod navigation;
@@ -28,7 +29,7 @@ pub fn native_windows_available() -> bool {
 pub enum NewWindowTarget {
     Book { locator: library_model::BookLocator, title: String },
     Folder { library_id: sync_common::LibraryId, directory_id: sync_common::DirId, title: String },
-    Subject { library_id: sync_common::LibraryId, location: String, label: String },
+    Subject { library_id: sync_common::LibraryId, location: library_model::BrowseLocation, label: String },
 }
 
 #[derive(Clone, Debug, PartialEq, gpui::Action)]
@@ -87,7 +88,7 @@ pub use universal::sync::SyncState;
 
 actions!(
     bokheim_browser,
-    [DismissSettings, ShowSettings, DecreaseUiFontSize, IncreaseUiFontSize, ActivateAuthor, PreviousDestination, NextDestination, OpenLibrarySwitcher, FocusNextSetting, FocusPreviousSetting, OpenContextMenu, UndoLibraryAction]
+    [DismissSettings, OpenTrash, ShowSettings, DecreaseUiFontSize, IncreaseUiFontSize, ActivateAuthor, PreviousDestination, NextDestination, OpenLibrarySwitcher, FocusNextSetting, FocusPreviousSetting, OpenContextMenu, UndoLibraryAction]
 );
 
 pub fn bind_keys(cx: &mut App) {
@@ -140,7 +141,7 @@ mod directory_selection_tests {
         std::fs::create_dir(path.join("Empty")).unwrap();
         std::fs::write(path.join("Shelf/book.epub"), b"book contents").unwrap();
         std::fs::write(path.join("notes.txt"), b"not a book").unwrap();
-        let dispatcher = std::sync::Arc::new(gpui::TestDispatcher::new(0));
+        let dispatcher = Arc::new(gpui::TestDispatcher::new(0));
         let executor = gpui::BackgroundExecutor::new(dispatcher.clone());
         let foreground = gpui::ForegroundExecutor::new(dispatcher);
         let imported = foreground.block_test(prepare_directory_import(selected, &executor)).unwrap();
@@ -161,7 +162,7 @@ mod directory_selection_tests {
     fn missing_local_root_does_not_become_an_empty_import() {
         let path = std::env::temp_dir().join(format!("missing-root-{}", uuid::Uuid::new_v4()));
         let selected = gpui::SelectedDirectory::root(path.clone()).unwrap();
-        let dispatcher = std::sync::Arc::new(gpui::TestDispatcher::new(0));
+        let dispatcher = Arc::new(gpui::TestDispatcher::new(0));
         let executor = gpui::BackgroundExecutor::new(dispatcher.clone());
         let foreground = gpui::ForegroundExecutor::new(dispatcher);
         let error = foreground.block_test(prepare_directory_import(selected, &executor)).err().unwrap();

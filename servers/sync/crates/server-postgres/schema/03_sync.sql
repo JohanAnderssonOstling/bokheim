@@ -1,4 +1,4 @@
--- Sync domain: one row-per-logical-update state table per entity kind
+-- Sync domain: one row per synchronized cell in a shared state table
 -- (directories, books, placements, reading positions, annotations, metadata).
 -- Depends only on 01_core.sql
 -- (libraries).
@@ -14,7 +14,7 @@
 --
 -- Every table below that participates in last-writer-wins conflict
 -- resolution gets a `lww_guard` trigger (enforce_lww_order()): it refuses an
--- UPDATE whose (changed_at, version_rank, replica_id, replica_seq, event_id)
+-- UPDATE whose (changed_at, version_rank, replica_id, replica_seq)
 -- tuple does not beat the stored row's, so every writer -- this server, a
 -- future service, a manual fix -- gets the same tie-break guarantee without
 -- repeating the comparison in every upsert query. A refused update is not
@@ -50,23 +50,10 @@ BEGIN
     -- families. Each transition table contains only rows handled by that
     -- operation, so an empty half performs no revision write and a mixed half
     -- advances the head at most once per affected library.
-    IF TG_TABLE_NAME = 'sync_reading_state' THEN
-        INSERT INTO sync_library_revision(library_id, current_revision, reading_revision, other_revision)
-        SELECT library_id, MAX(server_seq), MAX(server_seq), 0
-        FROM new_rows GROUP BY library_id
-        ON CONFLICT (library_id) DO UPDATE SET
-            current_revision=GREATEST(sync_library_revision.current_revision, EXCLUDED.current_revision),
-            reading_revision=GREATEST(sync_library_revision.reading_revision, EXCLUDED.reading_revision),
-            other_revision=GREATEST(sync_library_revision.other_revision, EXCLUDED.other_revision);
-    ELSE
-        INSERT INTO sync_library_revision(library_id, current_revision, reading_revision, other_revision)
-        SELECT library_id, MAX(server_seq), 0, MAX(server_seq)
-        FROM new_rows GROUP BY library_id
-        ON CONFLICT (library_id) DO UPDATE SET
-            current_revision=GREATEST(sync_library_revision.current_revision, EXCLUDED.current_revision),
-            reading_revision=GREATEST(sync_library_revision.reading_revision, EXCLUDED.reading_revision),
-            other_revision=GREATEST(sync_library_revision.other_revision, EXCLUDED.other_revision);
-    END IF;
+    INSERT INTO sync_library_revision(library_id, current_revision)
+    SELECT library_id, MAX(server_seq) FROM new_rows GROUP BY library_id
+    ON CONFLICT (library_id) DO UPDATE SET
+        current_revision=GREATEST(sync_library_revision.current_revision, EXCLUDED.current_revision);
     RETURN NULL;
 END
 $$;
@@ -80,14 +67,14 @@ CREATE FUNCTION enforce_lww_order() RETURNS trigger
 DECLARE
     republished_seq bigint;
 BEGIN
-    IF (NEW.changed_at, NEW.version_rank, NEW.replica_id COLLATE "C", NEW.replica_seq, NEW.event_id COLLATE "C")
-       > (OLD.changed_at, OLD.version_rank, OLD.replica_id COLLATE "C", OLD.replica_seq, OLD.event_id COLLATE "C")
+    IF (NEW.changed_at, NEW.version_rank, NEW.replica_id COLLATE "C", NEW.replica_seq)
+       > (OLD.changed_at, OLD.version_rank, OLD.replica_id COLLATE "C", OLD.replica_seq)
     THEN
         RETURN NEW;
     END IF;
     -- The stored row already is this mutation, so a retried push has nothing
     -- to teach anyone. Cancel it rather than churn the channel head.
-    IF NEW.event_id COLLATE "C" = OLD.event_id COLLATE "C" THEN
+    IF (NEW.replica_id COLLATE "C", NEW.replica_seq) = (OLD.replica_id COLLATE "C", OLD.replica_seq) THEN
         RETURN NULL;
     END IF;
     -- The incoming mutation strictly loses. Its author applied it locally
@@ -118,55 +105,27 @@ CREATE SEQUENCE sync_server_sequence
 
 CREATE TABLE sync_library_revision (
     library_id text PRIMARY KEY REFERENCES libraries(id) ON DELETE CASCADE,
-    current_revision bigint NOT NULL CHECK (current_revision > 0),
-    reading_revision bigint NOT NULL DEFAULT 0,
-    other_revision bigint NOT NULL DEFAULT 0,
-    CONSTRAINT sync_library_revision_complete_channels CHECK (current_revision = GREATEST(reading_revision, other_revision)),
-    CONSTRAINT sync_library_revision_nonnegative_channels CHECK (reading_revision >= 0 AND other_revision >= 0)
+    current_revision bigint NOT NULL CHECK (current_revision > 0)
 );
 
--- Generic relay storage. Cold and high-frequency reading state share this
--- structure; the server treats `value` as opaque client-owned bytes.
+-- Generic relay storage for every synchronized kind; the server treats `value` as opaque client-owned bytes.
+-- `content_hash` names the book a value belongs to. A book_lifecycle row holds
+-- that book's bytes for quota unless its version_rank is 2 (purge).
 CREATE TABLE sync_state (
     library_id text NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
     kind text NOT NULL,
     entity_key text NOT NULL,
     entity_subkey text NOT NULL DEFAULT '',
     value bytea NOT NULL,
-    present boolean,
     content_hash text,
     changed_at bigint NOT NULL,
     replica_id text NOT NULL,
     replica_seq bigint NOT NULL,
     version_rank smallint NOT NULL,
-    event_id text NOT NULL,
     server_seq bigint NOT NULL DEFAULT nextval('sync_server_sequence'::regclass),
-    PRIMARY KEY (library_id, kind, entity_key, entity_subkey),
-    UNIQUE (library_id, event_id)
+    PRIMARY KEY (library_id, kind, entity_key, entity_subkey)
 );
 CREATE INDEX sync_state_library_seq ON sync_state (library_id, server_seq);
 CREATE TRIGGER advance_library_sync_revision_state_insert AFTER INSERT ON sync_state REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION advance_library_sync_revision_statement();
 CREATE TRIGGER advance_library_sync_revision_state_update AFTER UPDATE ON sync_state REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION advance_library_sync_revision_statement();
-CREATE TRIGGER lww_guard BEFORE UPDATE OF library_id, kind, entity_key, entity_subkey, value, present, content_hash, changed_at, replica_id, replica_seq, version_rank, event_id ON sync_state FOR EACH ROW EXECUTE FUNCTION enforce_lww_order();
-
-CREATE TABLE sync_reading_state (
-    library_id text NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
-    kind text NOT NULL,
-    entity_key text NOT NULL,
-    entity_subkey text NOT NULL DEFAULT '',
-    value bytea NOT NULL,
-    present boolean,
-    content_hash text,
-    changed_at bigint NOT NULL,
-    replica_id text NOT NULL,
-    replica_seq bigint NOT NULL,
-    version_rank smallint NOT NULL,
-    event_id text NOT NULL,
-    server_seq bigint NOT NULL DEFAULT nextval('sync_server_sequence'::regclass),
-    PRIMARY KEY (library_id, kind, entity_key, entity_subkey),
-    UNIQUE (library_id, event_id)
-);
-CREATE INDEX sync_reading_state_library_seq ON sync_reading_state (library_id, server_seq);
-CREATE TRIGGER advance_library_sync_revision_reading_insert AFTER INSERT ON sync_reading_state REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION advance_library_sync_revision_statement();
-CREATE TRIGGER advance_library_sync_revision_reading_update AFTER UPDATE ON sync_reading_state REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION advance_library_sync_revision_statement();
-CREATE TRIGGER lww_guard BEFORE UPDATE OF library_id, kind, entity_key, entity_subkey, value, present, content_hash, changed_at, replica_id, replica_seq, version_rank, event_id ON sync_reading_state FOR EACH ROW EXECUTE FUNCTION enforce_lww_order();
+CREATE TRIGGER lww_guard BEFORE UPDATE OF library_id, kind, entity_key, entity_subkey, value, content_hash, changed_at, replica_id, replica_seq, version_rank ON sync_state FOR EACH ROW EXECUTE FUNCTION enforce_lww_order();

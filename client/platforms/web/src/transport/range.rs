@@ -1,4 +1,6 @@
 //! Shared-memory range transport between dedicated browser workers.
+
+use std::cell::Cell;
 use super::{error_message, field};
 use js_sys::{Function, Uint8Array};
 use wasm_bindgen::prelude::*;
@@ -137,7 +139,7 @@ impl Drop for Server {
 // local to the worker that connected them.
 thread_local! {
     static SOURCES: std::cell::RefCell<std::collections::HashMap<u32, JsValue>> = Default::default();
-    static NEXT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static NEXT: Cell<u32> = const { Cell::new(0) };
 }
 pub struct Source {
     id: u32,

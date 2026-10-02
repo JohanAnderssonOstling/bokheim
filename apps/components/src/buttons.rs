@@ -10,7 +10,7 @@ use crate::{BrowserTheme, SPACE_MD, TEXT_SM, TOPBAR_ACTION_HEIGHT_REM};
 /// This is the shared base for all button-like controls, so pointer behavior
 /// stays consistent even when call sites use different variants.
 pub fn base_button(id: impl Into<ElementId>) -> Button {
-    Button::new(id).cursor_pointer().hover(|style| style.bg(BrowserTheme::default().hover))
+    Button::new(id).cursor_pointer()
 }
 
 /// Square, with a light border distinct from the background.

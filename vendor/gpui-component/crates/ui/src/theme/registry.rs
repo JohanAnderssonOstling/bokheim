@@ -1,10 +1,7 @@
 use crate::{Theme, ThemeColor, ThemeConfig, ThemeMode, ThemeSet, highlighter::HighlightTheme};
-#[allow(unused)]
-use anyhow::Result;
 use gpui::{App, Global, SharedString};
 use std::{
     collections::HashMap,
-    path::PathBuf,
     rc::Rc,
     sync::{Arc, LazyLock},
 };
@@ -74,7 +71,6 @@ pub(super) fn init(cx: &mut App) {
 
 #[derive(Default, Debug)]
 pub struct ThemeRegistry {
-    themes_dir: PathBuf,
     default_themes: HashMap<ThemeMode, Rc<ThemeConfig>>,
     themes: HashMap<SharedString, Rc<ThemeConfig>>,
     has_custom_themes: bool,
@@ -89,32 +85,6 @@ impl ThemeRegistry {
 
     pub fn global_mut(cx: &mut App) -> &mut Self {
         cx.global_mut::<Self>()
-    }
-
-    /// Watch themes directory.
-    ///
-    /// And reload themes to trigger the `on_load` callback.
-    #[cfg(not(target_family = "wasm"))]
-    pub fn watch_dir<F>(themes_dir: PathBuf, cx: &mut App, on_load: F) -> Result<()>
-    where
-        F: Fn(&mut App) + 'static,
-    {
-        Self::global_mut(cx).themes_dir = themes_dir.clone();
-
-        // Load theme in the background.
-        cx.spawn(async move |cx| {
-            _ = cx.update(|cx| {
-                if let Err(err) = Self::_watch_themes_dir(themes_dir, cx) {
-                    tracing::error!("Failed to watch themes directory: {}", err);
-                }
-
-                Self::reload_themes(cx);
-                on_load(cx);
-            });
-        })
-        .detach();
-
-        Ok(())
     }
 
     /// Returns a reference to the map of themes (including default themes).
@@ -171,7 +141,6 @@ impl ThemeRegistry {
                 self.default_themes.insert(ThemeMode::Light, Rc::new(theme));
             }
         }
-        self.themes_dir = PathBuf::from("./themes");
         self.themes = self
             .default_themes
             .values()
@@ -182,106 +151,4 @@ impl ThemeRegistry {
             .collect();
     }
 
-    #[cfg(not(target_family = "wasm"))]
-    fn _watch_themes_dir(themes_dir: PathBuf, cx: &mut App) -> anyhow::Result<()> {
-        if !themes_dir.exists() {
-            std::fs::create_dir_all(&themes_dir)?;
-        }
-
-        let (tx, rx) = smol::channel::bounded(100);
-        let mut watcher =
-            notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                if let Ok(event) = &res {
-                    match event.kind {
-                        notify::EventKind::Create(_)
-                        | notify::EventKind::Modify(_)
-                        | notify::EventKind::Remove(_) => {
-                            if let Err(err) = tx.send_blocking(res) {
-                                tracing::error!("Failed to send theme event: {:?}", err);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            })?;
-
-        cx.spawn(async move |cx| {
-            use notify::Watcher as _;
-
-            if let Err(err) = watcher.watch(&themes_dir, notify::RecursiveMode::Recursive) {
-                tracing::error!("Failed to watch themes directory: {:?}", err);
-            }
-
-            while (rx.recv().await).is_ok() {
-                tracing::info!("Reloading themes...");
-                _ = cx.update(Self::reload_themes);
-            }
-        })
-        .detach();
-
-        Ok(())
-    }
-
-    #[cfg(not(target_family = "wasm"))]
-    fn reload_themes(cx: &mut App) {
-        let registry = Self::global_mut(cx);
-        match registry.reload() {
-            Ok(_) => {
-                tracing::info!("Themes reloaded successfully.");
-            }
-            Err(e) => tracing::error!("Failed to reload themes: {:?}", e),
-        }
-    }
-
-    #[cfg(not(target_family = "wasm"))]
-    /// Reload themes from the `themes_dir`.
-    fn reload(&mut self) -> Result<()> {
-        let mut themes = vec![];
-
-        if self.themes_dir.exists() {
-            for entry in std::fs::read_dir(&self.themes_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
-                    let file_content = std::fs::read_to_string(path.clone())?;
-
-                    match serde_json::from_str::<ThemeSet>(&file_content) {
-                        Ok(theme_set) => {
-                            themes.extend(theme_set.themes);
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "ignored invalid theme file: {}, {}",
-                                path.display(),
-                                e
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        self.themes.clear();
-        for theme in self.default_themes.values() {
-            self.themes
-                .insert(theme.name.clone(), Rc::new((**theme).clone()));
-        }
-
-        for theme in themes.iter() {
-            if self.themes.contains_key(&theme.name) {
-                continue;
-            }
-
-            if theme.is_default {
-                self.default_themes
-                    .insert(theme.mode, Rc::new(theme.clone()));
-            }
-
-            self.has_custom_themes = true;
-            self.themes
-                .insert(theme.name.clone(), Rc::new(theme.clone()));
-        }
-
-        Ok(())
-    }
 }

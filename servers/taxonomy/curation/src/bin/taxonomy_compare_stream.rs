@@ -1,5 +1,7 @@
 //! Compare frozen taxonomies using full production matching, without route-label
 //! collisions elsewhere preventing a code audit. Input: system<TAB>uses<TAB>hex.
+
+use std::error::Error;
 use std::{
     collections::BTreeMap,
     io::{self, BufRead, Write},
@@ -7,7 +9,7 @@ use std::{
 };
 use subject_projection::{read_unified_taxonomy_sqlite, UnifiedConceptDefinition, UnifiedTaxonomy};
 
-fn load(path: &str) -> Result<UnifiedTaxonomy, Box<dyn std::error::Error>> {
+fn load(path: &str) -> Result<UnifiedTaxonomy, Box<dyn Error>> {
     let definitions = read_unified_taxonomy_sqlite(Path::new(path))?
         .iter()
         .map(|c| {
@@ -24,7 +26,7 @@ fn load(path: &str) -> Result<UnifiedTaxonomy, Box<dyn std::error::Error>> {
 fn ids(v: &[i64]) -> String {
     v.iter().map(i64::to_string).collect::<Vec<_>>().join("|")
 }
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
     let args = std::env::args().collect::<Vec<_>>();
     let before = load(&args[1])?;
     let after = load(&args[2])?;

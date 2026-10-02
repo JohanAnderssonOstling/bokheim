@@ -1,4 +1,6 @@
 //! Shared-WASM-memory wakeups; reader scheduling and cancellation stay with callers.
+
+use std::time::Duration;
 use std::sync::atomic::{AtomicI32, Ordering};
 use wasm_bindgen::prelude::*;
 #[wasm_bindgen(inline_js = r#"
@@ -40,7 +42,7 @@ impl Signal {
     pub fn observed(&self) -> i32 {
         self.0.load(Ordering::SeqCst)
     }
-    pub async fn wait_async(&self, observed: i32, timeout: std::time::Duration) {
+    pub async fn wait_async(&self, observed: i32, timeout: Duration) {
         let _ = wasm_bindgen_futures::JsFuture::from(wait_async(wasm_bindgen::memory(), self.0.as_ptr() as u32, observed, timeout.as_secs_f64() * 1000.0)).await;
     }
 }
@@ -48,7 +50,7 @@ impl Signal {
     pub fn check() -> Result<(), String> {
         check(wasm_bindgen::memory()).map_err(|e| format!("remote file bridge unavailable: {e:?}"))
     }
-    pub fn wait(&self, observed: i32, timeout: std::time::Duration) -> Result<String, String> {
+    pub fn wait(&self, observed: i32, timeout: Duration) -> Result<String, String> {
         wait(wasm_bindgen::memory(), self.0.as_ptr() as u32, observed, timeout.as_secs_f64() * 1000.0).map_err(|e| format!("remote file wait failed: {e:?}"))
     }
 }

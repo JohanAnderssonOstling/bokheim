@@ -5,11 +5,6 @@
 INSERT INTO sync_metadata(singleton, replica_id) VALUES (1, :value)
 ON CONFLICT(singleton) DO UPDATE SET replica_id = excluded.replica_id;
 
--- name: owner_set_change_origin!
--- param: value: &str
-INSERT INTO sync_metadata(singleton, change_origin) VALUES (1, :value)
-ON CONFLICT(singleton) DO UPDATE SET change_origin = excluded.change_origin;
-
 -- name: owner_set_remote_library_name!
 -- param: value: &str
 INSERT INTO sync_metadata(singleton, remote_library_name) VALUES (1, :value)
@@ -21,12 +16,11 @@ INSERT INTO sync_metadata(singleton, server_library_created) VALUES (1, :value)
 ON CONFLICT(singleton) DO UPDATE SET server_library_created = excluded.server_library_created;
 
 -- name: owner_transfer_history?
-SELECT entries_json FROM local_transfer_history WHERE singleton = 1;
+SELECT transfer_history_json FROM library_local_state WHERE singleton = 1 AND transfer_history_json IS NOT NULL;
 
 -- name: owner_save_transfer_history!
 -- param: entries_json: &str
-INSERT INTO local_transfer_history(singleton, entries_json) VALUES (1, :entries_json)
-ON CONFLICT(singleton) DO UPDATE SET entries_json = excluded.entries_json;
+UPDATE library_local_state SET transfer_history_json=:entries_json WHERE singleton=1;
 
 -- name: owner_sync_initialized ->
 SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'sync_metadata' AND type = 'table');
@@ -68,12 +62,8 @@ WHERE upload_id IS NULL;
 UPDATE book_transfer SET upload_id = upload_id + (SELECT MAX(MAX(COALESCE(upload_id, 0), COALESCE(upload_prepared, 0))) FROM book_transfer)
 WHERE upload_id IS NOT NULL;
 
--- name: owner_operation_record?
-SELECT operation_kind, operation_scan_complete, operation_completed FROM sync_metadata WHERE singleton = 1;
-
--- name: owner_book_format?
--- param: content_hash: &str
-SELECT format FROM book WHERE content_hash = :content_hash;
+-- name: owner_needs_scan ->
+SELECT EXISTS(SELECT 1 FROM library_local_state WHERE singleton=1 AND scan_state IN ('pending','failed'));
 
 -- name: taxonomy_attached?
 SELECT EXISTS(SELECT 1 FROM pragma_database_list WHERE name='curated');

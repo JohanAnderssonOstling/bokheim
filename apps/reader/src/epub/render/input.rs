@@ -1,5 +1,6 @@
 //! EPUB implementations of shared navigation commands.
 
+use crate::invalidation::notify;
 use gpui::{Context, Focusable, Window};
 use ui_components as components;
 
@@ -78,7 +79,7 @@ impl CommandTarget<ToggleToc> for ReaderView {
     fn execute(&mut self, _: &ToggleToc, _: &mut Window, cx: &mut Context<Self>) {
         self.chrome.show(cx);
         state_panel::select_tab(&mut self.sidebar, SidebarTab::Contents, cx);
-        crate::invalidation::notify(cx, Component::ReaderShell, "toc_visibility_changed");
+        notify(cx, Component::ReaderShell, "toc_visibility_changed");
     }
 }
 
@@ -86,7 +87,7 @@ impl CommandTarget<FocusReaderSearch> for ReaderView {
     fn execute(&mut self, _: &FocusReaderSearch, window: &mut Window, cx: &mut Context<Self>) {
         self.chrome.show(cx);
         if components::uses_mobile_navigation(window) && self.sidebar.close() {
-            crate::invalidation::notify(cx, Component::ReaderShell, "sidebar_closed_for_search");
+            notify(cx, Component::ReaderShell, "sidebar_closed_for_search");
         }
         if self.search.query.is_none() {
             self.open_search(cx);

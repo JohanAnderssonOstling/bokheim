@@ -1,3 +1,6 @@
+use std::io::ErrorKind;
+use std::process::{Child, Command, Stdio};
+use crate::OpeningTiming;
 use std::io::{BufReader, SeekFrom};
 #[cfg(feature = "kobo")]
 use std::io::{Read, Write};
@@ -141,8 +144,8 @@ pub struct AudioEngine {
 
 impl AudioEngine {
     pub fn open(reader: Box<dyn ReadSeek>, duration: Duration, stream_control: Option<app::AudioStreamControl>) -> Result<Self, String> {
-        let _opening = crate::OpeningTiming::new("audio_engine_open");
-        let decoder_timing = crate::OpeningTiming::new("decoder_init");
+        let _opening = OpeningTiming::new("audio_engine_open");
+        let decoder_timing = OpeningTiming::new("decoder_init");
         let decoder = open_decoder(reader)?;
         drop(decoder_timing);
         let channels = decoder.channels();
@@ -385,7 +388,7 @@ impl AudioEngine {
 }
 
 fn open_decoder(mut reader: Box<dyn ReadSeek>) -> Result<AudioDecoder, String> {
-    let length_timing = crate::OpeningTiming::new("source_length_probe");
+    let length_timing = OpeningTiming::new("source_length_probe");
     let byte_len = stream_byte_len(&mut *reader)?;
     drop(length_timing);
     Decoder::builder().with_data(BufReader::new(reader)).with_byte_len(byte_len).with_seekable(true).build().map_err(|error| error.to_string())
@@ -463,7 +466,7 @@ fn apply_pending_requests(pending: PendingDecoderRequests, decoder: &mut AudioDe
         if state.stream_control.as_ref().is_some_and(|control| !control.begin_seek(next)) {
             return DecoderRequestOutcome::Continue;
         }
-        let _seek_timing = crate::OpeningTiming::new("decoder_seek");
+        let _seek_timing = OpeningTiming::new("decoder_seek");
         eprintln!("AUDIOBOOK_TIMING phase=decoder_seek generation={next} target_ms={}", position.as_millis());
         if let Err(error) = decoder.try_seek(position) {
             state.reject_seek_if_current(next, format!("Could not seek audiobook: {error}"));
@@ -749,7 +752,7 @@ struct KoboOutput {
     playing: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     volume_bits: Arc<AtomicU64>,
-    child: Arc<Mutex<std::process::Child>>,
+    child: Arc<Mutex<Child>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -764,26 +767,26 @@ impl KoboOutput {
         let channel_count = channels.get().to_string();
         let sample_rate_value = sample_rate.get();
         let sample_rate = sample_rate_value.to_string();
-        let bluetooth_timing = crate::OpeningTiming::new("bluetooth_output_lookup");
+        let bluetooth_timing = OpeningTiming::new("bluetooth_output_lookup");
         let device = connected_audio_device(&cancelled)?;
         drop(bluetooth_timing);
         if cancelled() {
             return Err("Audio output recovery cancelled".into());
         }
         let pcm = format!("bluealsa:DEV={device},PROFILE=a2dp");
-        let spawn_timing = crate::OpeningTiming::new("aplay_spawn");
-        let child = std::process::Command::new("aplay")
+        let spawn_timing = OpeningTiming::new("aplay_spawn");
+        let child = Command::new("aplay")
             .args(["-q", "-D", &pcm, "-t", "raw", "-f", "S16_LE", "-c", &channel_count, "-r", &sample_rate])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("Could not start Kobo Bluetooth audio (aplay): {error}"))?;
         drop(spawn_timing);
         Self::from_child(child, audio_rx, state, channels, NonZeroU32::new(sample_rate_value).expect("sample rate is non-zero"), duration)
     }
 
-    fn from_child(mut child: std::process::Child, audio_rx: Receiver<AudioChunk>, state: Arc<SharedState>, channels: NonZeroU16, sample_rate: NonZeroU32, duration: Duration) -> Result<Self, String> {
+    fn from_child(mut child: Child, audio_rx: Receiver<AudioChunk>, state: Arc<SharedState>, channels: NonZeroU16, sample_rate: NonZeroU32, duration: Duration) -> Result<Self, String> {
         let sample_rate_value = sample_rate.get();
         let mut input = child.stdin.take().ok_or_else(|| "Kobo audio player has no input pipe".to_owned())?;
         let stderr = child.stderr.take().map(|mut pipe| {
@@ -814,7 +817,7 @@ impl KoboOutput {
                         continue;
                     }
                     if !prebuffered {
-                        let _prebuffer_timing = crate::OpeningTiming::new("prebuffer");
+                        let _prebuffer_timing = OpeningTiming::new("prebuffer");
                         // Do not start feeding ALSA until the decoder has built a
                         // small cushion. Without this, WorkerSource emits silence
                         // while the first compressed blocks are being decoded.
@@ -830,7 +833,7 @@ impl KoboOutput {
                     let sample = (sample * volume).clamp(-1.0, 1.0);
                     bytes.extend_from_slice(&((sample * i16::MAX as f32) as i16).to_le_bytes());
                     if bytes.len() >= 4096 {
-                        let first_write_timing = first_write.then(|| crate::OpeningTiming::new("first_pcm_write"));
+                        let first_write_timing = first_write.then(|| OpeningTiming::new("first_pcm_write"));
                         if input.write_all(&bytes).is_err() {
                             if !thread_stop.load(Ordering::Acquire) {
                                 state.output_lost.store(true, Ordering::Release);
@@ -904,7 +907,7 @@ fn kobo_output_message(detail: &str) -> Option<&'static str> {
 fn connected_audio_device(cancelled: &impl Fn() -> bool) -> Result<String, String> {
     // One budget for the complete discovery, not one budget per paired device.
     let deadline = Instant::now() + Duration::from_secs(8);
-    let output = bluetooth_output(std::process::Command::new("bluetoothctl").args(["devices"]), deadline, cancelled)?;
+    let output = bluetooth_output(Command::new("bluetoothctl").args(["devices"]), deadline, cancelled)?;
     for line in String::from_utf8_lossy(&output).lines() {
         let mut fields = line.split_whitespace();
         if fields.next() != Some("Device") {
@@ -914,7 +917,7 @@ fn connected_audio_device(cancelled: &impl Fn() -> bool) -> Result<String, Strin
         if !is_bluetooth_address(address) {
             continue;
         }
-        let info = match bluetooth_output(std::process::Command::new("bluetoothctl").args(["info", address]), deadline, cancelled) {
+        let info = match bluetooth_output(Command::new("bluetoothctl").args(["info", address]), deadline, cancelled) {
             Ok(info) => info,
             Err(error) if cancelled() || Instant::now() >= deadline => return Err(error),
             Err(_) => continue,
@@ -930,7 +933,7 @@ fn connected_audio_device(cancelled: &impl Fn() -> bool) -> Result<String, Strin
 }
 
 #[cfg(feature = "kobo")]
-fn bluetooth_output(command: &mut std::process::Command, deadline: Instant, cancelled: &impl Fn() -> bool) -> Result<Vec<u8>, String> {
+fn bluetooth_output(command: &mut Command, deadline: Instant, cancelled: &impl Fn() -> bool) -> Result<Vec<u8>, String> {
     let interrupted = || {
         if cancelled() {
             Some("Audio output recovery cancelled")
@@ -943,7 +946,7 @@ fn bluetooth_output(command: &mut std::process::Command, deadline: Instant, canc
     if let Some(error) = interrupted() {
         return Err(error.into());
     }
-    let mut child = command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().map_err(|error| format!("Could not query Bluetooth audio: {error}"))?;
+    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|error| format!("Could not query Bluetooth audio: {error}"))?;
     let stdout = child.stdout.take().expect("Bluetooth command has piped stdout");
     let reader = thread::spawn(move || {
         let mut bytes = Vec::new();
@@ -1013,8 +1016,8 @@ mod tests {
     #[cfg(all(feature = "kobo", unix))]
     #[test]
     fn kobo_pipe_loss_pauses_silently_and_retry_reseeks_before_output() {
-        fn child(script: &str) -> std::process::Child {
-            std::process::Command::new("/bin/sh").args(["-c", script]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn().unwrap()
+        fn child(script: &str) -> Child {
+            Command::new("/bin/sh").args(["-c", script]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap()
         }
         let mut state = test_state(0, 42_000_000);
         let control = app::AudioStreamControl::default();
@@ -1079,7 +1082,7 @@ mod tests {
     #[test]
     fn bluetooth_query_is_bounded_and_cancellable() {
         let started = Instant::now();
-        let result = bluetooth_output(std::process::Command::new("/bin/sh").args(["-c", "exec sleep 30"]), started + Duration::from_millis(100), &|| false);
+        let result = bluetooth_output(Command::new("/bin/sh").args(["-c", "exec sleep 30"]), started + Duration::from_millis(100), &|| false);
         assert!(result.unwrap_err().contains("timed out"));
         assert!(started.elapsed() < Duration::from_secs(2));
 
@@ -1090,7 +1093,7 @@ mod tests {
             signal.store(true, Ordering::Release);
         });
         let started = Instant::now();
-        let result = bluetooth_output(std::process::Command::new("/bin/sh").args(["-c", "exec sleep 30"]), started + Duration::from_secs(8), &|| cancelled.load(Ordering::Acquire));
+        let result = bluetooth_output(Command::new("/bin/sh").args(["-c", "exec sleep 30"]), started + Duration::from_secs(8), &|| cancelled.load(Ordering::Acquire));
         cancel.join().unwrap();
         assert!(result.unwrap_err().contains("cancelled"));
         assert!(started.elapsed() < Duration::from_secs(2));
@@ -1099,9 +1102,9 @@ mod tests {
     #[cfg(all(feature = "kobo", unix))]
     #[test]
     fn bluetooth_query_drains_output_and_honors_shared_deadline_before_spawn() {
-        let result = bluetooth_output(std::process::Command::new("/bin/sh").args(["-c", "head -c 60000 /dev/zero"]), Instant::now() + Duration::from_secs(2), &|| false).unwrap();
+        let result = bluetooth_output(Command::new("/bin/sh").args(["-c", "head -c 60000 /dev/zero"]), Instant::now() + Duration::from_secs(2), &|| false).unwrap();
         assert_eq!(result.len(), 60_000);
-        let result = bluetooth_output(&mut std::process::Command::new("/this-command-must-not-be-spawned"), Instant::now(), &|| false);
+        let result = bluetooth_output(&mut Command::new("/this-command-must-not-be-spawned"), Instant::now(), &|| false);
         assert!(result.unwrap_err().contains("timed out"));
     }
 
@@ -1114,7 +1117,7 @@ mod tests {
         let rate = NonZeroU32::new(22050).unwrap();
         let duration = Duration::from_secs(100);
         let output = |receiver: Receiver<AudioChunk>, state: Arc<SharedState>| {
-            let child = std::process::Command::new("/bin/sh").args(["-c", "exec cat >/dev/null"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+            let child = Command::new("/bin/sh").args(["-c", "exec cat >/dev/null"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
             KoboOutput::from_child(child, receiver, state, channels, rate, duration).unwrap()
         };
         let (request_tx, requests) = unbounded();
@@ -1156,7 +1159,7 @@ mod tests {
         for _ in 0..BUFFERED_BLOCKS {
             samples.send(AudioChunk { generation: 0, tempo: 1.0, samples: vec![0.0; BLOCK_SAMPLES] }).unwrap();
         }
-        let child = std::process::Command::new("/bin/sh").args(["-c", "exec sleep 30"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        let child = Command::new("/bin/sh").args(["-c", "exec sleep 30"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
         let output = KoboOutput::from_child(child, receiver, state.clone(), NonZeroU16::new(1).unwrap(), NonZeroU32::new(22050).unwrap(), Duration::from_secs(100)).unwrap();
         let cleanup = output.child.clone();
         output.play();
@@ -1193,7 +1196,7 @@ mod tests {
         let rate = NonZeroU32::new(22050).unwrap();
         let duration = Duration::from_secs(100);
         let output = || {
-            let child = std::process::Command::new("/bin/sh").args(["-c", "exec cat >/dev/null"]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+            let child = Command::new("/bin/sh").args(["-c", "exec cat >/dev/null"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
             KoboOutput::from_child(child, receiver.clone(), state.clone(), channels, rate, duration).unwrap()
         };
         let (request_tx, requests) = unbounded();
@@ -1241,20 +1244,20 @@ mod tests {
         impl Read for StallingReader {
             fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
                 if self.control.is_cancelled() {
-                    return Err(std::io::ErrorKind::ConnectionAborted.into());
+                    return Err(ErrorKind::ConnectionAborted.into());
                 }
                 if self.control.is_interrupted() {
-                    return Err(std::io::ErrorKind::WouldBlock.into());
+                    return Err(ErrorKind::WouldBlock.into());
                 }
                 if self.stall.load(Ordering::Acquire) {
                     let _ = self.started.send(());
                     loop {
                         if self.control.is_cancelled() {
-                            return Err(std::io::ErrorKind::ConnectionAborted.into());
+                            return Err(ErrorKind::ConnectionAborted.into());
                         }
                         if self.control.is_interrupted() {
                             self.stall.store(false, Ordering::Release);
-                            return Err(std::io::ErrorKind::WouldBlock.into());
+                            return Err(ErrorKind::WouldBlock.into());
                         }
                         thread::sleep(Duration::from_millis(2));
                     }
@@ -1269,7 +1272,7 @@ mod tests {
         }
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mp3-in-m4b.m4b");
-        let output = std::process::Command::new("ffmpeg")
+        let output = Command::new("ffmpeg")
             .args(["-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=30", "-c:a", "libmp3lame", "-b:a", "128k", "-movflags", "+faststart", "-f", "mp4"])
             .arg(&path)
             .output()

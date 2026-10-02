@@ -1,8 +1,9 @@
+use std::time::Instant;
 use crate::{PostgresDatabase, assets, sync_store};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::collections::HashSet;
 use sync_common::api::libraries::{LibraryNameRequest, LibrarySummary};
-use sync_common::{PullStateQuery, PullStateResponse, PushMutationsResponse, StateInventoryRequest, StateInventoryResponse, SyncExchangeRequest, SyncExchangeResponse};
+use sync_common::{PullStateQuery, PullStateResponse, PushMutationsResponse, SyncExchangeRequest, SyncExchangeResponse};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
@@ -47,7 +48,7 @@ impl PostgresSyncRepository {
 }
 
 fn pull_response(page: sync_store::FetchChangesPage) -> PullStateResponse {
-    PullStateResponse { book_creations: page.book_creations, mutations: page.changes, next_cursor: page.next_cursor, has_more: page.has_more }
+    PullStateResponse { mutations: page.changes, next_cursor: page.next_cursor, has_more: page.has_more }
 }
 
 fn internal(error: impl std::fmt::Display) -> SyncError {
@@ -87,21 +88,10 @@ impl PostgresSyncRepository {
         sync_store::rename_library(&self.pool, user_id, &LibraryNameRequest { library_name: name.to_owned(), ..request.clone() }).await.map_err(internal)
     }
 
-    pub async fn compare_state_inventory(&self, user_id: &str, request: &StateInventoryRequest) -> Result<StateInventoryResponse, SyncError> {
-        if request.cells.len() > sync_common::MAX_STATE_INVENTORY_CELLS {
-            return Err(SyncError::TooManyMutations);
-        }
-        if !sync_store::owns_library(&self.pool, user_id, &request.library_id).await.map_err(internal)? {
-            return Err(SyncError::LibraryOwnershipConflict);
-        }
-        let missing = sync_store::missing_state_cells(&self.pool, &request.library_id, &request.cells).await.map_err(internal)?;
-        Ok(StateInventoryResponse { missing })
-    }
-
     /// Deletes server-side library and synchronization state while retaining
     /// physical book and thumbnail objects in the asset store.
     pub async fn delete_library(&self, user_id: &str, library_id: &sync_common::LibraryId) -> Result<bool, SyncError> {
-        let phase_started = std::time::Instant::now();
+        let phase_started = Instant::now();
         let mut transaction = self.pool.begin().await.map_err(internal)?;
         tracing::debug!(target: "sync_performance", phase = "pool_acquire_and_begin", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
         let library_id = library_id.to_string();
@@ -129,7 +119,7 @@ impl PostgresSyncRepository {
         if reserved > 0 {
             sqlx::query("UPDATE user_storage_account SET reserved_bytes=GREATEST(reserved_bytes-$2, 0) WHERE user_id=$1").bind(user_id).bind(reserved).execute(&mut *transaction).await.map_err(internal)?;
         }
-        let lifecycle_hashes = sqlx::query_scalar::<_, String>("SELECT content_hash FROM sync_state WHERE library_id=$1 AND kind='book_lifecycle' AND present IS TRUE AND content_hash IS NOT NULL")
+        let lifecycle_hashes = sqlx::query_scalar::<_, String>("SELECT content_hash FROM sync_state WHERE library_id=$1 AND kind='book_lifecycle' AND version_rank<>2 AND content_hash IS NOT NULL")
             .bind(&library_id)
             .fetch_all(&mut *transaction)
             .await
@@ -138,7 +128,6 @@ impl PostgresSyncRepository {
         assets::apply_lifecycle_reference_deltas(&mut transaction, user_id, lifecycle_hashes.into_iter().filter(|_| cloud_enabled).map(|hash| (sync_common::ContentHash::new(&hash), -1))).await.map_err(internal)?;
         sqlx::query(include_str!("sql/cloud_storage/release_unreferenced.sql")).bind(user_id).execute(&mut *transaction).await.map_err(internal)?;
         sqlx::query("DELETE FROM book_upload_reservation WHERE library_id=$1").bind(&library_id).execute(&mut *transaction).await.map_err(internal)?;
-        sqlx::query("DELETE FROM sync_reading_state WHERE library_id=$1").bind(&library_id).execute(&mut *transaction).await.map_err(internal)?;
         sqlx::query("DELETE FROM sync_state WHERE library_id=$1").bind(&library_id).execute(&mut *transaction).await.map_err(internal)?;
         sqlx::query("DELETE FROM sync_library_revision WHERE library_id=$1").bind(&library_id).execute(&mut *transaction).await.map_err(internal)?;
         transaction.commit().await.map_err(internal)?;
@@ -157,69 +146,72 @@ impl PostgresSyncRepository {
             return Err(SyncError::TooManyMutations);
         }
         let mut identities = HashSet::with_capacity(request.mutations.len());
-        if !request.mutations.iter().all(|mutation| identities.insert(mutation.mutation_id)) {
+        if !request.mutations.iter().all(|mutation| identities.insert(mutation.publisher_seq)) {
             return Err(SyncError::AmbiguousMutationIdentity);
         }
         if request.mutations.is_empty() {
             let query = PullStateQuery { library_id: request.library_id.clone(), replica_id: request.replica_id.clone(), cursor: request.cursor };
-            return Ok(SyncExchangeResponse { push: PushMutationsResponse { accepted: Vec::new(), rejected: Vec::new() }, pull: self.load_changes(user_id, &query).await? });
+            return Ok(SyncExchangeResponse { push: PushMutationsResponse { rejected: Vec::new() }, pull: self.load_changes(user_id, &query).await? });
         }
 
-        let phase_started = std::time::Instant::now();
+        let phase_started = Instant::now();
         let mut transaction = self.pool.begin().await.map_err(internal)?;
         tracing::debug!(target: "sync_performance", phase = "pool_acquire_and_begin", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
-        let phase_started = std::time::Instant::now();
+        let phase_started = Instant::now();
         if !self.authorize_owned_library(&mut transaction, user_id, &request.library_id).await? {
             transaction.rollback().await.map_err(internal)?;
             return Err(SyncError::LibraryOwnershipConflict);
         }
         tracing::debug!(target: "sync_performance", phase = "library_lock_and_authorize", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
-        let phase_started = std::time::Instant::now();
+        let phase_started = Instant::now();
         sync_store::validate_owned_cursor(&mut transaction, &request.library_id, request.cursor).await.map_err(fetch_error)?;
         tracing::debug!(target: "sync_performance", phase = "validate_cursor", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
-        let phase_started = std::time::Instant::now();
+        let phase_started = Instant::now();
         let inserted = sync_store::insert_changes(&mut transaction, user_id, &request.library_id, &request.replica_id, &request.mutations).await.map_err(internal)?;
         tracing::debug!(target: "sync_performance", phase = "insert_changes", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
-        let phase_started = std::time::Instant::now();
+        let phase_started = Instant::now();
         let page = sync_store::fetch_owned_changes(&mut transaction, &request.library_id, request.cursor).await.map_err(fetch_error)?;
         tracing::debug!(target: "sync_performance", phase = "fetch_page", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
-        let phase_started = std::time::Instant::now();
+        let phase_started = Instant::now();
         transaction.commit().await.map_err(internal)?;
         tracing::debug!(target: "sync_performance", phase = "commit", elapsed_ms = phase_started.elapsed().as_secs_f64() * 1000.0);
-        return Ok(SyncExchangeResponse { push: PushMutationsResponse { accepted: inserted.accepted, rejected: inserted.rejected }, pull: pull_response(page) });
+        return Ok(SyncExchangeResponse { push: PushMutationsResponse { rejected: inserted.rejected }, pull: pull_response(page) });
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+    use super::test_sequence;
+    use crate::test_support::isolated_pool;
     use super::{PostgresSyncRepository, SyncError};
     use sqlx::PgPool;
     use sync_common::api::libraries::LibraryNameRequest;
-    use sync_common::{DeclaredBlobReference, MutationId, MutationRejection, MutationRejectionReason, ReplicaSeq, SyncCursor, SyncExchangeRequest, WireMutation};
+    use sync_common::{MutationRejection, MutationRejectionReason, ReplicaSeq, SyncCursor, SyncExchangeRequest, OpaquePublication};
 
     #[tokio::test]
     async fn cloud_storage_disabled_accepts_metadata_without_upload_and_preserves_it() {
-        let pool = crate::test_support::isolated_pool("cloud_metadata", 4).await.expect("SYNC_E2E_DATABASE_URL is required");
+        let pool = isolated_pool("cloud_metadata", 4).await.expect("SYNC_E2E_DATABASE_URL is required");
         let (user, id) = seed_account(&pool).await;
         let repo = PostgresSyncRepository { pool: pool.clone() };
         repo.set_cloud_storage(&user, &id, uuid::Uuid::new_v4(), false).await.unwrap();
         let hash = sync_common::ContentHash::new(&"c".repeat(64));
         let mut change = wire_mutation("book_lifecycle", hash.as_str(), 10, 1);
-        change.blob_reference = Some(DeclaredBlobReference { present: true, content_hash: Some(hash) });
+        change.state.value.book = Some(hash);
         let response = repo.exchange(&user, &exchange_request(id, vec![change.clone()])).await.unwrap();
-        assert_eq!(response.push.accepted, vec![change.mutation_id]);
+        assert!(response.push.rejected.is_empty());
         assert!(!response.pull.mutations.is_empty());
         repo.set_cloud_storage(&user, &id, uuid::Uuid::new_v4(), true).await.unwrap();
         repo.set_cloud_storage(&user, &id, uuid::Uuid::new_v4(), false).await.unwrap();
         let response = repo.exchange(&user, &exchange_request(id, vec![])).await.unwrap();
-        assert!(response.pull.mutations.iter().any(|m| m.mutation.mutation_id == change.mutation_id));
+        assert!(response.pull.mutations.iter().any(|m| m.state.version.replica_seq == change.publisher_seq));
         assert_eq!(crate::assets::storage_usage(&pool, &user).await.unwrap().used_bytes, 0);
         assert!(repo.delete_library(&user, &id).await.unwrap(), "deleting a disabled library must not decrement its references twice");
     }
 
     #[tokio::test]
     async fn recovery_preserves_origin_in_batch_and_singleton_exchanges() {
-        let pool = crate::test_support::isolated_pool("recovery_origin", 4).await.expect("SYNC_E2E_DATABASE_URL is required");
+        let pool = isolated_pool("recovery_origin", 4).await.expect("SYNC_E2E_DATABASE_URL is required");
         let (user, library) = seed_account(&pool).await;
         let repo = PostgresSyncRepository { pool: pool.clone() };
         repo.set_cloud_storage(&user, &library, uuid::Uuid::new_v4(), false).await.unwrap();
@@ -227,20 +219,20 @@ mod tests {
         let key = "a".repeat(64);
         for kind in ["directory_name", "reading_position"] {
             let mut older = wire_mutation(kind, &key, 100, 500);
-            older.blob_reference = None;
-            older.value = vec![1];
-            older.origin = Some(sync_common::MutationOrigin { replica_id: uuid::Uuid::from_u128(1), replica_seq: ReplicaSeq::new(90).unwrap(), mutation_id: MutationId::new() });
+            older.state.value.book = None;
+            older.state.value.bytes = vec![1];
+            older.state.version = sync_common::VersionKey::new(100, sync_common::ConflictRank::Update, uuid::Uuid::from_u128(1), ReplicaSeq::new(90).unwrap());
             let mut winner = wire_mutation(kind, &key, 100, 1);
-            winner.blob_reference = None;
-            winner.value = vec![2];
-            winner.origin = Some(sync_common::MutationOrigin { replica_id: uuid::Uuid::from_u128(2), replica_seq: ReplicaSeq::new(1).unwrap(), mutation_id: MutationId::new() });
-            let expected = sync_common::VersionKey::from_wire(&winner, publisher);
-            let table = if kind == "reading_position" { "sync_reading_state" } else { "sync_state" };
+            winner.state.value.book = None;
+            winner.state.value.bytes = vec![2];
+            winner.state.version = sync_common::VersionKey::new(100, sync_common::ConflictRank::Update, uuid::Uuid::from_u128(2), ReplicaSeq::new(1).unwrap());
+            let expected = (winner).state.version.clone();
+            let table = "sync_state";
             for batch in [vec![older.clone(), winner.clone()], vec![winner.clone(), older.clone()]] {
                 sqlx::query(&format!("DELETE FROM {table} WHERE library_id=$1")).bind(library.to_string()).execute(&pool).await.unwrap();
                 if kind == "reading_position" {
                     let mut creation = wire_mutation("book_lifecycle", &key, 1, 900);
-                    creation.blob_reference = Some(DeclaredBlobReference { present: true, content_hash: Some(sync_common::ContentHash::new(&key)) });
+                    creation.state.value.book = Some(sync_common::ContentHash::new(&key));
                     repo.exchange(&user, &exchange_request(library, vec![creation])).await.unwrap();
                 }
                 let mut request = exchange_request(library, batch);
@@ -252,9 +244,9 @@ mod tests {
                     request.replica_id = publisher;
                     let response = repo.exchange(&user, &request).await.unwrap();
                     assert!(response.push.rejected.is_empty());
-                    let stored = response.pull.mutations.iter().find(|m| m.mutation.kind == kind).unwrap();
-                    assert_eq!(stored.mutation.value, vec![2]);
-                    assert_eq!(sync_common::VersionKey::from_wire(&stored.mutation, stored.replica_id), expected);
+                    let stored = response.pull.mutations.iter().find(|m| m.state.value.address.kind == kind).unwrap();
+                    assert_eq!(stored.state.value.bytes, vec![2]);
+                    assert_eq!(stored.state.version.clone(), expected);
                 }
             }
             // Restoring a missing cell must preserve provenance too, including
@@ -263,116 +255,114 @@ mod tests {
             let mut request = exchange_request(library, vec![winner.clone()]);
             request.replica_id = publisher;
             let response = repo.exchange(&user, &request).await.unwrap();
-            assert_eq!(response.push.accepted, vec![winner.mutation_id], "acknowledge the transport identity");
-            let restored = response.pull.mutations.iter().find(|m| m.mutation.kind == kind).unwrap();
-            assert_eq!(sync_common::VersionKey::from_wire(&restored.mutation, restored.replica_id), expected);
+            assert!(response.push.rejected.is_empty());
+            let restored = response.pull.mutations.iter().find(|m| m.state.value.address.kind == kind).unwrap();
+            assert_eq!(restored.state.version.clone(), expected);
         }
     }
 
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
-    async fn creation_prerequisites_cover_incremental_reading_and_reimport() {
-        let pool = crate::test_support::isolated_pool("creation_prerequisites", 4).await.expect("test database");
+    async fn a_book_lifecycle_reaches_every_pull_before_its_fields() {
+        let pool = isolated_pool("lifecycle_first", 4).await.expect("test database");
         let (user, library) = seed_account(&pool).await;
         let repo = PostgresSyncRepository { pool: pool.clone() };
         repo.set_cloud_storage(&user, &library, uuid::Uuid::new_v4(), false).await.unwrap();
         let hash = sync_common::ContentHash::new(&"a".repeat(64));
         let mut addition = wire_mutation("book_lifecycle", hash.as_str(), 10, 1);
-        addition.blob_reference = Some(DeclaredBlobReference { present: true, content_hash: Some(hash) });
+        addition.state.value.book = Some(hash);
         let first = repo.exchange(&user, &exchange_request(library, vec![addition.clone()])).await.unwrap();
-        assert_eq!(first.pull.book_creations.len(), 1);
-        assert_eq!(first.pull.book_creations[0].mutation.mutation_id, addition.mutation_id);
+        assert_eq!(first.pull.mutations.iter().map(|change| change.state.version.replica_seq).collect::<Vec<_>>(), vec![addition.publisher_seq]);
         sync_common::validate_pull_batch(&first.pull, SyncCursor::default()).unwrap();
         let mut cursor = first.pull.next_cursor;
         for (kind, time) in [("metadata", 20), ("reading_position", 30)] {
             let mut update = wire_mutation(kind, hash.as_str(), time, time);
-            update.blob_reference = Some(DeclaredBlobReference { present: true, content_hash: Some(hash) });
+            update.state.value.book = Some(hash);
             let mut request = exchange_request(library, vec![update]);
             request.cursor = cursor;
             let page = repo.exchange(&user, &request).await.unwrap().pull;
             assert_eq!(page.mutations.len(), 1);
-            assert_eq!(page.mutations[0].mutation.kind, kind);
-            assert_eq!(page.book_creations.len(), 1, "creation must accompany {kind} even behind the cursor");
-            assert_eq!(page.book_creations[0].mutation.mutation_id, addition.mutation_id);
+            assert_eq!(page.mutations[0].state.value.address.kind, kind);
             sync_common::validate_pull_batch(&page, cursor).unwrap();
-            if kind == "reading_position" {
-                assert_eq!(page.next_cursor.state_revision, cursor.state_revision);
-            }
             cursor = page.next_cursor;
         }
-        let mut purge = wire_mutation("book_lifecycle", hash.as_str(), 40, 40);
-        purge.conflict_rank = 2;
-        purge.blob_reference = Some(DeclaredBlobReference { present: false, content_hash: None });
-        let mut request = exchange_request(library, vec![purge]);
-        request.cursor = cursor;
-        let page = repo.exchange(&user, &request).await.unwrap().pull;
-        assert!(page.book_creations.is_empty(), "a purged book must not have a creation prerequisite");
+        // Trash moves the lifecycle after its fields in server order. A fresh
+        // replica must still receive the lifecycle first.
+        let mut trash = addition.clone();
+        trash.publisher_seq = test_sequence();
+        trash.state.version.replica_seq = trash.publisher_seq;
+        trash.state.version.changed_at = 40;
+        trash.state.version.conflict_rank = sync_common::ConflictRank::Delete;
+        repo.exchange(&user, &exchange_request(library, vec![trash.clone()])).await.unwrap();
         let snapshot = repo.exchange(&user, &exchange_request(library, vec![])).await.unwrap().pull;
-        assert!(snapshot.book_creations.is_empty(), "old metadata must not create a purged book during recovery");
-        let mut readd = addition.clone();
-        readd.changed_at = 50;
-        readd.mutation_id = MutationId::new();
-        readd.replica_seq = ReplicaSeq::new(50).unwrap();
-        let snapshot = repo.exchange(&user, &exchange_request(library, vec![readd.clone()])).await.unwrap().pull;
-        assert_eq!(snapshot.book_creations.len(), 1);
-        assert_eq!(snapshot.book_creations[0].mutation.mutation_id, readd.mutation_id);
+        sync_common::validate_pull_batch(&snapshot, SyncCursor::default()).unwrap();
+        assert_eq!(snapshot.mutations.iter().map(|change| change.state.value.address.kind.as_str()).collect::<Vec<_>>(), vec!["book_lifecycle", "metadata", "reading_position"]);
+        assert_eq!(snapshot.mutations[0].state.version.replica_seq, trash.publisher_seq);
+        let mut purge = addition;
+        purge.publisher_seq = test_sequence();
+        purge.state.version.replica_seq = purge.publisher_seq;
+        purge.state.version.changed_at = 50;
+        purge.state.version.conflict_rank = sync_common::ConflictRank::Purge;
+        purge.state.value.book = Some(hash);
+        repo.exchange(&user, &exchange_request(library, vec![purge.clone()])).await.unwrap();
+        let snapshot = repo.exchange(&user, &exchange_request(library, vec![])).await.unwrap().pull;
+        assert_eq!(snapshot.mutations.iter().map(|change| change.state.version.replica_seq).collect::<Vec<_>>(), vec![purge.publisher_seq], "a purge leaves only its lifecycle");
     }
 
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
-    async fn creation_prerequisite_crosses_snapshot_page_boundary() {
-        let pool = crate::test_support::isolated_pool("creation_page_boundary", 4).await.unwrap();
+    async fn a_lifecycle_after_a_full_page_of_fields_still_comes_first() {
+        let pool = isolated_pool("lifecycle_page_boundary", 4).await.unwrap();
         let (user, library) = seed_account(&pool).await;
         let repo = PostgresSyncRepository { pool: pool.clone() };
         repo.set_cloud_storage(&user, &library, uuid::Uuid::new_v4(), false).await.unwrap();
         let hash = sync_common::ContentHash::new(&"b".repeat(64));
         let mut initial = wire_mutation("book_lifecycle", hash.as_str(), 0, 3000);
-        initial.blob_reference = Some(DeclaredBlobReference { present: true, content_hash: Some(hash) });
+        initial.state.value.book = Some(hash);
         repo.exchange(&user, &exchange_request(library, vec![initial])).await.unwrap();
         let mut updates = vec![wire_mutation("metadata", hash.as_str(), 1, 1)];
-        updates[0].blob_reference = Some(DeclaredBlobReference { present: true, content_hash: Some(hash) });
+        updates[0].state.value.book = Some(hash);
         updates.extend((1..sync_common::MAX_PULL_CHANGES).map(|i| wire_mutation("directory_name", &format!("folder-{i}"), i as u64 + 1, i as u64 + 1)));
-        // State values precede the latest explicit declaration in server order.
         for batch in updates.chunks(sync_common::MAX_PUSH_MUTATIONS) {
             repo.exchange(&user, &exchange_request(library, batch.to_vec())).await.unwrap();
         }
+        // The rewritten lifecycle now follows every field in server order.
         let mut addition = wire_mutation("book_lifecycle", hash.as_str(), 2000, 2000);
-        addition.blob_reference = Some(DeclaredBlobReference { present: true, content_hash: Some(hash) });
+        addition.state.value.book = Some(hash);
         repo.exchange(&user, &exchange_request(library, vec![addition.clone()])).await.unwrap();
         let first = repo.exchange(&user, &exchange_request(library, vec![])).await.unwrap().pull;
         assert!(first.has_more);
         assert_eq!(first.mutations.len(), sync_common::MAX_PULL_CHANGES);
-        assert!(first.mutations.iter().all(|change| change.mutation.kind != "book_lifecycle"));
-        assert_eq!(first.book_creations.len(), 1);
-        assert_eq!(first.book_creations[0].mutation.mutation_id, addition.mutation_id);
+        assert_eq!(first.mutations[0].state.version.replica_seq, addition.publisher_seq);
         sync_common::validate_pull_batch(&first, SyncCursor::default()).unwrap();
         let mut request = exchange_request(library, vec![]);
         request.cursor = first.next_cursor;
         let second = repo.exchange(&user, &request).await.unwrap().pull;
         assert!(!second.has_more);
         assert_eq!(second.mutations.len(), 1);
-        assert_eq!(second.mutations[0].mutation.mutation_id, addition.mutation_id);
         sync_common::validate_pull_batch(&second, first.next_cursor).unwrap();
+        let fields = first.mutations[1..].iter().chain(&second.mutations).map(|change| change.state.version.replica_seq).collect::<std::collections::HashSet<_>>();
+        assert_eq!(fields, updates.iter().map(|update| update.publisher_seq).collect(), "every field arrives once, after the lifecycle");
     }
 
     #[tokio::test]
     async fn unified_book_lifetime_discards_fields_and_accepts_old_updates_after_readd() {
-        let Some(pool) = crate::test_support::isolated_pool("unified_lifetime", 4).await else { return };
+        let Some(pool) = isolated_pool("unified_lifetime", 4).await else { return };
         let (user, library) = seed_account(&pool).await;
         let repo = PostgresSyncRepository { pool: pool.clone() };
         repo.set_cloud_storage(&user, &library, uuid::Uuid::new_v4(), false).await.unwrap();
         let hash = "a".repeat(64);
         let lifecycle = |time, seq, present| {
             let mut value = wire_mutation("book_lifecycle", &hash, time, seq);
-            value.blob_reference = Some(DeclaredBlobReference { present, content_hash: present.then(|| sync_common::ContentHash::new(&hash)) });
-            value.conflict_rank = if present { 0 } else { 2 };
+            value.state.value.book = Some(sync_common::ContentHash::new(&hash));
+            value.state.version.conflict_rank = if present { sync_common::ConflictRank::Update } else { sync_common::ConflictRank::Purge };
             value
         };
         let field = |kind, time, seq| {
             let mut value = wire_mutation(kind, &hash, time, seq);
-            value.blob_reference = Some(DeclaredBlobReference { present: true, content_hash: Some(sync_common::ContentHash::new(&hash)) });
+            value.state.value.book = Some(sync_common::ContentHash::new(&hash));
             if kind == "annotation" {
-                value.entity_key = "annotation-id".into();
+                value.state.value.address.entity_key = "annotation-id".into();
             }
             value
         };
@@ -380,7 +370,7 @@ mod tests {
         // Existing library is local-only, so logical existence is the only gate.
         for mutation in &fields {
             let response = repo.exchange(&user, &exchange_request(library, vec![mutation.clone()])).await.unwrap();
-            assert_eq!(response.push.accepted, vec![mutation.mutation_id]);
+            assert!(response.push.rejected.is_empty());
             assert!(response.pull.mutations.is_empty());
         }
         let mut initial = fields.clone();
@@ -389,14 +379,14 @@ mod tests {
         assert!(created.push.rejected.is_empty());
         assert_eq!(created.pull.mutations.len(), 4);
         let mut deletion = field("annotation", 11, 5);
-        deletion.blob_reference.as_mut().unwrap().present = false;
+        deletion.state.version.conflict_rank = sync_common::ConflictRank::Delete;
         assert!(repo.exchange(&user, &exchange_request(library, vec![deletion])).await.unwrap().push.rejected.is_empty());
         let mut purge_request = exchange_request(library, vec![lifecycle(20, 6, false), field("metadata", 100, 7)]);
         purge_request.cursor = created.pull.next_cursor;
         let purged = repo.exchange(&user, &purge_request).await.unwrap();
-        assert_eq!(purged.push.accepted.len(), 2);
+        assert!(purged.push.rejected.is_empty());
         assert_eq!(purged.pull.mutations.len(), 1);
-        for table in ["sync_state", "sync_reading_state"] {
+        for table in ["sync_state"] {
             let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table} WHERE library_id=$1 AND kind!='book_lifecycle'")).bind(library.to_string()).fetch_one(&pool).await.unwrap();
             assert_eq!(count, 0, "purge clears {table}");
         }
@@ -404,64 +394,66 @@ mod tests {
         let mut delayed = exchange_request(library, vec![fields[2].clone()]);
         delayed.cursor = purged.pull.next_cursor;
         let ignored = repo.exchange(&user, &delayed).await.unwrap();
-        assert_eq!(ignored.push.accepted.len(), 1);
+        assert!(ignored.push.rejected.is_empty());
         assert!(ignored.pull.mutations.is_empty());
         let mut readd = fields.clone();
         readd.push(lifecycle(30, 8, true));
         let response = repo.exchange(&user, &exchange_request(library, readd)).await.unwrap();
-        assert_eq!(response.push.accepted.len(), 4);
+        assert!(response.push.rejected.is_empty());
         assert_eq!(response.pull.mutations.len(), 4);
         // A delayed losing purge cannot delete fields from the current readd.
         let stale = repo.exchange(&user, &purge_request).await.unwrap();
         assert!(stale.push.rejected.is_empty());
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM sync_state WHERE library_id=$1 AND kind!='book_lifecycle'").bind(library.to_string()).fetch_one(&pool).await.unwrap();
-        assert_eq!(count, 2);
+        assert_eq!(count, 3);
     }
 
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn losing_purge_redelivers_all_owned_fields_without_changing_versions() {
-        let pool = crate::test_support::isolated_pool("losing_purge", 4).await.expect("test database");
+        let pool = isolated_pool("losing_purge", 4).await.expect("test database");
         let (user, library) = seed_account(&pool).await;
         let repo = PostgresSyncRepository { pool: pool.clone() };
         repo.set_cloud_storage(&user, &library, uuid::Uuid::new_v4(), false).await.unwrap();
         let hash = sync_common::ContentHash::new(&"a".repeat(64));
         let other = sync_common::ContentHash::new(&"b".repeat(64));
         let mut creation = wire_mutation("book_lifecycle", hash.as_str(), 100, 1);
-        creation.blob_reference = Some(DeclaredBlobReference { present: true, content_hash: Some(hash) });
+        creation.state.value.book = Some(hash);
         let mut other_creation = creation.clone();
-        other_creation.mutation_id = MutationId::new();
-        other_creation.entity_key = other.to_string();
-        other_creation.blob_reference.as_mut().unwrap().content_hash = Some(other);
+        other_creation.publisher_seq = test_sequence();
+        other_creation.state.version.replica_seq = other_creation.publisher_seq;
+        other_creation.state.value.address.entity_key = other.to_string();
+        other_creation.state.value.book = Some(other);
         let mut values = vec![creation.clone(), other_creation];
         for (i, kind) in ["book_facts", "metadata", "description", "placement", "reading_position", "pdf_reader_metadata", "book_toc", "annotation"].into_iter().enumerate() {
             let mut field = wire_mutation(kind, hash.as_str(), 10, i as u64 + 2);
-            field.value = vec![i as u8];
-            field.blob_reference = Some(DeclaredBlobReference { present: kind != "annotation", content_hash: Some(hash) });
+            field.state.value.bytes = vec![i as u8];
+            field.state.value.book = Some(hash);
             if kind == "annotation" {
-                field.entity_key = "deleted-note".into();
+                field.state.value.address.entity_key = "deleted-note".into();
             }
             if kind == "placement" {
-                field.entity_subkey = sync_common::ROOT_DIR_ID.to_string();
+                field.state.value.address.entity_subkey = sync_common::ROOT_DIR_ID.to_string();
             }
             values.push(field);
         }
         let mut unrelated = wire_mutation("metadata", other.as_str(), 10, 20);
-        unrelated.blob_reference = Some(DeclaredBlobReference { present: true, content_hash: Some(other) });
+        unrelated.state.value.book = Some(other);
         values.push(unrelated);
         let initial_request = exchange_request(library, values);
         let initial = repo.exchange(&user, &initial_request).await.unwrap();
         assert!(initial.push.rejected.is_empty());
         assert_eq!(initial.pull.mutations.len(), 11);
         let mut purge = creation;
-        purge.mutation_id = MutationId::new();
-        purge.changed_at = 50; // loses to the existing creation
-        purge.conflict_rank = 2;
-        purge.blob_reference = Some(DeclaredBlobReference { present: false, content_hash: None });
+        purge.publisher_seq = test_sequence();
+        purge.state.version.replica_seq = purge.publisher_seq;
+        purge.state.version.changed_at = 50; // loses to the existing creation
+        purge.state.version.conflict_rank = sync_common::ConflictRank::Purge;
+        purge.state.value.book = Some(hash);
         let mut request = exchange_request(library, vec![purge.clone()]);
         request.cursor = initial.pull.next_cursor;
         // Even rejected purge attempts must not cause field republication.
-        request.mutations[0].changed_at = crate::sync_store::server_now_ms() + sync_common::MAX_LWW_FUTURE_SKEW_MS + 60_000;
+        request.mutations[0].state.version.changed_at = crate::sync_store::server_now_ms() + sync_common::MAX_LWW_FUTURE_SKEW_MS + 60_000;
         let rejected = repo.exchange(&user, &request).await.unwrap();
         assert_eq!(rejected.push.rejected.len(), 1);
         assert!(rejected.pull.mutations.is_empty());
@@ -471,16 +463,15 @@ mod tests {
         assert!(repaired.push.rejected.is_empty());
         sync_common::validate_pull_batch(&repaired.pull, request.cursor).unwrap();
         assert_eq!(repaired.pull.mutations.len(), 9, "lifecycle plus every owned field, including deleted annotations");
-        assert_eq!(repaired.pull.book_creations.len(), 1);
         for row in &repaired.pull.mutations {
-            let old = initial.pull.mutations.iter().find(|old| old.mutation.mutation_id == row.mutation.mutation_id).unwrap();
-            assert_eq!(row.mutation, old.mutation);
-            assert_eq!(row.replica_id, old.replica_id);
+            let old = initial.pull.mutations.iter().find(|old| old.state.version.replica_seq == row.state.version.replica_seq).unwrap();
+            assert_eq!(row.state, old.state);
+            assert_eq!(row.state.version.replica_id, old.state.version.replica_id);
             assert!(row.revision > old.revision);
-            assert_ne!(row.mutation.entity_key, other.as_str(), "other books must not be republished");
+            assert_ne!(row.state.value.address.entity_key, other.as_str(), "other books must not be republished");
         }
-        assert!(repaired.pull.next_cursor.reading_revision > request.cursor.reading_revision);
-        assert!(repaired.pull.next_cursor.state_revision > request.cursor.state_revision);
+        assert!(repaired.pull.next_cursor.lifecycle_revision > request.cursor.lifecycle_revision);
+        assert!(repaired.pull.next_cursor.field_revision > request.cursor.field_revision);
         // Exact retries of normal values must still be revision-stable; the
         // explicit revision-only repair must not weaken duplicate suppression.
         let mut duplicate = initial_request;
@@ -499,19 +490,9 @@ mod tests {
         (user_id, library_id)
     }
 
-    fn wire_mutation(kind: &str, entity_key: &str, changed_at: u64, replica_seq: u64) -> WireMutation {
-        WireMutation {
-            origin: None,
-            mutation_id: MutationId::new(),
-            kind: kind.to_owned(),
-            entity_key: entity_key.to_owned(),
-            entity_subkey: String::new(),
-            value: Vec::new(),
-            conflict_rank: 0,
-            blob_reference: matches!(kind, "metadata" | "reading_position").then(|| DeclaredBlobReference { present: true, content_hash: Some(sync_common::ContentHash::new(blake3::hash(entity_key.as_bytes()).to_hex().as_str())) }),
-            changed_at,
-            replica_seq: ReplicaSeq::new(replica_seq).unwrap(),
-        }
+    fn wire_mutation(kind: &str, entity_key: &str, changed_at: u64, replica_seq: u64) -> OpaquePublication {
+        let fixture_id = test_sequence();
+        sync_common::Publication { publisher_seq: ReplicaSeq::new(replica_seq).unwrap(), state: sync_common::Versioned { version: sync_common::VersionKey::new(changed_at, sync_common::ConflictRank::Update, sync_common::ReplicaId::nil(), ReplicaSeq::new(replica_seq).unwrap()), value: sync_common::OpaqueStateEntry { address: sync_common::StateAddress { kind: kind.to_owned(), entity_key: entity_key.to_owned(), entity_subkey: String::new() }, bytes: Vec::new(), book: matches!(kind, "metadata" | "reading_position").then(|| sync_common::ContentHash::new(blake3::hash(entity_key.as_bytes()).to_hex().as_str())) } } }
     }
 
     async fn seed_uploaded_books(pool: &PgPool, user: &str, keys: &[&str]) {
@@ -520,21 +501,21 @@ mod tests {
             sqlx::query("INSERT INTO blob_object(content_hash,size_bytes) VALUES($1,10)").bind(&hash).execute(pool).await.unwrap();
             sqlx::query("INSERT INTO user_blob_charge(user_id,content_hash) VALUES($1,$2)").bind(user).bind(&hash).execute(pool).await.unwrap();
             let library: String = sqlx::query_scalar("SELECT id FROM libraries WHERE user_id=$1").bind(user).fetch_one(pool).await.unwrap();
-            let mut creation = wire_mutation("book_lifecycle", key, 1, 1);
-            creation.blob_reference = Some(DeclaredBlobReference { present: true, content_hash: Some(sync_common::ContentHash::new(&hash)) });
+            let mut creation = wire_mutation("book_lifecycle", &hash, 1, 1);
+            creation.state.value.book = Some(sync_common::ContentHash::new(&hash));
             let response = PostgresSyncRepository { pool: pool.clone() }.exchange(user, &exchange_request(sync_common::LibraryId::parse_str(&library).unwrap(), vec![creation])).await.unwrap();
             assert!(response.push.rejected.is_empty());
         }
     }
 
-    fn exchange_request(library_id: sync_common::LibraryId, mutations: Vec<WireMutation>) -> SyncExchangeRequest {
+    fn exchange_request(library_id: sync_common::LibraryId, mutations: Vec<OpaquePublication>) -> SyncExchangeRequest {
         SyncExchangeRequest { library_id, replica_id: sync_common::ReplicaId::new_v4(), mutations, cursor: SyncCursor::default() }
     }
 
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn sync_requires_explicit_named_library_creation() {
-        let Some(pool) = crate::test_support::isolated_pool("explicit_library", 2).await else { return };
+        let Some(pool) = isolated_pool("explicit_library", 2).await else { return };
         let (user, _) = seed_account(&pool).await;
         let repository = PostgresSyncRepository { pool: pool.clone() };
         let id = sync_common::LibraryId::new_v4();
@@ -558,7 +539,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn stale_creation_cannot_rename_and_rename_cannot_create() {
-        let Some(pool) = crate::test_support::isolated_pool("create_rename", 2).await else { return };
+        let Some(pool) = isolated_pool("create_rename", 2).await else { return };
         let (user, _) = seed_account(&pool).await;
         let repository = PostgresSyncRepository { pool: pool.clone() };
         let id = sync_common::LibraryId::new_v4();
@@ -585,7 +566,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn exchange_refuses_a_push_page_beyond_the_published_maximum() {
-        let Some(pool) = crate::test_support::isolated_pool("push_limit", 2).await else { return };
+        let Some(pool) = isolated_pool("push_limit", 2).await else { return };
         let (user_id, library_id) = seed_account(&pool).await;
         let repository = PostgresSyncRepository { pool: pool.clone() };
 
@@ -602,15 +583,15 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn exchange_refuses_a_batch_that_reuses_one_mutation_identity() {
-        let Some(pool) = crate::test_support::isolated_pool("ambiguous_identity", 2).await else { return };
+        let Some(pool) = isolated_pool("ambiguous_identity", 2).await else { return };
         let (user_id, library_id) = seed_account(&pool).await;
         let repository = PostgresSyncRepository { pool: pool.clone() };
 
-        let shared_identity = MutationId::new();
+        let shared_identity = test_sequence();
         let mut first = wire_mutation("directory_name", "dir-a", 1, 1);
         let mut second = wire_mutation("directory_name", "dir-b", 1, 2);
-        first.mutation_id = shared_identity;
-        second.mutation_id = shared_identity;
+        first.publisher_seq = shared_identity;
+        second.publisher_seq = shared_identity;
         let error = repository.exchange(&user_id, &exchange_request(library_id, vec![first, second])).await.err();
 
         assert!(matches!(error, Some(SyncError::AmbiguousMutationIdentity)), "a reused mutation identity must be a client error, got {error:?}");
@@ -623,7 +604,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn repeated_lifecycle_mutations_for_one_book_charge_only_the_winning_reference() {
-        let Some(pool) = crate::test_support::isolated_pool("lifecycle_delta", 2).await else { return };
+        let Some(pool) = isolated_pool("lifecycle_delta", 2).await else { return };
         let (user_id, library_id) = seed_account(&pool).await;
         let repository = PostgresSyncRepository { pool: pool.clone() };
         let (original, superseded, winner) = ("a".repeat(64), "b".repeat(64), "c".repeat(64));
@@ -637,12 +618,11 @@ mod tests {
         sqlx::query("INSERT INTO user_blob_charge(user_id, content_hash) VALUES($1, $2)").bind(&user_id).bind(&original).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO user_blob_reference(user_id, content_hash, reference_count) VALUES($1, $2, 1)").bind(&user_id).bind(&original).execute(&pool).await.unwrap();
         sqlx::query(
-            "INSERT INTO sync_state(library_id,kind,entity_key,entity_subkey,value,present,content_hash,changed_at,replica_id,replica_seq,version_rank,event_id)
-             VALUES($1,'book_lifecycle','book','',''::bytea,TRUE,$2,1,$3,1,0,$4)",
+            "INSERT INTO sync_state(library_id,kind,entity_key,entity_subkey,value,content_hash,changed_at,replica_id,replica_seq,version_rank)
+             VALUES($1,'book_lifecycle','book','',''::bytea,$2,1,$3,1,0)",
         )
         .bind(library_id.to_string())
         .bind(&original)
-        .bind(uuid::Uuid::new_v4().to_string())
         .bind(uuid::Uuid::new_v4().to_string())
         .execute(&pool)
         .await
@@ -652,8 +632,8 @@ mod tests {
         // later one survives the batch's DISTINCT ON.
         let mut earlier = wire_mutation("book_lifecycle", "book", 10, 1);
         let mut later = wire_mutation("book_lifecycle", "book", 20, 2);
-        earlier.blob_reference = Some(DeclaredBlobReference { present: true, content_hash: Some(sync_common::ContentHash::new(&superseded)) });
-        later.blob_reference = Some(DeclaredBlobReference { present: true, content_hash: Some(sync_common::ContentHash::new(&winner)) });
+        earlier.state.value.book = Some(sync_common::ContentHash::new(&superseded));
+        later.state.value.book = Some(sync_common::ContentHash::new(&winner));
         repository.exchange(&user_id, &exchange_request(library_id, vec![earlier, later])).await.expect("a batch repeating one cell must apply cleanly");
 
         let stored: String = sqlx::query_scalar("SELECT content_hash FROM sync_state WHERE library_id=$1 AND kind='book_lifecycle' AND entity_key='book'").bind(library_id.to_string()).fetch_one(&pool).await.unwrap();
@@ -669,63 +649,23 @@ mod tests {
         assert_eq!(reference(original.clone()).await, 0, "the replaced hash is released exactly once");
     }
 
-    /// `blob_reference` is optional on the wire, but for a lifecycle mutation it
-    /// is the service's only statement about whether a book's bytes are held.
-    /// Admitting one without it stored an undeclared presence that the quota
-    /// ledger could not interpret, and from then on every push touching that
-    /// cell failed as an internal error -- stalling the library's sync rather
-    /// than degrading. It must be refused up front, permanently.
+    /// `book` is optional on the wire, but the quota ledger charges a lifecycle's
+    /// book. A lifecycle without one must be refused up front, permanently.
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
-    async fn exchange_refuses_a_lifecycle_mutation_without_a_blob_declaration() {
-        let Some(pool) = crate::test_support::isolated_pool("lifecycle_undeclared", 2).await else { return };
+    async fn exchange_refuses_a_lifecycle_mutation_without_a_book() {
+        let Some(pool) = isolated_pool("lifecycle_undeclared", 2).await else { return };
         let (user_id, library_id) = seed_account(&pool).await;
         let repository = PostgresSyncRepository { pool: pool.clone() };
 
         let undeclared = wire_mutation("book_lifecycle", "book", 10, 1);
-        assert!(undeclared.blob_reference.is_none());
+        assert!(undeclared.state.value.book.is_none());
         let response = repository.exchange(&user_id, &exchange_request(library_id, vec![undeclared.clone()])).await.expect("the batch itself is well formed");
 
-        assert!(response.push.accepted.is_empty(), "an undeclared lifecycle reference is not stored");
-        assert_eq!(response.push.rejected, vec![MutationRejection { mutation_id: undeclared.mutation_id, reason: MutationRejectionReason::InvalidPayload }]);
+        assert_eq!(response.push.rejected.len(), 1);
+        assert_eq!(response.push.rejected, vec![MutationRejection { publisher_seq: undeclared.publisher_seq, reason: MutationRejectionReason::InvalidPayload }]);
         assert!(!MutationRejectionReason::InvalidPayload.is_transient(), "the client must stop retrying rather than queue it forever");
         assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sync_state WHERE library_id=$1").bind(library_id.to_string()).fetch_one(&pool).await.unwrap(), 0, "a refused mutation leaves no row behind to poison the cell");
-    }
-
-    /// Refusing new undeclared rows does not help a library that already has
-    /// one. Such a cell must read as holding no reference so the exchange
-    /// proceeds, instead of failing to decode and answering every later push
-    /// for that book with an internal error.
-    #[tokio::test]
-    #[ignore = "requires SYNC_E2E_DATABASE_URL"]
-    async fn a_stored_lifecycle_row_without_a_presence_declaration_does_not_wedge_the_library() {
-        let Some(pool) = crate::test_support::isolated_pool("lifecycle_null_row", 2).await else { return };
-        let (user_id, library_id) = seed_account(&pool).await;
-        let repository = PostgresSyncRepository { pool: pool.clone() };
-        let replacement = "f".repeat(64);
-        sqlx::query("INSERT INTO blob_object(content_hash, size_bytes) VALUES($1, 10)").bind(&replacement).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO user_blob_charge(user_id,content_hash) VALUES($1,$2)").bind(&user_id).bind(&replacement).execute(&pool).await.unwrap();
-
-        // `present` and `content_hash` are deliberately left NULL, exactly as a
-        // writer that never declared a reference would have stored them.
-        sqlx::query(
-            "INSERT INTO sync_state(library_id,kind,entity_key,entity_subkey,value,present,content_hash,changed_at,replica_id,replica_seq,version_rank,event_id)
-             VALUES($1,'book_lifecycle','book','',''::bytea,NULL,NULL,1,$2,1,0,$3)",
-        )
-        .bind(library_id.to_string())
-        .bind(uuid::Uuid::new_v4().to_string())
-        .bind(uuid::Uuid::new_v4().to_string())
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let mut mutation = wire_mutation("book_lifecycle", "book", 10, 1);
-        mutation.blob_reference = Some(DeclaredBlobReference { present: true, content_hash: Some(sync_common::ContentHash::new(&replacement)) });
-        let response = repository.exchange(&user_id, &exchange_request(library_id, vec![mutation.clone()])).await.expect("an undeclared stored presence must not fail the exchange");
-
-        assert_eq!(response.push.accepted, vec![mutation.mutation_id]);
-        let charged = sqlx::query_scalar::<_, i64>("SELECT COALESCE(SUM(reference_count), 0)::BIGINT FROM user_blob_reference WHERE user_id=$1 AND content_hash=$2").bind(&user_id).bind(&replacement).fetch_one(&pool).await.unwrap();
-        assert_eq!(charged, 1, "the replacement is charged once and the undeclared cell released nothing");
     }
 
     /// Lifecycle accounting must inspect the exact logical cell that the
@@ -735,7 +675,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn lifecycle_accounting_uses_the_mutations_entity_subkey() {
-        let Some(pool) = crate::test_support::isolated_pool("lifecycle_subkey", 2).await else { return };
+        let Some(pool) = isolated_pool("lifecycle_subkey", 2).await else { return };
         let (user_id, library_id) = seed_account(&pool).await;
         let repository = PostgresSyncRepository { pool: pool.clone() };
         let (original, replacement) = ("d".repeat(64), "e".repeat(64));
@@ -749,20 +689,19 @@ mod tests {
         sqlx::query("INSERT INTO user_blob_charge(user_id, content_hash) VALUES($1, $2)").bind(&user_id).bind(&original).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO user_blob_reference(user_id, content_hash, reference_count) VALUES($1, $2, 1)").bind(&user_id).bind(&original).execute(&pool).await.unwrap();
         sqlx::query(
-            "INSERT INTO sync_state(library_id,kind,entity_key,entity_subkey,value,present,content_hash,changed_at,replica_id,replica_seq,version_rank,event_id)
-             VALUES($1,'book_lifecycle','book','edition-a',''::bytea,TRUE,$2,1,$3,1,0,$4)",
+            "INSERT INTO sync_state(library_id,kind,entity_key,entity_subkey,value,content_hash,changed_at,replica_id,replica_seq,version_rank)
+             VALUES($1,'book_lifecycle','book','edition-a',''::bytea,$2,1,$3,1,0)",
         )
         .bind(library_id.to_string())
         .bind(&original)
-        .bind(uuid::Uuid::new_v4().to_string())
         .bind(uuid::Uuid::new_v4().to_string())
         .execute(&pool)
         .await
         .unwrap();
 
         let mut replacement_mutation = wire_mutation("book_lifecycle", "book", 10, 2);
-        replacement_mutation.entity_subkey = "edition-a".to_owned();
-        replacement_mutation.blob_reference = Some(DeclaredBlobReference { present: true, content_hash: Some(sync_common::ContentHash::new(&replacement)) });
+        replacement_mutation.state.value.address.entity_subkey = "edition-a".to_owned();
+        replacement_mutation.state.value.book = Some(sync_common::ContentHash::new(&replacement));
         repository.exchange(&user_id, &exchange_request(library_id, vec![replacement_mutation])).await.expect("the targeted lifecycle cell is replaced");
 
         let reference_count = |hash: String| {
@@ -780,7 +719,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn a_committed_reading_head_never_skips_an_in_flight_lower_sequence() {
-        let Some(pool) = crate::test_support::isolated_pool("reading_head_gap", 6).await else { return };
+        let Some(pool) = isolated_pool("reading_head_gap", 6).await else { return };
         let (user_id, library_id) = seed_account(&pool).await;
         seed_uploaded_books(&pool, &user_id, &["slow-a", "slow-b", "fast"]).await;
         const DELAY_LOCK: i64 = 7_341_991;
@@ -794,16 +733,16 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("CREATE TRIGGER delay_selected_reading_insert BEFORE INSERT ON sync_reading_state FOR EACH ROW EXECUTE FUNCTION delay_selected_reading_insert()").execute(&pool).await.unwrap();
+        sqlx::query("CREATE TRIGGER delay_selected_reading_insert BEFORE INSERT ON sync_state FOR EACH ROW EXECUTE FUNCTION delay_selected_reading_insert()").execute(&pool).await.unwrap();
         let mut delay_connection = pool.acquire().await.unwrap();
         sqlx::query("SELECT pg_advisory_lock($1)").bind(DELAY_LOCK).execute(&mut *delay_connection).await.unwrap();
         let sequence_before = sqlx::query_as::<_, (i64, bool)>("SELECT last_value, is_called FROM sync_server_sequence").fetch_one(&pool).await.unwrap();
 
         let repository = PostgresSyncRepository { pool: pool.clone() };
-        let mut slow_a = wire_mutation(sync_common::mutation_kind::READING_POSITION, "slow-a", 10, 1);
-        let mut slow_b = wire_mutation(sync_common::mutation_kind::READING_POSITION, "slow-b", 10, 2);
-        slow_a.value = b"slow-a".to_vec();
-        slow_b.value = b"slow-b".to_vec();
+        let mut slow_a = wire_mutation("reading_position", "slow-a", 10, 1);
+        let mut slow_b = wire_mutation("reading_position", "slow-b", 10, 2);
+        slow_a.state.value.bytes = b"slow-a".to_vec();
+        slow_b.state.value.bytes = b"slow-b".to_vec();
         let batch_repository = repository.clone();
         let batch_user = user_id.clone();
         let batch_request = exchange_request(library_id, vec![slow_a, slow_b]);
@@ -816,21 +755,21 @@ mod tests {
                 lower_sequence_allocated = true;
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(lower_sequence_allocated, "the delayed batch must allocate its lower sequence before the racing singleton");
 
-        let fast = wire_mutation(sync_common::mutation_kind::READING_POSITION, "fast", 20, 1);
+        let fast = wire_mutation("reading_position", "fast", 20, 1);
         let fast_repository = repository.clone();
         let fast_user = user_id.clone();
         let fast_request = exchange_request(library_id, vec![fast]);
         let mut fast_exchange = tokio::spawn(async move { fast_repository.exchange(&fast_user, &fast_request).await });
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(100), &mut fast_exchange).await.is_err(), "the singleton must wait for the lower-sequence transaction");
+        assert!(tokio::time::timeout(Duration::from_millis(100), &mut fast_exchange).await.is_err(), "the singleton must wait for the lower-sequence transaction");
 
         assert!(sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)").bind(DELAY_LOCK).fetch_one(&mut *delay_connection).await.unwrap());
         batch.await.unwrap().expect("the delayed batch eventually commits");
         let fast_response = fast_exchange.await.unwrap().expect("the singleton commits after the lower sequences");
-        let delivered_with_head = fast_response.pull.mutations.iter().map(|change| change.mutation.entity_key.as_str()).collect::<Vec<_>>();
+        let delivered_with_head = fast_response.pull.mutations.iter().map(|change| change.state.value.address.entity_key.as_str()).collect::<Vec<_>>();
         assert!(
             delivered_with_head.contains(&"slow-a") && delivered_with_head.contains(&"slow-b") && delivered_with_head.contains(&"fast"),
             "the response that advertises the head must include every lower sequence; got {delivered_with_head:?}"
@@ -851,30 +790,30 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn a_superseded_push_republishes_the_winner_above_the_losers_cursor() {
-        let Some(pool) = crate::test_support::isolated_pool("lww_republish", 2).await else { return };
+        let Some(pool) = isolated_pool("lww_republish", 2).await else { return };
         let (user_id, library_id) = seed_account(&pool).await;
         seed_uploaded_books(&pool, &user_id, &["book"]).await;
         let repository = PostgresSyncRepository { pool: pool.clone() };
 
         let mut winner = wire_mutation("metadata", "book", 2_000, 1);
-        winner.value = b"winner".to_vec();
+        winner.state.value.bytes = b"winner".to_vec();
         let published = repository.exchange(&user_id, &exchange_request(library_id, vec![winner.clone()])).await.expect("publish the winning version");
         let cursor = published.pull.next_cursor;
 
         // A replica whose clock runs behind writes the same cell honestly and
         // loses. It pushes from the cursor that already covers the winner.
         let mut loser = wire_mutation("metadata", "book", 1_000, 2);
-        loser.value = b"loser".to_vec();
+        loser.state.value.bytes = b"loser".to_vec();
         let request = SyncExchangeRequest { library_id, replica_id: sync_common::ReplicaId::new_v4(), mutations: vec![loser.clone()], cursor };
         let response = repository.exchange(&user_id, &request).await.expect("a losing push is still accepted");
 
-        assert_eq!(response.push.accepted, vec![loser.mutation_id], "a merged-and-discarded mutation is acknowledged, not rejected");
+        assert!(response.push.rejected.is_empty());
         let stored: Vec<u8> = sqlx::query_scalar("SELECT value FROM sync_state WHERE library_id=$1 AND kind='metadata' AND entity_key='book'").bind(library_id.to_string()).fetch_one(&pool).await.unwrap();
         assert_eq!(stored, b"winner", "the stale write must not take the cell");
 
-        let delivered = response.pull.mutations.iter().map(|change| change.mutation.value.as_slice()).collect::<Vec<_>>();
+        let delivered = response.pull.mutations.iter().map(|change| change.state.value.bytes.as_slice()).collect::<Vec<_>>();
         assert_eq!(delivered, vec![b"winner".as_slice()], "the same exchange must hand the loser the authoritative value");
-        assert!(response.pull.next_cursor.state_revision.unwrap().get() > cursor.state_revision.unwrap().get(), "the republished winner advances the state channel");
+        assert!(response.pull.next_cursor.field_revision.unwrap().get() > cursor.field_revision.unwrap().get(), "the republished winner advances the field cursor");
     }
 
     /// Republishing must be reserved for a genuine conflict loss. A push
@@ -883,7 +822,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn a_retried_push_of_the_stored_mutation_does_not_advance_the_head() {
-        let Some(pool) = crate::test_support::isolated_pool("lww_retry", 2).await else { return };
+        let Some(pool) = isolated_pool("lww_retry", 2).await else { return };
         let (user_id, library_id) = seed_account(&pool).await;
         seed_uploaded_books(&pool, &user_id, &["book"]).await;
         let repository = PostgresSyncRepository { pool: pool.clone() };
@@ -899,7 +838,7 @@ mod tests {
         let retry = SyncExchangeRequest { library_id, replica_id, mutations: vec![mutation.clone()], cursor };
         let response = repository.exchange(&user_id, &retry).await.expect("a retried push is accepted");
 
-        assert_eq!(response.push.accepted, vec![mutation.mutation_id]);
+        assert!(response.push.rejected.is_empty());
         assert!(response.pull.mutations.is_empty(), "an idempotent retry has nothing to redeliver");
         assert_eq!(response.pull.next_cursor, cursor, "an idempotent retry leaves the channel head where it was");
     }
@@ -911,25 +850,25 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn a_superseded_reading_position_is_answered_with_the_stored_winner() {
-        let Some(pool) = crate::test_support::isolated_pool("lww_reading_republish", 2).await else { return };
+        let Some(pool) = isolated_pool("lww_reading_republish", 2).await else { return };
         let (user_id, library_id) = seed_account(&pool).await;
         seed_uploaded_books(&pool, &user_id, &["book"]).await;
         let repository = PostgresSyncRepository { pool: pool.clone() };
 
-        let mut winner = wire_mutation(sync_common::mutation_kind::READING_POSITION, "book", 2_000, 1);
-        winner.value = b"winner".to_vec();
+        let mut winner = wire_mutation("reading_position", "book", 2_000, 1);
+        winner.state.value.bytes = b"winner".to_vec();
         let published = repository.exchange(&user_id, &exchange_request(library_id, vec![winner.clone()])).await.expect("publish the winning position");
         let cursor = published.pull.next_cursor;
 
-        let mut loser = wire_mutation(sync_common::mutation_kind::READING_POSITION, "book", 1_000, 2);
-        loser.value = b"loser".to_vec();
+        let mut loser = wire_mutation("reading_position", "book", 1_000, 2);
+        loser.state.value.bytes = b"loser".to_vec();
         let request = SyncExchangeRequest { library_id, replica_id: sync_common::ReplicaId::new_v4(), mutations: vec![loser.clone()], cursor };
         let response = repository.exchange(&user_id, &request).await.expect("a losing reading position is still accepted");
 
-        assert_eq!(response.push.accepted, vec![loser.mutation_id]);
-        let delivered = response.pull.mutations.iter().map(|change| change.mutation.value.as_slice()).collect::<Vec<_>>();
+        assert!(response.push.rejected.is_empty());
+        let delivered = response.pull.mutations.iter().map(|change| change.state.value.bytes.as_slice()).collect::<Vec<_>>();
         assert_eq!(delivered, vec![b"winner".as_slice()], "the caught-up fast path must not echo a discarded mutation");
-        let stored: Vec<u8> = sqlx::query_scalar("SELECT value FROM sync_reading_state WHERE library_id=$1 AND entity_key='book'").bind(library_id.to_string()).fetch_one(&pool).await.unwrap();
+        let stored: Vec<u8> = sqlx::query_scalar("SELECT value FROM sync_state WHERE library_id=$1 AND entity_key='book'").bind(library_id.to_string()).fetch_one(&pool).await.unwrap();
         assert_eq!(stored, b"winner");
     }
 
@@ -939,13 +878,13 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn a_regressed_library_head_reports_the_stale_client_cursor() {
-        let Some(pool) = crate::test_support::isolated_pool("cursor_ahead", 2).await else { return };
+        let Some(pool) = isolated_pool("cursor_ahead", 2).await else { return };
         let (user_id, library_id) = seed_account(&pool).await;
         let repository = PostgresSyncRepository { pool: pool.clone() };
 
         let published = repository.exchange(&user_id, &exchange_request(library_id, vec![wire_mutation("directory_name", "dir-a", 1, 1)])).await.expect("publish one mutation");
         let cursor = published.pull.next_cursor;
-        assert!(cursor.state_revision.is_some(), "the published mutation advances the state channel");
+        assert!(cursor.field_revision.is_some(), "the published mutation advances the field cursor");
 
         // Restore-from-backup: the library's rows and its head both regress.
         sqlx::query("DELETE FROM sync_state WHERE library_id=$1").bind(library_id.to_string()).execute(&pool).await.unwrap();
@@ -959,25 +898,15 @@ mod tests {
 
     #[test]
     fn opaque_wire_fixture_has_no_domain_payload() {
-        let mutation = WireMutation {
-            origin: None,
-            mutation_id: MutationId::new(),
-            kind: "future_kind".to_owned(),
-            entity_key: "opaque-key".to_owned(),
-            entity_subkey: String::new(),
-            value: vec![0xde, 0xad, 0xbe, 0xef],
-            conflict_rank: 0,
-            blob_reference: None,
-            changed_at: 1,
-            replica_seq: ReplicaSeq::new(1).unwrap(),
-        };
-        assert_eq!(mutation.value, [0xde, 0xad, 0xbe, 0xef]);
+        let fixture_id = test_sequence();
+        let mutation = sync_common::Publication { publisher_seq: ReplicaSeq::new(1).unwrap(), state: sync_common::Versioned { version: sync_common::VersionKey::new(1, sync_common::ConflictRank::Update, sync_common::ReplicaId::nil(), ReplicaSeq::new(1).unwrap()), value: sync_common::OpaqueStateEntry { address: sync_common::StateAddress { kind: "future_kind".to_owned(), entity_key: "opaque-key".to_owned(), entity_subkey: String::new() }, bytes: vec![0xde, 0xad, 0xbe, 0xef], book: None } } };
+        assert_eq!(mutation.state.value.bytes, [0xde, 0xad, 0xbe, 0xef]);
     }
 
     #[tokio::test]
     #[ignore = "requires SYNC_E2E_DATABASE_URL"]
     async fn deleting_library_keeps_blob_object_and_releases_library_quota_state() {
-        let Some(pool) = crate::test_support::isolated_pool("delete_library", 2).await else { return };
+        let Some(pool) = isolated_pool("delete_library", 2).await else { return };
         let user_id = uuid::Uuid::new_v4().to_string();
         let library_id = sync_common::LibraryId::new_v4();
         let hash = "a".repeat(64);
@@ -987,10 +916,9 @@ mod tests {
         sqlx::query("INSERT INTO blob_object(content_hash, size_bytes) VALUES($1, 10)").bind(&hash).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO user_blob_charge(user_id, content_hash) VALUES($1, $2)").bind(&user_id).bind(&hash).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO user_blob_reference(user_id, content_hash, reference_count) VALUES($1, $2, 1)").bind(&user_id).bind(&hash).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO sync_state(library_id, kind, entity_key, value, present, content_hash, changed_at, replica_id, replica_seq, version_rank, event_id) VALUES($1, 'book_lifecycle', $2, ''::bytea, TRUE, $2, 1, $3, 1, 0, $4)")
+        sqlx::query("INSERT INTO sync_state(library_id, kind, entity_key, value, content_hash, changed_at, replica_id, replica_seq, version_rank) VALUES($1, 'book_lifecycle', $2, ''::bytea, $2, 1, $3, 1, 0)")
             .bind(library_id.to_string())
             .bind(&hash)
-            .bind(uuid::Uuid::new_v4().to_string())
             .bind(uuid::Uuid::new_v4().to_string())
             .execute(&pool)
             .await
@@ -1026,4 +954,10 @@ mod tests {
         let replacement_id = sync_common::LibraryId::new_v4();
         assert!(repository.create_library(&user_id, &LibraryNameRequest { library_id: replacement_id, library_name: "Replacement".to_owned() }).await.unwrap().is_some());
     }
+}
+
+#[cfg(test)]
+fn test_sequence() -> sync_common::ReplicaSeq {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1_000_000);
+    sync_common::ReplicaSeq::new(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)).unwrap()
 }

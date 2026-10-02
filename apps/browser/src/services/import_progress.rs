@@ -1,3 +1,5 @@
+#[cfg(target_arch = "wasm32")]
+use crate::SyncEvent;
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use futures_util::{FutureExt, select_biased};
@@ -201,7 +203,7 @@ fn presentation(progress: Option<DirectoryImportProgress>) -> Presentation {
 
 /// One styled notification per coordinator job, including recovered imports.
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn watch_browser_imports(backend: Rc<app::AppClient>, sync_events: async_channel::Sender<crate::SyncEvent>, window: &mut Window, cx: &mut App) -> gpui::Task<()> {
+pub(crate) fn watch_browser_imports(backend: Rc<app::AppClient>, sync_events: async_channel::Sender<SyncEvent>, window: &mut Window, cx: &mut App) -> gpui::Task<()> {
     use super::import_presentation::browser_presentation;
     use app::ImportProgress;
     use std::collections::BTreeMap;
@@ -261,7 +263,7 @@ pub(crate) fn watch_browser_imports(backend: Rc<app::AppClient>, sync_events: as
             }
             if wake_activity {
                 last_activity_refresh = Some(web_time::Instant::now());
-                let _ = sync_events.try_send(crate::SyncEvent::TransferRefreshWake);
+                let _ = sync_events.try_send(SyncEvent::TransferRefreshWake);
             }
             if updates.changed().await.is_err() {
                 break;

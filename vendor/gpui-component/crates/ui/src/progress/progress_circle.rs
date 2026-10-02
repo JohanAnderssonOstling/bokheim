@@ -10,7 +10,7 @@ use instant::Duration;
 use std::f32::consts::TAU;
 
 use super::ProgressState;
-use crate::plot::shape::{Arc, ArcData};
+use super::arc::{Arc, ArcData};
 
 /// A circular progress indicator element.
 #[derive(IntoElement)]
@@ -92,9 +92,6 @@ impl ProgressCircle {
 
                 arc.paint(
                     &ArcData {
-                        data: &(),
-                        index: 0,
-                        value: 100.,
                         start_angle: 0.,
                         end_angle: TAU,
                         pad_angle: 0.,
@@ -111,9 +108,6 @@ impl ProgressCircle {
                     let end_angle = (prepaint.end_value / 100.) * TAU;
                     arc.paint(
                         &ArcData {
-                            data: &(),
-                            index: 1,
-                            value: prepaint.end_value,
                             start_angle,
                             end_angle,
                             pad_angle: 0.,

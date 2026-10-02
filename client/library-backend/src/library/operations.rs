@@ -1,22 +1,27 @@
 //! Multi-resource library workflows implemented on the public library handle.
-use super::filenames;
-use super::LibrarySession;
-use crate::asset_workflow::AssetPlacementWorkflow;
-use crate::BackendError;
-use crate::{BlobKind, ContentHash, DownloadState};
-use book_model::BookFormat;
-use library_model::Dir;
-use std::collections::HashMap;
-use std::io::Read;
-use sync_common::DirId;
 
-pub(super) struct ValidatedImport {
-    pub(super) parent_id: DirId,
-    pub(super) file_name: String,
-    pub(super) format: BookFormat,
+use std::time::Duration;
+pub(crate) use super::filenames;
+pub(crate) use super::LibrarySession;
+use crate::asset_store::CopiedBook;
+use crate::executor::sleep;
+pub(crate) use crate::BackendError;
+use crate::ThumbnailResolution;
+pub(crate) use crate::{ContentHash, DownloadState};
+pub(crate) use book_model::BookFormat;
+pub(crate) use library_model::BlobKind;
+pub(crate) use library_model::Dir;
+pub(crate) use std::collections::HashMap;
+pub(crate) use std::io::Read;
+pub(crate) use sync_common::DirId;
+
+pub(crate) struct ValidatedImport {
+    pub(crate) parent_id: DirId,
+    pub(crate) file_name: String,
+    pub(crate) format: BookFormat,
 }
 
-fn validate_import_destination(db: &library_database::Database, parent_id: &DirId) -> Result<(), BackendError> {
+pub(crate) fn validate_import_destination(db: &library_database::Database, parent_id: &DirId) -> Result<(), BackendError> {
     if !db.is_live_destination(parent_id).map_err(BackendError::operation)? {
         return Err(format!("library folder does not exist: {parent_id}").into());
     }
@@ -24,17 +29,17 @@ fn validate_import_destination(db: &library_database::Database, parent_id: &DirI
 }
 
 impl LibrarySession {
-    pub(super) fn persistent_download_state(&self, content_hash: ContentHash) -> Result<DownloadState, BackendError> {
-        let bytes_present = self.assets.exists(BlobKind::Book, &content_hash).map_err(BackendError::operation)?;
+    pub(crate) fn persistent_download_state(&self, content_hash: ContentHash) -> Result<DownloadState, BackendError> {
+        let bytes_present = self.assets.book_exists(&content_hash, &self.db.book_paths(&content_hash)?).map_err(BackendError::operation)?;
         self.db.transfer_download_state(&content_hash, bytes_present).map_err(BackendError::operation)
     }
 
-    pub(crate) async fn thumbnail(&self, content_hash: ContentHash, resolution: crate::ThumbnailResolution) -> Result<Option<Vec<u8>>, BackendError> {
+    pub(crate) async fn thumbnail(&self, content_hash: ContentHash, resolution: ThumbnailResolution) -> Result<Option<Vec<u8>>, BackendError> {
         let bytes = match resolution {
-            crate::ThumbnailResolution::Browse => self.assets.read_thumbnail_variant(&content_hash, resolution.width()).await.map_err(BackendError::operation)?,
-            crate::ThumbnailResolution::HighDensity => self.assets.read_bytes(BlobKind::Thumbnail, &content_hash).await.map_err(BackendError::operation)?,
+            ThumbnailResolution::Browse => self.assets.read_named(library_files::asset_store::thumbnail_variant_name(&content_hash, resolution.width())).await.map_err(BackendError::operation)?,
+            ThumbnailResolution::HighDensity => self.assets.read_bytes(BlobKind::Thumbnail, &content_hash).await.map_err(BackendError::operation)?,
         };
-        if bytes.is_none() && self.assets.exists(BlobKind::Book, &content_hash).map_err(BackendError::operation)? && self.db.thumbnail_book_format(content_hash).map_err(BackendError::operation)?.is_some() {
+        if bytes.is_none() && self.assets.book_exists(&content_hash, &self.db.book_paths(&content_hash)?).map_err(BackendError::operation)? && self.db.thumbnail_book_format(content_hash).map_err(BackendError::operation)?.is_some() {
             self.db.request_missing_thumbnail(&content_hash).map_err(BackendError::operation)?;
         }
         Ok(bytes)
@@ -43,7 +48,7 @@ impl LibrarySession {
     /// Evicts downloaded book files without deleting the library book,
     /// its placements, reading state, or relationships.
     pub(crate) fn remove_local_book_copy(&self, content_hash: ContentHash) -> Result<DownloadState, BackendError> {
-        self.assets.evict_local_book(&self.db, &content_hash).map_err(BackendError::operation)?;
+        crate::asset_workflow::evict_local_book(&self.assets, &self.db, &content_hash)?;
         let state = self.persistent_download_state(content_hash)?;
         self.emit(super::events::LibraryEvent::DownloadStatusChanged { content_hash, state: state.clone() });
         self.notify_contents_changed();
@@ -56,7 +61,7 @@ impl LibrarySession {
         let created = if self.assets.local_access_enabled() {
             let id = DirId::new_v4();
             let (_, path) = self.db.directory_creation_path(parent_id, &name)?;
-            let chosen = self.assets.placement().create_directory(&path, id).map_err(BackendError::operation)?;
+            let chosen = self.assets.create_directory(&path, id).map_err(BackendError::operation)?;
             let parent = path.rsplit_once('/').map(|(parent, _)| parent);
             let path = parent.map_or_else(|| chosen.clone(), |parent| format!("{parent}/{chosen}"));
             self.db.register_created_directory(&id, parent_id, &chosen, &path)?
@@ -90,7 +95,7 @@ impl LibrarySession {
         };
         // Let queued import status reach subscribers before doing SQLite work;
         // large directory trees must not monopolize the executor.
-        crate::executor::sleep(std::time::Duration::ZERO).await;
+        sleep(Duration::ZERO).await;
         let root_id = match name {
             Some(name) => create(parent_id, &name, &[])?.id,
             None => *parent_id,
@@ -103,8 +108,8 @@ impl LibrarySession {
         directories.dedup();
         let mut slice_started = web_time::Instant::now();
         for path in directories {
-            if slice_started.elapsed() >= std::time::Duration::from_millis(8) {
-                crate::executor::sleep(std::time::Duration::ZERO).await;
+            if slice_started.elapsed() >= Duration::from_millis(8) {
+                sleep(Duration::ZERO).await;
                 slice_started = web_time::Instant::now();
             }
             let Some((name, parent_path)) = path.split_last() else { continue };
@@ -123,7 +128,7 @@ impl LibrarySession {
         Ok(super::PreparedDirectoryImport { directories: imported_directories.into_iter().collect(), failures })
     }
 
-    pub(super) fn validate_import(&self, parent_id: &DirId, file_name: &str) -> Result<ValidatedImport, BackendError> {
+    pub(crate) fn validate_import(&self, parent_id: &DirId, file_name: &str) -> Result<ValidatedImport, BackendError> {
         let file_name = filenames::validate_component(file_name)?;
         let extension = file_name.rsplit_once('.').map(|(_, extension)| extension).unwrap_or_default();
         let format = BookFormat::from_import_extension(extension).ok_or("only EPUB, PDF, DRM-free MOBI/AZW/AZW3, and M4B files can be added to a library")?;
@@ -131,38 +136,49 @@ impl LibrarySession {
         Ok(ValidatedImport { parent_id: *parent_id, file_name, format })
     }
 
-    pub(crate) async fn import_book_reader(&self, parent_id: &DirId, source: Box<dyn Read + Send>, file_name: String) -> Result<ContentHash, BackendError> {
+    pub(crate) async fn import_book_bytes(&self, parent_id: &DirId, file_name: String, bytes: Vec<u8>) -> Result<ContentHash, BackendError> {
         let import = self.validate_import(parent_id, &file_name)?;
-        let staged = self.assets.stage_import(&self.db, *parent_id, import.file_name.clone(), source).await.map_err(BackendError::operation)?;
+        let (_, staged) = crate::asset_workflow::stage_import(&self.assets, &self.db, *parent_id, import.file_name.clone(), Box::new(std::io::Cursor::new(bytes)), Default::default()).await.map_err(BackendError::operation)?;
         self.finish_import(import, staged).await
     }
 
-    pub(super) async fn finish_import(&self, import: ValidatedImport, staged: crate::asset_store::StagedBook) -> Result<ContentHash, BackendError> {
+    pub(crate) async fn finish_import(&self, import: ValidatedImport, staged: CopiedBook) -> Result<ContentHash, BackendError> {
         self.finish_import_with_progress(import, staged, None).await
     }
 
-    pub(super) async fn finish_import_with_progress(&self, import: ValidatedImport, staged: crate::asset_store::StagedBook, progress: Option<crate::asset_store::ImportProgressObserver>) -> Result<ContentHash, BackendError> {
+    pub(crate) async fn finish_import_with_progress(&self, import: ValidatedImport, staged: CopiedBook, progress: Option<crate::asset_store::ImportProgressObserver>) -> Result<ContentHash, BackendError> {
         use library_model::ImportFileStage;
         let report = |stage| {
             if let Some(progress) = &progress {
                 progress(stage);
             }
         };
-        report(ImportFileStage::ReadingMetadata);
         let started = web_time::Instant::now();
-        let reuse = import.format != BookFormat::Pdf && self.db.has_import_inspection(&staged.content_hash(), import.format, book_inspection::inspection_version(import.format)).map_err(BackendError::operation)?;
-        let inspection = if reuse {
-            None
-        } else {
-            let reader = staged.open_reader().map_err(BackendError::operation)?;
-            Some(
-                cpu_host::submit_book(&*self.cpu, cpu_host::Inspect { source_name: import.file_name.clone(), format: import.format, checksum: Some(staged.checksum()) }, cpu_host::as_cpu_reader(reader))
-                    .await
-                    .map_err(|error| BackendError::message(format!("invalid {} book: {error}", import.format.canonical_extension().to_ascii_uppercase())))?,
-            )
+        #[cfg(not(target_arch = "wasm32"))]
+        let (staged, inspection) = {
+            let ingested = filesystem_scanner::ingestion::ingest_file(staged.path().to_owned(), import.file_name.clone(), &*self.cpu, progress.as_ref())
+                .await
+                .map_err(|error| BackendError::message(format!("invalid {} book: {error}", import.format.canonical_extension().to_ascii_uppercase())))?;
+            let inspection = Some(ingested.inspection);
+            (staged.into_staged(ingested.content_hash, ingested.checksum, ingested.size_bytes), inspection)
+        };
+        #[cfg(target_arch = "wasm32")]
+        let inspection = {
+            report(ImportFileStage::ReadingMetadata);
+            let reuse = import.format != BookFormat::Pdf && self.db.has_import_inspection(&staged.content_hash(), import.format, book_inspection::inspection_version(import.format)).map_err(BackendError::operation)?;
+            if reuse {
+                None
+            } else {
+                let reader = staged.open_reader().map_err(BackendError::operation)?;
+                Some(
+                    cpu_host::submit_book(&*self.cpu, cpu_host::Inspect { source_name: import.file_name.clone(), format: import.format, checksum: Some(staged.checksum()) }, cpu_host::as_cpu_reader(reader))
+                        .await
+                        .map_err(|error| BackendError::message(format!("invalid {} book: {error}", import.format.canonical_extension().to_ascii_uppercase())))?,
+                )
+            }
         };
         let content_hash = staged.content_hash();
-        log::info!(target: "import_timing", "inspection_finished reused={reuse} ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+        log::info!(target: "import_timing", "inspection_finished ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
         let checksum = staged.checksum();
         let size_bytes = staged.size_bytes();
         // Inspection may overlap a delete/move. Do not publish into a folder
@@ -173,11 +189,10 @@ impl LibrarySession {
         let _lease = self.assets.lease_book(&content_hash).await.map_err(|error| BackendError::message(format!("could not lock the imported book: {error}")))?;
         log::info!(target: "import_timing", "book_lease_acquired ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
         let started = web_time::Instant::now();
-        let prepared = staged.prepare_import().await.map_err(BackendError::operation)?;
 
         // Book precedes the metadata commit. On a database failure the
         // library file remains discoverable by the next scan.
-        let published = self.publish_import(&import, prepared).await?;
+        let published = self.publish_import(&import, staged).await?;
         let request_thumbnail = !self.assets.thumbnail_set_exists(&content_hash).map_err(BackendError::operation)?;
         let restore_paths = self.import_restore_paths(&content_hash)?;
         log::info!(target: "import_timing", "publication_finished ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
@@ -189,42 +204,29 @@ impl LibrarySession {
         Ok(content_hash)
     }
 
-    /// Filesystem book from database snapshots, without holding the
-    /// writer. Staging already prepared the destination once; this second
-    /// pass covers a concurrent rename before the bytes move.
-    #[cfg(not(target_arch = "wasm32"))]
-    async fn publish_import(&self, import: &ValidatedImport, prepared: crate::asset_store::PreparedImport) -> Result<library_database::PublishedImport, BackendError> {
-        self.assets.placement().prepare_directory_with_database(&self.db, import.parent_id).await.map_err(|error| BackendError::message(format!("could not prepare the destination library folder for book: {error}")))?;
-        let relative = self.db.native_book_path(import.parent_id, &import.file_name).map_err(BackendError::operation)?.ok_or_else(|| BackendError::message("prepared directory no longer exists"))?;
-        let occupied = self.db.shared_occupied_file_names(&import.parent_id).map_err(BackendError::operation)?;
-        let staged = prepared.publish_snapshot(&self.assets, &relative, &occupied).map_err(|error| BackendError::message(format!("could not publish the imported book: {error}")))?;
+    pub(crate) async fn publish_import(&self, import: &ValidatedImport, staged: crate::asset_store::StagedBook) -> Result<library_database::PublishedImport, BackendError> {
+        let staged = crate::asset_workflow::publish_import(&self.assets, &self.db, import.parent_id, &import.file_name, staged, import.format == BookFormat::Mp3Folder)
+            .await
+            .map_err(|error| BackendError::message(format!("could not publish the imported book: {error}")))?;
         Ok(library_database::PublishedImport { name: staged.name, relative_path: staged.relative_path, published: staged.published, fingerprint: staged.fingerprint })
-    }
-
-    /// Browser imports commit bytes during preparation; there is no placement
-    /// filesystem to publish to, so the commit records the validated name.
-    #[cfg(target_arch = "wasm32")]
-    async fn publish_import(&self, import: &ValidatedImport, prepared: crate::asset_store::PreparedImport) -> Result<library_database::PublishedImport, BackendError> {
-        let _ = prepared;
-        Ok(library_database::PublishedImport { name: import.file_name.clone(), relative_path: String::new(), published: true, fingerprint: None })
     }
 
     /// Placement rows whose remembered path disagrees with storage, resolved
     /// from a snapshot so no filesystem check holds the writer.
     #[cfg(not(target_arch = "wasm32"))]
-    fn import_restore_paths(&self, content_hash: &ContentHash) -> Result<Vec<String>, BackendError> {
+    pub(crate) fn import_restore_paths(&self, content_hash: &ContentHash) -> Result<Vec<String>, BackendError> {
         let candidates = self.db.import_restore_candidates(content_hash).map_err(BackendError::operation)?;
-        Ok(candidates.into_iter().filter(|(path, materialized)| materialized.as_deref() != Some(path.as_str()) || !self.assets.placement_file_exists(path)).map(|(path, _)| path).collect())
+        Ok(candidates.into_iter().filter(|(path, materialized)| materialized.as_deref() != Some(path.as_str()) || !self.assets.placement_file_exists(path)).map(|(path, _)| path.to_string()).collect())
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn import_restore_paths(&self, _content_hash: &ContentHash) -> Result<Vec<String>, BackendError> {
+    pub(crate) fn import_restore_paths(&self, _content_hash: &ContentHash) -> Result<Vec<String>, BackendError> {
         Ok(Vec::new())
     }
 
     /// Committing the metadata transaction is the import's success point.
     /// Resolve all fallible result data before it, and notify before optional work.
-    fn commit_import(
+    pub(crate) fn commit_import(
         &self, import: ValidatedImport, content_hash: ContentHash, checksum: ContentHash, size_bytes: u64, inspection: Option<book_metadata::InspectedBook>, published: library_database::PublishedImport, request_thumbnail: bool,
         restore_paths: Vec<String>,
     ) -> Result<(), BackendError> {

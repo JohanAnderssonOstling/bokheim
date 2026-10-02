@@ -1,4 +1,3 @@
-use metadata_contract::{EditionIdentityRequest, EditionIdentityResponse, MetadataEnrichmentRequest, RichMetadataEnrichmentResponse};
 use std::fmt;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
@@ -24,10 +23,7 @@ async fn browser_delay(milliseconds: u32) {
 pub struct MetadataClient {
     http: reqwest::Client,
     base_url: Url,
-    cover_origin: Url,
 }
-
-static LAST_COVER_REQUEST: tokio::sync::Mutex<Option<web_time::Instant>> = tokio::sync::Mutex::const_new(None);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MetadataClientError(String);
@@ -50,13 +46,7 @@ impl MetadataClient {
     pub fn new(base_url: &str) -> Result<Self, MetadataClientError> {
         let base_url = Self::parse_origin(base_url)?;
         let http = reqwest::Client::new();
-        Ok(Self { http, base_url, cover_origin: Url::parse("https://covers.openlibrary.org/").expect("valid cover origin") })
-    }
-
-    /// Override the cover origin for a proxy or a local test server.
-    pub fn with_cover_origin(mut self, origin: &str) -> Result<Self, MetadataClientError> {
-        self.cover_origin = Self::parse_origin(origin)?;
-        Ok(self)
+        Ok(Self { http, base_url })
     }
 
     fn parse_origin(origin: &str) -> Result<Url, MetadataClientError> {
@@ -67,21 +57,13 @@ impl MetadataClient {
         Ok(url)
     }
 
-    /// Fetch artwork for an already-resolved ISBN; identity is owned by enrichment.
-    pub async fn cover(&self, isbn: &str) -> Result<Option<Vec<u8>>, MetadataClientError> {
-        if !matches!(isbn.len(), 10 | 13) || !isbn.bytes().all(|byte| byte.is_ascii_digit() || byte == b'X') {
-            return Err(MetadataClientError::new("invalid cover ISBN"));
-        }
-        self.artwork(&format!("b/isbn/{isbn}-L.jpg?default=false")).await
-    }
-
-    /// Fetch artwork only after the library has selected this recording.
-    pub async fn audible_cover(&self, asin: &str, region: &str) -> Result<Option<Vec<u8>>, MetadataClientError> {
-        if asin.len() != 10 || !asin.bytes().all(|b| b.is_ascii_alphanumeric()) || !matches!(region, "us" | "uk") {
-            return Err(MetadataClientError::new("invalid audiobook artwork identity"));
+    /// Fetch the artwork already resolved and cached by the metadata server.
+    pub async fn resolved_cover(&self, id: &str) -> Result<Option<Vec<u8>>, MetadataClientError> {
+        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+            return Err(MetadataClientError::new("invalid cover reference"));
         }
         Self::with_deadline(35_000, async {
-            let response = self.http.get(self.endpoint(&format!("v2/audiobooks/audible?region={region}&asin={asin}"))?).send().await.map_err(MetadataClientError::new)?;
+            let response = self.http.get(self.endpoint(&format!("v3/covers/{id}"))?).send().await.map_err(MetadataClientError::new)?;
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 return Ok(None);
             }
@@ -90,69 +72,21 @@ impl MetadataClient {
         .await
     }
 
-    async fn artwork(&self, path: &str) -> Result<Option<Vec<u8>>, MetadataClientError> {
-        let mut last = LAST_COVER_REQUEST.lock().await;
-        // Keep the anonymous Covers API at no more than one request per second.
-        if let Some(previous) = *last {
-            let remaining = std::time::Duration::from_secs(1).saturating_sub(previous.elapsed());
-            #[cfg(not(target_arch = "wasm32"))]
-            tokio::time::sleep(remaining).await;
-            #[cfg(target_arch = "wasm32")]
-            browser_delay(remaining.as_millis() as u32).await;
-        }
-        *last = Some(web_time::Instant::now());
-        drop(last);
-        Self::with_timeout(async {
-            let url = self.cover_origin.join(path).map_err(MetadataClientError::new)?;
-            let request = self.http.get(url);
-            #[cfg(not(target_arch = "wasm32"))]
-            let request = request.header(reqwest::header::USER_AGENT, "Bokheim/0.1 (cover enrichment)");
-            let response = request.send().await.map_err(MetadataClientError::new)?;
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
-                return Ok(None);
-            }
-            let response = response.error_for_status().map_err(MetadataClientError::new)?;
-            Self::response_bytes(response, 4 * 1024 * 1024).await.map(Some)
-        })
-        .await
-    }
-
-    pub async fn enrichment(&self, request: &MetadataEnrichmentRequest) -> Result<RichMetadataEnrichmentResponse, MetadataClientError> {
-        let body = metadata_contract::encode_v2_request(request).map_err(MetadataClientError::new)?;
-        let bytes = self.post("v2/enrichment", body).await?;
-        metadata_contract::decode_v2_response(&bytes, metadata_contract::MAX_RESPONSE_BYTES).map_err(MetadataClientError::new)
-    }
-
-    pub async fn resolve_edition_identities(&self, request: &EditionIdentityRequest) -> Result<EditionIdentityResponse, MetadataClientError> {
-        let body = metadata_contract::encode_v2_edition_identity_request(request).map_err(MetadataClientError::new)?;
-        let bytes = self.post("v2/edition-identities", body).await?;
-        metadata_contract::decode_v2_edition_identity_response(&bytes, metadata_contract::MAX_RESPONSE_BYTES).map_err(MetadataClientError::new)
-    }
-
-    pub async fn audible_lookup(&self, request: &metadata_contract::audible::LookupRequest) -> Result<metadata_contract::audible::LookupResponse, MetadataClientError> {
+    /// Every lookup and merge rule for a batch of books runs on the server.
+    pub async fn books(&self, request: &metadata_contract::books::BookEnrichmentRequest) -> Result<metadata_contract::books::BookEnrichmentResponse, MetadataClientError> {
         let body = serde_json::to_vec(request).map_err(MetadataClientError::new)?;
-        if body.len() > metadata_contract::audible::MAX_LOOKUP_REQUEST_BYTES {
-            return Err(MetadataClientError::new("audiobook request exceeds size limit"));
+        if body.len() > metadata_contract::books::MAX_BOOKS_REQUEST_BYTES {
+            return Err(MetadataClientError::new("book request exceeds size limit"));
         }
-        Self::with_deadline(60_000, async {
-            let response = self
-                .http
-                .post(self.endpoint("v2/audiobooks/audible")?)
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .body(body)
-                .send()
-                .await
-                .map_err(MetadataClientError::new)?
-                .error_for_status()
-                .map_err(MetadataClientError::new)?;
-            let bytes = Self::response_bytes(response, 8 * 1024 * 1024).await?;
+        // The server resolves books concurrently, but one may wait on Audible
+        // and the Library of Congress fallback.
+        Self::with_deadline(120_000, async {
+            let response =
+                self.http.post(self.endpoint("v3/books")?).header(reqwest::header::CONTENT_TYPE, "application/json").body(body).send().await.map_err(MetadataClientError::new)?.error_for_status().map_err(MetadataClientError::new)?;
+            let bytes = Self::response_bytes(response, metadata_contract::MAX_RESPONSE_BYTES).await?;
             serde_json::from_slice(&bytes).map_err(MetadataClientError::new)
         })
         .await
-    }
-
-    async fn with_timeout<T>(operation: impl std::future::Future<Output = Result<T, MetadataClientError>>) -> Result<T, MetadataClientError> {
-        Self::with_deadline(30_000, operation).await
     }
 
     async fn with_deadline<T>(milliseconds: u32, operation: impl std::future::Future<Output = Result<T, MetadataClientError>>) -> Result<T, MetadataClientError> {
@@ -168,30 +102,6 @@ impl MetadataClient {
                 Either::Right(_) => Err(MetadataClientError::new("metadata request timed out")),
             }
         }
-    }
-
-    async fn post(&self, path: &str, body: Vec<u8>) -> Result<Vec<u8>, MetadataClientError> {
-        Self::with_timeout(async {
-            let media_type = metadata_contract::MEDIA_TYPE_V2;
-            let response = self.http.post(self.endpoint(path)?).header(reqwest::header::ACCEPT, media_type).header(reqwest::header::CONTENT_TYPE, media_type).body(body).send().await.map_err(MetadataClientError::new)?;
-            if !response.status().is_success() {
-                let status = response.status();
-                let mut detail = Vec::new();
-                const MAX_ERROR_DETAIL_BYTES: usize = 4 * 1024;
-                let mut stream = response.bytes_stream();
-                while detail.len() < MAX_ERROR_DETAIL_BYTES {
-                    let Some(chunk) = stream.next().await else { break };
-                    let chunk = chunk.map_err(MetadataClientError::new)?;
-                    let remaining = MAX_ERROR_DETAIL_BYTES - detail.len();
-                    detail.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
-                }
-                let detail = String::from_utf8_lossy(&detail).split_whitespace().collect::<Vec<_>>().join(" ");
-                let message = if detail.is_empty() { format!("metadata server returned HTTP {status}") } else { format!("metadata server returned HTTP {status}: {detail}") };
-                return Err(MetadataClientError::new(message));
-            }
-            Self::response_bytes(response, metadata_contract::MAX_RESPONSE_BYTES).await
-        })
-        .await
     }
 
     async fn response_bytes(response: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>, MetadataClientError> {

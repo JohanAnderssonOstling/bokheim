@@ -1,3 +1,5 @@
+use std::future::Future;
+use crate::BackendError;
 #[derive(Clone)]
 pub(crate) struct Transport {
     jobs: async_channel::Sender<BackendJob>,
@@ -8,9 +10,9 @@ use super::*;
 use futures_util::{FutureExt, StreamExt};
 use std::panic::AssertUnwindSafe;
 
-fn request_panicked(_: Box<dyn std::any::Any + Send>) -> crate::BackendError {
+fn request_panicked(_: Box<dyn std::any::Any + Send>) -> BackendError {
     log::error!("backend request panicked; request failed without stopping the worker");
-    crate::BackendError::message("backend request failed unexpectedly")
+    BackendError::message("backend request failed unexpectedly")
 }
 
 #[cfg(test)]
@@ -33,7 +35,7 @@ mod panic_tests {
             });
             let failures = async {
                 ready.await.unwrap();
-                let construction = client.transport.run::<(), _, std::future::Ready<Result<(), crate::BackendError>>>(|_| panic!("construction failure")).await;
+                let construction = client.transport.run::<(), _, std::future::Ready<Result<(), BackendError>>>(|_| panic!("construction failure")).await;
                 assert_eq!(construction.unwrap_err().to_string(), "backend request failed unexpectedly");
                 let polling = client
                     .transport
@@ -60,7 +62,7 @@ mod panic_tests {
     }
 }
 
-type NativeJobFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>;
+type NativeJobFuture = std::pin::Pin<Box<dyn Future<Output = ()>>>;
 
 pub(crate) enum BackendJob {
     Run(Box<dyn FnOnce(AppBackend) -> NativeJobFuture + Send>),
@@ -101,11 +103,11 @@ impl AppWorker {
 }
 
 impl Transport {
-    pub(crate) async fn run<T, F, Fut>(&self, operation: F) -> Result<T, crate::BackendError>
+    pub(crate) async fn run<T, F, Fut>(&self, operation: F) -> Result<T, BackendError>
     where
         T: Send + 'static,
         F: FnOnce(AppBackend) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = Result<T, crate::BackendError>> + 'static,
+        Fut: Future<Output = Result<T, BackendError>> + 'static,
     {
         let (response, result) = oneshot::channel();
         let operation = Box::new(move |backend| {
@@ -121,10 +123,10 @@ impl Transport {
         result.await.map_err(|_| "backend worker stopped before replying".to_owned())?
     }
 
-    pub(crate) async fn run_ordered<T, F>(&self, operation: F) -> Result<T, crate::BackendError>
+    pub(crate) async fn run_ordered<T, F>(&self, operation: F) -> Result<T, BackendError>
     where
         T: Send + 'static,
-        F: FnOnce(&AppBackend) -> Result<T, crate::BackendError> + Send + 'static,
+        F: FnOnce(&AppBackend) -> Result<T, BackendError> + Send + 'static,
     {
         let (response, result) = oneshot::channel();
         self.jobs
@@ -139,7 +141,7 @@ impl Transport {
 }
 
 impl Transport {
-    pub(crate) async fn request<T: LibraryReply>(&self, command: AppCommand) -> Result<T, crate::BackendError> {
+    pub(crate) async fn request<T: LibraryReply>(&self, command: AppCommand) -> Result<T, BackendError> {
         if command.is_settings_update() {
             return self.run_ordered(move |backend| super::requests::execute_ordered(backend, command)).await.and_then(client_runtime::reply::Reply::take);
         }
@@ -153,7 +155,7 @@ impl Transport {
         .and_then(client_runtime::reply::Reply::take)
     }
 
-    async fn subscribe<T: LibraryReply>(&self, command: AppCommand) -> Result<(WorkerSubscription, T), crate::BackendError> {
+    async fn subscribe<T: LibraryReply>(&self, command: AppCommand) -> Result<(WorkerSubscription, T), BackendError> {
         self.run(move |backend| async move {
             match super::requests::dispatch_request(backend, command).await? {
                 WorkerDispatchResult::Subscription { initial, events } => Ok((events, initial)),
@@ -164,7 +166,7 @@ impl Transport {
         .and_then(|(events, initial)| Ok((events, initial.take()?)))
     }
 
-    pub(super) async fn unit_subscription(&self, command: AppCommand) -> Result<async_channel::Receiver<()>, crate::BackendError> {
+    pub(super) async fn unit_subscription(&self, command: AppCommand) -> Result<async_channel::Receiver<()>, BackendError> {
         let (WorkerSubscription::Unit(events), ()) = self.subscribe::<()>(command).await? else { return Err("unexpected subscription type".into()) };
         Ok(events)
     }
@@ -172,9 +174,9 @@ impl Transport {
 
 impl AppClient {
     /// Starts the native backend on its application-owned thread.
-    pub fn start_native(launch: crate::api::BackendLaunch) -> Result<(Self, AppStartupState), crate::BackendError> {
+    pub fn start_native(launch: crate::api::BackendLaunch) -> Result<(Self, AppStartupState), BackendError> {
         let backend_context = launch.into_context()?;
-        let backend = AppBackend::new(backend_context).map_err(crate::BackendError::operation)?;
+        let backend = AppBackend::new(backend_context).map_err(BackendError::operation)?;
         let startup = app_startup_state(&backend)?;
         let (client, worker) = crate::runtime::native::channel(&backend);
         std::thread::Builder::new().name("bokheim-app-worker".to_owned()).spawn(move || backend.run_native_worker(worker)).map_err(|error| format!("failed to start application backend worker: {error}"))?;
@@ -189,7 +191,7 @@ impl NoHostCommand {
     pub(crate) fn is_book_subscription(&self) -> bool {
         match *self {}
     }
-    pub(crate) async fn dispatch_app(self, _: AppBackend) -> Result<WorkerDispatchResult<client_runtime::reply::Reply>, crate::BackendError> {
+    pub(crate) async fn dispatch_app(self, _: AppBackend) -> Result<WorkerDispatchResult<client_runtime::reply::Reply>, BackendError> {
         match self {}
     }
 }

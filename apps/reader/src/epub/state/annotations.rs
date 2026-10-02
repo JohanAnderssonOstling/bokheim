@@ -1,5 +1,6 @@
 //! EPUB annotation loading, editing, and renderer projection.
 
+use crate::invalidation::notify;
 use book_model::{AnnotationAnchor, AnnotationStyle};
 use gpui::{Context, Window};
 use html_view_core::RendererCommand;
@@ -26,7 +27,7 @@ impl ReaderView {
                 this.marks.merge_loaded(annotations);
                 let overlays = marks::overlays(this.marks.annotations());
                 this.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::SetAnnotations(overlays), cx));
-                crate::invalidation::notify(cx, Component::ReaderShell, "marks_loaded");
+                notify(cx, Component::ReaderShell, "marks_loaded");
             },
         );
     }
@@ -35,27 +36,13 @@ impl ReaderView {
         let Some(Selection { cfi_range, text: exact_text }) = self.selection.take() else { return };
         self.annotation_note_input.update(cx, |input, cx| input.set_value(String::new(), window, cx));
         let now = crate::shell::marks::now_millis();
-        let annotation = ReaderAnnotation {
-            id: uuid::Uuid::new_v4().to_string(),
-            content_hash: self.locator.content_hash(),
-            anchor: AnnotationAnchor::epub_cfi(cfi_range),
-            exact_text,
-            style: AnnotationStyle::Highlight,
-            color: ui_components::READER_ANNOTATION_DEFAULT_COLOR.to_owned(),
-            note: String::new(),
-            created_at: now,
-            modified_at: now,
-            // The selection is visible, so the viewport's entry is the
-            // selection's entry in every case but a stale position event.
-            toc_ordinal: self.toc.ordinal_of_active().map(|ordinal| ordinal as i64),
-            progress: None,
-        };
+        let annotation = ReaderAnnotation { id: uuid::Uuid::new_v4().to_string(), state: book_model::AnnotationState { content_hash: self.locator.content_hash(), detail: book_model::AnnotationDetail { anchor: AnnotationAnchor::epub_cfi(cfi_range), exact_text: exact_text, style: AnnotationStyle::Highlight, color: ui_components::READER_ANNOTATION_DEFAULT_COLOR.to_owned(), note: String::new(), created_at: u64::try_from(now).expect("annotation timestamps must be nonnegative"), toc_ordinal: self.toc.ordinal_of_active().map(|ordinal| ordinal as i64), progress: None }, modified_at: u64::try_from(now).expect("annotation timestamps must be nonnegative"), deleted: false } };
         let overlay = marks::renderer_annotation(&annotation).expect("new EPUB annotation has an EPUB anchor");
         let annotation_id = annotation.id.clone();
         self.marks.append(annotation, "save reader annotation");
         self.marks.select(annotation_id);
         self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::UpsertAnnotation(overlay), cx));
-        crate::invalidation::notify(cx, Component::ReaderShell, "annotation_created");
+        notify(cx, Component::ReaderShell, "annotation_created");
     }
 
     pub(in crate::epub) fn copy_selection_citation(&self, cx: &mut Context<Self>) {
@@ -67,13 +54,13 @@ impl ReaderView {
     pub(in crate::epub) fn select_annotation(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let note = self.marks.select(id);
         self.annotation_note_input.update(cx, |input, cx| input.set_value(note, window, cx));
-        crate::invalidation::notify(cx, Component::ReaderShell, "annotation_selected");
+        notify(cx, Component::ReaderShell, "annotation_selected");
     }
 
     pub(in crate::epub) fn close_annotation_popup(&mut self, cx: &mut Context<Self>) {
         if self.marks.clear_selection() {
             self.annotation_popup_anchor = None;
-            crate::invalidation::notify(cx, Component::ReaderShell, "annotation_closed");
+            notify(cx, Component::ReaderShell, "annotation_closed");
         }
     }
 
@@ -88,13 +75,13 @@ impl ReaderView {
         if let Some(overlay) = marks::renderer_annotation(&annotation) {
             self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::UpsertAnnotation(overlay), cx));
         }
-        crate::invalidation::notify(cx, Component::ReaderShell, "annotation_updated");
+        notify(cx, Component::ReaderShell, "annotation_updated");
     }
 
     pub(in crate::epub) fn delete_annotation(&mut self, id: String, cx: &mut Context<Self>) {
         self.marks.delete(id.clone(), "delete reader annotation");
         self.annotation_popup_anchor = None;
         self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::RemoveAnnotation(id), cx));
-        crate::invalidation::notify(cx, Component::ReaderShell, "annotation_deleted");
+        notify(cx, Component::ReaderShell, "annotation_deleted");
     }
 }

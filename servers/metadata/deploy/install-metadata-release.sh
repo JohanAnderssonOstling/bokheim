@@ -25,7 +25,7 @@ if [[ ! -r /home/johan/data/openlibrary/current.sqlite ]]; then
     echo "missing verified metadata snapshot" >&2
     exit 1
 fi
-for required in bokheim-metadata.service; do
+for required in bokheim-metadata.service bokheim-metadata-crawl.service; do
     if [[ ! -f ${service_templates}/${required} || -L ${service_templates}/${required} || $(stat -c %u "${service_templates}/${required}") -ne 0 ]]; then
         echo "missing or unsafe root-owned service template: ${required}" >&2
         exit 1
@@ -39,7 +39,7 @@ activation_started=false
 deployment_succeeded=false
 [[ -f /usr/local/bin/metadata-server ]] && metadata_binary_existed=true
 [[ -f /etc/systemd/system/bokheim-metadata.service ]] && metadata_unit_existed=true
-for installed in /usr/local/bin/metadata-server /etc/systemd/system/bokheim-metadata.service; do
+for installed in /usr/local/bin/metadata-server /etc/systemd/system/bokheim-metadata.service /etc/systemd/system/bokheim-metadata-crawl.service; do
     if [[ -f ${installed} ]]; then
         cp -a -- "${installed}" "${rollback_root}/"
     fi
@@ -50,7 +50,7 @@ cleanup() {
     trap - EXIT
     if [[ ${activation_started} == true && ${deployment_succeeded} != true ]]; then
         echo "activation failed; restoring the previous metadata release" >&2
-        systemctl stop bokheim-metadata.service 2>/dev/null || true
+        systemctl stop bokheim-metadata.service bokheim-metadata-crawl.service 2>/dev/null || true
         if [[ -d ${rollback_root}/pdfium ]]; then install -o root -g root -m 0644 "${rollback_root}/pdfium/libpdfium.so" "${rollback_root}/pdfium/LICENSE" /usr/local/bin/pdfium/; fi
         if [[ ${metadata_binary_existed} == true ]]; then
             install -o root -g root -m 0755 "${rollback_root}/metadata-server" /usr/local/bin/metadata-server
@@ -63,9 +63,16 @@ cleanup() {
             systemctl disable --now bokheim-metadata.service 2>/dev/null || true
             rm -f -- /etc/systemd/system/bokheim-metadata.service
         fi
+        if [[ -f ${rollback_root}/bokheim-metadata-crawl.service ]]; then
+            install -o root -g root -m 0644 "${rollback_root}/bokheim-metadata-crawl.service" /etc/systemd/system/bokheim-metadata-crawl.service
+        else
+            systemctl disable --now bokheim-metadata-crawl.service 2>/dev/null || true
+            rm -f -- /etc/systemd/system/bokheim-metadata-crawl.service
+        fi
         systemctl daemon-reload
         if [[ ${metadata_binary_existed} == true && ${metadata_unit_existed} == true ]]; then
             systemctl restart bokheim-metadata.service || true
+            if [[ -f ${rollback_root}/bokheim-metadata-crawl.service ]]; then systemctl restart bokheim-metadata-crawl.service || true; fi
         fi
     fi
     rm -rf -- "${rollback_root}"
@@ -74,7 +81,7 @@ cleanup() {
 trap cleanup EXIT
 
 activation_started=true
-systemctl stop bokheim-metadata.service 2>/dev/null || true
+systemctl stop bokheim-metadata.service bokheim-metadata-crawl.service 2>/dev/null || true
 # Do not use a process-name-wide cleanup here. Linux truncates `comm` names,
 # which can make a long-running metadata importer look exactly like the server
 # and would interrupt an unrelated resumable snapshot build.
@@ -83,9 +90,11 @@ install -d -o root -g root -m 0755 /usr/local/bin/pdfium
 install -o root -g root -m 0644 "${source_root}/pdfium/libpdfium.so" /usr/local/bin/pdfium/libpdfium.so
 install -o root -g root -m 0644 "${source_root}/pdfium/LICENSE" /usr/local/bin/pdfium/LICENSE
 install -o root -g root -m 0644 "${service_templates}/bokheim-metadata.service" /etc/systemd/system/bokheim-metadata.service
+install -o root -g root -m 0644 "${service_templates}/bokheim-metadata-crawl.service" /etc/systemd/system/bokheim-metadata-crawl.service
 systemctl daemon-reload
-systemctl enable bokheim-metadata.service
+systemctl enable bokheim-metadata.service bokheim-metadata-crawl.service
 systemctl restart bokheim-metadata.service
+systemctl restart bokheim-metadata-crawl.service
 
 metadata_ready=false
 for _ in $(seq 1 30); do
@@ -100,15 +109,15 @@ fi
 
 curl --noproxy '*' --fail --silent --show-error --max-time 15 \
     -H 'Content-Type: application/json' \
-    --data '{"isbns":["9780821338278"]}' \
-    http://127.0.0.1:8091/v2/enrichment >/dev/null
+    --data '{"books":[{"key":"0","record":{"title":"Smoke check","subtitle":null,"contributors":[],"description":"","book":{"identifiers":[{"value":"9780821338278","scheme":"isbn","scope":"book"}],"publishers":[],"languages":[],"dates":[],"subjects":[]}},"audiobook":false}]}' \
+    http://127.0.0.1:8091/v3/books >/dev/null
 
 # Check the public route as well as the internal health endpoint. No provider call.
 audiobook_status=$(curl --proto '=https' --tlsv1.2 --silent --show-error --max-time 15 \
     --output /dev/null --write-out '%{http_code}' -H 'Content-Type: application/json' \
-    --data '{}' "https://${BOKHEIM_METADATA_DOMAIN:-meta.bokheim.se}/v2/audiobooks/audible")
+    --data '{}' "https://${BOKHEIM_METADATA_DOMAIN:-meta.bokheim.se}/v3/books")
 if [[ ${audiobook_status} != 422 ]]; then
-    echo "public audiobook endpoint verification failed: expected 422, got ${audiobook_status}" >&2
+    echo "public books endpoint verification failed: expected 422, got ${audiobook_status}" >&2
     exit 1
 fi
 
@@ -117,9 +126,9 @@ preflight=$(curl --proto '=https' --tlsv1.2 --silent --show-error --max-time 15 
     --dump-header - --output /dev/null -X OPTIONS \
     -H 'Origin: https://app.bokheim.se' -H 'Access-Control-Request-Method: POST' \
     -H 'Access-Control-Request-Headers: content-type' \
-    "https://${BOKHEIM_METADATA_DOMAIN:-meta.bokheim.se}/v2/audiobooks/audible")
+    "https://${BOKHEIM_METADATA_DOMAIN:-meta.bokheim.se}/v3/books")
 if ! grep -Eqi '^access-control-allow-origin:[[:space:]]*\*' <<<"${preflight}"; then
-    echo "public audiobook endpoint is missing browser CORS support" >&2
+    echo "public books endpoint is missing browser CORS support" >&2
     exit 1
 fi
 

@@ -1,3 +1,4 @@
+use crate::CONTENT_INSET;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -33,7 +34,7 @@ const READER_SETTINGS_PADDING: f32 = 16.0;
 const READER_SETTINGS_GAP: f32 = 13.0;
 
 pub fn reader_toolbar(theme: BrowserTheme) -> Div {
-    div().h(gpui::rems(READER_TOOLBAR_SIZE_REM)).flex_none().w_full().min_w_0().px(px(crate::CONTENT_INSET)).flex().items_center().gap(px(SPACE_SM)).bg(theme.page_bg).border_b_1().border_color(theme.rule)
+    div().h(gpui::rems(READER_TOOLBAR_SIZE_REM)).flex_none().w_full().min_w_0().px(px(CONTENT_INSET)).flex().items_center().gap(px(SPACE_SM)).bg(theme.page_bg).border_b_1().border_color(theme.rule)
 }
 
 /// `.ghost()`, not `outlined_icon_button`: the header's square icon buttons
@@ -322,7 +323,7 @@ pub fn reader_settings_group(theme: BrowserTheme) -> Div {
     // hugging its border. Horizontal padding lives here rather than on the
     // tab body, so the border-bottom below it spans full width, edge to edge
     // with the sidebar's own borders.
-    div().w_full().flex().flex_col().gap(px(SPACE_XS)).px(px(crate::CONTENT_INSET)).pt(px(SPACE_MD)).pb(px(SPACE_MD)).border_b_1().border_color(theme.rule)
+    div().w_full().flex().flex_col().gap(px(SPACE_XS)).px(px(CONTENT_INSET)).pt(px(SPACE_MD)).pb(px(SPACE_MD)).border_b_1().border_color(theme.rule)
 }
 
 pub fn reader_setting_row(label: impl Into<SharedString>) -> Div {

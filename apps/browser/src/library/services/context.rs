@@ -1,3 +1,6 @@
+use std::path::Path;
+use crate::services::import_failure_message;
+use crate::BOOK_IMPORT_EXTENSIONS;
 use futures_util::future::join_all;
 use gpui::{App, Context, Entity, FileDialogFilter, PathPromptOptions, Window};
 use library_backend::LibraryClient;
@@ -46,7 +49,7 @@ impl LibraryContext {
     /// Successful imports are observed through [`LibraryUpdateBridge`], so
     /// callers do not need to reload their page explicitly.
     pub(crate) fn choose_and_import_book<C: 'static>(&self, parent_id: DirId, cx: &mut Context<C>) {
-        let extensions = crate::BOOK_IMPORT_EXTENSIONS.into_iter().map(str::to_owned).collect();
+        let extensions = BOOK_IMPORT_EXTENSIONS.into_iter().map(str::to_owned).collect();
         let selection = cx.prompt_for_files_with_filters(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Add book".into()) }, vec![FileDialogFilter { name: "Books".to_owned(), extensions }]);
         let library = self.backend.clone();
         cx.spawn(async move |view, cx| {
@@ -72,9 +75,9 @@ impl LibraryContext {
                             #[cfg(not(target_arch = "wasm32"))]
                             {
                                 library
-                                    .import_directory_contents_with_activity(parent_id, directory, activity)
+                                    .import_selected_directory(parent_id, directory, false, Some(activity))
                                     .await
-                                    .and_then(|failures| if failures.is_empty() { Ok(()) } else { Err(failures.iter().map(crate::services::import_failure_message).collect::<Vec<_>>().join("\n")) })
+                                    .and_then(|failures| if failures.is_empty() { Ok(()) } else { Err(failures.iter().map(import_failure_message).collect::<Vec<_>>().join("\n")) })
                             }
                         };
                         result.map(|_| ())
@@ -131,7 +134,7 @@ impl LibraryContext {
                                     if errors.is_empty() {
                                         imported += 1;
                                     }
-                                    failures.extend(errors.iter().map(crate::services::import_failure_message));
+                                    failures.extend(errors.iter().map(import_failure_message));
                                 }
                                 Err(error) => failures.push(error),
                             }
@@ -148,7 +151,7 @@ impl LibraryContext {
                 match library.import_directory_contents(parent_id, dropped_files).await {
                     Ok(errors) => {
                         imported += dropped_file_count.saturating_sub(errors.len());
-                        failures.extend(errors.iter().map(crate::services::import_failure_message));
+                        failures.extend(errors.iter().map(import_failure_message));
                     }
                     Err(error) => failures.push(error),
                 }
@@ -193,10 +196,10 @@ struct DroppedImport {
 /// Classifies a dropped path and enumerates folders on a background thread.
 /// Book bytes are opened by the backend only when the import starts.
 #[cfg(not(target_arch = "wasm32"))]
-fn scan_dropped_path(path: &std::path::Path) -> Result<DroppedImport, String> {
+fn scan_dropped_path(path: &Path) -> Result<DroppedImport, String> {
     let metadata = path.metadata().map_err(|error| format!("{}: {error}", path.display()))?;
     if metadata.is_dir() {
-        let selected = gpui::SelectedDirectory::from_path(path, crate::BOOK_IMPORT_EXTENSIONS).map_err(|error| format!("{error:#}"))?;
+        let selected = gpui::SelectedDirectory::from_path(path, BOOK_IMPORT_EXTENSIONS).map_err(|error| format!("{error:#}"))?;
         return Ok(DroppedImport { directory: crate::directory_import(selected), create_root: true });
     }
     if !metadata.is_file() || !is_importable_book(path) {
@@ -212,8 +215,8 @@ fn scan_dropped_path(path: &std::path::Path) -> Result<DroppedImport, String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn is_importable_book(path: &std::path::Path) -> bool {
-    path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| crate::BOOK_IMPORT_EXTENSIONS.iter().any(|allowed| allowed.eq_ignore_ascii_case(extension)))
+fn is_importable_book(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| BOOK_IMPORT_EXTENSIONS.iter().any(|allowed| allowed.eq_ignore_ascii_case(extension)))
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

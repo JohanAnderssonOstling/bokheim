@@ -1,5 +1,6 @@
 //! PDF reader construction and renderer/input event wiring.
 
+use crate::invalidation::notify;
 use std::rc::Rc;
 
 use gpui::prelude::*;
@@ -104,13 +105,13 @@ impl PdfReaderView {
                     return;
                 }
                 self.positions.record(StoredPosition::pdf_page(current_page, full_page_position, *total));
-                crate::invalidation::notify(cx, Component::PdfShell, "page_changed");
+                notify(cx, Component::PdfShell, "page_changed");
             }
             PdfViewEvent::SearchChanged { current, total } => {
                 let Some(match_position) = self.search_match.as_mut() else { return };
                 if *match_position != (*current, *total) {
                     *match_position = (*current, *total);
-                    crate::invalidation::notify(cx, Component::PdfShell, "match_changed");
+                    notify(cx, Component::PdfShell, "match_changed");
                 }
             }
             PdfViewEvent::PageTapped => self.toggle_mobile_controls(window, cx),

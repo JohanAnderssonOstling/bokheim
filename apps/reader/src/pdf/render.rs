@@ -1,3 +1,5 @@
+use crate::invalidation::notify;
+use crate::shell::search::search_bar;
 mod actions;
 mod annotations;
 mod init;
@@ -90,7 +92,7 @@ impl Render for PdfReaderView {
         let overlay = chrome::sidebar_overlays_document(window);
         let active_tab = if overlay { self.sidebar.effective(outline_available) } else { Some(self.sidebar.effective_or_default(outline_available)) };
         let sidebar_visible = chrome_visible && active_tab.is_some();
-        let mobile_search = if mobile && chrome_visible && !sidebar_visible { self.search_match.map(|position| crate::shell::search::search_bar(&entity, &self.search_input, position, theme)) } else { None };
+        let mobile_search = if mobile && chrome_visible && !sidebar_visible { self.search_match.map(|position| search_bar(&entity, &self.search_input, position, theme)) } else { None };
         let toc_width = chrome::sidebar_width(sidebar_visible, window, cx);
         let available_width = (f32::from(window.viewport_size().width) - toc_width).max(0.0);
         self.pdf.update(cx, |pdf, cx| {
@@ -140,7 +142,7 @@ impl Render for PdfReaderView {
                 SidebarTab::Annotations => self.render_annotations_body(theme, cx),
                 SidebarTab::Settings => self.render_settings(cx),
             };
-            let search_element = if mobile { None } else { self.search_match.map(|position| crate::shell::search::search_bar(&entity, &self.search_input, position, theme)) };
+            let search_element = if mobile { None } else { self.search_match.map(|position| search_bar(&entity, &self.search_input, position, theme)) };
             let sidebar_content = SidebarContent::new(section_title, progress, page_indicator, Some(pdf_document_focus), tabs, sidebar_body);
             let sidebar = sidebar_chrome::reader_sidebar(self, &entity, sidebar_content, search_element, theme, window);
             chrome::with_sidebar(sidebar, body.into_any_element(), window, cx)
@@ -165,7 +167,7 @@ impl Render for PdfReaderView {
                 if reader.sidebar.is_visible() {
                     reader.focus_document(window, cx);
                 }
-                crate::invalidation::notify(cx, Component::PdfShell, "mobile_sidebar_tab_changed");
+                notify(cx, Component::PdfShell, "mobile_sidebar_tab_changed");
                 });
             });
             let search_target = entity.clone();
@@ -190,7 +192,7 @@ impl Render for PdfReaderView {
                     return;
                 }
                 crate::shell::state_panel::select_tab(&mut reader.sidebar, SidebarTab::Contents, cx);
-                crate::invalidation::notify(cx, Component::PdfShell, "sidebar_shown");
+                notify(cx, Component::PdfShell, "sidebar_shown");
             }
         });
         let mut page = page.children(interactions);

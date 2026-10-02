@@ -1,3 +1,7 @@
+use std::rc::Rc;
+use std::time::Duration;
+use crate::invalidation::notify;
+use crate::settings::ReaderSettings;
 mod document;
 mod input;
 mod overlays;
@@ -39,7 +43,7 @@ impl Render for ReaderView {
             if self.applied_palette != selected {
                 self.applied_palette = selected;
                 let appearance = crate::settings::library_theme_adaptation(cx);
-                let overrides = crate::settings::ReaderSettings::preferences(cx).style_overrides(Some(appearance));
+                let overrides = ReaderSettings::preferences(cx).style_overrides(Some(appearance));
                 let paint = crate::settings::library_paint_palette(cx);
                 renderer.update(cx, |renderer, cx| {
                     renderer.apply(html_view_core::RendererCommand::SetReaderStyleOverrides(overrides), cx);
@@ -58,7 +62,7 @@ impl Render for ReaderView {
         let active_tab = self.active_sidebar_tab(window);
         let sidebar_visible = chrome_visible && active_tab.is_some();
         let mobile_search = if mobile && chrome_visible && !sidebar_visible { self.render_search(theme, cx) } else { None };
-        let preferences = crate::settings::ReaderSettings::preferences(cx);
+        let preferences = ReaderSettings::preferences(cx);
         let (split_sidebar_width, horizontal_margin, available_width) = Self::horizontal_layout(window, cx, sidebar_visible);
         let vertical_margin = preferences.vertical_margin_px.min(((f32::from(window.viewport_size().height) - 100.0) / 2.0).max(0.0));
         let max_columns = self.max_columns_for_gap(f64::from(available_width), cx);
@@ -106,18 +110,18 @@ impl Render for ReaderView {
         self.chrome.sync_system_bars(chrome_visible, cx);
         let bottom_bar = (mobile && chrome_visible).then(|| {
             let tab_target = entity.clone();
-            let on_select: std::rc::Rc<dyn Fn(crate::shell::state_panel::SidebarTab, &mut Window, &mut App)> = std::rc::Rc::new(move |tab, window, cx| {
+            let on_select: Rc<dyn Fn(crate::shell::state_panel::SidebarTab, &mut Window, &mut App)> = Rc::new(move |tab, window, cx| {
                 tab_target.update(cx, |reader, cx| {
                 state_panel::toggle_tab(&mut reader.sidebar, tab, true, cx);
                 reader.chrome.show(cx);
                 if reader.sidebar.is_visible() {
                     reader.focus_document(window, cx);
                 }
-                crate::invalidation::notify(cx, Component::ReaderShell, "mobile_sidebar_tab_changed");
+                notify(cx, Component::ReaderShell, "mobile_sidebar_tab_changed");
                 });
             });
             let search_target = entity.clone();
-            let on_search: std::rc::Rc<dyn Fn(&mut Window, &mut App)> = std::rc::Rc::new(move |window, cx| search_target.update(cx, |reader, cx| reader.toggle_search(window, cx)));
+            let on_search: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |window, cx| search_target.update(cx, |reader, cx| reader.toggle_search(window, cx)));
             sidebar_chrome::reader_bottom_bar("epub-reader-bottom-bar", self.sidebar.active(), true, search_visible, theme, on_select, on_search)
         });
         let page = crate::shell::page::reader_page(window, cx, theme, document_ready, &self.focus, chrome_visible, bottom_bar, mobile_search, content)
@@ -148,7 +152,7 @@ impl Render for ReaderView {
                     return;
                 }
                 state_panel::select_tab(&mut reader.sidebar, crate::shell::state_panel::SidebarTab::Contents, cx);
-                crate::invalidation::notify(cx, Component::ReaderShell, "sidebar_shown");
+                notify(cx, Component::ReaderShell, "sidebar_shown");
             }
         });
         let mut page = page.children(interactions);
@@ -166,7 +170,7 @@ impl Render for ReaderView {
 
 /// Quiet period that ends a wheel gesture, matching the browse paginator so the
 /// two surfaces respond to the same flick in the same way.
-const WHEEL_SCROLL_END_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+const WHEEL_SCROLL_END_DELAY: Duration = Duration::from_millis(150);
 
 impl ReaderView {
     /// Unconditionally claim both OS-window and document focus on pointer hover.

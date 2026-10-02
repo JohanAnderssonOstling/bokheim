@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+use crate::library::LibraryDirectory;
 pub(super) use super::data::{AppDataLocation, BackendContext, LibraryEntry, LibraryRegistry};
 use crate::executor::{BackendExecutor, BackendTask};
 pub(super) use crate::LibraryId;
@@ -35,9 +37,9 @@ pub(crate) struct AppState {
     pub(super) registry: LibraryRegistry,
     /// Durable registry/account policy remain app-owned. The library module
     /// owns the in-memory directory of resource-bearing sessions.
-    pub(super) library_directory: Arc<crate::library::LibraryDirectory>,
+    pub(super) library_directory: Arc<LibraryDirectory>,
     pub(super) account: DeviceAccountSession,
-    pub(super) library_list_subscribers: std::sync::Mutex<Vec<async_channel::Sender<()>>>,
+    pub(super) library_list_subscribers: Mutex<Vec<async_channel::Sender<()>>>,
     pub(super) account_scheduler: SyncScheduler,
     pub(super) remote_changes: crate::notification_interest::RemoteChanges,
     notification_task: Option<BackendTask<()>>,
@@ -50,7 +52,9 @@ impl Drop for AppState {
     fn drop(&mut self) {
         self.account_scheduler.stop();
         self.notification_task.take();
-        self.library_directory.shutdown_all();
+        for (_, handle) in self.library_directory.handles.lock().unwrap_or_else(|error| error.into_inner()).drain() {
+            handle.shutdown();
+        }
     }
 }
 
@@ -81,16 +85,16 @@ impl AppBackend {
         let state = Arc::new(AppState {
             executor: executor.clone(),
             registry: context.registry,
-            library_directory: Arc::new(crate::library::LibraryDirectory::default()),
+            library_directory: Arc::new(LibraryDirectory::default()),
             account: account.clone(),
-            library_list_subscribers: std::sync::Mutex::new(Vec::new()),
+            library_list_subscribers: Mutex::new(Vec::new()),
             account_scheduler: account_scheduler.clone(),
             remote_changes: remote_changes.clone(),
             notification_task: Some(notification_task),
             notification_interest: notification_interest.clone(),
         });
         let weak = Arc::downgrade(&state);
-        super::account::tasks::start_maintenance(&executor, &weak, (account_scheduler.clone(), account_wake_rx));
+        super::account::tasks::start_maintenance(&executor, &weak, account_wake_rx);
         let core = Self { state };
         core.open_registered_libraries()?;
         core.start_pending_local_purges();
@@ -108,7 +112,7 @@ impl AppBackend {
 
     /// Runtime routing may resolve an already-open actor here. It cannot open
     /// or configure libraries; that remains the explicit lifecycle path.
-    pub(crate) fn library_directory(&self) -> &Arc<crate::library::LibraryDirectory> {
+    pub(crate) fn library_directory(&self) -> &Arc<LibraryDirectory> {
         &self.state.library_directory
     }
 

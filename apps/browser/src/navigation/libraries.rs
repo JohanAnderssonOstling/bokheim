@@ -1,11 +1,12 @@
 //! Cached page sessions and coarse lifecycle operations for every library.
 
+use crate::services::{import_failure_message, notify_warning};
+use crate::services::library_add_trace::mark;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use app::AppClient;
-use app_preferences::LibraryView;
 use gpui::{App, AppContext, Context, Entity, SharedString, Task, Window};
 use sync_common::LibraryId;
 
@@ -38,12 +39,6 @@ fn selected_library_id(libraries: &[LibrarySummary], current: Option<LibraryId>,
 }
 
 impl Libraries {
-    pub(crate) fn set_library_view(&mut self, view: LibraryView, cx: &mut Context<Self>) {
-        for session in self.sessions.values() {
-            session.update(cx, |session, cx| session.set_library_view(view, cx));
-        }
-    }
-
     pub(super) fn new(backend: Rc<AppClient>, open_book: OpenBook, book_detail_closed: BookDetailClosed, entries: Vec<LibrarySummary>, library_id: Option<LibraryId>, navigate: Navigate, cx: &mut Context<Self>) -> Self {
         let selection_epoch = Rc::new(Cell::new(0));
         let list_epoch = selection_epoch.clone();
@@ -118,11 +113,11 @@ impl Libraries {
             self.set_selected_library(library_id, cx);
             return;
         }
-        crate::services::library_add_trace::mark(library_id, "list_refresh_requested");
+        mark(library_id, "list_refresh_requested");
         let backend = self.backend.clone();
         cx.spawn(async move |sessions, cx| {
             let result = library_summaries(&backend).await;
-            crate::services::library_add_trace::mark(library_id, "list_refresh_received");
+            mark(library_id, "list_refresh_received");
             let _ = sessions.update_in(cx, |sessions, window, cx| {
                 if sessions.selection_epoch.get() != epoch {
                     return;
@@ -228,7 +223,7 @@ impl Libraries {
                 }
                 cx.notify();
                 if !errors.is_empty() {
-                    crate::services::notify_warning("library-add-warning", format!("Some folders could not be added: {}", errors.join("; ")), window, cx);
+                    notify_warning("library-add-warning", format!("Some folders could not be added: {}", errors.join("; ")), window, cx);
                 }
                 if let Some(library_id) = selected {
                     sessions.select_library(library_id, cx);
@@ -246,11 +241,11 @@ impl Libraries {
                 #[cfg(not(target_arch = "wasm32"))]
                 match result {
                     Ok(failures) if !failures.is_empty() => {
-                        let _ = sessions.update_in(cx, |_, window, cx| crate::services::notify_warning("library-import-warning", import_failure_summary(&failures), window, cx));
+                        let _ = sessions.update_in(cx, |_, window, cx| notify_warning("library-import-warning", import_failure_summary(&failures), window, cx));
                     }
                     Err(error) => {
                         log::warn!("Could not import library {name}: {error}");
-                        let _ = sessions.update_in(cx, |_, window, cx| crate::services::notify_warning("library-import-warning", format!("Could not import books from “{name}”"), window, cx));
+                        let _ = sessions.update_in(cx, |_, window, cx| notify_warning("library-import-warning", format!("Could not import books from “{name}”"), window, cx));
                     }
                     _ => {}
                 }
@@ -291,7 +286,7 @@ impl Libraries {
     }
 
     fn set_selected_library(&mut self, library_id: LibraryId, cx: &mut Context<Self>) {
-        crate::services::library_add_trace::mark(library_id, "session_creation_started");
+        mark(library_id, "session_creation_started");
         let backend = self.backend.clone();
         let open_book = self.open_book.clone();
         let book_detail_closed = self.book_detail_closed.clone();
@@ -299,7 +294,7 @@ impl Libraries {
             self.sessions.entry(library_id).or_insert_with(|| cx.new(|cx| LibrarySession::new(backend, open_book, book_detail_closed, library_id, cx)));
         }
         self.selected_id = Some(library_id);
-        crate::services::library_add_trace::mark(library_id, "selection_updated");
+        mark(library_id, "selection_updated");
         cx.notify();
     }
 
@@ -309,7 +304,7 @@ impl Libraries {
 }
 
 fn import_failure_summary(failures: &[app::ImportFailure]) -> String {
-    let mut summary = failures.iter().take(3).map(crate::services::import_failure_message).collect::<Vec<_>>().join(". ");
+    let mut summary = failures.iter().take(3).map(import_failure_message).collect::<Vec<_>>().join(". ");
     if failures.len() > 3 {
         summary.push_str(&format!(". {} more imports failed.", failures.len() - 3));
     }
@@ -324,7 +319,7 @@ mod tests {
     fn import_warnings_limit_the_number_of_failures_shown() {
         let failures = (1..=100).map(|i| app::ImportFailure { kind: app::ImportFailureKind::File, path: vec![format!("Book {i}.epub")], diagnostic: None }).collect::<Vec<_>>();
         assert_eq!(import_failure_summary(&failures), "Could not import “Book 1.epub”. Could not import “Book 2.epub”. Could not import “Book 3.epub”. 97 more imports failed.");
-        assert_eq!(import_failure_summary(&failures[..1]), crate::services::import_failure_message(&failures[0]));
+        assert_eq!(import_failure_summary(&failures[..1]), import_failure_message(&failures[0]));
         assert_eq!(import_failure_summary(&[]), "");
     }
 

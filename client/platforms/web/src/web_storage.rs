@@ -1,6 +1,9 @@
 //! Browser SQLite VFS bootstrap. All higher-level behavior remains in the
 //! regular backend; this module only installs durable browser file semantics.
 
+use std::collections::HashMap;
+use std::io::{Error, SeekFrom};
+use std::time::Duration;
 use sqlite_wasm_vfs::sahpool::{install, OpfsSAHError, OpfsSAHPoolCfgBuilder, OpfsSAHPoolUtil};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -56,7 +59,7 @@ struct ReaderState {
 }
 
 thread_local! {
-    static READERS: RefCell<std::collections::HashMap<String, ReaderState>> = RefCell::new(std::collections::HashMap::new());
+    static READERS: RefCell<HashMap<String, ReaderState>> = RefCell::new(HashMap::new());
     static ASSET_INDEX: RefCell<Option<rusqlite::Connection>> = const { RefCell::new(None) };
     static STORAGE: RefCell<Option<Rc<OpfsSAHPoolUtil>>> = const { RefCell::new(None) };
 }
@@ -75,7 +78,7 @@ pub async fn initialize() -> Result<(), String> {
     ASSET_INDEX.with(|slot| *slot.borrow_mut() = Some(index));
     // Initialization must not wait for a library-wide object sweep.
     client_platform_runtime::executor::spawn_detached(async {
-        client_platform_runtime::executor::sleep(std::time::Duration::ZERO).await;
+        client_platform_runtime::executor::sleep(Duration::ZERO).await;
         if let Err(error) = reclaim_unreferenced_objects().await {
             log::warn!("Object reclamation will retry on next startup: {error}");
         }
@@ -98,7 +101,7 @@ async fn reclaim_unreferenced_objects() -> Result<(), String> {
         if !pinned && !published {
             remove_asset(&name).await.map_err(js_error)?;
         }
-        client_platform_runtime::executor::sleep(std::time::Duration::ZERO).await;
+        client_platform_runtime::executor::sleep(Duration::ZERO).await;
     }
     Ok(())
 }
@@ -278,20 +281,20 @@ impl Drop for FileReader {
 
 impl std::io::Read for FileReader {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-        let count = read_staged(&self.physical, self.position as f64, bytes).map_err(js_error).map_err(std::io::Error::other)?;
+        let count = read_staged(&self.physical, self.position as f64, bytes).map_err(js_error).map_err(Error::other)?;
         self.position += count as u64;
         Ok(count)
     }
 }
 
 impl std::io::Seek for FileReader {
-    fn seek(&mut self, from: std::io::SeekFrom) -> std::io::Result<u64> {
+    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
         let position = match from {
-            std::io::SeekFrom::Start(position) => Some(position),
-            std::io::SeekFrom::Current(offset) => self.position.checked_add_signed(offset),
-            std::io::SeekFrom::End(offset) => self.length.checked_add_signed(offset),
+            SeekFrom::Start(position) => Some(position),
+            SeekFrom::Current(offset) => self.position.checked_add_signed(offset),
+            SeekFrom::End(offset) => self.length.checked_add_signed(offset),
         }
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid asset seek"))?;
+        .ok_or_else(|| Error::new(std::io::ErrorKind::InvalidInput, "invalid asset seek"))?;
         self.position = position;
         Ok(position)
     }
