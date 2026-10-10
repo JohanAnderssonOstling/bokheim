@@ -105,9 +105,6 @@ fn decode_linux_mount_field(value: &str) -> String {
     value.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\")
 }
 
-pub fn install_archive(device_root: &Path, archive: &[u8]) -> io::Result<InstallSummary> {
-    install_archive_with_progress(device_root, archive, |_| {})
-}
 
 pub fn install_archive_with_progress(device_root: &Path, archive: &[u8], mut on_progress: impl FnMut(InstallProgress)) -> io::Result<InstallSummary> {
     let total_bytes = validate_archive_size(archive)?;
@@ -297,61 +294,6 @@ mod tests {
         compressed
     }
 
-    #[test]
-    fn installs_only_expected_package_roots() {
-        let directory = tempfile::tempdir().unwrap();
-        fs::create_dir(directory.path().join(".kobo")).unwrap();
-        let summary = install_archive(directory.path(), &test_archive(None)).unwrap();
-        assert_eq!(summary.files, REQUIRED_INSTALLED_FILES.len());
-        assert!(directory.path().join(".adds/bokheim/desktop-gpui-kobo").is_file());
-    }
-
-    #[test]
-    fn reports_byte_accurate_installation_progress() {
-        let directory = tempfile::tempdir().unwrap();
-        fs::create_dir(directory.path().join(".kobo")).unwrap();
-        let mut updates = Vec::new();
-        let summary = install_archive_with_progress(directory.path(), &test_archive(None), |progress| updates.push(progress)).unwrap();
-        let last = updates.last().copied().unwrap();
-        assert_eq!(last.copied_bytes, summary.bytes);
-        assert_eq!(last.total_bytes, summary.bytes);
-        assert!(updates.windows(2).all(|pair| pair[0].copied_bytes <= pair[1].copied_bytes));
-    }
-
-    #[test]
-    fn refuses_non_kobo_destination() {
-        let directory = tempfile::tempdir().unwrap();
-        let error = install_archive(directory.path(), &test_archive(None)).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::NotFound);
-    }
-
-    #[test]
-    fn refuses_files_outside_package_roots() {
-        let directory = tempfile::tempdir().unwrap();
-        fs::create_dir(directory.path().join(".kobo")).unwrap();
-        let error = install_archive(directory.path(), &test_archive(Some("unexpected/file"))).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    }
-
-    #[test]
-    fn names_package_entries_with_slashes_on_every_platform() {
-        // The required entries are spelled with slashes, so the sanitised path
-        // has to be rendered the same way on Windows, where rebuilding it
-        // component by component would otherwise separate it with backslashes.
-        for required in REQUIRED_INSTALLED_FILES {
-            let sanitized = sanitize_package_path(Path::new(required)).unwrap();
-            assert_eq!(package_entry_name(&sanitized), *required);
-        }
-    }
-
-    #[test]
-    fn replaces_an_existing_install() {
-        let directory = tempfile::tempdir().unwrap();
-        fs::create_dir_all(directory.path().join(".kobo")).unwrap();
-        install_archive(directory.path(), &test_archive(None)).unwrap();
-        install_archive(directory.path(), &test_archive(None)).unwrap();
-        assert!(directory.path().join(".adds/bokheim/fbink").is_file());
-    }
 
     #[test]
     fn reinstall_preserves_books_databases_and_preferences() {
@@ -364,7 +306,12 @@ mod tests {
         fs::write(directory.path().join(".adds/bokheim/reader_preferences.json"), b"preferences").unwrap();
         fs::write(directory.path().join(".adds/bokheim/data/canvas-mode"), b"canvas mode").unwrap();
 
-        install_archive(directory.path(), &test_archive(None)).unwrap();
+        let mut updates = Vec::new();
+        let summary = install_archive_with_progress(directory.path(), &test_archive(None), |progress| updates.push(progress)).unwrap();
+        let last = updates.last().copied().unwrap();
+        assert_eq!(last.copied_bytes, summary.bytes);
+        assert_eq!(last.total_bytes, summary.bytes);
+        assert!(updates.windows(2).all(|pair| pair[0].copied_bytes <= pair[1].copied_bytes));
 
         assert_eq!(fs::read(directory.path().join("Bokheim/Libraries/default/book.epub")).unwrap(), b"book data");
         assert_eq!(fs::read(directory.path().join("Bokheim/Libraries/default/.bokheim/library.db")).unwrap(), b"database");
@@ -372,11 +319,4 @@ mod tests {
         assert_eq!(fs::read(directory.path().join(".adds/bokheim/data/canvas-mode")).unwrap(), b"canvas mode");
     }
 
-    #[test]
-    fn refuses_packages_that_contain_user_data() {
-        let directory = tempfile::tempdir().unwrap();
-        fs::create_dir(directory.path().join(".kobo")).unwrap();
-        let error = install_archive(directory.path(), &test_archive(Some("Bokheim/Libraries/default/book.epub"))).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    }
 }

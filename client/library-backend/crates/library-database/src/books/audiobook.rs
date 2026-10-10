@@ -1,5 +1,6 @@
 //! Audiobook playback state and chapter navigation.
 
+use content_address::ContentHash;
 pub(crate) use crate::shared_sql::SharedSql;
 pub(crate) use crate::{Database, DatabaseError};
 pub(crate) use include_sqlite_sql::include_sql;
@@ -8,25 +9,11 @@ pub(crate) use library_model::BookTocEntry;
 // ---- audiobook ----
 // Cached audiobook playback metadata: chapters, duration, and recording narrator.
 //
-// Reading is one snapshot call; committing freshly inspected metadata is one
+// Reading is one call; committing freshly inspected metadata is one
 // write call with its own transaction. Callers never hold a connection or
 // transaction across the inspection work that produces the metadata.
 
-pub(crate) use library_model::AudiobookChapter;
-
-/// Everything needed to open playback: whether the book is an audiobook, its
-/// display title/author, and any already-cached chapter/duration/narrator data.
-pub struct AudiobookPlaybackSnapshot {
-    pub title: String,
-    pub author: String,
-    pub cached: Option<AudiobookPlaybackMetadata>,
-}
-
-pub struct AudiobookPlaybackMetadata {
-    pub duration_ms: u64,
-    pub chapters: Vec<AudiobookChapter>,
-    pub narrator: Option<String>,
-}
+pub(crate) use book_model::AudiobookChapter;
 
 /// A chapter is an interval; a navigation entry is a point. The end is the next
 /// chapter's start, and the last chapter runs to the end of the audio.
@@ -41,81 +28,50 @@ pub fn chapters_from_navigation(entries: &[BookTocEntry], duration_ms: u64) -> V
 
 /// The file's chapters as the navigation every format shares: a title and the
 /// offset it opens at, flat, because an M4B chapter list has no nesting.
-pub(crate) fn navigation_from_chapters(chapters: &[book_metadata::AudiobookChapterMetadata]) -> Vec<BookTocEntry> {
+pub(crate) fn navigation_from_chapters(chapters: &[AudiobookChapter]) -> Vec<BookTocEntry> {
     chapters.iter().map(|chapter| BookTocEntry { title: chapter.title.clone(), target: book_model::audiobook_toc_target(chapter.start_ms), children: Vec::new() }).collect()
 }
 
 impl Database {
-    /// Everything a playback session needs to decide whether it must inspect
-    /// the file: title/author for display, and cached chapters if present.
-    pub fn audiobook_playback_snapshot(&self, hash: &sync_common::ContentHash) -> Result<AudiobookPlaybackSnapshot, DatabaseError> {
+    /// Everything a player needs to open the book without inspecting its
+    /// file, except the cover, which lives in asset storage. `None` until the
+    /// file's chapters and duration have been cached.
+    pub fn audiobook_playback_metadata(&self, hash: &sync_common::ContentHash) -> Result<Option<library_model::PlaybackMetadata>, DatabaseError> {
+        let mut cached_row = None;
+        self.connection.audiobook_cached_metadata(hash, |row| {
+            cached_row = Some((row.get::<_, i64>(0)?, row.get::<_, String>(1)?));
+            Ok(())
+        })?;
+        let Some((duration_ms, toc_json)) = cached_row else { return Ok(None) };
+        let entries: Vec<BookTocEntry> = serde_json::from_str(&toc_json).map_err(DatabaseError::operation)?;
+        let chapters = chapters_from_navigation(&entries, duration_ms.max(0) as u64);
+        let mut evidence = None;
+        self.connection.shared_audiobook_recording_evidence(hash, |row| {
+            evidence = row.get::<_, Option<String>>(0)?;
+            Ok(())
+        })?;
+        let narrator = evidence.and_then(|json| serde_json::from_str::<metadata_contract::audible::LookupRequest>(&json).ok()).and_then(|request| request.recording.narrators.into_iter().next());
         let mut title_author = None;
-        self.connection.audiobook_playback_title_author(hash.as_str(), |row| {
+        self.connection.audiobook_playback_title_author(hash, |row| {
             title_author = Some((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
             Ok(())
         })?;
         let (title, author) = title_author.unwrap_or_default();
-        let mut cached_row = None;
-        self.connection.audiobook_cached_metadata(hash.as_str(), |row| {
-            cached_row = Some((row.get::<_, i64>(0)?, row.get::<_, String>(1)?));
-            Ok(())
-        })?;
-        let cached = match cached_row {
-            Some((duration_ms, toc_json)) => {
-                let entries: Vec<BookTocEntry> = serde_json::from_str(&toc_json).map_err(DatabaseError::operation)?;
-                let chapters = chapters_from_navigation(&entries, duration_ms.max(0) as u64);
-                let mut evidence = None;
-                self.connection.shared_audiobook_recording_evidence(hash.as_str(), |row| {
-                    evidence = row.get::<_, Option<String>>(0)?;
-                    Ok(())
-                })?;
-                let narrator = evidence.and_then(|json| serde_json::from_str::<metadata_contract::audible::LookupRequest>(&json).ok()).and_then(|request| request.recording.narrators.into_iter().next());
-                Some(AudiobookPlaybackMetadata { duration_ms: duration_ms as u64, chapters, narrator })
-            }
-            None => None,
-        };
-        Ok(AudiobookPlaybackSnapshot { title, author, cached })
-    }
-
-    /// Commits freshly inspected audiobook metadata and returns the resulting
-    /// playback facts in one call. Opens and commits its own transaction; the
-    /// inspection that produced `metadata` must already be finished.
-    pub fn commit_audiobook_metadata(&self, hash: &sync_common::ContentHash, metadata: &book_metadata::AudiobookMetadata) -> Result<AudiobookPlaybackMetadata, DatabaseError> {
-        let entries = navigation_from_chapters(&metadata.chapters);
-        self.write(|transaction| {
-            let tracks = if metadata.tracks.is_empty() {
-                let current = crate::sync::apply::registers::canonical_body(transaction, "book_toc", hash.as_str(), "")?;
-                current.map(|(bytes, _)| sync_common::wire::decode::<library_replica::LibraryStateEntry>(&bytes, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)).transpose()?.and_then(|body| match body {
-                    library_replica::LibraryStateEntry::BookToc { value, .. } => value.tracks,
-                    _ => None,
-                })
-            } else {
-                Some(metadata.tracks.clone())
-            };
-            crate::sync::apply::registers::record_local(
-                transaction,
-                library_replica::LibraryStateEntry::BookToc { content_hash: *hash, value: book_model::BookTocDocument { entries: entries.clone(), duration_ms: Some(metadata.duration_ms), tracks } },
-            )?;
-            let request_json = serde_json::to_string(&metadata.audible_lookup_request()).map_err(DatabaseError::operation)?;
-            transaction.audiobook_record_recording(hash.as_str(), &request_json)?;
-            Ok(())
-        })?;
-        // Projection has put back chapters from a matched recording, if any.
-        let mut projected = None;
-        self.connection.audiobook_cached_metadata(hash.as_str(), |row| {
-            projected = Some(row.get::<_, String>(1)?);
-            Ok(())
-        })?;
-        let entries = match projected {
-            Some(json) => serde_json::from_str(&json).map_err(DatabaseError::operation)?,
-            None => entries,
-        };
-        Ok(AudiobookPlaybackMetadata { duration_ms: metadata.duration_ms, chapters: chapters_from_navigation(&entries, metadata.duration_ms), narrator: metadata.recording.narrators.first().cloned() })
+        Ok(Some(library_model::PlaybackMetadata {
+            format: self.book_format(hash)?.unwrap_or(book_model::BookFormat::M4b),
+            title,
+            author,
+            narrator,
+            duration_ms: duration_ms as u64,
+            chapters,
+            tracks: self.audiobook_tracks(hash)?,
+            cover: Vec::new(),
+        }))
     }
 
     pub fn audiobook_tracks(&self, hash: &sync_common::ContentHash) -> Result<Vec<book_model::AudiobookTrack>, DatabaseError> {
         let mut tracks = None;
-        self.connection.audiobook_track_index_select(hash.as_str(), |row| {
+        self.connection.audiobook_track_index_select(hash, |row| {
             tracks = Some(serde_json::from_str::<Vec<book_model::AudiobookTrack>>(&row.get::<_, String>(0)?).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?);
             Ok(())
         })?;
@@ -124,10 +80,3 @@ impl Database {
 }
 
 include_sql!("src/books/sql/audiobook.sql");
-
-#[cfg(test)]
-impl Database {
-    pub(crate) fn audiobook_chapters(&self, hash: &sync_common::ContentHash) -> Result<Vec<AudiobookChapter>, DatabaseError> {
-        Ok(self.audiobook_playback_snapshot(hash)?.cached.map(|metadata| metadata.chapters).unwrap_or_default())
-    }
-}

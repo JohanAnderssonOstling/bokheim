@@ -1,0 +1,265 @@
+{
+  "scope": "Apply all user-approved groups from the saved plan, transferring all classification mappings to existing parents.",
+  "before_concepts": 15713,
+  "after_concepts": 15673,
+  "groups": [
+    {
+      "name": "Art and object exhibition records",
+      "absorbed_subjects": 9
+    },
+    {
+      "name": "Periodicals, handbooks and reference detail",
+      "absorbed_subjects": 10
+    },
+    {
+      "name": "Technical and commercial information resources",
+      "absorbed_subjects": 4
+    },
+    {
+      "name": "Early scientific works",
+      "absorbed_subjects": 8
+    },
+    {
+      "name": "Art and photographic collection formats",
+      "absorbed_subjects": 6
+    },
+    {
+      "name": "Medical-office administration",
+      "absorbed_subjects": 3
+    }
+  ],
+  "merges": {
+    "6416": {
+      "into": 1039,
+      "old_label": "Exhibitions by place held",
+      "surviving_label": "Watercolor Painting"
+    },
+    "6608": {
+      "into": 653,
+      "old_label": "Museums",
+      "surviving_label": "Furniture"
+    },
+    "6754": {
+      "into": 653,
+      "old_label": "Exhibitions by place held",
+      "surviving_label": "Furniture"
+    },
+    "6805": {
+      "into": 1048,
+      "old_label": "Exhibitions by place held",
+      "surviving_label": "Printmaking & engraving"
+    },
+    "7445": {
+      "into": 659,
+      "old_label": "Exhibitions by Place",
+      "surviving_label": "Tapestries"
+    },
+    "7741": {
+      "into": 1048,
+      "old_label": "Museums. Collections",
+      "surviving_label": "Printmaking & engraving"
+    },
+    "8299": {
+      "into": 671,
+      "old_label": "Museums & collections",
+      "surviving_label": "Posters"
+    },
+    "8626": {
+      "into": 659,
+      "old_label": "Museums",
+      "surviving_label": "Tapestries"
+    },
+    "8824": {
+      "into": 670,
+      "old_label": "Exhibitions by place held",
+      "surviving_label": "Visual Humor & Caricature"
+    },
+    "13526": {
+      "into": 55018,
+      "old_label": "Journals by Language",
+      "surviving_label": "Scientific Reference & Publishing"
+    },
+    "13553": {
+      "into": 55018,
+      "old_label": "Terminology",
+      "surviving_label": "Scientific Reference & Publishing"
+    },
+    "10893": {
+      "into": 5532,
+      "old_label": "Terminology",
+      "surviving_label": "Reference"
+    },
+    "52839": {
+      "into": 5229,
+      "old_label": "Banking Periodicals",
+      "surviving_label": "Banking"
+    },
+    "52854": {
+      "into": 11761,
+      "old_label": "Periodicals",
+      "surviving_label": "Socialism & Communism"
+    },
+    "52878": {
+      "into": 5183,
+      "old_label": "Investment Periodicals",
+      "surviving_label": "Investments & Securities"
+    },
+    "53462": {
+      "into": 55043,
+      "old_label": "Handbooks",
+      "surviving_label": "Business Learning & Reference"
+    },
+    "6113": {
+      "into": 6106,
+      "old_label": "Handbooks",
+      "surviving_label": "Foundations & Professional Study"
+    },
+    "6199": {
+      "into": 2208,
+      "old_label": "U.S. Education History Miscellany",
+      "surviving_label": "U.S. Education History"
+    },
+    "53350": {
+      "into": 5036,
+      "old_label": "Geomagnetism Reference & Study",
+      "surviving_label": "Geophysics"
+    },
+    "6836": {
+      "into": 301,
+      "old_label": "Information services",
+      "surviving_label": "Environmental protection"
+    },
+    "6996": {
+      "into": 405,
+      "old_label": "Terminology & Symbols",
+      "surviving_label": "Aeronautical Engineering"
+    },
+    "52715": {
+      "into": 5083,
+      "old_label": "Commerce Information Services",
+      "surviving_label": "Commerce"
+    },
+    "8081": {
+      "into": 4686,
+      "old_label": "Printing Recipes & Handbooks",
+      "surviving_label": "Practical printing"
+    },
+    "6092": {
+      "into": 6073,
+      "old_label": "Early Works",
+      "surviving_label": "Electricity"
+    },
+    "6644": {
+      "into": 4793,
+      "old_label": "Early works through 1860",
+      "surviving_label": "Evolution"
+    },
+    "7262": {
+      "into": 5033,
+      "old_label": "Early works through 1800",
+      "surviving_label": "Experimental & Descriptive Mechanics"
+    },
+    "8294": {
+      "into": 5040,
+      "old_label": "Early works through 1800",
+      "surviving_label": "Optics"
+    },
+    "8940": {
+      "into": 4787,
+      "old_label": "Early works through 1800",
+      "surviving_label": "Practical & Spherical Astronomy"
+    },
+    "9121": {
+      "into": 4923,
+      "old_label": "Early works through 1800",
+      "surviving_label": "Analytic mechanics"
+    },
+    "9415": {
+      "into": 4908,
+      "old_label": "Early works",
+      "surviving_label": "Paleontology"
+    },
+    "13542": {
+      "into": 55018,
+      "old_label": "Early works through 1800",
+      "surviving_label": "Scientific Reference & Publishing"
+    },
+    "916": {
+      "into": 920,
+      "old_label": "Annuals",
+      "surviving_label": "Collections, Catalogs, Exhibitions"
+    },
+    "921": {
+      "into": 920,
+      "old_label": "Group Shows",
+      "surviving_label": "Collections, Catalogs, Exhibitions"
+    },
+    "922": {
+      "into": 920,
+      "old_label": "Permanent Collections",
+      "surviving_label": "Collections, Catalogs, Exhibitions"
+    },
+    "975": {
+      "into": 998,
+      "old_label": "Annuals",
+      "surviving_label": "Collections, Catalogs, Exhibitions"
+    },
+    "999": {
+      "into": 998,
+      "old_label": "Group Shows",
+      "surviving_label": "Collections, Catalogs, Exhibitions"
+    },
+    "1000": {
+      "into": 998,
+      "old_label": "Permanent Collections",
+      "surviving_label": "Collections, Catalogs, Exhibitions"
+    },
+    "6355": {
+      "into": 2739,
+      "old_label": "Medical Office Staff",
+      "surviving_label": "Medical Practice"
+    },
+    "8729": {
+      "into": 2739,
+      "old_label": "Corporate Medical Practice",
+      "surviving_label": "Medical Practice"
+    },
+    "9120": {
+      "into": 2739,
+      "old_label": "Physician Fees & Income",
+      "surviving_label": "Medical Practice"
+    }
+  },
+  "validation": {
+    "integrity_check": "ok",
+    "foreign_key_violations": 0,
+    "exact_row_remapping": true,
+    "range_multiplicity_preserved": true,
+    "surviving_ids_and_autoincrement_preserved": true,
+    "only_childless_subjects_removed": true,
+    "production_matcher": {
+      "probes": 172771,
+      "changed_destinations": 272,
+      "unexpected_changes": 0,
+      "coverage_losses": 0,
+      "coverage_gains": 0,
+      "scope": "Stored selectors, structured range endpoints and full spans, adjacent numeric boundaries, author work/year/volume and malformed notation probes. Full observed-code cache unavailable."
+    },
+    "full_usage_refresh": "Local OpenLibrary code-usage cache unavailable; viewer regenerated without usage counts and historical usage TSV retained.",
+    "viewer": {
+      "subjects": 15673,
+      "usage_counts_visible": false,
+      "all_40_absorbed_subjects_absent": true,
+      "selector_counts_verified_in_staging": true
+    },
+    "rust_tests": {
+      "command": "cargo test --offline -p subject-projection --lib",
+      "passed": 34,
+      "failed": 0
+    }
+  },
+  "plan": "shared/subject-projection/data/reports/20261007-further-absorption-candidates.json",
+  "before_sha256": "4005d6a4ea197883f14efeb7d66230f9a1275f213f28b02911f639eee6fc2374",
+  "after_sha256": "76360c083643dad081be951c134aed52d43a7fc845493a5c1e528efda50616a0",
+  "recoverable_before_snapshot": "/tmp/taxonomy-further-install-20261007/before.sqlite3"
+}

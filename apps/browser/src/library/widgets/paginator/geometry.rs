@@ -3,7 +3,7 @@
 //!
 //! Grid groups resolve a column count and shared width. Intrinsic groups pack
 //! measured child widths in reading order with fixed gaps. Both use the same
-//! row-height and group-header budget for pagination.
+//! row-height budget for pagination.
 
 use gpui::{Pixels, px};
 
@@ -155,7 +155,7 @@ fn forward_page_rows(data: &PaginatorData, geometries: &[GroupGeometry], child_o
         };
         let mut candidate = rows.clone();
         candidate.push(row);
-        if rows_height(data, &candidate, rem_size) > available_height.max(px(1.0)) && (!rows.is_empty() || data.groups[candidate[0].group_index].header_sizing.is_some()) {
+        if rows_height(data, &candidate, rem_size) > available_height.max(px(1.0)) && !rows.is_empty() {
             break;
         }
         rows = candidate;
@@ -185,8 +185,7 @@ fn backward_page_start(data: &PaginatorData, geometries: &[GroupGeometry], page_
         // that straddle a group boundary take the larger of the two policies.
         let boundary_gap = adjacent_group.map_or(0.0, |next| f32::from(data.groups[next].policy.row_gap).max(row_gap));
 
-        let header = f32::from(header_height(data, group_index, geometry.child_width, rem_size));
-        let available = budget - used - boundary_gap - header;
+        let available = budget - used - boundary_gap;
         let mut fit = if available < 0.0 { 0 } else { ((available + row_gap) / (row_height + row_gap)).floor() as usize };
         if let Some(maximum_rows) = maximum_rows {
             fit = fit.min(maximum_rows.saturating_sub(rows_taken));
@@ -218,14 +217,14 @@ fn backward_page_start(data: &PaginatorData, geometries: &[GroupGeometry], page_
         let mut take = fit.min(need);
         if take == 0 {
             // A page is never empty, even when its only row is too tall.
-            if rows_taken > 0 || group.header_sizing.is_some() {
+            if rows_taken > 0 {
                 break;
             }
             take = 1;
         }
 
         start = if group.policy.intrinsic { starts[take - 1] } else { start - (take * columns).min(children_here) };
-        used += header + take as f32 * row_height + take.saturating_sub(1) as f32 * row_gap + boundary_gap;
+        used += take as f32 * row_height + take.saturating_sub(1) as f32 * row_gap + boundary_gap;
         rows_taken += take;
         adjacent_group = Some(group_index);
         if take < need {
@@ -248,246 +247,13 @@ fn backward_page_rows(data: &PaginatorData, geometries: &[GroupGeometry], child_
     forward_rows_in_range(data, geometries, start, page_end)
 }
 
-pub(super) fn header_height(data: &PaginatorData, group_index: usize, width: Pixels, rem_size: Pixels) -> Pixels {
-    data.groups[group_index].header_sizing.map_or(Pixels::ZERO, |sizing| sizing.height(width, rem_size))
-}
-
-/// A header is charged once per visible group segment, including continuations.
-pub(super) fn row_header_height(data: &PaginatorData, previous: Option<&AssignedRow>, row: &AssignedRow, rem_size: Pixels) -> Pixels {
-    if previous.is_none_or(|previous| previous.group_index != row.group_index) { header_height(data, row.group_index, row.child_width, rem_size) } else { Pixels::ZERO }
-}
-
 pub(super) fn rows_height(data: &PaginatorData, rows: &[AssignedRow], rem_size: Pixels) -> Pixels {
     let mut height = Pixels::ZERO;
     for (index, row) in rows.iter().enumerate() {
-        height += row_header_height(data, index.checked_sub(1).map(|i| &rows[i]), row, rem_size);
         height += data.groups[row.group_index].policy.sizing.height(row.child_width, rem_size);
         if let Some(next) = rows.get(index + 1) {
             height += gap_between(data, row, next);
         }
     }
     height
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::library::widgets::shelf_card_policy;
-    use crate::library::widgets::{PaginatorSizing, PaginatorWidthPolicy};
-    use gpui::rems;
-
-    fn header_fixture() -> PaginatorData {
-        use crate::library::widgets::{PaginatorChild, PaginatorGroup};
-        use gpui::{IntoElement, div};
-        let policy = PaginatorGroupPolicy::new(PaginatorWidthPolicy::pixels(px(100.0)), PaginatorSizing::pixels(px(40.0)), px(8.0)).flush_edges();
-        let children = |count| (0..count).map(|_| PaginatorChild::new(|_, _, _| div().into_any_element())).collect::<Vec<_>>();
-        PaginatorData::new([
-            PaginatorGroup::new(policy, children(8)).with_header(PaginatorSizing::pixels(px(30.0)), |_, _| div().into_any_element()),
-            PaginatorGroup::new(policy, children(6)).with_header(PaginatorSizing::pixels(px(30.0)), |_, _| div().into_any_element()),
-            PaginatorGroup::new(policy, children(2)),
-        ])
-    }
-
-    #[test]
-    fn intrinsic_rows_pack_widths_and_cap_oversized_children() {
-        use crate::library::widgets::{PaginatorChild, PaginatorGroup};
-        use gpui::{IntoElement, div};
-        let policy = PaginatorGroupPolicy::new(PaginatorWidthPolicy::pixels(px(1.0)), PaginatorSizing::pixels(px(40.0)), px(8.0)).intrinsic().with_gap(px(8.0)).with_edge_inset(px(8.0));
-        let children = [60.0, 80.0, 120.0, 40.0, 900.0, 70.0, 60.0].map(|width| {
-            let child = PaginatorChild::new(|_, _, _| div().into_any_element());
-            child.measured_width.set(px(width));
-            child
-        });
-        let data = PaginatorData::new([PaginatorGroup::new(policy, children).with_header(PaginatorSizing::pixels(px(30.0)), |_, _| div().into_any_element())]);
-        let mut paginator = super::super::Paginator::new("intrinsic-navigation", []);
-        paginator.data = std::rc::Rc::new(data);
-        paginator.prefetched = Some(super::super::PrefetchKey { children_revision: 0, page: super::super::VisiblePage { first_child: 0, last_child: 6 }, width: px(300.0), height: px(500.0), rem_size: px(16.0) });
-        use super::super::CursorMove;
-        assert_eq!(paginator.cursor_target(2, CursorMove::Down), Some(3));
-        assert_eq!(paginator.cursor_target(3, CursorMove::Up), Some(0));
-        assert_eq!(paginator.cursor_target(4, CursorMove::Down), Some(6));
-        assert_eq!(paginator.cursor_target(0, CursorMove::Up), None);
-        paginator.visible_page = Some(super::super::VisiblePage { first_child: 3, last_child: 6 });
-        assert_eq!(paginator.cursor_target(3, CursorMove::Up), Some(0));
-        let data = &paginator.data;
-        let geometries = group_geometries(&data, px(300.0), px(16.0));
-        let rows = forward_rows_in_range(&data, &geometries, 0, 7);
-        assert_eq!(rows.iter().map(|r| r.items.len()).collect::<Vec<_>>(), [3, 1, 1, 2]);
-        assert_eq!(rows[0].items.iter().map(|i| i.width).collect::<Vec<_>>(), [px(60.0), px(80.0), px(120.0)]);
-        assert_eq!(rows[0].items[2].x, px(164.0));
-        assert_eq!(rows[2].items[0].width, px(284.0));
-        for width in [100.0, 180.0, 300.0, 600.0] {
-            let geometries = group_geometries(&data, px(width), px(16.0));
-            for end in 1..=7 {
-                for height in [69.0, 70.0, 118.0, 166.0] {
-                    let rows = page_rows(&data, &geometries, AssignmentDirection::Backward, end - 1, None, px(height), px(16.0));
-                    if height < 70.0 {
-                        assert!(rows.is_empty());
-                        continue;
-                    }
-                    assert_eq!(rows.last().unwrap().items.last().unwrap().child_index, end - 1);
-                    assert!(rows_height(&data, &rows, px(16.0)) <= px(height));
-                    let start = rows[0].items[0].child_index;
-                    let forward = page_rows(&data, &geometries, AssignmentDirection::Forward, start, None, px(height), px(16.0));
-                    assert!(forward.last().unwrap().items.last().unwrap().child_index >= end - 1);
-                    for row in rows {
-                        assert!(row.items.last().unwrap().x + row.items.last().unwrap().width <= px(width - 8.0));
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn cloning_groups_preserves_headers_and_empty_groups_stay_invisible() {
-        use crate::library::widgets::{Paginator, PaginatorChild, PaginatorGroup};
-        use gpui::{IntoElement, div};
-        let policy = PaginatorGroupPolicy::new(PaginatorWidthPolicy::pixels(px(100.0)), PaginatorSizing::pixels(px(40.0)), px(8.0));
-        let groups = [
-            PaginatorGroup::new(policy, []).with_header(PaginatorSizing::pixels(px(30.0)), |_, _| div().into_any_element()),
-            PaginatorGroup::new(policy, [PaginatorChild::new(|_, _, _| div().into_any_element())]).with_header(PaginatorSizing::pixels(px(30.0)), |_, _| div().into_any_element()),
-        ];
-        let paginator = Paginator::new("clone-headers", groups);
-        let data = PaginatorData::new(paginator.cloned_groups());
-        assert_eq!(data.groups.len(), 1);
-        assert_eq!(data.children.len(), 1);
-        assert!(data.headers[0].is_some());
-        assert_eq!(header_height(&data, 0, px(100.0), px(16.0)), px(30.0));
-    }
-
-    #[test]
-    fn headers_repeat_on_continuations_without_taking_child_indices() {
-        let data = header_fixture();
-        let geometries = group_geometries(&data, px(240.0), px(16.0));
-        let page = |start| page_rows(&data, &geometries, AssignmentDirection::Forward, start, None, px(118.0), px(16.0));
-        let first = page(0);
-        let second = page(4);
-        assert_eq!(first.len(), 2);
-        assert_eq!(second.len(), 2);
-        assert_eq!(first[0].items[0].child_index, 0);
-        assert_eq!(second[0].items[0].child_index, 4);
-        assert_eq!(rows_height(&data, &first, px(16.0)), px(118.0));
-        assert_eq!(rows_height(&data, &second, px(16.0)), px(118.0));
-        assert_eq!(row_header_height(&data, None, &second[0], px(16.0)), px(30.0));
-        assert_eq!(row_header_height(&data, Some(&second[0]), &second[1], px(16.0)), Pixels::ZERO);
-        assert_eq!(data.children.len(), 16);
-    }
-
-    #[test]
-    fn headers_and_first_rows_move_together_at_page_boundaries() {
-        let data = header_fixture();
-        let geometries = group_geometries(&data, px(240.0), px(16.0));
-        for direction in [AssignmentDirection::Forward, AssignmentDirection::Backward] {
-            let offset = if matches!(direction, AssignmentDirection::Forward) { 0 } else { 7 };
-            assert!(page_rows(&data, &geometries, direction, offset, None, px(69.0), px(16.0)).is_empty());
-            let exact = page_rows(&data, &geometries, direction, offset, None, px(70.0), px(16.0));
-            assert_eq!(exact.len(), 1);
-            assert_eq!(rows_height(&data, &exact, px(16.0)), px(70.0));
-        }
-        // Last row of first group fits; the next group's header + row does not.
-        let page = page_rows(&data, &geometries, AssignmentDirection::Forward, 6, None, px(147.0), px(16.0));
-        assert_eq!(page.len(), 1);
-        let page = page_rows(&data, &geometries, AssignmentDirection::Forward, 6, None, px(148.0), px(16.0));
-        assert_eq!(page.len(), 2);
-        assert_ne!(page[0].group_index, page[1].group_index);
-        assert_eq!(rows_height(&data, &page, px(16.0)), px(148.0));
-    }
-
-    #[test]
-    fn forward_and_backward_header_costs_agree_across_group_boundaries() {
-        let data = header_fixture();
-        for width in [120.0, 240.0, 450.0] {
-            let geometries = group_geometries(&data, px(width), px(16.0));
-            for height in [70.0, 118.0, 148.0, 200.0, 500.0] {
-                for end in 1..=data.children.len() {
-                    let backward = page_rows(&data, &geometries, AssignmentDirection::Backward, end - 1, None, px(height), px(16.0));
-                    if backward.is_empty() {
-                        continue;
-                    }
-                    let start = backward[0].items[0].child_index;
-                    let forward = forward_rows_in_range(&data, &geometries, start, end);
-                    assert_eq!(rows_height(&data, &backward, px(16.0)), rows_height(&data, &forward, px(16.0)));
-                    assert!(rows_height(&data, &backward, px(16.0)) <= px(height));
-                    let fitting = page_rows(&data, &geometries, AssignmentDirection::Forward, start, None, px(height), px(16.0));
-                    assert!(fitting.last().unwrap().items.last().unwrap().child_index >= end - 1);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn book_slack_grows_cards_by_up_to_25_percent_then_expands_gaps() {
-        for policy in [
-            crate::library::widgets::book_card_policy(app_preferences::CoverText::Always),
-            shelf_card_policy(app_preferences::CoverText::Always),
-            shelf_card_policy(app_preferences::CoverText::CoverOnly),
-        ] {
-            for rem_size in [px(16.0), px(20.0)] {
-                let width = policy.width.width(rem_size);
-                assert_eq!(width, policy.width.width(px(16.0)), "book widths must not scale with text");
-                let exact = width * 3.0 + policy.column_gap * 2.0;
-                let first = group_geometry(policy, 0, exact, rem_size);
-                let wider = group_geometry(policy, 0, exact + px(60.0), rem_size);
-                assert_eq!(first.columns, 3);
-                assert_eq!(wider.columns, 3);
-                assert_eq!(first.child_width, width);
-                assert_eq!(wider.child_width, width + px(20.0));
-                assert_eq!(wider.column_gap, first.column_gap);
-                let maximum = width * 1.25;
-                let capped = group_geometry(policy, 0, maximum * 3.0 + policy.column_gap * 2.0 + px(12.0), rem_size);
-                assert_eq!(capped.columns, 3);
-                assert_eq!(capped.child_width, maximum);
-                assert_eq!(capped.column_gap, policy.column_gap + px(6.0));
-                assert_eq!(wider.leading, Pixels::ZERO);
-                assert!(policy.sizing.height(wider.child_width, rem_size) > policy.sizing.height(first.child_width, rem_size));
-                let fourth = group_geometry(policy, 0, width * 4.0 + policy.column_gap * 3.0, rem_size);
-                assert_eq!(fourth.columns, 4);
-                assert_eq!(fourth.child_width, width);
-            }
-        }
-    }
-
-    /// A shelf row holds a second paginator, and its cards stretch. A row that
-    /// reserved their nominal height would clip the bottom of every stretched
-    /// cover and the title under it, so the row is measured against what the
-    /// cards actually resolve to — at every width, not just the nominal one.
-    #[test]
-    fn shelf_rows_are_as_tall_as_the_cards_they_hold() {
-        let rem_size = px(16.0);
-        for cover_text in [app_preferences::CoverText::Always, app_preferences::CoverText::CoverOnly] {
-            let cards = shelf_card_policy(cover_text);
-            let row = crate::library::widgets::shelf_rows_policy(cover_text);
-            let heading = px(16.0 * ui_components::SHELF_HEADING_HEIGHT_REM + ui_components::CAROUSEL_CONTENT_GAP);
-            // Nominal, stretched, and capped: the three widths a card resolves to.
-            let nominal = px(ui_components::BOOK_CARD_WIDTH) * 4.0 + cards.column_gap * 3.0;
-            for width in [nominal, nominal + px(120.0), px(4000.0)] {
-                let card = cards.sizing.height(group_geometry(cards, 0, width, rem_size).child_width, rem_size);
-                assert_eq!(row.sizing.height(width, rem_size), heading + card, "a {width:?} row must be its heading over a {card:?} card");
-            }
-            let stretched = row.sizing.height(nominal + px(120.0), rem_size);
-            assert!(stretched > row.sizing.height(nominal, rem_size), "a row whose cards stretched must grow with them");
-        }
-    }
-
-    #[test]
-    fn mobile_book_carousels_keep_two_cards_visible() {
-        for cover_text in [app_preferences::CoverText::Always, app_preferences::CoverText::CoverOnly] {
-            let policy = shelf_card_policy(cover_text);
-            for width in [280.0, 320.0, 390.0] {
-                let geometry = group_geometry(policy, 0, px(width), px(16.0));
-                assert_eq!(geometry.columns, 2);
-                assert!(geometry.child_width * 2.0 <= px(width));
-            }
-        }
-    }
-
-    #[test]
-    fn mobile_chips_fit_two_columns_for_single_and_multiple_rows() {
-        let policy = PaginatorGroupPolicy::new(PaginatorWidthPolicy::new(rems(24.5)), PaginatorSizing::rems(rems(3.5)), px(4.0)).with_gap(px(4.0)).with_minimum_columns(2).flush_edges();
-        for width in [280.0, 320.0, 390.0] {
-            let geometry = group_geometry(policy, 0, px(width), px(16.0));
-            assert_eq!(geometry.columns, 2);
-            assert_eq!(geometry.child_width * 2.0 + geometry.column_gap, px(width));
-        }
-    }
 }

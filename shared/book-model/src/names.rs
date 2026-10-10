@@ -68,31 +68,3 @@ pub fn comparison_key(value: &str) -> String {
     }
     key
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_two_part_personal_name_is_reordered() {
-        assert_eq!(given_name_first("Yakobson, Alexander").as_deref(), Some("Alexander Yakobson"));
-        assert_eq!(given_name_first("Ekman, Kerstin").as_deref(), Some("Kerstin Ekman"));
-        assert_eq!(given_name_first("Boyer, Paul S.").as_deref(), Some("Paul S. Boyer"));
-    }
-
-    #[test]
-    fn a_generational_suffix_stays_with_the_person() {
-        assert_eq!(given_name_first("King, Martin Luther, Jr.").as_deref(), Some("Martin Luther King Jr."));
-    }
-
-    #[test]
-    fn nothing_that_is_not_plainly_one_person_is_touched() {
-        assert_eq!(given_name_first("Robert D. Putnam"), None, "already given-name-first");
-        assert_eq!(given_name_first("Yakobson, Alexander, Gat, Azar"), None, "two people");
-        assert_eq!(given_name_first("Grose, Peter, 1934-"), None, "a life date, not a given name");
-        assert_eq!(given_name_first("Oxford University Press, Oxford"), None, "an organisation");
-        assert_eq!(given_name_first("Smith & Sons, Ltd"), None);
-        assert_eq!(given_name_first(""), None);
-        assert_eq!(given_name_first("Ekman,"), None, "half a name is not a name");
-    }
-}

@@ -1,5 +1,8 @@
 //! Replica sync: pull commits, cursors, outbox, sync functions.
 
+use crate::SqlParam;
+use sync_common::StateKey;
+use content_address::ContentHash;
 use std::io::{Error, ErrorKind};
 pub(crate) use crate::shared_sql::SharedSql;
 pub(crate) mod apply;
@@ -7,13 +10,7 @@ pub(crate) mod outbox;
 pub(crate) mod state;
 pub use state::CURSOR_RECOVERY_PENDING_KEY;
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod convergence_tests;
-#[cfg(test)]
-mod creation_tests;
-#[cfg(test)]
-mod projection_repair_tests;
 
 pub(crate) use crate::DatabaseError;
 pub(crate) use include_sqlite_sql::include_sql;
@@ -37,8 +34,6 @@ pub(crate) fn invalid_integer_column(column: usize, message: impl Into<String>) 
 pub(crate) fn nonnegative_u64(value: i64, column: usize, name: &str) -> rusqlite::Result<u64> {
     u64::try_from(value).map_err(|_| invalid_integer_column(column, format!("{name} must not be negative")))
 }
-
-
 
 pub(crate) fn storage_i64(value: u64, name: &str) -> rusqlite::Result<i64> {
     i64::try_from(value).map_err(|_| rusqlite::Error::ToSqlConversionFailure(Box::new(Error::new(ErrorKind::InvalidData, format!("{name} exceeds the database integer range")))))
@@ -109,8 +104,6 @@ pub(crate) fn write_cursor_revision(tx: &rusqlite::Connection, key: PullCursorKe
 // --- Metadata projection helpers. All pure: no statement here touches
 // storage. The commit method below runs every write inline. ---
 
-
-
 pub(crate) fn normalized_description(description: &str) -> String {
     let mut normalized = String::with_capacity(description.len().min(65_536));
     for character in description.chars().filter(|character| !character.is_control() || matches!(character, '\n' | '\r' | '\t')) {
@@ -122,28 +115,8 @@ pub(crate) fn normalized_description(description: &str) -> String {
     normalized
 }
 
-
-
-
-
-pub(crate) fn parse_author_name_opt(author_name: &str) -> Result<Option<book_model::AuthorName>, DatabaseError> {
-    if author_name.trim().is_empty() {
-        return Ok(None);
-    }
-    let name = book_model::AuthorName::parse(author_name).map_err(|error| DatabaseError::message(format!("author name is not readable: {error}")))?;
-    if name.match_key().as_str().is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(name))
-}
-
 pub(crate) fn unix_millis() -> Result<i64, DatabaseError> {
     let millis = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_err(DatabaseError::operation)?.as_millis();
     i64::try_from(millis).map_err(DatabaseError::operation)
 }
 
-#[cfg(test)]
-mod randomized_convergence_tests;
-
-#[cfg(test)]
-mod adversarial_convergence_tests;

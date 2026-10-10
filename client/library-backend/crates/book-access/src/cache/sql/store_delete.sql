@@ -1,1 +1,0 @@
-DELETE FROM block WHERE rowid=?1

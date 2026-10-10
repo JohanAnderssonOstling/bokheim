@@ -1,17 +1,17 @@
-use std::io::{Error, Result};
 use super::*;
 use pdf_view_common::PdfStoredPage;
-use std::sync::Mutex;
+use std::io::{Error, Result};
+use std::rc::Rc;
 
-struct SharedReader<R>(Arc<Mutex<R>>);
+struct SharedReader<R>(Rc<RefCell<R>>);
 impl<R: Read> Read for SharedReader<R> {
     fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
-        self.0.lock().map_err(|_| Error::other("PDF reader poisoned"))?.read(buffer)
+        self.0.borrow_mut().read(buffer)
     }
 }
 impl<R: Seek> Seek for SharedReader<R> {
     fn seek(&mut self, position: SeekFrom) -> Result<u64> {
-        self.0.lock().map_err(|_| Error::other("PDF reader poisoned"))?.seek(position)
+        self.0.borrow_mut().seek(position)
     }
 }
 
@@ -21,7 +21,7 @@ impl<R: Seek> Seek for SharedReader<R> {
 /// book's navigation, which is neither byte-specific nor the renderer's
 /// to keep. The outline is returned beside the snapshot rather than inside it
 /// so a PDF reaches the library in the same navigation form an EPUB does.
-pub fn inspect_reader_metadata<R: Read + Seek + 'static>(mut reader: R) -> PdfResult<(R, PdfReaderMetadata, Vec<BookTocEntry>)> {
+pub fn inspect_reader_metadata<R: Read + Seek + Send + 'static>(mut reader: R) -> PdfResult<(R, PdfReaderMetadata, Vec<BookTocEntry>)> {
     reader.seek(SeekFrom::Start(0)).map_err(PdfError::new_io)?;
     let mut hash = blake3::Hasher::new();
     let mut buffer = [0; 64 * 1024];
@@ -36,9 +36,18 @@ pub fn inspect_reader_metadata<R: Read + Seek + 'static>(mut reader: R) -> PdfRe
         hash.update(&buffer[..count]);
     }
     reader.seek(SeekFrom::Start(0)).map_err(PdfError::new_io)?;
-    let shared = Arc::new(Mutex::new(reader));
-    let pdfium = runtime::lock();
-    let session = PdfDocumentSession::from_reader("ingestion", SharedReader(shared.clone()))?;
+    let content_hash = hash.finalize().to_hex().to_string();
+    let (mut reader, mut metadata, outline) = runtime::run(move || inspect_local(reader, content_hash))?;
+    reader.seek(SeekFrom::Start(0)).map_err(PdfError::new_io)?;
+    metadata.dependencies = pdf_range_reader::dependency_index(&mut reader).ok().filter(|d| d.valid(metadata.pages.len()));
+    reader.seek(SeekFrom::Start(0)).map_err(PdfError::new_io)?;
+    metadata.bound_optional_data();
+    Ok((reader, metadata, outline))
+}
+
+fn inspect_local<R: Read + Seek + 'static>(reader: R, content_hash: String) -> PdfResult<(R, PdfReaderMetadata, Vec<BookTocEntry>)> {
+    let shared = Rc::new(RefCell::new(reader));
+    let session = LocalDocumentSession::from_reader("ingestion", SharedReader(shared.clone()))?;
     let mut annotations = Vec::new();
     let mut annotation_budget = 512 * 1024;
     let mut skippable_pages = Vec::new();
@@ -58,14 +67,9 @@ pub fn inspect_reader_metadata<R: Read + Seek + 'static>(mut reader: R) -> PdfRe
         })
         .collect::<PdfResult<Vec<_>>>()?;
     let outline = document_outline(&session.document);
-    let mut metadata = PdfReaderMetadata { version: 1, checksum: hash.finalize().to_hex().to_string(), pages, skippable_pages: Some(skippable_pages), annotations, dependencies: None };
+    let metadata = PdfReaderMetadata { version: 1, content_hash, pages, skippable_pages: Some(skippable_pages), annotations, dependencies: None };
     drop(session);
-    drop(pdfium);
-    let mut reader = Arc::try_unwrap(shared).map_err(|_| PdfError::new("PDF ingestion reader still in use"))?.into_inner().map_err(|_| PdfError::new("PDF reader poisoned"))?;
-    reader.seek(SeekFrom::Start(0)).map_err(PdfError::new_io)?;
-    metadata.dependencies = pdf_range_reader::dependency_index(&mut reader).ok().filter(|d| d.valid(metadata.pages.len()));
-    reader.seek(SeekFrom::Start(0)).map_err(PdfError::new_io)?;
-    metadata.bound_optional_data();
+    let reader = Rc::try_unwrap(shared).map_err(|_| PdfError::new("PDF ingestion reader still in use"))?.into_inner();
     Ok((reader, metadata, outline))
 }
 
@@ -75,13 +79,12 @@ impl PdfError {
     }
 }
 
-impl PdfDocumentSession {
-    /// The caller supplies the checksum of the opened source, never the stable
-    /// book identity. Invalid, old, or missing metadata uses normal inspection.
-    pub fn from_reader_with_metadata<R: Read + Seek + 'static>(source_name: impl Into<String>, reader: R, checksum: &str, metadata: Option<PdfReaderMetadata>) -> PdfResult<Self> {
-        let _pdfium = runtime::lock();
+impl LocalDocumentSession {
+    /// The caller supplies the content hash of the opened book.
+    /// Invalid, old, or missing metadata uses normal inspection.
+    pub fn from_reader_with_metadata<R: Read + Seek + 'static>(source_name: impl Into<String>, reader: R, content_hash: &str, metadata: Option<PdfReaderMetadata>) -> PdfResult<Self> {
         let source_name = source_name.into();
-        let Some(metadata) = metadata.filter(|m| m.valid_for(checksum)) else {
+        let Some(metadata) = metadata.filter(|m| m.valid_for(content_hash)) else {
             return Self::from_reader(source_name, reader);
         };
         let document = load_document(reader).map_err(|e| PdfError::new(e.to_string()))?;
@@ -99,13 +102,13 @@ impl PdfDocumentSession {
     }
 }
 
-impl PdfDocumentSession {
-    pub fn from_reader_with_page_source<R: Read + Seek + 'static>(source_name: impl Into<String>, reader: R, checksum: &str, metadata: Option<PdfReaderMetadata>, page_source: Option<Arc<dyn PdfPageSource>>) -> PdfResult<Self> {
+impl LocalDocumentSession {
+    pub fn from_reader_with_page_source<R: Read + Seek + 'static>(source_name: impl Into<String>, reader: R, content_hash: &str, metadata: Option<PdfReaderMetadata>, page_source: Option<Arc<dyn PdfPageSource>>) -> PdfResult<Self> {
         if let Some(source) = &page_source {
             source.prepare_startup().map_err(PdfError::new)?;
         }
-        let already_classified = metadata.as_ref().is_some_and(|value| value.valid_for(checksum) && value.skippable_pages.is_some());
-        let mut session = Self::from_reader_with_metadata(source_name, reader, checksum, metadata)?;
+        let already_classified = metadata.as_ref().is_some_and(|value| value.valid_for(content_hash) && value.skippable_pages.is_some());
+        let mut session = Self::from_reader_with_metadata(source_name, reader, content_hash, metadata)?;
         session.page_source = page_source;
         if !already_classified {
             let pages = session.inspect_skippable_pages();

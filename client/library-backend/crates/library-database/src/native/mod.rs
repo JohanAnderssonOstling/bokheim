@@ -28,7 +28,6 @@ pub struct NativeBookSnapshot {
 pub struct NativeBookCompletion {
     pub snapshot: NativeBookSnapshot,
     pub publication: library_model::PublishedStagedBook,
-    pub checksum: ContentHash,
     pub size_bytes: u64,
 }
 
@@ -52,7 +51,7 @@ impl Database {
         let placement_current = current.is_some_and(|(hash, dir, name)| hash == completion.snapshot.content_hash && dir == directory && name == completion.snapshot.name);
         let mut conflict = false;
         if placement_current {
-            connection.shared_book_name_conflict(&directory.to_string(), &library_replica::portable_name_key(&completion.publication.name), completion.snapshot.content_hash.as_str(), |row| {
+            connection.shared_book_name_conflict(&directory.to_string(), &library_replica::portable_name_key(&completion.publication.name), &completion.snapshot.content_hash, |row| {
                 conflict = row.get(0)?;
                 Ok(())
             })?;
@@ -61,11 +60,11 @@ impl Database {
             if completion.publication.published {
                 // Purge may have removed its original job before this download published.
                 // Retry deletion of the actual published path through durable file work.
-                connection.shared_placements_queue_file_work("remove", completion.snapshot.content_hash.as_str(), &completion.publication.relative_path)?;
+                connection.shared_placements_queue_file_work("remove", &completion.snapshot.content_hash, &completion.publication.relative_path)?;
             }
             return Ok(NativeBookAcknowledgement::Obsolete);
         }
-        connection.native_rename_book(&directory.to_string(), completion.snapshot.content_hash.as_str(), &completion.publication.name)?;
+        connection.native_rename_book(&directory.to_string(), &completion.snapshot.content_hash, &completion.publication.name)?;
         if completion.publication.published && completion.publication.fingerprint.is_none() {
             return Err(DatabaseError::message("published native file has no fingerprint"));
         }
@@ -75,13 +74,13 @@ impl Database {
             &completion.snapshot.content_hash,
             &completion.publication.relative_path,
             completion.publication.fingerprint.as_deref(),
-            observations::Revision::Remote { checksum: &completion.checksum, size: i64::try_from(completion.size_bytes).map_err(DatabaseError::operation)? },
+            observations::Revision::Remote { size: i64::try_from(completion.size_bytes).map_err(DatabaseError::operation)? },
         )?;
-        connection.native_record_remote_book(completion.snapshot.content_hash.as_str())?;
-        connection.shared_transfer_complete_download(completion.snapshot.content_hash.as_str())?;
-        connection.native_queue_book_work(completion.snapshot.content_hash.as_str())?;
+        connection.native_record_remote_book(&completion.snapshot.content_hash)?;
+        connection.shared_transfer_complete_download(&completion.snapshot.content_hash)?;
+        connection.native_queue_book_work(&completion.snapshot.content_hash)?;
         if !thumbnail_set_exists {
-            connection.native_request_thumbnail(completion.snapshot.content_hash.as_str())?;
+            connection.native_request_thumbnail(&completion.snapshot.content_hash)?;
         }
         Ok(NativeBookAcknowledgement::Applied)
     }
@@ -109,7 +108,6 @@ pub struct NativeFileWorkSnapshot {
     pub live: bool,
     pub placement: Option<(String, String)>,
     pub occupied_names: Vec<String>,
-    pub expected_checksum: Option<String>,
     pub book_paths: Vec<library_model::RelativeBookPath>,
 }
 
@@ -141,18 +139,18 @@ impl Database {
     pub fn native_file_work(&self) -> Result<Vec<NativeFileWork>, DatabaseError> {
         let mut rows = Vec::new();
         self.connection.native_file_work_rows(|row| {
-            rows.push((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, ContentHash::new(&row.get::<_, String>(2)?), row.get::<_, String>(3)?));
+            rows.push((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, ContentHash>(2)?, row.get::<_, String>(3)?));
             Ok(())
         })?;
         rows.into_iter().map(|(id, operation, content_hash, path)| Ok(NativeFileWork { id, operation, content_hash, original_path: stored_book_path(&path)? })).collect()
     }
 
     pub fn native_file_work_snapshot(&self, work: NativeFileWork) -> Result<Option<NativeFileWorkSnapshot>, DatabaseError> {
-        if !self.connection.native_file_is_current(work.id, work.operation.as_str(), work.content_hash.as_str(), work.original_path.as_str(), |row| row.get(0))? {
+        if !self.connection.native_file_is_current(work.id, work.operation.as_str(), &work.content_hash, work.original_path.as_str(), |row| row.get(0))? {
             return Ok(None);
         }
         let mut placements = Vec::new();
-        self.connection.native_live_placement_paths(work.content_hash.as_str(), |row| {
+        self.connection.native_live_placement_paths(&work.content_hash, |row| {
             placements.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
             Ok(())
         })?;
@@ -165,7 +163,7 @@ impl Database {
         }
         live_places.sort_by(|left, right| left.2.cmp(&right.2));
         let mut projected = Vec::new();
-        self.connection.native_file_projection_paths(work.content_hash.as_str(), |row| {
+        self.connection.native_file_projection_paths(&work.content_hash, |row| {
             projected.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
             Ok(())
         })?;
@@ -184,21 +182,14 @@ impl Database {
                 Ok(())
             })?;
         }
-        let mut expected_checksum = None;
-        if let Some((dir_id, file_name)) = crate::placements::resolve_placement_path(&self.connection, resolved_path.as_str())? {
-            self.connection.native_current_checksum(work.content_hash.as_str(), &dir_id, &file_name, |row| {
-                expected_checksum = row.get::<_, Option<String>>(0)?;
-                Ok(())
-            })?;
-        }
-        Ok(Some(NativeFileWorkSnapshot { work, resolved_path, live, placement, occupied_names, expected_checksum, book_paths: projections.into_iter().map(|(_, relative)| relative).collect() }))
+        Ok(Some(NativeFileWorkSnapshot { work, resolved_path, live, placement, occupied_names, book_paths: projections.into_iter().map(|(_, relative)| relative).collect() }))
     }
 
     pub fn acknowledge_native_file_work(&self, completion: NativeFileWorkCompletion) -> Result<(), DatabaseError> {
         self.with_write_transaction(|transaction| {
             let snapshot = &completion.snapshot;
             let work = &snapshot.work;
-            let hash = work.content_hash.as_str();
+            let hash = &work.content_hash;
             let Some(current) = self.native_file_work_snapshot(work.clone())? else { return Ok(Rollback(())) };
             if current.resolved_path != snapshot.resolved_path || current.placement != snapshot.placement {
                 return Err(DatabaseError::message("file placement changed during reconciliation; retry"));
@@ -209,7 +200,7 @@ impl Database {
                         return Err(DatabaseError::message("placement became live before removal; retry"));
                     }
                     // Do not forget a replacement file now recorded for the same membership.
-                    if let Some(dir) = transaction.query_row("SELECT dir_id FROM local_file_projection WHERE content_hash=?1 AND relative_path=?2", rusqlite::params![hash, completion.final_path], |row| row.get::<_, String>(0)).optional()? {
+                    if let Some(dir) = transaction.observations_file_directory(&hash, &completion.final_path, |row| row.get::<_, String>(0)).optional()? {
                         observations::forget_file(transaction, &dir, &work.content_hash)?;
                     }
                 } else if work.operation == "materialize" {
@@ -240,28 +231,28 @@ impl Database {
         })
     }
 
-    pub fn requested_purge_books(&self, after: &str) -> Result<Vec<ContentHash>, DatabaseError> {
+    pub fn requested_purge_books(&self, after: Option<&ContentHash>) -> Result<Vec<ContentHash>, DatabaseError> {
         let mut hashes = Vec::new();
         self.connection.requested_purge_books(after, |row| {
-            hashes.push(ContentHash::new(&row.get::<_, String>(0)?));
+            hashes.push(row.get::<_, ContentHash>(0)?);
             Ok(())
         })?;
         Ok(hashes)
     }
 
     pub fn purge_book_snapshot(&self, hash: &ContentHash) -> Result<Option<PurgeBookSnapshot>, DatabaseError> {
-        let work_id: Option<i64> = self.connection.query_row("SELECT id FROM local_purge_work WHERE content_hash=?1", [hash.as_str()], |r| r.get(0)).optional()?;
+        let work_id: Option<i64> = self.connection.observations_purge_work(&(&hash), |r| r.get(0)).optional()?;
         let Some(work_id) = work_id else { return Ok(None) };
-        let retired = self.connection.purge_book_is_retired(hash.as_str(), |row| row.get::<_, bool>(0)).map_err(DatabaseError::operation)?;
+        let retired = self.connection.purge_book_is_retired(hash, |row| row.get::<_, bool>(0)).map_err(DatabaseError::operation)?;
         // Finish placement removal before acknowledging the permanent purge.
-        if retired && self.connection.query_row("SELECT EXISTS(SELECT 1 FROM local_file_work WHERE content_hash=?1)", [hash.as_str()], |r| r.get::<_, bool>(0))? {
+        if retired && self.connection.observations_has_file_work(&(&hash), |r| r.get::<_, bool>(0))? {
             return Ok(None);
         }
         Ok(Some(PurgeBookSnapshot { work_id, content_hash: *hash, remove_bytes: retired }))
     }
 
     pub fn acknowledge_purge_book(&self, snapshot: PurgeBookSnapshot) -> Result<(), DatabaseError> {
-        self.connection.acknowledge_purge_book(snapshot.content_hash.as_str(), snapshot.work_id)?;
+        self.connection.acknowledge_purge_book(&snapshot.content_hash, snapshot.work_id)?;
         Ok(())
     }
 
@@ -294,6 +285,19 @@ impl Database {
         Ok(work)
     }
 
+    /// Removes replayed folders from the directory replay list.
+    pub fn complete_directory_replay(&self, ids: &[i64]) -> Result<(), DatabaseError> {
+        self.connection.native_complete_directory_replay(&serde_json::to_string(ids).map_err(DatabaseError::operation)?)?;
+        Ok(())
+    }
+
+    /// Removes replayed books from the book replay list, keeping any that
+    /// still have file work.
+    pub fn complete_book_replay(&self, ids: &[i64]) -> Result<(), DatabaseError> {
+        self.connection.native_complete_book_replay(&serde_json::to_string(ids).map_err(DatabaseError::operation)?)?;
+        Ok(())
+    }
+
     pub fn native_book_replay_work_ids(&self) -> Result<Vec<i64>, DatabaseError> {
         let mut ids = Vec::new();
         self.connection.native_book_replay_work_ids(|row| {
@@ -307,16 +311,10 @@ impl Database {
     pub fn local_book_work_hashes(&self) -> Result<Vec<ContentHash>, DatabaseError> {
         let mut hashes = Vec::new();
         self.connection.local_book_work_hashes(|row| {
-            hashes.push(ContentHash::new(&row.get::<_, String>(0)?));
+            hashes.push(row.get::<_, ContentHash>(0)?);
             Ok(())
         })?;
         Ok(hashes)
-    }
-
-    /// Seeds a book's remembered physical projection path directly, without
-    /// going through the snapshot/acknowledge flow.
-    pub fn seed_file_projection(&self, hash: &ContentHash, dir_id: &DirId, relative_path: &str) {
-        self.connection.shared_scanner_publish_projection(hash.as_str(), &dir_id.to_string(), relative_path).expect("seed file projection");
     }
 
     /// Drops every queued directory reconciliation without performing it.
@@ -371,22 +369,22 @@ pub enum NativeDirectoryAcknowledgement {
 impl Database {
     pub fn native_directory_snapshot(&self, id: &DirId) -> Result<Option<NativeDirectorySnapshot>, DatabaseError> {
         let snapshot = self.connection.is_autocommit().then(|| self.connection.unchecked_transaction()).transpose()?;
-        let Some((relative_path, projected_path, parent_id, name)) = native_directory_record(&self.connection, id)? else { return Ok(None) };
+        let Some(record) = native_directory_record(&self.connection, id)? else { return Ok(None) };
         let mut sibling_names = Vec::new();
-        self.connection.native_directory_sibling_names(parent_id.as_str(), |sibling| {
+        self.connection.native_directory_sibling_names(record.parent_id.as_str(), |sibling| {
             sibling_names.push(sibling.get::<_, String>(0)?);
             Ok(())
         })?;
         if let Some(snapshot) = snapshot {
             snapshot.commit()?;
         }
-        Ok(Some(NativeDirectorySnapshot { id: *id, relative_path, projected_path, name, sibling_names }))
+        Ok(Some(NativeDirectorySnapshot { id: *id, relative_path: record.relative_path, projected_path: record.projected_path, name: record.name, sibling_names }))
     }
 
     /// Physical locations remain recoverable after a directory is hidden or trashed.
     pub fn native_directory_projected_path(&self, id: &DirId) -> Result<Option<String>, DatabaseError> {
         use rusqlite::OptionalExtension;
-        Ok(self.connection.query_row("SELECT '/' || ltrim(relative_path,'/') FROM local_directory_projection WHERE dir_id=?1", [id.to_string()], |row| row.get(0)).optional()?)
+        Ok(self.connection.observations_directory_path(&(id.to_string()), |row| row.get(0)).optional()?)
     }
 
     /// Remember an intermediate physical location independently of logical lifecycle.
@@ -409,10 +407,10 @@ impl Database {
     pub fn acknowledge_native_directory(&self, completion: NativeDirectoryCompletion) -> Result<NativeDirectoryAcknowledgement, DatabaseError> {
         self.with_write_transaction(|transaction| {
             let snapshot = &completion.snapshot;
-            let Some((relative_path, projected_path, _, name)) = native_directory_record(transaction, &snapshot.id)? else {
+            let Some(record) = native_directory_record(transaction, &snapshot.id)? else {
                 return Ok(Rollback(NativeDirectoryAcknowledgement::Obsolete));
             };
-            if relative_path != snapshot.relative_path || projected_path != snapshot.projected_path || name != snapshot.name {
+            if record.relative_path != snapshot.relative_path || record.projected_path != snapshot.projected_path || record.name != snapshot.name {
                 return Ok(Rollback(NativeDirectoryAcknowledgement::Retry));
             }
             let final_name = completion.renamed_to.as_deref().unwrap_or(snapshot.name.as_str());
@@ -423,8 +421,8 @@ impl Database {
                 if transaction.native_directory_rename_conflict(snapshot.id.to_string().as_str(), renamed_to, |row| row.get(0))? {
                     return Ok(Rollback(NativeDirectoryAcknowledgement::Retry));
                 }
-                crate::sync::apply::registers::record_local(&transaction, library_replica::LibraryStateEntry::DirectoryName { dir_id: snapshot.id, name: renamed_to.to_owned() })?;
-                crate::projection::project_dirty(&transaction)?;
+                crate::sync::apply::registers::record_local(transaction, library_replica::LibraryStateEntry::DirectoryName { dir_id: snapshot.id, name: renamed_to.to_owned() })?;
+                crate::projection::project_dirty(transaction)?;
                 transaction.native_directory_queue_work(snapshot.id.to_string().as_str())?;
             }
             let final_path = {
@@ -454,12 +452,21 @@ impl Database {
     }
 }
 
-pub(crate) fn native_directory_record(connection: &rusqlite::Connection, id: &DirId) -> Result<Option<(String, Option<String>, String, String)>, DatabaseError> {
+struct NativeDirectoryRecord {
+    relative_path: String,
+    projected_path: Option<String>,
+    parent_id: String,
+    name: String,
+}
+
+fn native_directory_record(connection: &rusqlite::Connection, id: &DirId) -> Result<Option<NativeDirectoryRecord>, DatabaseError> {
     let Some(relative_path) = crate::placements::directory_relative_path(connection, id)? else { return Ok(None) };
     let mut record = None;
     connection.native_directory_snapshot(id.to_string().as_str(), |row| {
-        record = Some((format!("/{relative_path}"), row.get(0)?, row.get(1)?, row.get(2)?));
+        record = Some(NativeDirectoryRecord { relative_path: format!("/{relative_path}"), projected_path: row.get(0)?, parent_id: row.get(1)?, name: row.get(2)? });
         Ok(())
     })?;
     Ok(record)
 }
+
+use crate::native::observations::ObservationsSql;

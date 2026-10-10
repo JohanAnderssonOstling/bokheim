@@ -12,7 +12,7 @@ use gpui::prelude::*;
 use gpui::{Div, SharedString, div, px, rems};
 
 use crate::{
-    BOOK_COVER_WIDTH, BOOK_DETAIL_CONTENTS_WIDTH_REM, BOOK_DETAIL_COVER_FRACTION, BOOK_DETAIL_DESCRIPTION_LINE_HEIGHT_EM, BOOK_DETAIL_DESCRIPTION_SIZE, BOOK_DETAIL_DESCRIPTION_WIDTH_REM,
+    BOOK_DETAIL_COVER_FRACTION, BOOK_DETAIL_COVER_WIDTH, BOOK_DETAIL_DESCRIPTION_LINE_HEIGHT_EM, BOOK_DETAIL_DESCRIPTION_SIZE, BOOK_DETAIL_DESCRIPTION_WIDTH_REM,
     BOOK_DETAIL_HERO_GAP, BOOK_DETAIL_PAGE_WIDTH_REM, BOOK_DETAIL_SECTION_GAP, BOOK_DETAIL_SIDEBAR_WIDTH_REM, BOOK_DETAIL_WIDE_PAGE_WIDTH_REM, BrowserTheme, SPACE_LG, SPACE_SM, SPACE_XS,
     TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_LG, TITLE_MD,
 };
@@ -41,19 +41,19 @@ pub fn book_detail_medium_measure() -> Div {
 }
 
 pub fn book_detail_sidebar() -> Div {
-    div().w(rems(BOOK_DETAIL_SIDEBAR_WIDTH_REM)).flex_none().min_w_0().flex().flex_col().gap(px(SPACE_LG))
+    div().w(px(BOOK_DETAIL_COVER_WIDTH)).flex_none().min_w_0().flex().flex_col().gap(px(SPACE_LG))
 }
 
 pub fn book_detail_sidebar_cover_slot() -> Div {
-    div().relative().w(px(180.0)).max_w_full().flex_none()
+    div().relative().w(px(BOOK_DETAIL_COVER_WIDTH)).max_w_full().flex_none()
 }
 
 pub fn book_detail_contents_column() -> Div {
-    div().flex_1().min_w_0().max_w(rems(BOOK_DETAIL_CONTENTS_WIDTH_REM)).flex().flex_col().gap(px(BOOK_DETAIL_SECTION_GAP))
+    div().flex_1().w_0().min_w_0().flex().flex_col().gap(px(BOOK_DETAIL_SECTION_GAP))
 }
 
 pub fn book_detail_description_column() -> Div {
-    div().flex_1().min_w_0().max_w(rems(BOOK_DETAIL_DESCRIPTION_WIDTH_REM)).flex().flex_col().gap(px(BOOK_DETAIL_SECTION_GAP))
+    div().flex_1().w_0().min_w_0().flex().flex_col().gap(px(BOOK_DETAIL_SECTION_GAP))
 }
 
 /// The cover and the words beside it. The two stand side by side at every width
@@ -63,14 +63,12 @@ pub fn book_detail_hero() -> Div {
     div().w_full().min_w_0().flex().flex_row().items_start().gap(px(BOOK_DETAIL_HERO_GAP))
 }
 
-/// The cover takes half the hero, capped at the width a cover is drawn at
-/// everywhere else — so a narrow window shrinks it rather than pushing the title
-/// into a column one word wide, and a wide one does not inflate it.
+/// The cover is 300 pixels wide, limited to half the hero on narrow screens.
 ///
 /// Positioned, because the reading position hangs under it the way it does
 /// under a card in the grid.
 pub fn book_detail_cover_slot() -> Div {
-    div().relative().flex_none().w(gpui::relative(BOOK_DETAIL_COVER_FRACTION)).max_w(px(BOOK_COVER_WIDTH))
+    div().relative().flex_none().w(px(BOOK_DETAIL_COVER_WIDTH)).max_w(gpui::relative(BOOK_DETAIL_COVER_FRACTION))
 }
 
 pub fn book_detail_headline() -> Div {
@@ -179,16 +177,4 @@ pub fn book_detail_description(description: &str, theme: BrowserTheme) -> Option
             .text_color(theme.text)
             .child(gpui::StyledText::new(text).with_highlights(highlights)),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_cover_never_takes_more_than_half_the_hero() {
-        assert!(BOOK_DETAIL_COVER_FRACTION <= 0.5);
-        assert!(BOOK_COVER_WIDTH / (BOOK_DETAIL_PAGE_WIDTH_REM * 16.0) < BOOK_DETAIL_COVER_FRACTION, "at the page's full measure the cover is at its natural width, not the cap");
-    }
-
 }

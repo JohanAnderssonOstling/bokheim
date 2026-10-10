@@ -1,8 +1,11 @@
 use super::*;
 use crate::{AccountStatus, BackendError};
-pub use library_backend::ThumbnailResolution;
+use library_backend::{LibraryCommand, LibrarySyncStatus};
+use tokio::sync::watch;
 
-pub use client_runtime::wire::{decode_worker_message, decode_worker_payload, encode_reply, encode_worker_message, WorkerPayload};
+#[cfg(target_arch = "wasm32")]
+pub use client_runtime::wire::decode_worker_payload;
+pub use client_runtime::wire::{WorkerPayload, decode_worker_message, encode_reply, encode_worker_message};
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct AppStartupState {
@@ -16,7 +19,6 @@ pub struct AppStartupState {
 pub enum AppWorkerStartupMessage {
     Ready { startup: AppStartupState },
     Failed { error: BackendError },
-    Diagnostic { message: String },
     Response { id: u64, result: Result<WorkerPayload, BackendError> },
     Event { id: u64, payload: WorkerPayload },
 }
@@ -52,9 +54,7 @@ impl WorkerCommand {
                     false
                 }
             }
-            // Accept the earlier flat application command at the wire boundary.
-            Self::App(command) => command.is_book_subscription(),
-            Self::Library { .. } => false,
+            Self::App(_) | Self::Library { .. } => false,
         }
     }
 }
@@ -67,10 +67,7 @@ impl From<AppCommand> for WorkerCommand {
 
 impl AppWorkerRequest {
     pub fn is_source_subscription(&self) -> bool {
-        self.is_resolve_book() || matches!(&self.command, WorkerCommand::App(AppCommand::SubscribeNotifications { .. }))
-    }
-    pub fn is_resolve_book(&self) -> bool {
-        self.command.is_book_subscription()
+        self.command.is_book_subscription() || matches!(&self.command, WorkerCommand::App(AppCommand::SubscribeNotifications { .. }))
     }
 }
 
@@ -80,30 +77,25 @@ pub enum AppWorkerClientMessage {
     CancelSubscription { id: u64 },
 }
 
-/// The application-level RPC protocol used by browser pages and their shared
-/// backend worker.
-
-/// Operations scoped to one library. Keeping the library identity in the
-/// enclosing command prevents paths or database handles crossing the worker.
-pub use library_backend::{BookSource, ResolvedBookData};
-
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct AccountSnapshot {
     pub account: AccountStatus,
-    pub storage_usage: Option<crate::AccountStorageUsage>,
-    pub sync_statuses: Vec<crate::LibrarySyncStatus>,
+    pub storage_usage: Option<account_contract::StorageUsageResponse>,
+    pub sync_statuses: Vec<LibrarySyncStatus>,
     pub server_storage_usage: Option<Vec<crate::ServerLibraryStorageUsage>>,
 }
 
 pub enum WorkerSubscription {
     Library(LibraryEvents),
+    LibraryList(watch::Receiver<()>),
     Unit(async_channel::Receiver<()>),
 }
 
 impl WorkerSubscription {
-    pub async fn next_value(&self) -> Option<WorkerPayload> {
+    pub async fn next_value(&mut self) -> Option<WorkerPayload> {
         match self {
             Self::Library(events) => events.next_value().await,
+            Self::LibraryList(receiver) => receiver.changed().await.ok().and_then(|()| encode_reply(()).ok()),
             Self::Unit(receiver) => receiver.recv().await.ok().and_then(|()| encode_reply(()).ok()),
         }
     }
@@ -114,6 +106,7 @@ pub enum WorkerDispatchResult<Value = WorkerPayload> {
     Subscription { initial: Value, events: WorkerSubscription },
 }
 
+#[cfg(target_arch = "wasm32")]
 impl WorkerDispatchResult<client_runtime::reply::Reply> {
     pub(crate) fn into_wire(self) -> Result<WorkerDispatchResult, BackendError> {
         Ok(match self {
@@ -124,19 +117,48 @@ impl WorkerDispatchResult<client_runtime::reply::Reply> {
 }
 
 #[cfg(test)]
-mod wire_tests {
+mod tests {
     use super::*;
+    use library_backend::ContentHash;
+
+    #[tokio::test]
+    async fn library_list_watch_delivers_coalesced_wire_notifications_and_closes() {
+        let (sender, receiver) = watch::channel(());
+        let mut events = WorkerSubscription::LibraryList(receiver);
+        sender.send_replace(());
+        sender.send_replace(());
+        let payload = events.next_value().await.unwrap();
+        client_runtime::wire::decode_worker_payload::<()>(payload).unwrap();
+        drop(sender);
+        assert!(events.next_value().await.is_none(), "coalesced notifications should be consumed before closure");
+    }
 
     #[test]
-    fn direct_encoding_preserves_the_named_messagepack_wire_format() {
-        for message in [AppWorkerClientMessage::Request(AppWorkerRequest { id: 42, command: WorkerCommand::App(AppCommand::CreateLibrary { name: "Böcker".to_owned() }) }), AppWorkerClientMessage::CancelSubscription { id: 42 }] {
-            let mut previous = b"BKHW\x02".to_vec();
-            previous.extend(rmp_serde::to_vec_named(&message).unwrap());
-            let encoded = encode_worker_message(&message).unwrap();
-            assert_eq!(encoded, previous);
-            let restored: AppWorkerClientMessage = decode_worker_message(&encoded).unwrap();
-            assert_eq!(encode_worker_message(&restored).unwrap(), encoded);
-        }
-        assert!(decode_worker_message::<AppWorkerClientMessage>(b"BKHW\x01invalid").is_err());
+    fn rejects_flat_book_subscription_requests() {
+        let request = serde_json::json!({
+            "Request": {
+                "id": 1,
+                "command": {
+                    "App": {
+                        "SubscribeBook": {
+                            "library_id": LibraryId::new_v4(),
+                            "content_hash": ContentHash::from_bytes([7; 32]),
+                        }
+                    }
+                }
+            }
+        });
+        let bytes = encode_worker_message(&request).unwrap();
+        let error = decode_worker_message::<AppWorkerClientMessage>(&bytes).unwrap_err();
+        assert!(error.to_string().contains("unknown variant `SubscribeBook`"), "{error}");
+    }
+
+    #[test]
+    fn accepts_library_scoped_subscriptions() {
+        let library_id = LibraryId::new_v4();
+        let request = AppWorkerClientMessage::Request(AppWorkerRequest { id: 1, command: WorkerCommand::LibrarySubscription { library_id, subscription: LibrarySubscription::Updates } });
+        let bytes = encode_worker_message(&request).unwrap();
+        let decoded = decode_worker_message::<AppWorkerClientMessage>(&bytes).unwrap();
+        assert!(matches!(decoded, AppWorkerClientMessage::Request(AppWorkerRequest { id: 1, command: WorkerCommand::LibrarySubscription { library_id: id, subscription: LibrarySubscription::Updates } }) if id == library_id));
     }
 }

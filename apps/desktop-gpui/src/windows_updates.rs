@@ -2,9 +2,12 @@
 use browser_ui::{UpdateAction, UpdateControls, UpdateView};
 use gpui::{App, AppContext, Entity};
 use linux_update_host::windows::{WindowsHost, WindowsStartup};
-use std::{path::Path, sync::{Arc, Mutex, OnceLock}, time::Duration};
+use std::{cell::RefCell, path::Path};
 pub use linux_update_host::windows_process::{enter, Entry};
-static HOST: OnceLock<Arc<Mutex<WindowsHost>>> = OnceLock::new();
+thread_local! {
+    // Startup owns the host until healthy() commits; the worker then takes it.
+    static HOST: RefCell<Option<WindowsHost>> = const { RefCell::new(None) };
+}
 
 fn config() -> Result<update_client::DiscoveryConfig, String> {
     let mut config = update_client::DiscoveryConfig::bundled()?;
@@ -42,24 +45,25 @@ pub fn initialize(data: &Path, trial: Option<&str>) -> Result<bool, String> {
             }
         }
     }
-    HOST.set(Arc::new(Mutex::new(host))).map_err(|_| "Windows update host already initialized")?;
+    HOST.with_borrow_mut(|slot| {
+        if slot.is_some() {
+            return Err("Windows update host already initialized");
+        }
+        *slot = Some(host);
+        Ok(())
+    })?;
     Ok(true)
 }
 
 pub fn trial_pending() -> bool {
-    HOST.get().is_some_and(|h| h.lock().map(|h| h.is_trial()).unwrap_or(false))
+    HOST.with_borrow(|host| host.as_ref().is_some_and(WindowsHost::is_trial))
 }
 pub fn healthy() -> Result<(), String> {
-    if let Some(host) = HOST.get() { host.lock().map_err(|_| "update host lock poisoned")?.healthy()?; }
-    Ok(())
+    HOST.with_borrow_mut(|host| host.as_mut().map_or(Ok(()), WindowsHost::healthy))
 }
 
 pub fn bind(cx: &mut App) -> Option<Entity<UpdateControls>> {
-    let host = HOST.get()?.clone();
-    let restart = {
-        let h = host.lock().ok()?;
-        h.installation.join("Bokheim.exe")
-    };
+    let restart = HOST.with_borrow(|host| host.as_ref().map(|host| host.installation.join("Bokheim.exe")))?;
     let (actions, requests) = std::sync::mpsc::channel();
     let (views, received) = async_channel::unbounded();
     let controls = cx.new(|_| {
@@ -77,32 +81,39 @@ pub fn bind(cx: &mut App) -> Option<Entity<UpdateControls>> {
     });
     let weak = controls.downgrade();
     let worker = crate::blocking_worker::BlockingWorker::new(cx.background_executor(), 1);
-    // Scheduling this after the startup callback lets healthy() commit before polling.
+    // The startup callback commits healthy() before this task transfers ownership.
     cx.spawn(async move |_| {
+        let Some(mut host) = HOST.with_borrow_mut(Option::take) else { return };
         let _ = worker
-            .dispatch(move || loop {
-                let action = match requests.recv_timeout(Duration::from_secs(1)) {
-                    Ok(action) => Some(action),
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
-                    Err(_) => break,
-                };
-                let result = (|| {
-                    let mut host = host.lock().map_err(|_| "update host lock poisoned".to_owned())?;
-                    if action == Some(UpdateAction::Update) {
-                        host.approve()?;
-                    }
-                    host.tick()
-                })();
-                match result {
-                    Ok(view) => {
-                        if views.send_blocking(view).is_err() {
-                            break;
+            .dispatch(move || {
+                let mut action = None;
+                loop {
+                    let result = (|| {
+                        if action.is_none() {
+                            host.check_for_updates()?;
+                        } else if action == Some(UpdateAction::Update) {
+                            host.approve()?;
+                        }
+                        views.try_send(Ok(host.view())).map_err(|_| "update UI closed".to_owned())?;
+                        host.prepare()
+                    })();
+                    match result {
+                        Ok(view) => {
+                            if views.try_send(Ok(view)).is_err() {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            log::warn!("update work failed: {error}");
+                            if views.try_send(Ok(host.view())).is_err() || views.try_send(Err(())).is_err() {
+                                break;
+                            }
                         }
                     }
-                    Err(error) => {
-                        log::warn!("update work will retry: {error}");
-                        std::thread::sleep(Duration::from_secs(30));
-                    }
+                    action = match requests.recv() {
+                        Ok(action) => Some(action),
+                        Err(_) => break,
+                    };
                 }
             })
             .recv()
@@ -111,7 +122,13 @@ pub fn bind(cx: &mut App) -> Option<Entity<UpdateControls>> {
     .detach();
     cx.spawn(async move |cx| {
         while let Ok(view) = received.recv().await {
-            if weak.update(cx, |controls, cx| controls.apply(view, cx)).is_err() {
+            if weak
+                .update(cx, |controls, cx| match view {
+                    Ok(view) => controls.apply(view, cx),
+                    Err(()) => controls.work_failed(cx),
+                })
+                .is_err()
+            {
                 break;
             }
         }

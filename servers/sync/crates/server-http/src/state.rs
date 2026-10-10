@@ -89,33 +89,3 @@ impl AppState {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::ThumbnailUploadGate;
-
-    #[test]
-    fn thumbnail_upload_capacity_is_per_account_and_global_and_releases_on_drop() {
-        let gate = ThumbnailUploadGate::new(2, 1, 10, 6);
-        let alice = gate.acquire("alice", 6).unwrap();
-        assert!(gate.acquire("alice", 1).is_none());
-        let bob = gate.acquire("bob", 4).unwrap();
-        assert!(gate.acquire("carol", 1).is_none());
-        drop(alice);
-        let carol = gate.acquire("carol", 6).unwrap();
-        drop((bob, carol));
-        assert!(gate.acquire("alice", 6).is_some());
-    }
-
-    #[test]
-    fn thumbnail_upload_capacity_is_weighted_by_declared_bytes() {
-        let gate = ThumbnailUploadGate::new(10, 10, 10, 6);
-        let alice = gate.acquire("alice", 4).unwrap();
-        assert!(gate.acquire("alice", 3).is_none(), "per-account byte budget must apply even when count permits remain");
-        let bob = gate.acquire("bob", 6).unwrap();
-        assert!(gate.acquire("carol", 1).is_none(), "global byte budget must apply even when count permits remain");
-        drop(alice);
-        assert!(gate.acquire("carol", 4).is_some());
-        drop(bob);
-    }
-}

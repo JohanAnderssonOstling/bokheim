@@ -1,4 +1,3 @@
-use std::rc::Rc;
 use std::time::Duration;
 use crate::invalidation::notify;
 use crate::settings::ReaderSettings;
@@ -12,8 +11,7 @@ use crate::epub::{LoadState, ReaderView};
 use crate::invalidation::Component;
 use crate::shell::chrome;
 use crate::shell::input::{self as shell_input, CommandTarget};
-use crate::shell::state_panel;
-use crate::shell::toolbar::{self as sidebar_chrome, SidebarContent, SidebarTarget};
+use crate::shell::toolbar::{self as sidebar_chrome, SidebarContent};
 use crate::{DecreaseColumnWidth, DecreaseFont, IncreaseColumnWidth, IncreaseFont, NextPage, NextSection, PreviousPage, PreviousSection, ToggleFullscreen};
 use gpui::prelude::*;
 use gpui::{App, Context, FocusHandle, Focusable, IntoElement, KeyBinding, Render, Window};
@@ -108,22 +106,7 @@ impl Render for ReaderView {
         // still sits on the dispatch path, so `Reader` bindings keep firing.
         let document_ready = self.document_focus(cx).is_some();
         self.chrome.sync_system_bars(chrome_visible, cx);
-        let bottom_bar = (mobile && chrome_visible).then(|| {
-            let tab_target = entity.clone();
-            let on_select: Rc<dyn Fn(crate::shell::state_panel::SidebarTab, &mut Window, &mut App)> = Rc::new(move |tab, window, cx| {
-                tab_target.update(cx, |reader, cx| {
-                state_panel::toggle_tab(&mut reader.sidebar, tab, true, cx);
-                reader.chrome.show(cx);
-                if reader.sidebar.is_visible() {
-                    reader.focus_document(window, cx);
-                }
-                notify(cx, Component::ReaderShell, "mobile_sidebar_tab_changed");
-                });
-            });
-            let search_target = entity.clone();
-            let on_search: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(move |window, cx| search_target.update(cx, |reader, cx| reader.toggle_search(window, cx)));
-            sidebar_chrome::reader_bottom_bar("epub-reader-bottom-bar", self.sidebar.active(), true, search_visible, theme, on_select, on_search)
-        });
+        let bottom_bar = (mobile && chrome_visible).then(|| sidebar_chrome::reader_bottom_bar("epub-reader-bottom-bar", &entity, self.sidebar.active(), true, search_visible, theme));
         let page = crate::shell::page::reader_page(window, cx, theme, document_ready, &self.focus, chrome_visible, bottom_bar, mobile_search, content)
             .id("epub-reader-page")
             // Reading is pointer-first: merely returning to this window should
@@ -151,17 +134,13 @@ impl Render for ReaderView {
                 if !reader.chrome.show_from_pointer(cx) {
                     return;
                 }
-                state_panel::select_tab(&mut reader.sidebar, crate::shell::state_panel::SidebarTab::Contents, cx);
+                reader.sidebar.reopen();
                 notify(cx, Component::ReaderShell, "sidebar_shown");
             }
         });
         let mut page = page.children(interactions);
         if let Some(actions) = &self.context_sheet {
-            let dismiss = entity.clone();
-            let sheet = actions.sheet(theme, window.insets().safe_area.bottom, move |_, cx| dismiss.update(cx, |reader, cx| {
-                reader.context_sheet = None;
-                cx.notify();
-            }));
+            let sheet = actions.sheet(theme, window.insets().safe_area.bottom, &entity);
             page = page.child(sheet);
         }
         page
@@ -173,8 +152,11 @@ impl Render for ReaderView {
 const WHEEL_SCROLL_END_DELAY: Duration = Duration::from_millis(150);
 
 impl ReaderView {
-    /// Unconditionally claim both OS-window and document focus on pointer hover.
+    /// Reclaim document focus on hover without interrupting sidebar keyboard input.
     fn reclaim_hover_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar_focus.contains_focused(window, cx) {
+            return;
+        }
         window.activate_window();
         self.focus_document(window, cx);
     }

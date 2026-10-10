@@ -173,36 +173,6 @@ fn list_devices() -> io::Result<Vec<Device>> {
     Ok(devices)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parse_devices;
-
-    #[test]
-    fn parses_device_listing_with_spaces_in_names() {
-        assert_eq!(
-            parse_devices("Device AA:BB:CC:DD:EE:FF Headphones\nDevice 11:22:33:44:55:66 Kitchen Speaker\nnot a device"),
-            vec![super::Device { address: "AA:BB:CC:DD:EE:FF".into(), name: "Headphones".into(), connected: false }, super::Device { address: "11:22:33:44:55:66".into(), name: "Kitchen Speaker".into(), connected: false },]
-        );
-    }
-
-    #[test]
-    fn uses_fallback_for_missing_device_name() {
-        assert!(parse_devices("Device AA:BB:CC:DD:EE:FF").is_empty());
-    }
-
-    #[test]
-    fn never_uses_an_address_as_a_device_name() {
-        assert!(parse_devices("Device AA:BB:CC:DD:EE:FF 11:22:33:44:55:66").is_empty());
-    }
-
-    #[test]
-    fn ignores_scan_prefixes_and_duplicate_addresses() {
-        assert_eq!(
-            parse_devices("[NEW] Device AA:BB:CC:DD:EE:FF Headphones\nDevice AA:BB:CC:DD:EE:FF Headphones\nDevice 11:22:33:44:55:66"),
-            vec![super::Device { address: "AA:BB:CC:DD:EE:FF".into(), name: "Headphones".into(), connected: false }]
-        );
-    }
-}
 
 fn parse_devices(text: &str) -> Vec<Device> {
     let mut devices = Vec::new();

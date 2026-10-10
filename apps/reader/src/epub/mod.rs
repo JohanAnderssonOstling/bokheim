@@ -21,6 +21,7 @@ use library_backend::LibraryClient;
 use library_model::BookLocator;
 
 use crate::epub::toc::TocState;
+use crate::shell::context_sheet::ContextActions;
 use crate::shell::marks::MarkSession;
 use crate::shell::persistence::ReadingPositionWriter;
 use crate::shell::state_panel::SidebarState;
@@ -29,6 +30,21 @@ enum LoadState {
     Loading,
     Error(String),
     Ready(Entity<HtmlView>),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum TableCopyFormat {
+    Markdown,
+    UnstyledHtml,
+    StyledHtml,
+}
+
+#[derive(Clone)]
+pub(crate) enum EpubContextCommand {
+    Highlight,
+    Cite,
+    CopyTable { view: Entity<HtmlView>, position: Point<Pixels>, format: TableCopyFormat },
+    CopyImage { view: Entity<HtmlView>, position: Point<Pixels> },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -97,8 +113,10 @@ pub(crate) struct ReaderView {
     annotation_popup_anchor: Option<Point<Pixels>>,
     footnote: Option<(html_view_core::FootnotePreview, html_view_gpui::PreparedNote)>,
     image_preview: Option<(String, Arc<gpui::Image>)>,
-    context_sheet: Option<crate::shell::context_sheet::ContextActions>,
+    context_sheet: Option<ContextActions<EpubContextCommand>>,
     focus: FocusHandle,
+    sidebar_focus: FocusHandle,
+    settings_navigation: crate::shell::settings_navigation::SettingsNavigation,
     renderer_subscription: Option<Subscription>,
     document_tap_subscription: Option<Subscription>,
     reading_positions: ReadingPositionWriter,

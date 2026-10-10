@@ -106,17 +106,7 @@ pub fn serve(port: MessagePort, input: JsValue, fetch: Option<Function>) -> Resu
         }
     });
     REQUESTS.with(|requests| requests.insert(id, state.clone()));
-    let started = (|| {
-        let options = Object::assign(&Object::new(), &request.options);
-        Reflect::set(&options, &"body".into(), &request.body)?;
-        Reflect::set(&options, &"signal".into(), &state.controller.signal())?;
-        let global = js_sys::global();
-        let fetch = match fetch {
-            Some(fetch) => fetch,
-            None => Reflect::get(&global, &"fetch".into())?.dyn_into::<Function>()?,
-        };
-        fetch.call2(&global, &request.url.into(), &options)
-    })();
+    let started = start_fetch(request, &state.controller, fetch);
     wasm_bindgen_futures::spawn_local(async move {
         let result = async {
             let response: Response = JsFuture::from(Promise::resolve(&started?)).await?.unchecked_into();
@@ -155,6 +145,20 @@ pub fn serve(port: MessagePort, input: JsValue, fetch: Option<Function>) -> Resu
         }
     });
     Ok(())
+}
+
+/// Calls `fetch`, or the global one, with the request's options, body and
+/// abort signal. Returns the response promise.
+fn start_fetch(request: super::control::NetworkRequest, controller: &AbortController, fetch: Option<Function>) -> Result<JsValue, JsValue> {
+    let options = Object::assign(&Object::new(), &request.options);
+    Reflect::set(&options, &"body".into(), &request.body)?;
+    Reflect::set(&options, &"signal".into(), &controller.signal())?;
+    let global = js_sys::global();
+    let fetch = match fetch {
+        Some(fetch) => fetch,
+        None => Reflect::get(&global, &"fetch".into())?.dyn_into::<Function>()?,
+    };
+    fetch.call2(&global, &request.url.into(), &options)
 }
 
 pub fn fail_all(error: JsValue) {

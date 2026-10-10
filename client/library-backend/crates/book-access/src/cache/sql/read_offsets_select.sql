@@ -1,1 +1,0 @@
-SELECT b.bytes FROM block b JOIN source s ON s.hash=b.hash WHERE b.hash=?1 AND b.offset=?2 AND s.checksum=?3 AND s.size=?4

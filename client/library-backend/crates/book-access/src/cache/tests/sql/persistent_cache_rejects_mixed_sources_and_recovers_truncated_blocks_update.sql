@@ -1,1 +1,0 @@
-UPDATE block SET bytes=x'00'

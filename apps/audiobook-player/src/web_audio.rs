@@ -1,4 +1,6 @@
 use crate::{AudiobookBook, PlaybackPosition};
+#[cfg(target_arch = "wasm32")]
+use library_backend::library::BrowserAudiobook;
 use std::time::Duration;
 use wasm_bindgen::{closure::Closure, prelude::*};
 
@@ -43,12 +45,15 @@ pub(crate) struct AudioEngine {
     browser: BrowserAudio,
     // Keep the callback valid until dispose has detached browser event handlers.
     _save: Closure<dyn FnMut(f64, f64)>,
-    _source: app::BrowserAudiobook,
+    _source: BrowserAudiobook,
 }
 
 impl AudioEngine {
-    pub fn open(source: app::BrowserAudiobook, book: &AudiobookBook, initial: Duration, updates: async_channel::Sender<PlaybackPosition>) -> Result<Self, String> {
-        let metadata = js_sys::JSON::parse(&serde_json::json!({"title": book.title, "artist": book.author.clone().unwrap_or_default(), "tracks": source.metadata.tracks, "localTrackUrls": source.local_tracks, "bookDuration": book.duration.as_secs_f64()}).to_string()).map_err(|e| format!("{e:?}"))?;
+    pub fn open(source: BrowserAudiobook, book: &AudiobookBook, initial: Duration, updates: async_channel::Sender<PlaybackPosition>) -> Result<Self, String> {
+        let metadata = js_sys::JSON::parse(
+            &serde_json::json!({"title": book.title, "artist": book.author.clone().unwrap_or_default(), "tracks": source.metadata.tracks, "localTrackUrls": source.local_tracks, "bookDuration": book.duration.as_secs_f64()}).to_string(),
+        )
+        .map_err(|e| format!("{e:?}"))?;
         let save = Closure::new(move |position: f64, progress: f64| {
             if let Some(position) = crate::browser_position_update(position, progress) {
                 let _ = updates.try_send(position);

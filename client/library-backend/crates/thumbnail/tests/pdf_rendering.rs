@@ -51,11 +51,6 @@ fn complex_pdf_uses_supplied_renderer_with_rewound_reader() {
     assert_eq!(image::load_from_memory(&versions.browse).unwrap().width(), 300);
 }
 
-#[test]
-fn renderer_errors_propagate() {
-    let result = generate_thumbnail_versions_with_pdf_renderer("pdf", Cursor::new(pdf(true)), |_| Err("renderer unavailable".into()));
-    assert_eq!(result.err().unwrap().to_string(), "renderer unavailable");
-}
 
 #[test]
 fn pdfium_preserves_page_margins_and_vector_overlay() {

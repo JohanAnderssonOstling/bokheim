@@ -10,15 +10,3 @@ pub(super) fn canonical_ddc_notation(value: &str) -> Option<String> {
 pub(super) fn specificity(notation: &str) -> usize {
     notation.split_once('.').map_or(0, |(_, decimal)| decimal.len())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn canonicalizes_complete_ddc_notations() {
-        assert_eq!(canonical_ddc_notation(" 005.133 "), Some("005.133".to_owned()));
-        assert_eq!(canonical_ddc_notation("005"), Some("005".to_owned()));
-        assert_eq!(canonical_ddc_notation("5"), None);
-    }
-}

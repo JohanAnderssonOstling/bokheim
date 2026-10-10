@@ -114,7 +114,7 @@ pub(super) fn extract(reader: &mut (impl Read + Seek)) -> Option<RgbImage> {
     validate_cover_image_dimensions(width, height).ok()?;
     // Peel ordinary PDF filters in order, retaining the final image codec and its
     // own DecodeParms. A parameter array belongs to individual filters, not all of them.
-    let (encoded, codec, codec_parameters) = 'payload: {
+    let (encoded, codec, codec_parameters) = {
         let filters = match stream.dict.get(b"Filter") {
             Ok(value) => match resolve(document, value)? {
                 Object::Array(values) => values.iter().map(|value| resolve(document, value)?.as_name().ok()).collect::<Option<Vec<_>>>()?,
@@ -130,6 +130,8 @@ pub(super) fn extract(reader: &mut (impl Read + Seek)) -> Option<RgbImage> {
             Err(_) => None,
         };
         let mut bytes = stream.content.clone();
+        let mut codec = Vec::new();
+        let mut codec_parameters = Dictionary::new();
         let limit = usize::try_from(MAX_COVER_IMAGE_PIXELS).ok()?.checked_mul(4)?.checked_add(MAX_COVER_IMAGE_DIMENSION as usize)?;
         if bytes.len() > limit {
             return None;
@@ -150,7 +152,9 @@ pub(super) fn extract(reader: &mut (impl Read + Seek)) -> Option<RgbImage> {
                 if index + 1 != filters.len() || bytes.len() > MAX_COVER_IMAGE_BYTES {
                     return None;
                 }
-                break 'payload (bytes, filter.to_vec(), parameters);
+                codec = filter.to_vec();
+                codec_parameters = parameters;
+                break;
             }
             if !matches!(*filter, b"FlateDecode" | b"LZWDecode" | b"ASCII85Decode") {
                 return None;
@@ -160,7 +164,7 @@ pub(super) fn extract(reader: &mut (impl Read + Seek)) -> Option<RgbImage> {
             dictionary.set("DecodeParms", parameters);
             bytes = Stream::new(dictionary, bytes).get_plain_content_with_limit(limit).ok()?;
         }
-        (bytes, Vec::new(), Dictionary::new())
+        (bytes, codec, codec_parameters)
     };
     let jpx = codec == b"JPXDecode";
     let space;

@@ -1,47 +1,65 @@
 use crate::session::{AuthError, Session};
-use crate::ServerUrl;
+use crate::Url;
 use account_contract::{AuthResponse, EmailRequest, EmailVerificationRequest, LoginRequest, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest};
+use reqwest::{header, Client};
 use serde::Serialize;
+use sync_common::transport as wire;
 
-fn session_from_response(server_url: ServerUrl, body: AuthResponse) -> Result<Session, AuthError> {
+fn session_from_response(server_url: Url, body: AuthResponse) -> Result<Session, AuthError> {
     Session::try_new_with_tokens(server_url, body.user_id, body.email, body.token, Some(body.expires_at), Some(body.refresh_token), Some(body.refresh_expires_at))
 }
 
-async fn post_auth(url: reqwest::Url, request: &impl Serialize) -> Result<AuthResponse, AuthError> {
-    Ok(binary_http::send(reqwest::Client::builder().build()?.post(url), request).await?)
+async fn post_auth(url: Url, request: &impl Serialize) -> Result<AuthResponse, AuthError> {
+    let response = Client::builder().build()?.post(url).header(header::ACCEPT, wire::MEDIA_TYPE).header(header::CONTENT_TYPE, wire::MEDIA_TYPE).body(wire::encode(request)?).send().await?.error_for_status()?;
+    Ok(wire::decode(&response.bytes().await?, wire::MAX_DECODED_RESPONSE_BYTES)?)
 }
 
-pub async fn login(server_url: &ServerUrl, email: &str, password: &str) -> Result<Session, AuthError> {
-    let response = post_auth(server_url.endpoint("api/auth/login"), &LoginRequest { email: email.to_owned(), password: password.to_owned() }).await?;
+pub async fn login(server_url: &Url, email: &str, password: &str) -> Result<Session, AuthError> {
+    let response = post_auth(server_url.join("api/auth/login")?, &LoginRequest { email: email.to_owned(), password: password.to_owned() }).await?;
     session_from_response(server_url.clone(), response)
 }
 
-pub async fn request_public_registration(server_url: &ServerUrl, email: &str, password: &str) -> Result<(), AuthError> {
-    Ok(binary_http::send_status(reqwest::Client::builder().build()?.post(server_url.endpoint("api/auth/register")), &PublicRegistrationRequest { email: email.to_owned(), password: password.to_owned() }).await?)
+pub async fn request_public_registration(server_url: &Url, email: &str, password: &str) -> Result<(), AuthError> {
+    let request = PublicRegistrationRequest { email: email.to_owned(), password: password.to_owned() };
+    Client::builder().build()?.post(server_url.join("api/auth/register")?).header(header::ACCEPT, wire::MEDIA_TYPE).header(header::CONTENT_TYPE, wire::MEDIA_TYPE).body(wire::encode(&request)?).send().await?.error_for_status()?;
+    Ok(())
 }
 
-pub async fn resend_verification(server_url: &ServerUrl, email: &str) -> Result<(), AuthError> {
-    Ok(binary_http::send_status(reqwest::Client::builder().build()?.post(server_url.endpoint("api/auth/resend-verification")), &EmailRequest { email: email.to_owned() }).await?)
+pub async fn resend_verification(server_url: &Url, email: &str) -> Result<(), AuthError> {
+    let request = EmailRequest { email: email.to_owned() };
+    Client::builder().build()?.post(server_url.join("api/auth/resend-verification")?).header(header::ACCEPT, wire::MEDIA_TYPE).header(header::CONTENT_TYPE, wire::MEDIA_TYPE).body(wire::encode(&request)?).send().await?.error_for_status()?;
+    Ok(())
 }
 
-pub async fn verify_email(server_url: &ServerUrl, email: &str, pin: &str) -> Result<Session, AuthError> {
-    let response = post_auth(server_url.endpoint("api/auth/verify-email"), &EmailVerificationRequest { email: email.to_owned(), pin: pin.to_owned() }).await?;
+pub async fn verify_email(server_url: &Url, email: &str, pin: &str) -> Result<Session, AuthError> {
+    let response = post_auth(server_url.join("api/auth/verify-email")?, &EmailVerificationRequest { email: email.to_owned(), pin: pin.to_owned() }).await?;
     session_from_response(server_url.clone(), response)
 }
 
-pub async fn request_password_reset(server_url: &ServerUrl, email: &str) -> Result<(), AuthError> {
-    Ok(binary_http::send_status(reqwest::Client::builder().build()?.post(server_url.endpoint("api/auth/request-password-reset")), &EmailRequest { email: email.to_owned() }).await?)
+pub async fn request_password_reset(server_url: &Url, email: &str) -> Result<(), AuthError> {
+    let request = EmailRequest { email: email.to_owned() };
+    Client::builder()
+        .build()?
+        .post(server_url.join("api/auth/request-password-reset")?)
+        .header(header::ACCEPT, wire::MEDIA_TYPE)
+        .header(header::CONTENT_TYPE, wire::MEDIA_TYPE)
+        .body(wire::encode(&request)?)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
 }
 
-pub async fn reset_password(server_url: &ServerUrl, token: &str, new_password: &str) -> Result<(), AuthError> {
-    Ok(binary_http::send_status(reqwest::Client::builder().build()?.post(server_url.endpoint("api/auth/reset-password")), &ResetPasswordRequest { token: token.to_owned(), new_password: new_password.to_owned() }).await?)
+pub async fn reset_password(server_url: &Url, token: &str, new_password: &str) -> Result<(), AuthError> {
+    let request = ResetPasswordRequest { token: token.to_owned(), new_password: new_password.to_owned() };
+    Client::builder().build()?.post(server_url.join("api/auth/reset-password")?).header(header::ACCEPT, wire::MEDIA_TYPE).header(header::CONTENT_TYPE, wire::MEDIA_TYPE).body(wire::encode(&request)?).send().await?.error_for_status()?;
+    Ok(())
 }
 
 pub async fn logout(session: &Session) -> Result<(), AuthError> {
-    let request = reqwest::Client::builder().build()?.post(session.server_url().endpoint("api/auth/logout"));
     let refresh_token = session.refresh_token().ok_or_else(|| AuthError::InvalidData("session has no refresh token; sign in again".to_owned()))?;
-    let response = binary_http::body(request, &RefreshRequest { refresh_token: refresh_token.to_owned() })?.send().await?;
-    binary_http::ensure_ok(response).await?;
+    let request = RefreshRequest { refresh_token: refresh_token.to_owned() };
+    Client::builder().build()?.post(session.server_url().join("api/auth/logout")?).header(header::ACCEPT, wire::MEDIA_TYPE).header(header::CONTENT_TYPE, wire::MEDIA_TYPE).body(wire::encode(&request)?).send().await?.error_for_status()?;
     Ok(())
 }
 
@@ -50,7 +68,7 @@ pub async fn refresh_session(session: &Session) -> Result<Session, AuthError> {
     if session.refresh_expires_within(0) {
         return Err(AuthError::InvalidData("refresh token has expired; sign in again".to_owned()));
     }
-    let response: AuthResponse = binary_http::send(reqwest::Client::builder().build()?.post(session.server_url().endpoint("api/auth/refresh")), &RefreshRequest { refresh_token: refresh_token.to_owned() }).await?;
+    let response = post_auth(session.server_url().join("api/auth/refresh")?, &RefreshRequest { refresh_token: refresh_token.to_owned() }).await?;
     let refreshed = session_from_response(session.server_url().clone(), response)?;
     if refreshed.user_id() != session.user_id() {
         return Err(AuthError::InvalidData("refreshed session changed authenticated user".to_owned()));
@@ -62,26 +80,73 @@ pub async fn refresh_session(session: &Session) -> Result<Session, AuthError> {
 mod tests {
     use super::*;
     use axum::body::Bytes;
-    use axum::http::{header, HeaderMap, HeaderValue};
-    use axum::response::IntoResponse;
-    use axum::routing::post;
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::{get, post};
     use axum::Router;
+    use flate2::{write::GzEncoder, Compression};
+    use std::io::Write;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use sync_common::transport as wire;
 
     const TEST_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+    fn gzip_response(body: &[u8], content_type: &'static str) -> Response {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(body).unwrap();
+        let mut response = encoder.finish().unwrap().into_response();
+        response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+        response.headers_mut().insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        response
+    }
+
     #[tokio::test]
-    async fn refresh_rotates_both_credentials_without_changing_identity() {
+    async fn logout_sends_refresh_token_and_preserves_status_errors() {
+        let app = Router::new().route(
+            "/api/auth/logout",
+            post(|headers: HeaderMap, body: Bytes| async move {
+                assert_eq!(headers.get(header::ACCEPT).unwrap(), wire::MEDIA_TYPE);
+                assert_eq!(headers.get(header::CONTENT_TYPE).unwrap(), wire::MEDIA_TYPE);
+                let request: RefreshRequest = wire::decode(&body, wire::MAX_DECODED_REQUEST_BYTES).unwrap();
+                match request.refresh_token.as_str() {
+                    token if token == "b".repeat(43) => (StatusCode::NO_CONTENT, "").into_response(),
+                    _ => (StatusCode::UNAUTHORIZED, gzip_response(b"refresh token revoked", "text/plain")).into_response(),
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let make_session =
+            |refresh_token: char| Session::try_new_with_tokens(origin.clone(), "user-1".into(), "reader@example.com".into(), TEST_TOKEN.into(), Some(1_900_000_000), Some(refresh_token.to_string().repeat(43)), Some(1_910_000_000)).unwrap();
+
+        logout(&make_session('b')).await.unwrap();
+        let error = logout(&make_session('c')).await.unwrap_err();
+        assert!(error.is_unauthorized());
+        assert!(matches!(error, AuthError::Http(error) if error.status() == Some(StatusCode::UNAUTHORIZED)));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn refresh_and_snapshot_decode_gzip_without_changing_identity() {
         let received_old_refresh = Arc::new(AtomicBool::new(false));
         let observed = Arc::clone(&received_old_refresh);
+        let library_id = sync_common::LibraryId::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
+        let expected_snapshot = account_contract::AccountSnapshotResponse {
+            libraries: vec![sync_common::api::libraries::LibrarySummary { library_id, library_name: "Classics".to_owned() }],
+            deleted_library_ids: Vec::new(),
+            storage: account_contract::StorageUsageResponse { used_bytes: 40, reserved_bytes: 2, quota_bytes: 100 },
+            library_storage: vec![account_contract::LibraryStorageUsage { library_id: library_id.to_string(), used_bytes: 40 }],
+        };
+        let response_snapshot = expected_snapshot.clone();
         let app = Router::new().route(
             "/api/auth/refresh",
             post(move |headers: HeaderMap, body: Bytes| {
                 let observed = Arc::clone(&observed);
                 async move {
                     assert!(headers.get(header::CONTENT_ENCODING).is_none());
+                    assert!(headers.get(header::ACCEPT_ENCODING).unwrap().to_str().unwrap().split(',').any(|encoding| encoding.trim() == "gzip"));
                     let request: RefreshRequest = wire::decode(&body, wire::MAX_DECODED_REQUEST_BYTES).unwrap();
                     observed.store(request.refresh_token == "b".repeat(43), Ordering::SeqCst);
                     let encoded = wire::encode(&AuthResponse {
@@ -93,17 +158,23 @@ mod tests {
                         email: "reader@example.com".to_owned(),
                     })
                     .unwrap();
-                    let mut response = encoded.into_response();
-                    response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(wire::MEDIA_TYPE));
-                    response
+                    gzip_response(&encoded, wire::MEDIA_TYPE)
                 }
+            }),
+        );
+        let app = app.route(
+            "/api/account/snapshot",
+            get(move |headers: HeaderMap| async move {
+                assert_eq!(headers.get(header::AUTHORIZATION).and_then(|value| value.to_str().ok()), Some(format!("Bearer {}", "c".repeat(43)).as_str()));
+                let encoded = wire::encode(&response_snapshot).unwrap();
+                gzip_response(&encoded, wire::MEDIA_TYPE)
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let session =
-            Session::try_new_with_tokens(ServerUrl::parse(&format!("http://{address}")).unwrap(), "user-1".to_owned(), "reader@example.com".to_owned(), TEST_TOKEN.to_owned(), Some(1_800_000_000), Some("b".repeat(43)), Some(1_910_000_000))
+            Session::try_new_with_tokens(Url::parse(&format!("http://{address}")).unwrap(), "user-1".to_owned(), "reader@example.com".to_owned(), TEST_TOKEN.to_owned(), Some(1_800_000_000), Some("b".repeat(43)), Some(1_910_000_000))
                 .unwrap();
 
         let refreshed = refresh_session(&session).await.unwrap();
@@ -113,6 +184,7 @@ mod tests {
         assert_eq!(refreshed.refresh_token(), Some("d".repeat(43).as_str()));
         assert_eq!(refreshed.user_id(), session.user_id());
         assert_eq!(refreshed.email(), session.email());
+        assert_eq!(crate::account::account_snapshot(&refreshed).await.unwrap(), expected_snapshot);
         server.abort();
     }
 }

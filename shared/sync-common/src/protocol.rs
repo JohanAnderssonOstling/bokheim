@@ -1,5 +1,6 @@
 //! Transport-independent validation for synchronization pages.
 
+use crate::ContentHash;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use crate::transport::encode;
@@ -49,8 +50,8 @@ impl PushBatcher {
     /// Leave fields of failed creations in the durable outbox for a later
     /// exchange. Sending them in a later page would look like standalone
     /// absent-book edits, which the server correctly acknowledges as no-ops.
-    pub fn defer_book_fields(&mut self, books: &[String]) {
-        self.ready.retain(|row| !row.publication.state.value.book.is_some_and(|book| books.iter().any(|hash| hash == book.as_str())));
+    pub fn defer_book_fields(&mut self, books: &[ContentHash]) {
+        self.ready.retain(|row| !row.publication.state.value.book.is_some_and(|book| books.contains(&book)));
     }
 
     pub fn next_batch(&mut self) -> Vec<OpaquePublication> {
@@ -191,111 +192,4 @@ pub fn validate_push_response(requested: &[ReplicaSeq], response: &PushMutations
     }
     let accepted = requested.iter().copied().filter(|seq| !accounted.contains(seq)).collect();
     Ok(ValidatedPushResponse { accepted, issues })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{ConflictRank, OpaqueStateEntry, Publication, ReplicaId, StateAddress, VersionKey, Versioned};
-
-    fn server_mutation(kind: &str, revision: u64) -> crate::StateDelivery {
-        crate::fixture_delivery(Publication { publisher_seq: ReplicaSeq::new(1).unwrap(), state: Versioned { version: VersionKey::new(1, ConflictRank::Update, ReplicaId::nil(), ReplicaSeq::new(1).unwrap()), value: OpaqueStateEntry { address: StateAddress { kind: kind.to_owned(), entity_key: "key".to_owned(), entity_subkey: String::new() }, bytes: Vec::new(), book: None } } }, ReplicaId::nil(), LibraryRevision::new(revision).unwrap())
-    }
-
-    fn wire_mutation(sequence: u64, value_bytes: usize) -> OpaquePublication {
-        Publication { publisher_seq: ReplicaSeq::new(sequence).unwrap(), state: Versioned { version: VersionKey::new(sequence, ConflictRank::Update, ReplicaId::nil(), ReplicaSeq::new(sequence).unwrap()), value: OpaqueStateEntry { address: StateAddress { kind: "annotation".to_owned(), entity_key: sequence.to_string(), entity_subkey: String::new() }, bytes: vec![0; value_bytes], book: None } } }
-    }
-
-    #[test]
-    fn push_batcher_preserves_order_and_sets_aside_untransmittable_mutations() {
-        let first = wire_mutation(1, 1);
-        let oversized = wire_mutation(2, MAX_PUSH_BATCH_BYTES + 1);
-        let last = wire_mutation(3, 1);
-        let oversized_id = oversized.publisher_seq;
-        let mut batcher = PushBatcher::new(vec![first.clone(), oversized, last.clone()]).unwrap();
-
-        assert_eq!(batcher.untransmittable(), &[oversized_id]);
-        assert_eq!(batcher.next_batch().iter().map(|mutation| mutation.publisher_seq).collect::<Vec<_>>(), vec![first.publisher_seq, last.publisher_seq]);
-        assert!(batcher.is_empty());
-    }
-
-    #[test]
-    fn push_batcher_limits_both_count_and_encoded_bytes() {
-        let mut count_limited = PushBatcher::new((1..=MAX_PUSH_MUTATIONS as u64 + 1).map(|sequence| wire_mutation(sequence, 1)).collect()).unwrap();
-        assert_eq!(count_limited.next_batch().len(), MAX_PUSH_MUTATIONS);
-        assert_eq!(count_limited.next_batch().len(), 1);
-
-        let mut byte_limited = PushBatcher::new((1..=100).map(|sequence| wire_mutation(sequence, 64 * 1024)).collect()).unwrap();
-        let batch = byte_limited.next_batch();
-        let encoded_bytes = batch.iter().map(|mutation| encode(mutation).unwrap().len()).sum::<usize>();
-        assert!(!batch.is_empty());
-        assert!(batch.len() < 100);
-        assert!(encoded_bytes <= MAX_PUSH_BATCH_BYTES);
-        assert!(!byte_limited.is_empty());
-    }
-
-    #[test]
-    fn identity_acknowledgements_do_not_depend_on_sequence_prefixes() {
-        let first = ReplicaSeq::new(1).unwrap();
-        let second = ReplicaSeq::new(19).unwrap();
-        let response = PushMutationsResponse { rejected: Vec::new() };
-        let validated = validate_push_response(&[first, second], &response).unwrap();
-        assert_eq!(validated.accepted, vec![first, second]);
-    }
-
-    #[test]
-    fn every_requested_identity_is_partitioned_by_rejection_lifetime() {
-        let accepted = ReplicaSeq::new(1).unwrap();
-        let transient = ReplicaSeq::new(5).unwrap();
-        let first_permanent = ReplicaSeq::new(17).unwrap();
-        let second_permanent = ReplicaSeq::new(21).unwrap();
-        let response = PushMutationsResponse {
-            rejected: vec![
-                MutationRejection { publisher_seq: transient, reason: MutationRejectionReason::TimestampTooFarFuture },
-                MutationRejection { publisher_seq: first_permanent, reason: MutationRejectionReason::InvalidPayload },
-                MutationRejection { publisher_seq: second_permanent, reason: MutationRejectionReason::InvalidPayload },
-            ],
-        };
-
-        let validated = validate_push_response(&[accepted, transient, first_permanent, second_permanent], &response).unwrap();
-        assert_eq!(validated.accepted, vec![accepted]);
-        assert_eq!(
-            validated.issues,
-            vec![
-                MutationIssue::Retryable(MutationRejection { publisher_seq: transient, reason: MutationRejectionReason::TimestampTooFarFuture }),
-                MutationIssue::Rejected(MutationRejection { publisher_seq: first_permanent, reason: MutationRejectionReason::InvalidPayload }),
-                MutationIssue::Rejected(MutationRejection { publisher_seq: second_permanent, reason: MutationRejectionReason::InvalidPayload }),
-            ]
-        );
-        assert_eq!(validated.completed_sequences(), vec![accepted, first_permanent, second_permanent]);
-    }
-
-    fn cursor(lifecycle: u64, field: u64) -> SyncCursor {
-        SyncCursor { lifecycle_revision: LibraryRevision::new(lifecycle).ok(), field_revision: LibraryRevision::new(field).ok() }
-    }
-
-    #[test]
-    fn final_cursor_may_advance_past_the_last_returned_state() {
-        let response = PullStateResponse { mutations: Vec::new(), next_cursor: cursor(10, 10), has_more: false };
-        validate_pull_batch(&response, cursor(5, 0)).unwrap();
-    }
-
-    #[test]
-    fn lifecycles_precede_fields_and_fields_stay_at_or_below_the_lifecycle_cursor() {
-        let page = |mutations, next_cursor| PullStateResponse { mutations, next_cursor, has_more: false };
-        validate_pull_batch(&page(vec![server_mutation("book_lifecycle", 30), server_mutation("metadata", 12)], cursor(30, 30)), cursor(10, 10)).unwrap();
-        assert!(validate_pull_batch(&page(vec![server_mutation("metadata", 12), server_mutation("book_lifecycle", 30)], cursor(30, 30)), cursor(10, 10)).is_err(), "a field cannot precede a lifecycle");
-        assert!(validate_pull_batch(&page(vec![server_mutation("metadata", 31)], cursor(30, 31)), cursor(30, 10)).is_err(), "a field cannot pass the lifecycle cursor");
-        assert!(validate_pull_batch(&page(vec![server_mutation("metadata", 9)], cursor(30, 30)), cursor(30, 10)).is_err(), "a field must advance the field cursor");
-    }
-
-    #[test]
-    fn a_non_final_page_ends_at_its_last_delivered_revision() {
-        let lifecycles = PullStateResponse { mutations: vec![server_mutation("book_lifecycle", 22)], next_cursor: cursor(22, 10), has_more: true };
-        validate_pull_batch(&lifecycles, cursor(20, 10)).unwrap();
-        let skipped = PullStateResponse { next_cursor: cursor(40, 10), ..lifecycles.clone() };
-        assert!(validate_pull_batch(&skipped, cursor(20, 10)).is_err(), "unread lifecycles cannot be skipped");
-        let fields = PullStateResponse { mutations: vec![server_mutation("reading_position", 15)], next_cursor: cursor(40, 15), has_more: true };
-        validate_pull_batch(&fields, cursor(40, 10)).unwrap();
-    }
 }

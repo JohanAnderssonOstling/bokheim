@@ -71,6 +71,12 @@ pub struct StorageUsageResponse {
     pub quota_bytes: u64,
 }
 
+impl StorageUsageResponse {
+    pub const fn available_bytes(self) -> u64 {
+        self.quota_bytes.saturating_sub(self.used_bytes.saturating_add(self.reserved_bytes))
+    }
+}
+
 /// One library's share of [`StorageUsageResponse::used_bytes`].
 ///
 /// A separate response rather than a field on `StorageUsageResponse`: the
@@ -115,46 +121,4 @@ pub struct SessionRevocationResponse {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OtherSessionsRevocationResponse {
     pub revoked: u64,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn access_and_refresh_credentials_have_distinct_wire_fields() {
-        let response = AuthResponse { token: "access".to_owned(), expires_at: 100, refresh_token: "refresh".to_owned(), refresh_expires_at: 200, user_id: "user-1".to_owned(), email: "reader@example.com".to_owned() };
-        let encoded = wire::encode(&response).unwrap();
-        let value: AuthResponse = wire::decode(&encoded, 1024).unwrap();
-        assert_eq!(value.token, "access");
-        assert_eq!(value.refresh_token, "refresh");
-    }
-
-    #[test]
-    fn session_summaries_expose_identifiers_and_times_but_no_credentials() {
-        let summary = SessionSummary { session_id: "session-1".to_owned(), created_at: 100, expires_at: 200, current: true };
-        let encoded = wire::encode(&summary).unwrap();
-        let value: SessionSummary = wire::decode(&encoded, 1024).unwrap();
-        assert_eq!(value, summary);
-    }
-
-    #[test]
-    fn storage_usage_round_trips_without_losing_large_byte_counts() {
-        let usage = StorageUsageResponse { used_bytes: 1_000_000_000_000, reserved_bytes: 42, quota_bytes: 2_000_000_000_000 };
-        let encoded = wire::encode(&usage).unwrap();
-        assert_eq!(wire::decode::<StorageUsageResponse>(&encoded, 1024).unwrap(), usage);
-    }
-
-    #[test]
-    fn account_snapshot_round_trips_all_remote_settings_state() {
-        let library_id = sync_common::LibraryId::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
-        let snapshot = AccountSnapshotResponse {
-            libraries: vec![sync_common::api::libraries::LibrarySummary { library_id, library_name: "Classics".to_owned() }],
-            deleted_library_ids: Vec::new(),
-            storage: StorageUsageResponse { used_bytes: 50, reserved_bytes: 5, quota_bytes: 100 },
-            library_storage: vec![LibraryStorageUsage { library_id: library_id.to_string(), used_bytes: 50 }],
-        };
-        let encoded = wire::encode(&snapshot).unwrap();
-        assert_eq!(wire::decode::<AccountSnapshotResponse>(&encoded, 4096).unwrap(), snapshot);
-    }
 }

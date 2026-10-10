@@ -1,24 +1,23 @@
 //! Browser shell and route coordinator.
 //!
 //! This shell owns the current route. Library sessions own library lifecycle
-//! and per-library page state, and global pages own Settings.
-//! sidebar draws whichever route it is handed.
+//! and per-library page state. Settings belongs to this shell.
+//! The sidebar draws whichever route it is handed.
 
 use crate::services::notify_error;
 use gpui::prelude::*;
 use gpui::{App, AppContext, Context, Entity, IntoElement, Render, Subscription, Window};
-#[cfg(not(target_arch = "wasm32"))]
-use library_backend::{ImportBookSource, LibraryCommand, PendingCommand, SessionCommand};
 use sync_common::LibraryId;
 #[cfg(not(target_arch = "wasm32"))]
 use sync_common::ROOT_DIR_ID;
 use ui_components as components;
 
 use super::sidebar::Sidebar;
-use super::{GlobalPages, Libraries, LibrarySummary, Navigate, Route};
+use super::{GlobalRoute, Libraries, LibrarySummary, Navigate, Route};
 use crate::library::{BookDetailClosed, OpenBook};
 use crate::services::AppServices;
 use crate::stores::Preferences;
+use crate::universal::settings::SettingsPage;
 use crate::universal::sync::SyncPage;
 
 pub struct BrowserShell {
@@ -31,7 +30,8 @@ pub struct BrowserShell {
     pending_folder: Option<(LibraryId, sync_common::DirId, String)>,
     pending_subject: Option<(LibraryId, library_model::BrowseLocation, String)>,
     libraries: Entity<Libraries>,
-    global_pages: GlobalPages,
+    sync_page: Entity<SyncPage>,
+    settings: Entity<SettingsPage>,
     navigation: Entity<Sidebar>,
     _library_subscription: Subscription,
     _navigation_subscription: Subscription,
@@ -40,7 +40,7 @@ pub struct BrowserShell {
 impl BrowserShell {
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn apply_sync_event(&mut self, event: crate::SyncEvent, cx: &mut Context<Self>) {
-        self.global_pages.apply_sync_event(event, cx);
+        self.sync_page.update(cx, |page, cx| page.apply_event(event, cx));
     }
     pub(crate) fn set_content_footer(&mut self, footer: Option<gpui::AnyView>, cx: &mut Context<Self>) {
         if self.content_footer.as_ref().map(|view| view.entity_id()) == footer.as_ref().map(|view| view.entity_id()) {
@@ -56,18 +56,15 @@ impl BrowserShell {
         session.update(cx, |session, cx| session.open_book_detail(content_hash, window, cx));
     }
 
-    pub(crate) fn clear_cached_book_details(&mut self, cx: &mut Context<Self>) {
-        self.libraries.update(cx, |libraries, cx| libraries.clear_cached_book_details(cx));
-    }
     /// Builds the browser around the restored session and starts background subscriptions.
     pub fn new(services: AppServices, sync_state: Entity<crate::SyncState>, open_book: OpenBook, book_detail_closed: BookDetailClosed, preferences: Entity<Preferences>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let libraries = services.startup.libraries.iter().map(|entry| LibrarySummary::from_entry(&entry)).collect::<Vec<_>>();
+        let libraries = services.startup.libraries.iter().map(LibrarySummary::from_entry).collect::<Vec<_>>();
         let active_library_id = libraries.first().map(|entry| *entry.library_id());
         let shell = cx.entity().downgrade();
         let navigate_callback: Navigate = std::rc::Rc::new(move |route, window, cx| {
             let _ = shell.update(cx, |shell, cx| shell.navigate(route, window, cx));
         });
-        let libraries = cx.new(|cx| Libraries::new(services.backend.clone(), open_book.clone(), book_detail_closed, libraries, active_library_id, navigate_callback.clone(), cx));
+        let libraries = cx.new(|cx| Libraries::new(services.backend.clone(), open_book.clone(), book_detail_closed, libraries, active_library_id, cx));
         let session = libraries.read(cx).selected_session();
         let route = if let Some(session) = session {
             session.read(cx).focus_handle(cx).focus(window, cx);
@@ -83,18 +80,18 @@ impl BrowserShell {
             shell.open_pending_folder(window, cx);
             shell.open_pending_subject(window, cx);
             let session = libraries.read(cx).selected_session();
-            if matches!(shell.route, Route::Library(_)) {
-                if let Some(session) = session {
-                    shell.route = Route::Library(session.read(cx).route());
-                    session.read(cx).focus_handle(cx).focus(window, cx);
-                }
+            if matches!(shell.route, Route::Library(_))
+                && let Some(session) = session
+            {
+                shell.route = Route::Library(session.read(cx).route());
+                session.read(cx).focus_handle(cx).focus(window, cx);
             }
             cx.notify();
         });
         // Sync state belongs to the application shell, not to Settings. The
         // page stays alive across navigation and Settings only renders it.
         let sync_page = cx.new(|cx| SyncPage::new(services.clone(), sync_state, libraries.clone(), window, cx));
-        let global_pages = GlobalPages::new(services.updates.clone(), preferences, libraries.clone(), sync_page);
+        let settings = cx.new(|cx| SettingsPage::new(services.updates.clone(), sync_page.clone(), preferences, cx));
         Self {
             #[cfg(not(target_arch = "wasm32"))]
             services,
@@ -105,7 +102,8 @@ impl BrowserShell {
             pending_folder: None,
             pending_subject: None,
             libraries,
-            global_pages,
+            sync_page,
+            settings,
             navigation,
             _library_subscription: library_subscription,
             _navigation_subscription: navigation_subscription,
@@ -181,14 +179,8 @@ impl BrowserShell {
         cx.spawn(async move |root, cx| {
             let result = async {
                 let library = backend.library_for_import(library_id).await?;
-                let _progress = root.update_in(cx, |_, window, cx| crate::services::ImportProgressToast::start(library.clone(), window, cx)).ok();
-                let hash = library
-                    .request::<app::ContentHash>(LibraryCommand::Session(SessionCommand::Pending(PendingCommand::ImportBook {
-                        parent_id: ROOT_DIR_ID,
-                        file_name: name,
-                        source: ImportBookSource::Stored { location: path.clone(), staged: None },
-                    })))
-                    .await?;
+                let _progress = root.update_in(cx, |_, window, cx| crate::services::ImportProgressToast::start(window, cx)).ok();
+                let hash = library.import_stored_book(ROOT_DIR_ID, name, path.clone()).await?;
                 Ok::<_, String>(library_model::BookLocator::new(*library.id(), hash))
             }
             .await;
@@ -228,10 +220,10 @@ impl BrowserShell {
     /// focusing the shell or the root leaves the grid unreachable from the
     /// keyboard even though the browser is visible.
     pub(crate) fn focus_active_page(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.route, Route::Library(_)) {
-            if let Some(session) = self.libraries.read(cx).selected_session() {
-                session.read(cx).focus_handle(cx).focus(window, cx);
-            }
+        if matches!(self.route, Route::Library(_))
+            && let Some(session) = self.libraries.read(cx).selected_session()
+        {
+            session.read(cx).focus_handle(cx).focus(window, cx);
         }
     }
 
@@ -246,7 +238,10 @@ impl BrowserShell {
                     session.update(cx, |session, cx| session.navigate(route, window, cx));
                 }
             }
-            Route::Global(route) => self.global_pages.prepare(route, cx),
+            Route::Global(GlobalRoute::Settings) => {
+                // Refresh local storage usage when returning after imports.
+                self.sync_page.update(cx, |page, cx| page.schedule_refresh(cx));
+            }
         }
         cx.notify();
     }
@@ -295,16 +290,10 @@ impl Render for BrowserShell {
                 Some(session) => session.into_any_element(),
                 None => self.empty_libraries(cx),
             },
-            Route::Global(global) => components::library_section_content().child(self.global_pages.page(global, cx)).into_any_element(),
+            Route::Global(GlobalRoute::Settings) => components::library_section_content().child(self.settings.clone()).into_any_element(),
         };
         let compact_navigation = components::WindowWidthClass::for_window(window).is_compact();
         let mobile_heading = components::uses_mobile_navigation(window).then(|| route).and_then(|route| match route {
-            // Home is the root of the mobile tab bar: there is nothing to go
-            // back to, so its heading never has a back button.
-            Route::Library(super::LibraryRoute::Home) => {
-                let theme = components::browser_theme(cx);
-                Some(components::mobile_navigation_bar("Home", None, theme))
-            }
             Route::Global(super::GlobalRoute::Settings) => {
                 let theme = components::browser_theme(cx);
                 // The OS back button/gesture already does this on native
@@ -312,7 +301,7 @@ impl Render for BrowserShell {
                 let back = (!components::has_native_back_button()).then(|| components::mobile_back_button(theme).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::DismissSettings), cx)));
                 Some(components::mobile_navigation_bar("Settings", back, theme))
             }
-            // Browse pages own their current folder or subject title.
+            // Browse pages, Home among them, own their current title.
             _ => None,
         });
         let content = gpui::div()

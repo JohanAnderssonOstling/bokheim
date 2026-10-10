@@ -5,21 +5,20 @@
 //! to a node browses it; the graph then moves that node to the camera centre.
 
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
 use std::sync::Arc;
 
-use super::controls::BrowseOptionsSelection;
-use crate::library::widgets::{BookCardInteraction, BookCardPresentation, BookCardView, Paginator, PaginatorAxis, PaginatorGroup, graph_cover_policy};
+use crate::library::widgets::{BookCardInteraction, BookCardPresentation, Paginator, PaginatorAxis, PaginatorGroup, PaginatorPosition, graph_cover_policy};
 use gpui::prelude::*;
 use gpui::{Context, div};
 use gpui_component::IconName;
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, App, Bounds, Entity, IntoElement, Pixels, Point, Window, point, px};
+use gpui::{AnyElement, App, Bounds, Entity, FocusHandle, IntoElement, Pixels, Point, SharedString, Size, Subscription, Window, point, px, size};
 use library_model::{BrowseLocation, BrowseRow};
-use ui_components::{self as components, CanvasCamera, GraphLayout, GraphLayoutKind, GraphMetrics, GraphNode, GraphTree, GraphType, InfiniteCanvas, LayoutParams};
+use ui_components::{self as components, CanvasCamera, GraphLayout, GraphLayoutKind, GraphTree, InfiniteCanvas, LayoutParams, NodeRole};
 
-use super::listing::{BrowseCrumb, BrowseDestination, BrowseKind};
+use super::listing::{BrowseCrumb, BrowseKind};
+use super::navigator::{BrowseNavigator, Loaded};
 
 const MIN_ZOOM: f32 = 0.3;
 const MAX_ZOOM: f32 = 2.5;
@@ -35,14 +34,32 @@ pub(super) enum GraphTap {
     Open,
 }
 
-/// A drawn layout and, for each of its nodes, the trail that browses it.
-struct Drawn {
-    layout: GraphLayout,
-    trails: Arc<Vec<Vec<BrowseCrumb>>>,
-    keys: Arc<Vec<String>>,
+/// One node of the graph: what its chip shows, the trail that browses it, and
+/// the key that follows it from one layout to the next.
+struct GraphEntry {
+    name: String,
+    books: usize,
+    trail: Vec<BrowseCrumb>,
+    key: String,
 }
 
-struct CachedGraph {
+impl GraphEntry {
+    /// The count a label shows: books in this location and beneath it, if any.
+    fn count(&self) -> Option<usize> {
+        (self.books > 0).then_some(self.books)
+    }
+}
+
+/// A layout and the entry for each of its nodes.
+struct Drawn {
+    layout: Arc<GraphLayout>,
+    entries: Arc<Vec<GraphEntry>>,
+}
+
+/// Everything a layout is computed from: the graph is laid out again only
+/// when one of these changes.
+#[derive(PartialEq)]
+struct GraphKey {
     root: BrowseLocation,
     root_label: String,
     root_book_count: usize,
@@ -50,15 +67,12 @@ struct CachedGraph {
     compact: bool,
     rem_size: Pixels,
     kind: GraphLayoutKind,
-    layout: Arc<GraphLayout>,
-    trails: Arc<Vec<Vec<BrowseCrumb>>>,
-    keys: Arc<Vec<String>>,
 }
 
-impl CachedGraph {
-    fn matches(&self, root: BrowseLocation, root_label: &str, root_book_count: usize, path: &[BrowseCrumb], compact: bool, rem_size: Pixels, kind: GraphLayoutKind) -> bool {
-        self.root == root && self.root_label == root_label && self.root_book_count == root_book_count && self.path == path && self.compact == compact && self.rem_size == rem_size && self.kind == kind
-    }
+/// The settled layout for a key, which the drawn one animates towards.
+struct CachedGraph {
+    key: GraphKey,
+    target: Drawn,
 }
 
 struct GraphMotion {
@@ -71,59 +85,89 @@ struct GraphMotion {
     selected_key: String,
     anchor: Point<Pixels>,
     departing: GraphLayout,
+    /// The entries the departing layout's nodes index.
+    departing_entries: Arc<Vec<GraphEntry>>,
     ghost_opacity: f32,
 }
 
 pub(super) struct BrowseGraph {
     canvas: Entity<InfiniteCanvas>,
+    navigator: Entity<BrowseNavigator>,
+    /// The location's own books, beside the graph.
     covers: Entity<Paginator>,
+    covers_focus: FocusHandle,
+    covers_focus_subscription: Option<Subscription>,
+    cover_positions: HashMap<BrowseLocation, PaginatorPosition>,
     sheet_expanded: bool,
     sidebar_width: f32,
     sidebar_drag: Option<(f32, f32)>,
     layout_kind: GraphLayoutKind,
-    /// The children of every location loaded, so the path and its sibling fans
-    /// draw without asking again.
+    /// The children of the page's location and of every location above it.
     children: HashMap<BrowseLocation, Vec<BrowseRow>>,
-    /// Locations whose children are being fetched.
-    fetching: HashSet<BrowseLocation>,
     target: Option<CachedGraph>,
     drawn: Option<Drawn>,
-    hovered: Option<usize>,
     /// The next selected location to centre after its children have loaded.
     center_for: Option<BrowseLocation>,
     /// The selection the camera was last placed for.
     placed_for: Option<BrowseLocation>,
     motion: Option<GraphMotion>,
+    _loaded: Subscription,
 }
 
 impl gpui::EventEmitter<GraphTap> for BrowseGraph {}
 
 impl BrowseGraph {
-    pub(super) fn new(layout_kind: GraphLayoutKind, covers_id: String, cx: &mut App) -> Self {
+    pub(super) fn new(navigator: Entity<BrowseNavigator>, layout_kind: GraphLayoutKind, cx: &mut Context<Self>) -> Self {
+        let covers_id = format!("{}-graph-covers", navigator.read(cx).kind.list_prefix());
+        let loaded = cx.subscribe(&navigator, |graph, _, loaded: &Loaded, cx| graph.install(loaded, cx));
         Self {
+            navigator,
             covers: cx.new(|_| Paginator::new(covers_id, []).flow_axis(PaginatorAxis::Vertical)),
+            covers_focus: cx.focus_handle(),
+            covers_focus_subscription: None,
+            cover_positions: HashMap::new(),
             sheet_expanded: false,
             sidebar_width: 380.0,
             sidebar_drag: None,
             canvas: cx.new(|_| InfiniteCanvas::new(MIN_ZOOM, MAX_ZOOM)),
             layout_kind,
             children: HashMap::new(),
-            fetching: HashSet::new(),
             target: None,
             drawn: None,
-            hovered: None,
             center_for: None,
             placed_for: None,
             motion: None,
+            _loaded: loaded,
         }
     }
 
-    pub(super) fn book_groups(&self, books: Rc<Vec<Entity<BookCardView>>>, cx: &App) -> Vec<PaginatorGroup> {
-        if books.is_empty() {
-            return Vec::new();
+    /// Takes the navigator's new listing: the children of its location and of
+    /// every location above it, and the location's books for the covers.
+    fn install(&mut self, loaded: &Loaded, cx: &mut Context<Self>) {
+        if let Some(left) = loaded.left {
+            self.cover_positions.insert(left, self.covers.read(cx).position());
         }
-        let children = books.iter().cloned().map(|book| super::layout::book_child(book, BookCardPresentation::GraphCover, |_, _, _| BookCardInteraction::default(), None, cx));
-        vec![PaginatorGroup::new(graph_cover_policy(), children)]
+        let navigator = self.navigator.read(cx);
+        let location = navigator.destination.location;
+        let mut children: HashMap<_, _> = navigator.listing.ancestors.iter().cloned().collect();
+        children.insert(location, navigator.listing.children.to_vec());
+        let books = navigator.listing.books.clone();
+        let groups = if books.is_empty() { Vec::new() } else { vec![PaginatorGroup::new(graph_cover_policy(), books.iter().cloned().map(|book| super::layout::book_child(book, BookCardPresentation::GraphCover, |_, _, _| BookCardInteraction::default(), None, cx)))] };
+        self.children = children;
+        self.target = None;
+        let restored = loaded.left.and_then(|_| self.cover_positions.get(&location).cloned());
+        let refresh = loaded.refresh;
+        self.covers.update(cx, |covers, cx| {
+            if refresh {
+                covers.refresh_groups(groups, cx);
+            } else {
+                covers.set_groups(groups, cx);
+            }
+            if let Some(position) = &restored {
+                covers.restore_position(position, cx);
+            }
+        });
+        cx.notify();
     }
 
     pub(super) fn layout_control(&self, cx: &Context<Self>) -> AnyElement {
@@ -138,10 +182,6 @@ impl BrowseGraph {
                 cx.notify();
             }))
             .into_any_element()
-    }
-
-    pub(super) fn covers(&self) -> Entity<Paginator> {
-        self.covers.clone()
     }
 
     fn set_sheet_expanded(&mut self, expanded: bool) -> bool {
@@ -166,22 +206,19 @@ impl BrowseGraph {
     }
 
     pub(super) fn render_panel(
-        &mut self, kind: BrowseKind, destination: &BrowseDestination, root_book_count: usize, controls: AnyElement, search_field: Option<gpui::Div>, has_books: bool, window: &mut Window, cx: &mut Context<Self>,
+        &mut self, root_book_count: usize, controls: AnyElement, search_field: Option<gpui::Div>, window: &mut Window, cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = components::browser_theme(cx);
-        let on_tap = cx.listener(|graph, world: &Point<Pixels>, _, cx| {
-            if let Some(action) = graph.tap(*world, cx) {
-                cx.emit(action);
-            }
-        });
-        let on_hover = cx.listener(|graph, world: &Option<Point<Pixels>>, _, cx| {
-            if graph.hover(*world, cx) {
-                cx.notify();
-            }
-        });
-        let graph = self.render(kind.root_location(), &kind.root_label(), root_book_count, &destination.path, move |world, window, cx| on_tap(&world, window, cx), move |world, window, cx| on_hover(&world, window, cx), window, cx);
+        let navigator = self.navigator.read(cx);
+        let (kind, path, has_books) = (navigator.kind, navigator.destination.path.clone(), !navigator.listing.books.is_empty());
+        let graph = self.render(kind, root_book_count, &path, window, cx);
         let compact = components::WindowWidthClass::for_window(window).is_compact();
-        let covers = self.covers.clone().into_any_element();
+        if self.covers_focus_subscription.is_none() {
+            self.covers_focus_subscription = Some(cx.on_focus_in(&self.covers_focus.clone(), window, |graph, _, cx| {
+                if graph.set_sheet_expanded(true) { cx.notify(); }
+            }));
+        }
+        let covers = div().id("graph-covers-focus").track_focus(&self.covers_focus).size_full().child(self.covers.clone()).into_any_element();
         let graph_area = div().relative().flex_1().min_h_0().min_w_0().child(graph).child(div().absolute().right(px(8.0)).bottom(px(8.0)).child(controls));
         // The grid holds the selection's own books, so with none it is
         // not drawn at all rather than drawn empty. An open search keeps
@@ -219,12 +256,11 @@ impl BrowseGraph {
                                 }
                             }))
                             .on_scroll_wheel(cx.listener(|graph, event: &gpui::ScrollWheelEvent, _, cx| {
-                                if let gpui::ScrollDelta::Pixels(delta) = event.delta {
-                                    if f32::from(delta.y) < -3.0 {
-                                        if graph.set_sheet_expanded(true) {
-                                            cx.notify();
-                                        }
-                                    }
+                                if let gpui::ScrollDelta::Pixels(delta) = event.delta
+                                    && f32::from(delta.y) < -3.0
+                                    && graph.set_sheet_expanded(true)
+                                {
+                                    cx.notify();
                                 }
                                 cx.stop_propagation();
                             })),
@@ -248,12 +284,11 @@ impl BrowseGraph {
                             cx.notify();
                         }))
                         .on_scroll_wheel(cx.listener(|graph, event: &gpui::ScrollWheelEvent, _, cx| {
-                            if let gpui::ScrollDelta::Pixels(delta) = event.delta {
-                                if f32::from(delta.y) > 3.0 {
-                                    if graph.set_sheet_expanded(false) {
-                                        cx.notify();
-                                    }
-                                }
+                            if let gpui::ScrollDelta::Pixels(delta) = event.delta
+                                && f32::from(delta.y) > 3.0
+                                && graph.set_sheet_expanded(false)
+                            {
+                                cx.notify();
                             }
                         })),
                 );
@@ -301,27 +336,6 @@ impl BrowseGraph {
         true
     }
 
-    pub(super) fn fetch_path(&mut self, kind: BrowseKind, destination: &BrowseDestination, selection: &BrowseOptionsSelection, library: &library_backend::LibraryClient, cx: &mut Context<Self>) {
-        for location in self.take_missing(kind.root_location(), &destination.path) {
-            let query = selection.backend_query(location, false);
-            let operation = super::listing::request(library, query);
-            cx.spawn(async move |graph, cx| {
-                let result = operation.await;
-                let _ = graph.update(cx, |graph, cx| {
-                    match result {
-                        Ok(response) => graph.remember(location, response.data.sections.into_iter().map(|section| section.parent).collect()),
-                        Err(error) => {
-                            log::warn!("Graph fetch failed for {location}: {error}");
-                            graph.forget_fetch(location);
-                        }
-                    }
-                    cx.notify();
-                });
-            })
-            .detach();
-        }
-    }
-
     pub(super) fn handle_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
         if key == "l" {
             self.toggle_layout();
@@ -344,51 +358,9 @@ impl BrowseGraph {
             return;
         }
         self.layout_kind = kind;
-        let root = self.target.take().map(|target| target.root);
+        let root = self.target.take().map(|target| target.key.root);
         self.placed_for = None;
-        self.hovered = None;
-        self.center_for = self.drawn.as_ref().and_then(|drawn| drawn.layout.path.last().and_then(|&id| drawn.trails[id].last().map(|crumb| crumb.location).or(root)));
-    }
-
-    pub(super) fn remember(&mut self, location: BrowseLocation, children: Vec<BrowseRow>) {
-        self.fetching.remove(&location);
-        self.children.insert(location, children);
-        self.target = None;
-    }
-
-    /// Locations on the way to the selection whose children are neither known
-    /// nor being fetched. Each is marked as being fetched.
-    pub(super) fn take_missing(&mut self, root: BrowseLocation, path: &[BrowseCrumb]) -> Vec<BrowseLocation> {
-        let locations = std::iter::once(root).chain(path.iter().map(|crumb| crumb.location));
-        let missing: Vec<BrowseLocation> = locations.filter(|location| !self.children.contains_key(location) && !self.fetching.contains(location)).collect();
-        self.fetching.extend(missing.iter().copied());
-        missing
-    }
-
-    /// A fetch that failed can be tried again the next time the graph is drawn.
-    pub(super) fn forget_fetch(&mut self, location: BrowseLocation) {
-        self.fetching.remove(&location);
-    }
-
-    pub(super) fn tap(&mut self, world: Point<Pixels>, cx: &App) -> Option<GraphTap> {
-        let drawn = self.drawn.as_ref()?;
-        let camera = self.canvas.read(cx).camera;
-        let node = drawn.layout.hit_test(point(f32::from(world.x), f32::from(world.y)), camera.zoom)?;
-        self.activate(node)
-    }
-
-    /// Updates the label under the pointer. Repaint only when it changes.
-    pub(super) fn hover(&mut self, world: Option<Point<Pixels>>, cx: &App) -> bool {
-        let hovered = world.and_then(|world| {
-            let drawn = self.drawn.as_ref()?;
-            let zoom = self.canvas.read(cx).camera.zoom;
-            drawn.layout.hit_test(point(f32::from(world.x), f32::from(world.y)), zoom)
-        });
-        if self.hovered == hovered {
-            return false;
-        }
-        self.hovered = hovered;
-        true
+        self.center_for = self.drawn.as_ref().and_then(|drawn| drawn.layout.path.last().and_then(|&id| drawn.entries[id].trail.last().map(|crumb| crumb.location).or(root)));
     }
 
     /// Arrows walk the hierarchy and its ordered column. Page Up/Down (also
@@ -397,23 +369,23 @@ impl BrowseGraph {
     pub(super) fn key(&mut self, key: &str) -> Option<GraphTap> {
         let drawn = self.drawn.as_ref()?;
         let selection = *drawn.layout.path.last()?;
-        let selected_label = drawn.layout.label(selection)?;
-        let parent = selected_label.parent;
+        let selected_node = drawn.layout.node(selection)?;
+        let parent = selected_node.parent;
         if key == "pageup" {
             return self.activate(parent?);
         }
         if key == "pagedown" {
-            let child = drawn.layout.labels.iter().find(|label| label.parent == Some(selection))?.node;
+            let child = drawn.layout.nodes.iter().find(|placed| placed.parent == Some(selection))?.node;
             return self.activate(child);
         }
         if drawn.layout.kind == GraphLayoutKind::AdaptiveRadial {
-            let children = || drawn.layout.labels.iter().find(|label| label.parent == Some(selection)).map(|label| label.node);
+            let children = || drawn.layout.nodes.iter().find(|placed| placed.parent == Some(selection)).map(|placed| placed.node);
             let node = match key {
                 "left" => parent?,
                 "right" => children()?,
                 "up" | "down" => {
                     let parent = parent?;
-                    let siblings: Vec<usize> = drawn.layout.labels.iter().filter(|label| label.parent == Some(parent)).map(|label| label.node).collect();
+                    let siblings: Vec<usize> = drawn.layout.nodes.iter().filter(|placed| placed.parent == Some(parent)).map(|placed| placed.node).collect();
                     let index = siblings.iter().position(|&node| node == selection)?;
                     siblings[if key == "down" { (index + 1) % siblings.len() } else { (index + siblings.len() - 1) % siblings.len() }]
                 }
@@ -422,8 +394,8 @@ impl BrowseGraph {
             };
             return self.activate(node);
         }
-        let side = if selected_label.angle.cos() < 0.0 { -1.0 } else { 1.0 };
-        let first_child = |direction: f32| drawn.layout.labels.iter().find(|label| label.parent == Some(selection) && label.angle.cos() * direction > 0.0).map(|label| label.node);
+        let side = if selected_node.angle.cos() < 0.0 { -1.0 } else { 1.0 };
+        let first_child = |direction: f32| drawn.layout.nodes.iter().find(|placed| placed.parent == Some(selection) && placed.angle.cos() * direction > 0.0).map(|placed| placed.node);
         let node = match key {
             "left" if selection == 0 => first_child(-1.0)?,
             "right" if selection == 0 => first_child(1.0)?,
@@ -432,7 +404,7 @@ impl BrowseGraph {
             "left" => parent?,
             "right" => first_child(side)?,
             "up" | "down" => {
-                let siblings: Vec<usize> = drawn.layout.labels.iter().filter(|label| label.parent == parent && parent.is_some() && label.angle.cos() * side > 0.0).map(|label| label.node).collect();
+                let siblings: Vec<usize> = drawn.layout.nodes.iter().filter(|placed| placed.parent == parent && parent.is_some() && placed.angle.cos() * side > 0.0).map(|placed| placed.node).collect();
                 let index = siblings.iter().position(|&node| node == selection)?;
                 let next = if key == "down" { (index + 1) % siblings.len() } else { (index + siblings.len() - 1) % siblings.len() };
                 siblings[next]
@@ -451,10 +423,9 @@ impl BrowseGraph {
         if Some(&node) == drawn.layout.path.last() {
             return Some(GraphTap::Open);
         }
-        drawn.layout.label(node)?;
-        let trail = drawn.trails[node].clone();
-        let location = trail.last().map(|crumb| crumb.location).or(self.target.as_ref().map(|target| target.root));
-        self.hovered = None;
+        drawn.layout.node(node)?;
+        let trail = drawn.entries[node].trail.clone();
+        let location = trail.last().map(|crumb| crumb.location).or(self.target.as_ref().map(|target| target.key.root));
         self.center_for = location;
         self.motion = None;
         Some(GraphTap::Select(trail))
@@ -462,64 +433,79 @@ impl BrowseGraph {
 
     /// The graph for `path` below `root`. Until every column along the path is
     /// known, the last graph drawn stays up.
-    pub(super) fn render(
-        &mut self, root: BrowseLocation, root_label: &str, root_book_count: usize, path: &[BrowseCrumb], on_tap: impl Fn(Point<Pixels>, &mut Window, &mut App) + 'static, on_hover: impl Fn(Option<Point<Pixels>>, &mut Window, &mut App) + 'static,
-        window: &mut Window, cx: &mut App,
-    ) -> AnyElement {
+    pub(super) fn render(&mut self, kind: BrowseKind, root_book_count: usize, path: &[BrowseCrumb], window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let (root, root_label) = (kind.root_location(), kind.root_label());
         let compact = components::WindowWidthClass::for_window(window).is_compact();
-        let (params, sizes) = if compact { (LayoutParams::compact(), GraphType::compact()) } else { (LayoutParams::desktop(), GraphType::desktop()) };
-        let target_changed = !self.target.as_ref().is_some_and(|target| target.matches(root, root_label, root_book_count, path, compact, window.rem_size(), self.layout_kind));
+        let params = if compact { LayoutParams::compact() } else { LayoutParams::desktop() };
+        let key = GraphKey { root, root_label: root_label.to_string(), root_book_count, path: path.to_vec(), compact, rem_size: window.rem_size(), kind: self.layout_kind };
+        let target_changed = !self.target.as_ref().is_some_and(|target| target.key == key);
         if target_changed {
-            self.target = graph_tree(root, root_label, root_book_count, path, &self.children).map(|(tree, trails, selection)| {
-                let keys: Vec<String> = trails.iter().map(|trail| trail_key(root, trail)).collect();
-                let metrics = GraphMetrics { window, sizes };
-                let layout = match self.layout_kind {
-                    GraphLayoutKind::Columns => components::graph_layout(&tree, selection, &params, &metrics),
-                    GraphLayoutKind::AdaptiveRadial => components::radial_graph_layout(&tree, selection, &params, &metrics),
-                };
-                CachedGraph {
-                    root,
-                    root_label: root_label.to_owned(),
-                    root_book_count,
-                    path: path.to_vec(),
-                    compact,
-                    rem_size: window.rem_size(),
-                    kind: self.layout_kind,
-                    layout: Arc::new(layout),
-                    trails: Arc::new(trails),
-                    keys: Arc::new(keys),
-                }
-            });
+            self.target = None;
+            if let Some((tree, entries, selection)) = graph_tree(root, &root_label, root_book_count, path, &self.children) {
+                // Each label is measured in every role, since the layout picks
+                // the role and fits column slots to all of them.
+                let sizes: HashMap<(usize, NodeRole), Size<f32>> = entries
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(node, entry)| NodeRole::ALL.map(|role| (node, role, entry)))
+                    .map(|(node, role, entry)| {
+                        let measured = components::graph_label_size(role, &entry.name, entry.count(), compact, window, cx);
+                        ((node, role), size(f32::from(measured.width), f32::from(measured.height)))
+                    })
+                    .collect();
+                let layout = components::graph_layout(self.layout_kind, &tree, selection, &|node, role| sizes[&(node, role)], &params);
+                self.target = Some(CachedGraph { key, target: Drawn { layout: Arc::new(layout), entries: Arc::new(entries) } });
+            }
         }
-        if let Some(target) = &self.target {
+        if let Some(CachedGraph { target, .. }) = &self.target {
             let layout = Arc::clone(&target.layout);
-            let trails = Arc::clone(&target.trails);
-            let keys = Arc::clone(&target.keys);
+            let entries = Arc::clone(&target.entries);
             let location = path.last().map_or(root, |crumb| crumb.location);
             let center_new = self.center_for == Some(location);
             if self.placed_for != Some(location) || center_new {
-                self.place_camera(&layout, &keys, location, compact, center_new, window, cx);
+                self.place_camera(&layout, &entries, location, window, cx);
             }
             if target_changed || self.motion.is_some() || self.drawn.is_none() {
-                let layout = self.animated_layout(&layout, &keys, window, cx);
-                self.drawn = Some(Drawn { layout, trails, keys });
+                let layout = Arc::new(self.animated_layout(&layout, &entries, window, cx));
+                self.drawn = Some(Drawn { layout, entries });
             }
         }
         let Some(drawn) = &self.drawn else {
             return components::infinite_canvas(&self.canvas).into_any_element();
         };
-        let ghost = self.motion.as_ref().and_then(|motion| {
-            if motion.departing.labels.is_empty() || motion.ghost_opacity <= 0.0 {
-                return None;
+        let ghost = self.motion.as_ref().filter(|motion| !motion.departing.nodes.is_empty() && motion.ghost_opacity > 0.0);
+        let theme = components::browser_theme(cx);
+        let graph = cx.weak_entity();
+        // A tap browses the node, unless the press that ended on it was a pan;
+        // a fading node only shows.
+        let node = |placed: &components::PlacedNode, departing: bool| {
+            let entries = if departing { &ghost.expect("a departing node belongs to the motion").departing_entries } else { &drawn.entries };
+            let entry = &entries[placed.node];
+            let label = components::graph_label(SharedString::from(format!("graph-node-{}", entry.key)), placed.role, &entry.name, entry.count(), compact, theme);
+            if departing {
+                return label.into_any_element();
             }
-            Some((&motion.departing, motion.ghost_opacity))
-        });
-        components::graph_scene(&self.canvas, &drawn.layout, ghost, self.hovered, sizes, window, cx).on_tap(on_tap).on_hover(on_hover).into_any_element()
+            let (graph, canvas, index) = (graph.clone(), self.canvas.clone(), placed.node);
+            label.on_click(move |_, _, cx| {
+                if canvas.read(cx).panned() {
+                    return;
+                }
+                let _ = graph.update(cx, |graph, cx| {
+                    if let Some(tap) = graph.activate(index) {
+                        cx.emit(tap);
+                    }
+                });
+            })
+            .into_any_element()
+        };
+        components::graph_canvas(&self.canvas, &drawn.layout, ghost.map(|motion| (&motion.departing, motion.ghost_opacity)), node, cx).into_any_element()
     }
 
     /// Centres a newly selected node, or frames the initial selection.
     /// Camera placement waits for the canvas's first layout.
-    fn place_camera(&mut self, layout: &GraphLayout, keys: &[String], location: BrowseLocation, compact: bool, center_new: bool, window: &Window, cx: &mut App) {
+    fn place_camera(&mut self, layout: &GraphLayout, entries: &[GraphEntry], location: BrowseLocation, window: &Window, cx: &mut App) {
+        let compact = components::WindowWidthClass::for_window(window).is_compact();
+        let center_new = self.center_for == Some(location);
         let selection = *layout.path.last().expect("the path always holds the root");
         let Some(bounds) = self.canvas.read(cx).bounds else {
             window.request_animation_frame();
@@ -533,24 +519,24 @@ impl BrowseGraph {
             components::framing_camera(layout, Bounds::new(point(px(0.0), px(0.0)), bounds.size), compact, 1.0)
         };
         let from_camera = self.canvas.read(cx).camera;
-        let selected_key = &keys[selection];
-        let previous = self.drawn.as_ref().and_then(|drawn| drawn.layout.labels.iter().find(|label| drawn.keys[label.node] == *selected_key).map(|label| (drawn, label.center)));
+        let selected_key = &entries[selection].key;
+        let previous = self.drawn.as_ref().and_then(|drawn| drawn.layout.nodes.iter().find(|placed| drawn.entries[placed.node].key == *selected_key).map(|placed| (drawn, placed.center)));
         if center_new && !cx.reduce_motion() && !cfg!(feature = "kobo") {
             if let Some((drawn, old_center)) = previous {
-                let old_centers: HashMap<&str, Point<f32>> = drawn.layout.labels.iter().map(|label| (drawn.keys[label.node].as_str(), label.center)).collect();
-                let mut from = vec![point(0.0, 0.0); keys.len()];
-                let mut appearing = vec![false; keys.len()];
-                for label in &layout.labels {
-                    let key = keys[label.node].as_str();
-                    from[label.node] = old_centers.get(key).copied().or_else(|| label.parent.and_then(|parent| old_centers.get(keys[parent].as_str()).copied())).unwrap_or(label.center);
-                    appearing[label.node] = !old_centers.contains_key(key);
+                let old_centers: HashMap<&str, Point<f32>> = drawn.layout.nodes.iter().map(|placed| (drawn.entries[placed.node].key.as_str(), placed.center)).collect();
+                let mut from = vec![point(0.0, 0.0); entries.len()];
+                let mut appearing = vec![false; entries.len()];
+                for placed in &layout.nodes {
+                    let key = entries[placed.node].key.as_str();
+                    from[placed.node] = old_centers.get(key).copied().or_else(|| placed.parent.and_then(|parent| old_centers.get(entries[parent].key.as_str()).copied())).unwrap_or(placed.center);
+                    appearing[placed.node] = !old_centers.contains_key(key);
                 }
                 let anchor = from_camera.to_screen(point(px(old_center.x), px(old_center.y)));
-                let visible: HashSet<&str> = keys.iter().map(String::as_str).collect();
-                let mut departing = drawn.layout.clone();
-                departing.retain_labels(|label| !visible.contains(drawn.keys[label.node].as_str()));
-                Arc::make_mut(&mut departing.edges).retain(|edge| !visible.contains(drawn.keys[edge.to].as_str()));
-                self.motion = Some(GraphMotion { started: Instant::now(), from, appearing, from_camera, last_camera: from_camera, target_camera: camera, selected_key: selected_key.clone(), anchor, departing, ghost_opacity: 1.0 });
+                let visible: HashSet<&str> = entries.iter().map(|entry| entry.key.as_str()).collect();
+                let mut departing = GraphLayout::clone(&drawn.layout);
+                departing.retain_nodes(|placed| !visible.contains(drawn.entries[placed.node].key.as_str()));
+                Arc::make_mut(&mut departing.edges).retain(|edge| !visible.contains(drawn.entries[edge.to].key.as_str()));
+                self.motion = Some(GraphMotion { started: Instant::now(), from, appearing, from_camera, last_camera: from_camera, target_camera: camera, selected_key: selected_key.clone(), anchor, departing, departing_entries: Arc::clone(&drawn.entries), ghost_opacity: 1.0 });
             } else {
                 self.motion = None;
                 self.canvas.update(cx, |canvas, _| canvas.camera = camera);
@@ -563,12 +549,12 @@ impl BrowseGraph {
         self.placed_for = Some(location);
     }
 
-    fn animated_layout(&mut self, layout: &GraphLayout, keys: &[String], window: &Window, cx: &mut App) -> GraphLayout {
+    fn animated_layout(&mut self, layout: &GraphLayout, entries: &[GraphEntry], window: &Window, cx: &mut App) -> GraphLayout {
         let Some(motion) = &mut self.motion else {
             return layout.clone();
         };
         let selection = *layout.path.last().expect("the path always holds the root");
-        if keys[selection] != motion.selected_key || self.canvas.read(cx).camera != motion.last_camera {
+        if entries[selection].key != motion.selected_key || self.canvas.read(cx).camera != motion.last_camera {
             // A wheel, pinch, or drag takes control of the camera immediately.
             self.motion = None;
             return layout.clone();
@@ -576,18 +562,18 @@ impl BrowseGraph {
         let elapsed = motion.started.elapsed();
         motion.ghost_opacity = 1.0 - (elapsed.as_secs_f32() / 0.12).clamp(0.0, 1.0);
         let progress = (elapsed.saturating_sub(PIN_DURATION).as_secs_f32() / MOVE_DURATION.as_secs_f32()).clamp(0.0, 1.0);
-        let mut centers = vec![point(0.0, 0.0); keys.len()];
-        let mut opacity = vec![1.0; keys.len()];
-        for label in &layout.labels {
-            let old = motion.from[label.node];
-            centers[label.node] = point(old.x + (label.center.x - old.x) * progress, old.y + (label.center.y - old.y) * progress);
-            if motion.appearing[label.node] {
-                opacity[label.node] = progress;
+        let mut centers = vec![point(0.0, 0.0); entries.len()];
+        let mut opacity = vec![1.0; entries.len()];
+        for placed in &layout.nodes {
+            let old = motion.from[placed.node];
+            centers[placed.node] = point(old.x + (placed.center.x - old.x) * progress, old.y + (placed.center.y - old.y) * progress);
+            if motion.appearing[placed.node] {
+                opacity[placed.node] = progress;
             }
         }
         let posed = layout.with_pose(&centers, &opacity);
-        let selected = posed.label(selection).expect("selected node is placed").center;
-        let target = layout.label(selection).expect("selected node is placed").center;
+        let selected = posed.node(selection).expect("selected node is placed").center;
+        let target = layout.node(selection).expect("selected node is placed").center;
         let end = motion.target_camera.to_screen(point(px(target.x), px(target.y)));
         let zoom = motion.from_camera.zoom + (motion.target_camera.zoom - motion.from_camera.zoom) * progress;
         let screen = point(motion.anchor.x + (end.x - motion.anchor.x) * progress, motion.anchor.y + (end.y - motion.anchor.y) * progress);
@@ -616,10 +602,10 @@ fn trail_key(root: BrowseLocation, trail: &[BrowseCrumb]) -> String {
 /// The tree the graph draws: the root, the children of the root and of every
 /// location on `path`, and the index of the path's last location. `None` while
 /// any of those locations' children are unknown.
-fn graph_tree(root: BrowseLocation, root_label: &str, root_book_count: usize, path: &[BrowseCrumb], children: &HashMap<BrowseLocation, Vec<BrowseRow>>) -> Option<(GraphTree, Vec<Vec<BrowseCrumb>>, usize)> {
-    let node = |name: &str, parent, books| GraphNode { name: name.to_owned(), parent, children: Vec::new(), books };
-    let mut nodes = vec![node(root_label, None, root_book_count)];
-    let mut trails: Vec<Vec<BrowseCrumb>> = vec![Vec::new()];
+fn graph_tree(root: BrowseLocation, root_label: &str, root_book_count: usize, path: &[BrowseCrumb], children: &HashMap<BrowseLocation, Vec<BrowseRow>>) -> Option<(GraphTree, Vec<GraphEntry>, usize)> {
+    let entry = |name: &str, books: usize, trail: Vec<BrowseCrumb>| GraphEntry { name: name.to_owned(), books, key: trail_key(root, &trail), trail };
+    let mut parents = vec![None];
+    let mut entries = vec![entry(root_label, root_book_count, Vec::new())];
     let mut parent = 0;
     let mut location = root;
     for depth in 0..=path.len() {
@@ -627,20 +613,22 @@ fn graph_tree(root: BrowseLocation, root_label: &str, root_book_count: usize, pa
         let mut next_index = None;
         for row in children.get(&location)? {
             if next.is_some_and(|crumb| crumb.location == row.id) {
-                next_index = Some(nodes.len());
+                next_index = Some(entries.len());
             }
-            nodes.push(node(&row.name, Some(parent), row.book_count));
-            trails.push([trails[parent].clone(), vec![BrowseCrumb { location: row.id, label: row.name.clone() }]].concat());
+            let trail = [entries[parent].trail.clone(), vec![BrowseCrumb { location: row.id, label: row.name.clone() }]].concat();
+            parents.push(Some(parent));
+            entries.push(entry(&row.name, row.book_count, trail));
         }
         let Some(crumb) = next else { break };
         // A location reached some other way than through its parent's children
         // — a search hit's trail — still belongs on the path.
         parent = next_index.unwrap_or_else(|| {
-            nodes.push(node(&crumb.label, Some(parent), 0));
-            trails.push([trails[parent].clone(), vec![crumb.clone()]].concat());
-            nodes.len() - 1
+            let trail = [entries[parent].trail.clone(), vec![crumb.clone()]].concat();
+            parents.push(Some(parent));
+            entries.push(entry(&crumb.label, 0, trail));
+            entries.len() - 1
         });
         location = crumb.location;
     }
-    Some((GraphTree::new(nodes), trails, parent))
+    Some((GraphTree::new(parents), entries, parent))
 }

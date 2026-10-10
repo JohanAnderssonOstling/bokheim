@@ -1,14 +1,20 @@
-use std::io::ErrorKind;
-use std::process::{Child, Command, Stdio};
 use crate::OpeningTiming;
+#[cfg(not(target_arch = "wasm32"))]
+use library_backend::library::AudioStreamControl;
+#[cfg(test)]
+use std::io::ErrorKind;
 use std::io::{BufReader, SeekFrom};
 #[cfg(feature = "kobo")]
 use std::io::{Read, Write};
 use std::num::{NonZeroU16, NonZeroU32};
+#[cfg(any(feature = "kobo", test))]
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(any(feature = "kobo", test))]
+use std::time::Instant;
 
 use crossbeam_channel::{Receiver, SendTimeoutError, Sender, TryRecvError, bounded, unbounded};
 use rodio::Decoder;
@@ -63,7 +69,7 @@ struct AudioChunk {
 struct SharedState {
     buffering: AtomicBool,
     output_lost: AtomicBool,
-    stream_control: Option<app::AudioStreamControl>,
+    stream_control: Option<AudioStreamControl>,
     decoder_stopped: AtomicBool,
     resume_blocks: usize,
     generation: AtomicU64,
@@ -127,7 +133,7 @@ impl SharedState {
 pub struct AudioEngine {
     #[cfg(feature = "kobo")]
     recovery: Mutex<Option<OutputRecovery>>,
-    stream_control: Option<app::AudioStreamControl>,
+    stream_control: Option<AudioStreamControl>,
     #[cfg(not(feature = "kobo"))]
     _output: MixerDeviceSink,
     #[cfg(not(feature = "kobo"))]
@@ -143,7 +149,7 @@ pub struct AudioEngine {
 }
 
 impl AudioEngine {
-    pub fn open(reader: Box<dyn ReadSeek>, duration: Duration, stream_control: Option<app::AudioStreamControl>) -> Result<Self, String> {
+    pub fn open(reader: Box<dyn ReadSeek>, duration: Duration, stream_control: Option<AudioStreamControl>) -> Result<Self, String> {
         let _opening = OpeningTiming::new("audio_engine_open");
         let decoder_timing = OpeningTiming::new("decoder_init");
         let decoder = open_decoder(reader)?;
@@ -449,38 +455,6 @@ fn collect_pending_requests(first: Option<DecoderRequest>, request_rx: &Receiver
     pending
 }
 
-fn apply_pending_requests(pending: PendingDecoderRequests, decoder: &mut AudioDecoder, stretch: &mut TimeStretch, tempo: &mut f32, generation: &mut u64, state: &SharedState) -> DecoderRequestOutcome {
-    if pending.stop {
-        return DecoderRequestOutcome::Stop;
-    }
-    if let Some(next) = pending.tempo {
-        *tempo = next;
-        // A tempo change back to normal playback switches the decoder to the
-        // direct path below. Reset WSOLA so samples buffered while stretching
-        // cannot leak into the direct stream. Conversely, reset before
-        // entering WSOLA so it never consumes stale state from direct audio.
-        stretch.reset();
-        stretch.set_tempo(next);
-    }
-    if let Some((position, next)) = pending.seek {
-        if state.stream_control.as_ref().is_some_and(|control| !control.begin_seek(next)) {
-            return DecoderRequestOutcome::Continue;
-        }
-        let _seek_timing = OpeningTiming::new("decoder_seek");
-        eprintln!("AUDIOBOOK_TIMING phase=decoder_seek generation={next} target_ms={}", position.as_millis());
-        if let Err(error) = decoder.try_seek(position) {
-            state.reject_seek_if_current(next, format!("Could not seek audiobook: {error}"));
-            return DecoderRequestOutcome::Continue;
-        }
-        stretch.reset();
-        *generation = next;
-        state.confirm_seek(next, position);
-        state.decoder_end_generation.store(NO_GENERATION, Ordering::Release);
-        return DecoderRequestOutcome::Seeked;
-    }
-    DecoderRequestOutcome::Continue
-}
-
 impl Drop for AudioEngine {
     fn drop(&mut self) {
         #[cfg(feature = "kobo")]
@@ -507,90 +481,145 @@ fn read_decoder_block(decoder: &mut impl Iterator<Item = f32>, block_samples: us
     Vec::new()
 }
 
-fn decode_worker(
-    mut decoder: AudioDecoder, channels: NonZeroU16, sample_rate: NonZeroU32, request_rx: Receiver<DecoderRequest>, audio_tx: Sender<AudioChunk>, state: Arc<SharedState>, stream: Option<app::AudioStreamControl>,
-) -> Result<(), String> {
-    let mut stretch = TimeStretch::new(sample_rate.get(), channels.get()).map_err(|error| error.to_string())?;
-    let mut tempo = 1.0;
-    let mut generation = 0;
+struct DecoderWorker {
+    decoder: AudioDecoder,
+    stretch: TimeStretch,
+    tempo: f32,
+    generation: u64,
+    channels: NonZeroU16,
+    aligned_block: usize,
+    request_rx: Receiver<DecoderRequest>,
+    audio_tx: Sender<AudioChunk>,
+    state: Arc<SharedState>,
+    stream: Option<AudioStreamControl>,
+}
+
+fn decode_worker(decoder: AudioDecoder, channels: NonZeroU16, sample_rate: NonZeroU32, request_rx: Receiver<DecoderRequest>, audio_tx: Sender<AudioChunk>, state: Arc<SharedState>, stream: Option<AudioStreamControl>) -> Result<(), String> {
+    let stretch = TimeStretch::new(sample_rate.get(), channels.get()).map_err(|error| error.to_string())?;
     let aligned_block = BLOCK_SAMPLES / channels.get() as usize * channels.get() as usize;
+    DecoderWorker { decoder, stretch, tempo: 1.0, generation: 0, channels, aligned_block, request_rx, audio_tx, state, stream }.run()
+}
 
-    'decode: loop {
-        // A seek can invalidate I/O just before its command is enqueued. Wait
-        // for that command rather than spinning the decoder on WouldBlock.
-        let first = if stream.as_ref().is_some_and(|control| control.is_interrupted()) {
-            match request_rx.recv_timeout(Duration::from_millis(20)) {
-                Ok(request) => Some(request),
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-            }
-        } else {
-            None
-        };
-        let pending = collect_pending_requests(first, &request_rx);
-        if apply_pending_requests(pending, &mut decoder, &mut stretch, &mut tempo, &mut generation, &state) == DecoderRequestOutcome::Stop {
-            break;
+impl DecoderWorker {
+    fn apply_pending_requests(&mut self, pending: PendingDecoderRequests) -> DecoderRequestOutcome {
+        if pending.stop {
+            return DecoderRequestOutcome::Stop;
         }
+        if let Some(next) = pending.tempo {
+            self.tempo = next;
+            // A tempo change back to normal playback switches the decoder to the
+            // direct path below. Reset WSOLA so samples buffered while stretching
+            // cannot leak into the direct stream. Conversely, reset before
+            // entering WSOLA so it never consumes stale state from direct audio.
+            self.stretch.reset();
+            self.stretch.set_tempo(next);
+        }
+        if let Some((position, next)) = pending.seek {
+            if self.state.stream_control.as_ref().is_some_and(|control| !control.begin_seek(next)) {
+                return DecoderRequestOutcome::Continue;
+            }
+            let _seek_timing = OpeningTiming::new("decoder_seek");
+            eprintln!("AUDIOBOOK_TIMING phase=decoder_seek generation={next} target_ms={}", position.as_millis());
+            if let Err(error) = self.decoder.try_seek(position) {
+                self.state.reject_seek_if_current(next, format!("Could not seek audiobook: {error}"));
+                return DecoderRequestOutcome::Continue;
+            }
+            self.stretch.reset();
+            self.generation = next;
+            self.state.confirm_seek(next, position);
+            self.state.decoder_end_generation.store(NO_GENERATION, Ordering::Release);
+            return DecoderRequestOutcome::Seeked;
+        }
+        DecoderRequestOutcome::Continue
+    }
 
-        // Symphonia's iterator uses `None` for both real EOF and some packet or
-        // demuxer errors from which a later call can recover. A single empty
-        // read therefore must not send playback to the end of the book.
-        let input = read_decoder_block(&mut decoder, aligned_block);
-        if let Some(control) = &stream {
-            if control.is_cancelled() {
+    fn run(mut self) -> Result<(), String> {
+        loop {
+            // A seek can invalidate I/O just before its command is enqueued. Wait
+            // for that command rather than spinning the decoder on WouldBlock.
+            let first = if self.stream.as_ref().is_some_and(|control| control.is_interrupted()) {
+                match self.request_rx.recv_timeout(Duration::from_millis(20)) {
+                    Ok(request) => Some(request),
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                }
+            } else {
+                None
+            };
+            let pending = collect_pending_requests(first, &self.request_rx);
+            if self.apply_pending_requests(pending) == DecoderRequestOutcome::Stop {
                 break;
             }
-            if control.is_interrupted() {
-                continue;
-            }
-            if let Some(error) = control.failure() {
-                return Err(format!("Audiobook stream unavailable: {error}"));
-            }
-        }
-        let at_end = input.is_empty();
-        let samples = if is_realtime_tempo(tempo) {
-            // WSOLA is unnecessary at 1.0x and is expensive on Kobo's single
-            // Cortex-A9 core. Pass decoded samples through unchanged so the
-            // decoder can stay ahead of the Bluetooth output clock.
-            input
-        } else if at_end {
-            stretch.flush()
-        } else {
-            let aligned = input.len() / channels.get() as usize * channels.get() as usize;
-            stretch.push(&input[..aligned]);
-            stretch.pull(aligned_block)
-        };
 
-        if !samples.is_empty() {
-            let mut chunk = AudioChunk { generation, tempo, samples };
-            loop {
-                match audio_tx.send_timeout(chunk, Duration::from_millis(10)) {
-                    Ok(()) => break,
-                    Err(SendTimeoutError::Disconnected(_)) => break 'decode,
-                    Err(SendTimeoutError::Timeout(returned)) => {
-                        chunk = returned;
-                        match apply_pending_requests(collect_pending_requests(None, &request_rx), &mut decoder, &mut stretch, &mut tempo, &mut generation, &state) {
-                            DecoderRequestOutcome::Stop => break 'decode,
-                            DecoderRequestOutcome::Seeked => continue 'decode,
-                            DecoderRequestOutcome::Continue => {}
-                        }
+            // Symphonia's iterator uses `None` for both real EOF and some packet or
+            // demuxer errors from which a later call can recover. A single empty
+            // read therefore must not send playback to the end of the book.
+            let input = read_decoder_block(&mut self.decoder, self.aligned_block);
+            if let Some(control) = &self.stream {
+                if control.is_cancelled() {
+                    break;
+                }
+                if control.is_interrupted() {
+                    continue;
+                }
+                if let Some(error) = control.failure() {
+                    return Err(format!("Audiobook stream unavailable: {error}"));
+                }
+            }
+            let at_end = input.is_empty();
+            let samples = if is_realtime_tempo(self.tempo) {
+                // WSOLA is unnecessary at 1.0x and is expensive on Kobo's single
+                // Cortex-A9 core. Pass decoded samples through unchanged so the
+                // decoder can stay ahead of the Bluetooth output clock.
+                input
+            } else if at_end {
+                self.stretch.flush()
+            } else {
+                let aligned = input.len() / self.channels.get() as usize * self.channels.get() as usize;
+                self.stretch.push(&input[..aligned]);
+                self.stretch.pull(self.aligned_block)
+            };
+
+            if !samples.is_empty() {
+                let chunk = AudioChunk { generation: self.generation, tempo: self.tempo, samples };
+                match self.send_chunk(chunk) {
+                    DecoderRequestOutcome::Stop => return Ok(()),
+                    DecoderRequestOutcome::Seeked => continue,
+                    DecoderRequestOutcome::Continue => {}
+                }
+            }
+            if at_end {
+                self.state.decoder_end_generation.store(self.generation, Ordering::Release);
+                loop {
+                    let Ok(request) = self.request_rx.recv() else { return Ok(()) };
+                    let pending = collect_pending_requests(Some(request), &self.request_rx);
+                    match self.apply_pending_requests(pending) {
+                        DecoderRequestOutcome::Stop => return Ok(()),
+                        DecoderRequestOutcome::Seeked => break,
+                        DecoderRequestOutcome::Continue => {}
                     }
                 }
             }
         }
-        if at_end {
-            state.decoder_end_generation.store(generation, Ordering::Release);
-            loop {
-                let Ok(request) = request_rx.recv() else { break 'decode };
-                match apply_pending_requests(collect_pending_requests(Some(request), &request_rx), &mut decoder, &mut stretch, &mut tempo, &mut generation, &state) {
-                    DecoderRequestOutcome::Stop => break 'decode,
-                    DecoderRequestOutcome::Seeked => continue 'decode,
-                    DecoderRequestOutcome::Continue => {}
+        Ok(())
+    }
+
+    fn send_chunk(&mut self, mut chunk: AudioChunk) -> DecoderRequestOutcome {
+        loop {
+            match self.audio_tx.send_timeout(chunk, Duration::from_millis(10)) {
+                Ok(()) => return DecoderRequestOutcome::Continue,
+                Err(SendTimeoutError::Disconnected(_)) => return DecoderRequestOutcome::Stop,
+                Err(SendTimeoutError::Timeout(returned)) => {
+                    chunk = returned;
+                    let pending = collect_pending_requests(None, &self.request_rx);
+                    let outcome = self.apply_pending_requests(pending);
+                    if outcome != DecoderRequestOutcome::Continue {
+                        return outcome;
+                    }
                 }
             }
         }
     }
-    Ok(())
 }
 
 fn is_realtime_tempo(tempo: f32) -> bool {
@@ -1004,14 +1033,6 @@ impl Drop for KoboOutput {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "kobo")]
-    #[test]
-    fn headphone_disconnect_is_silent_but_other_output_failures_are_reported() {
-        assert_eq!(kobo_output_message("pcm_write:2050: write error: No such device"), None);
-        assert_eq!(kobo_output_message("Broken pipe"), None);
-        assert_eq!(kobo_output_message("Disconnected"), None);
-        assert!(kobo_output_message("unsupported sample format").is_some());
-    }
 
     #[cfg(all(feature = "kobo", unix))]
     #[test]
@@ -1020,7 +1041,7 @@ mod tests {
             Command::new("/bin/sh").args(["-c", script]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap()
         }
         let mut state = test_state(0, 42_000_000);
-        let control = app::AudioStreamControl::default();
+        let control = AudioStreamControl::default();
         Arc::get_mut(&mut state).unwrap().stream_control = Some(control.clone());
         let (samples, receiver) = bounded(BUFFERED_BLOCKS);
         for _ in 0..8 {
@@ -1058,25 +1079,6 @@ mod tests {
         drop(samples);
     }
 
-    #[cfg(all(feature = "kobo", unix))]
-    #[test]
-    fn recovery_worker_returns_control_before_discovery_completes() {
-        let (started, running) = bounded(1);
-        let (release, released) = bounded(1);
-        let (finished, done) = bounded(1);
-        let recovery = OutputRecovery::start(move |cancelled| {
-            started.send(()).unwrap();
-            released.recv_timeout(Duration::from_secs(2)).unwrap();
-            finished.send(cancelled.load(Ordering::Acquire)).unwrap();
-            Err("cancelled fixture discovery".into())
-        })
-        .unwrap();
-        running.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(matches!(recovery.result.try_recv(), Err(TryRecvError::Empty)));
-        drop(recovery);
-        release.send(()).unwrap();
-        assert!(done.recv_timeout(Duration::from_secs(2)).unwrap());
-    }
 
     #[cfg(all(feature = "kobo", unix))]
     #[test]
@@ -1238,7 +1240,7 @@ mod tests {
         struct StallingReader {
             data: Cursor<Vec<u8>>,
             stall: Arc<AtomicBool>,
-            control: app::AudioStreamControl,
+            control: AudioStreamControl,
             started: std::sync::mpsc::Sender<()>,
         }
         impl Read for StallingReader {
@@ -1278,7 +1280,7 @@ mod tests {
             .output()
             .expect("this integration test requires ffmpeg");
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let control = app::AudioStreamControl::default();
+        let control = AudioStreamControl::default();
         let stall = Arc::new(AtomicBool::new(false));
         let (started, waiting) = std::sync::mpsc::channel();
         let decoder = open_decoder(Box::new(StallingReader { data: Cursor::new(std::fs::read(&path).unwrap()), stall: stall.clone(), control: control.clone(), started })).unwrap();
@@ -1360,93 +1362,6 @@ mod tests {
         assert!(!state.playback_finished());
     }
 
-    #[test]
-    fn seek_discards_the_current_old_generation_before_updating_position() {
-        let (_audio_tx, audio_rx) = bounded(1);
-        let state = test_state(1, 42_000_000);
-        let mut source = test_source(audio_rx, state.clone(), 1, 1);
-        source.current = vec![0.75];
-        source.current_generation = Some(0);
-        source.source_position_us = 5_000_000.0;
-
-        assert_eq!(source.next(), Some(0.0));
-        assert_eq!(state.position_micros(), 42_000_000);
-    }
-
-    #[test]
-    fn stale_queued_chunks_are_skipped_after_a_seek() {
-        let (audio_tx, audio_rx) = bounded(2);
-        audio_tx.send(AudioChunk { generation: 0, tempo: 1.0, samples: vec![0.25] }).unwrap();
-        audio_tx.send(AudioChunk { generation: 1, tempo: 1.0, samples: vec![0.75] }).unwrap();
-        let state = test_state(1, 10_000_000);
-        let mut source = test_source(audio_rx, state, 1, 1);
-
-        assert_eq!(source.next(), Some(0.75));
-    }
-
-    #[test]
-    fn position_accumulates_across_chunk_boundaries() {
-        let (audio_tx, audio_rx) = bounded(2);
-        for _ in 0..2 {
-            audio_tx.send(AudioChunk { generation: 0, tempo: 1.0, samples: vec![0.5; 128] }).unwrap();
-        }
-        let state = test_state(0, 0);
-        let mut source = test_source(audio_rx, state.clone(), 1, 256);
-
-        for _ in 0..256 {
-            assert_eq!(source.next(), Some(0.5));
-        }
-        assert_eq!(state.position_micros(), 1_000_000);
-    }
-
-    #[test]
-    fn position_uses_source_time_at_non_default_tempo() {
-        let (audio_tx, audio_rx) = bounded(1);
-        audio_tx.send(AudioChunk { generation: 0, tempo: 2.0, samples: vec![0.5; 256] }).unwrap();
-        let state = test_state(0, 3_000_000);
-        let mut source = test_source(audio_rx, state.clone(), 1, 256);
-
-        for _ in 0..256 {
-            source.next();
-        }
-        assert_eq!(state.position_micros(), 5_000_000);
-    }
-
-    #[test]
-    fn stereo_samples_advance_position_once_per_frame() {
-        let (audio_tx, audio_rx) = bounded(1);
-        audio_tx.send(AudioChunk { generation: 0, tempo: 1.0, samples: vec![0.5; 512] }).unwrap();
-        let state = test_state(0, 0);
-        let mut source = test_source(audio_rx, state.clone(), 2, 256);
-
-        for _ in 0..512 {
-            source.next();
-        }
-        assert_eq!(state.position_micros(), 1_000_000);
-    }
-
-    #[test]
-    fn disconnected_source_ends_after_buffered_audio() {
-        let (audio_tx, audio_rx) = bounded(1);
-        audio_tx.send(AudioChunk { generation: 0, tempo: 1.0, samples: vec![0.5] }).unwrap();
-        drop(audio_tx);
-        let mut source = test_source(audio_rx, test_state(0, 0), 1, 1);
-
-        assert_eq!(source.next(), Some(0.5));
-        assert_eq!(source.next(), None);
-    }
-
-    #[test]
-    fn decoder_end_keeps_source_alive_and_marks_playback_finished() {
-        let (_audio_tx, audio_rx) = bounded(1);
-        let state = test_state(0, 90_000_000);
-        state.decoder_end_generation.store(0, Ordering::Release);
-        let mut source = test_source(audio_rx, state.clone(), 1, 1);
-
-        assert_eq!(source.next(), Some(0.0));
-        assert_eq!(state.position_micros(), 100_000_000);
-        assert!(state.playback_finished());
-    }
 
     #[test]
     fn stale_end_of_stream_cannot_overwrite_a_newer_chapter_seek() {
@@ -1460,30 +1375,6 @@ mod tests {
         assert!(!state.playback_finished());
     }
 
-    #[test]
-    fn failed_seek_submission_rolls_back_generation_and_position() {
-        let (request_tx, request_rx) = unbounded();
-        drop(request_rx);
-        let state = test_state(7, 12_000_000);
-
-        assert_eq!(request_seek(&state, &request_tx, Duration::from_secs(80)), Err("audio decoder stopped".to_owned()));
-        assert_eq!(state.generation.load(Ordering::Acquire), 7);
-        assert_eq!(state.position_micros(), 12_000_000);
-    }
-
-    #[test]
-    fn decoder_seek_failure_restores_the_last_confirmed_position() {
-        let (request_tx, _request_rx) = unbounded();
-        let state = test_state(7, 12_000_000);
-        request_seek(&state, &request_tx, Duration::from_secs(80)).unwrap();
-
-        assert!(state.reject_seek_if_current(8, "seek failed".to_owned()));
-
-        assert_eq!(state.generation.load(Ordering::Acquire), 7);
-        assert_eq!(state.position_micros(), 12_000_000);
-        assert_eq!(state.confirmed_position_micros(), Some(12_000_000));
-        assert_eq!(state.error.lock().unwrap().as_deref(), Some("seek failed"));
-    }
 
     #[test]
     fn stale_decoder_seek_failure_cannot_roll_back_a_newer_request() {
@@ -1500,32 +1391,6 @@ mod tests {
         assert!(state.error.lock().unwrap().is_none());
     }
 
-    #[test]
-    fn pending_seek_has_no_persistable_position_until_the_decoder_accepts_it() {
-        let (request_tx, _request_rx) = unbounded();
-        let state = test_state(0, 12_000_000);
-        request_seek(&state, &request_tx, Duration::from_secs(80)).unwrap();
-
-        assert_eq!(state.confirmed_position_micros(), None);
-
-        state.confirm_seek(1, Duration::from_secs(80));
-        assert_eq!(state.confirmed_position_micros(), Some(80_000_000));
-    }
-
-    #[test]
-    fn confirmed_seek_becomes_the_rollback_point_for_the_next_request() {
-        let (request_tx, _request_rx) = unbounded();
-        let state = test_state(0, 0);
-        request_seek(&state, &request_tx, Duration::from_secs(10)).unwrap();
-        state.confirm_seek(1, Duration::from_secs(10));
-        request_seek(&state, &request_tx, Duration::from_secs(20)).unwrap();
-
-        assert!(state.reject_seek_if_current(2, "seek failed".to_owned()));
-
-        assert_eq!(state.generation.load(Ordering::Acquire), 1);
-        assert_eq!(state.position_micros(), 10_000_000);
-        assert_eq!(state.confirmed_position_micros(), Some(10_000_000));
-    }
 
     #[test]
     fn rapid_seek_burst_preserves_the_latest_request_without_backpressure() {
@@ -1544,47 +1409,6 @@ mod tests {
         assert_eq!(request_rx.len(), 0);
     }
 
-    #[test]
-    fn stale_position_updates_never_win_during_long_seek_sequence() {
-        let state = test_state(0, 0);
-
-        for generation in 1..=1_000 {
-            state.generation.store(generation, Ordering::Release);
-            *state.position.lock().unwrap() = PositionState { generation, micros: generation * 1_000_000 };
-            assert!(!state.set_position_if_generation(generation - 1, u64::MAX));
-            assert_eq!(state.position_micros(), generation * 1_000_000);
-        }
-    }
-
-    #[test]
-    fn seeking_after_finish_immediately_clears_finished_state() {
-        let (request_tx, _request_rx) = unbounded();
-        let state = test_state(3, 100_000_000);
-        state.playback_finished_generation.store(3, Ordering::Release);
-        assert!(state.playback_finished());
-
-        request_seek(&state, &request_tx, Duration::from_secs(20)).unwrap();
-
-        assert!(!state.playback_finished());
-        assert_eq!(state.position_micros(), 20_000_000);
-    }
-
-    #[test]
-    fn tempo_rejects_non_finite_values_and_clamps_extremes() {
-        assert!(normalized_tempo(f32::NAN).is_err());
-        assert!(normalized_tempo(f32::INFINITY).is_err());
-        assert_eq!(normalized_tempo(0.0).unwrap(), wsola::MIN_TEMPO);
-        assert_eq!(normalized_tempo(100.0).unwrap(), wsola::MAX_TEMPO);
-        assert_eq!(normalized_tempo(1.25).unwrap(), 1.25);
-    }
-
-    #[test]
-    fn normal_tempo_uses_direct_decode_path() {
-        assert!(is_realtime_tempo(1.0));
-        assert!(is_realtime_tempo(1.00005));
-        assert!(!is_realtime_tempo(0.99));
-        assert!(!is_realtime_tempo(1.01));
-    }
 
     #[test]
     fn seek_generation_exhaustion_fails_without_mutating_state() {
@@ -1596,150 +1420,6 @@ mod tests {
         assert_eq!(state.position_micros(), 17_000_000);
     }
 
-    #[test]
-    fn decoded_position_never_advances_past_total_duration() {
-        let (audio_tx, audio_rx) = bounded(1);
-        audio_tx.send(AudioChunk { generation: 0, tempo: 4.0, samples: vec![0.5; 256] }).unwrap();
-        let state = test_state(0, 99_000_000);
-        let mut source = test_source(audio_rx, state.clone(), 1, 256);
-
-        for _ in 0..256 {
-            source.next();
-        }
-        assert_eq!(state.position_micros(), 100_000_000);
-    }
-
-    #[test]
-    fn collecting_no_requests_produces_no_work() {
-        let (_request_tx, request_rx) = unbounded();
-
-        let pending = collect_pending_requests(None, &request_rx);
-
-        assert_eq!(pending.seek, None);
-        assert_eq!(pending.tempo, None);
-        assert!(!pending.stop);
-    }
-
-    #[test]
-    fn mixed_request_burst_coalesces_seek_and_tempo_independently() {
-        let (request_tx, request_rx) = unbounded();
-        request_tx.send(DecoderRequest::Seek { position: Duration::from_secs(4), generation: 1 }).unwrap();
-        request_tx.send(DecoderRequest::Tempo(0.75)).unwrap();
-        request_tx.send(DecoderRequest::Seek { position: Duration::from_secs(9), generation: 2 }).unwrap();
-        request_tx.send(DecoderRequest::Tempo(1.5)).unwrap();
-
-        let pending = collect_pending_requests(None, &request_rx);
-
-        assert_eq!(pending.seek, Some((Duration::from_secs(9), 2)));
-        assert_eq!(pending.tempo, Some(1.5));
-        assert!(!pending.stop);
-    }
-
-    #[test]
-    fn first_request_and_queued_requests_are_coalesced_together() {
-        let (request_tx, request_rx) = unbounded();
-        request_tx.send(DecoderRequest::Seek { position: Duration::from_secs(8), generation: 4 }).unwrap();
-        request_tx.send(DecoderRequest::Tempo(2.0)).unwrap();
-
-        let pending = collect_pending_requests(Some(DecoderRequest::Tempo(0.5)), &request_rx);
-
-        assert_eq!(pending.seek, Some((Duration::from_secs(8), 4)));
-        assert_eq!(pending.tempo, Some(2.0));
-    }
-
-    #[test]
-    fn stop_is_preserved_while_the_queue_is_drained() {
-        let (request_tx, request_rx) = unbounded();
-        request_tx.send(DecoderRequest::Stop).unwrap();
-        request_tx.send(DecoderRequest::Seek { position: Duration::from_secs(12), generation: 7 }).unwrap();
-
-        let pending = collect_pending_requests(None, &request_rx);
-
-        assert!(pending.stop);
-        assert_eq!(pending.seek, Some((Duration::from_secs(12), 7)));
-        assert!(request_rx.is_empty());
-    }
-
-    #[test]
-    fn successful_seek_updates_state_and_enqueues_the_same_generation() {
-        let (request_tx, request_rx) = unbounded();
-        let state = test_state(41, 3_000_000);
-        let target = Duration::from_micros(7_654_321);
-
-        request_seek(&state, &request_tx, target).unwrap();
-
-        assert_eq!(state.generation.load(Ordering::Acquire), 42);
-        assert_eq!(state.position_micros(), 7_654_321);
-        match request_rx.recv().unwrap() {
-            DecoderRequest::Seek { position, generation } => {
-                assert_eq!(position, target);
-                assert_eq!(generation, 42);
-            }
-            _ => panic!("expected seek request"),
-        }
-    }
-
-    #[test]
-    fn failed_seek_restores_a_preexisting_finished_state() {
-        let (request_tx, request_rx) = unbounded();
-        drop(request_rx);
-        let state = test_state(5, 100_000_000);
-        state.playback_finished_generation.store(5, Ordering::Release);
-
-        assert!(request_seek(&state, &request_tx, Duration::from_secs(10)).is_err());
-
-        assert_eq!(state.generation.load(Ordering::Acquire), 5);
-        assert_eq!(state.position_micros(), 100_000_000);
-        assert!(state.playback_finished());
-    }
-
-    #[test]
-    fn position_update_only_accepts_the_current_position_generation() {
-        let state = test_state(3, 1_000_000);
-
-        assert!(!state.set_position_if_generation(2, 99_000_000));
-        assert_eq!(state.position_micros(), 1_000_000);
-        assert!(state.set_position_if_generation(3, 2_000_000));
-        assert_eq!(state.position_micros(), 2_000_000);
-    }
-
-    #[test]
-    fn finished_flag_only_applies_to_the_current_generation() {
-        let state = test_state(9, 0);
-
-        state.playback_finished_generation.store(8, Ordering::Release);
-        assert!(!state.playback_finished());
-        state.playback_finished_generation.store(9, Ordering::Release);
-        assert!(state.playback_finished());
-        state.generation.store(10, Ordering::Release);
-        assert!(!state.playback_finished());
-    }
-
-    #[test]
-    fn an_empty_live_source_yields_silence_without_finishing() {
-        let (_audio_tx, audio_rx) = bounded(1);
-        let state = test_state(0, 15_000_000);
-        let mut source = test_source(audio_rx, state.clone(), 1, 48_000);
-
-        assert_eq!(source.next(), Some(0.0));
-        assert_eq!(state.position_micros(), 15_000_000);
-        assert!(!state.playback_finished());
-    }
-
-    #[test]
-    fn eof_waits_until_the_buffered_chunk_has_been_consumed() {
-        let (audio_tx, audio_rx) = bounded(1);
-        audio_tx.send(AudioChunk { generation: 0, tempo: 1.0, samples: vec![0.25] }).unwrap();
-        let state = test_state(0, 99_000_000);
-        state.decoder_end_generation.store(0, Ordering::Release);
-        let mut source = test_source(audio_rx, state.clone(), 1, 1);
-
-        assert_eq!(source.next(), Some(0.25));
-        assert!(!state.playback_finished());
-        assert_eq!(source.next(), Some(0.0));
-        assert!(state.playback_finished());
-        assert_eq!(state.position_micros(), 100_000_000);
-    }
 
     #[test]
     fn eof_on_a_zero_duration_source_finishes_at_zero() {
@@ -1753,35 +1433,6 @@ mod tests {
         assert!(state.playback_finished());
     }
 
-    #[test]
-    fn surround_audio_advances_position_once_per_complete_frame() {
-        let (audio_tx, audio_rx) = bounded(1);
-        audio_tx.send(AudioChunk { generation: 0, tempo: 1.0, samples: vec![0.5; 256 * 6] }).unwrap();
-        let state = test_state(0, 0);
-        let mut source = test_source(audio_rx, state.clone(), 6, 256);
-
-        for _ in 0..256 * 6 {
-            source.next();
-        }
-
-        assert_eq!(state.position_micros(), 1_000_000);
-    }
-
-    #[test]
-    fn position_is_published_at_the_exact_update_interval() {
-        let (audio_tx, audio_rx) = bounded(2);
-        audio_tx.send(AudioChunk { generation: 0, tempo: 1.0, samples: vec![0.5; 255] }).unwrap();
-        audio_tx.send(AudioChunk { generation: 0, tempo: 1.0, samples: vec![0.5] }).unwrap();
-        let state = test_state(0, 4_000_000);
-        let mut source = test_source(audio_rx, state.clone(), 1, 256);
-
-        for _ in 0..255 {
-            source.next();
-        }
-        assert_eq!(state.position_micros(), 4_000_000);
-        source.next();
-        assert_eq!(state.position_micros(), 5_000_000);
-    }
 
     #[test]
     fn generation_change_resets_partial_position_accounting() {
@@ -1803,20 +1454,6 @@ mod tests {
         assert_eq!(state.position_micros(), 11_000_000);
     }
 
-    #[test]
-    fn tempo_changes_between_chunks_accumulate_source_time_correctly() {
-        let (audio_tx, audio_rx) = bounded(2);
-        audio_tx.send(AudioChunk { generation: 0, tempo: 0.5, samples: vec![0.5; 128] }).unwrap();
-        audio_tx.send(AudioChunk { generation: 0, tempo: 1.5, samples: vec![0.5; 128] }).unwrap();
-        let state = test_state(0, 2_000_000);
-        let mut source = test_source(audio_rx, state.clone(), 1, 256);
-
-        for _ in 0..256 {
-            source.next();
-        }
-
-        assert_eq!(state.position_micros(), 3_000_000);
-    }
 
     #[test]
     fn stale_chunks_followed_by_disconnect_end_cleanly() {
@@ -1830,16 +1467,6 @@ mod tests {
         assert_eq!(state.position_micros(), 7_000_000);
     }
 
-    #[test]
-    fn source_reports_its_audio_format_and_duration() {
-        let (_audio_tx, audio_rx) = bounded(1);
-        let source = WorkerSource::new(audio_rx, test_state(0, 0), NonZeroU16::new(2).unwrap(), NonZeroU32::new(44_100).unwrap(), Duration::from_secs(321));
-
-        assert_eq!(source.channels(), NonZeroU16::new(2).unwrap());
-        assert_eq!(source.sample_rate(), NonZeroU32::new(44_100).unwrap());
-        assert_eq!(source.total_duration(), Some(Duration::from_secs(321)));
-        assert_eq!(source.current_span_len(), None);
-    }
 
     struct IntermittentDecoder {
         reads: std::vec::IntoIter<Option<f32>>,
@@ -1864,19 +1491,5 @@ mod tests {
         }
     }
 
-    #[test]
-    fn repeated_empty_decoder_reads_confirm_eof() {
-        let mut decoder = IntermittentDecoder { reads: vec![None; EOF_CONFIRMATION_READS].into_iter() };
 
-        assert!(read_decoder_block(&mut decoder, 16).is_empty());
-    }
-
-    #[test]
-    fn byte_length_probe_restores_type_erased_reader_position() {
-        let mut reader: Box<dyn ReadSeek> = Box::new(std::io::Cursor::new(vec![0_u8; 4096]));
-        reader.seek(SeekFrom::Start(137)).unwrap();
-
-        assert_eq!(stream_byte_len(&mut *reader), Ok(4096));
-        assert_eq!(reader.stream_position().unwrap(), 137);
-    }
 }

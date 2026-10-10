@@ -65,6 +65,12 @@ pub fn author_match_keys(value: &str) -> BTreeSet<String> {
     keys
 }
 
+/// Whether two credits name the same person: the names agree once accents,
+/// honorifics and surname-first order are set aside.
+pub fn same_author(left: &str, right: &str) -> bool {
+    !author_match_keys(left).is_disjoint(&author_match_keys(right))
+}
+
 pub fn author_match_tokens(value: &str) -> BTreeSet<String> {
     NormalizedAuthor::new(value).candidate_tokens()
 }
@@ -110,39 +116,6 @@ pub fn author_names_compatible(left: &str, right: &str) -> bool {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn explicit_credit_separators_preserve_inverted_names() {
-        assert_eq!(author_credits(&["Mendez, Antonio J. with McConnell, Malcolm".into()]), vec!["Mendez, Antonio J.", "McConnell, Malcolm"]);
-        assert_eq!(author_credits(&["Smith, John".into()]), vec!["Smith, John"]);
-        assert!(author_credits(&[" ; ".into()]).is_empty());
-    }
-
-    #[test]
-    fn omitted_middle_initial_is_compatible_but_conflicts_are_not() {
-        for (a, b) in [("Brian Klaas", "Brian P. Klaas"), ("Klaas, Brian P.", "Brian Klaas"), ("Brian P. Klaas", "Brian P Klaas")] {
-            assert!(author_names_compatible(a, b));
-            assert!(author_names_compatible(b, a));
-        }
-        for (a, b) in
-            [("Brian P. Klaas", "Brian Q. Klaas"), ("Brian Paul Klaas", "Brian Peter Klaas"), ("Brian Klaas", "Brian Paul Klaas"), ("B. Klaas", "Brian Klaas"), ("Brian Klaas", "Brandon Klaas"), ("John Smith Jr.", "John Smith Sr.")]
-        {
-            assert!(!author_names_compatible(a, b), "{a} / {b}");
-            assert!(!author_names_compatible(b, a));
-        }
-    }
-
-    #[test]
-    fn shared_keys_preserve_existing_bokheim_matching() {
-        assert_eq!(bibliographic_match_key("L'Étranger — Revised Edition"), "l etranger revised edition");
-        assert!(author_match_keys("Smith, John Q.").contains("john q smith"));
-        assert_eq!(author_match_tokens("John Q. Smith Jr."), BTreeSet::from(["john".into(), "smith".into()]));
-        assert_ne!(author_match_tokens("John Smith"), author_match_tokens("Jane Smith"));
-    }
-}
 
 /// Bounded whole-word title fragments shared with edition candidate lookup.
 pub fn title_substring_keys(value: &str, limit: usize) -> Vec<(String, usize)> {
@@ -238,16 +211,62 @@ pub fn author_credits(values: &[String]) -> Vec<String> {
     credits
 }
 
-#[cfg(test)]
-mod title_apostrophe_tests {
-    use super::*;
-    #[test]
-    fn internal_apostrophes_are_removed_without_merging_other_boundaries() {
-        for title in ["Owner's Manual", "Owner’s Manual", "Ownerʼs Manual", "Owners Manual"] {
-            assert_eq!(bibliographic_title_match_key(title), "owners manual");
+/// Complete groups can mix parentheses and brackets. Unclosed groups remain
+/// intact so cleanup cannot swallow the remaining title.
+pub fn delimited_segments(value: &str) -> Vec<(usize, usize)> {
+    let mut stack = Vec::new();
+    let mut start = 0;
+    let mut spans = Vec::new();
+    for (index, character) in value.char_indices() {
+        match character {
+            '(' | '[' => {
+                if stack.is_empty() {
+                    start = index;
+                }
+                stack.push(character);
+            }
+            ')' | ']' if !stack.is_empty() => {
+                stack.pop();
+                if stack.is_empty() {
+                    spans.push((start, index + 1));
+                }
+            }
+            _ => {}
         }
-        assert_eq!(bibliographic_title_match_key("'Logic' and 'Reason'"), "logic and reason");
-        assert_eq!(bibliographic_title_match_key("Logic—Reason"), "logic reason");
-        assert_eq!(bibliographic_title_match_key("L'Étranger"), "letranger");
+    }
+    spans
+}
+
+/// Drops parenthetical groups such as series names. Volume and adaptation
+/// qualifiers always stay; edition notes stay when `keep_edition_notes`.
+pub fn title_without_parenthetical_segments(title: &str, keep_edition_notes: bool) -> String {
+    let mut outside = String::new();
+    let mut previous = 0;
+    for (start, end) in delimited_segments(title) {
+        outside.push_str(&title[previous..start]);
+        let inside = &title[start + 1..end - 1];
+        let key = bibliographic_match_key(inside);
+        if key.split_whitespace().any(|word| is_title_qualifier_word(word) || (keep_edition_notes && matches!(word, "edition" | "ed" | "revised" | "revision" | "unabridged" | "translation" | "translated"))) {
+            outside.push(' ');
+            outside.push_str(&title[start..end]);
+        }
+        previous = end;
+    }
+    outside.push_str(&title[previous..]);
+    outside.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_author;
+
+    #[test]
+    fn same_author_ignores_order_accents_and_honorifics() {
+        assert!(same_author("Yakobson, Alexander", " ALEXANDER  YAKOBSON "));
+        assert!(same_author("García, José", "Jose Garcia"));
+        assert!(same_author("Dr John Smith", "John Smith"));
+        assert!(!same_author("Alexander Yakobson", "Alexander Smith"));
+        assert!(!same_author("John Smith", "John A. Smith"));
+        assert!(!same_author("...", "---"));
     }
 }

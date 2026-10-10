@@ -6,7 +6,8 @@
 -- A single LIMIT over the whole list let a run of finished books crowd out
 -- the ones still being read, which is the list Home exists to show; ranking
 -- within each group spends the limit twice in one statement rather than
--- asking for the two lists in two round trips.
+-- asking for the two lists in two round trips. Each book comes with whether
+-- it is finished, which is the shelf it belongs on.
 WITH read_books AS (
   SELECT book.row_id, book.search_title, book.title, book.content_hash, book.read_at,
          COALESCE(book.read_progress, 0) >= :finished_threshold AS finished
@@ -15,7 +16,7 @@ WITH read_books AS (
     AND EXISTS(SELECT 1 FROM library_book_presence presence
              WHERE presence.book_row_id=book.row_id AND (:downloaded_only=0 OR presence.downloaded=1))
 )
-SELECT row_id FROM (
+SELECT row_id, finished FROM (
     SELECT row_id, finished, ROW_NUMBER() OVER (
         PARTITION BY finished
         ORDER BY read_at DESC, search_title, title, content_hash

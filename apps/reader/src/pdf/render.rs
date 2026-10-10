@@ -11,7 +11,7 @@ mod settings;
 use gpui::prelude::*;
 use gpui::{App, ClickEvent, Context, Entity, FocusHandle, Focusable, Pixels, Point, Render, Subscription, Window};
 use gpui_component::input::InputState;
-use gpui_component::menu::ContextMenuExt;
+use gpui_component::menu::{ContextMenuExt, OpenContextMenu};
 use gpui_component::tree::TreeState;
 use library_backend::LibraryClient;
 use library_model::BookLocator;
@@ -25,16 +25,22 @@ use crate::pdf::state::{page_indicator, progress};
 use crate::pdf::toc::PdfTocState;
 use crate::shell::annotation_editor;
 use crate::shell::chrome;
-use crate::shell::context_sheet::{ContextAction, ContextActions};
+use crate::shell::context_sheet::{ContextAction, ContextActionTarget, ContextActions};
 use crate::shell::input::{self as shell_input, CommandTarget};
 use crate::shell::marks::MarkSession;
 use crate::shell::persistence::ReadingPositionWriter;
 use crate::shell::state_panel::{SidebarState, SidebarTab};
-use crate::shell::toolbar::{self as sidebar_chrome, SidebarContent, SidebarTarget};
+use crate::shell::toolbar::{self as sidebar_chrome, SidebarContent};
 use crate::{NextPage, PreviousPage};
 
 /// One zoom step, in pixels per PDF point.
 const ZOOM_STEP: f32 = 0.1;
+
+#[derive(Clone)]
+pub(crate) enum PdfContextCommand {
+    Highlight,
+    Copy(Entity<PdfView>),
+}
 
 pub(crate) struct PdfReaderView {
     #[cfg(feature = "kobo")]
@@ -53,12 +59,14 @@ pub(crate) struct PdfReaderView {
     marks: MarkSession,
     annotation_note_input: Entity<InputState>,
     annotation_popup_anchor: Option<Point<Pixels>>,
-    context_sheet: Option<ContextActions>,
+    context_sheet: Option<ContextActions<PdfContextCommand>>,
     current_page: usize,
     page_count: usize,
     positions: ReadingPositionWriter,
     close_reader: crate::CloseReader,
     focus: FocusHandle,
+    sidebar_focus: FocusHandle,
+    settings_navigation: crate::shell::settings_navigation::SettingsNavigation,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -117,9 +125,9 @@ impl Render for PdfReaderView {
             }
         }));
         let pdf_document = if mobile {
-            pdf_document.into_any_element()
+            pdf_document.on_action(cx.listener(|reader, _: &OpenContextMenu, _, cx| reader.open_context_sheet(cx))).into_any_element()
         } else {
-            pdf_document.context_menu(move |menu, _window, cx| context_target.read(cx).context_actions(&context_target, cx).popup(menu)).into_any_element()
+            pdf_document.context_menu(move |menu, _window, cx| context_target.read(cx).context_actions(cx).popup(menu, &context_target)).into_any_element()
         };
         let mut body = components::reader_document_body().id("pdf-reader-document-surface").child(pdf_document);
         if let Some(annotation) = self.marks.selected().cloned() {
@@ -158,22 +166,7 @@ impl Render for PdfReaderView {
         // clicked again. The container still sits on the dispatch path either
         // way, so `Reader` bindings keep firing.
         let document_ready = self.page_count > 0;
-        let bottom_bar = (mobile && chrome_visible).then(|| {
-            let tab_target = entity.clone();
-            let on_select: std::rc::Rc<dyn Fn(SidebarTab, &mut Window, &mut App)> = std::rc::Rc::new(move |tab, window, cx| {
-                tab_target.update(cx, |reader, cx| {
-                crate::shell::state_panel::toggle_tab(&mut reader.sidebar, tab, outline_available, cx);
-                reader.chrome.show(cx);
-                if reader.sidebar.is_visible() {
-                    reader.focus_document(window, cx);
-                }
-                notify(cx, Component::PdfShell, "mobile_sidebar_tab_changed");
-                });
-            });
-            let search_target = entity.clone();
-            let on_search: std::rc::Rc<dyn Fn(&mut Window, &mut App)> = std::rc::Rc::new(move |window, cx| search_target.update(cx, |reader, cx| reader.toggle_search(window, cx)));
-            sidebar_chrome::reader_bottom_bar("pdf-reader-bottom-bar", active_tab, outline_available, search_visible, theme, on_select, on_search)
-        });
+        let bottom_bar = (mobile && chrome_visible).then(|| sidebar_chrome::reader_bottom_bar("pdf-reader-bottom-bar", &entity, active_tab, outline_available, search_visible, theme));
         let page = crate::shell::page::reader_page(window, cx, theme, document_ready, &self.focus, chrome_visible, bottom_bar, mobile_search, content)
             .id("pdf-reader-page")
             // The reader deliberately uses hover-to-focus: returning the
@@ -191,17 +184,13 @@ impl Render for PdfReaderView {
                 if !reader.chrome.show_from_pointer(cx) {
                     return;
                 }
-                crate::shell::state_panel::select_tab(&mut reader.sidebar, SidebarTab::Contents, cx);
+                reader.sidebar.reopen();
                 notify(cx, Component::PdfShell, "sidebar_shown");
             }
         });
         let mut page = page.children(interactions);
         if let Some(actions) = &self.context_sheet {
-            let dismiss = entity.clone();
-            let sheet = actions.sheet(theme, window.insets().safe_area.bottom, move |_, cx| dismiss.update(cx, |reader, cx| {
-                reader.context_sheet = None;
-                cx.notify();
-            }));
+            let sheet = actions.sheet(theme, window.insets().safe_area.bottom, &entity);
             page = page.child(sheet);
         }
         page
@@ -228,25 +217,38 @@ pub(crate) fn bind_pdf_keys(cx: &mut App) {
 }
 
 impl PdfReaderView {
-    fn context_actions(&self, entity: &Entity<Self>, cx: &App) -> ContextActions {
+    fn context_actions(&self, cx: &App) -> ContextActions<PdfContextCommand> {
         let mut actions = ContextActions::default();
         if self.pdf.read(cx).selection_snapshot().is_some() {
-            let highlight = entity.clone();
-            let copy = self.pdf.clone();
-            actions.add_section(vec![
-                ContextAction::new("Highlight", move |window, cx| highlight.update(cx, |reader, cx| reader.create_annotation(window, cx))),
-                ContextAction::new("Copy", move |_, cx| { copy.update(cx, |pdf, cx| pdf.copy_selection(cx)); }),
-            ]);
+            actions.add_section(vec![ContextAction { label: "Highlight", command: PdfContextCommand::Highlight }, ContextAction { label: "Copy", command: PdfContextCommand::Copy(self.pdf.clone()) }]);
         }
         actions
     }
 
     fn open_context_sheet(&mut self, cx: &mut Context<Self>) {
-        let actions = self.context_actions(&cx.entity(), cx);
+        let actions = self.context_actions(cx);
         if !actions.is_empty() {
             self.context_sheet = Some(actions);
             self.chrome.hide(cx);
             cx.notify();
         }
+    }
+}
+
+impl ContextActionTarget for PdfReaderView {
+    type Command = PdfContextCommand;
+
+    fn run_context_action(&mut self, command: Self::Command, window: &mut Window, cx: &mut Context<Self>) {
+        match command {
+            PdfContextCommand::Highlight => self.create_annotation(window, cx),
+            PdfContextCommand::Copy(pdf) => {
+                pdf.update(cx, |pdf, cx| pdf.copy_selection(cx));
+            }
+        }
+    }
+
+    fn dismiss_context_actions(&mut self, cx: &mut Context<Self>) {
+        self.context_sheet = None;
+        cx.notify();
     }
 }

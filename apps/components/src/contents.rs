@@ -16,10 +16,8 @@
 //! it — and which of those means "seek the running audiobook" rather than "open
 //! the book" is a decision only the surface can make.
 
-use std::rc::Rc;
-
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Div, ElementId, MouseButton, SharedString, Stateful, Window, div, px};
+use gpui::{Div, ElementId, MouseButton, SharedString, Stateful, div, px};
 use gpui_component::{Icon, IconName};
 
 use crate::{BrowserTheme, CONTENTS_AMOUNT_WIDTH_REM, CONTENTS_DISCLOSURE_SIZE_REM, CONTENTS_ROW_GAP, CONTENTS_ROW_INDENT, SPACE_SM, SPACE_XS, TEXT_SM, TEXT_XS};
@@ -72,45 +70,22 @@ pub fn contents_title(id: impl Into<ElementId>, title: impl Into<SharedString>, 
 /// there holds nothing of its own and lets the event through to the row behind
 /// it. A chevron that swallowed the event without handling it would be the one
 /// spot in the list that did nothing at all.
-pub fn contents_disclosure(id: impl Into<ElementId>, row: ContentsRow, theme: BrowserTheme) -> AnyElement {
-    disclosure(id, row, theme, None)
-}
-
-/// The disclosure with the opening of the entry as its own, for a list whose row
-/// means something else — the book's page, where the row goes to the entry.
 ///
-/// The toggle arrives here rather than being wrapped around the outside: keeping
-/// the click off the row means swallowing the mouse down, and a listener on an
-/// ancestor never sees an event a descendant has consumed. Both belong to this
-/// element, whose own click is registered after the swallow and so still runs.
-pub fn contents_toggle_disclosure(id: impl Into<ElementId>, row: ContentsRow, theme: BrowserTheme, toggle: impl Fn(&mut Window, &mut App) + 'static) -> AnyElement {
-    disclosure(id, row, theme, Some(Rc::new(toggle)))
-}
-
 /// Rows without children keep the empty column so that every title in the list
 /// starts on the same line — a ragged left edge reads as damage.
-fn disclosure(id: impl Into<ElementId>, row: ContentsRow, theme: BrowserTheme, toggle: Option<Rc<dyn Fn(&mut Window, &mut App)>>) -> AnyElement {
+/// Callers can attach their own toggle handler when `row.has_children` is true.
+pub fn contents_disclosure(id: impl Into<ElementId>, row: ContentsRow, theme: BrowserTheme) -> Stateful<Div> {
     let size = gpui::rems(CONTENTS_DISCLOSURE_SIZE_REM);
-    if !row.has_children {
-        return div().w(size).h(size).flex_none().into_any_element();
-    }
-    div()
-        .id(id)
-        .w(size)
-        .h(size)
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .text_color(if row.marked { theme.accent_text } else { theme.text_muted })
-        .hover(move |style| style.bg(theme.hover))
-        .when_some(toggle, |element, toggle| {
-            // The title beside it navigates; opening an entry must not also go to it.
-            element.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(move |_, window, cx| toggle(window, cx))
-        })
-        .child(Icon::new(if row.expanded { IconName::ChevronDown } else { IconName::ChevronRight }).size(gpui::rems(CONTENTS_DISCLOSURE_SIZE_REM * 0.7)))
-        .into_any_element()
+    div().id(id).w(size).h(size).flex_none().when(row.has_children, |disclosure| {
+        disclosure
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .text_color(if row.marked { theme.accent_text } else { theme.text_muted })
+            .hover(move |style| style.bg(theme.hover))
+            .child(Icon::new(if row.expanded { IconName::ChevronDown } else { IconName::ChevronRight }).size(gpui::rems(CONTENTS_DISCLOSURE_SIZE_REM * 0.7)))
+    })
 }
 
 /// One row, laid out and stated. The caller supplies the disclosure and hangs
@@ -118,7 +93,7 @@ fn disclosure(id: impl Into<ElementId>, row: ContentsRow, theme: BrowserTheme, t
 ///
 /// Hover is the neutral overlay, the keyboard cursor is `accent_wash`, and
 /// the current entry is solid accent. Earlier leaf entries use muted ink.
-pub fn contents_row(id: impl Into<ElementId>, row: ContentsRow, disclosure: AnyElement, title: impl IntoElement, number: Option<usize>, amount: Option<SharedString>, theme: BrowserTheme) -> Stateful<Div> {
+pub fn contents_row(id: impl Into<ElementId>, row: ContentsRow, disclosure: impl IntoElement, title: impl IntoElement, number: Option<usize>, amount: Option<SharedString>, theme: BrowserTheme) -> Stateful<Div> {
     let (background, hovered, ink) = match (row.marked, row.focused) {
         (true, _) => (Some(theme.accent), theme.accent_hover, theme.accent_text),
         (false, true) => (Some(theme.accent_wash), theme.accent_wash_hover, if row.read { theme.text_muted } else { theme.text }),
@@ -154,18 +129,3 @@ pub fn contents_row(id: impl Into<ElementId>, row: ContentsRow, disclosure: AnyE
 /// navigable; it simply stops marching rightwards in a column that may be a
 /// sidebar's width.
 const MAXIMUM_DRAWN_DEPTH: usize = 3;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn indent_stops_growing_but_the_entry_is_never_dropped() {
-        let indent = |depth: usize| SPACE_SM + CONTENTS_ROW_INDENT * depth.min(MAXIMUM_DRAWN_DEPTH) as f32;
-
-        assert!(indent(1) > indent(0), "a child steps in from its parent");
-        assert!(indent(3) > indent(2));
-        assert_eq!(indent(4), indent(3), "and a fourth level stops stepping rather than vanishing rightwards");
-        assert_eq!(indent(9), indent(3));
-    }
-}

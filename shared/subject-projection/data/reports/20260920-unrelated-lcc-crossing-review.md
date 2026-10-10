@@ -79,10 +79,8 @@ Local reproducibility artifacts:
 
 Rebuild the probe with `cargo build --release -p subject-projection --example
 taxonomy_probe`, then run the comparison generator from the repository root.
-The ignored geometric audit can be repeated with `TAXONOMY_AUDIT_INPUT` pointing
-to either snapshot and `TAXONOMY_AUDIT_DIR` pointing to a new output directory:
-`cargo test --release -p subject-projection --lib runtime::range_audit::audit --
---ignored --nocapture`.
+The manual geometric audit test used for the snapshot comparisons was
+subsequently removed during test pruning. Its original results remain linked above.
 
 ## Pair-by-pair dispositions
 

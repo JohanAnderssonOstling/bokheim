@@ -47,7 +47,7 @@ pub fn object(fields: &[(&str, JsValue)]) -> JsValue {
     object.into()
 }
 
-/// The common byte/error envelope used by CPU, sync storage and transfer replies.
+/// The common byte/error envelope used by CPU and sync storage replies.
 pub fn read_byte_reply(message: &JsValue) -> Result<Vec<u8>, String> {
     protocol::byte_result(message).unwrap_or_else(Err)
 }
@@ -71,8 +71,6 @@ pub fn error_message(error: &JsValue) -> String {
     error.as_string().or_else(|| field(error, "message").as_string()).unwrap_or_else(|| format!("{error:?}"))
 }
 
-#[cfg(feature = "web-runtime-tests")]
-pub use port::lifecycle_contract as port_lifecycle_contract;
 pub mod lifetime;
 pub mod tab;
 
@@ -93,5 +91,3 @@ pub mod request;
 pub mod control;
 
 pub mod host;
-
-pub mod transfer;

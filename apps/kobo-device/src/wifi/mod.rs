@@ -96,10 +96,11 @@ fn worker() -> Result<&'static mpsc::Sender<Job>> {
                             Ok(Job::FinishSleep) => controller.sleeping = false,
                             Ok(Job::UiReady) => controller.resume_after_ui_with(|controller| controller.power(true)),
                             Err(mpsc::RecvTimeoutError::Timeout) => {
-                                if !controller.sleeping && (controller.attempt.is_some() || controller.scan_started.is_some() || controller.address_requested) {
-                                    if let Err(error) = controller.refresh() {
-                                        controller.snapshot.error = Some(error);
-                                    }
+                                if !controller.sleeping
+                                    && (controller.attempt.is_some() || controller.scan_started.is_some() || controller.address_requested)
+                                    && let Err(error) = controller.refresh()
+                                {
+                                    controller.snapshot.error = Some(error);
                                 }
                             }
                             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -314,10 +315,10 @@ impl Controller {
             Ok(control) => control,
             Err(error) => {
                 self.service_lost();
-                if let Some(interface) = &self.interface {
-                    if !PathBuf::from("/sys/class/net").join(interface).exists() {
-                        return Ok(());
-                    }
+                if let Some(interface) = &self.interface
+                    && !PathBuf::from("/sys/class/net").join(interface).exists()
+                {
+                    return Ok(());
                 }
                 return Err(error);
             }
@@ -377,13 +378,13 @@ impl Controller {
                 return Err("Connection timed out. Check the password and network availability.".into());
             }
         }
-        if let Some(child) = self.dhcp.as_mut() {
-            if let Some(status) = child.try_wait().map_err(|_| "Could not check address acquisition")? {
-                self.dhcp = None;
-                if !status.success() && self.address_requested {
-                    self.cancel_attempt(&control)?;
-                    return Err("Could not obtain a network address. Try connecting again.".into());
-                }
+        if let Some(child) = self.dhcp.as_mut()
+            && let Some(status) = child.try_wait().map_err(|_| "Could not check address acquisition")?
+        {
+            self.dhcp = None;
+            if !status.success() && self.address_requested {
+                self.cancel_attempt(&control)?;
+                return Err("Could not obtain a network address. Try connecting again.".into());
             }
         }
         Ok(())

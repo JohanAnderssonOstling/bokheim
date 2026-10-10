@@ -1,6 +1,6 @@
 WITH input AS MATERIALIZED (
     SELECT content_hash, size_bytes, ordinal
-    FROM UNNEST($1::TEXT[], $2::BIGINT[]) WITH ORDINALITY
+    FROM UNNEST($1::BYTEA[], $2::BIGINT[]) WITH ORDINALITY
          AS value(content_hash, size_bytes, ordinal)
 )
 SELECT input.content_hash AS content_hash,

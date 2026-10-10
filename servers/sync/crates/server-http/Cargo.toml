@@ -8,7 +8,7 @@ publish = false
 workspace = true
 
 [dependencies]
-audiobook-folder = { path = "../../../../shared/audiobook-folder" }
+audiobook-archive = { path = "../../../../shared/audiobook-archive" }
 uuid = { version = "1", features = ["v4"] }
 account-contract = { path = "../../../../shared/account-contract" }
 axum = { version = "0.7", features = ["ws"] }

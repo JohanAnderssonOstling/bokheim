@@ -34,9 +34,6 @@ pub struct SubjectSystem {
     nodes: Vec<SubjectNode>,
     path_index: HashMap<String, usize>,
     code_index: HashMap<String, usize>,
-    /// Narrows hierarchy matching to nodes whose leaf component is present in
-    /// the input. This keeps dump-scale matching proportional to the supplied
-    /// headings instead of scanning the complete BISAC tree for every work.
     tail_component_index: HashMap<String, Vec<usize>>,
 }
 
@@ -55,9 +52,6 @@ impl SubjectSystem {
     }
     pub(super) fn node_by_code(&self, code: &str) -> Option<&SubjectNode> {
         self.code_index.get(&code.trim().to_ascii_uppercase()).map(|index| &self.nodes[*index])
-    }
-    pub(super) fn code_for_path(&self, path: &str) -> Option<&str> {
-        self.node_by_path(path).and_then(SubjectNode::code).or_else(|| self.node_by_path(&format!("{path} / General")).and_then(SubjectNode::code))
     }
 }
 
@@ -82,7 +76,8 @@ pub fn bisac_subject_system() -> &'static SubjectSystem {
 }
 
 pub fn bisac_code_for_path(path: &str) -> Option<&'static str> {
-    bisac_subject_system().code_for_path(path)
+    let system = bisac_subject_system();
+    system.node_by_path(path).and_then(SubjectNode::code).or_else(|| system.node_by_path(&format!("{path} / General")).and_then(SubjectNode::code))
 }
 
 fn parse_bisac(csv: &str) -> SubjectSystem {
@@ -124,10 +119,19 @@ fn parse_bisac(csv: &str) -> SubjectSystem {
     SubjectSystem { id: BISAC_SYSTEM_ID, version: BISAC_VERSION, nodes, path_index, code_index, tail_component_index }
 }
 
+/// Matches actual BISAC paths whose every component is supported by the
+/// supplied subjects. Separate labels may supply different components;
+/// structured LCSH headings must match independently as complete paths.
 pub fn match_bisac_subjects(subjects: &[BookSubject]) -> Vec<SubjectAssignment> {
+    match_bisac_subjects_with_minimum_adjacent(subjects, 0)
+}
+
+/// Requires every component of an actual BISAC path, and at least
+/// `minimum_components` components. Explicit codes bypass the length requirement.
+pub fn match_bisac_subjects_with_minimum_adjacent(subjects: &[BookSubject], minimum_components: usize) -> Vec<SubjectAssignment> {
     let system = bisac_subject_system();
-    let mut component_evidence = HashMap::<String, BTreeSet<usize>>::new();
     let mut matches = BTreeMap::<String, BTreeSet<usize>>::new();
+    let mut component_evidence = HashMap::<String, BTreeSet<usize>>::new();
     for (position, subject) in subjects.iter().enumerate() {
         let authority = subject.authority().map(str::trim).filter(|authority| !authority.is_empty());
         let authority_system = authority.and_then(canonical_subject_system);
@@ -135,35 +139,27 @@ pub fn match_bisac_subjects(subjects: &[BookSubject]) -> Vec<SubjectAssignment> 
         if authority_system.is_some() && !matches!(authority_system, Some(BISAC_SYSTEM_ID | "lcsh")) {
             continue;
         }
-        let components = split_path(subject.name());
-        if lcsh_style {
-            // An LCSH heading is independent evidence. It may map to BISAC
-            // only when the complete heading is already one contiguous BISAC
-            // hierarchy in root-to-leaf order. Never omit intermediate nodes
-            // or combine subdivisions from separate LCSH headings.
+        if split_path(subject.name()).len() >= minimum_components {
             if let Some(node) = system.node_by_path(subject.name()) {
                 matches.entry(node.path.clone()).or_default().insert(position);
             }
-            continue;
         }
-        for component in &components {
-            component_evidence.entry(normalize_term(component)).or_default().insert(position);
-        }
-        if components.len() > 1 {
-            if let Some(node) = system.node_by_path(subject.name()) {
+        if !lcsh_style {
+            for component in split_path(subject.name()) {
+                component_evidence.entry(normalize_term(&component)).or_default().insert(position);
+            }
+            let declared_code = subject.code().or_else(|| (authority.is_none() || authority_system == Some(BISAC_SYSTEM_ID)).then_some(subject.name()));
+            if let Some(node) = declared_code.and_then(|code| system.node_by_code(code)) {
                 matches.entry(node.path.clone()).or_default().insert(position);
             }
-        } else if let Some(node) = system.node_by_path(subject.name()) {
-            matches.entry(node.path.clone()).or_default().insert(position);
-        }
-        let declared_code = subject.code().or_else(|| (authority.is_none()).then_some(subject.name()));
-        if let Some(node) = declared_code.and_then(|code| system.node_by_code(code)) {
-            matches.entry(node.path.clone()).or_default().insert(position);
         }
     }
     let candidate_nodes = component_evidence.keys().filter_map(|component| system.tail_component_index.get(component)).flatten().copied().collect::<BTreeSet<_>>();
     for node_index in candidate_nodes {
         let node = &system.nodes[node_index];
+        if node.normalized_components.len() < minimum_components {
+            continue;
+        }
         let mut evidence = BTreeSet::<usize>::new();
         if node.normalized_components.iter().all(|component| {
             component_evidence.get(component).is_some_and(|positions| {
@@ -188,73 +184,4 @@ pub fn match_bisac_subjects(subjects: &[BookSubject]) -> Vec<SubjectAssignment> 
         })
         .map(|(node_path, evidence)| SubjectAssignment { node_path, evidence_positions: evidence.into_iter().collect() })
         .collect()
-}
-
-/// Matches a BISAC node only when the combined subject evidence supports at
-/// least `minimum_adjacent` consecutive components of that node's hierarchy.
-/// Unrelated and unmatched headings do not invalidate supported branches.
-pub fn match_bisac_subjects_with_minimum_adjacent(subjects: &[BookSubject], minimum_adjacent: usize) -> Vec<SubjectAssignment> {
-    if minimum_adjacent == 0 {
-        return match_bisac_subjects(subjects);
-    }
-    let system = bisac_subject_system();
-    let mut component_evidence = HashMap::<String, BTreeSet<usize>>::new();
-    let mut matches = BTreeMap::<String, BTreeSet<usize>>::new();
-    for (position, subject) in subjects.iter().enumerate() {
-        for component in split_path(subject.name()) {
-            component_evidence.entry(normalize_term(&component)).or_default().insert(position);
-        }
-        let authority = subject.authority().map(str::trim).filter(|authority| !authority.is_empty());
-        let declared_code = subject.code().or_else(|| authority.is_some_and(|authority| canonical_subject_system(authority) == Some(BISAC_SYSTEM_ID)).then_some(subject.name()));
-        if let Some(node) = declared_code.and_then(|code| system.node_by_code(code)) {
-            matches.entry(node.path.clone()).or_default().insert(position);
-        }
-    }
-    let candidate_nodes = component_evidence.keys().filter_map(|component| system.tail_component_index.get(component)).flatten().copied().collect::<BTreeSet<_>>();
-    for node_index in candidate_nodes {
-        let node = &system.nodes[node_index];
-        if node.normalized_components.len() < minimum_adjacent {
-            continue;
-        }
-        let window = &node.normalized_components[node.normalized_components.len() - minimum_adjacent..];
-        let mut evidence = BTreeSet::<usize>::new();
-        if window.iter().all(|component| {
-            component_evidence.get(component).is_some_and(|positions| {
-                evidence.extend(positions);
-                true
-            })
-        }) {
-            matches.entry(node.path.clone()).or_default().extend(evidence);
-        }
-    }
-    let candidate_paths = matches.keys().cloned().collect::<Vec<_>>();
-    matches
-        .into_iter()
-        .filter(|(path, _)| !candidate_paths.iter().any(|candidate| candidate.starts_with(&format!("{path} / "))))
-        .map(|(node_path, evidence)| SubjectAssignment { node_path, evidence_positions: evidence.into_iter().collect() })
-        .collect()
-}
-
-#[cfg(test)]
-mod adjacent_tests {
-    use super::*;
-
-    fn subject(value: &str) -> BookSubject {
-        BookSubject::new(None, value, "openlibrary:subject", None, None).unwrap()
-    }
-
-    #[test]
-    fn three_adjacent_subjects_match_without_requiring_unrelated_headings() {
-        let subjects = [subject("History"), subject("Europe"), subject("Great Britain"), subject("Unrelated noisy heading")];
-        let matches = match_bisac_subjects_with_minimum_adjacent(&subjects, 3);
-
-        assert!(matches.iter().any(|assignment| assignment.node_path() == "History / Europe / Great Britain"));
-        assert!(!matches.iter().flat_map(|assignment| assignment.evidence_positions()).any(|position| *position == 3));
-    }
-
-    #[test]
-    fn two_adjacent_subjects_do_not_infer_a_bisac_branch() {
-        let subjects = [subject("History"), subject("Europe")];
-        assert!(match_bisac_subjects_with_minimum_adjacent(&subjects, 3).is_empty());
-    }
 }

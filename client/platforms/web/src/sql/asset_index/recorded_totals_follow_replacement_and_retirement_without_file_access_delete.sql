@@ -1,1 +1,0 @@
-DELETE FROM asset_file WHERE name LIKE 'assets/a/book/%'

@@ -1,6 +1,6 @@
 //! Conservative storage pruning: reuse existing ranges and base codes without widening coverage.
 use crate::lcc::{canonical_lcc_notation, lcc_match_keys, parse_lcc_call};
-use crate::{UnifiedConceptDefinition, UnifiedTaxonomy};
+use crate::{UnifiedConceptDefinition, UnifiedTaxonomy, LCC_SYSTEM_ID};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Exact selectors whose removal together preserves LCC matching. Retains
@@ -54,7 +54,7 @@ pub fn redundant_lcc_exact_selectors(concepts: &[UnifiedConceptDefinition]) -> R
             let ancestor = keys[..keys.len() - 1].iter().rev().find_map(|key| exact.get(key));
             let covered = match ancestor {
                 Some(owners) => owners == &owner,
-                None => ranges.lcc_match_candidates(&canonical) == [concept.concept_id()],
+                None => ranges.match_candidates(LCC_SYSTEM_ID, &canonical) == [concept.concept_id()],
             };
             if covered {
                 redundant.push((concept.concept_id(), selector.clone()));
@@ -87,7 +87,7 @@ mod tests {
         )
         .unwrap();
         for code in ["QA10", "QA10.A1", "QA10.A1 .B2 2025", "QA10.Z9", "QA20.A1.B2", "QA20.A1.B2.Z9", "QA20.A1.B2.C3.Z9", "QA20.C3", "QA30", "QA30.A1", "QA1-100", "QA101"] {
-            assert_eq!(before.lcc_match_candidates(code), after.lcc_match_candidates(code), "{code}");
+            assert_eq!(before.match_candidates(LCC_SYSTEM_ID, code), after.match_candidates(LCC_SYSTEM_ID, code), "{code}");
         }
     }
 }

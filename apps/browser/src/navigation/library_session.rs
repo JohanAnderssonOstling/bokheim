@@ -1,6 +1,5 @@
 //! Persistent pages owned by one library session.
 
-use crate::services::library_add_trace::mark;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -11,7 +10,7 @@ use sync_common::{LibraryId, ROOT_DIR_ID};
 
 use super::LibraryRoute;
 use crate::library::BrowseCrumb;
-use crate::library::{AuthorsPage, BookDetailClosed, BrowseKind, BrowseSplitPlane, HomePage, LibraryContext, LibraryUpdateBridge, OpenBook, TrashPage};
+use crate::library::{BookDetailClosed, BrowseKind, BrowseSplitPlane, LibraryContext, LibraryUpdateBridge, OpenBook, TrashPage};
 
 struct CachedPage {
     view: AnyView,
@@ -35,13 +34,12 @@ fn create_page<V: Focusable + Render>(build: impl FnOnce(&mut Context<V>) -> V, 
 impl LibrarySession {
     pub(super) fn new(app_backend: Rc<AppClient>, open_book: OpenBook, book_detail_closed: BookDetailClosed, library_id: LibraryId, cx: &mut Context<Self>) -> Self {
         let library_backend = Rc::new(app_backend.library(library_id));
-        let updates = LibraryUpdateBridge::create(app_backend, library_id, cx);
-        let library = LibraryContext::new(library_backend, open_book, book_detail_closed, updates);
+        let updates = LibraryUpdateBridge::create(app_backend.clone(), library_id, cx);
+        let library = LibraryContext::new(app_backend, library_backend, open_book, book_detail_closed, updates);
         let library_updates = library.updates();
         let library_updates_subscription = cx.observe(&library_updates, |_, _, cx| cx.notify());
         let mut session = Self { library, route: LibraryRoute::Home, pages: HashMap::new(), browse_planes: HashMap::new(), _library_updates_subscription: library_updates_subscription };
-        let page = session.create_route_page(LibraryRoute::Home, cx);
-        session.pages.insert(LibraryRoute::Home, page);
+        session.browse_plane(LibraryRoute::Home, cx);
         session
     }
 
@@ -52,9 +50,7 @@ impl LibrarySession {
     fn create_route_page(&self, route: LibraryRoute, cx: &mut Context<Self>) -> CachedPage {
         let library = self.library.clone();
         match route {
-            LibraryRoute::Home => create_page(|cx| HomePage::new(library, cx), cx),
-            LibraryRoute::Authors => create_page(|cx| AuthorsPage::new(library, cx), cx),
-            LibraryRoute::Folders | LibraryRoute::Subjects => unreachable!("browse routes use split planes"),
+            LibraryRoute::Home | LibraryRoute::Books | LibraryRoute::Folders | LibraryRoute::Subjects | LibraryRoute::Authors | LibraryRoute::Catalog => unreachable!("browse routes use split planes"),
             LibraryRoute::Trash => create_page(|cx| TrashPage::new(library, cx), cx),
         }
     }
@@ -64,7 +60,7 @@ impl LibrarySession {
     }
 
     fn is_browse_route(route: LibraryRoute) -> bool {
-        matches!(route, LibraryRoute::Folders | LibraryRoute::Subjects)
+        matches!(route, LibraryRoute::Home | LibraryRoute::Books | LibraryRoute::Folders | LibraryRoute::Subjects | LibraryRoute::Authors | LibraryRoute::Catalog)
     }
 
     fn browse_plane(&mut self, route: LibraryRoute, cx: &mut Context<Self>) -> Entity<BrowseSplitPlane> {
@@ -72,8 +68,12 @@ impl LibrarySession {
             return plane.clone();
         }
         let kind = match route {
+            LibraryRoute::Home => BrowseKind::Home,
+            LibraryRoute::Books => BrowseKind::Books,
             LibraryRoute::Folders => BrowseKind::Folder,
             LibraryRoute::Subjects => BrowseKind::Subject,
+            LibraryRoute::Authors => BrowseKind::Author,
+            LibraryRoute::Catalog => BrowseKind::Catalog,
             _ => unreachable!("only browse routes have browse planes"),
         };
         let library = self.library.clone();
@@ -93,7 +93,12 @@ impl LibrarySession {
 
     pub(super) fn open_subject(&mut self, location: library_model::BrowseLocation, label: String, window: &mut Window, cx: &mut Context<Self>) {
         self.navigate(LibraryRoute::Subjects, window, cx);
-        self.browse_plane(LibraryRoute::Subjects, cx).update(cx, |plane, cx| plane.open_subject(location, label, cx));
+        self.browse_plane(LibraryRoute::Subjects, cx).update(cx, |plane, cx| plane.open_location(location, label, cx));
+    }
+
+    fn open_author(&mut self, author: book_model::AuthorId, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate(LibraryRoute::Authors, window, cx);
+        self.browse_plane(LibraryRoute::Authors, cx).update(cx, |plane, cx| plane.open_location(library_model::BrowseLocation::Author(Some(author)), name, cx));
     }
 
     pub(super) fn open_book_detail(&mut self, content_hash: sync_common::ContentHash, window: &mut Window, cx: &mut Context<Self>) {
@@ -102,7 +107,7 @@ impl LibrarySession {
         let plane = self.browse_plane(LibraryRoute::Folders, cx);
         cx.spawn(async move |session, cx| {
             let result = backend.book_detail(content_hash).await;
-            cx.defer_update(session, move |session, cx| {
+            cx.defer_update(session, move |_session, cx| {
                 if let Ok(detail) = result {
                     let path = detail.path.into_iter().map(|segment| BrowseCrumb { location: segment.id, label: segment.name }).collect();
                     plane.update(cx, |plane, cx| plane.open_book_detail(detail.book, path, cx));
@@ -110,12 +115,6 @@ impl LibrarySession {
             });
         })
         .detach();
-    }
-
-    pub(super) fn clear_cached_book_detail(&mut self, cx: &mut Context<Self>) {
-        for plane in self.browse_planes.values() {
-            plane.update(cx, |plane, cx| plane.clear_cached_book_detail(cx));
-        }
     }
 
     pub(super) fn focus_handle(&self, cx: &App) -> FocusHandle {
@@ -141,16 +140,11 @@ impl LibrarySession {
 
 impl Render for LibrarySession {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let library_id = *self.library.backend().id();
-        if mark(library_id, "selected_view_render") {
-            window.on_next_frame(move |_, _| {
-                mark(library_id, "selected_frame_completed");
-            });
-        }
         let updates = self.library.updates();
         let updates = updates.read(cx);
-        let uses_contents = matches!(self.route, LibraryRoute::Home | LibraryRoute::Authors | LibraryRoute::Folders | LibraryRoute::Subjects);
-        let content = if !(uses_contents && self.route != LibraryRoute::Folders && !updates.loading() && updates.book_count() == Some(0) && !updates.scanning()) {
+        let uses_contents = matches!(self.route, LibraryRoute::Home | LibraryRoute::Books | LibraryRoute::Authors | LibraryRoute::Folders | LibraryRoute::Subjects | LibraryRoute::Catalog);
+        // Keep drop destinations mounted even for the first book in a library.
+        let content = if !(uses_contents && !matches!(self.route, LibraryRoute::Folders | LibraryRoute::Books) && !updates.loading() && updates.book_count() == Some(0) && !updates.scanning()) {
             let view = if Self::is_browse_route(self.route) { self.browse_planes.get(&self.route).expect("browse plane must exist before render").clone().into_any_element() } else { self.page().view.clone().into_any_element() };
             ui_components::library_section_content().child(view).into_any_element()
         } else {
@@ -161,6 +155,8 @@ impl Render for LibrarySession {
             }));
             let heading = ui_components::uses_mobile_navigation(window)
                 .then(|| match self.route {
+                    LibraryRoute::Home => Some("Home"),
+                    LibraryRoute::Books => Some("All books"),
                     LibraryRoute::Authors => Some("Authors"),
                     LibraryRoute::Folders => Some("Folders"),
                     LibraryRoute::Subjects => Some("Subjects"),
@@ -168,7 +164,9 @@ impl Render for LibrarySession {
                 })
                 .flatten()
                 .map(|title| {
-                    let back = (!ui_components::has_native_back_button()).then(|| ui_components::mobile_back_button(theme).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::DismissSettings), cx)));
+                    // Home is the root of the mobile tab bar: there is nothing to go back to.
+                    let back =
+                        (self.route != LibraryRoute::Home && !ui_components::has_native_back_button()).then(|| ui_components::mobile_back_button(theme).on_click(|_, window, cx| window.dispatch_action(Box::new(crate::DismissSettings), cx)));
                     ui_components::mobile_navigation_bar(title, back, theme)
                 });
             ui_components::library_section_content()
@@ -176,6 +174,9 @@ impl Render for LibrarySession {
                 .child(ui_components::remaining_space_column().child(ui_components::browser_actionable_empty("No books in this library", "Add a book to get started.", actions, theme).size_full()))
                 .into_any_element()
         };
-        ui_components::library_section_content().on_action(cx.listener(|session, _: &crate::OpenTrash, window, cx| session.navigate(LibraryRoute::Trash, window, cx))).child(content)
+        ui_components::library_section_content()
+            .on_action(cx.listener(|session, _: &crate::OpenTrash, window, cx| session.navigate(LibraryRoute::Trash, window, cx)))
+            .on_action(cx.listener(|session, open: &crate::OpenAuthor, window, cx| session.open_author(open.author, open.name.clone(), window, cx)))
+            .child(content)
     }
 }

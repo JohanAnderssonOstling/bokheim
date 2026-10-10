@@ -19,10 +19,9 @@ fn annotated_streaming_fixture(rotation: u16) -> Vec<u8> {
 
 #[test]
 fn ingestion_keeps_simple_annotations_in_rotated_cropped_display_coordinates() -> PdfResult<()> {
-    let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     for rotation in [0, 90] {
         let (_, metadata, _) = inspect_reader_metadata(Cursor::new(annotated_streaming_fixture(rotation)))?;
-        assert!(metadata.valid_for(&metadata.checksum));
+        assert!(metadata.valid_for(&metadata.content_hash));
         assert_eq!(metadata.annotations.len(), 2, "complex and app-owned annotations must be omitted");
         assert_eq!(metadata.annotations[0].note, "Imported highlight");
         assert_eq!(metadata.annotations[1].kind, PdfStoredAnnotationKind::Note);
@@ -36,7 +35,6 @@ fn ingestion_keeps_simple_annotations_in_rotated_cropped_display_coordinates() -
 
 #[test]
 fn document_prepares_startup_then_only_requested_pages() -> PdfResult<()> {
-    let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     #[derive(Default)]
     struct Hook(std::sync::Mutex<Vec<Option<usize>>>);
     impl PdfPageSource for Hook {
@@ -45,8 +43,8 @@ fn document_prepares_startup_then_only_requested_pages() -> PdfResult<()> {
     }
     let bytes = annotated_streaming_fixture(0);
     let (_, metadata, _) = inspect_reader_metadata(Cursor::new(bytes.clone()))?;
-    let checksum = metadata.checksum.clone(); let hook = Arc::new(Hook::default());
-    let document = PdfDocumentSession::from_reader_with_page_source("fixture", Cursor::new(bytes), &checksum, Some(metadata), Some(hook.clone()))?;
+    let content_hash = metadata.content_hash.clone(); let hook = Arc::new(Hook::default());
+    let document = PdfDocumentSession::from_reader_with_page_source("fixture", Cursor::new(bytes), &content_hash, Some(metadata), Some(hook.clone()))?;
     assert_eq!(*hook.0.lock().unwrap(), vec![None]);
     document.render_page(0, Some(100))?;
     assert!(hook.0.lock().unwrap().iter().skip(1).all(|page| *page == Some(0)));

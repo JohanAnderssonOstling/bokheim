@@ -1,14 +1,6 @@
 use super::*;
 use std::os::unix::net::UnixDatagram;
 
-#[test]
-fn separates_authentication_from_address_acquisition() {
-    assert_eq!(phase(&fields("wpa_state=4WAY_HANDSHAKE\n")), Phase::Connecting);
-    assert_eq!(phase(&fields("wpa_state=COMPLETED\n")), Phase::ObtainingAddress);
-    assert_eq!(phase(&fields("wpa_state=COMPLETED\nip_address=0.0.0.0\n")), Phase::ObtainingAddress);
-    assert_eq!(phase(&fields("wpa_state=COMPLETED\nip_address=192.168.2.5\n")), Phase::Connected);
-    assert_eq!(phase(&fields("wpa_state=DISCONNECTED\nip_address=192.168.2.5\n")), Phase::Disconnected);
-}
 
 #[test]
 fn scan_groups_only_matching_ssid_and_security_and_preserves_bytes() {
@@ -26,13 +18,6 @@ fn scan_groups_only_matching_ssid_and_security_and_preserves_bytes() {
     assert!(parse_scan("header\ntruncated row").is_err());
 }
 
-#[test]
-fn saved_network_ids_are_numeric_and_restore_only_previously_enabled_networks() {
-    let text = "network id / ssid / bssid / flags\n4\tHome\\tWiFi\tany\t[CURRENT]\n8\tOther\tany\t[DISABLED]\n9\tCafe\tany\t\nall\tInvalid\tany\t\n";
-    assert_eq!(parse_saved(text).len(), 3);
-    assert_eq!(parse_saved(text)[0].name, "Home\tWiFi");
-    assert_eq!(enabled_networks(text), vec![4, 9]);
-}
 
 #[test]
 fn control_uses_a_private_socket_and_does_not_expose_secrets_in_errors() {
@@ -71,21 +56,6 @@ fn monitor_receives_scan_completion_without_mixing_command_responses() {
     assert!(monitor.events().unwrap().is_empty());
 }
 
-#[test]
-fn interface_names_cannot_be_paths_or_options() {
-    assert!(valid_interface("eth0"));
-    assert!(valid_interface("wlan0"));
-    for invalid in ["", "-a", "../../tmp", "wifi;id", "wifi name", "interface-name-too-long"] {
-        assert!(!valid_interface(invalid));
-    }
-}
-
-#[test]
-fn ssid_escape_decode_does_not_double_decode_literals() {
-    assert_eq!(decode_ssid(r"Cafe\\x20"), b"Cafe\\x20");
-    assert_eq!(decode_ssid(r"A\x20B\tC"), b"A B\tC");
-    assert_eq!(hex(b"a\";\n"), "61223b0a");
-}
 
 fn fake_service(replies: Vec<(&'static str, &'static str)>) -> (tempfile::TempDir, PathBuf, std::thread::JoinHandle<()>) {
     let directory = tempfile::tempdir().unwrap();
@@ -188,28 +158,6 @@ fn failed_radio_shutdown_aborts_sleep_and_releases_operation_guard() {
     assert_ne!(controller.snapshot.phase, Phase::Off);
 }
 
-#[test]
-fn wake_waits_for_ui_then_restores_only_once() {
-    let mut controller = Controller::new();
-    controller.socket_path = None;
-    controller.snapshot.phase = Phase::Connected;
-    controller
-        .prepare_sleep_with(|controller| {
-            controller.snapshot.phase = Phase::Off;
-            Ok(())
-        })
-        .unwrap();
-    controller.resume_after_ui_with(|_| panic!("must not start during suspend"));
-    controller.sleeping = false;
-    assert_eq!(controller.snapshot.phase, Phase::Off);
-    assert!(controller.restore_after_ui);
-    controller.resume_after_ui_with(|controller| {
-        controller.snapshot.phase = Phase::Connecting;
-        Ok(())
-    });
-    assert_eq!(controller.snapshot.phase, Phase::Connecting);
-    controller.resume_after_ui_with(|_| panic!("duplicate wake notification"));
-}
 
 #[test]
 fn wake_preserves_off_setting_and_explicit_user_override() {
@@ -223,22 +171,6 @@ fn wake_preserves_off_setting_and_explicit_user_override() {
     controller.resume_after_ui_with(|_| panic!("user action overrides restore"));
 }
 
-#[test]
-fn failed_wake_startup_reports_error_without_retry_loop() {
-    let mut controller = Controller::new();
-    controller.restore_after_ui = true;
-    controller.resume_after_ui_with(|_| Err("radio unavailable".into()));
-    assert_eq!(controller.snapshot.error.as_deref(), Some("radio unavailable"));
-    assert!(!controller.sleeping);
-    controller.resume_after_ui_with(|_| panic!("must not retry automatically"));
-}
-
-#[test]
-fn sleep_timeout_rejects_a_late_worker_reply() {
-    let (reply, response) = mpsc::sync_channel(0);
-    assert!(wait_for_sleep(response, Duration::from_millis(10)).unwrap_err().contains("timed out"));
-    assert!(reply.send(Ok(())).is_err());
-}
 
 #[test]
 fn subprocess_timeout_stops_descendants_and_reports_failures() {

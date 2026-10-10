@@ -1,17 +1,12 @@
-use crate::{
-    runtime::{AppCommand, LibraryReply, Transport},
-    LibraryId,
-};
+use crate::runtime::{AppCommand, LibraryReply, Transport};
 use library_backend::LibraryClient;
+use sync_common::LibraryId;
 
 /// The frontend entry point for running backend operations.
 /// Backend implementation objects are deliberately not part of this API.
 ///
 /// ```compile_fail
 /// use app::app::{AppBackend, BackendContext};
-/// ```
-/// ```compile_fail
-/// use app::library::LibrarySession;
 /// ```
 #[derive(Clone)]
 pub struct AppClient {

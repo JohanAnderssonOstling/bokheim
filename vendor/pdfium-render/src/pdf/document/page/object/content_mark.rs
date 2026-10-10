@@ -17,23 +17,8 @@ use crate::pdf::document::{page::object::PdfPageObject, PdfDocument};
 /// More information on content markers and PDF's concept of "marked content" in general
 /// in The PDF Reference, Sixth Edition, in Section 10.5, beginning on page 850.
 pub struct PdfPageObjectMark<'a> {
-    handle: FPDF_PAGEOBJECTMARK,
+    _handle: FPDF_PAGEOBJECTMARK,
     lifetime: PhantomData<&'a FPDF_PAGEOBJECTMARK>,
-}
-
-impl<'a> PdfPageObjectMark<'a> {
-    pub(crate) fn from_pdfium(handle: FPDF_PAGEOBJECTMARK) -> Self {
-        PdfPageObjectMark {
-            handle,
-            lifetime: PhantomData,
-        }
-    }
-
-    /// Returns the internal `FPDF_PAGEOBJECTMARK` handle for this [PdfContentMark].
-    #[inline]
-    pub(crate) fn handle(&self) -> FPDF_PAGEOBJECTMARK {
-        self.handle
-    }
 }
 
 impl<'a> PdfiumLibraryBindingsAccessor<'a> for PdfPageObjectMark<'a> {}

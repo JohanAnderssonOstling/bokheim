@@ -11,7 +11,7 @@ flock -n 9 || { echo "another Bokheim metadata deployment is running" >&2; exit 
 
 source_root=/var/lib/bokheim-deploy/metadata-incoming
 service_templates=/usr/local/share/bokheim-deploy
-for required in pdfium/libpdfium.so pdfium/LICENSE metadata-server; do
+for required in metadata-server; do
     if [[ ! -f ${source_root}/${required} || -L ${source_root}/${required} ]]; then
         echo "missing or unsafe staged artifact: ${required}" >&2
         exit 1
@@ -21,8 +21,8 @@ if [[ ! -x ${source_root}/metadata-server ]]; then
     echo "staged server binary must be executable" >&2
     exit 1
 fi
-if [[ ! -r /home/johan/data/openlibrary/current.sqlite ]]; then
-    echo "missing verified metadata snapshot" >&2
+if [[ ! -r /home/johan/data/openlibrary/answers-current.sqlite ]]; then
+    echo "missing answers file: build one and point answers-current.sqlite at it" >&2
     exit 1
 fi
 for required in bokheim-metadata.service bokheim-metadata-crawl.service; do
@@ -44,14 +44,12 @@ for installed in /usr/local/bin/metadata-server /etc/systemd/system/bokheim-meta
         cp -a -- "${installed}" "${rollback_root}/"
     fi
 done
-if [[ -d /usr/local/bin/pdfium ]]; then cp -a /usr/local/bin/pdfium "${rollback_root}/pdfium"; fi
 cleanup() {
     status=$?
     trap - EXIT
     if [[ ${activation_started} == true && ${deployment_succeeded} != true ]]; then
         echo "activation failed; restoring the previous metadata release" >&2
         systemctl stop bokheim-metadata.service bokheim-metadata-crawl.service 2>/dev/null || true
-        if [[ -d ${rollback_root}/pdfium ]]; then install -o root -g root -m 0644 "${rollback_root}/pdfium/libpdfium.so" "${rollback_root}/pdfium/LICENSE" /usr/local/bin/pdfium/; fi
         if [[ ${metadata_binary_existed} == true ]]; then
             install -o root -g root -m 0755 "${rollback_root}/metadata-server" /usr/local/bin/metadata-server
         else
@@ -86,9 +84,6 @@ systemctl stop bokheim-metadata.service bokheim-metadata-crawl.service 2>/dev/nu
 # which can make a long-running metadata importer look exactly like the server
 # and would interrupt an unrelated resumable snapshot build.
 install -o root -g root -m 0755 "${source_root}/metadata-server" /usr/local/bin/metadata-server
-install -d -o root -g root -m 0755 /usr/local/bin/pdfium
-install -o root -g root -m 0644 "${source_root}/pdfium/libpdfium.so" /usr/local/bin/pdfium/libpdfium.so
-install -o root -g root -m 0644 "${source_root}/pdfium/LICENSE" /usr/local/bin/pdfium/LICENSE
 install -o root -g root -m 0644 "${service_templates}/bokheim-metadata.service" /etc/systemd/system/bokheim-metadata.service
 install -o root -g root -m 0644 "${service_templates}/bokheim-metadata-crawl.service" /etc/systemd/system/bokheim-metadata-crawl.service
 systemctl daemon-reload
@@ -109,7 +104,7 @@ fi
 
 curl --noproxy '*' --fail --silent --show-error --max-time 15 \
     -H 'Content-Type: application/json' \
-    --data '{"books":[{"key":"0","record":{"title":"Smoke check","subtitle":null,"contributors":[],"description":"","book":{"identifiers":[{"value":"9780821338278","scheme":"isbn","scope":"book"}],"publishers":[],"languages":[],"dates":[],"subjects":[]}},"audiobook":false}]}' \
+    --data '{"books":[{"key":"0","record":{"title":"Smoke check","subtitle":null,"contributors":[],"description":"","book":{"identifiers":[{"value":"9780821338278","scheme":"isbn","scope":"book"}],"publishers":[],"languages":[],"year":null,"subjects":[]}},"audiobook":false}]}' \
     http://127.0.0.1:8091/v3/books >/dev/null
 
 # Check the public route as well as the internal health endpoint. No provider call.

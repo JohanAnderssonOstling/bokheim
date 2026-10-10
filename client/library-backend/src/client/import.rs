@@ -1,38 +1,39 @@
 use super::LibraryClient;
-use crate::library::{ImportBookSource, LibraryCommand, PendingCommand, RuntimeCommand, SessionCommand};
+use crate::library::{LibraryCommand, PendingCommand};
 use crate::{DirId, DirectoryImport, ImportFailure};
 
 impl LibraryClient {
-    /// Explicit imports only; automatic filesystem scanning is excluded.
-    pub async fn directory_import_progress(&self) -> Result<Option<library_model::DirectoryImportProgress>, String> {
-        self.request(LibraryCommand::Runtime(RuntimeCommand::DirectoryImportProgress)).await
-    }
-
+    /// Copy or move complete paths into the library, then import them in place.
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn directory_import_progress_for(&self, activity: uuid::Uuid) -> Result<Option<library_model::DirectoryImportProgress>, String> {
-        self.request(LibraryCommand::Runtime(RuntimeCommand::ImportProgress { activity })).await
+    pub async fn import_paths(&self, parent_id: DirId, paths: Vec<std::path::PathBuf>, moving: bool) -> Result<Vec<ImportFailure>, String> {
+        self.request(LibraryCommand::Pending(PendingCommand::ImportPaths { parent_id, paths, moving })).await
     }
 
-    /// Browser imports transfer ownership to the shared import coordinator.
-    pub async fn import_directory_contents(&self, parent_id: DirId, directory: DirectoryImport) -> Result<Vec<ImportFailure>, String> {
-        self.import_selected_directory(parent_id, directory, false, None).await
+    /// Imports a file the caller staged on local disk; the caller deletes it afterwards.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn import_stored_book(&self, parent_id: DirId, file_name: String, location: std::path::PathBuf) -> Result<crate::ContentHash, String> {
+        self.request(LibraryCommand::Pending(PendingCommand::ImportBook { parent_id, file_name, location })).await
     }
 
-    pub async fn import_book_bytes(&self, parent_id: DirId, file_name: String, bytes: Vec<u8>) -> Result<crate::ContentHash, String> {
-        self.request(LibraryCommand::Session(SessionCommand::Pending(PendingCommand::ImportBook { parent_id, file_name, source: ImportBookSource::Bytes(bytes) }))).await
-    }
-    pub async fn import_directory(&self, parent_id: DirId, directory: DirectoryImport) -> Result<Vec<ImportFailure>, String> {
-        self.import_selected_directory(parent_id, directory, true, None).await
+    /// Downloads a public-domain catalog book and imports it under `parent_id`.
+    pub async fn add_catalog_book(&self, parent_id: DirId, content_hash: crate::ContentHash) -> Result<crate::ContentHash, String> {
+        self.request(LibraryCommand::Pending(PendingCommand::AddCatalogBook { parent_id, content_hash })).await
     }
 
-    pub async fn import_selected_directory(&self, parent_id: DirId, directory: DirectoryImport, create_root: bool, activity: Option<uuid::Uuid>) -> Result<Vec<ImportFailure>, String> {
+    /// Imports a file downloaded elsewhere, such as from an OPDS feed.
+    pub async fn import_downloaded_book(&self, parent_id: DirId, file_name: String, bytes: Vec<u8>) -> Result<crate::ContentHash, String> {
+        self.request(LibraryCommand::Pending(PendingCommand::ImportDownloadedBook { parent_id, file_name, bytes: serde_bytes::ByteBuf::from(bytes) })).await
+    }
+
+    /// Imports `directory` under `parent_id`, as a folder of its own when
+    /// `create_root` is set and otherwise as loose books.
+    pub async fn import_directory(&self, parent_id: DirId, directory: DirectoryImport, create_root: bool) -> Result<Vec<ImportFailure>, String> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.transport.handle().map_err(|error| error.to_string())?.import_selected_directory(parent_id, directory, create_root, activity).await.map_err(|error| error.to_string())
+            self.transport.handle().map_err(|error| error.to_string())?.import_selected_directory(parent_id, directory, create_root).await.map_err(|error| error.to_string())
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = activity;
             self.transport.import_directory(parent_id, directory, create_root).await
         }
     }

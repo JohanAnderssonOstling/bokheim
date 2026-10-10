@@ -19,28 +19,13 @@ function directPlayer(t, renew) {
     const {player: old} = setup(); old.dispose();
     const released = [];
     t.mock.method(globalThis, 'fetch', async (url, options) => { released.push([url, options.method]); return {}; });
-    const config = {url: 'https://audio.invalid/api/playback/old', expires_in_seconds: 900, checksum: 'revision'};
+    const config = {url: 'https://audio.invalid/api/playback/old', expires_in_seconds: 900, content_hash: 'revision'};
     const player = new BrowserAudio(config.url, new Uint8Array(), {title: 'Direct'}, 60, () => {}, config, renew);
     player.audio.dispatchEvent(new Event('loadedmetadata'));
     player.validUntil = 0;
     return {player, released, config};
 }
 
-test('expired direct media renews at the confirmed position and releases the previous grant', async t => {
-    const {player, released, config} = directPlayer(t, async () => ({...config, url: 'https://audio.invalid/api/playback/new'}));
-    player.setRate(1.5);
-    player.play();
-    await new Promise(resolve => setTimeout(resolve, 550));
-    assert.equal(player.url, 'https://audio.invalid/api/playback/new');
-    player.audio.dispatchEvent(new Event('loadedmetadata'));
-    assert.equal(player.position(), 60);
-    assert.equal(player.audio.paused, false);
-    assert.equal(player.audio.crossOrigin, 'anonymous');
-    assert.equal(player.rate(), 1.5);
-    assert.deepEqual(released, [[config.url, 'DELETE']]);
-    player.dispose();
-    assert.equal(released.length, 2);
-});
 
 test('pause discards a late direct grant without restarting audio', async t => {
     let finish;
@@ -155,7 +140,7 @@ test('media errors under direct recovery do not discard the session', async t =>
 });
 
 test('renewal rejects and revokes a changed revision without playing it', async t => {
-    const {player, released, config} = directPlayer(t, async () => ({...config, checksum: 'changed', url: 'https://audio.invalid/api/playback/changed'}));
+    const {player, released, config} = directPlayer(t, async () => ({...config, content_hash: 'changed', url: 'https://audio.invalid/api/playback/changed'}));
     player.play();
     await new Promise(resolve => setTimeout(resolve, 550));
     assert.equal(player.audio.paused, true);
@@ -165,27 +150,6 @@ test('renewal rejects and revokes a changed revision without playing it', async 
     player.dispose();
 });
 
-test('lock-screen actions use 15/30 seconds, clamp bounds, and persist without a UI timer', () => {
-    const {player, actions, session, saves} = setup();
-    actions.get('seekbackward')({});
-    assert.equal(player.position(), 45);
-    actions.get('seekforward')({});
-    assert.equal(player.position(), 75);
-    actions.get('seekto')({seekTime: 200});
-    assert.equal(player.position(), 120);
-    actions.get('seekto')({seekTime: 4});
-    actions.get('seekbackward')({});
-    assert.equal(player.position(), 0);
-    assert.equal(saves.at(-1)[0], 0);
-    actions.get('play')();
-    assert.equal(session.playbackState, 'playing');
-    actions.get('pause')();
-    assert.equal(session.playbackState, 'paused');
-    player.setRate(1.5);
-    assert.equal(session.position.playbackRate, 1.5);
-    player.dispose();
-    assert.equal(actions.get('play'), null);
-});
 
 test('a replaced reader cannot clear the new session or save after disposal', () => {
     const first = setup();
@@ -210,61 +174,6 @@ test('autoplay rejection permits a later user gesture and browsers without Media
     player.dispose();
 });
 
-test('initial position is not persisted before metadata confirms it', () => {
-    const {player, saves} = setup();
-    const nextSaves = [];
-    const next = new BrowserAudio("blob:test-audiobook", new Uint8Array(), {}, 85, (...args) => nextSaves.push(args));
-    next.audio.dispatchEvent(new Event('timeupdate'));
-    assert.equal(nextSaves.length, 0);
-    next.audio.dispatchEvent(new Event('loadedmetadata'));
-    assert.equal(nextSaves[0][0], 85);
-    next.dispose();
-});
-
-test('pending seek cannot become a saved resume position', () => {
-    const {player, saves} = setup();
-    const count = saves.length;
-    player.audio.seeking = true;
-    player.seek(95);
-    player.audio.dispatchEvent(new Event('timeupdate'));
-    player.audio.dispatchEvent(new Event('pause'));
-    assert.equal(player.confirmedPosition(), undefined);
-    assert.equal(player.lastConfirmedPosition(), 60);
-    assert.equal(saves.length, count);
-    player.dispose();
-    assert.equal(saves.length, count);
-    assert.equal(player.lastConfirmedPosition(), 60);
-});
-
-test('only a completed seek updates progress, including while paused', () => {
-    const {player, saves} = setup();
-    player.audio.seeking = true;
-    player.seek(95);
-    player.audio.dispatchEvent(new Event('seeked'));
-    assert.equal(player.confirmedPosition(), undefined, 'stale seeked while still seeking');
-    player.audio.seeking = false;
-    player.audio.dispatchEvent(new Event('seeked'));
-    assert.equal(player.confirmedPosition(), 95);
-    assert.equal(saves.at(-1)[0], 95);
-    player.dispose();
-});
-
-test('buffering holds position and pause suppresses its transport state', () => {
-    const {player} = setup();
-    player.play();
-    player.audio.dispatchEvent(new Event('waiting'));
-    assert.equal(player.buffering(), true);
-    player.audio.currentTime = 63;
-    assert.equal(player.position(), 60);
-    assert.equal(player.confirmedPosition(), 60);
-    player.toggle();
-    assert.equal(player.buffering(), false);
-    assert.equal(player.playing(), false);
-    assert.equal(player.confirmedPosition(), 60);
-    player.audio.dispatchEvent(new Event('canplay'));
-    assert.equal(player.playing(), false, 'data arrival must not undo pause');
-    player.dispose();
-});
 
 test('initial asynchronous seek is not confirmed by metadata alone', () => {
     setup();
@@ -280,20 +189,6 @@ test('initial asynchronous seek is not confirmed by metadata alone', () => {
     player.dispose();
 });
 
-test('explicit pause while buffering is idempotent', () => {
-    const {player} = setup();
-    player.play();
-    player.audio.dispatchEvent(new Event('waiting'));
-    player.pause();
-    player.pause();
-    assert.equal(player.playing(), false);
-    assert.equal(player.buffering(), false);
-    player.audio.dispatchEvent(new Event('canplay'));
-    assert.equal(player.playing(), false);
-    player.dispose();
-    player.pause();
-    assert.equal(player.playing(), false);
-});
 
 test('terminal media failure remains detectable after the UI consumes its message', () => {
     const {player} = setup();

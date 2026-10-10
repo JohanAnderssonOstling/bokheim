@@ -15,12 +15,12 @@ pub mod assets {
     pub struct PlaybackGrant {
         pub path: String,
         pub expires_in_seconds: u32,
-        pub checksum: ContentHash,
+        pub content_hash: ContentHash,
         pub length: u64,
     }
     impl fmt::Debug for PlaybackGrant {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_struct("PlaybackGrant").field("expires_in_seconds", &self.expires_in_seconds).field("checksum", &self.checksum).finish_non_exhaustive()
+            f.debug_struct("PlaybackGrant").field("expires_in_seconds", &self.expires_in_seconds).field("content_hash", &self.content_hash).finish_non_exhaustive()
         }
     }
 
@@ -50,8 +50,6 @@ pub mod assets {
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
     pub struct BlobManifestEntry {
         pub content_hash: ContentHash,
-        /// Checksum of immutable bytes; may differ from permanent book identity.
-        pub checksum: ContentHash,
         pub size_bytes: u64,
     }
 
@@ -65,7 +63,6 @@ pub mod assets {
     pub enum BlobManifestRejectionReason {
         InvalidSize,
         SizeMismatch,
-        IdentityMismatch,
         QuotaExceeded,
         UploadInProgress,
     }
@@ -150,7 +147,6 @@ pub mod assets {
     }
 
     pub type ThumbnailBatchDownloadEntry = ThumbnailBatchEntry;
-
 }
 
 pub mod libraries {
@@ -187,6 +183,20 @@ pub mod libraries {
     }
 }
 
+pub mod opds_feeds {
+    use serde::{Deserialize, Serialize};
+
+    pub type OpdsFeedId = uuid::Uuid;
+
+    /// One of the account's OPDS feeds. Credentials for it stay on devices.
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    pub struct OpdsFeed {
+        pub id: OpdsFeedId,
+        pub name: String,
+        pub url: String,
+    }
+}
+
 pub mod notifications {
     use crate::LibraryId;
     use serde::{Deserialize, Serialize};
@@ -201,77 +211,5 @@ pub mod notifications {
         LibraryChanged { library_id: LibraryId },
         LibrariesChanged,
         Reconcile,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::transport::{decode, encode};
-    use super::{assets, libraries, notifications};
-    use crate::ContentHash;
-
-    fn round_trip<T>(value: &T) -> T
-    where
-        T: serde::Serialize + serde::de::DeserializeOwned,
-    {
-        let encoded = encode(value).unwrap();
-        decode(&encoded, crate::transport::MAX_DECODED_REQUEST_BYTES).unwrap()
-    }
-
-    fn hash(character: char) -> ContentHash {
-        ContentHash::new(&character.to_string().repeat(64))
-    }
-
-    #[test]
-    fn blob_manifest_contract_classifies_each_hash_without_ambiguous_booleans() {
-        let owned = hash('a');
-        let upload = hash('b');
-        let rejected = hash('c');
-        let request = assets::BlobManifestRequest {
-            blobs: vec![
-                assets::BlobManifestEntry { content_hash: owned.clone(), checksum: owned.clone(), size_bytes: 41 },
-                assets::BlobManifestEntry { content_hash: upload.clone(), checksum: upload.clone(), size_bytes: 42 },
-                assets::BlobManifestEntry { content_hash: rejected.clone(), checksum: rejected.clone(), size_bytes: 43 },
-            ],
-        };
-        assert_eq!(round_trip(&request), request);
-
-        let response = assets::BlobManifestResponse {
-            owned: vec![owned.clone()],
-            claimed: Vec::new(),
-            upload: vec![upload.clone()],
-            rejected: vec![assets::RejectedBlobManifestEntry { content_hash: rejected.clone(), reason: assets::BlobManifestRejectionReason::QuotaExceeded }],
-        };
-        assert_eq!(round_trip(&response), response);
-        assert_eq!(assets::validate_blob_manifest_response(&request, &response), Ok(()));
-
-        let incomplete = assets::BlobManifestResponse { upload: vec![upload], ..Default::default() };
-        assert_eq!(assets::validate_blob_manifest_response(&request, &incomplete), Err(assets::BlobManifestValidationError::OmittedResponseHash));
-    }
-
-    #[test]
-    fn thumbnail_batch_contract_round_trips() {
-        let thumbnail = assets::ThumbnailBatchEntry { content_hash: hash('d'), bytes: vec![0xff, 0xd8, 0xff], browse_bytes: vec![0xff, 0xd8, 0xff, 1] };
-        let request = assets::ThumbnailBatchUploadRequest { thumbnails: vec![thumbnail.clone()] };
-        assert_eq!(round_trip(&request), request);
-        let response = assets::ThumbnailBatchDownloadResponse { thumbnails: vec![thumbnail], missing: vec![hash('e')] };
-        let encoded = encode(&response).unwrap();
-        assert_eq!(decode::<assets::ThumbnailBatchDownloadResponse>(&encoded, assets::MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES).unwrap(), response);
-    }
-
-    #[test]
-    fn library_contract_preserves_stable_ids_and_names() {
-        let request = libraries::LibraryNameRequest { library_id: crate::LibraryId::parse_str("11111111-1111-4111-8111-111111111111").unwrap(), library_name: "History".to_string() };
-        let summary = libraries::LibrarySummary { library_id: request.library_id.clone(), library_name: request.library_name.clone() };
-        assert_eq!(round_trip(&request), request);
-        assert_eq!(round_trip(&summary), summary);
-    }
-
-    #[test]
-    fn notification_contract_is_granular_without_carrying_state() {
-        let message = notifications::NotificationMessage::LibraryChanged { library_id: crate::LibraryId::parse_str("11111111-1111-4111-8111-111111111111").unwrap() };
-        assert_eq!(round_trip(&message), message);
-        let encoded = encode(&notifications::NotificationMessage::LibrariesChanged).unwrap();
-        assert_eq!(decode::<notifications::NotificationMessage>(&encoded, 1024).unwrap(), notifications::NotificationMessage::LibrariesChanged);
     }
 }

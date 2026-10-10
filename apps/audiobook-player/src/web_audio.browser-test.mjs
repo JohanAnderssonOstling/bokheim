@@ -42,7 +42,7 @@ try {
     await page.evaluate(async direct => {
         const {BrowserAudio} = await import('/module.js');
         const data = direct ? '/api/playback/first' : URL.createObjectURL(await (await fetch('/book.m4b')).blob());
-        const grant = direct ? {url: data, expires_in_seconds: 900, checksum: 'fixture'} : null;
+        const grant = direct ? {url: data, expires_in_seconds: 900, content_hash: 'fixture'} : null;
         window.actions = {};
         window.saves = [];
         const original = navigator.mediaSession.setActionHandler.bind(navigator.mediaSession);
@@ -84,7 +84,7 @@ try {
         // Leave a fresh live grant to test the real browser pagehide event.
         await page.evaluate(async () => {
             const {BrowserAudio} = await import('/module.js');
-            const grant = {url: '/api/playback/reload', expires_in_seconds: 900, checksum: 'fixture'};
+            const grant = {url: '/api/playback/reload', expires_in_seconds: 900, content_hash: 'fixture'};
             window.player = new BrowserAudio(grant.url, new Uint8Array(), {}, 0, () => {}, grant, async () => grant);
         });
         const beforeReload = revocations;

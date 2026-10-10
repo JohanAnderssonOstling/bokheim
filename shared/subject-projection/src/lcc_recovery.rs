@@ -47,6 +47,15 @@ pub(super) fn report(original: &str, strict: impl Fn(&str) -> Vec<i64>, known_su
         letters > 0 && letters <= 4 && known_subclass(&value[..letters]) && value[letters..].trim_start().as_bytes().first().is_some_and(u8::is_ascii_digit)
     };
     let mut assignments: BTreeMap<i64, Vec<LccMatchEvidence>> = BTreeMap::new();
+    let mut record_recovered = |ids: Vec<i64>, code: &str| {
+        for id in ids {
+            let evidence = LccMatchEvidence { method: LccMatchMethod::RecoveredComponent, code: code.to_owned() };
+            let entries = assignments.entry(id).or_default();
+            if !entries.contains(&evidence) {
+                entries.push(evidence);
+            }
+        }
+    };
     for (part_index, raw) in original.split([';', '|', '\n']).enumerate() {
         let segment = raw.trim();
         if segment.is_empty() {
@@ -61,13 +70,7 @@ pub(super) fn report(original: &str, strict: impl Fn(&str) -> Vec<i64>, known_su
         if !segment.is_ascii() || !is_start(&upper) {
             let ids = strict(segment);
             if !ids.is_empty() {
-                for id in ids {
-                    let evidence = LccMatchEvidence { method: LccMatchMethod::RecoveredComponent, code: segment.to_owned() };
-                    let entries = assignments.entry(id).or_default();
-                    if !entries.contains(&evidence) {
-                        entries.push(evidence);
-                    }
-                }
+                record_recovered(ids, segment);
                 continue;
             }
         }
@@ -122,13 +125,7 @@ pub(super) fn report(original: &str, strict: impl Fn(&str) -> Vec<i64>, known_su
                 }
             }
             if let Some((next, candidate, ids)) = recovered {
-                for id in ids {
-                    let evidence = LccMatchEvidence { method: LccMatchMethod::RecoveredComponent, code: candidate.to_owned() };
-                    let entries = assignments.entry(id).or_default();
-                    if !entries.contains(&evidence) {
-                        entries.push(evidence);
-                    }
-                }
+                record_recovered(ids, candidate);
                 cursor = next;
                 continue;
             }
@@ -148,13 +145,7 @@ pub(super) fn report(original: &str, strict: impl Fn(&str) -> Vec<i64>, known_su
                 }
             }
             if let Some((at, candidate, ids)) = leading {
-                for id in ids {
-                    let evidence = LccMatchEvidence { method: LccMatchMethod::RecoveredComponent, code: candidate.to_owned() };
-                    let entries = assignments.entry(id).or_default();
-                    if !entries.contains(&evidence) {
-                        entries.push(evidence);
-                    }
-                }
+                record_recovered(ids, candidate);
                 result.unresolved_fragments.push(fragment[at..].trim().to_owned());
             } else {
                 result.unresolved_fragments.push(fragment.to_owned());

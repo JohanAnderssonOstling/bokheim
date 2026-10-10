@@ -1,6 +1,6 @@
 use super::core::*;
-use crate::library::LibraryRuntimeSpec;
 use library_backend::library::handle::{LibraryActorCommand, LibraryControl};
+use library_backend::library::{LibraryOpenConfig, LibraryRuntimeSpec};
 use std::sync::Arc;
 
 impl AppBackend {
@@ -23,35 +23,27 @@ impl AppBackend {
         Ok(())
     }
 
-    pub fn create_library(&self, name: String, locator: Option<String>) -> Result<LibraryEntry, BackendError> {
-        let entry = self.register_library_with_asset_storage(&name, locator, true)?;
-        self.finish_created_library(entry)
-    }
-
     pub(crate) fn create_library_with_asset_storage(&self, name: String, asset_storage_enabled: bool) -> Result<LibraryEntry, BackendError> {
         let entry = self.register_library_with_asset_storage(&name, None, asset_storage_enabled)?;
         self.finish_created_library(entry)
     }
 
     fn register_library_with_asset_storage(&self, name: &str, locator: Option<String>, asset_storage_enabled: bool) -> Result<LibraryEntry, BackendError> {
-        let _guard = self.state.library_directory.lock_lifecycle()?;
-        let previous = self.state.registry.entries().map_err(BackendError::operation)?;
-        let entry = self.state.registry.create_with_asset_storage(name, locator, asset_storage_enabled).map_err(BackendError::operation)?;
-        if previous.iter().any(|old| old.library_id() == entry.library_id() && old.storage_locator() != entry.storage_locator()) {
-            self.state.library_directory.retire(entry.library_id())?;
-        }
-        drop(_guard);
-        Ok(entry)
+        let name = name.to_owned();
+        self.with_storage(move |this| {
+            let previous = this.state.registry.entries().map_err(BackendError::operation)?;
+            let entry = this.state.registry.create_with_asset_storage(&name, locator, asset_storage_enabled).map_err(BackendError::operation)?;
+            if previous.iter().any(|old| old.library_id() == entry.library_id() && old.storage_locator() != entry.storage_locator()) {
+                this.state.library_directory.retire(entry.library_id())?;
+            }
+            Ok(entry)
+        })
     }
 
     /// Registers folders selected by a native frontend.
     ///
     /// Paths remain inside the backend after this call. Frontends identify the
     /// resulting libraries only by `LibraryId`.
-    pub(crate) fn create_libraries_from_paths(&self, paths: Vec<PathBuf>) -> Result<(Vec<LibraryId>, Vec<String>), BackendError> {
-        self.create_libraries_from_paths_with_asset_storage(paths, true)
-    }
-
     pub(crate) fn create_libraries_from_paths_with_asset_storage(&self, paths: Vec<PathBuf>, asset_storage_enabled: bool) -> Result<(Vec<LibraryId>, Vec<String>), BackendError> {
         let mut known_paths = self.libraries()?.into_iter().map(|entry| PathBuf::from(entry.storage_locator())).collect::<HashSet<_>>();
         let mut created_ids = Vec::new();
@@ -93,19 +85,18 @@ impl AppBackend {
     /// Chooses or creates a destination for an explicit import.
     /// Startup and deletion must allow an empty library list.
     ///
-    /// The check and creation share the library-list lock so concurrent imports
+    /// The check and creation share one storage command so concurrent imports
     /// cannot create two destinations from the same empty snapshot.
     pub fn ensure_import_library(&self) -> Result<LibraryEntry, BackendError> {
-        let entry = {
-            let _guard = self.state.library_directory.lock_lifecycle()?;
-            for entry in self.state.registry.entries().map_err(BackendError::operation)? {
-                if self.state.library_directory.try_get(entry.library_id())?.is_some() || self.open_registered_library(entry.library_id()).is_ok() {
+        self.with_storage(move |this| {
+            for entry in this.state.registry.entries().map_err(BackendError::operation)? {
+                if this.state.library_directory.try_get(entry.library_id())?.is_some() || this.open_registered_library(entry.library_id()).is_ok() {
                     return Ok(entry);
                 }
             }
-            self.state.registry.create("Library", None).map_err(BackendError::operation)?
-        };
-        self.finish_created_library(entry)
+            let entry = this.state.registry.create("Library", None).map_err(BackendError::operation)?;
+            this.finish_created_library(entry)
+        })
     }
 
     fn finish_created_library(&self, entry: LibraryEntry) -> Result<LibraryEntry, BackendError> {
@@ -115,11 +106,12 @@ impl AppBackend {
     }
 
     pub(crate) async fn remove_library_from_device(&self, library_id: &LibraryId) -> Result<(), BackendError> {
-        {
-            let _guard = self.state.library_directory.lock_lifecycle()?;
-            self.state.registry.begin_local_removal(library_id).map_err(BackendError::operation)?;
-            self.state.library_directory.retire(library_id)?;
-        }
+        let id = *library_id;
+        self.with_storage(move |this| {
+            this.state.registry.begin_local_removal(&id).map_err(BackendError::operation)?;
+            this.state.library_directory.retire(&id)?;
+            Ok(())
+        })?;
         self.send_library_list_changed();
         self.finish_local_purge(*library_id).await?;
         Ok(())
@@ -158,23 +150,21 @@ impl AppBackend {
     }
 
     pub(crate) fn rename_library(&self, library_id: &LibraryId, name: &str) -> Result<(), BackendError> {
-        {
-            let _guard = self.state.library_directory.lock_lifecycle()?;
+        let library_id = *library_id;
+        let name = name.to_owned();
+        self.with_storage(move |this| {
             // Require an existing library; renaming must never recreate a deleted one.
-            self.library_entry(library_id)?;
+            this.library_entry(&library_id)?;
             // Updates both registry metadata and the native manifest, preserving storage.
-            let entry = self.state.registry.attach_remote(library_id, name).map_err(BackendError::operation)?;
-            self.state.registry.write_value(&format!("pending-library-rename/{library_id}"), entry.library_name().as_bytes()).map_err(BackendError::operation)?;
-            if let Ok(handle) = self.state.library_directory.get(library_id) {
-                let _ = handle.commands.try_send(LibraryActorCommand::Control(LibraryControl::Rename {
-                    name: entry.library_name().to_owned(),
-                    refresh_remote: true,
-                }));
+            let entry = this.state.registry.attach_remote(&library_id, &name).map_err(BackendError::operation)?;
+            this.state.registry.write_value(&format!("pending-library-rename/{library_id}"), entry.library_name().as_bytes()).map_err(BackendError::operation)?;
+            if let Ok(handle) = this.state.library_directory.get(&library_id) {
+                let _ = handle.commands.try_send(LibraryActorCommand::Control(LibraryControl::Rename { name: entry.library_name().to_owned(), refresh_remote: true }));
             }
-        }
-        self.send_library_list_changed();
-        self.state.account_scheduler.wake();
-        Ok(())
+            this.send_library_list_changed();
+            this.state.account_wake.send_replace(());
+            Ok(())
+        })
     }
 
     pub(crate) async fn delete_library(&self, library_id: &LibraryId) -> Result<(), BackendError> {
@@ -187,22 +177,18 @@ impl AppBackend {
     /// Explicit eager open.  This is called only during startup and creation;
     /// ordinary lookups never open a library as a side effect.
     pub(super) fn open_registered_library(&self, library_id: &LibraryId) -> Result<(), BackendError> {
-        let entry = self.library_entry(library_id)?;
-        let (spec, reset_token) = self.library_runtime_spec(entry.storage_locator(), *library_id)?;
-        let opened = (|| -> Result<bool, BackendError> {
-            let id = spec.config.id;
-            let mut handles = self.state.library_directory.handles.lock().map_err(|_| BackendError::message("library directory lock is poisoned"))?;
-            if handles.contains_key(&id) { return Ok(false); }
-            handles.insert(id, library_backend::LibraryHandle::open(spec, &self.state.executor)?);
-            Ok(true)
-        })()?;
-        if opened {
-            if let Some(token) = reset_token {
-                let reset_key = format!("cloud-storage-reset:{library_id}");
-                self.state.registry.clear_value_if_current(&reset_key, &token).map_err(BackendError::operation)?;
+        let library_id = *library_id;
+        self.with_storage(move |this| {
+            let entry = this.library_entry(&library_id)?;
+            let (spec, reset_token) = this.library_runtime_spec(entry.storage_locator(), library_id)?;
+            if this.state.library_directory.open(spec, &this.state.executor)? {
+                if let Some(token) = reset_token {
+                    let reset_key = format!("cloud-storage-reset:{library_id}");
+                    this.state.registry.clear_value_if_current(&reset_key, &token).map_err(BackendError::operation)?;
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     pub(crate) fn set_library_asset_storage(&self, id: LibraryId, enabled: bool) -> Result<(), BackendError> {
@@ -210,11 +196,8 @@ impl AppBackend {
         self.state.registry.queue_cloud_storage(&id, enabled).map_err(BackendError::operation)?;
         // The registry owns the durable policy; the session actor owns its
         // local cache, sync object, and any reconciliation it triggers.
-        let _ = library.commands.try_send(LibraryActorCommand::Control(LibraryControl::SetAssetStorage {
-            enabled,
-            reset_cloud_presence: true,
-        }));
-        self.state.account_scheduler.wake();
+        let _ = library.commands.try_send(LibraryActorCommand::Control(LibraryControl::SetAssetStorage { enabled, reset_cloud_presence: true }));
+        self.state.account_wake.send_replace(());
         Ok(())
     }
 
@@ -234,7 +217,7 @@ impl AppBackend {
         let display_name = self.library_entry(&library_id)?.library_name().to_owned();
         Ok((
             LibraryRuntimeSpec {
-                config: crate::library::LibraryOpenConfig {
+                config: LibraryOpenConfig {
                     id: library_id,
                     display_name,
                     root: library_path.to_owned(),
@@ -246,7 +229,6 @@ impl AppBackend {
                 },
                 account: self.state.account.library_account(),
                 notification_interest: self.state.notification_interest.clone(),
-                remote_changes: self.state.remote_changes.clone(),
             },
             reset_token,
         ))

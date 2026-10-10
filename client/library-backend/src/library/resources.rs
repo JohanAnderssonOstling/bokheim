@@ -3,14 +3,15 @@
 //! The application registry decides *which* location and account policy to
 //! use.  Everything opened from that location belongs to the library session.
 
-use std::path::{Path, PathBuf};
+use crate::BackendError;
 use crate::asset_store::AssetStore;
+#[cfg(target_arch = "wasm32")]
 use crate::library::discovery::LibraryScanner;
 use crate::notification_interest::NotificationInterest;
-use crate::sync::{LibrarySync, LibrarySyncConfig};
-use crate::BackendError;
 use library_database::Database;
+use library_sync::{LibrarySync, LibrarySyncConfig};
 use std::sync::Arc;
+use std::{cell::RefCell, rc::Rc};
 
 use super::LibrarySession;
 
@@ -18,7 +19,6 @@ pub struct LibraryRuntimeSpec {
     pub config: super::open::LibraryOpenConfig,
     pub account: crate::integration::LibraryAccount,
     pub notification_interest: NotificationInterest,
-    pub remote_changes: crate::notification_interest::RemoteChanges,
 }
 
 impl LibrarySession {
@@ -44,12 +44,15 @@ impl LibrarySession {
                 .clone()
         };
         let assets = open_assets(&spec.config.root, &spec.config.database_locator, &cpu)?;
-        let transfer_history_path = history_path(&spec.config.root, &spec.config.database_locator);
         // `Database::open` already configured the connection (pragmas, sync
         // functions) internally.
         let replica_id = database.initialize_library()?;
         database.set_remote_library_name(&spec.config.display_name)?;
-        let (event_tx, event_rx) = async_channel::unbounded();
+        let (sync_wake, sync_requests) = library_runtime::scheduler::SyncScheduler::new();
+        let (asset_wake, asset_requests) = library_runtime::scheduler::SyncScheduler::new();
+        let (file_wake, file_requests) = library_runtime::scheduler::SyncScheduler::new();
+        let (enrichment_wake, enrichment_requests) = library_runtime::scheduler::SyncScheduler::new();
+        let (events, coordination) = library_runtime::events::LibraryEventRouter::new(sync_wake, asset_wake, file_wake, enrichment_wake);
         let scanner = {
             use crate::library::discovery::*;
             let root: &str = &spec.config.root;
@@ -58,48 +61,54 @@ impl LibrarySession {
         };
         database.set_asset_storage_policy(spec.config.asset_storage_enabled, spec.config.reset_cloud_presence)?;
         let sync = Arc::new(LibrarySync::new(LibrarySyncConfig {
-            database_path: spec.config.database_locator.clone().into(),
+            database: database.clone(),
             account: Some(spec.account.clone()),
-            transfer_queue: Arc::new(library_runtime::transfer_history::queue_with_history(&database, transfer_history_path)),
             assets: assets.clone(),
             replica_id,
-            server_url: spec.account.current().map_err(BackendError::operation)?.map(|session| session.server_url().clone()).unwrap_or(default_sync_server_url),
+            // Opening runs on a library thread while the storage owner waits.
+            // Consume published credentials without an account persistence call.
+            server_url: spec.account.credentials().credentials().map(|credentials| credentials.server_url().clone()).unwrap_or(default_sync_server_url),
             library_id: spec.config.id,
-            event_tx: Some(event_tx.clone()),
+            events: Some(events.clone()),
             credentials: spec.account.credentials(),
             notification_interest: spec.notification_interest,
             cpu: cpu.clone(),
         }));
         sync.set_asset_storage_enabled(spec.config.asset_storage_enabled);
-        let metadata = metadata_client::MetadataClient::new(&metadata_server_url).map_err(BackendError::operation)?;
-        let (sync_wake, sync_requests) = library_runtime::scheduler::SyncScheduler::new();
-        let (asset_wake, asset_requests) = library_runtime::scheduler::SyncScheduler::new();
+        let enrichment = library_enrichment::LibraryEnrichment {
+            database: database.clone(),
+            assets: assets.clone(),
+            client: library_enrichment::MetadataClient::new(&metadata_server_url).map_err(BackendError::operation)?,
+            cpu: cpu.clone(),
+            events: events.clone(),
+        };
+        let placement = Arc::new(library_placement::LibraryPlacement { database: database.clone(), assets: assets.clone(), events: events.clone() });
+        let import = library_import::LibraryImport {
+            database: database.clone(),
+            assets: assets.clone(),
+            cpu: cpu.clone(),
+            events: events.clone(),
+            placement: placement.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            root: scanner.root.clone(),
+        };
         let library = Self {
             id: spec.config.id,
             db: database,
             assets,
-            metadata,
+            enrichment,
+            placement,
+            import,
             sync,
-            event_tx,
-            event_rx: Some(event_rx),
-            subscriptions: Default::default(),
-            runtime: Arc::new(crate::library::session::LibraryRuntime::default()),
-            workers: super::workers::LibraryWorkers::default(),
-            sync_wake,
-            sync_requests: Some(sync_requests),
-            asset_wake,
-            asset_requests: Some(asset_requests),
+            events,
+            coordination: RefCell::new(coordination),
+            requests: Some(super::workers::WorkerRequests { sync: sync_requests, assets: asset_requests, files: file_requests, enrichment: enrichment_requests }),
+            runtime: Rc::new(crate::library::session::LibraryRuntime::default()),
             account: spec.account,
-            remote_changes: spec.remote_changes,
             _scanner: Arc::new(scanner),
             cpu,
             filesystem_scanning: std::cell::Cell::new(false),
-            file_work_error: Default::default(),
         };
-        // The initial scan (if needed) is triggered by the caller after the
-        // actor spawns: the scanner now does async inspection work, and this
-        // constructor runs synchronously on the library's blocking-open path,
-        // before that actor (and its async command channel) exists.
         Ok(library)
     }
 }
@@ -112,14 +121,4 @@ fn open_assets(root: &str, _database_locator: &str, _cpu: &std::sync::Arc<dyn cp
 #[cfg(target_arch = "wasm32")]
 fn open_assets(root: &str, _database_locator: &str, cpu: &std::sync::Arc<dyn cpu_host::CpuHost>) -> Result<AssetStore, BackendError> {
     Ok(crate::asset_store::open(root, cpu.clone()).map_err(BackendError::operation)?)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn history_path(_root: &str, database_locator: &str) -> PathBuf {
-    Path::new(database_locator).parent().expect("library database locator has a parent").join("transfer-history-v1.msgpack")
-}
-
-#[cfg(target_arch = "wasm32")]
-fn history_path(root: &str, _database_locator: &str) -> PathBuf {
-    Path::new(root).join(crate::APP_HIDDEN_DIR).join("transfer-history-v1.msgpack")
 }

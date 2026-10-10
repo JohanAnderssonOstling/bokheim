@@ -122,10 +122,10 @@ jobs:
             bokheim/apps/kobo-installer/target
           key: kobo-installer-windows-v3-${{ runner.os }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('bokheim/apps/kobo-installer/Cargo.lock') }}
 
-      - name: Test platform path conventions
+      - name: Test installer workflows
         working-directory: bokheim
         shell: pwsh
-        run: cargo test --release --manifest-path apps/kobo-installer/Cargo.toml --lib tests::names_package_entries_with_slashes_on_every_platform -- --exact
+        run: cargo test --release --manifest-path apps/kobo-installer/Cargo.toml --lib
 
       - name: Build portable Windows installer
         working-directory: bokheim
@@ -238,9 +238,9 @@ jobs:
             --output "$RUNNER_TEMP/appimagetool-x86_64.AppImage"
           chmod +x "$RUNNER_TEMP/linuxdeploy-x86_64.AppImage" "$RUNNER_TEMP/appimagetool-x86_64.AppImage"
 
-      - name: Test platform path conventions
+      - name: Test installer workflows
         working-directory: bokheim
-        run: cargo test --release --manifest-path apps/kobo-installer/Cargo.toml --lib tests::names_package_entries_with_slashes_on_every_platform -- --exact
+        run: cargo test --release --manifest-path apps/kobo-installer/Cargo.toml --lib
 
       - name: Build Linux installer
         working-directory: bokheim

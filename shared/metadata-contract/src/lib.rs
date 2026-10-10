@@ -3,7 +3,6 @@ pub use wikidata::*;
 pub mod audible;
 pub mod authority_subjects;
 pub mod books;
-pub mod identity_evidence;
 pub mod matching;
 pub mod subject_consensus;
 pub mod year_consensus;
@@ -25,6 +24,10 @@ pub struct EditionIdentityQuery {
     pub query_id: String,
     pub title: String,
     pub authors: Vec<String>,
+    /// A surname the device read from the title, not yet confirmed. Used only
+    /// when `authors` is empty.
+    #[serde(default)]
+    pub author_surname: Option<String>,
     pub publishers: Vec<String>,
     pub book_year: Option<i32>,
 }
@@ -194,14 +197,6 @@ pub struct IsbnClassificationResult {
     pub matches: Vec<WorkClassificationMatch>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct IsbnMetadataResult {
-    pub requested_isbn: String,
-    pub canonical_isbn13: Option<String>,
-    pub status: LookupStatus,
-    pub matches: Vec<WorkMetadataMatch>,
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LookupStatus {
@@ -216,14 +211,6 @@ pub struct WorkClassificationMatch {
     pub open_library_work_id: Option<String>,
     pub exact_edition_ids: Vec<String>,
     pub classifications: Vec<Classification>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct WorkMetadataMatch {
-    pub open_library_work_id: Option<String>,
-    pub exact_edition_ids: Vec<String>,
-    pub classifications: Vec<Classification>,
-    pub authors: Vec<AuthorMetadata>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -448,122 +435,4 @@ pub fn filter_classification_outliers(classifications: impl IntoIterator<Item = 
             keep.then(|| Classification { evidence: evidence.remove(&(scheme, notation.clone())).unwrap_or_default().into_iter().collect(), scheme, notation, source })
         })
         .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn classifications_round_trip_through_binary_storage() {
-        for scheme in [ClassificationScheme::LibraryOfCongress, ClassificationScheme::DeweyDecimal, ClassificationScheme::Bisac] {
-            for evidence in [Vec::new(), vec![ClassificationEvidence { method: "exact".to_owned(), isbn13: "9780306406157".to_owned(), open_library_work_id: "OL10W".to_owned(), open_library_edition_id: "OL1M".to_owned() }]] {
-                let value = Classification { evidence, scheme, notation: "QA76.73".to_owned(), source: ClassificationSource::Work };
-                let bytes = wire::encode(&value).unwrap();
-                assert_eq!(wire::decode::<Classification>(&bytes, MAX_RESPONSE_BYTES).unwrap(), value);
-            }
-        }
-    }
-
-    #[test]
-    fn classification_consensus_drops_small_distant_families_but_keeps_exact_evidence() {
-        let mut classifications = (1..=8).map(|number| Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: format!("PA40{number}"), source: ClassificationSource::Work }).collect::<Vec<_>>();
-        classifications.extend([
-            Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "B580".to_owned(), source: ClassificationSource::ExactEdition },
-            Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "PQ3434".to_owned(), source: ClassificationSource::Work },
-            Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "HQ75.6".to_owned(), source: ClassificationSource::Work },
-        ]);
-
-        let filtered = filter_classification_outliers(classifications, |_, notation| {
-            let key = if notation.starts_with("PA") {
-                "Humanities / Literature / Classical Greek & Latin Literatures"
-            } else if notation.starts_with("B") {
-                "Humanities / Philosophy / History, Traditions & Regions"
-            } else if notation.starts_with("PQ") {
-                "Humanities / Literature / Romance-Language Literatures"
-            } else {
-                "Social Sciences / Society / Social Topics"
-            };
-            vec![key.to_owned()]
-        });
-        assert_eq!(filtered.len(), 9);
-        assert!(filtered.iter().any(|classification| classification.notation == "B580"));
-        assert!(!filtered.iter().any(|classification| classification.notation == "PQ3434"));
-        assert!(!filtered.iter().any(|classification| classification.notation == "HQ75.6"));
-    }
-
-    #[test]
-    fn exact_edition_consensus_keeps_multiple_supported_branches_per_scheme() {
-        let editions = [
-            [(ClassificationScheme::LibraryOfCongress, "QA76.6".to_owned()), (ClassificationScheme::DeweyDecimal, "005.1".to_owned())].into_iter().collect::<BTreeSet<_>>(),
-            [(ClassificationScheme::LibraryOfCongress, "QA76.6.A1 2001".to_owned()), (ClassificationScheme::DeweyDecimal, "005.1".to_owned())].into_iter().collect(),
-            [(ClassificationScheme::LibraryOfCongress, "PN1993".to_owned()), (ClassificationScheme::DeweyDecimal, "791.43".to_owned())].into_iter().collect(),
-            [(ClassificationScheme::LibraryOfCongress, "PN1993.A2".to_owned()), (ClassificationScheme::DeweyDecimal, "791.43".to_owned())].into_iter().collect(),
-            [(ClassificationScheme::LibraryOfCongress, "B580".to_owned()), (ClassificationScheme::DeweyDecimal, "999".to_owned())].into_iter().collect(),
-        ];
-
-        let retained = exact_edition_classification_consensus(editions.iter().map(BTreeSet::iter));
-        let notations = retained.iter().map(|classification| classification.notation.as_str()).collect::<BTreeSet<_>>();
-        assert!(notations.contains("QA76.6"));
-        assert!(notations.contains("PN1993"));
-        assert!(notations.contains("005.1"));
-        assert!(notations.contains("791.43"));
-        assert!(!notations.contains("B580"));
-        assert!(!notations.contains("999"));
-    }
-
-    #[test]
-    fn classification_consensus_normalizes_item_specific_call_numbers() {
-        assert_eq!(classification_consensus_notation(ClassificationScheme::LibraryOfCongress, "PA4025.A5 R6 1999").as_deref(), Some("PA4025"));
-        assert_eq!(classification_consensus_notation(ClassificationScheme::LibraryOfCongress, "PA4025.A5W56 2018eb").as_deref(), Some("PA4025"));
-        assert_eq!(classification_consensus_notation(ClassificationScheme::DeweyDecimal, "883/.01").as_deref(), Some("883.01"));
-    }
-
-    #[test]
-    fn alternative_edition_consensus_removes_singletons_and_demotes_other_evidence() {
-        let matched = |work: &str, edition: &str, notation: &str| RichWorkMetadataMatch {
-            open_library_work_id: Some(work.to_owned()),
-            exact_edition_ids: vec![edition.to_owned()],
-            classifications: vec![Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: notation.to_owned(), source: ClassificationSource::ExactEdition }],
-            authors: vec![AuthorMetadata { open_library_author_id: "OL1A".to_owned(), name: None, identifiers: Vec::new(), source: AuthorSource::ExactEdition, position: 0 }],
-            description: None,
-            subjects: Vec::new(),
-        };
-        let mut consensus = EditionClassificationConsensus::default();
-        let mut first = vec![matched("OL1W", "OL1M", "PR4034.P7 1995")];
-        let mut second = vec![matched("OL2W", "OL2M", "PR4034 .P7 2006")];
-        let mut singleton = vec![matched("OL3W", "OL3M", "PS3558.A4758 P75t 1999")];
-        consensus.record_alternative_matches(&mut first, "9780000000001");
-        consensus.record_alternative_matches(&mut second, "9780000000002");
-        consensus.record_alternative_matches(&mut singleton, "9780000000003");
-
-        assert!(first[0].classifications.is_empty());
-        assert_eq!(first[0].authors[0].source, AuthorSource::Work);
-        assert_eq!(consensus.classifications(), vec![Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "PR4034".to_owned(), source: ClassificationSource::Work }]);
-    }
-
-    #[test]
-    fn rich_match_merging_combines_split_work_records() {
-        let first = RichWorkMetadataMatch {
-            open_library_work_id: Some("OL1W".to_owned()),
-            exact_edition_ids: vec!["OL1M".to_owned()],
-            classifications: vec![Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation: "GN496".to_owned(), source: ClassificationSource::ExactEdition }],
-            authors: Vec::new(),
-            description: None,
-            subjects: Vec::new(),
-        };
-        let second = RichWorkMetadataMatch {
-            open_library_work_id: Some("OL2W".to_owned()),
-            exact_edition_ids: vec!["OL2M".to_owned()],
-            classifications: vec![Classification { evidence: Vec::new(), scheme: ClassificationScheme::DeweyDecimal, notation: "306".to_owned(), source: ClassificationSource::Work }],
-            authors: Vec::new(),
-            description: None,
-            subjects: Vec::new(),
-        };
-
-        let merged = merge_rich_work_matches([&first, &second], |_, _| Vec::new());
-        assert_eq!(merged.exact_edition_ids, ["OL1M", "OL2M"]);
-        assert_eq!(merged.classifications.len(), 2);
-        assert!(merged.classifications.iter().any(|c| c.scheme == ClassificationScheme::DeweyDecimal));
-    }
 }

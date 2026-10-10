@@ -41,6 +41,7 @@ use crate::input::{
     search::SearchPanel,
 };
 use crate::native_menu::NativeMenu;
+use crate::menu::OpenContextMenu;
 use crate::scroll::AutoScroll;
 use crate::{Root, history::History};
 
@@ -1600,6 +1601,13 @@ impl InputState {
         cx.propagate();
     }
 
+    pub(super) fn open_context_menu(&mut self, _: &OpenContextMenu, window: &mut Window, cx: &mut Context<Self>) {
+        if self.enable_context_menu || self.context_menu_builder.is_some() {
+            let position = self.last_layout.as_ref().and_then(|layout| layout.cursor_bounds).map_or_else(|| window.mouse_position(), |bounds| point(bounds.left(), bounds.bottom()));
+            self.handle_right_click_menu(position, self.selected_range.start, window, cx);
+        }
+    }
+
     /// Show the right-click context menu as a native OS menu.
     pub(crate) fn handle_right_click_menu(
         &mut self,
@@ -2988,6 +2996,30 @@ mod tests {
 
     use crate::theme::Theme;
     use gpui::{TestAppContext, VisualTestContext};
+
+    #[gpui::test]
+    fn keyboard_context_menu_preserves_text_selection(cx: &mut TestAppContext) {
+        let opened = Rc::new(Cell::new(false));
+        let input_view = InputView::build(cx, |state| state);
+        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
+        cx.update(|window, cx| {
+            crate::global_state::init(cx);
+            input_view.input.update(cx, |state, cx| {
+                state.set_value("selected text", window, cx);
+                state.selected_range = (0..8).into();
+                state.context_menu_builder = Some(Rc::new({
+                    let opened = opened.clone();
+                    move |menu, _, _| {
+                        opened.set(true);
+                        menu
+                    }
+                }));
+                state.open_context_menu(&OpenContextMenu, window, cx);
+                assert!(opened.get());
+                assert_eq!(state.selected_range, (0..8).into());
+            });
+        });
+    }
 
     struct InputView {
         input: Entity<InputState>,

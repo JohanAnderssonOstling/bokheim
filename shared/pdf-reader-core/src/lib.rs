@@ -12,10 +12,9 @@ pub use pdf_view_common::{
 };
 use pdf_view_common::{PageRotation, PageTransform, TextCharacter, merge_line_rects};
 use pdfium_render::prelude::*;
-pub use reader_style::{ReaderInteractionStyle, RgbaColor};
+mod interaction_style;
+pub use interaction_style::{ReaderInteractionStyle, RgbaColor};
 use std::cell::RefCell;
-#[cfg(test)]
-use std::collections::HashSet;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs;
@@ -26,8 +25,12 @@ use std::sync::{Arc, OnceLock};
 
 mod annotations;
 mod metadata;
+#[cfg(not(target_arch = "wasm32"))]
+mod native;
 mod runtime;
 pub use metadata::inspect_reader_metadata;
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::PdfDocumentSession;
 pub use pdf_view_common::PdfPageSource;
 pub use pdf_view_common::{PdfReaderMetadata, PdfStoredAnnotationKind};
 #[cfg(not(target_arch = "wasm32"))]
@@ -35,22 +38,12 @@ const PDFIUM_THIRD_PARTY_NOTICES: &str = include_str!(env!("PDFIUM_NOTICES_PATH"
 const DEFAULT_RENDER_WIDTH: u16 = 1400;
 const MIN_RENDER_WIDTH: u16 = 320;
 const MAX_RENDER_WIDTH: u16 = 3200;
-#[cfg(test)]
-const HEADER_ZONE_BOTTOM: f32 = 0.18;
-#[cfg(test)]
-const FOOTER_ZONE_TOP: f32 = 0.82;
 const ELEMENT_CROP_PADDING: f32 = 0.008;
 
 #[cfg(target_arch = "wasm32")]
 pub mod browser;
 
 static PDFIUM: OnceLock<Result<Pdfium, String>> = OnceLock::new();
-
-#[cfg(test)]
-static ANALYZED_PAGE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-#[cfg(test)]
-static TEXT_EXTRACTION_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 pub type PdfResult<T> = Result<T, PdfError>;
 
@@ -73,7 +66,17 @@ impl fmt::Display for PdfError {
 
 impl std::error::Error for PdfError {}
 
+#[cfg(target_arch = "wasm32")]
 pub struct PdfDocumentSession {
+    document: runtime::Document,
+    info: PdfDocumentInfo,
+    analysis: RefCell<PageAnalysisCache>,
+    page_source: Option<Arc<dyn PdfPageSource>>,
+}
+#[cfg(target_arch = "wasm32")]
+type LocalDocumentSession = PdfDocumentSession;
+#[cfg(not(target_arch = "wasm32"))]
+struct LocalDocumentSession {
     document: runtime::Document,
     info: PdfDocumentInfo,
     analysis: RefCell<PageAnalysisCache>,
@@ -177,8 +180,11 @@ pub fn render_first_page_image(path: impl AsRef<Path>, target_width: u16) -> Pdf
 }
 
 /// Renders a cover from seekable storage without requiring a filesystem path.
-pub fn render_first_page_image_from_reader(reader: impl Read + Seek + 'static, target_width: u16) -> PdfResult<RenderedPdfImage> {
-    let _pdfium = runtime::lock();
+pub fn render_first_page_image_from_reader(reader: impl Read + Seek + Send + 'static, target_width: u16) -> PdfResult<RenderedPdfImage> {
+    runtime::run(move || render_first_page_image_local(reader, target_width))
+}
+
+fn render_first_page_image_local(reader: impl Read + Seek + 'static, target_width: u16) -> PdfResult<RenderedPdfImage> {
     let document = load_document(reader).map_err(|error| PdfError::new(format!("opening PDF cover: {error}")))?;
     let page = document.pages().get(0).map_err(|_| PdfError::new("the PDF has no pages"))?;
     // Render the actual page so stored thumbnails cannot reintroduce annotations.
@@ -216,12 +222,15 @@ struct RepeatingPageBands {
 
 /// Read bounded opening/closing page text using the reader's visual-line geometry.
 /// No rendering or document-wide page analysis is performed.
-pub fn inspect_page_text(reader: impl Read + Seek + 'static, edge_pages: usize, max_text_bytes: usize) -> PdfResult<Vec<(usize, String)>> {
+pub fn inspect_page_text(reader: impl Read + Seek + Send + 'static, edge_pages: usize, max_text_bytes: usize) -> PdfResult<Vec<(usize, String)>> {
     inspect_page_text_with_count(reader, edge_pages, max_text_bytes).map(|(_, pages)| pages)
 }
 
-pub fn inspect_page_text_with_count(reader: impl Read + Seek + 'static, edge_pages: usize, max_text_bytes: usize) -> PdfResult<(usize, Vec<(usize, String)>)> {
-    let _pdfium = runtime::lock();
+pub fn inspect_page_text_with_count(reader: impl Read + Seek + Send + 'static, edge_pages: usize, max_text_bytes: usize) -> PdfResult<(usize, Vec<(usize, String)>)> {
+    runtime::run(move || inspect_page_text_local(reader, edge_pages, max_text_bytes))
+}
+
+fn inspect_page_text_local(reader: impl Read + Seek + 'static, edge_pages: usize, max_text_bytes: usize) -> PdfResult<(usize, Vec<(usize, String)>)> {
     let document = load_document(reader)?;
     let count = document.pages().len() as usize;
     let mut result = Vec::new();
@@ -247,20 +256,14 @@ pub fn inspect_page_text_with_count(reader: impl Read + Seek + 'static, edge_pag
 /// Renders a bounded set of inspection pages one at a time. The visitor can stop
 /// immediately after finding evidence; no document-wide reader analysis is run.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn inspect_page_images(reader: impl Read + Seek + 'static, pages: &[usize], mut visit: impl FnMut(usize, RenderedPdfImage) -> bool) -> PdfResult<()> {
-    let document = load_document(reader)?;
+pub fn inspect_page_images(reader: impl Read + Seek + Send + 'static, pages: &[usize], mut visit: impl FnMut(usize, RenderedPdfImage) -> bool) -> PdfResult<()> {
+    let session = PdfDocumentSession::for_inspection(reader)?;
     for &number in pages.iter().take(12) {
-        let Some(index) = number.checked_sub(1).and_then(|index| i32::try_from(index).ok()) else { continue };
-        let image = {
-            let _pdfium = runtime::lock();
-            let Ok(page) = document.pages().get(index) else { continue };
-            let bitmap = page.render_with_config(&PdfRenderConfig::new().set_target_width(2200).set_maximum_width(2600).set_maximum_height(3200)).map_err(|error| PdfError::new(format!("rendering inspection page {number}: {error}")))?;
-            
-            RenderedPdfImage { rgba: bitmap.as_rgba_bytes(), pixel_width: bitmap.width() as u32, pixel_height: bitmap.height() as u32, source: RenderedPdfImageSource::RenderedPage }
-        };
-        // OCR and image processing operate on owned pixels outside PDFium.
-        if !visit(number, image) {
-            break;
+        if let Some(image) = session.inspection_image(number)? {
+            // OCR and image processing consume owned pixels on the caller.
+            if !visit(number, image) {
+                break;
+            }
         }
     }
     Ok(())
@@ -268,8 +271,7 @@ pub fn inspect_page_images(reader: impl Read + Seek + 'static, pages: &[usize], 
 
 // Both native and WASM keep a seekable source alive for on-demand reads.
 fn load_document(reader: impl Read + Seek + 'static) -> PdfResult<runtime::Document> {
-    let _pdfium = runtime::lock();
-    shared_pdfium()?.load_pdf_from_reader(PdfiumExactReader::new(reader), None).map(runtime::Document::from).map_err(|error| PdfError::new(error.to_string()))
+    shared_pdfium()?.load_pdf_from_reader(PdfiumExactReader::new(reader), None).map_err(|error| PdfError::new(error.to_string()))
 }
 
 /// Adapts Rust's short-read semantics to Pdfium's custom file-access contract.
@@ -302,7 +304,7 @@ impl<R: Seek> Seek for PdfiumExactReader<R> {
     }
 }
 
-impl PdfDocumentSession {
+impl LocalDocumentSession {
     pub fn open(path: impl Into<PathBuf>) -> PdfResult<Self> {
         let path = path.into();
         let bytes = fs::read(&path).map_err(|error| PdfError::new(format!("reading {}: {error}", path.display())))?;
@@ -310,7 +312,6 @@ impl PdfDocumentSession {
     }
 
     pub fn from_bytes(source_name: impl Into<String>, bytes: Vec<u8>) -> PdfResult<Self> {
-        let _pdfium = runtime::lock();
         let source_name = source_name.into();
         let document = shared_pdfium()?.load_pdf_from_byte_vec(bytes, None).map_err(|error| PdfError::new(format!("opening {source_name}: {error}")))?;
         Self::from_document(source_name, document)
@@ -325,9 +326,7 @@ impl PdfDocumentSession {
         Self::from_document(source_name, document)
     }
 
-    fn from_document(source_name: String, document: impl Into<runtime::Document>) -> PdfResult<Self> {
-        let _pdfium = runtime::lock();
-        let document = document.into();
+    fn from_document(source_name: String, document: runtime::Document) -> PdfResult<Self> {
         let pages = document
             .pages()
             .page_sizes()
@@ -349,7 +348,6 @@ impl PdfDocumentSession {
     /// Inspect the source pages without rasterizing them. An unreadable page is
     /// retained so classification cannot silently hide content.
     pub fn inspect_skippable_pages(&self) -> Vec<usize> {
-        let _pdfium = runtime::lock();
         (0..self.info.page_count())
             .filter(|&index| {
                 if self.page_source.as_ref().is_some_and(|source| source.prepare_page(index).is_err()) {
@@ -364,6 +362,7 @@ impl PdfDocumentSession {
         self.info.skippable_pages = pages;
     }
 
+    #[cfg(target_arch = "wasm32")]
     pub fn render_page(&self, page_index: usize, target_width: Option<u16>) -> PdfResult<RenderedPdfPage> {
         self.render_page_with_margin_trim(page_index, target_width, false)
     }
@@ -381,7 +380,6 @@ impl PdfDocumentSession {
         if let Some(source) = &self.page_source {
             source.prepare_page(page_index).map_err(PdfError::new)?;
         }
-        let _pdfium = runtime::lock();
         let mut page = self.document.pages().get(page_index as i32).map_err(|_| PdfError::new(format!("PDF page {} does not exist", page_index + 1)))?;
         suppress_bokheim_annotation_rendering(&mut page);
         let width = target_width.unwrap_or(DEFAULT_RENDER_WIDTH).clamp(MIN_RENDER_WIDTH, MAX_RENDER_WIDTH) as i32;
@@ -436,11 +434,10 @@ impl PdfDocumentSession {
     /// Searches a single page.
     ///
     /// Scanning a long document takes long enough to matter, and the session
-    /// is behind the same lock that page rendering needs, so readers search a
+    /// shares the PDFium worker with page rendering, so readers search a
     /// chunk of pages at a time rather than holding the session for the whole
     /// document.
     pub fn search_page(&self, page_index: usize, query: &str) -> PdfResult<Vec<PdfSearchHit>> {
-        let _pdfium = runtime::lock();
         if query.trim().is_empty() {
             return Ok(Vec::new());
         }
@@ -465,7 +462,6 @@ impl PdfDocumentSession {
         if let Some(source) = &self.page_source {
             source.prepare_page(page_index).map_err(PdfError::new)?;
         }
-        let _pdfium = runtime::lock();
         let page = self.document.pages().get(page_index as i32).map_err(|_| PdfError::new(format!("PDF page {} does not exist", page_index + 1)))?;
         let width = page.width().value.max(1.0);
         let height = page.height().value.max(1.0);
@@ -502,7 +498,7 @@ pub struct PdfDocumentInfo {
 
 impl PdfDocumentInfo {
     pub fn open(path: impl Into<PathBuf>) -> PdfResult<Self> {
-        Ok(PdfDocumentSession::open(path)?.info)
+        Ok(PdfDocumentSession::open(path)?.info().clone())
     }
 
     pub fn source_name(&self) -> &str {
@@ -624,12 +620,22 @@ pub struct RenderedPdfPage {
     break_avoidance: Arc<[(f32, f32)]>,
 }
 
+/// Owned page data in the pixel order of the rendering operation that produced it.
+pub struct RenderedPdfPageParts {
+    pub pixels: Vec<u8>,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub crop: PixelCrop,
+    pub text_layout: Arc<PdfPageTextLayout>,
+    pub break_avoidance: Arc<[(f32, f32)]>,
+}
+
 /// A page whose pixels are already in GPUI's BGRA order. Kept distinct from
 /// `RenderedPdfPage` so RGBA consumers cannot accidentally swap its colors.
 pub struct RenderedPdfBgraPage(RenderedPdfPage);
 
 impl RenderedPdfBgraPage {
-    pub fn into_parts(self) -> (Vec<u8>, u32, u32, PixelCrop, Arc<PdfPageTextLayout>, Arc<[(f32, f32)]>) {
+    pub fn into_parts(self) -> RenderedPdfPageParts {
         self.0.into_parts()
     }
 }
@@ -659,12 +665,8 @@ impl RenderedPdfPage {
         &self.break_avoidance
     }
 
-    pub fn select_text(&self, start: (f32, f32), end: (f32, f32)) -> Option<PdfTextSelection> {
-        self.text_layout.select(start, end)
-    }
-
-    pub fn into_parts(self) -> (Vec<u8>, u32, u32, PixelCrop, Arc<PdfPageTextLayout>, Arc<[(f32, f32)]>) {
-        (self.rgba, self.pixel_width, self.pixel_height, self.crop, self.text_layout, self.break_avoidance)
+    pub fn into_parts(self) -> RenderedPdfPageParts {
+        RenderedPdfPageParts { pixels: self.rgba, pixel_width: self.pixel_width, pixel_height: self.pixel_height, crop: self.crop, text_layout: self.text_layout, break_avoidance: self.break_avoidance }
     }
 }
 
@@ -824,8 +826,6 @@ pub fn pdfium_third_party_notices() -> &'static str {
 }
 
 fn extract_text_layout(page: &PdfPage<'_>, page_index: usize) -> PdfResult<PdfPageTextLayout> {
-    #[cfg(test)]
-    TEXT_EXTRACTION_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let width = page.width().value.max(1.0);
     let height = page.height().value.max(1.0);
     let text = page.text().map_err(|error| PdfError::new(format!("extracting text from page {}: {error}", page_index + 1)))?;
@@ -850,8 +850,6 @@ fn extract_text_layout(page: &PdfPage<'_>, page_index: usize) -> PdfResult<PdfPa
 }
 
 fn analyze_page_elements(page: &PdfPage<'_>, text_layout: &PdfPageTextLayout) -> PageElements {
-    #[cfg(test)]
-    ANALYZED_PAGE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let page_width = page.width().value.max(1.0);
     let page_height = page.height().value.max(1.0);
     let text_lines = text_lines(text_layout.geometry());
@@ -929,83 +927,6 @@ fn same_visual_text_line(left: NormalizedRect, right: NormalizedRect) -> bool {
     vertical_overlap > left.height().min(right.height()) * 0.3 && horizontal_gap <= 0.08
 }
 
-#[cfg(test)]
-fn repeating_page_bands(pages: &[PageElements]) -> Vec<RepeatingPageBands> {
-    let required_pages = ((pages.len() as f32 * 0.4).ceil() as usize).max(2);
-    if pages.len() < required_pages {
-        return vec![RepeatingPageBands::default(); pages.len()];
-    }
-    pages
-        .iter()
-        .enumerate()
-        .map(|(page_index, page)| {
-            let mut bands = RepeatingPageBands::default();
-            for line in &page.text_lines {
-                let zone = line_zone(line.bounds);
-                let Some(zone) = zone else { continue };
-                let matching_pages = pages
-                    .iter()
-                    .enumerate()
-                    .filter(|(candidate_page, _)| *candidate_page != page_index)
-                    .filter(|(_, candidate)| candidate.text_lines.iter().any(|candidate| line_zone(candidate.bounds) == Some(zone) && vertically_aligned(line.bounds, candidate.bounds) && text_overlap(&line.text, &candidate.text) >= 0.8))
-                    .count()
-                    + 1;
-                if matching_pages < required_pages {
-                    continue;
-                }
-                match zone {
-                    PageLineZone::Header => bands.header_bottom = Some(bands.header_bottom.unwrap_or(0.0).max((line.bounds.bottom() + 0.01).min(1.0))),
-                    PageLineZone::Footer => bands.footer_top = Some(bands.footer_top.unwrap_or(1.0).min((line.bounds.top() - 0.01).max(0.0))),
-                }
-            }
-            bands
-        })
-        .collect()
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(test)]
-enum PageLineZone {
-    Header,
-    Footer,
-}
-
-#[cfg(test)]
-fn line_zone(bounds: NormalizedRect) -> Option<PageLineZone> {
-    let center = bounds.top() + bounds.height() * 0.5;
-    if center <= HEADER_ZONE_BOTTOM {
-        Some(PageLineZone::Header)
-    } else if center >= FOOTER_ZONE_TOP {
-        Some(PageLineZone::Footer)
-    } else {
-        None
-    }
-}
-
-#[cfg(test)]
-fn vertically_aligned(left: NormalizedRect, right: NormalizedRect) -> bool {
-    let overlap = left.bottom().min(right.bottom()) - left.top().max(right.top());
-    let overlap_ratio = overlap.max(0.0) / left.height().min(right.height()).max(f32::EPSILON);
-    let center_distance = ((left.top() + left.height() * 0.5) - (right.top() + right.height() * 0.5)).abs();
-    overlap_ratio >= 0.5 || center_distance <= 0.012
-}
-
-#[cfg(test)]
-fn text_overlap(left: &str, right: &str) -> f32 {
-    let left = normalized_text_tokens(left);
-    let right = normalized_text_tokens(right);
-    if left.is_empty() || right.is_empty() {
-        return 0.0;
-    }
-    let common = left.intersection(&right).count() as f32;
-    2.0 * common / (left.len() + right.len()) as f32
-}
-
-#[cfg(test)]
-fn normalized_text_tokens(text: &str) -> HashSet<String> {
-    text.to_lowercase().split(|character: char| !character.is_alphanumeric()).filter(|token| !token.is_empty()).map(|token| if token.chars().all(|character| character.is_ascii_digit()) { "#".to_owned() } else { token.to_owned() }).collect()
-}
-
 fn content_bounds(elements: &PageElements, bands: RepeatingPageBands) -> Option<NormalizedRect> {
     let is_body = |bounds: NormalizedRect| {
         let center = bounds.top() + bounds.height() * 0.5;
@@ -1052,18 +973,17 @@ pub fn crop_normalized_rect(crop: PixelCrop, rect: NormalizedRect) -> Option<Nor
 }
 
 fn shared_pdfium() -> PdfResult<&'static Pdfium> {
+    #[cfg(not(target_arch = "wasm32"))]
+    assert!(native::on_worker(), "PDFium can only be accessed by its owning worker");
     let pdfium = PDFIUM.get_or_init(runtime::initialize);
     pdfium.as_ref().map_err(|error| PdfError::new(error.clone()))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, PoisonError};
     use super::*;
     use std::io::Cursor;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    static PDFIUM_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn fixture_path(label: &str) -> PdfResult<PathBuf> {
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| PdfError::new(error.to_string()))?.as_nanos();
@@ -1073,44 +993,47 @@ mod tests {
     include!("streaming_tests.rs");
 
     fn create_fixture_pdf(path: &Path) -> PdfResult<()> {
-        let pdfium = shared_pdfium()?;
-        let mut document = pdfium.create_new_pdf().map_err(|error| PdfError::new(error.to_string()))?;
-        let font = document.fonts_mut().helvetica();
-        for text in ["First searchable page", "Second searchable page"] {
-            let mut page = document.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).map_err(|error| PdfError::new(error.to_string()))?;
-            page.objects_mut().create_text_object(PdfPoints::new(72.0), PdfPoints::new(720.0), text, font, PdfPoints::new(18.0)).map_err(|error| PdfError::new(error.to_string()))?;
-        }
-        document.save_to_file(path).map_err(|error| PdfError::new(error.to_string()))
+        let path = path.to_owned();
+        runtime::run(move || {
+            let pdfium = shared_pdfium()?;
+            let mut document = pdfium.create_new_pdf().map_err(|error| PdfError::new(error.to_string()))?;
+            let font = document.fonts_mut().helvetica();
+            for text in ["First searchable page", "Second searchable page"] {
+                let mut page = document.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).map_err(|error| PdfError::new(error.to_string()))?;
+                page.objects_mut().create_text_object(PdfPoints::new(72.0), PdfPoints::new(720.0), text, font, PdfPoints::new(18.0)).map_err(|error| PdfError::new(error.to_string()))?;
+            }
+            document.save_to_file(&path).map_err(|error| PdfError::new(error.to_string()))
+        })
     }
 
     #[test]
     fn blank_page_classification_keeps_pages_with_other_text() -> PdfResult<()> {
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        let path = fixture_path("blank-pages")?;
-        {
-            let pdfium = shared_pdfium()?;
-            let mut document = pdfium.create_new_pdf().map_err(|error| PdfError::new(error.to_string()))?;
-            let font = document.fonts_mut().helvetica();
-            for text in ["", "This page intentionally left blank", "This page intentionally left blank. More text", "Ordinary content"] {
-                let mut page = document.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).map_err(|error| PdfError::new(error.to_string()))?;
-                if !text.is_empty() {
-                    page.objects_mut().create_text_object(PdfPoints::new(72.0), PdfPoints::new(720.0), text, font, PdfPoints::new(18.0)).map_err(|error| PdfError::new(error.to_string()))?;
+        runtime::run(move || {
+            let path = fixture_path("blank-pages")?;
+            {
+                let pdfium = shared_pdfium()?;
+                let mut document = pdfium.create_new_pdf().map_err(|error| PdfError::new(error.to_string()))?;
+                let font = document.fonts_mut().helvetica();
+                for text in ["", "This page intentionally left blank", "This page intentionally left blank. More text", "Ordinary content"] {
+                    let mut page = document.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).map_err(|error| PdfError::new(error.to_string()))?;
+                    if !text.is_empty() {
+                        page.objects_mut().create_text_object(PdfPoints::new(72.0), PdfPoints::new(720.0), text, font, PdfPoints::new(18.0)).map_err(|error| PdfError::new(error.to_string()))?;
+                    }
                 }
+                document.save_to_file(&path).map_err(|error| PdfError::new(error.to_string()))?;
             }
-            document.save_to_file(&path).map_err(|error| PdfError::new(error.to_string()))?;
-        }
-        let session = PdfDocumentSession::open(&path)?;
-        assert_eq!(session.inspect_skippable_pages(), [0, 1]);
-        let (_, metadata, _) = inspect_reader_metadata(fs::File::open(&path).map_err(|error| PdfError::new(error.to_string()))?)?;
-        assert_eq!(metadata.skippable_pages.as_deref(), Some(&[0, 1][..]));
-        fs::remove_file(path).ok();
-        Ok(())
+            let session = LocalDocumentSession::open(&path)?;
+            assert_eq!(session.inspect_skippable_pages(), [0, 1]);
+            let (_, metadata, _) = inspect_reader_metadata(fs::File::open(&path).map_err(|error| PdfError::new(error.to_string()))?)?;
+            assert_eq!(metadata.skippable_pages.as_deref(), Some(&[0, 1][..]));
+            fs::remove_file(path).ok();
+            Ok(())
+        })
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn concurrent_extraction_and_reader_operations_share_pdfium_access() -> PdfResult<()> {
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let path = fixture_path("sequential-extraction")?;
         create_fixture_pdf(&path)?;
         let bytes = fs::read(&path).map_err(|error| PdfError::new(error.to_string()))?;
@@ -1126,8 +1049,8 @@ mod tests {
                         assert_eq!(cover.pixel_width(), 320);
                         let (reader, metadata, _) = inspect_reader_metadata(Cursor::new(bytes.clone()))?;
                         assert_eq!(metadata.pages.len(), 2);
-                        let checksum = metadata.checksum.clone();
-                        let session = PdfDocumentSession::from_reader_with_metadata("concurrent", reader, &checksum, Some(metadata))?;
+                        let content_hash = metadata.content_hash.clone();
+                        let session = PdfDocumentSession::from_reader_with_metadata("concurrent", reader, &content_hash, Some(metadata))?;
                         assert!(!session.search_page(0, "searchable")?.is_empty());
                         session.render_page(0, Some(320))?;
                     }
@@ -1145,7 +1068,6 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn extracted_image_processing_does_not_hold_pdfium_access() -> PdfResult<()> {
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let path = fixture_path("image-processing")?;
         create_fixture_pdf(&path)?;
         let bytes = fs::read(&path).map_err(|error| PdfError::new(error.to_string()))?;
@@ -1166,29 +1088,28 @@ mod tests {
 
     #[test]
     fn ingestion_metadata_round_trips_and_rejects_a_different_revision() -> PdfResult<()> {
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let path = fixture_path("ingestion")?;
         create_fixture_pdf(&path)?;
         let bytes = fs::read(&path).map_err(|e| PdfError::new(e.to_string()))?;
         let (reader, metadata, _) = inspect_reader_metadata(Cursor::new(bytes.clone()))?;
         assert_eq!(reader.position(), 0);
-        assert_eq!(metadata.checksum, blake3::hash(&bytes).to_hex().to_string());
+        assert_eq!(metadata.content_hash, blake3::hash(&bytes).to_hex().to_string());
         assert_eq!(metadata.pages.len(), 2);
-        let checksum = metadata.checksum.clone();
+        let content_hash = metadata.content_hash.clone();
         let expected = PdfDocumentSession::from_bytes("fixture", bytes.clone())?;
-        let cached = PdfDocumentSession::from_reader_with_metadata("fixture", reader, &checksum, Some(metadata.clone()))?;
+        let cached = PdfDocumentSession::from_reader_with_metadata("fixture", reader, &content_hash, Some(metadata.clone()))?;
         assert_eq!(cached.info().pages(), expected.info().pages());
         assert_eq!(cached.info().outline(), expected.info().outline());
         assert_eq!(cached.info().skippable_pages(), metadata.skippable_pages.as_deref().unwrap_or_default());
         assert_eq!(cached.render_page(0, Some(320))?.rgba, expected.render_page(0, Some(320))?.rgba);
         let mut wrong = metadata.clone();
-        wrong.checksum = "0".repeat(64);
+        wrong.content_hash = "0".repeat(64);
         wrong.pages[0].width = 999.0;
-        let fallback = PdfDocumentSession::from_reader_with_metadata("fixture", Cursor::new(bytes), &checksum, Some(wrong))?;
+        let fallback = PdfDocumentSession::from_reader_with_metadata("fixture", Cursor::new(bytes), &content_hash, Some(wrong))?;
         assert_eq!(fallback.info(), expected.info());
         let mut invalid = metadata;
         invalid.pages[0].width = f32::NAN;
-        assert!(!invalid.valid_for(&checksum));
+        assert!(!invalid.valid_for(&content_hash));
         let _ = fs::remove_file(path);
         Ok(())
     }
@@ -1211,20 +1132,8 @@ mod tests {
         }
     }
 
-    fn fake_page(byte_len: usize) -> Arc<RenderedPdfPage> {
-        Arc::new(RenderedPdfPage {
-            rgba: vec![0; byte_len],
-            pixel_width: 1,
-            pixel_height: 1,
-            crop: PixelCrop::full(1, 1),
-            text_layout: Arc::new(PdfPageTextLayout { page_index: 0, geometry: PageTextGeometry::default() }),
-            break_avoidance: Arc::from([]),
-        })
-    }
-
     #[test]
     fn cover_ignores_stored_thumbnail_and_visible_annotations() -> PdfResult<()> {
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let bytes = include_bytes!("../tests/fixtures/cover-annotations.pdf").to_vec();
         let rendered = render_first_page_image_from_reader(Cursor::new(bytes), 100)?;
         assert_eq!(rendered.source(), RenderedPdfImageSource::RenderedPage);
@@ -1243,47 +1152,7 @@ mod tests {
     }
 
     #[test]
-    fn page_render_keys_bound_requested_width() {
-        assert_eq!(PageRenderKey::new(2, 1).target_width(), MIN_RENDER_WIDTH);
-        assert_eq!(PageRenderKey::new(2, u16::MAX).target_width(), MAX_RENDER_WIDTH);
-        assert_ne!(PageRenderKey::new(2, 800), PageRenderKey::with_margin_trim(2, 800, true));
-    }
-
-    #[test]
-    fn page_cache_evicts_least_recently_used_pages() {
-        let mut cache = PageRenderCache::new(20);
-        let first = PageRenderKey::new(0, 800);
-        let second = PageRenderKey::new(1, 800);
-        let third = PageRenderKey::new(2, 800);
-        cache.insert(first, fake_page(10));
-        cache.insert(second, fake_page(10));
-        assert!(cache.get(first).is_some());
-        cache.insert(third, fake_page(10));
-        assert!(cache.get(first).is_some());
-        assert!(cache.get(second).is_none());
-        assert!(cache.get(third).is_some());
-        assert_eq!(cache.byte_len(), 20);
-    }
-
-    #[test]
-    fn oversized_page_is_not_cached() {
-        let mut cache = PageRenderCache::new(5);
-        cache.insert(PageRenderKey::new(0, 800), fake_page(6));
-        assert!(cache.is_empty());
-    }
-
-    #[test]
-    fn selection_rects_merge_characters_on_the_same_line() {
-        let layout = PdfPageTextLayout { page_index: 0, geometry: PageTextGeometry::new([TextCharacter::new(0, 'A', NormalizedRect::new(0.1, 0.2, 0.04, 0.03)), TextCharacter::new(1, 'B', NormalizedRect::new(0.14, 0.2, 0.04, 0.03))]) };
-        let selection = layout.select((0.11, 0.21), (0.17, 0.21)).expect("text selection");
-        assert_eq!(selection.text(), "AB");
-        assert_eq!(selection.rects().len(), 1);
-        assert!((selection.rects()[0].width() - 0.08).abs() < 0.0001);
-    }
-
-    #[test]
     fn concurrent_background_inspections_keep_documents_valid() -> PdfResult<()> {
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let path = fixture_path("concurrent-inspection")?;
         create_fixture_pdf(&path)?;
         std::thread::scope(|scope| {
@@ -1303,185 +1172,55 @@ mod tests {
     }
 
     #[test]
-    fn prepared_pdfium_session_opens_once_renders_searches_and_selects() -> PdfResult<()> {
-        let _pdfium_guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        let path = fixture_path("reader")?;
-        create_fixture_pdf(&path)?;
-        let session = PdfDocumentSession::open(&path)?;
-        assert_eq!(session.info().page_count(), 2);
-        assert!(session.info().pages().iter().all(|page| page.aspect_ratio() > 0.0));
-        let rendered = session.render_page(1, Some(640))?;
-        assert_eq!(rendered.pixel_width(), 640);
-        assert!(rendered.pixel_height() > rendered.pixel_width());
-        assert_eq!(rendered.rgba().len(), rendered.pixel_width() as usize * rendered.pixel_height() as usize * 4);
-        assert!(!rendered.break_avoidance().is_empty(), "text lines should protect fit-width slice boundaries");
-        let hits = session.search("Second searchable")?;
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].page_index(), 1);
-        let hit = hits[0].bounds();
-        let selection = rendered.select_text((hit.left() + 0.001, hit.top() + hit.height() * 0.5), (hit.left() + hit.width(), hit.top() + hit.height() * 0.5)).expect("selection from search bounds");
-        assert!(selection.text().contains("Second searchable"));
-
-        let trimmed = session.render_page_with_margin_trim(1, Some(640), true)?;
-        assert!(!trimmed.crop().is_full_page(), "element trim bounds should crop the rendered page");
-        assert!(trimmed.pixel_width() < trimmed.crop().full_width());
-        assert_eq!(trimmed.rgba().len(), trimmed.pixel_width() as usize * trimmed.pixel_height() as usize * 4);
-        let mapped = crop_normalized_rect(trimmed.crop(), hit).expect("search hit remains inside the trimmed page");
-        let trimmed_selection = trimmed.select_text((mapped.left() + 0.001, mapped.top() + mapped.height() * 0.5), (mapped.left() + mapped.width(), mapped.top() + mapped.height() * 0.5)).expect("selection from trimmed search bounds");
-        assert!(trimmed_selection.text().contains("Second searchable"));
-
-        drop(session);
-        fs::remove_file(path).map_err(|error| PdfError::new(error.to_string()))?;
-        Ok(())
-    }
-
-    #[test]
     fn direct_crop_matches_full_raster_and_display_pixels_preserve_colors() -> PdfResult<()> {
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        let path = fixture_path("direct-crop")?;
-        create_fixture_pdf(&path)?;
-        let document = shared_pdfium()?.load_pdf_from_byte_vec(fs::read(&path).unwrap(), None).unwrap();
-        document.pages().get(1).unwrap().set_rotation(PdfPageRenderRotation::Degrees90);
-        let session = PdfDocumentSession::from_document("crop".into(), document)?;
-        for page_index in 0..2 {
-            for width in [640, 1024] {
-                let page = session.document.pages().get(page_index as i32).unwrap();
-                let full = page.render_with_config(&PdfRenderConfig::new().set_target_width(width)).unwrap();
-                let image = RgbaImage::from_raw(full.width() as u32, full.height() as u32, full.as_rgba_bytes()).unwrap();
-                let cropped = session.render_page_with_margin_trim(page_index, Some(width as u16), true)?;
-                let crop = cropped.crop();
-                let reference = image::imageops::crop_imm(&image, crop.left(), crop.top(), crop.width(), crop.height()).to_image().into_raw();
-                assert_eq!(cropped.rgba(), reference, "direct crop changed pixels on page {page_index} at {width}");
-                let display = session.render_page_for_display(PageRenderKey::with_margin_trim(page_index, width as u16, true))?;
-                let (bgra, w, h, display_crop, layout, _) = display.into_parts();
-                assert_eq!((w, h, display_crop), (crop.width(), crop.height(), crop));
-                assert_eq!(layout.geometry, cropped.text_layout.geometry);
-                for (display, rgba) in bgra.chunks_exact(4).zip(reference.chunks_exact(4)) {
-                    assert_eq!(display, [rgba[2], rgba[1], rgba[0], rgba[3]]);
+        runtime::run(move || {
+            let path = fixture_path("direct-crop")?;
+            create_fixture_pdf(&path)?;
+            let document = shared_pdfium()?.load_pdf_from_byte_vec(fs::read(&path).unwrap(), None).unwrap();
+            document.pages().get(1).unwrap().set_rotation(PdfPageRenderRotation::Degrees90);
+            let session = LocalDocumentSession::from_document("crop".into(), document)?;
+            for page_index in 0..2 {
+                for width in [640, 1024] {
+                    let page = session.document.pages().get(page_index as i32).unwrap();
+                    let full = page.render_with_config(&PdfRenderConfig::new().set_target_width(width)).unwrap();
+                    let image = RgbaImage::from_raw(full.width() as u32, full.height() as u32, full.as_rgba_bytes()).unwrap();
+                    let cropped = session.render_page_with_margin_trim(page_index, Some(width as u16), true)?;
+                    let crop = cropped.crop();
+                    let reference = image::imageops::crop_imm(&image, crop.left(), crop.top(), crop.width(), crop.height()).to_image().into_raw();
+                    assert_eq!(cropped.rgba(), reference, "direct crop changed pixels on page {page_index} at {width}");
+                    let display = session.render_page_for_display(PageRenderKey::with_margin_trim(page_index, width as u16, true))?;
+                    let display = display.into_parts();
+                    assert_eq!((display.pixel_width, display.pixel_height, display.crop), (crop.width(), crop.height(), crop));
+                    assert_eq!(display.text_layout.geometry, cropped.text_layout.geometry);
+                    for (display, rgba) in display.pixels.chunks_exact(4).zip(reference.chunks_exact(4)) {
+                        assert_eq!(display, [rgba[2], rgba[1], rgba[0], rgba[3]]);
+                    }
                 }
             }
-        }
-        fs::remove_file(path).unwrap();
-        Ok(())
+            fs::remove_file(path).unwrap();
+            Ok(())
+        })
     }
 
     #[test]
     fn lightweight_page_dimensions_match_loaded_rotated_pages() -> PdfResult<()> {
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut document = shared_pdfium()?.create_new_pdf().map_err(|error| PdfError::new(error.to_string()))?;
-        let mut expected = Vec::new();
-        for rotation in [PdfPageRenderRotation::None, PdfPageRenderRotation::Degrees90, PdfPageRenderRotation::Degrees180, PdfPageRenderRotation::Degrees270] {
-            let mut page = document.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).map_err(|error| PdfError::new(error.to_string()))?;
-            page.set_rotation(rotation);
-            expected.push((page.width().value, page.height().value));
-        }
-        let session = PdfDocumentSession::from_document("rotated".into(), document)?;
-        assert_eq!(session.info.pages.iter().map(|page| (page.width_points, page.height_points)).collect::<Vec<_>>(), expected);
-        Ok(())
-    }
-
-    #[test]
-    fn page_analysis_is_reused_across_zoom_and_trim_without_changing_output() -> PdfResult<()> {
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        let path = fixture_path("analysis-cache")?;
-        create_fixture_pdf(&path)?;
-        TEXT_EXTRACTION_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
-        ANALYZED_PAGE_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
-        let session = PdfDocumentSession::open(&path)?;
-        assert_eq!(TEXT_EXTRACTION_COUNT.load(std::sync::atomic::Ordering::Relaxed), 0);
-        let first = session.render_page(0, Some(640))?;
-        let zoomed = session.render_page(0, Some(1280))?;
-        assert!(Arc::ptr_eq(&first.text_layout, &zoomed.text_layout));
-        let trimmed = session.render_page_with_margin_trim(0, Some(640), true)?;
-        assert!(!trimmed.crop.is_full_page());
-        assert!(!trimmed.text_layout.geometry.characters().is_empty());
-        let _ = session.render_page_with_margin_trim(0, Some(1280), true)?;
-        assert_eq!(TEXT_EXTRACTION_COUNT.load(std::sync::atomic::Ordering::Relaxed), 1);
-        assert_eq!(ANALYZED_PAGE_COUNT.load(std::sync::atomic::Ordering::Relaxed), 1);
-        *session.analysis.borrow_mut() = PageAnalysisCache::default();
-        let cold = session.render_page_with_margin_trim(0, Some(640), true)?;
-        assert_eq!(trimmed.rgba, cold.rgba);
-        assert_eq!(trimmed.crop, cold.crop);
-        assert_eq!(trimmed.text_layout.geometry, cold.text_layout.geometry);
-        assert_eq!(trimmed.break_avoidance, cold.break_avoidance);
-        let restored = session.render_page(0, Some(640))?;
-        assert_eq!(first.text_layout.geometry, restored.text_layout.geometry, "cropping must not mutate cached full-page text");
-        assert_eq!(first.rgba, restored.rgba);
-        fs::remove_file(path).map_err(|error| PdfError::new(error.to_string()))?;
-        Ok(())
-    }
-
-    #[test]
-    fn analysis_cache_bounds_empty_pages_and_rejects_oversized_pages() {
-        let mut cache = PageAnalysisCache::default();
-        for page in 0..=MAX_ANALYSIS_CACHE_PAGES {
-            cache.insert(page, Arc::new(PageAnalysis { text: Arc::new(PdfPageTextLayout::default()), images: Vec::new(), trim_bounds: OnceLock::new() }));
-        }
-        assert_eq!(cache.pages.len(), MAX_ANALYSIS_CACHE_PAGES);
-        assert!(cache.get(0).is_none());
-        let oversized =
-            Arc::new(PageAnalysis { text: Arc::new(PdfPageTextLayout::default()), images: vec![NormalizedRect::new(0.0, 0.0, 1.0, 1.0); ANALYSIS_CACHE_BUDGET / std::mem::size_of::<NormalizedRect>()], trim_bounds: OnceLock::new() });
-        cache.insert(MAX_ANALYSIS_CACHE_PAGES + 1, oversized);
-        assert!(cache.get(MAX_ANALYSIS_CACHE_PAGES + 1).is_none());
-        assert!(cache.get(MAX_ANALYSIS_CACHE_PAGES).is_some());
-    }
-
-    #[test]
-    fn analysis_cache_evicts_by_memory_and_recency() {
-        let analysis =
-            || Arc::new(PageAnalysis { text: Arc::new(PdfPageTextLayout::default()), images: vec![NormalizedRect::new(0.0, 0.0, 1.0, 1.0); ANALYSIS_CACHE_BUDGET / 3 / std::mem::size_of::<NormalizedRect>()], trim_bounds: OnceLock::new() });
-        let mut cache = PageAnalysisCache::default();
-        cache.insert(0, analysis());
-        cache.insert(1, analysis());
-        assert!(cache.get(0).is_some());
-        cache.insert(2, analysis());
-        assert!(cache.get(0).is_some());
-        assert!(cache.get(1).is_none());
-        assert!(cache.get(2).is_some());
-        assert!(cache.byte_len <= ANALYSIS_CACHE_BUDGET);
-    }
-
-    #[test]
-    fn first_page_image_skips_document_wide_reader_analysis() -> PdfResult<()> {
-        let _pdfium_guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        let path = fixture_path("first-page-image")?;
-        create_fixture_pdf(&path)?;
-        ANALYZED_PAGE_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
-
-        let rendered = render_first_page_image(&path, MIN_RENDER_WIDTH)?;
-
-        assert_eq!(rendered.source(), RenderedPdfImageSource::RenderedPage);
-        assert_eq!(rendered.pixel_width(), MIN_RENDER_WIDTH as u32);
-        assert!(rendered.pixel_height() > rendered.pixel_width());
-        assert_eq!(rendered.rgba().len(), rendered.pixel_width() as usize * rendered.pixel_height() as usize * 4);
-        assert_eq!(ANALYZED_PAGE_COUNT.load(std::sync::atomic::Ordering::Relaxed), 0);
-
-        ANALYZED_PAGE_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
-        let session = PdfDocumentSession::open(&path)?;
-        assert_eq!(ANALYZED_PAGE_COUNT.load(std::sync::atomic::Ordering::Relaxed), 0, "opening the reader must not analyze every page before page 1 can render");
-        let reader_rendered = session.render_page(0, Some(300))?;
-        assert_eq!(rendered.pixel_width(), reader_rendered.pixel_width());
-        assert_eq!(rendered.pixel_height(), reader_rendered.pixel_height());
-        // Covers disable form rendering, selecting PDFium's matrix render path.
-        // Its antialiasing can differ from the reader's integer-coordinate path.
-        let ink = |pixels: &[u8]| pixels.chunks_exact(4).filter(|p| p[..3].iter().any(|v| *v < 128)).count();
-        let cover_ink = ink(rendered.rgba());
-        let reader_ink = ink(reader_rendered.rgba());
-        assert!(cover_ink > 0 && cover_ink.abs_diff(reader_ink) * 10 <= reader_ink, "cover and reader text coverage differs: {cover_ink}/{reader_ink}");
-        assert_eq!(ANALYZED_PAGE_COUNT.load(std::sync::atomic::Ordering::Relaxed), 0);
-
-        let _ = session.render_page_with_margin_trim(0, Some(300), true)?;
-        assert_eq!(ANALYZED_PAGE_COUNT.load(std::sync::atomic::Ordering::Relaxed), 1, "margin analysis should be limited to the page being rendered");
-
-        drop(session);
-        fs::remove_file(path).map_err(|error| PdfError::new(error.to_string()))?;
-        Ok(())
+        runtime::run(move || {
+            let mut document = shared_pdfium()?.create_new_pdf().map_err(|error| PdfError::new(error.to_string()))?;
+            let mut expected = Vec::new();
+            for rotation in [PdfPageRenderRotation::None, PdfPageRenderRotation::Degrees90, PdfPageRenderRotation::Degrees180, PdfPageRenderRotation::Degrees270] {
+                let mut page = document.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).map_err(|error| PdfError::new(error.to_string()))?;
+                page.set_rotation(rotation);
+                expected.push((page.width().value, page.height().value));
+            }
+            let session = LocalDocumentSession::from_document("rotated".into(), document)?;
+            assert_eq!(session.info.pages.iter().map(|page| (page.width_points, page.height_points)).collect::<Vec<_>>(), expected);
+            Ok(())
+        })
     }
 
     #[test]
     fn streamed_pdf_first_page_skips_later_page_image_content() -> PdfResult<()> {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let _guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let image_size = 2048 * 2048;
         let first = b"BT /F1 18 Tf 72 720 Td (Streamed first page) Tj ET";
         let second = b"q 400 0 0 400 72 200 cm /Im1 Do Q BT /F1 18 Tf 72 720 Td (Later page) Tj ET";
@@ -1553,7 +1292,6 @@ mod tests {
 
     #[test]
     fn reader_short_reads_are_completed_before_pdfium_parses_them() -> PdfResult<()> {
-        let _pdfium_guard = PDFIUM_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let path = fixture_path("short-reads")?;
         create_fixture_pdf(&path)?;
         let bytes = fs::read(&path).map_err(|error| PdfError::new(error.to_string()))?;
@@ -1564,50 +1302,5 @@ mod tests {
         drop(session);
         fs::remove_file(path).map_err(|error| PdfError::new(error.to_string()))?;
         Ok(())
-    }
-
-    #[test]
-    fn vertical_break_avoidance_bands_stay_independent() {
-        assert_eq!(sorted_vertical_bands([(0.5, 0.7), (0.1, 0.2), (0.18, 0.3), (0.8, 0.9)]), vec![(0.1, 0.2), (0.18, 0.3), (0.5, 0.7), (0.8, 0.9)]);
-    }
-
-    #[test]
-    fn text_break_avoidance_groups_characters_by_line_only() {
-        let layout = PdfPageTextLayout {
-            page_index: 0,
-            geometry: PageTextGeometry::new([
-                TextCharacter::new(0, 'A', NormalizedRect::new(0.1, 0.20, 0.04, 0.03)),
-                TextCharacter::new(1, 'B', NormalizedRect::new(0.14, 0.20, 0.04, 0.03)),
-                TextCharacter::new(2, 'C', NormalizedRect::new(0.1, 0.25, 0.04, 0.03)),
-            ]),
-        };
-        assert_eq!(layout.break_avoidance_bands().len(), 2);
-    }
-
-    #[test]
-    fn repeating_aligned_headers_and_footers_are_excluded_from_element_bounds() {
-        let page = |page_number: usize, body_top: f32| PageElements {
-            text_lines: vec![
-                PageTextLine { text: "Scientific Reports | nature.com".to_owned(), bounds: NormalizedRect::new(0.08, 0.03, 0.5, 0.025) },
-                PageTextLine { text: format!("Page {page_number}"), bounds: NormalizedRect::new(0.45, 0.94, 0.1, 0.02) },
-                PageTextLine { text: format!("Distinct body text {page_number}"), bounds: NormalizedRect::new(0.12, body_top, 0.7, 0.3) },
-            ],
-            graphics: vec![NormalizedRect::new(0.05, 0.06, 0.9, 0.002)],
-        };
-        let pages = vec![page(1, 0.2), page(2, 0.21), page(3, 0.19), page(4, 0.2)];
-        let bands = repeating_page_bands(&pages);
-        assert!(bands.iter().all(|bands| bands.header_bottom.is_some() && bands.footer_top.is_some()));
-        let cropped = content_bounds(&pages[0], bands[0]).expect("body content bounds");
-        assert!(cropped.top() > 0.15);
-        assert!(cropped.bottom() < 0.9);
-    }
-
-    #[test]
-    fn similar_text_at_different_vertical_positions_is_not_a_running_header() {
-        let pages = [0.03, 0.25, 0.45]
-            .into_iter()
-            .map(|top| PageElements { text_lines: vec![PageTextLine { text: "Repeated chapter wording".to_owned(), bounds: NormalizedRect::new(0.1, top, 0.6, 0.03) }], graphics: Vec::new() })
-            .collect::<Vec<_>>();
-        assert!(repeating_page_bands(&pages).iter().all(|bands| bands.header_bottom.is_none()));
     }
 }

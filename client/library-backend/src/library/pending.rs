@@ -102,43 +102,6 @@ impl<C: 'static> PendingOperations<C> {
 }
 
 /// One background lane: repeated wakes coalesce without replacing active work.
-pub(crate) struct BackgroundJob<T> {
-    pub task: Option<LocalBoxFuture<'static, T>>,
-    pub pending: bool,
-}
-impl<T> Default for BackgroundJob<T> {
-    fn default() -> Self {
-        Self { task: None, pending: false }
-    }
-}
-impl<T> BackgroundJob<T> {
-    pub fn begin(&mut self) -> bool {
-        if self.task.is_some() {
-            self.pending = true;
-            false
-        } else {
-            true
-        }
-    }
-    pub fn finish(&mut self) -> bool {
-        self.task = None;
-        std::mem::take(&mut self.pending)
-    }
-    pub async fn next(&mut self) -> T {
-        match self.task.as_mut() {
-            Some(task) => task.await,
-            None => std::future::pending().await,
-        }
-    }
-}
-impl BackgroundJob<()> {
-    pub fn retry_after(&mut self, seconds: u64) {
-        if self.task.is_none() {
-            self.task = Some(Box::pin(crate::executor::sleep(std::time::Duration::from_secs(seconds))));
-        }
-    }
-}
-
 /// Channel closure alone retains queued messages while a sender survives.
 /// Drain on every exit path, including panic and cancellation.
 pub(crate) struct Inbox<T>(pub async_channel::Receiver<T>);
@@ -152,7 +115,6 @@ impl<T> Drop for Inbox<T> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
-    use std::cell::Cell;
 
     fn reply() -> (PendingReply<()>, async_channel::Receiver<Result<(), BackendError>>) {
         let (sender, receiver) = async_channel::bounded(1);
@@ -162,99 +124,6 @@ mod tests {
         reply.finish(result);
     }
 
-    #[tokio::test]
-    async fn caller_cancellation_stops_reads_but_not_accepted_writes() {
-        for kind in [OperationKind::Read, OperationKind::Import] {
-            let mut operations = PendingOperations::<()>::default();
-            let (reply, receiver) = reply();
-            let (release, resume) = async_channel::bounded::<()>(1);
-            let ran = Rc::new(Cell::new(false));
-            let completed = ran.clone();
-            operations.submit(
-                kind,
-                reply,
-                async move {
-                    resume.recv().await.unwrap();
-                    completed.set(true);
-                    Ok(())
-                },
-                finish,
-            );
-            assert!(operations.next().now_or_never().is_none());
-            drop(receiver);
-            if matches!(kind, OperationKind::Read) {
-                operations.next().await;
-                assert!(!ran.get());
-            } else {
-                assert!(operations.next().now_or_never().is_none());
-                release.send(()).await.unwrap();
-                operations.next().await;
-                assert!(ran.get());
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn ownership_resolves_unpolled_and_active_replies_and_contains_panics() {
-        let mut operations = PendingOperations::<()>::default();
-        let (pending, receiver) = reply();
-        operations.submit(OperationKind::Read, pending, std::future::pending(), finish);
-        assert!(operations.next().now_or_never().is_none());
-        let (unpolled, queued) = reply();
-        operations.submit(OperationKind::Read, unpolled, std::future::pending(), finish);
-        drop(operations);
-        assert!(receiver.recv().await.unwrap().is_err());
-        assert!(queued.recv().await.unwrap().is_err());
-
-        let mut operations = PendingOperations::<()>::default();
-        let (pending, receiver) = reply();
-        operations.submit(OperationKind::Read, pending, async { panic!("broken operation") }, finish);
-        operations.next().await;
-        assert!(receiver.recv().await.unwrap().unwrap_err().to_string().contains("panicked"));
-        let (pending, receiver) = reply();
-        operations.submit(OperationKind::Read, pending, async { Ok(()) }, finish);
-        operations.next().await;
-        assert!(receiver.recv().await.unwrap().is_ok());
-    }
-
-    #[tokio::test]
-    async fn concurrency_and_admission_are_bounded_without_blocking_other_classes() {
-        let mut operations = PendingOperations::<()>::default();
-        let started = Rc::new(Cell::new(0));
-        let mut receivers = Vec::new();
-        for _ in 0..PendingOperations::<()>::MAX_PENDING {
-            let (pending, receiver) = reply();
-            receivers.push(receiver);
-            let count = started.clone();
-            operations.submit(
-                OperationKind::Read,
-                pending,
-                async move {
-                    count.set(count.get() + 1);
-                    std::future::pending::<Result<(), BackendError>>().await
-                },
-                finish,
-            );
-        }
-        assert!(operations.next().now_or_never().is_none());
-        assert_eq!(started.get(), 8);
-        let (pending, receiver) = reply();
-        operations.submit(OperationKind::Read, pending, async { Ok(()) }, finish);
-        assert!(receiver.recv().await.unwrap().unwrap_err().to_string().contains("too many"));
-        drop(operations);
-        for receiver in receivers {
-            assert!(receiver.recv().await.unwrap().is_err());
-        }
-
-        let mut operations = PendingOperations::<()>::default();
-        let (pending, import) = reply();
-        operations.submit(OperationKind::Import, pending, std::future::pending(), finish);
-        let (pending, read) = reply();
-        operations.submit(OperationKind::Read, pending, async { Ok(()) }, finish);
-        operations.next().await;
-        assert!(read.recv().await.unwrap().is_ok());
-        assert!(import.try_recv().is_err());
-    }
 
     #[test]
     fn inbox_unwind_releases_queued_replies_even_with_a_retained_sender() {

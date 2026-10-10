@@ -208,21 +208,6 @@ pub fn browser_topbar_right() -> Div {
     div().flex_none().min_w_0().flex().items_center().justify_end().gap(px(TOPBAR_ACTION_GAP)).pr(px(CONTENT_INSET))
 }
 
-/// A page that names itself rather than trailing a breadcrumb, with a muted
-/// count beside the title. Set at the breadcrumb's size so a page carrying one
-/// of these and a page carrying a trail have the same topbar height.
-pub fn browser_page_title(title: impl Into<SharedString>, detail: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div()
-        .min_w_0()
-        .flex()
-        .flex_row()
-        .items_baseline()
-        .gap(px(SPACE_SM))
-        .text_size(gpui::rems(crate::TEXT_LG))
-        .child(div().flex_none().font_family(DISPLAY_FONT_FAMILY).child(title.into()))
-        .child(div().min_w_0().text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(detail.into()))
-}
-
 /// Centred, quiet status text for a section that is still loading.
 ///
 /// Deliberately plainer than [`browser_actionable_empty`]: a page that is

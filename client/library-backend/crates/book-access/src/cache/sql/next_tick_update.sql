@@ -1,1 +1,0 @@
-UPDATE clock SET tick=tick+1 WHERE id=1 RETURNING tick

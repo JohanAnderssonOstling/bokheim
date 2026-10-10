@@ -2,6 +2,7 @@
 pub(crate) use book_model::BookFormat;
 pub(crate) use library_model::{BrowseBookSort, BrowseChipSort, LibraryBrowseQuery, LibraryFileTypeFilter};
 
+#[derive(Clone)]
 pub(crate) struct BrowseOptions {
     pub search: String,
     pub file_types: i32,

@@ -12,5 +12,3 @@ book-model = { path = "../book-model" }
 unicode-normalization.workspace = true
 serde = { version = "1", features = ["derive"] }
 
-[dev-dependencies]
-wire = { path = "../wire" }

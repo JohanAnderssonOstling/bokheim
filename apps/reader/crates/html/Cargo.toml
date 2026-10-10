@@ -6,9 +6,10 @@ publish = false
 autobins = false
 
 [dependencies]
+futures-lite = "2"
 scraper.workspace = true
 lightningcss.workspace = true
-html-book = { path = "crates/html-book" }
+book-content = { path = "../../../../client/book-content" }
 html.workspace = true
 
 [[bin]]
@@ -18,3 +19,6 @@ path = "src/bin/css_audit.rs"
 [[bin]]
 name = "pipeline_profile"
 path = "src/bin/pipeline_profile.rs"
+
+[dev-dependencies]
+zip.workspace = true

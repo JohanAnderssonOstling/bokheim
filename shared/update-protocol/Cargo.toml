@@ -1,0 +1,15 @@
+[package]
+name = "update-protocol"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ring = "0.17"
+semver = { version = "1", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+ring = { version = "0.17", features = ["wasm32_unknown_unknown_js"] }

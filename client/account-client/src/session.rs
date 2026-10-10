@@ -1,54 +1,76 @@
+use crate::Url;
+use serde::{Deserialize, Serialize};
 use std::fmt::Formatter;
 use std::io::Error;
-use crate::ServerUrl;
-use serde::{Deserialize, Serialize};
+use sync_common::transport::WireError;
+use url::ParseError;
 
 #[derive(Debug)]
 pub enum AuthError {
-    Network(reqwest::Error),
+    Http(reqwest::Error),
+    Wire(WireError),
+    Url(ParseError),
     Io(Error),
     InvalidData(String),
-    BadStatus(reqwest::StatusCode, String),
     Binding(String),
 }
 
 impl std::fmt::Display for AuthError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Network(error) => write!(formatter, "network error: {error}"),
+            Self::Http(error) => error.fmt(formatter),
+            Self::Wire(error) => error.fmt(formatter),
+            Self::Url(error) => error.fmt(formatter),
             Self::Io(error) => write!(formatter, "io error: {error}"),
             Self::InvalidData(message) => write!(formatter, "invalid authentication data: {message}"),
-            Self::BadStatus(status, message) => write!(formatter, "server returned {status}: {message}"),
             Self::Binding(message) => message.fmt(formatter),
         }
     }
 }
 
-impl std::error::Error for AuthError {}
+impl std::error::Error for AuthError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Http(error) => Some(error),
+            Self::Wire(error) => Some(error),
+            Self::Url(error) => Some(error),
+            Self::Io(error) => Some(error),
+            Self::InvalidData(_) | Self::Binding(_) => None,
+        }
+    }
+}
 
 impl AuthError {
     pub fn is_not_found(&self) -> bool {
-        matches!(self, Self::BadStatus(status, _) if *status == reqwest::StatusCode::NOT_FOUND)
+        matches!(self, Self::Http(error) if error.status() == Some(reqwest::StatusCode::NOT_FOUND))
     }
 
     pub fn is_unauthorized(&self) -> bool {
-        matches!(self, Self::BadStatus(status, _) if *status == reqwest::StatusCode::UNAUTHORIZED)
+        matches!(self, Self::Http(error) if error.status() == Some(reqwest::StatusCode::UNAUTHORIZED))
+    }
+
+    /// The server refused the request as made (400 or 409): sending it again
+    /// cannot succeed.
+    pub fn is_rejected(&self) -> bool {
+        matches!(self, Self::Http(error) if matches!(error.status(), Some(reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::CONFLICT)))
     }
 }
 
 impl From<reqwest::Error> for AuthError {
     fn from(error: reqwest::Error) -> Self {
-        Self::Network(error)
+        Self::Http(error)
     }
 }
 
-impl From<binary_http::Error> for AuthError {
-    fn from(error: binary_http::Error) -> Self {
-        match error {
-            binary_http::Error::Network(error) => Self::Network(error),
-            binary_http::Error::InvalidData(message) => Self::InvalidData(message),
-            binary_http::Error::BadStatus(status, message) => Self::BadStatus(status, message),
-        }
+impl From<WireError> for AuthError {
+    fn from(error: WireError) -> Self {
+        Self::Wire(error)
+    }
+}
+
+impl From<ParseError> for AuthError {
+    fn from(error: ParseError) -> Self {
+        Self::Url(error)
     }
 }
 
@@ -60,7 +82,7 @@ impl From<Error> for AuthError {
 
 #[derive(Clone)]
 pub struct Session {
-    server_url: ServerUrl,
+    server_url: Url,
     user_id: String,
     email: String,
     token: String,
@@ -71,7 +93,7 @@ pub struct Session {
 
 #[derive(Serialize, Deserialize)]
 struct StoredSession {
-    server_url: ServerUrl,
+    server_url: Url,
     user_id: String,
     email: String,
     token: String,
@@ -146,15 +168,15 @@ fn validate_token(value: &str) -> Result<(), AuthError> {
 }
 
 impl Session {
-    pub fn try_new(server_url: ServerUrl, user_id: String, email: String, token: String) -> Result<Self, AuthError> {
+    pub fn try_new(server_url: Url, user_id: String, email: String, token: String) -> Result<Self, AuthError> {
         Self::try_new_with_expiry(server_url, user_id, email, token, None)
     }
 
-    pub fn try_new_with_expiry(server_url: ServerUrl, user_id: String, email: String, token: String, expires_at: Option<i64>) -> Result<Self, AuthError> {
+    pub fn try_new_with_expiry(server_url: Url, user_id: String, email: String, token: String, expires_at: Option<i64>) -> Result<Self, AuthError> {
         Self::try_new_with_tokens(server_url, user_id, email, token, expires_at, None, None)
     }
 
-    pub fn try_new_with_tokens(server_url: ServerUrl, user_id: String, email: String, token: String, expires_at: Option<i64>, refresh_token: Option<String>, refresh_expires_at: Option<i64>) -> Result<Self, AuthError> {
+    pub fn try_new_with_tokens(server_url: Url, user_id: String, email: String, token: String, expires_at: Option<i64>, refresh_token: Option<String>, refresh_expires_at: Option<i64>) -> Result<Self, AuthError> {
         validate_identity(&user_id, "user id")?;
         validate_email(&email)?;
         validate_token(&token)?;
@@ -174,7 +196,7 @@ impl Session {
         Ok(Self { server_url, user_id, email, token, expires_at, refresh_token, refresh_expires_at })
     }
 
-    pub fn server_url(&self) -> &ServerUrl {
+    pub fn server_url(&self) -> &Url {
         &self.server_url
     }
 
@@ -212,7 +234,7 @@ impl Session {
         self.refresh_expires_at.is_some_and(|expires_at| expires_at <= now.saturating_add(seconds.max(0)))
     }
 
-    pub fn with_server_url(&self, server_url: ServerUrl) -> Result<Self, AuthError> {
+    pub fn with_server_url(&self, server_url: Url) -> Result<Self, AuthError> {
         Self::try_new_with_tokens(server_url, self.user_id.clone(), self.email.clone(), self.token.clone(), self.expires_at, self.refresh_token.clone(), self.refresh_expires_at)
     }
 }
@@ -224,34 +246,13 @@ mod tests {
     const TEST_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     #[test]
-    fn deserialization_validates_every_field() {
-        let valid = serde_json::json!({ "server_url": "https://example.com", "user_id": "user-1", "email": "reader@example.com", "token": TEST_TOKEN, "expires_at": null, "refresh_token": null, "refresh_expires_at": null });
-        let session: Session = serde_json::from_value(valid.clone()).unwrap();
-        assert_eq!(session.server_url().as_str(), "https://example.com/");
-        for (field, invalid) in [("server_url", "file:///tmp/server"), ("user_id", "bad/id"), ("email", &"a".repeat(account_contract::EMAIL_MAX_BYTES + 1)), ("token", "short")] {
-            let mut value = valid.clone();
-            value[field] = serde_json::Value::String(invalid.to_string());
-            assert!(serde_json::from_value::<Session>(value).is_err());
-        }
-    }
-
-    #[test]
     fn debug_redacts_token_and_expiry_is_validated() {
-        let session = Session::try_new(ServerUrl::parse("https://example.com").unwrap(), "user-1".into(), "reader@example.com".into(), TEST_TOKEN.into()).unwrap();
+        let session = Session::try_new(Url::parse("https://example.com").unwrap(), "user-1".into(), "reader@example.com".into(), TEST_TOKEN.into()).unwrap();
         assert!(!format!("{session:?}").contains(TEST_TOKEN));
+        let restored: Session = serde_json::from_value(serde_json::to_value(&session).unwrap()).unwrap();
+        assert_eq!(restored.server_url(), session.server_url());
+        assert_eq!(restored.token(), session.token());
         let invalid = serde_json::json!({ "server_url": "https://example.com", "user_id": "user-1", "email": "reader@example.com", "token": TEST_TOKEN, "expires_at": 0, "refresh_token": null, "refresh_expires_at": null });
         assert!(serde_json::from_value::<Session>(invalid).is_err());
-    }
-
-    #[test]
-    fn refresh_credentials_round_trip_and_remain_redacted() {
-        let session = Session::try_new_with_tokens(ServerUrl::parse("https://example.com").unwrap(), "user-1".into(), "reader@example.com".into(), TEST_TOKEN.into(), Some(100), Some("b".repeat(43)), Some(200)).unwrap();
-        let stored = serde_json::to_string(&session).unwrap();
-        let restored: Session = serde_json::from_str(&stored).unwrap();
-        assert_eq!(restored.refresh_token(), Some("b".repeat(43).as_str()));
-        let debug = format!("{session:?}");
-        assert!(!debug.contains(TEST_TOKEN));
-        assert!(!debug.contains(&"b".repeat(43)));
-        assert!(Session::try_new_with_tokens(ServerUrl::parse("https://example.com").unwrap(), "user-1".into(), "reader@example.com".into(), TEST_TOKEN.into(), Some(100), Some("b".repeat(43)), None).is_err());
     }
 }

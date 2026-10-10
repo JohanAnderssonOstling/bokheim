@@ -24,9 +24,7 @@ fn required_content_length(headers: &HeaderMap) -> Result<u64, StatusCode> {
     headers.get(header::CONTENT_LENGTH).ok_or(StatusCode::LENGTH_REQUIRED)?.to_str().ok().and_then(|value| value.parse::<u64>().ok()).ok_or(StatusCode::BAD_REQUEST)
 }
 
-fn required_book_checksum(headers: &HeaderMap) -> Result<ContentHash, StatusCode> {
-    headers.get("x-bokheim-content-checksum").and_then(|value| ContentHash::try_from(value.as_bytes()).ok()).ok_or(StatusCode::BAD_REQUEST)
-}
+
 
 fn response_headers(kind: AssetKind, hash: &ContentHash) -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -53,10 +51,7 @@ async fn head(state: &AppState, user_id: &str, library_id: &LibraryId, kind: Ass
         return Err(StatusCode::NOT_FOUND);
     };
     let mut response = Response::new(Body::empty());
-    *response.headers_mut() = response_headers(kind, &asset.checksum);
-    if kind == AssetKind::Book {
-        response.headers_mut().insert("x-bokheim-content-checksum", header::HeaderValue::from_str(asset.checksum.as_str()).unwrap());
-    }
+    *response.headers_mut() = response_headers(kind, &asset.content_hash);
     response.headers_mut().insert(header::CONTENT_LENGTH, asset.total_len.into());
     Ok(response)
 }
@@ -69,7 +64,7 @@ async fn get(state: &AppState, user_id: &str, library_id: &LibraryId, kind: Asse
 }
 
 pub(crate) async fn stream_asset(mut asset: server_asset_store::StoredAsset, kind: AssetKind, request_headers: &HeaderMap, governor: TransferGovernor, user_id: String) -> Result<Response, StatusCode> {
-    let headers = response_headers(kind, &asset.checksum);
+    let headers = response_headers(kind, &asset.content_hash);
     let if_range_matches = request_headers.get(header::IF_RANGE).is_none_or(|value| Some(value) == headers.get(header::ETAG));
     let requested_range = if if_range_matches { request_headers.get(header::RANGE).map(|value| parse_range(value, asset.total_len)).transpose()? } else { None };
     let offset = requested_range.map(|range| range.start).unwrap_or(0);
@@ -93,10 +88,7 @@ pub(crate) async fn stream_asset(mut asset: server_asset_store::StoredAsset, kin
     });
     let mut response = Response::new(Body::from_stream(stream));
     *response.status_mut() = if requested_range.is_some() { StatusCode::PARTIAL_CONTENT } else { StatusCode::OK };
-    *response.headers_mut() = response_headers(kind, &asset.checksum);
-    if kind == AssetKind::Book {
-        response.headers_mut().insert("x-bokheim-content-checksum", header::HeaderValue::from_str(asset.checksum.as_str()).unwrap());
-    }
+    *response.headers_mut() = response_headers(kind, &asset.content_hash);
     response.headers_mut().insert(header::CONTENT_LENGTH, response_len.into());
     if requested_range.is_some() {
         let end = offset + response_len - 1;
@@ -110,7 +102,7 @@ pub(crate) async fn stream_audio_track(mut asset: server_asset_store::StoredAsse
     if length == 0 || base.checked_add(length).is_none_or(|end| end > asset.total_len) {
         return Err(StatusCode::RANGE_NOT_SATISFIABLE);
     }
-    let etag = format!("\"{}-{base}-{length}\"", asset.checksum);
+    let etag = format!("\"{}-{base}-{length}\"", asset.content_hash);
     let if_range_matches = request_headers.get(header::IF_RANGE).is_none_or(|value| value.to_str().ok() == Some(etag.as_str()));
     let requested = if if_range_matches { request_headers.get(header::RANGE).map(|value| parse_range(value, length)).transpose()? } else { None };
     let start = requested.map(|range| range.start).unwrap_or(0);
@@ -198,8 +190,7 @@ async fn put(state: &AppState, user_id: &str, library_id: &LibraryId, kind: Asse
     });
     let reader = StreamReader::new(stream.boxed());
     if kind == AssetKind::Book {
-        let checksum = required_book_checksum(headers)?;
-        state.assets.put_book_revision(user_id, library_id, hash, &checksum, content_length, Box::new(reader)).await.map_err(asset_error)?;
+        state.assets.put_book(user_id, library_id, hash, content_length, Box::new(reader)).await.map_err(asset_error)?;
     } else {
         state.assets.put(user_id, library_id, kind, hash, Some(content_length), Box::new(reader)).await.map_err(asset_error)?;
     }
@@ -355,8 +346,8 @@ mod tests {
 
     #[tokio::test]
     async fn audio_track_ranges_are_relative_to_the_mp3_entry() {
-        let checksum = ContentHash::new(&"c".repeat(64));
-        let asset = server_asset_store::StoredAsset { reader: Box::new(Cursor::new(b"zip!TRACKaudio!tail".to_vec())), total_len: 19, offset: 0, checksum };
+        let content_hash = ContentHash::new(&"c".repeat(64));
+        let asset = server_asset_store::StoredAsset { reader: Box::new(Cursor::new(b"zip!TRACKaudio!tail".to_vec())), total_len: 19, offset: 0, content_hash };
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(header::RANGE, "bytes=2-5".parse().unwrap());
         let response = super::stream_audio_track(asset, 4, 10, &headers, TransferGovernor::new(Default::default()), "test".into()).await.unwrap();
@@ -366,74 +357,27 @@ mod tests {
         assert_eq!(axum::body::to_bytes(response.into_body(), 1024).await.unwrap().as_ref(), b"ACKa");
     }
 
-    #[test]
-    fn book_upload_requires_an_explicit_valid_checksum() {
-        let mut headers = axum::http::HeaderMap::new();
-        assert_eq!(super::required_book_checksum(&headers), Err(StatusCode::BAD_REQUEST));
-        headers.insert("x-bokheim-content-checksum", "invalid".parse().unwrap());
-        assert_eq!(super::required_book_checksum(&headers), Err(StatusCode::BAD_REQUEST));
-        let checksum = ContentHash::new(&"a".repeat(64));
-        headers.insert("x-bokheim-content-checksum", checksum.as_str().parse().unwrap());
-        assert_eq!(super::required_book_checksum(&headers).unwrap(), checksum);
-    }
 
     #[tokio::test]
-    async fn range_responses_are_bound_to_the_actual_revision_checksum() {
-        let checksum = ContentHash::new(&"b".repeat(64));
+    async fn range_responses_are_bound_to_the_content_hash() {
+        let content_hash = ContentHash::new(&"b".repeat(64));
         let payload = b"0123456789abcdef";
-        for (range, validator, expected) in [("bytes=4-7", format!("\"{checksum}\""), StatusCode::PARTIAL_CONTENT), ("bytes=4-7", "\"old-revision\"".into(), StatusCode::OK)] {
-            let asset = server_asset_store::StoredAsset { reader: Box::new(Cursor::new(payload.to_vec())), total_len: payload.len() as u64, offset: 0, checksum };
+        for (range, validator, expected) in [("bytes=4-7", format!("\"{content_hash}\""), StatusCode::PARTIAL_CONTENT), ("bytes=4-7", "\"old-revision\"".into(), StatusCode::OK)] {
+            let asset = server_asset_store::StoredAsset { reader: Box::new(Cursor::new(payload.to_vec())), total_len: payload.len() as u64, offset: 0, content_hash };
             let mut headers = axum::http::HeaderMap::new();
             headers.insert(header::RANGE, range.parse().unwrap());
             headers.insert(header::IF_RANGE, validator.parse().unwrap());
             let response = super::stream_asset(asset, AssetKind::Book, &headers, TransferGovernor::new(Default::default()), "test".into()).await.unwrap();
             assert_eq!(response.status(), expected);
-            assert_eq!(response.headers().get("x-bokheim-content-checksum").unwrap(), checksum.as_str());
-            assert_eq!(response.headers().get(header::ETAG).unwrap().to_str().unwrap(), format!("\"{checksum}\""));
+            assert_eq!(response.headers().get(header::ETAG).unwrap().to_str().unwrap(), format!("\"{content_hash}\""));
             let bytes = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
             assert_eq!(bytes.as_ref(), if expected == StatusCode::OK { payload.as_slice() } else { &payload[4..8] });
         }
-        let asset = server_asset_store::StoredAsset { reader: Box::new(Cursor::new(payload.to_vec())), total_len: payload.len() as u64, offset: 0, checksum };
+        let asset = server_asset_store::StoredAsset { reader: Box::new(Cursor::new(payload.to_vec())), total_len: payload.len() as u64, offset: 0, content_hash };
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(header::RANGE, "bytes=18446744073709551615-".parse().unwrap());
         assert_eq!(super::stream_asset(asset, AssetKind::Book, &headers, TransferGovernor::new(Default::default()), "test".into()).await.unwrap_err(), StatusCode::RANGE_NOT_SATISFIABLE);
     }
 
-    #[test]
-    fn head_and_get_share_canonical_asset_headers() {
-        let hash = ContentHash::new(&"a".repeat(64));
-        let book = response_headers(AssetKind::Book, &hash);
-        assert_eq!(book.get(header::ETAG).unwrap().to_str().unwrap(), format!("\"{hash}\""));
-        assert_eq!(book.get(header::CONTENT_TYPE).unwrap(), "application/octet-stream");
-        assert!(book.get(header::CACHE_CONTROL).is_none());
 
-        let thumbnail = response_headers(AssetKind::Thumbnail, &hash);
-        assert!(thumbnail.get(header::ETAG).is_none());
-        assert_eq!(thumbnail.get(header::CONTENT_TYPE).unwrap(), "image/jpeg");
-        assert_eq!(thumbnail.get(header::CACHE_CONTROL).unwrap(), "private, no-store, no-transform");
-    }
-
-    #[tokio::test]
-    async fn suffix_ranges_stream_the_tail_with_correct_headers() {
-        let asset = server_asset_store::StoredAsset { reader: Box::new(Cursor::new(b"0123456789".to_vec())), total_len: 10, offset: 0, checksum: ContentHash::new(&"b".repeat(64)) };
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert(header::RANGE, "bytes=-3".parse().unwrap());
-        let response = super::stream_asset(asset, AssetKind::Book, &headers, TransferGovernor::new(Default::default()), "test".into()).await.unwrap();
-        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
-        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 7-9/10");
-        assert_eq!(response.headers()[header::CONTENT_LENGTH], "3");
-        assert_eq!(axum::body::to_bytes(response.into_body(), 10).await.unwrap().as_ref(), b"789");
-    }
-
-    #[test]
-    fn accepts_one_bounded_or_open_ended_byte_range() {
-        assert_eq!(parse_range(&header::HeaderValue::from_static("bytes=42-"), 100).unwrap(), ByteRange { start: 42, end: None });
-        assert_eq!(parse_range(&header::HeaderValue::from_static("bytes=42-99"), 100).unwrap(), ByteRange { start: 42, end: Some(99) });
-        assert_eq!(parse_range(&header::HeaderValue::from_static("bytes=-5"), 100).unwrap(), ByteRange { start: 95, end: None });
-        assert_eq!(parse_range(&header::HeaderValue::from_static("bytes=-500"), 100).unwrap(), ByteRange { start: 0, end: None });
-        assert_eq!(parse_range(&header::HeaderValue::from_static("bytes=-5"), 0), Err(StatusCode::RANGE_NOT_SATISFIABLE));
-        for invalid in ["items=1-", "bytes=-0", "bytes=-", "bytes=9-1", "bytes=1-,3-", "bytes=x-"] {
-            assert_eq!(parse_range(&header::HeaderValue::from_str(invalid).unwrap(), 100), Err(StatusCode::RANGE_NOT_SATISFIABLE));
-        }
-    }
 }

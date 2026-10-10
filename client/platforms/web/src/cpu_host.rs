@@ -2,9 +2,21 @@
 
 use super::transport::{cpu_client, range::Server};
 use client_platform_runtime::executor::BoxedBackendFuture;
-use cpu_host::{BackendError, BookOperation, BookTask, BoxedCpuReader, CpuHost, CpuRequest, CpuResponse, Operation, ThumbnailBytes};
+use cpu_host::{Artifact, BackendError, BookOperation, BookTask, BoxedCpuReader, CpuHost, CpuRequest, CpuResponse, Operation, ThumbnailBytes};
+use std::cell::RefCell;
 use std::io::{Read, Seek, SeekFrom};
 use wasm_bindgen::JsValue;
+
+thread_local! {
+    static TAXONOMY: RefCell<Option<Artifact>> = const { RefCell::new(None) };
+}
+
+/// The snapshot the database worker's taxonomy came from. Inspection checks
+/// subject codes against the taxonomy, and the CPU worker, a separate module,
+/// loads this snapshot itself on its first inspection.
+pub fn set_taxonomy(artifact: Artifact) {
+    TAXONOMY.with(|slot| *slot.borrow_mut() = Some(artifact));
+}
 
 #[derive(Default)]
 pub struct WebHost;
@@ -12,7 +24,8 @@ impl CpuHost for WebHost {
     fn book(&self, task: BookTask, reader: BoxedCpuReader) -> BoxedBackendFuture<'_, Result<CpuResponse, BackendError>> {
         Box::pin(async move {
             let server = serve_reader(reader).map_err(BackendError::operation)?;
-            let bytes = rmp_serde::to_vec_named(&CpuRequest::Book { task }).map_err(BackendError::operation)?;
+            let taxonomy = matches!(task, BookTask::Inspect { .. }).then(|| TAXONOMY.with(|slot| slot.borrow().clone())).flatten();
+            let bytes = rmp_serde::to_vec_named(&CpuRequest::Book { task, taxonomy }).map_err(BackendError::operation)?;
             let response = cpu_client::request_with_source(bytes, server.source()).map_err(BackendError::operation)?.await.map_err(BackendError::operation)?;
             rmp_serde::from_slice(&response).map_err(BackendError::operation)?
         })

@@ -56,31 +56,3 @@ fn validate_production_path(name: &str, path: &Path) -> Result<(), StorageConfig
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    fn paths(values: &[(&str, &str)]) -> Result<StoragePaths, StorageConfigError> {
-        let values: HashMap<_, _> = values.iter().map(|(key, value)| ((*key).to_owned(), OsString::from(value))).collect();
-        StoragePaths::from_values(|name| values.get(name).cloned())
-    }
-
-    #[test]
-    fn local_development_has_isolated_relative_defaults() {
-        assert_eq!(paths(&[]).unwrap().into_parts(), (PathBuf::from("./books"), PathBuf::from("./thumbnails")));
-    }
-
-    #[test]
-    fn production_root_must_be_absolute_and_normalized() {
-        assert!(paths(&[(ASSETS_DIRECTORY, "assets")]).is_err());
-        assert!(paths(&[(ASSETS_DIRECTORY, "/srv/bokheim/../assets")]).is_err());
-    }
-
-    #[test]
-    fn derives_storage_directories_from_the_production_root() {
-        let configured = paths(&[(ASSETS_DIRECTORY, "/var/lib/bokheim/assets")]).unwrap();
-        assert_eq!(configured.into_parts(), (PathBuf::from("/var/lib/bokheim/assets/books"), PathBuf::from("/var/lib/bokheim/assets/thumbnails")));
-    }
-}

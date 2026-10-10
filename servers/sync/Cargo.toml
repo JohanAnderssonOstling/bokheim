@@ -41,12 +41,7 @@ server-account = { path = "crates/server-account" }
 [dev-dependencies]
 account-contract = { path = "../../shared/account-contract" }
 wire = { package = "protobuf-wire", path = "../../shared/protobuf-wire" }
-blake3 = "1"
-reqwest = { version = "0.12", default-features = false, features = ["stream"] }
-futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "postgres"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
-sync-common = { path = "../../shared/sync-common", features = ["test-support"] }
-zip = { version = "2.4.2", default-features = false, features = ["deflate"] }

@@ -1,0 +1,256 @@
+{
+  "scope": "Apply all user-approved groups from the saved plan, transferring all classification mappings to existing parents.",
+  "before_concepts": 15751,
+  "after_concepts": 15713,
+  "groups": [
+    {
+      "name": "Directories & general resources",
+      "absorbed_subjects": 10
+    },
+    {
+      "name": "Manuals",
+      "absorbed_subjects": 8
+    },
+    {
+      "name": "Ancient Greek author filing detail",
+      "absorbed_subjects": 9
+    },
+    {
+      "name": "Photographic collection periods",
+      "absorbed_subjects": 4
+    },
+    {
+      "name": "Recreation facility operations",
+      "absorbed_subjects": 3
+    },
+    {
+      "name": "Sociology reference detail",
+      "absorbed_subjects": 4
+    }
+  ],
+  "merges": {
+    "6207": {
+      "into": 54994,
+      "old_label": "National Ed Directories",
+      "surviving_label": "Reference & Documents"
+    },
+    "7041": {
+      "into": 54994,
+      "old_label": "U.S. Ed Directories",
+      "surviving_label": "Reference & Documents"
+    },
+    "6928": {
+      "into": 405,
+      "old_label": "Directories. Registers",
+      "surviving_label": "Aeronautical Engineering"
+    },
+    "13662": {
+      "into": 2725,
+      "old_label": "Medical Directories",
+      "surviving_label": "Medicine"
+    },
+    "52846": {
+      "into": 5106,
+      "old_label": "Advertising Directories",
+      "surviving_label": "Advertising"
+    },
+    "53460": {
+      "into": 55043,
+      "old_label": "Directories",
+      "surviving_label": "Business Learning & Reference"
+    },
+    "52972": {
+      "into": 12684,
+      "old_label": "Computer Science Information Services",
+      "surviving_label": "Computer Science Resources"
+    },
+    "52974": {
+      "into": 12684,
+      "old_label": "Computer Science Directories",
+      "surviving_label": "Computer Science Resources"
+    },
+    "8255": {
+      "into": 4691,
+      "old_label": "Minor works",
+      "surviving_label": "Book History"
+    },
+    "7175": {
+      "into": 4370,
+      "old_label": "Information services",
+      "surviving_label": "Authorship"
+    },
+    "6858": {
+      "into": 264,
+      "old_label": "Laboratory manuals",
+      "surviving_label": "Electronics"
+    },
+    "8505": {
+      "into": 5046,
+      "old_label": "Laboratory manuals",
+      "surviving_label": "Neurophysiology & Psychology"
+    },
+    "6788": {
+      "into": 1050,
+      "old_label": "Treatises. Manuals",
+      "surviving_label": "Wood engraving"
+    },
+    "8159": {
+      "into": 293,
+      "old_label": "Surveying Field Manuals",
+      "surviving_label": "Surveying"
+    },
+    "7636": {
+      "into": 282,
+      "old_label": "Soil Measurement Manuals",
+      "surviving_label": "Engineering Geology & Geomechanics"
+    },
+    "9184": {
+      "into": 1038,
+      "old_label": "Art Technique Manuals",
+      "surviving_label": "Technique & materials"
+    },
+    "6236": {
+      "into": 2322,
+      "old_label": "Elementary Teaching Manuals",
+      "surviving_label": "Primary Education"
+    },
+    "8677": {
+      "into": 2327,
+      "old_label": "Manuals of instruction",
+      "surviving_label": "Secondary Education"
+    },
+    "6999": {
+      "into": 4255,
+      "old_label": "Editions",
+      "surviving_label": "Ancient Greek Authors"
+    },
+    "7178": {
+      "into": 4255,
+      "old_label": "Selected orations",
+      "surviving_label": "Ancient Greek Authors"
+    },
+    "7223": {
+      "into": 4255,
+      "old_label": "Language. Style",
+      "surviving_label": "Ancient Greek Authors"
+    },
+    "8077": {
+      "into": 4255,
+      "old_label": "Interpretation & criticism",
+      "surviving_label": "Ancient Greek Authors"
+    },
+    "8242": {
+      "into": 4255,
+      "old_label": "Particular orations",
+      "surviving_label": "Ancient Greek Authors"
+    },
+    "8470": {
+      "into": 4255,
+      "old_label": "Criticism & interpretation",
+      "surviving_label": "Ancient Greek Authors"
+    },
+    "9285": {
+      "into": 4255,
+      "old_label": "Greek Fable Criticism",
+      "surviving_label": "Ancient Greek Authors"
+    },
+    "9328": {
+      "into": 4255,
+      "old_label": "Separate works",
+      "surviving_label": "Ancient Greek Authors"
+    },
+    "9674": {
+      "into": 4255,
+      "old_label": "Fragments & lost works",
+      "surviving_label": "Ancient Greek Authors"
+    },
+    "53258": {
+      "into": 12571,
+      "old_label": "Photographic Collections through 1900",
+      "surviving_label": "Photographic Collections"
+    },
+    "53259": {
+      "into": 12571,
+      "old_label": "Photographic Collections, 1901–1950",
+      "surviving_label": "Photographic Collections"
+    },
+    "53260": {
+      "into": 12571,
+      "old_label": "Photographic Collections, 1951–2000",
+      "surviving_label": "Photographic Collections"
+    },
+    "53261": {
+      "into": 12571,
+      "old_label": "Photographic Collections since 2001",
+      "surviving_label": "Photographic Collections"
+    },
+    "6853": {
+      "into": 4670,
+      "old_label": "Financial & business aspects",
+      "surviving_label": "Recreation Facilities"
+    },
+    "8036": {
+      "into": 4670,
+      "old_label": "Public relations",
+      "surviving_label": "Recreation Facilities"
+    },
+    "10051": {
+      "into": 4670,
+      "old_label": "Facility planning. Standards",
+      "surviving_label": "Recreation Facilities"
+    },
+    "52909": {
+      "into": 13838,
+      "old_label": "Sociology Periodicals",
+      "surviving_label": "Reference"
+    },
+    "52910": {
+      "into": 13838,
+      "old_label": "Sociology Museums & Exhibitions",
+      "surviving_label": "Reference"
+    },
+    "52911": {
+      "into": 13838,
+      "old_label": "Sociology Directories & Institutions",
+      "surviving_label": "Reference"
+    },
+    "52912": {
+      "into": 13838,
+      "old_label": "Sociology Special Works",
+      "surviving_label": "Reference"
+    }
+  },
+  "validation": {
+    "integrity_check": "ok",
+    "foreign_key_violations": 0,
+    "exact_row_remapping": true,
+    "range_multiplicity_preserved": true,
+    "surviving_ids_and_autoincrement_preserved": true,
+    "only_childless_subjects_removed": true,
+    "production_matcher": {
+      "probes": 172771,
+      "changed_destinations": 379,
+      "unexpected_changes": 0,
+      "coverage_losses": 0,
+      "coverage_gains": 0,
+      "scope": "Stored selectors, structured range endpoints and full spans, adjacent numeric boundaries, author work/year/volume and malformed notation probes. Full observed-code cache unavailable."
+    },
+    "replay_guard": "Already absorbed IDs are rejected without changing data.",
+    "full_usage_refresh": "Local OpenLibrary code-usage cache unavailable; viewer regenerated without usage counts and historical usage TSV retained.",
+    "viewer": {
+      "subjects": 15713,
+      "usage_counts_visible": false,
+      "all_38_absorbed_subjects_absent": true,
+      "Greek_translations_and_named_works_retained": true
+    },
+    "rust_tests": {
+      "command": "cargo test --offline -p subject-projection --lib",
+      "passed": 34,
+      "failed": 0
+    }
+  },
+  "plan": "shared/subject-projection/data/reports/20261007-next-absorption-candidates.json",
+  "before_sha256": "a0d33ae5d184ee607d96be714d6d4899ce14ea6618923c00210356bf358708e7",
+  "after_sha256": "4005d6a4ea197883f14efeb7d66230f9a1275f213f28b02911f639eee6fc2374",
+  "recoverable_before_snapshot": "/tmp/taxonomy-next-install-20261007/before.sqlite3"
+}

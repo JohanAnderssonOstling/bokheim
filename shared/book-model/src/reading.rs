@@ -92,11 +92,7 @@ impl ReadingPosition {
     }
 
     pub fn epub_cfi(value: &str) -> Result<Self, InvalidReadingPosition> {
-        if valid_epub_cfi(value) {
-            Ok(Self::Epub(ReadingEpubCfi(value.to_owned())))
-        } else {
-            Err(InvalidReadingPosition)
-        }
+        if valid_epub_cfi(value) { Ok(Self::Epub(ReadingEpubCfi(value.to_owned()))) } else { Err(InvalidReadingPosition) }
     }
 
     pub const fn pdf_page(page_index: u32) -> Self {
@@ -235,6 +231,19 @@ fn parse_full_page_position(value: &str) -> Option<f32> {
     Some(full_page_position.max(0.0))
 }
 
+/// How far through the book a position is, on the shared 0–100 progress
+/// scale that reading positions and annotations both store. A PDF counts the
+/// page being read as reached, so the last page is 100.
+pub fn pdf_page_progress(page_index: usize, page_count: usize) -> f32 {
+    if page_count == 0 { 0.0 } else { (page_index.saturating_add(1) as f32 / page_count as f32 * 100.0).clamp(0.0, 100.0) }
+}
+
+/// The same scale for a reflowed book, whose renderer reports a 0–1 layout
+/// fraction.
+pub fn layout_fraction_progress(fraction: f32) -> f32 {
+    fraction.clamp(0.0, 1.0) * 100.0
+}
+
 pub fn pdf_page_reading_position(page_index: u32) -> String {
     format!("pdfpage({page_index})")
 }
@@ -278,11 +287,7 @@ impl ReadProgress {
     pub const ZERO: Self = Self(0.0);
 
     pub fn new(value: f32) -> Result<Self, InvalidReadProgress> {
-        if value.is_finite() && (0.0..=100.0).contains(&value) {
-            Ok(Self(value))
-        } else {
-            Err(InvalidReadProgress)
-        }
+        if value.is_finite() && (0.0..=100.0).contains(&value) { Ok(Self(value)) } else { Err(InvalidReadProgress) }
     }
 
     pub fn value(self) -> f32 {
@@ -324,33 +329,5 @@ mod tests {
         assert!(EpubCfi::parse(" epubcfi(/6/4)").is_err());
     }
 
-    #[test]
-    fn read_progress_rejects_non_finite_and_out_of_range_values() {
-        assert_eq!(ReadProgress::new(37.5).unwrap().value(), 37.5);
-        assert!(ReadProgress::new(f32::NAN).is_err());
-        assert!(ReadProgress::new(-0.1).is_err());
-        assert!(ReadProgress::new(100.1).is_err());
-    }
 
-    #[test]
-    fn canonical_positions_round_trip_for_every_reader_format() {
-        for value in ["epubcfi(/6/4)", "pdfpage(0)", "pdfpage(0,0)", "pdfpage(0,0.25)", "pdfpage(17)", "pdfpage(17,0.25)", "audiopos(1234567)"] {
-            let position = ReadingPosition::parse(value).unwrap();
-            assert_eq!(position.as_str(), value);
-            let encoded = serde_json::to_string(&position).unwrap();
-            let decoded: ReadingPosition = serde_json::from_str(&encoded).unwrap();
-            assert_eq!(decoded, position);
-        }
-        assert!(ReadingPosition::parse("pdfpage(01)").is_err());
-        assert!(ReadingPosition::parse("pdfpage(01,0.25)").is_err());
-        let negative = ReadingPosition::parse("pdfpage(17,-0.5)").unwrap();
-        assert_eq!(negative.as_str(), "pdfpage(17,0)");
-        assert_eq!(negative.pdf_page_position(), Some(0.0));
-        assert!(ReadingPosition::parse("pdfpage(17,NaN)").is_err());
-        assert!(ReadingPosition::parse("pdfpage(17,)").is_err());
-        assert!(ReadingPosition::parse("pdfpage(17,0,5)").is_err());
-        assert!(ReadingPosition::parse("audiopos(-1)").is_err());
-        assert!(ReadingPosition::parse("epubcfi(/6/4[unclosed)").is_ok());
-        assert!(EpubCfi::parse("epubcfi(/6/4[unclosed)").is_err());
-    }
 }

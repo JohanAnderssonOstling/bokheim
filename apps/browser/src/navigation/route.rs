@@ -48,9 +48,11 @@ impl LibrarySummary {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LibraryRoute {
     Home,
+    Books,
     Authors,
     Folders,
     Subjects,
+    Catalog,
     Trash,
 }
 

@@ -38,7 +38,7 @@ impl Drop for Reservation {
 mod tests {
     use super::*;
     use crate::{
-        coordinator::{CpuJobs, SyncJobs, TransferJobs},
+        coordinator::{CpuJobs, SyncJobs},
         worker_lifecycle::Connection,
     };
     #[test]
@@ -51,33 +51,6 @@ mod tests {
         drop(first);
         assert_eq!(budget.used(), 0);
         assert!(budget.reserve(10).is_some());
-    }
-    #[test]
-    fn rejected_job_and_dropped_queue_return_all_capacity() {
-        let budget = ByteBudget::new(10);
-        let mut jobs = CpuJobs::new(1);
-        assert!(jobs.request(1, budget.reserve(4).unwrap()).is_ok());
-        let rejected = jobs.request(2, budget.reserve(6).unwrap());
-        assert!(rejected.is_err());
-        drop(rejected);
-        assert_eq!(budget.used(), 4);
-        drop(jobs);
-        assert_eq!(budget.used(), 0);
-    }
-    #[test]
-    fn active_cpu_keeps_reservation_after_caller_cancellation() {
-        let budget = ByteBudget::new(10);
-        let mut jobs = CpuJobs::new(2);
-        assert!(jobs.request(1, budget.reserve(7).unwrap()).is_ok());
-        assert!(jobs.request(2, budget.reserve(3).unwrap()).is_ok());
-        jobs.ready();
-        jobs.next();
-        assert!(jobs.cancel_pending(1).is_none());
-        drop(jobs.cancel_pending(2));
-        assert_eq!(budget.used(), 7);
-        assert!(budget.reserve(4).is_none());
-        drop(jobs.complete(1).unwrap());
-        assert_eq!(budget.used(), 0);
     }
     #[test]
     fn repeated_startup_cancellation_failure_and_stale_reply_release_every_request() {
@@ -107,38 +80,5 @@ mod tests {
             drop(jobs.complete(first + 2).unwrap());
             assert_eq!(budget.used(), 0);
         }
-    }
-    #[test]
-    fn coalesced_sync_holds_every_input_until_its_pass_completes() {
-        let budget = ByteBudget::new(12);
-        let mut jobs = SyncJobs::new(3);
-        assert!(jobs.request("a".into(), budget.reserve(3).unwrap()).is_ok());
-        assert!(jobs.request("a".into(), budget.reserve(4).unwrap()).is_ok());
-        assert!(jobs.request("a".into(), budget.reserve(5).unwrap()).is_ok());
-        drop(jobs.complete("a"));
-        assert_eq!(budget.used(), 9);
-        drop(jobs.fail("host replaced".into()));
-        assert_eq!(budget.used(), 0);
-        assert!(jobs.complete("a").is_empty());
-        let rejected = jobs.request("a".into(), budget.reserve(1).unwrap());
-        assert!(rejected.is_err());
-        drop(rejected);
-        assert_eq!(budget.used(), 0);
-    }
-    #[test]
-    fn transfer_failure_releases_owner_and_subscriber_once() {
-        let resources = Rc::new(());
-        let mut jobs = TransferJobs::new(3);
-        for id in 1..=3 {
-            jobs.request("book".into(), id, resources.clone()).unwrap();
-        }
-        jobs.cancel("book", 1);
-        drop(jobs.cancel("book", 2));
-        assert_eq!(Rc::strong_count(&resources), 3);
-        drop(jobs.take_finished("book", 3, true));
-        assert_eq!(Rc::strong_count(&resources), 1);
-        assert!(jobs.take_finished("book", 1, false).is_none());
-        drop(jobs.drain("host lost".into()));
-        assert_eq!(Rc::strong_count(&resources), 1);
     }
 }

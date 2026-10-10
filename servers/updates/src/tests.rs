@@ -1,6 +1,9 @@
 use super::*;
-use ring::signature::{Ed25519KeyPair, KeyPair};
-use update_client::{ApplicationRelease, SIGNATURE_CONTEXT};
+use ring::{
+    digest::SHA256,
+    signature::{Ed25519KeyPair, KeyPair},
+};
+use update_protocol::{ApplicationRelease, TaxonomyRelease, SIGNATURE_CONTEXT};
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -31,6 +34,7 @@ impl Fixture {
             expires_at_unix: 200,
             application: Some(ApplicationRelease { version: "2.0.0".parse().unwrap(), name: "Release".into(), schema_version: 1, taxonomy_format_versions: vec![1], artifacts: [("linux".into(), artifact)].into() }),
             taxonomy: None,
+            catalog: None,
         };
         let fixture = Self { temp: tempfile::tempdir().unwrap(), config, manifest, key };
         fs::create_dir_all(fixture.bundle().join("artifacts/updates/releases/2.0")).unwrap();
@@ -77,7 +81,7 @@ fn taxonomy_only_and_withdrawal_preserve_downloads() {
     let mut artifact = f.manifest.application.take().unwrap().artifacts["linux"].clone();
     artifact.url = "https://taxonomy.example.org/releases/42/snapshot.sqlite3".into();
     f.config.origins.insert("https://taxonomy.example.org".into(), "taxonomy".into());
-    f.manifest.taxonomy = Some(update_client::TaxonomyRelease { release_id: 42, format_version: 1, minimum_application_version: "1.0.0".parse().unwrap(), minimum_schema_version: 1, artifact });
+    f.manifest.taxonomy = Some(TaxonomyRelease { release_id: 42, format_version: 1, minimum_application_version: "1.0.0".parse().unwrap(), minimum_schema_version: 1, artifact });
     let directory = f.bundle().join("artifacts/taxonomy/releases/42");
     fs::create_dir_all(&directory).unwrap();
     fs::write(directory.join("snapshot.sqlite3"), b"app").unwrap();
@@ -169,8 +173,7 @@ fn external_assets_are_checked_before_feed_promotion_and_on_retry() {
     let previous = fs::read(f.feed()).unwrap();
     f.config.external_artifact_prefixes.push("https://github.com/bokheim/releases/releases/download/".into());
     f.manifest.sequence = 2;
-    f.manifest.application.as_mut().unwrap().artifacts.get_mut("linux").unwrap().url =
-        "https://github.com/bokheim/releases/releases/download/v2.0.0/Bokheim.AppImage".into();
+    f.manifest.application.as_mut().unwrap().artifacts.get_mut("linux").unwrap().url = "https://github.com/bokheim/releases/releases/download/v2.0.0/Bokheim.AppImage".into();
     fs::write(f.bundle().join("manifest.signed.json"), f.envelope()).unwrap();
     let failed = publish_with_verifier(&f.config, &f.bundle(), &f.root(), 150, |_| bail!("not publicly available"));
     assert!(failed.is_err());
@@ -182,7 +185,8 @@ fn external_assets_are_checked_before_feed_promotion_and_on_retry() {
             // Exercise the same authenticated size/hash checks as local files.
             checked += 1;
             copy_verified(regular(&f.bundle().join("artifacts/updates/releases/2.0/app.bin"))?, std::io::sink(), artifact)
-        }).unwrap();
+        })
+        .unwrap();
     }
     assert_eq!(checked, 2);
     assert_eq!(fs::read(f.feed()).unwrap(), f.envelope());
@@ -192,7 +196,7 @@ fn external_assets_are_checked_before_feed_promotion_and_on_retry() {
 fn external_allowlist_has_directory_boundaries_and_canonical_urls() {
     let mut f = Fixture::new();
     f.config.external_artifact_prefixes = vec!["https://github.com/owner/repo/releases/download/".into()];
-    f.config.discovery().unwrap();
+    f.config.validate().unwrap();
     assert!(f.config.external("https://github.com/owner/repo/releases/download/v1/app.bin").unwrap());
     assert!(!f.config.external("https://updates.example.org/releases/v1/app.bin").unwrap());
     for url in [
@@ -209,7 +213,7 @@ fn external_allowlist_has_directory_boundaries_and_canonical_urls() {
     }
     for prefix in ["https://github.com/", "https://github.com/owner/repo", "http://github.com/owner/repo/", "https://github.com/owner/../repo/", "https://updates.example.org/releases/"] {
         f.config.external_artifact_prefixes = vec![prefix.into()];
-        assert!(f.config.discovery().is_err(), "{prefix}");
+        assert!(f.config.validate().is_err(), "{prefix}");
     }
 }
 

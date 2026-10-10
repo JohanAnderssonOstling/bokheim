@@ -9,8 +9,8 @@ pub(super) async fn local(library: &LibrarySession, hash: ContentHash, info: &Bo
     if matches!(info.format, BookFormat::M4b | BookFormat::Mp3Folder) {
         return audio(library, hash, Some(file)).await.map(Some);
     }
-    let pdf_metadata = match file.checksum().map_err(BackendError::operation)? {
-        Some(checksum) => pdf_metadata(library, hash, checksum).await?,
+    let pdf_metadata = match file.content_hash().map_err(BackendError::operation)? {
+        Some(_content_hash) => pdf_metadata(library, hash).await?,
         None => None,
     };
     use crate::library::book::browser::SOURCES;

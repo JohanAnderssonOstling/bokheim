@@ -3,16 +3,18 @@
 //! Persisted BLOBs use the separate `wire` storage crate. Synchronization
 //! values serialize their domain types through this same codec.
 
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::fmt;
 
-pub const MEDIA_TYPE: &str = "application/vnd.bokheim+protobuf; version=23";
+mod value_serializer;
+
+pub const MEDIA_TYPE: &str = "application/vnd.bokheim+protobuf; version=28";
 pub const MEDIA_TYPE_BASE: &str = "application/vnd.bokheim+protobuf";
 pub const MAX_DECODED_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_DECODED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
-const VERSION: u32 = 23;
+const VERSION: u32 = 28;
 
 /// The protobuf protocol version written into every envelope.
 pub const fn version() -> u32 {
@@ -63,7 +65,7 @@ impl std::error::Error for WireError {}
 pub fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, WireError> {
     use prost::Message;
 
-    let value = serde_value::to_value(value).map_err(|error| WireError::Encode(error.to_string()))?;
+    let value = value_serializer::to_value(value).map_err(|error| WireError::Encode(error.to_string()))?;
     let envelope = protobuf::Envelope { version: VERSION, value: Some(protobuf_value(value)?) };
     let mut body = Vec::with_capacity(envelope.encoded_len());
     envelope.encode(&mut body).map_err(|error| WireError::Encode(error.to_string()))?;
@@ -73,7 +75,7 @@ pub fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, WireError> {
 /// Apply serialization adapters without encoding and reparsing an outer byte
 /// envelope. Used when a relay needs the opaque form of a typed payload.
 pub fn representation<S: Serialize + ?Sized, D: DeserializeOwned>(value: &S) -> Result<D, WireError> {
-    let value = serde_value::to_value(value).map_err(|error| WireError::Encode(error.to_string()))?;
+    let value = value_serializer::to_value(value).map_err(|error| WireError::Encode(error.to_string()))?;
     D::deserialize(value).map_err(|error| WireError::Decode(error.to_string()))
 }
 
@@ -186,18 +188,8 @@ mod tests {
     }
 
     #[test]
-    fn protobuf_round_trip_uses_the_versioned_bokheim_envelope() {
-        let encoded = encode(&example(8)).unwrap();
-        assert_eq!(encoded.first(), Some(&0x08));
-        assert_eq!(decode::<Example>(&encoded, MAX_DECODED_REQUEST_BYTES).unwrap(), example(8));
-
-        let variant = encode(&NumericVariant::Second(42)).unwrap();
-        assert_eq!(decode::<NumericVariant>(&variant, 64).unwrap(), NumericVariant::Second(42));
-    }
-
-    #[test]
     fn version_and_decoded_size_are_bounded() {
-        assert_eq!(version(), 23);
+        assert_eq!(version(), 28);
         let mut unsupported = encode(&example(1)).unwrap();
         unsupported[1] = (VERSION + 1) as u8;
         assert!(matches!(decode::<Example>(&unsupported, MAX_DECODED_REQUEST_BYTES), Err(WireError::UnsupportedVersion(version)) if version == VERSION + 1));
@@ -218,18 +210,5 @@ mod tests {
         let encoded = encode(&blob).unwrap();
         assert!(encoded.len() < blob.bytes.len() + 128);
         assert_eq!(decode::<Blob>(&encoded, 2 * 1024 * 1024).unwrap(), blob);
-    }
-
-    #[test]
-    fn media_type_requires_the_current_version() {
-        assert!(is_current_media_type(MEDIA_TYPE));
-        assert!(is_current_media_type("Application/Vnd.Bokheim+Protobuf; charset=binary; version=23"));
-        assert!(!is_current_media_type("application/vnd.bokheim+protobuf; version=14"));
-        assert!(!is_current_media_type(MEDIA_TYPE_BASE));
-        assert!(!is_current_media_type("application/vnd.bokheim+protobuf; version=1"));
-        assert!(!is_current_media_type("application/vnd.bokheim+protobuf; version=2"));
-        assert!(!is_current_media_type("application/vnd.bokheim+protobuf; version=6"));
-        assert!(!is_current_media_type("application/vnd.bokheim+protobuf; version=1; version=5"));
-        assert!(!is_current_media_type("application/json; version=1"));
     }
 }

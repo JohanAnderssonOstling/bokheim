@@ -1,13 +1,4 @@
-//! Transfer execution: the worker snapshots, drains, commits.
+//! Typed network execution; the library asset scheduler owns ordering and retry.
 mod authentication;
-mod coordination;
-pub(crate) mod executor;
-mod worker;
-
-use authentication::RefreshScope;
-pub use worker::TransferWorker;
-
-type TransferRunResult = Result<(), crate::TransferError>;
-
-#[cfg(test)]
-mod tests;
+mod executor;
+pub use executor::AssetExecutor;

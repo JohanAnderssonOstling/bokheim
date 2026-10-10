@@ -1,7 +1,8 @@
 //! Sync cursor and recovery primitives.
 
+use sync_common::StateKey;
 use crate::shared_sql::SharedSql;
-use crate::sync::{write_cursor_revision, PullCursorKey, SyncApplySql, SyncStateSql};
+use crate::sync::{write_cursor_revision, PullCursorKey, SyncStateSql};
 use crate::{Database, DatabaseError};
 
 // Sync cursor and recovery primitives.
@@ -58,6 +59,19 @@ impl Database {
         Ok(())
     }
 
+    /// Writes one explicit sync_metadata column. Only the columns written
+    /// from outside this crate are accepted.
+    pub fn set_sync_metadata(&self, key: &str, value: &str) -> Result<(), DatabaseError> {
+        use crate::assets::ActivitySql;
+        use crate::OwnerSql;
+        match key {
+            "server_library_created" => self.connection.owner_set_server_library_created(value)?,
+            "last_successful_sync_at" => self.connection.activity_set_last_successful_sync_at(value)?,
+            _ => return Err(DatabaseError::message(format!("sync_metadata column {key} is not writable"))),
+        };
+        Ok(())
+    }
+
     /// Reads one explicit sync_metadata column as text. Unknown keys read as
     /// `None`; absent rows and null columns both read as `None`.
     pub fn sync_metadata(&self, key: &str) -> Result<Option<String>, DatabaseError> {
@@ -81,7 +95,8 @@ impl Database {
     /// made behind this cursor already create durable outbox work through
     /// normal triggers.
     pub fn sync_inventory_page(&self, after: Option<&StateAddress>) -> Result<Vec<StateAddress>, DatabaseError> {
-        let (kind, key, subkey) = after.map(|cell| (cell.kind.as_str(), cell.entity_key.as_str(), cell.entity_subkey.as_str())).unwrap_or(("", "", ""));
+        let start = StateKey::Text(String::new());
+        let (kind, key, subkey) = after.map(|cell| (cell.kind.as_str(), &cell.entity_key, cell.entity_subkey.as_str())).unwrap_or(("", &start, ""));
         let mut cells = Vec::new();
         self.connection.sync_state_inventory_page(kind, key, subkey, |row| {
             cells.push((|row: &rusqlite::Row<'_>| -> rusqlite::Result<StateAddress> { Ok(StateAddress { kind: row.get(0)?, entity_key: row.get(1)?, entity_subkey: row.get(2)? }) })(row)?);

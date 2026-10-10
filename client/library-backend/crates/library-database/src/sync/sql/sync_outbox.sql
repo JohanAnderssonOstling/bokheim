@@ -41,3 +41,17 @@ DELETE FROM sync_outbox;
 -- param: body: &[u8]
 -- param: changed_at: i64
 INSERT INTO sync_outbox(replica_seq,state_kind,state_key,body,changed_at) VALUES(:replica_seq,'reading_position','1',:body,:changed_at);
+
+
+-- name: outbox_pending_snapshots ?
+SELECT state_kind,state_key,state_subkey,replica_seq FROM sync_outbox WHERE body IS NULL ORDER BY replica_seq;
+
+-- name: outbox_freeze_snapshot !
+-- param: body: &SqlParam<'_>
+-- param: changed_at: &SqlParam<'_>
+-- param: winning_version: &SqlParam<'_>
+-- param: replica_seq: &SqlParam<'_>
+UPDATE sync_outbox SET body=:body,changed_at=:changed_at,winning_version=:winning_version WHERE replica_seq=:replica_seq;
+
+-- name: sync_pending_book_drafts ?
+SELECT content_hash FROM local_book_draft;

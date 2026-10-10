@@ -27,6 +27,16 @@ impl SessionSender {
         let bytes = js_sys::Uint8Array::from(bytes);
         self.0.port.post_message_with_transferable(&bytes, &js_sys::Array::of1(&bytes.buffer())).map_err(|error| format!("{error:?}"))
     }
+    /// Sends a request together with picked files, which cannot travel in
+    /// the binary encoding. The database worker holds them under `token`.
+    pub fn send_with_files(&self, bytes: &[u8], token: &str, files: &js_sys::Array) -> Result<(), String> {
+        if self.0.closed.get() {
+            return Err("Worker connection closed".into());
+        }
+        let bytes = js_sys::Uint8Array::from(bytes);
+        let message = super::object(&[("request", bytes.into()), ("token", token.into()), ("files", files.into())]);
+        self.0.port.post_message(&message).map_err(|error| format!("{error:?}"))
+    }
     pub fn close(&self) {
         if self.0.closed.replace(true) {
             return;
@@ -53,7 +63,6 @@ impl Session {
             match kind.as_deref() {
                 Some("reconnecting") => message(SessionMessage::Reconnecting),
                 Some("failed") => message(SessionMessage::Failed(super::field(&data, "error").as_string().unwrap_or_else(|| "Worker connection failed".into()))),
-                Some("diagnostic") => web_sys::console::info_1(&super::field(&data, "message")),
                 _ => message(SessionMessage::Bytes(js_sys::Uint8Array::new(&data).to_vec())),
             }
         });

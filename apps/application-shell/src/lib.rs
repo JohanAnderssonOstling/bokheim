@@ -46,8 +46,6 @@ pub struct ApplicationRoot {
     sync_sender: async_channel::Sender<browser_ui::SyncEvent>,
     #[cfg(target_arch = "wasm32")]
     account_generation: u64,
-    #[cfg(target_arch = "wasm32")]
-    transfer_generation: u64,
     #[cfg(feature = "kobo")]
     device_bar: Entity<kobo_bar::KoboDeviceBar>,
     browser: Entity<BrowserRoot>,
@@ -113,17 +111,6 @@ impl ApplicationRoot {
                 })
                 .detach();
             }
-            SyncEvent::TransferRefreshRequested => {
-                self.transfer_generation = self.transfer_generation.wrapping_add(1);
-                let generation = self.transfer_generation;
-                let backend = self.backend.clone();
-                let sender = self.sync_sender.clone();
-                cx.spawn(async move |_, _| {
-                    let result = backend.transfers().await;
-                    let _ = sender.try_send(SyncEvent::TransferSnapshot { generation, result });
-                })
-                .detach();
-            }
             SyncEvent::AssetStorageRequested { library_id, enabled } => {
                 let backend = self.backend.clone();
                 let sender = self.sync_sender.clone();
@@ -155,7 +142,6 @@ impl ApplicationRoot {
                 .detach();
             }
             SyncEvent::AccountSnapshot { generation, .. } | SyncEvent::AccountOperation { generation, .. } | SyncEvent::LocalStorageUsage { generation, .. } if generation != self.account_generation => {}
-            SyncEvent::TransferSnapshot { generation, .. } if generation != self.transfer_generation => {}
             SyncEvent::AccountSnapshot { generation, result } => {
                 if let Ok(snapshot) = &result {
                     self.sync_state.update(cx, |state, cx| state.apply_account_snapshot(snapshot, cx));
@@ -171,19 +157,6 @@ impl ApplicationRoot {
                     self.sync_state.update(cx, |state, cx| state.apply_account_snapshot(snapshot, cx));
                 }
                 self.browser.update(cx, |browser, cx| browser.apply_sync_event(SyncEvent::AccountOperation { generation, result, success, reveal_password_reset_on_error }, cx));
-            }
-            SyncEvent::TransferSnapshot { result, .. } => {
-                let result = match result {
-                    Ok(groups) => {
-                        self.sync_state.update(cx, |state, cx| state.apply_transfer_snapshot(groups, cx));
-                        Ok(())
-                    }
-                    Err(error) => {
-                        self.sync_state.update(cx, |state, cx| state.apply_transfer_snapshot(Vec::new(), cx));
-                        Err(error)
-                    }
-                };
-                self.browser.update(cx, |browser, cx| browser.apply_sync_event(SyncEvent::TransferApplied { result }, cx));
             }
             SyncEvent::AssetStorageChanged { library_id, enabled, result } => {
                 if result.is_ok() {
@@ -284,8 +257,6 @@ impl ApplicationRoot {
             sync_sender,
             #[cfg(target_arch = "wasm32")]
             account_generation: 0,
-            #[cfg(target_arch = "wasm32")]
-            transfer_generation: 0,
             #[cfg(feature = "kobo")]
             device_bar: cx.new(|cx| kobo_bar::KoboDeviceBar::new(backend.clone(), kobo_bar_services, kobo_auto_rotate, window, cx)),
             browser,
@@ -396,7 +367,6 @@ impl ApplicationRoot {
             controller.reserve_open()
         });
         self.sync_playback(window, cx);
-        self.browser.update(cx, |browser, cx| browser.clear_cached_book_details(cx));
         let library = Rc::new(self.backend.library(*locator.library_id()));
         let audio_locator = locator.clone();
         let audio_title = title.clone();
@@ -478,10 +448,10 @@ impl ApplicationRoot {
         if active.as_ref().is_some_and(|(_, session)| self.audiobook.as_ref().is_some_and(|audio| &audio.session == session)) {
             return;
         }
-        if let Some(old) = self.audiobook.take() {
-            if self.reader.as_ref().is_some_and(|reader| reader.locator == old.locator) {
-                self.return_to_library(window, cx);
-            }
+        if let Some(old) = self.audiobook.take()
+            && self.reader.as_ref().is_some_and(|reader| reader.locator == old.locator)
+        {
+            self.return_to_library(window, cx);
         }
         let Some((locator, session)) = active else {
             cx.notify();
@@ -592,7 +562,10 @@ impl Render for ApplicationRoot {
                         .child(gpui_component::TitleBar::new().child(self.application_title.clone())),
                 )
             } else {
-                root.child(div().id("window-titlebar-reveal").absolute().top_0().left_0().right_0().h(NATIVE_TITLEBAR_HOVER_HEIGHT).on_hover(cx.listener(|root, hovered: &bool, window, cx| {
+                root.child(div().id("window-titlebar-reveal").focusable().tab_index(0)
+                    .focus(|style| style.bg(gpui::rgba(0x80808080)))
+                    .on_action(|_: &gpui_component::menu::OpenContextMenu, window, _| window.show_window_menu(gpui::point(gpui::px(12.), NATIVE_TITLEBAR_HOVER_HEIGHT)))
+                    .absolute().top_0().left_0().right_0().h(NATIVE_TITLEBAR_HOVER_HEIGHT).on_hover(cx.listener(|root, hovered: &bool, window, cx| {
                     if *hovered && root.titlebar_reveal_armed {
                         root.titlebar_reveal_armed = false;
                         root.native_pointer_left_client = false;
@@ -605,18 +578,5 @@ impl Render for ApplicationRoot {
             }
         });
         root
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn removed_reader_library_requires_returning_to_the_browser() {
-        let library_id = LibraryId::from_u128(1);
-        assert!(active_reader_library_is_missing(Some(&library_id), |_| false));
-        assert!(!active_reader_library_is_missing(Some(&library_id), |_| true));
-        assert!(!active_reader_library_is_missing(None, |_| false));
     }
 }

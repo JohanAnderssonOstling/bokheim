@@ -1,21 +1,4 @@
-#[path = "src/selector_format.rs"]
-mod selector_format;
-// Compile the same matcher builder used for downloaded overlays. The build
-// script never loads the artifact it is producing.
-#[allow(dead_code)]
-#[path = "src/lcc.rs"]
-mod lcc;
-#[allow(dead_code)]
-#[path = "src/runtime_index.rs"]
-mod runtime;
-fn compact_whitespace(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-#[path = "src/range_storage.rs"]
-mod range_storage;
-#[path = "src/taxonomy_reader.rs"]
-mod taxonomy_reader;
-
+use subject_taxonomy::{runtime_index as runtime, taxonomy_reader};
 use rusqlite::Connection;
 use std::env;
 use std::path::PathBuf;

@@ -5,115 +5,19 @@
 //! policy that treats a whole [`BookMetadata`] value as a single
 //! last-writer-wins register lives with the mutation protocol, not here.
 
-use crate::{CollectionError, DateError, IdentifierError, LanguageTagError, SubjectError, ValueError};
-use crate::{BookDate, BookSubject, Identifier, LanguageTag, MarcRelatorCode};
+use crate::{BookSubject, Identifier, LanguageTag, MarcRelatorCode};
+use crate::{IdentifierError, LanguageTagError, SubjectError};
+use content_address::ContentHash;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
 pub type AgentId = uuid::Uuid;
 pub type AuthorId = AgentId;
-pub type PublisherId = AgentId;
 pub type ContributorId = AgentId;
 
 pub fn agent_id_from_migration_seed(seed: &[u8]) -> AgentId {
     const NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([0x7f, 0xe7, 0x7e, 0x34, 0x29, 0x7f, 0x4a, 0xfa, 0x99, 0x8d, 0x2f, 0x86, 0xf0, 0x58, 0x7b, 0x31]);
     uuid::Uuid::new_v5(&NAMESPACE, seed)
-}
-
-/// A publisher spelling exactly as credited by a book. Equality is
-/// deliberately distinct from publisher identity; [`PublisherName::match_key`]
-/// supplies the conservative grouping key used by library indexes.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
-pub struct PublisherName(String);
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct PublisherMatchKey(String);
-
-impl PublisherName {
-    pub fn parse(value: impl AsRef<str>) -> Result<Self, BookMetadataError> {
-        normalized_book_text(value.as_ref()).map(Self)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn match_key(&self) -> PublisherMatchKey {
-        let normalized = self.0.nfkc().collect::<String>();
-        let mut key = String::with_capacity(normalized.len());
-        let mut separator_pending = false;
-        for character in normalized.chars() {
-            if character.is_alphanumeric() || is_combining_mark(character) {
-                if separator_pending && !key.is_empty() {
-                    key.push(' ');
-                }
-                separator_pending = false;
-                key.extend(character.to_lowercase());
-            } else {
-                separator_pending = true;
-            }
-        }
-        PublisherMatchKey(key)
-    }
-}
-
-impl PublisherMatchKey {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl<'de> Deserialize<'de> for PublisherName {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Self::parse(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
-    }
-}
-
-/// One exact publisher credit linked to a stable Bokheim agent. The credited
-/// spelling remains book evidence; identity resolution can later add
-/// authority identifiers without rewriting that evidence.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct PublisherCredit {
-    publisher_id: PublisherId,
-    name: PublisherName,
-}
-
-impl PublisherCredit {
-    #[cfg(feature = "random-ids")]
-    pub fn new(name: impl AsRef<str>) -> Result<Self, BookMetadataError> {
-        Self::with_id(PublisherId::new_v4(), name)
-    }
-
-    pub fn with_id(publisher_id: PublisherId, name: impl AsRef<str>) -> Result<Self, BookMetadataError> {
-        Ok(Self { publisher_id, name: PublisherName::parse(name)? })
-    }
-
-    pub const fn publisher_id(&self) -> PublisherId {
-        self.publisher_id
-    }
-
-    pub const fn agent_id(&self) -> AgentId {
-        self.publisher_id
-    }
-
-    pub fn name(&self) -> &PublisherName {
-        &self.name
-    }
-}
-
-impl<'de> Deserialize<'de> for PublisherCredit {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        struct EncodedPublisherCredit {
-            publisher_id: PublisherId,
-            name: PublisherName,
-        }
-
-        let encoded = EncodedPublisherCredit::deserialize(deserializer)?;
-        Self::with_id(encoded.publisher_id, encoded.name.as_str()).map_err(serde::de::Error::custom)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -169,9 +73,10 @@ impl<'de> Deserialize<'de> for Contributor {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookMetadata {
     pub identifiers: Vec<Identifier>,
-    pub publishers: Vec<PublisherCredit>,
+    pub publishers: Vec<String>,
     pub languages: Vec<LanguageTag>,
-    pub dates: Vec<BookDate>,
+    /// Publication year, when known.
+    pub year: Option<i32>,
     pub subjects: Vec<BookSubject>,
 }
 
@@ -281,7 +186,7 @@ pub struct AudiobookTrack {
     pub length: u64,
     /// ZIP revision whose stored byte offsets this track index describes.
     #[serde(default)]
-    pub archive_checksum: Option<content_address::ContentHash>,
+    pub archive_hash: Option<ContentHash>,
 }
 
 impl AudiobookTrack {
@@ -295,8 +200,8 @@ impl AudiobookTrack {
     }
 }
 
-pub fn tracks_match_archive(tracks: &[AudiobookTrack], checksum: content_address::ContentHash) -> bool {
-    !tracks.is_empty() && tracks.iter().all(|track| track.valid() && track.archive_checksum == Some(checksum))
+pub fn tracks_match_archive(tracks: &[AudiobookTrack], hash: ContentHash) -> bool {
+    !tracks.is_empty() && tracks.iter().all(|track| track.valid() && track.archive_hash == Some(hash))
 }
 
 /// Complete value of the navigation register. Replacement includes absence:
@@ -312,33 +217,6 @@ pub struct BookTocDocument {
 impl BookTocDocument {
     pub fn entries(entries: Vec<BookTocEntry>) -> Self {
         Self { entries, duration_ms: None, tracks: None }
-    }
-}
-
-#[cfg(test)]
-mod toc_document_tests {
-    use super::*;
-
-    #[test]
-    fn track_index_only_matches_the_archive_revision_it_describes() {
-        let first = content_address::ContentHash::new(&"a".repeat(64));
-        let second = content_address::ContentHash::new(&"b".repeat(64));
-        let track = AudiobookTrack { name: "01.mp3".into(), start_ms: 0, end_ms: 1000, offset: 42, length: 100, archive_checksum: Some(first) };
-        assert!(tracks_match_archive(&[track.clone()], first));
-        assert!(!tracks_match_archive(&[track.clone()], second));
-        assert!(!tracks_match_archive(&[AudiobookTrack { archive_checksum: None, ..track }], first));
-    }
-
-    fn entry(title: &str, target: &str) -> BookTocEntry {
-        BookTocEntry { title: title.into(), target: target.into(), children: Vec::new() }
-    }
-
-    #[test]
-    fn document_round_trips_with_and_without_duration() {
-        let without_duration = BookTocDocument::entries(vec![entry("One", "audiobook-position-ms:0")]);
-        assert_eq!(serde_json::from_str::<BookTocDocument>(&serde_json::to_string(&without_duration).unwrap()).unwrap(), without_duration);
-        let with_duration = BookTocDocument { entries: vec![entry("One", "audiobook-position-ms:0")], duration_ms: Some(1000), tracks: None };
-        assert_eq!(serde_json::from_str::<BookTocDocument>(&serde_json::to_string(&with_duration).unwrap()).unwrap(), with_duration);
     }
 }
 
@@ -359,26 +237,8 @@ impl From<IdentifierError> for BookMetadataError {
     }
 }
 
-impl From<CollectionError> for BookMetadataError {
-    fn from(_: CollectionError) -> Self {
-        Self
-    }
-}
-
 impl From<SubjectError> for BookMetadataError {
     fn from(_: SubjectError) -> Self {
-        Self
-    }
-}
-
-impl From<DateError> for BookMetadataError {
-    fn from(_: DateError) -> Self {
-        Self
-    }
-}
-
-impl From<ValueError> for BookMetadataError {
-    fn from(_: ValueError) -> Self {
         Self
     }
 }

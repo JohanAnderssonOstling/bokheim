@@ -64,11 +64,8 @@ checks and ranking. The serialized index grew from **44,296 to 80,735 bytes**
 (+36,439 bytes); its native node array occupies 218,304 bytes. The parsed range
 vector already existed and is shared by either search method.
 
-Reproduce with:
-
-```sh
-cargo test --release -p subject-projection --lib benchmark_curated_candidate_lookup -- --ignored --nocapture
-```
+The manual benchmark test was subsequently removed during test pruning.
+The measurements above describe its original run.
 
 Local artifacts: [frozen taxonomy](../../../../target/lcc-interval-index/taxonomy.sqlite3),
 [comparison inputs](../../../../target/lcc-interval-index/probes.json),

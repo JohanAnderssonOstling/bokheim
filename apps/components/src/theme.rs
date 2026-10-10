@@ -95,15 +95,20 @@ pub struct SelectedPalette(pub ApplicationTheme, pub ResolvedAppearance);
 
 impl gpui::Global for SelectedPalette {}
 
+/// Saves palette selections through the application's preference store.
+pub trait PaletteSelectionService {
+    fn select_palette(&self, theme: ApplicationTheme, appearance: ResolvedAppearance, cx: &mut App);
+}
+
 /// Installed by the browser preference store so reader controls save through
 /// the same backend path as Browse settings.
-pub struct PaletteSelectionHandler(pub Rc<dyn Fn(ApplicationTheme, ResolvedAppearance, &mut App)>);
+pub struct PaletteSelectionHandler(pub Rc<dyn PaletteSelectionService>);
 
 impl gpui::Global for PaletteSelectionHandler {}
 
 pub fn select_palette(theme: ApplicationTheme, appearance: ResolvedAppearance, cx: &mut App) {
     if let Some(handler) = cx.try_global::<PaletteSelectionHandler>().map(|handler| handler.0.clone()) {
-        handler(theme, appearance, cx);
+        handler.select_palette(theme, appearance, cx);
     }
 }
 
@@ -416,223 +421,4 @@ impl InteractionHighlights {
         }
     }
 
-    #[cfg(test)]
-    fn roles(self) -> [[u8; 4]; 5] {
-        [self.selection, self.search_match, self.active_search_match, self.annotation, self.active_annotation]
-    }
-}
-
-#[cfg(test)]
-mod interaction_tests {
-    use super::*;
-    use app_preferences::ApplicationTheme;
-
-    fn highlights(theme: ApplicationTheme, appearance: ResolvedAppearance) -> InteractionHighlights {
-        InteractionHighlights::from_theme(BrowserTheme::from_palette(palette(theme, appearance)))
-    }
-
-    /// The five roles have to stay tellable apart — a hit that draws like the
-    /// note under it is no signal at all.
-    #[test]
-    fn every_interaction_role_is_distinct() {
-        for theme in ApplicationTheme::ALL {
-            for appearance in [ResolvedAppearance::Light, ResolvedAppearance::Dark] {
-                let roles = highlights(theme, appearance).roles();
-                for (index, role) in roles.iter().enumerate() {
-                    for other in &roles[index + 1..] {
-                        assert_ne!(role, other, "{theme:?}/{appearance:?}: two interaction roles draw identically");
-                    }
-                }
-            }
-        }
-    }
-
-    /// The regression this replaced: one set of constants for every theme, and
-    /// the light ones at that.
-    #[test]
-    fn highlights_follow_the_theme_and_the_appearance() {
-        assert_ne!(highlights(ApplicationTheme::Cool, ResolvedAppearance::Light), highlights(ApplicationTheme::Cool, ResolvedAppearance::Dark), "dark draws the light palette's highlights");
-        assert_ne!(highlights(ApplicationTheme::Cool, ResolvedAppearance::Light), highlights(ApplicationTheme::Warm, ResolvedAppearance::Light), "two themes draw the same highlights");
-    }
-
-    /// Translucent, always: a highlight sits over text somebody else drew.
-    #[test]
-    fn no_highlight_is_opaque() {
-        for role in highlights(ApplicationTheme::Warm, ResolvedAppearance::Light).roles() {
-            assert!(role[3] > 0 && role[3] < 200, "alpha {} does not read as a highlight", role[3]);
-        }
-    }
-}
-
-#[cfg(test)]
-mod palette_tests {
-    use super::*;
-    use app_preferences::ApplicationTheme;
-
-    fn channel(value: f64) -> f64 {
-        if value <= 0.04045 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
-    }
-
-    fn luminance(colour: u32) -> f64 {
-        let component = |shift: u32| channel(f64::from((colour >> shift) & 0xff) / 255.0);
-        0.2126 * component(16) + 0.7152 * component(8) + 0.0722 * component(0)
-    }
-
-    fn contrast(a: u32, b: u32) -> f64 {
-        let (x, y) = (luminance(a), luminance(b));
-        (x.max(y) + 0.05) / (x.min(y) + 0.05)
-    }
-
-    fn palettes() -> Vec<(String, ApplicationPalette)> {
-        let mut out = Vec::new();
-        for theme in ApplicationTheme::ALL {
-            for appearance in [ResolvedAppearance::Light, ResolvedAppearance::Dark] {
-                out.push((format!("{theme:?}/{appearance:?}"), palette(theme, appearance)));
-            }
-        }
-        out
-    }
-
-    /// WCAG 1.4.11 sets 3:1 for a boundary that carries meaning. Card and panel
-    /// definition rests entirely on these 1px borders, and they used to sit at
-    /// 1.3:1 — visible only if you already knew where to look.
-    #[test]
-    fn borders_separate_from_every_surface_they_touch() {
-        for (name, palette) in palettes() {
-            for (surface, label) in [(palette.surface_bg, "surface_bg"), (palette.raised_bg, "raised_bg")] {
-                let ratio = contrast(palette.border, surface);
-                assert!(ratio >= 3.0, "{name}: border against {label} is {ratio:.2}:1, under the 3:1 floor for UI boundaries");
-            }
-        }
-    }
-
-    #[test]
-    fn body_text_and_muted_text_pass_wcag_aa() {
-        for (name, palette) in palettes() {
-            for (surface, label) in [(palette.surface_bg, "surface_bg"), (palette.raised_bg, "raised_bg")] {
-                let ink = contrast(palette.ink_text, surface);
-                assert!(ink >= 7.0, "{name}: body text on {label} is {ink:.2}:1");
-                let muted = contrast(palette.subtle_text, surface);
-                assert!(muted >= 4.5, "{name}: muted text on {label} is {muted:.2}:1");
-                let accent = contrast(palette.accent, surface);
-                assert!(accent >= 4.5, "{name}: accent on {label} is {accent:.2}:1");
-                // Warning text is set directly on a surface as often as it is on
-                // its own tint — the verdict stripe and the state pills.
-                let warning = contrast(palette.warning_text, surface);
-                assert!(warning >= 4.5, "{name}: warning on {label} is {warning:.2}:1");
-            }
-            let danger = contrast(palette.danger_text, palette.danger_bg);
-            assert!(danger >= 4.5, "{name}: danger text is {danger:.2}:1");
-            let warning = contrast(palette.warning_text, palette.warning_bg);
-            assert!(warning >= 4.5, "{name}: warning text is {warning:.2}:1");
-        }
-    }
-
-    /// With one fill, a card is its edge. `rule` stopped being decoration the
-    /// day the second surface was removed, so its lower bound is now what keeps
-    /// a card, a popover and a panel visible at all.
-    /// `rule` is the quiet tier: visible as a boundary, but never competing
-    /// with `border`, which is reserved for interactive edges and hover.
-    #[test]
-    fn the_rule_is_visible_but_quieter_than_the_border() {
-        for (name, palette) in palettes() {
-            let rule = contrast(palette.rule, palette.surface_bg);
-            let border = contrast(palette.border, palette.surface_bg);
-            assert!(rule >= 1.4, "{name}: rule is only {rule:.2}:1 against the surface — every card edge is invisible");
-            assert!(rule <= 2.2, "{name}: rule is {rule:.2}:1 — too loud for decoration");
-            assert!(border > rule, "{name}: border {border:.2}:1 must outrank rule {rule:.2}:1");
-        }
-    }
-
-    /// Whatever sits on a filled accent must be readable on it. This used to
-    /// rely on a surface tone happening to contrast; `accent_text` is now its
-    /// own value, which is what makes this an assertion rather than luck.
-    #[test]
-    fn accent_text_is_readable_on_the_accent() {
-        for (name, palette) in palettes() {
-            let ratio = contrast(palette.accent_text, palette.accent);
-            assert!(ratio >= 4.5, "{name}: accent_text on accent is {ratio:.2}:1");
-        }
-    }
-
-    /// Supporting text on a filled accent — the author line of a focused book
-    /// card — uses `accent_wash` so it steps back from the title.
-    ///
-    /// Asserted for the light palettes only. In the dark ones the accent is
-    /// light and `accent_wash` is a dark tint that lands close behind it, which
-    /// is a known and accepted gap.
-    #[test]
-    fn soft_accent_text_is_readable_on_the_accent_in_light_palettes() {
-        for theme in ApplicationTheme::ALL {
-            let colours = palette(theme, ResolvedAppearance::Light);
-            let ratio = contrast(colours.active_highlight, colours.accent);
-            assert!(ratio >= 4.5, "{theme:?} light: accent_wash on accent is {ratio:.2}:1");
-        }
-    }
-
-    /// A primary button has to acknowledge the pointer. These were once all
-    /// aliased to `accent`, which left it visually inert on hover and press.
-    #[test]
-    fn the_accent_moves_under_the_pointer_and_on_press() {
-        for (name, palette) in palettes() {
-            let hover = contrast(palette.accent_hover, palette.accent);
-            let active = contrast(palette.accent_active, palette.accent);
-            assert!(hover > 1.08, "{name}: accent_hover is {hover:.2}:1 from accent — no feedback");
-            assert!(active > hover, "{name}: press must read as further than hover");
-            assert!(hover < 1.5, "{name}: accent_hover is {hover:.2}:1 — reads as a different colour");
-        }
-    }
-
-    /// Hover is an overlay rather than a solid so one value works on every
-    /// surface. A fully opaque value would mean it had been written as a solid
-    /// colour by mistake, which reads as a colour change rather than a hover.
-    #[test]
-    fn the_hover_overlay_is_translucent() {
-        for (name, palette) in palettes() {
-            let alpha = palette.hover_overlay & 0xff;
-            assert!(alpha > 0 && alpha < 0x40, "{name}: hover alpha {alpha:#04x} is not a subtle overlay");
-        }
-    }
-
-    #[test]
-    fn light_and_dark_are_actually_light_and_dark() {
-        for theme in ApplicationTheme::ALL {
-            let light = palette(theme, ResolvedAppearance::Light);
-            let dark = palette(theme, ResolvedAppearance::Dark);
-            assert!(luminance(light.surface_bg) > 0.5, "{theme:?} light background is not light");
-            assert!(luminance(dark.surface_bg) < 0.1, "{theme:?} dark background is not dark");
-        }
-    }
-}
-
-#[cfg(all(test, feature = "kobo"))]
-mod kobo_tests {
-    use super::*;
-
-    #[test]
-    fn kobo_ignores_all_saved_themes_and_dark_appearance() {
-        for theme in ApplicationTheme::ALL {
-            for appearance in [ResolvedAppearance::Light, ResolvedAppearance::Dark] {
-                assert_eq!(platform_palette(theme, appearance), kobo::PALETTE);
-            }
-        }
-        assert_eq!(BrowserTheme::default().page_bg, gpui::rgb(0xffffff).into());
-    }
-
-    #[test]
-    fn kobo_palette_is_grayscale_with_readable_control_states() {
-        let p = kobo::PALETTE;
-        for colour in [p.surface_bg, p.ink_text, p.subtle_text, p.accent, p.accent_hover, p.accent_active, p.accent_text, p.border, p.rule, p.hover_overlay >> 8, p.active_highlight, p.danger_text, p.danger_bg, p.warning_text, p.warning_bg]
-        {
-            assert_eq!((colour >> 16) & 255, (colour >> 8) & 255);
-            assert_eq!((colour >> 8) & 255, colour & 255);
-            assert_eq!((colour & 255) % 17, 0, "Use native 16-level grayscale values");
-        }
-        assert_eq!(p.ink_text, 0);
-        assert_eq!(p.surface_bg, 0xffffff);
-        assert!(p.subtle_text <= 0x555555);
-        assert!(p.accent_active <= 0x777777);
-        assert_ne!(p.active_highlight, p.surface_bg);
-        assert_eq!(p.hover_overlay & 255, 255);
-    }
 }

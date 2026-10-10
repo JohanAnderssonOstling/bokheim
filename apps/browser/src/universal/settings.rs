@@ -20,11 +20,11 @@ use std::rc::Rc;
 use app_preferences::{BrowsingPreferencePatch, CoverText, UI_FONT_SIZE_MAX, UI_FONT_SIZE_MIN};
 use gpui::prelude::*;
 use gpui::{Bounds, Context, Entity, FocusHandle, Focusable, IntoElement, Pixels, Render, ScrollHandle, SharedString, Window, px};
+use gpui_component::button::Button;
 use ui_components as components;
 
-use crate::navigation::Libraries;
 use crate::stores::Preferences;
-use crate::universal::sync::SyncPage;
+use crate::universal::sync::{LibrariesView, SyncPage};
 use crate::{FocusNextSetting, FocusPreviousSetting};
 
 /// The key context the page's focus movement is bound in. A context of its own,
@@ -49,15 +49,21 @@ const MAX_CONTROLS: usize = 128;
 /// to act on. The libraries come last: that block grows with every library on
 /// the device and with whatever is syncing, and the settings people open this
 /// page to change should not sit underneath it.
-const UPDATES_SECTION: usize = 0;
-const ACCOUNT_SECTION: usize = 1;
-#[cfg(not(feature = "kobo"))]
-const APPEARANCE_SECTION: usize = 2;
-const FONT_SIZE_SECTION: usize = 3;
-#[cfg(target_os = "android")]
-const LIBRARY_STORAGE_SECTION: usize = 4;
-const LIBRARIES_SECTION: usize = 5;
-const SECTION_COUNT: usize = 6;
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum Section {
+    Updates,
+    Account,
+    #[cfg(not(feature = "kobo"))]
+    Theme,
+    CoverText,
+    FontSize,
+    #[cfg(target_os = "android")]
+    LibraryStorage,
+    Libraries,
+}
+
+const SECTION_COUNT: usize = Section::Libraries as usize + 1;
 
 /// Where a section can be found: which focus it contains, and where it was last
 /// laid out.
@@ -69,10 +75,9 @@ struct SettingsSection {
 pub(crate) struct SettingsPage {
     updates: Option<Entity<UpdateControls>>,
     _update_changes: Option<gpui::Subscription>,
-    _library_changes: gpui::Subscription,
     preferences: Entity<Preferences>,
     account: Entity<SyncPage>,
-    libraries: Entity<crate::universal::sync::LibrariesView>,
+    libraries: Entity<LibrariesView>,
     /// The last preference write that failed, and which setting it was. It is
     /// drawn inside the group that setting lives in: one alert at the foot of
     /// the page reported a theme that would not save from below everything
@@ -80,25 +85,15 @@ pub(crate) struct SettingsPage {
     error: Option<SharedString>,
     focus: FocusHandle,
     scroll: ScrollHandle,
-    sections: Vec<SettingsSection>,
+    sections: [SettingsSection; SECTION_COUNT],
 }
 
 impl SettingsPage {
-    pub(crate) fn new(updates: Option<Entity<UpdateControls>>, account: Entity<SyncPage>, preferences: Entity<Preferences>, active_library: Entity<Libraries>, cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(updates: Option<Entity<UpdateControls>>, account: Entity<SyncPage>, preferences: Entity<Preferences>, cx: &mut Context<Self>) -> Self {
         let update_changes = updates.as_ref().map(|updates| cx.observe(updates, |_, _, cx| cx.notify()));
-        let libraries = cx.new(|cx| crate::universal::sync::LibrariesView::new(account.clone(), cx));
-        let mut selected = active_library.read(cx).selected_id();
-        let library_changes = cx.observe(&active_library, move |_page, libraries, cx| {
-            let next = libraries.read(cx).selected_id();
-            if next != selected {
-                selected = next;
-            }
-            cx.notify();
-        });
-        // Every section keeps its slot whether or not this build draws it, so a
-        // section's identity does not depend on which features are compiled in.
-        let sections = (0..SECTION_COUNT).map(|_| SettingsSection { focus: cx.focus_handle(), bounds: Rc::new(Cell::new(Bounds::default())) }).collect();
-        Self { updates, _update_changes: update_changes, _library_changes: library_changes, preferences, account, libraries, error: None, focus: cx.focus_handle(), scroll: ScrollHandle::default(), sections }
+        let libraries = cx.new(|cx| LibrariesView::new(account.clone(), cx));
+        let sections = std::array::from_fn(|_| SettingsSection { focus: cx.focus_handle(), bounds: Rc::new(Cell::new(Bounds::default())) });
+        Self { updates, _update_changes: update_changes, preferences, account, libraries, error: None, focus: cx.focus_handle(), scroll: ScrollHandle::default(), sections }
     }
 
     /// One conditional row above the existing settings groups. The backend
@@ -110,9 +105,9 @@ impl SettingsPage {
             UpdateView::Hidden => return None,
             UpdateView::Available => ("Update available".to_owned(), Some(("Update", UpdateAction::Update, false))),
             UpdateView::Preparing => ("Preparing update…".into(), Some(("Update", UpdateAction::Update, true))),
-            UpdateView::WaitingForConnection => ("Waiting for connection…".into(), None),
+            UpdateView::WaitingForConnection => ("Waiting for connection…".into(), Some(("Retry", UpdateAction::Update, false))),
             UpdateView::Ready { action } => ("Update ready".into(), Some((if *action == UpdateAction::Install { "Install" } else { "Restart" }, action.clone(), false))),
-            UpdateView::NeedsSpace { additional_bytes } => (format!("Free up {} to continue", crate::services::updates::needed_space(*additional_bytes)), None),
+            UpdateView::NeedsSpace { additional_bytes } => (format!("Free up {} to continue", crate::services::updates::needed_space(*additional_bytes)), Some(("Retry", UpdateAction::Update, false))),
             UpdateView::NeedsPermission => ("Permission needed".into(), Some(("Continue", UpdateAction::GrantPermission, false))),
             UpdateView::Activating => ("Updating your library…".into(), None),
         };
@@ -136,7 +131,7 @@ impl SettingsPage {
                     .on_click(move |_, _, cx| handler(action.clone(), cx)),
             );
         }
-        Some(self.section(UPDATES_SECTION, components::browser_settings_group(theme).child(row)))
+        Some(self.section(Section::Updates, components::browser_settings_group(theme).child(row)))
     }
 
     /// Applies a preference, and on failure says which setting did not take and
@@ -147,37 +142,23 @@ impl SettingsPage {
     /// goes on showing the old value, which without being told reads as the
     /// press having done nothing at all.
     fn update_browsing(&mut self, patch: BrowsingPreferencePatch, cx: &mut Context<Self>) {
-        let setting = Self::setting_name(&patch);
         let showing = self.preferences.read(cx).browsing();
-        let current = match &patch {
-            #[cfg(not(feature = "kobo"))]
-            BrowsingPreferencePatch::Theme(_) => showing.theme().label().to_owned(),
+        let (setting, current) = match &patch {
+            BrowsingPreferencePatch::Theme(_) => ("Application theme", showing.theme().label().to_owned()),
             BrowsingPreferencePatch::Palette(_, _) => {
                 let appearance = showing.appearance_override().unwrap_or_else(|| components::theme::resolved_appearance(cx));
-                if appearance == app_preferences::ResolvedAppearance::Dark { "Dark".to_owned() } else { format!("{} light", showing.theme().label()) }
+                ("Application theme", if appearance == app_preferences::ResolvedAppearance::Dark { "Dark".to_owned() } else { format!("{} light", showing.theme().label()) })
             }
-            BrowsingPreferencePatch::UiFontSizePx(_) => format!("{}px", showing.ui_font_size_px()),
-            BrowsingPreferencePatch::CoverText(_) => showing.cover_text().label().to_owned(),
-            _ => String::new(),
+            BrowsingPreferencePatch::UiFontSizePx(_) => ("UI font size", format!("{}px", showing.ui_font_size_px())),
+            BrowsingPreferencePatch::CoverText(_) => ("Cover text", showing.cover_text().label().to_owned()),
         };
         let result = self.preferences.update(cx, |preferences, cx| preferences.update_browsing(patch, cx));
-        self.error = result.err().map(|error| {
-            let showing = if current.is_empty() { String::new() } else { format!(" Still showing {current}.") };
-            SharedString::from(format!("{setting} was not saved: {error}.{showing}"))
-        });
+        self.error = result.err().map(|error| format!("{setting} was not saved: {error}. Still showing {current}.").into());
         cx.notify();
     }
 
-    /// What a patch is called where the user pressed it.
-    fn setting_name(patch: &BrowsingPreferencePatch) -> &'static str {
-        match patch {
-            #[cfg(not(feature = "kobo"))]
-            BrowsingPreferencePatch::Theme(_) => "Application theme",
-            BrowsingPreferencePatch::Palette(_, _) => "Application theme",
-            BrowsingPreferencePatch::UiFontSizePx(_) => "UI font size",
-            BrowsingPreferencePatch::CoverText(_) => "Cover text",
-            _ => "Setting",
-        }
+    fn preference_button(button: Button, patch: BrowsingPreferencePatch, cx: &Context<Self>) -> Button {
+        button.on_click(cx.listener(move |page, _, _, cx| page.update_browsing(patch.clone(), cx)))
     }
 
     /// Moves focus one control forward, wrapping at the end of the page.
@@ -229,8 +210,8 @@ impl SettingsPage {
 
     /// Wraps `child` in the measured, focusable block that keyboard navigation
     /// scrolls to.
-    fn section(&self, index: usize, child: impl IntoElement) -> gpui::Div {
-        let section = &self.sections[index];
+    fn section(&self, id: Section, child: impl IntoElement) -> gpui::Div {
+        let section = &self.sections[id as usize];
         components::browser_settings_section(&section.focus, section.bounds.clone(), child)
     }
 }
@@ -245,55 +226,42 @@ impl Render for SettingsPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = components::browser_theme(cx);
         let preferences = self.preferences.read(cx).browsing();
-        let entity = cx.entity();
-
         let current_font_size = preferences.ui_font_size_px();
-        let [minimum_font_size, maximum_font_size] = [UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX];
 
         #[cfg(not(feature = "kobo"))]
         let application_themes = {
             let selected = cx.try_global::<components::theme::SelectedPalette>().map(|selection| (selection.0, selection.1));
             let mut application_themes = components::theme_picker_group();
             for (index, (value, appearance)) in components::THEME_CHOICES.into_iter().enumerate() {
-                let entity = entity.clone();
-                application_themes =
-                    application_themes.child(components::theme_picker_swatch(format!("application-theme-{index}"), value, appearance, components::theme_choice_selected(selected, value, appearance)).on_click(move |_, _, cx| {
-                        entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::Palette(value, appearance), cx));
-                    }));
+                application_themes = application_themes.child(Self::preference_button(
+                    components::theme_picker_swatch(format!("application-theme-{index}"), value, appearance, components::theme_choice_selected(selected, value, appearance)),
+                    BrowsingPreferencePatch::Palette(value, appearance),
+                    cx,
+                ));
             }
 
             application_themes
         };
 
-        let decrease_entity = entity.clone();
-        let decrease_size = current_font_size.saturating_sub(1).max(minimum_font_size);
-        let decrease = components::settings_stepper_button("decrease-ui-font-size", "−", current_font_size == minimum_font_size, theme).on_click(move |_, _, cx| {
-            decrease_entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::UiFontSizePx(decrease_size), cx));
-        });
-        let increase_entity = entity.clone();
-        let increase_size = current_font_size.saturating_add(1).min(maximum_font_size);
-        let increase = components::settings_stepper_button("increase-ui-font-size", "+", current_font_size == maximum_font_size, theme).on_click(move |_, _, cx| {
-            increase_entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::UiFontSizePx(increase_size), cx));
-        });
+        let [decrease, increase] =
+            [("decrease-ui-font-size", "−", current_font_size.saturating_sub(1).max(UI_FONT_SIZE_MIN), UI_FONT_SIZE_MIN), ("increase-ui-font-size", "+", current_font_size.saturating_add(1).min(UI_FONT_SIZE_MAX), UI_FONT_SIZE_MAX)]
+                .map(|(id, label, value, limit)| Self::preference_button(components::settings_stepper_button(id, label, current_font_size == limit, theme), BrowsingPreferencePatch::UiFontSizePx(value), cx));
         let font_size = components::settings_stepper(decrease, format!("{current_font_size}px"), increase, theme);
 
         let current_cover_text = preferences.cover_text();
         let cover_texts = {
             let mut choices = components::browser_settings_button_group(theme);
             for (index, value) in [CoverText::Always, CoverText::CoverOnly].into_iter().enumerate() {
-                let entity = entity.clone();
-                choices = choices.child(components::browser_settings_choice_button(format!("cover-text-{index}"), value.label(), value == current_cover_text, theme).on_click(move |_, _, cx| {
-                    entity.update(cx, |page, cx| page.update_browsing(BrowsingPreferencePatch::CoverText(value), cx));
-                }));
+                choices = choices.child(Self::preference_button(components::browser_settings_choice_button(format!("cover-text-{index}"), value.label(), value == current_cover_text, theme), BrowsingPreferencePatch::CoverText(value), cx));
             }
             choices
         };
 
         let appearance_settings = components::browser_settings_fieldset("Appearance", theme);
         #[cfg(not(feature = "kobo"))]
-        let appearance_settings = appearance_settings.child(self.section(APPEARANCE_SECTION, components::browser_settings_compact_row("Application theme", application_themes, theme)));
-        let appearance_settings = appearance_settings.child(components::browser_settings_compact_row("Cover text", cover_texts, theme));
-        let appearance_settings = appearance_settings.child(self.section(FONT_SIZE_SECTION, components::browser_settings_compact_row("UI font size", font_size, theme)));
+        let appearance_settings = appearance_settings.child(self.section(Section::Theme, components::browser_settings_compact_row("Application theme", application_themes, theme)));
+        let appearance_settings = appearance_settings.child(self.section(Section::CoverText, components::browser_settings_compact_row("Cover text", cover_texts, theme)));
+        let appearance_settings = appearance_settings.child(self.section(Section::FontSize, components::browser_settings_compact_row("UI font size", font_size, theme)));
         // Every preference on this page lives in this group, so this is where a
         // preference that would not save reports.
         let appearance_settings = appearance_settings.children(self.error.clone().map(|error| components::browser_settings_group_error(error, theme)));
@@ -303,10 +271,10 @@ impl Render for SettingsPage {
         #[cfg(target_os = "android")]
         {
             let access = components::browser_settings_path_button("android-file-access", "Manage file access", theme).on_click(|_, _, _| gpui_android::request_all_files_access());
-            sections = sections.child(self.section(LIBRARY_STORAGE_SECTION, components::browser_settings_fieldset("Library storage", theme).child(components::browser_settings_compact_row("Android permissions", access, theme))));
+            sections = sections.child(self.section(Section::LibraryStorage, components::browser_settings_fieldset("Library storage", theme).child(components::browser_settings_compact_row("Android permissions", access, theme))));
         }
 
-        sections = sections.child(self.section(LIBRARIES_SECTION, self.libraries.clone()));
+        sections = sections.child(self.section(Section::Libraries, self.libraries.clone()));
 
         // Keep account and library invalidations inside their own entities.
         // Transfer progress reaches the library rows several times a second and
@@ -317,6 +285,6 @@ impl Render for SettingsPage {
             .tab_group()
             .on_action(cx.listener(Self::focus_next))
             .on_action(cx.listener(Self::focus_previous))
-            .child(components::browser_settings_content().children(self.update_row(cx)).child(self.section(ACCOUNT_SECTION, self.account.clone())).child(sections))
+            .child(components::browser_settings_content().children(self.update_row(cx)).child(self.section(Section::Account, self.account.clone())).child(sections))
     }
 }

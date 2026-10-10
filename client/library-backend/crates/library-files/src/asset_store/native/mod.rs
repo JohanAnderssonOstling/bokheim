@@ -1,11 +1,11 @@
 //! Native library-file access and adjacent transfer staging.
 
+use crate::APP_HIDDEN_DIR;
+use content_address::hash_file;
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind};
-use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
-use crate::APP_HIDDEN_DIR;
+use std::sync::{Arc, OnceLock};
 pub(crate) mod projection;
 pub(crate) use projection::readable_path;
 pub(crate) use projection::{create_directory, evict_book_files};
@@ -134,8 +134,8 @@ pub(crate) fn m4b_sidecar_cover(handle: &Handle, paths: &[RelativeBookPath]) -> 
         }
         if let Some(cover) = audiobook_folder::discover_m4b_cover(&path)? {
             let mut bytes = Vec::new();
-            File::open(cover.path)?.take(audiobook_folder::MAX_COVER_BYTES + 1).read_to_end(&mut bytes)?;
-            if bytes.len() as u64 > audiobook_folder::MAX_COVER_BYTES {
+            File::open(cover.path)?.take(audiobook_archive::MAX_COVER_BYTES + 1).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > audiobook_archive::MAX_COVER_BYTES {
                 return Err(AssetStoreError::operation("M4B cover exceeds byte limit"));
             }
             return Ok(Some(bytes));
@@ -147,10 +147,10 @@ pub(crate) fn m4b_sidecar_cover(handle: &Handle, paths: &[RelativeBookPath]) -> 
 pub(crate) fn content_matches(path: &Path, hash: &ContentHash) -> Result<bool, AssetStoreError> {
     if path.is_dir() {
         let tracks = audiobook_folder::discover(path)?;
-        return Ok(!tracks.is_empty() && ContentHash::new(audiobook_folder::identity(&tracks)?.to_hex().as_str()) == *hash);
+        return Ok(!tracks.is_empty() && ContentHash::from(audiobook_folder::folder_hash(path)?) == *hash);
     }
     let mut file = File::open(path)?;
-    Ok(book_identity::identify(&mut file)? == *hash)
+    Ok(hash_file(&mut file)? == *hash)
 }
 
 pub(crate) fn placement_conflicts(handle: &Handle, hash: &ContentHash, relative: &RelativeBookPath) -> Result<bool, AssetStoreError> {
@@ -229,7 +229,7 @@ impl PreparedPlacement {
             Self::Absent => Ok(()),
             Self::Existing(file) => file.check(),
             Self::Copied { output, destination } => {
-                persist_book_noclobber(output.into_temp_path(), &destination).map_err(|error| AssetStoreError::operation(error))?;
+                persist_book_noclobber(output.into_temp_path(), &destination).map_err(AssetStoreError::operation)?;
                 sync_parent(&destination)
             }
             Self::CopiedFolder { output, destination } => {
@@ -324,8 +324,7 @@ pub(crate) fn persist_book_noclobber(temporary: tempfile::TempPath, destination:
 pub(crate) struct StagedBook {
     // A cleanup guard; direct imports use the final path from the outset.
     pub(crate) temporary_path: tempfile::TempPath,
-    pub(crate) content_hash: String,
-    pub(crate) checksum: ContentHash,
+    pub(crate) content_hash: ContentHash,
     pub(crate) size_bytes: u64,
     pub(crate) direct: Option<DirectBook>,
 }
@@ -353,18 +352,8 @@ pub(crate) fn import_in_progress(path: &Path) -> bool {
     !imports.is_empty() && path.canonicalize().is_ok_and(|path| imports.contains(&path))
 }
 
-pub(crate) fn write_import_bytes(file: &mut File, source: &mut (dyn std::io::Read + Send), directory: &Path, progress: Option<&super::ImportProgressObserver>) -> Result<(), AssetStoreError> {
-    use library_model::ImportFileStage;
+pub(crate) fn write_import_bytes(file: &mut File, source: &mut (dyn std::io::Read + Send), directory: &Path) -> Result<(), AssetStoreError> {
     use std::io::Write as _;
-    let report = |stage| {
-        if let Some(progress) = progress {
-            progress(stage);
-        }
-    };
-    report(ImportFileStage::Copying { copied_bytes: 0 });
-    let mut last_progress = Instant::now();
-    let started = Instant::now();
-    log::info!(target: "import_timing", "copy_started");
     let mut copied_bytes = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
@@ -377,20 +366,11 @@ pub(crate) fn write_import_bytes(file: &mut File, source: &mut (dyn std::io::Rea
         }
         file.write_all(&buffer[..read]).map_err(|error| AssetStoreError::operation(format!("could not write the imported book in library folder '{}': {error}", directory.display())))?;
         copied_bytes += read as u64;
-        if last_progress.elapsed() >= Duration::from_millis(100) {
-            report(ImportFileStage::Copying { copied_bytes });
-            last_progress = Instant::now();
-        }
     }
     if copied_bytes == 0 {
         return Err(AssetStoreError::operation("book is empty".to_owned()));
     }
-    log::info!(target: "import_timing", "copy_finished bytes={copied_bytes} ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
-    report(ImportFileStage::Copying { copied_bytes });
-    report(ImportFileStage::Saving);
-    let started = Instant::now();
     file.sync_all().map_err(|error| AssetStoreError::operation(format!("could not flush the imported book in library folder '{}': {error}", directory.display())))?;
-    log::info!(target: "import_timing", "file_flush_finished ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
     Ok(())
 }
 
@@ -418,7 +398,7 @@ pub(crate) fn open_book_at_path(handle: &Handle, relative_path: &RelativeBookPat
         let nfo = audiobook_folder::discover_nfo(&path)?;
         let cue = audiobook_folder::discover_cue(&path)?;
         let cover = audiobook_folder::discover_cover(&path)?;
-        let mut archive = audiobook_folder::write_archive_with_sidecars(tempfile::tempfile()?, &tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref())?;
+        let mut archive = audiobook_archive::write_archive_with_sidecars(tempfile::tempfile()?, &tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref())?;
         archive.rewind()?;
         return Ok(Some(Box::new(archive)));
     }
@@ -443,26 +423,36 @@ pub(crate) fn read(handle: &Handle, name: String) -> Result<Option<Vec<u8>>, Ass
 }
 
 pub(crate) async fn write(handle: &Handle, name: String, bytes: &[u8]) -> Result<(), AssetStoreError> {
-    use std::io::Write as _;
     if name.starts_with("book/") {
         return Err(AssetStoreError::operation("native books require a library destination"));
     }
     let hash = name.strip_prefix("thumbnail/").and_then(|name| name.split('.').next()).ok_or_else(|| AssetStoreError::operation("unsupported native asset path"))?;
     let Some(lease) = lease(handle, hash, false)? else { return Err(AssetStoreError::operation("book is busy; retry thumbnail write")) };
-    let destination = handle.assets_root.join(name);
-    let bytes = bytes.to_owned();
+    write_files(handle, vec![(name, bytes.to_owned())], lease).await
+}
+
+pub(crate) async fn write_thumbnail_set(handle: &Handle, hash: &ContentHash, bytes: &[u8], browse: &[u8]) -> Result<(), AssetStoreError> {
+    let Some(lease) = lease(handle, hash.to_hex().as_str(), true)? else { return Err(AssetStoreError::operation("thumbnail is being updated")) };
+    write_files(handle, vec![(super::asset_name(super::BlobKind::Thumbnail, hash), bytes.to_owned()), (super::thumbnail_variant_name(hash, thumbnail::BROWSE_THUMBNAIL_WIDTH), browse.to_owned())], lease).await
+}
+
+async fn write_files(handle: &Handle, files: Vec<(String, Vec<u8>)>, lease: Lease) -> Result<(), AssetStoreError> {
+    use std::io::Write as _;
+    let root = handle.assets_root.clone();
     client_platform_runtime::executor::run_blocking(move || {
         let _lease = lease;
-        let mut file = tempfile::Builder::new().prefix(".bokheim-thumbnail.part-").tempfile_in(destination.parent().unwrap())?;
-        file.write_all(&bytes)?;
-        file.as_file().sync_all()?;
-        // Persist replaces atomically; a failed persist still owns and removes
-        // the temporary file when its error is dropped.
-        file.persist(&destination).map_err(|error| error.error)?;
-        sync_parent(&destination)
+        for (name, bytes) in files {
+            let destination = root.join(name);
+            let mut file = tempfile::Builder::new().prefix(".bokheim-thumbnail.part-").tempfile_in(destination.parent().unwrap())?;
+            file.write_all(&bytes)?;
+            file.as_file().sync_all()?;
+            file.persist(&destination).map_err(|error| error.error)?;
+            sync_parent(&destination)?;
+        }
+        Ok(())
     })
     .await
-    .map_err(|error| AssetStoreError::operation(error))?
+    .map_err(AssetStoreError::operation)?
 }
 
 pub(crate) fn remove(handle: &Handle, name: String) -> Result<bool, AssetStoreError> {
@@ -486,6 +476,7 @@ pub(crate) fn exists(handle: &Handle, name: String) -> Result<bool, AssetStoreEr
 #[cfg(test)]
 mod lease_location_tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn cancelling_download_creation_does_not_leave_a_temporary_file() {
@@ -497,9 +488,9 @@ mod lease_location_tests {
         let (release, released) = std::sync::mpsc::channel();
         let blocker = runtime.spawn_blocking(move || released.recv_timeout(Duration::from_secs(5)).unwrap());
         runtime.block_on(async {
-            let hash = ContentHash::new(blake3::hash(b"existing book").to_hex().as_str());
+            let hash = ContentHash::from(blake3::hash(b"existing book"));
             let path = RelativeBookPath::parse("book.epub").unwrap();
-            let mut pending = Box::pin(store.begin_book_write(&path, &hash, hash));
+            let mut pending = Box::pin(store.begin_book_write(&path, &hash));
             assert!(futures_util::poll!(pending.as_mut()).is_pending());
             drop(pending);
             release.send(()).unwrap();
@@ -552,7 +543,7 @@ mod prepared_file_tests {
         let handle = open(root.path().to_str().unwrap()).unwrap();
         let path = root.path().join("book.epub");
         std::fs::write(&path, b"original").unwrap();
-        let hash = ContentHash::new(blake3::hash(b"original").to_hex().as_str());
+        let hash = ContentHash::from(blake3::hash(b"original"));
         let prepared = prepare_removal(&handle, &hash, &RelativeBookPath::parse("/book.epub").unwrap()).unwrap();
         std::fs::write(&path, b"externally changed book").unwrap();
         assert!(prepared.publish().is_err());
@@ -565,19 +556,21 @@ mod identity_tests {
     use super::*;
 
     #[tokio::test]
-    async fn imported_and_renamed_m4b_retains_embedded_identity_after_edits() {
+    async fn imported_and_renamed_m4b_uses_current_byte_identity() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("book.m4b");
         std::fs::write(&path, include_bytes!("../../../tests/fixtures/embedded-cover.m4b")).unwrap();
-        let identity = book_identity::ensure(&path).unwrap();
-        // Alter an independent MP4 box without changing the identity metadata.
+        let original_identity = hash_file(&mut File::open(&path).unwrap()).unwrap();
+        // A non-audio MP4 edit changes identity because all file bytes are hashed.
         use std::io::Write as _;
         OpenOptions::new().append(true).open(&path).unwrap().write_all(b"\0\0\0\x0cfreedata").unwrap();
+        assert!(!content_matches(&path, &original_identity).unwrap());
+        let identity = hash_file(&mut File::open(&path).unwrap()).unwrap();
         assert!(content_matches(&path, &identity).unwrap());
         let store = super::super::AssetStore::open(directory.path().to_str().unwrap()).unwrap();
-        let copied = store.stage_book(RelativeBookPath::parse("copy.m4b").unwrap(), Box::new(File::open(&path).unwrap()), None).await.unwrap();
+        let copied = store.stage_book(RelativeBookPath::parse("copy.m4b").unwrap(), Box::new(File::open(&path).unwrap())).await.unwrap();
         assert!(content_matches(copied.path(), &identity).unwrap());
-        // Identity survives a rename without a file extension.
+        // Renaming preserves bytes and therefore preserves identity.
         let renamed = directory.path().join("extensionless");
         std::fs::rename(path, &renamed).unwrap();
         assert!(content_matches(&renamed, &identity).unwrap());

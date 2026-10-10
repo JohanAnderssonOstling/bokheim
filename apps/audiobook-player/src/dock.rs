@@ -211,8 +211,8 @@ impl Render for AudiobookDock {
             .as_ref()
             .and_then(|book| book.chapters.get(player.active_chapter_index()))
             .map(|chapter| {
-                let duration = chapter.end.saturating_sub(chapter.start);
-                (chapter.start, position.saturating_sub(chapter.start).min(duration), duration)
+                let duration = chapter.end().saturating_sub(chapter.start());
+                (chapter.start(), position.saturating_sub(chapter.start()).min(duration), duration)
             })
             .unwrap_or_default();
         let progress_fraction = if chapter_duration.is_zero() { 0.0 } else { (chapter_position.as_secs_f64() / chapter_duration.as_secs_f64()) as f32 };

@@ -1,19 +1,17 @@
 //! Indexed logical asset names.
 
 pub(super) fn initialize(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(include_str!("sql/asset_index/initialize_pragma.sql"))
+    conn.execute_batch(include_str!("sql/asset_index/initialize_pragma.sql"))?;
+    let compatible: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('asset_revision') WHERE name='content_hash' AND upper(type)='BLOB')", [], |row| row.get(0))?;
+    if !compatible {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(())
 }
 
 pub(super) fn publish(conn: &rusqlite::Connection, name: &str, physical: &str, length: u64) -> rusqlite::Result<()> {
     conn.execute(include_str!("sql/asset_index/publish_insert.sql"), rusqlite::params![name, physical, length as i64])?;
     Ok(())
-}
-
-pub(super) fn live_physical_files(conn: &rusqlite::Connection, prefix: &str) -> rusqlite::Result<std::collections::HashSet<String>> {
-    let upper = format!("{}0", prefix.strip_suffix('/').ok_or(rusqlite::Error::InvalidQuery)?);
-    let mut query = conn.prepare(include_str!("sql/asset_index/live_physical_files_select.sql"))?;
-    let rows = query.query_map(rusqlite::params![prefix, upper], |row| row.get(0))?;
-    rows.collect()
 }
 
 pub(super) fn page(conn: &rusqlite::Connection, prefix: &str, after: &str) -> rusqlite::Result<Vec<(String, String)>> {
@@ -48,6 +46,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn old_hash_columns_are_rejected_without_rewriting_data() {
+        for column in ["checksum TEXT", "content_hash TEXT"] {
+            let conn = rusqlite::Connection::open_in_memory().unwrap();
+            conn.execute_batch(&format!("CREATE TABLE asset_revision(physical_name TEXT PRIMARY KEY, {column} NOT NULL);")).unwrap();
+            let hash = "ab".repeat(32);
+            conn.execute("INSERT INTO asset_revision VALUES('book',?1)", [&hash]).unwrap();
+            assert!(initialize(&conn).is_err());
+            let stored: String = conn.query_row("SELECT * FROM asset_revision", [], |row| row.get(1)).unwrap();
+            assert_eq!(stored, hash);
+        }
+    }
+
+    #[test]
     fn publishing_records_replacement_and_preserves_existing_files() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         initialize(&conn).unwrap();
@@ -61,50 +72,14 @@ mod tests {
     }
 
     #[test]
-    fn recorded_totals_follow_replacement_and_retirement_without_file_access() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(include_str!("sql/asset_index/recorded_totals_follow_replacement_and_retirement_without_file_access_create.sql")).unwrap();
-        conn.execute_batch(include_str!("sql/asset_index/recorded_totals_follow_replacement_and_retirement_without_file_access_insert.sql")).unwrap();
-        assert_eq!(total_bytes(&conn, "assets/a/book/").unwrap(), 8);
-        conn.execute(include_str!("sql/asset_index/recorded_totals_follow_replacement_and_retirement_without_file_access_update.sql"), []).unwrap();
-        assert_eq!(total_bytes(&conn, "assets/a/book/").unwrap(), 12);
-        conn.execute(include_str!("sql/asset_index/recorded_totals_follow_replacement_and_retirement_without_file_access_delete.sql"), []).unwrap();
-        assert_eq!(total_bytes(&conn, "assets/a/book/").unwrap(), 0);
-    }
-
-    #[test]
-    fn live_physical_files_are_scoped_to_the_exact_import_prefix() {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(include_str!("sql/asset_index/live_physical_files_are_scoped_to_the_exact_import_prefix_create.sql")).unwrap();
-        for (name, physical) in [
-            ("first", Some("__libraries/library/imports/job/0")),
-            ("alias", Some("__libraries/library/imports/job/0")),
-            ("second", Some("__libraries/library/imports/job/1")),
-            ("other", Some("__libraries/library/imports/job-other/0")),
-            ("wildcard", Some("XXlibraries/library/imports/job/0")),
-            ("deleted", None),
-        ] {
-            conn.execute(include_str!("sql/asset_index/live_physical_files_are_scoped_to_the_exact_import_prefix_insert.sql"), rusqlite::params![name, physical]).unwrap();
-        }
-        assert_eq!(live_physical_files(&conn, "__libraries/library/imports/job/").unwrap(), ["__libraries/library/imports/job/0".to_owned(), "__libraries/library/imports/job/1".to_owned()].into_iter().collect());
-        assert!(live_physical_files(&conn, "__libraries/library/imports/absent/").unwrap().is_empty());
-        assert!(live_physical_files(&conn, "__libraries/library/imports/job").is_err());
-    }
-
-    fn insert_asset(conn: &rusqlite::Connection, name: &str) -> rusqlite::Result<()> {
-        conn.execute(include_str!("sql/asset_index/insert_asset_insert.sql"), rusqlite::params![name, format!("__asset_objects/{name}")])?;
-        Ok(())
-    }
-
-    #[test]
     fn pages_preserve_tombstones_and_do_not_skip_after_deletion() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(include_str!("sql/asset_index/pages_preserve_tombstones_and_do_not_skip_after_deletion_create.sql")).unwrap();
         for index in 0..70 {
-            insert_asset(&conn, &format!("assets/library/book/{index:03}")).unwrap();
+            publish(&conn, &format!("assets/library/book/{index:03}"), &format!("__asset_objects/{index:03}"), 1).unwrap();
         }
-        insert_asset(&conn, "assets/library/thumbnail/cover").unwrap();
-        insert_asset(&conn, "assets/other/book/000").unwrap();
+        publish(&conn, "assets/library/thumbnail/cover", "cover", 1).unwrap();
+        publish(&conn, "assets/other/book/000", "other", 1).unwrap();
         conn.execute(include_str!("sql/asset_index/pages_preserve_tombstones_and_do_not_skip_after_deletion_update.sql"), []).unwrap();
         conn.execute(include_str!("sql/asset_index/pages_preserve_tombstones_and_do_not_skip_after_deletion_update_2.sql"), []).unwrap();
         assert_eq!(conn.query_row(include_str!("sql/asset_index/pages_preserve_tombstones_and_do_not_skip_after_deletion_select.sql"), [], |row| row.get::<_, String>(0)).unwrap(), "__asset_objects/new-generation");
@@ -128,7 +103,7 @@ mod tests {
         initialize(&conn).unwrap();
         for (name, physical) in [("assets/a/book/first", "__libraries/a/book/one"), ("assets/a/thumbnail/first", "__libraries/a/thumbnail/two"), ("assets/ab/book/second", "__libraries/ab/book/three")] {
             publish(&conn, name, physical, 10).unwrap();
-            conn.execute("INSERT INTO asset_revision(physical_name,checksum) VALUES(?1,'checksum')", [physical]).unwrap();
+            conn.execute("INSERT INTO asset_revision(physical_name,content_hash) VALUES(?1,'content_hash')", [physical]).unwrap();
         }
 
         purge_library(&conn, "a").unwrap();

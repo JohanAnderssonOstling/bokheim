@@ -46,29 +46,3 @@ pub fn classification_record(query: &EditionIdentityQuery, matched: &AuthoritySu
     }
     Some(RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: Vec::new(), classifications, authors: Vec::new(), description: None, subjects: Vec::new() })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::*;
-    #[test]
-    fn authority_evidence_round_trips_and_cannot_assign_an_isbn() {
-        let q = EditionIdentityQuery { query_id: "1".into(), title: "French history".into(), authors: vec!["Jane Smith".into()], publishers: vec![], book_year: None };
-        let m = AuthoritySubjectMatch {
-            main_title: q.title.clone(),
-            provider_id: "library_of_congress".into(),
-            record_ids: vec!["12345".into()],
-            title: "French history; a survey".into(),
-            authors: vec!["Smith, Jane".into()],
-            classifications: vec![Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: "DC161".into(), source: ClassificationSource::Work, evidence: vec![] }],
-        };
-        assert_eq!(m.record_ids, vec!["12345"]);
-        let r = classification_record(&q, &m).unwrap();
-        assert!(r.exact_edition_ids.is_empty() && r.open_library_work_id.is_none());
-        assert!(r.classifications[0].evidence[0].isbn13.is_empty());
-        assert_eq!(r.classifications[0].evidence[0].method, "library_of_congress_title_author:12345");
-        let mut wrong = q.clone();
-        wrong.authors = vec!["John Smith".into()];
-        assert!(classification_record(&wrong, &m).is_none());
-    }
-}

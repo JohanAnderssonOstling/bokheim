@@ -1,28 +1,25 @@
 //! Public handle for operations scoped to one concrete library.
 
-use crate::library::ReadyCommand;
 
 use crate::executor::BackendExecutor;
 use crate::library::ResolvedBook;
 use crate::{DirectoryImport, ImportFailure, LibrarySyncState, LibrarySyncStatus};
-use std::panic::AssertUnwindSafe;
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 pub(crate) use std::sync::Arc;
-use std::time::Duration;
 
+use super::subscriptions::LibraryUpdates;
 pub(crate) use crate::asset_store::AssetStore;
 pub(crate) use crate::library::commands::LibraryCommand;
 pub(crate) use crate::library::discovery::LibraryScanner;
-pub(crate) use crate::library::events::{LibraryEvent, LibraryEventReceiver, LibraryEventSender, LibraryEventSubscriptions};
+pub(crate) use crate::library::events::{LibraryEvent, LibraryEventRouter, LibraryEventState};
 pub(crate) use crate::{ContentHash, DirId, DownloadState, LibraryId};
 pub(crate) use library_database::Database;
 
-pub(crate) use super::commands::{PreparedRequest, SessionCommand};
-pub(crate) use super::pending::{BackgroundJob, Inbox, OperationKind, PendingOperations, PendingReply};
+pub(crate) use super::commands::PreparedRequest;
+pub(crate) use super::pending::{Inbox, OperationKind, PendingOperations, PendingReply};
 pub(crate) use crate::BackendError;
-pub(crate) use futures_util::FutureExt;
-use library_runtime::TransferJob;
 
 /// All operations whose meaning is scoped to one concrete library.
 ///
@@ -32,31 +29,24 @@ pub struct LibrarySession {
     pub(crate) id: LibraryId,
     pub(crate) db: std::sync::Arc<Database>,
     pub(crate) assets: AssetStore,
-    pub(crate) metadata: metadata_client::MetadataClient,
-    pub(crate) sync: Arc<crate::sync::LibrarySync>,
-    pub(crate) event_tx: LibraryEventSender,
-    pub(crate) event_rx: Option<LibraryEventReceiver>,
-    pub(crate) subscriptions: LibraryEventSubscriptions,
-    pub(crate) runtime: Arc<crate::library::session::LibraryRuntime>,
-    /// All worker lifetimes are owned by this one concrete session.
-    pub(crate) workers: super::workers::LibraryWorkers,
-    pub(crate) sync_wake: library_runtime::scheduler::SyncScheduler,
-    pub(crate) sync_requests: Option<async_channel::Receiver<library_runtime::scheduler::SyncRequest>>,
-    pub(crate) asset_wake: library_runtime::scheduler::SyncScheduler,
-    pub(crate) asset_requests: Option<async_channel::Receiver<library_runtime::scheduler::SyncRequest>>,
+    pub(crate) enrichment: library_enrichment::LibraryEnrichment,
+    pub(crate) placement: Arc<library_placement::LibraryPlacement>,
+    pub(crate) import: library_import::LibraryImport,
+    pub(crate) sync: Arc<library_sync::LibrarySync>,
+    /// Publishes events and wakes the workers that follow them.
+    pub(crate) events: LibraryEventRouter,
+    pub(crate) coordination: RefCell<LibraryEventState>,
+    /// Taken once by the actor, whose root future runs the workers.
+    pub(crate) requests: Option<super::workers::WorkerRequests>,
+    pub(crate) runtime: Rc<crate::library::session::LibraryRuntime>,
     pub(crate) account: crate::integration::LibraryAccount,
-    pub(crate) remote_changes: crate::notification_interest::RemoteChanges,
     /// Kept only for library-owned accounting. The app registry never opens a
     /// library path merely to calculate a settings total.
     // Its Drop implementation stops and joins the scanner threads.
     pub(crate) _scanner: Arc<LibraryScanner>,
     pub(crate) cpu: std::sync::Arc<dyn cpu_host::CpuHost>,
     pub(crate) filesystem_scanning: std::cell::Cell<bool>,
-    pub(crate) file_work_error: std::cell::RefCell<Option<String>>,
 }
-
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) type ScanResult = Result<Option<library_database::ScanApplyResult>, BackendError>;
 
 pub(crate) enum OperationCompletion {
     Done,
@@ -67,11 +57,8 @@ pub(crate) enum OperationCompletion {
     },
 }
 
-#[cfg(target_arch = "wasm32")]
-pub(crate) type ScanResult = Result<(), BackendError>;
-
 #[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
-pub(crate) fn start_filesystem_watcher(root: &str, sender: async_channel::Sender<()>) -> notify::Result<notify::RecommendedWatcher> {
+pub(crate) fn start_filesystem_watcher(root: &str, scan: library_runtime::scheduler::SyncScheduler) -> notify::Result<notify::RecommendedWatcher> {
     use notify::Watcher as _;
     let root = PathBuf::from(root);
     let watched_root = root.clone();
@@ -80,7 +67,7 @@ pub(crate) fn start_filesystem_watcher(root: &str, sender: async_channel::Sender
             Ok(event) => event,
             Err(error) => {
                 log::warn!("library filesystem watcher error: {error}");
-                let _ = sender.try_send(());
+                scan.wake();
                 return;
             }
         };
@@ -88,7 +75,7 @@ pub(crate) fn start_filesystem_watcher(root: &str, sender: async_channel::Sender
             return;
         }
         if event.need_rescan() || event.paths.is_empty() {
-            let _ = sender.try_send(());
+            scan.wake();
             return;
         }
         for path in event.paths {
@@ -97,7 +84,7 @@ pub(crate) fn start_filesystem_watcher(root: &str, sender: async_channel::Sender
             if hidden {
                 continue;
             }
-            let _ = sender.try_send(());
+            scan.wake();
             return;
         }
     })?;
@@ -108,18 +95,7 @@ pub(crate) fn start_filesystem_watcher(root: &str, sender: async_channel::Sender
 pub(crate) struct LibraryActor {
     pub(crate) operations: PendingOperations<OperationCompletion>,
     pub(crate) session: Rc<LibrarySession>,
-    // Poll preparation beside commands/events, and keep filesystem replay
-    // independent so network enrichment cannot hold up physical folder moves.
-    pub(crate) enrichment_job: BackgroundJob<Result<(), BackendError>>,
-    pub(crate) file_job: BackgroundJob<Result<(), BackendError>>,
-    pub(crate) local_retry: BackgroundJob<()>,
-    pub(crate) enrichment_retry: BackgroundJob<()>,
-    pub(crate) scan_job: BackgroundJob<ScanResult>,
-    pub(crate) watch_debounce: BackgroundJob<()>,
-    pub(crate) watch_events: async_channel::Receiver<()>,
-    pub(crate) _watch_events_sender: async_channel::Sender<()>,
-    #[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
-    pub(crate) _watcher: Option<notify::RecommendedWatcher>,
+    requests: Option<super::workers::WorkerRequests>,
     /// Browser book readers and Blob URLs are thread-local resources.
     /// The actor retains them for the lifetime of the page subscription; only
     /// a Send cancellation guard leaves the actor.
@@ -129,49 +105,39 @@ pub(crate) struct LibraryActor {
 
 impl Drop for LibraryActor {
     fn drop(&mut self) {
-        self.session.subscriptions.close();
+        self.session.coordination.borrow_mut().close();
     }
 }
 
 impl LibraryActor {
-    pub(crate) fn new(session: LibrarySession) -> Self {
-        let (watch_events_sender, watch_events) = async_channel::bounded(1);
-        #[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
-        let watcher = if session.assets.local_access_enabled() {
-            match start_filesystem_watcher(session._scanner.root(), watch_events_sender.clone()) {
-                Ok(watcher) => Some(watcher),
-                Err(error) => {
-                    log::warn!("could not watch library folder {}: {error}", session._scanner.root());
-                    None
-                }
-            }
-        } else {
-            None
-        };
+    pub(crate) fn new(mut session: LibrarySession) -> Self {
+        let requests = session.requests.take();
+        // Replay whatever an earlier run left queued; admission then wakes enrichment.
+        session.events.files.wake();
         Self {
             session: Rc::new(session),
             operations: Default::default(),
-            scan_job: Default::default(),
-            watch_debounce: Default::default(),
-            watch_events,
-            _watch_events_sender: watch_events_sender,
-            #[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
-            _watcher: watcher,
-            enrichment_job: Default::default(),
-            file_job: Default::default(),
-            local_retry: Default::default(),
-            enrichment_retry: Default::default(),
+            requests,
             #[cfg(target_arch = "wasm32")]
             books: Default::default(),
         }
     }
 
+    /// The library's root future: commands and every worker. When the
+    /// command loop ends, the workers are dropped with it.
+    pub(crate) async fn run(mut self, commands: async_channel::Receiver<LibraryActorCommand>, observers: impl std::future::Future<Output = ()>) {
+        let workers = super::workers::run_workers(self.session.clone(), self.requests.take().expect("an actor runs once"), observers);
+        tokio::select! {
+            () = workers => {}
+            () = self.serve(commands) => {}
+        }
+    }
+
     // Commands never suspend this loop. It owns pending operations and polls
-    // their completions beside events, scans, and preparation.
-    pub(crate) async fn run(mut self, commands: async_channel::Receiver<LibraryActorCommand>, events: LibraryEventReceiver, event_commands: async_channel::Sender<LibraryActorCommand>) {
+    // their completions beside commands.
+    async fn serve(&mut self, commands: async_channel::Receiver<LibraryActorCommand>) {
         let commands = Inbox(commands);
-        let sync_wake = self.session.sync_wake.clone();
-        let asset_wake = self.session.asset_wake.clone();
+        let events = self.session.coordination.borrow().receiver();
         loop {
             // Retirement closes admission immediately; do not execute a
             // backlog of commands against an already-retired generation.
@@ -179,36 +145,14 @@ impl LibraryActor {
                 break;
             }
             tokio::select! {
-                event = self.watch_events.recv() => if event.is_ok() {
-                    // Reset the quiet period while a file manager is still copying.
-                    self.watch_debounce.task = Some(Box::pin(crate::executor::sleep(Duration::from_millis(500))));
-                },
-                _ = self.watch_debounce.next() => {
-                    self.watch_debounce.finish();
-                    self.begin_scan();
+                event = events.recv() => match event {
+                    Ok(event) if !commands.0.is_closed() => self.session.coordination.borrow_mut().apply(event, &self.session.events),
+                    _ => break,
                 },
                 Some(completion) = self.operations.next(), if !self.operations.is_empty() => self.complete_operation(completion),
-                _ = self.local_retry.next() => { self.local_retry.finish(); self.begin_file_work(); },
-                _ = self.enrichment_retry.next() => { self.enrichment_retry.finish(); self.begin_enrichment(); },
-                result = self.file_job.next() => self.finish_file_work(result),
-                result = self.enrichment_job.next() => self.finish_enrichment(result),
-                result = self.scan_job.next() => self.finish_scan(result),
-                event = events.recv() => match event {
-                    Ok(event) => self.publish_event(event, &event_commands),
-                    Err(_) => break,
-                },
                 command = commands.0.recv() => match command {
                     Ok(command) => {
-                        if matches!(&command, LibraryActorCommand::Ui { command: SessionCommand::Ready(ReadyCommand::DownloadState { .. }), .. }) {
-                            // A transfer may have committed while its earlier
-                            // queued/progress events still sit in this inbox.
-                            // Publish those before taking a subscription
-                            // baseline, so they cannot replay after it.
-                            while let Ok(event) = events.try_recv() {
-                                self.publish_event(event, &event_commands);
-                            }
-                        }
-                        if !self.handle_command(command, &sync_wake, &asset_wake) {
+                        if !self.handle_command(command) {
                             break;
                         }
                     }
@@ -219,13 +163,25 @@ impl LibraryActor {
     }
 
     /// Applies one command in receive order. Returns false on shutdown.
-    fn handle_command(&mut self, command: LibraryActorCommand, sync_wake: &library_runtime::scheduler::SyncScheduler, asset_wake: &library_runtime::scheduler::SyncScheduler) -> bool {
+    fn handle_command(&mut self, command: LibraryActorCommand) -> bool {
+        self.session.drain_events();
         match command {
-            LibraryActorCommand::WorkerState(request) => request.apply(&self.session.db),
+            LibraryActorCommand::SubscribeUpdates { reply } => {
+                if !reply.is_closed() {
+                    // Registration and the initial snapshot are one synchronous
+                    // actor operation, so no event can fall between them.
+                    let updates = self.session.coordination.borrow_mut().subscribe_updates();
+                    let scanning = self.session.scanner_running();
+                    let _ = reply.try_send(Ok((updates, scanning)));
+                }
+            }
             LibraryActorCommand::Ui { command, reply } => {
                 let reply = PendingReply::new(reply);
                 match super::commands::prepare_library_request(self.session.clone(), command) {
-                    Ok(PreparedRequest::Ready(value)) => reply.finish(Ok(value)),
+                    Ok(PreparedRequest::Ready(value)) => {
+                        self.session.drain_events();
+                        reply.finish(Ok(value));
+                    }
                     Ok(PreparedRequest::Pending(operation)) => self.submit(operation.kind, reply, operation.future),
                     Err(error) => reply.finish(Err(error)),
                 }
@@ -250,49 +206,37 @@ impl LibraryActor {
                 self.submit(OperationKind::Read, PendingReply::new(reply), async move { session.prepare_audiobook_track(content_hash, index).await });
             }
             #[cfg(not(target_arch = "wasm32"))]
-            LibraryActorCommand::ImportDirectory { parent_id, directory, create_root, activity, reply } => {
-                let queued = std::time::Instant::now();
-                log::info!(target: "import_timing", "import_command_received");
+            LibraryActorCommand::ImportDirectory { parent_id, directory, create_root, reply } => {
                 let session = self.session.clone();
                 let cancelled = reply.clone();
                 self.submit(OperationKind::Import, PendingReply::new(reply), async move {
-                    log::info!(target: "import_timing", "import_admitted queue_ms={:.3}", queued.elapsed().as_secs_f64() * 1000.0);
-                    session.import_selected_directory(parent_id, directory, create_root, activity, &|| cancelled.is_closed()).await
+                    session.import_selected_directory(parent_id, directory, create_root, &|| cancelled.is_closed()).await
                 });
-            }
-            LibraryActorCommand::Control(LibraryControl::WakeAssets(hashes)) => {
-                if hashes.is_empty() {
-                    asset_wake.wake();
-                } else {
-                    asset_wake.wake_hashes(hashes);
-                }
-                self.begin_file_work();
-            }
-            LibraryActorCommand::Control(LibraryControl::StartScanner) => {
-                self.begin_scan();
             }
             LibraryActorCommand::Control(LibraryControl::SetAssetStorage { enabled, reset_cloud_presence }) => {
                 if let Err(error) = self.session.db.set_asset_storage_policy(enabled, reset_cloud_presence) {
                     log::warn!("could not update cloud-storage policy for {}: {error}", self.session.id);
                 } else {
                     self.session.sync.clone().set_asset_storage_enabled(enabled);
-                    asset_wake.wake();
-                    sync_wake.request_remote_refresh();
+                    self.session.events.assets.wake();
+                    self.session.events.sync.request_remote_refresh();
                 }
             }
             LibraryActorCommand::Control(LibraryControl::Rename { name, refresh_remote }) => {
                 if let Err(error) = self.session.db.set_remote_library_name(&name) {
                     log::warn!("could not update the remote name for {}: {error}", self.session.id);
                 } else if refresh_remote {
-                    sync_wake.request_remote_refresh();
+                    self.session.events.sync.request_remote_refresh();
                 }
             }
+            LibraryActorCommand::Control(LibraryControl::RefreshRemote) => self.session.events.sync.request_remote_refresh(),
             LibraryActorCommand::Control(LibraryControl::Shutdown) => return false,
         }
         true
     }
 
     fn complete_operation(&mut self, completion: OperationCompletion) {
+        self.session.drain_events();
         match completion {
             OperationCompletion::Done => {}
             #[cfg(target_arch = "wasm32")]
@@ -313,259 +257,13 @@ impl LibraryActor {
         }
     }
 
-    fn finish_file_work(&mut self, result: Result<(), BackendError>) {
-        let pending = self.file_job.finish();
-        *self.session.file_work_error.borrow_mut() = result.as_ref().err().map(ToString::to_string);
-        self.session.emit(LibraryEvent::TransferStatusChanged);
-        if let Err(error) = result {
-            log::warn!("library file replay will resume: {error}");
-            self.local_retry.retry_after(30);
-        }
-        // A lease can leave durable work queued even after a successful pass.
-        if self.session.db.has_pending_file_work().unwrap_or(true) || self.session.db.has_pending_purge_work().unwrap_or(true) {
-            self.local_retry.retry_after(30);
-        }
-        // Enrichment follows local replay, but never prevents a later replay.
-        self.admit_and_enrich();
-        if pending {
-            self.begin_file_work();
-        }
-    }
-
-    fn finish_enrichment(&mut self, result: Result<(), BackendError>) {
-        let pending = self.enrichment_job.finish();
-        if let Err(error) = &result {
-            log::warn!("library enrichment will resume: {error}");
-        }
-        if result.is_err() || self.session.assets.local_access_enabled() && self.session.db.pending_thumbnail_job_count().map_or(true, |count| count > 0) {
-            self.enrichment_retry.retry_after(30);
-        } else if let Some(retry_at) = self.session.db.enrichment_next_retry().unwrap_or(None) {
-            // Failed lookups retry within minutes; answers refresh after weeks
-            // and are picked up by a later pass.
-            let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-            if retry_at <= now + 3_600 {
-                self.enrichment_retry.retry_after((retry_at - now).max(30) as u64);
-            }
-        }
-        if pending {
-            self.begin_enrichment();
-        }
-    }
-
     pub(crate) fn submit<T: 'static>(&mut self, kind: OperationKind, reply: PendingReply<T>, operation: impl std::future::Future<Output = Result<T, BackendError>> + 'static) {
-        self.operations.submit(kind, reply, operation, |reply, result| {
+        let session = self.session.clone();
+        self.operations.submit(kind, reply, operation, move |reply, result| {
+            session.drain_events();
             reply.finish(result);
             OperationCompletion::Done
         });
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn begin_scan(&mut self) {
-        if self.scan_job.task.is_some() {
-            self.scan_job.pending = true;
-            return;
-        }
-        self.session.filesystem_scanning.set(true);
-        let session = self.session.clone();
-        self.scan_job.task = Some(Box::pin(async move { AssertUnwindSafe(session.start_scanner()).catch_unwind().await.map_err(|_| BackendError::message("library scan panicked")) }));
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn finish_scan(&mut self, result: ScanResult) {
-        self.scan_job.finish();
-        self.session.filesystem_scanning.set(false);
-        if let Err(error) = result {
-            log::warn!("library scan failed: {error}");
-        }
-        self.session.emit(LibraryEvent::ScanComplete);
-    }
-
-    pub(crate) fn begin_file_work(&mut self) {
-        if !self.session.assets.local_access_enabled() {
-            self.admit_and_enrich();
-            return;
-        }
-        if self.session.scanner_running() {
-            self.local_retry.retry_after(30);
-            return;
-        }
-        if !self.file_job.begin() {
-            return;
-        }
-        let session = self.session.clone();
-        self.file_job.task = Some(Box::pin(async move {
-            AssertUnwindSafe(async {
-                // A scan can start after this job was queued but before polling.
-                if session.scanner_running() {
-                    return Err(BackendError::message("Waiting for library scan"));
-                }
-                let Some(_files) = session.runtime.begin_local_work(session.event_tx.clone()) else {
-                    return Err(BackendError::message("local file preparation is already running"));
-                };
-                session.run_file_jobs().await
-            })
-            .catch_unwind()
-            .await
-            .unwrap_or_else(|_| Err(BackendError::message("library file replay panicked")))
-        }));
-    }
-
-    pub(crate) fn admit_and_enrich(&mut self) {
-        if let Err(error) = self.session.admit_uploads() {
-            log::warn!("upload admission will resume: {error}");
-            self.local_retry.retry_after(30);
-            return;
-        }
-        self.begin_enrichment();
-    }
-
-    pub(crate) fn begin_enrichment(&mut self) {
-        if !self.enrichment_job.begin() {
-            return;
-        }
-        let session = self.session.clone();
-        self.enrichment_job.task = Some(Box::pin(async move { AssertUnwindSafe(session.run_enrichment()).catch_unwind().await.unwrap_or_else(|_| Err(BackendError::message("library enrichment panicked"))) }));
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn begin_scan(&mut self) {
-        if self.scan_job.task.is_some() {
-            self.scan_job.pending = true;
-            return;
-        }
-        if !self.session.assets.local_access_enabled() || !self.session._scanner.enabled() {
-            self.session.filesystem_scanning.set(false);
-            return;
-        }
-        self.session.filesystem_scanning.set(true);
-        let snapshot = match self.session.db.scan_snapshot() {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                log::warn!("could not create filesystem scan snapshot; retrying in 30 seconds: {error}");
-                self.retry_scan(Duration::from_secs(30));
-                return;
-            }
-        };
-        self.session.emit(LibraryEvent::ScanStarted);
-        let scanner = self.session._scanner.clone();
-        let session = self.session.clone();
-        self.scan_job.task = Some(Box::pin(async move {
-            // Walking directories and fingerprinting files is blocking I/O.
-            // Keep it off the library actor's thread as well as its command loop.
-            let (snapshot, discovery) = crate::executor::run_blocking({
-                let scanner = scanner.clone();
-                move || {
-                    let discovery = scanner.discover(&snapshot);
-                    (snapshot, discovery)
-                }
-            })
-            .await
-            .map_err(BackendError::operation)?;
-            AssertUnwindSafe({
-                let mut snapshot: library_database::ScanSnapshot = snapshot;
-                let mut discovery: library_database::FilesystemScan = discovery;
-                async move {
-                    let mut readable = discovery.readable;
-                    for files in discovery.files.chunks(filesystem_scanner::filesystem_scan::PUBLISH_BATCH_SIZE) {
-                        let chunk = library_database::FilesystemScan { files: files.to_vec(), readable: discovery.readable, ..Default::default() };
-                        let inspected = session._scanner.inspect(&chunk, &snapshot, &session.cpu).await;
-                        readable &= inspected.readable;
-                        if !inspected.books.is_empty() || !inspected.failures.is_empty() {
-                            let result = session.db.apply_filesystem_scan_batch(&mut snapshot, &discovery, &inspected, false).map_err(BackendError::operation)?;
-                            if result == library_database::ScanApplyResult::Stale {
-                                return Ok(Some(result));
-                            }
-                            discovery.directories.clear();
-                            session.emit(LibraryEvent::ContentsChanged);
-                            session.sync_wake.wake();
-                        }
-                        // Deliver queries and partial contents before inspecting another batch.
-                        tokio::task::yield_now().await;
-                    }
-                    let result = session.db.apply_filesystem_scan_batch(&mut snapshot, &discovery, &library_database::InspectedFilesystemScan { failures: vec![], readable, books: vec![] }, true).map_err(BackendError::operation)?;
-                    if result == library_database::ScanApplyResult::Applied && !discovery.readable {
-                        return Err(BackendError::message("filesystem scan was incomplete"));
-                    }
-                    Ok(Some(result))
-                }
-            })
-            .catch_unwind()
-            .await
-            .unwrap_or_else(|_| Err(BackendError::message("library scan panicked")))
-        }));
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn retry_scan(&mut self, delay: Duration) {
-        self.scan_job.task = Some(Box::pin(async move {
-            tokio::time::sleep(delay).await;
-            Ok(None)
-        }));
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn finish_scan(&mut self, result: ScanResult) {
-        let pending = self.scan_job.finish();
-        let result = match result {
-            Ok(None) => {
-                self.begin_scan();
-                return;
-            }
-            Ok(Some(result)) => Ok(result),
-            Err(error) => Err(error),
-        };
-        match result {
-            Ok(library_database::ScanApplyResult::Applied) => {
-                self.session.filesystem_scanning.set(false);
-                self.session.emit(LibraryEvent::ContentsChanged);
-                self.session.emit(LibraryEvent::ScanComplete);
-                // A completed scan can leave lifecycle and metadata mutations
-                // that need a sync pass before dependent asset work is ready.
-                self.session.sync_wake.wake();
-                let mut next_scan = pending.then_some(Duration::from_millis(250));
-                #[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
-                if self._watcher.is_none() && self.session.assets.local_access_enabled() {
-                    self._watcher = match start_filesystem_watcher(self.session._scanner.root(), self._watch_events_sender.clone()) {
-                        Ok(watcher) => Some(watcher),
-                        Err(error) => {
-                            log::warn!("could not watch library folder {}: {error}", self.session._scanner.root());
-                            None
-                        }
-                    };
-                    // Recheck files that may have arrived before registration.
-                    next_scan = Some(if self._watcher.is_some() { Duration::from_millis(250) } else { Duration::from_secs(30) });
-                }
-                if let Some(delay) = next_scan {
-                    self.retry_scan(delay);
-                }
-            }
-            Ok(library_database::ScanApplyResult::Stale) => {
-                // Coalesce changes while allowing the actor to serve requests.
-                self.retry_scan(Duration::from_millis(250));
-            }
-            Err(error) => {
-                log::warn!("filesystem scan failed; retrying in 30 seconds: {error}");
-                #[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
-                if !std::path::Path::new(self.session._scanner.root()).is_dir() {
-                    self._watcher = None;
-                }
-                self.retry_scan(Duration::from_secs(30));
-            }
-        }
-    }
-
-    /// Event book is part of the library actor, not a second worker
-    /// that borrows session state through shared runtime objects.
-    pub(crate) fn publish_event(&self, event: LibraryEvent, commands: &async_channel::Sender<LibraryActorCommand>) {
-        let busy = self.session.runtime.has_directory_imports() || self.session.scanner_running();
-        self.session.subscriptions.publish(event.clone(), busy);
-        if matches!(event, LibraryEvent::ContentsChanged | LibraryEvent::ImportComplete | LibraryEvent::ScanComplete | LibraryEvent::DownloadStatusChanged { state: crate::DownloadState::Downloaded, .. }) {
-            let hashes = match &event {
-                LibraryEvent::DownloadStatusChanged { content_hash, .. } => vec![*content_hash],
-                _ => Vec::new(),
-            };
-            let _ = commands.try_send(LibraryActorCommand::Control(LibraryControl::WakeAssets(hashes)));
-        }
     }
 }
 
@@ -575,26 +273,23 @@ impl LibraryActor {
 pub struct LibraryHandle {
     pub(crate) id: LibraryId,
     pub commands: async_channel::Sender<LibraryActorCommand>,
-    pub(crate) subscriptions: LibraryEventSubscriptions,
-    pub(crate) runtime: Arc<super::session::LibraryRuntime>,
-    pub(crate) event_tx: LibraryEventSender,
-    pub(crate) sync_wake: library_runtime::scheduler::SyncScheduler,
 }
 
 #[derive(Clone, Debug)]
 pub enum LibraryControl {
-    WakeAssets(Vec<ContentHash>),
-    StartScanner,
     SetAssetStorage { enabled: bool, reset_cloud_presence: bool },
     Rename { name: String, refresh_remote: bool },
+    RefreshRemote,
     Shutdown,
 }
 
 pub enum LibraryActorCommand {
-    WorkerState(super::worker_state::WorkerStateRequest),
+    SubscribeUpdates {
+        reply: async_channel::Sender<Result<(async_channel::Receiver<library_model::LibraryUpdate>, bool), BackendError>>,
+    },
     Control(LibraryControl),
     Ui {
-        command: SessionCommand,
+        command: LibraryCommand,
         reply: async_channel::Sender<Result<client_runtime::reply::Reply, BackendError>>,
     },
     #[cfg(target_arch = "wasm32")]
@@ -625,7 +320,6 @@ pub enum LibraryActorCommand {
         parent_id: DirId,
         directory: DirectoryImport,
         create_root: bool,
-        activity: Option<uuid::Uuid>,
         reply: async_channel::Sender<Result<Vec<ImportFailure>, BackendError>>,
     },
 }
@@ -663,49 +357,54 @@ impl LibraryHandle {
         let executor_for_actor = library_executor.clone();
         let handle = library_executor.run_blocking(move || -> Result<LibraryHandle, BackendError> {
             let session = LibrarySession::open(spec)?;
-            session.sync_wake.request_remote_refresh();
+            session.events.sync.request_remote_refresh();
+            session.events.assets.wake();
             Ok(session.spawn_actor(executor_for_actor))
         })?;
-        let _ = handle.commands.try_send(LibraryActorCommand::Control(LibraryControl::WakeAssets(Vec::new())));
-        // Reconcile files on every native open, including startup and newly
-        // registered folders. Queue after spawning the actor so async book
-        // inspection runs on the library's executor.
-        let _ = handle.commands.try_send(LibraryActorCommand::Control(LibraryControl::StartScanner));
         Ok(handle)
     }
     #[cfg(target_arch = "wasm32")]
     pub fn open(spec: super::LibraryRuntimeSpec, executor: &BackendExecutor) -> Result<Self, BackendError> {
         let session = LibrarySession::open(spec)?;
-        let needs_scan = session.db.needs_scan()?;
-        session.sync_wake.request_remote_refresh();
-        let handle = session.spawn_actor(executor);
-        let _ = handle.commands.try_send(LibraryActorCommand::Control(LibraryControl::WakeAssets(Vec::new())));
-        if needs_scan {
-            let _ = handle.commands.try_send(LibraryActorCommand::Control(LibraryControl::StartScanner));
-        }
-        Ok(handle)
+        session.events.sync.request_remote_refresh();
+        session.events.assets.wake();
+        Ok(session.spawn_actor(executor))
     }
 
     pub fn id(&self) -> LibraryId {
         self.id
     }
 
+    /// Ask this library's actor to schedule a remote sync pass.
+    pub fn request_remote_refresh(&self) {
+        let _ = self.commands.try_send(LibraryActorCommand::Control(LibraryControl::RefreshRemote));
+    }
+
     pub fn shutdown(&self) {
-        self.subscriptions.close();
-        let _ = self.commands.try_send(LibraryActorCommand::Control(LibraryControl::Shutdown));
+        // Channel closure rejects admission and terminates update receivers
+        // immediately, even before the owning actor is next polled.
         self.commands.close();
     }
 
-    /// Reads and updates shared import progress directly; resource-bearing
-    /// commands are delivered to the owning actor.
+    pub async fn subscribe_updates(&self) -> Result<(LibraryUpdates, bool), BackendError> {
+        let (reply, result) = async_channel::bounded(1);
+        self.commands.send(LibraryActorCommand::SubscribeUpdates { reply }).await.map_err(|_| BackendError::message("library actor is no longer running"))?;
+        let (updates, scanning) = tokio::select! {
+            biased;
+            _ = self.commands.closed() => return Err(BackendError::message("library actor is no longer running")),
+            result = result.recv() => result.map_err(|_| BackendError::message("library actor stopped before subscribing"))??,
+        };
+        if self.commands.is_closed() {
+            return Err(BackendError::message("library actor is no longer running"));
+        }
+        Ok((LibraryUpdates::new(updates, self.commands.clone()), scanning))
+    }
+
+    /// Delivers a command to the owning actor and waits for its reply.
     pub async fn dispatch(&self, command: LibraryCommand) -> Result<client_runtime::reply::Reply, BackendError> {
         if self.commands.is_closed() {
             return Err("library actor is no longer running".into());
         }
-        let command = match command {
-            LibraryCommand::Runtime(command) => return Ok(super::commands::dispatch_runtime_request(&self.runtime, &self.event_tx, &self.sync_wake, command)),
-            LibraryCommand::Session(command) => command,
-        };
         let (reply, result) = async_channel::bounded(1);
         self.commands.send(LibraryActorCommand::Ui { command, reply }).await.map_err(|_| "library actor is no longer running".to_owned())?;
         result.recv().await.map_err(|_| "library actor stopped before replying".to_owned())?
@@ -734,26 +433,10 @@ impl LibraryHandle {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn import_selected_directory(&self, parent_id: DirId, directory: DirectoryImport, create_root: bool, activity: Option<uuid::Uuid>) -> Result<Vec<ImportFailure>, BackendError> {
+    pub async fn import_selected_directory(&self, parent_id: DirId, directory: DirectoryImport, create_root: bool) -> Result<Vec<ImportFailure>, BackendError> {
         let (reply, result) = async_channel::bounded(1);
-        self.commands.send(LibraryActorCommand::ImportDirectory { parent_id, directory, create_root, activity, reply }).await.map_err(|_| "library actor is no longer running".to_owned())?;
+        self.commands.send(LibraryActorCommand::ImportDirectory { parent_id, directory, create_root, reply }).await.map_err(|_| "library actor is no longer running".to_owned())?;
         result.recv().await.map_err(|_| "library actor stopped before replying".to_owned())?
-    }
-
-    pub async fn download_changes(&self, content_hash: ContentHash) -> Result<(async_channel::Receiver<DownloadState>, DownloadState), BackendError> {
-        let durable = self.dispatch(LibraryCommand::Session(SessionCommand::Ready(ReadyCommand::DownloadState { content_hash }))).await?.take::<DownloadState>()?;
-        Ok({
-            let subscriptions = &self.subscriptions;
-
-            let (sender, receiver) = async_channel::unbounded();
-            let mut subscribers = subscriptions.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            let initial = subscribers.latest_downloads.get(&content_hash).cloned().unwrap_or(durable);
-            if !subscribers.closed {
-                subscribers.downloads.retain(|(_, sender)| !sender.is_closed());
-                subscribers.downloads.push((content_hash, sender));
-            }
-            (receiver, initial)
-        })
     }
 }
 
@@ -783,54 +466,16 @@ impl LibrarySession {
         Ok(LibrarySyncStatus { asset_storage_enabled: self.sync.clone().asset_storage_enabled(), library_id: self.id, state, has_unsynced_changes: sync_details.has_unsynced_changes, last_synced_at: sync_details.last_synced_at })
     }
 
-    /// Announces that the set of books or folders changed.
-    ///
-    /// A write site cannot tell whether it is alone or the four-thousandth
-    /// commit of an import, so it must not decide how often this is worth
-    /// saying. An import in flight already brackets itself and announces its
-    /// result once at [`Self::finish_directory_import`]; every commit inside
-    /// that bracket is the same announcement repeated, and each one costs every
-    /// open view a full reload.
-    pub(crate) fn notify_contents_changed(&self) {
-        if !self.runtime.has_directory_imports() {
-            let _ = self.event_tx.try_send(LibraryEvent::ContentsChanged);
-            self.sync_wake.wake();
-        }
-    }
-
-    pub(crate) fn notify_storage_changed(&self) {
-        // Folder imports publish their totals once through ImportComplete.
-        if !self.runtime.has_directory_imports() {
-            let _ = self.event_tx.try_send(LibraryEvent::StorageChanged);
-        }
-    }
-
     pub(crate) fn begin_directory_import(&self, id: uuid::Uuid) {
-        if self.runtime.begin_directory_import(id) {
-            let _ = self.event_tx.try_send(LibraryEvent::ImportStarted);
-        }
-    }
-
-    pub(crate) fn advance_directory_import(&self, id: uuid::Uuid, total: u64, succeeded: u64, failed: u64) {
-        if self.runtime.advance_directory_import(id, total, succeeded, failed) {
-            let _ = self.event_tx.try_send(LibraryEvent::TransferStatusChanged);
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn start_import_file(&self, id: uuid::Uuid, name: String, total_bytes: Option<u64>) -> crate::asset_store::ImportProgressObserver {
-        let progress = self.runtime.start_import_file(id, name, total_bytes);
-        std::sync::Arc::new(move |stage| {
-            progress.lock().unwrap_or_else(|e| e.into_inner()).stage = stage;
-        })
+        self.drain_events();
+        self.coordination.borrow_mut().begin_directory_import(id, &self.events);
     }
 
     pub(crate) fn finish_directory_import(&self, id: uuid::Uuid) {
         // Duplicate and late replies cannot complete another import.
-        if self.runtime.finish_directory_import(id) {
-            let _ = self.event_tx.try_send(LibraryEvent::ImportComplete);
-            self.sync_wake.wake();
-        }
+        // Flush writes while the import still owns its notification bracket.
+        self.drain_events();
+        self.coordination.borrow_mut().finish_directory_import(id, self.filesystem_scanning.get(), &self.events);
     }
 
     pub(crate) async fn local_storage_usage(&self) -> Result<Option<u64>, BackendError> {
@@ -863,110 +508,120 @@ impl LibrarySession {
     /// Called only from inside a job already running on `library_executor`'s
     /// dedicated thread (see [`Self::open`]) — everything here executes
     /// there, so nothing it touches needs to be `Send`.
-    pub(crate) fn spawn_actor(mut self, #[cfg(not(target_arch = "wasm32"))] library_executor: crate::executor::LibraryExecutor, #[cfg(target_arch = "wasm32")] executor: &BackendExecutor) -> LibraryHandle {
+    pub(crate) fn spawn_actor(self, #[cfg(not(target_arch = "wasm32"))] library_executor: crate::executor::LibraryExecutor, #[cfg(target_arch = "wasm32")] executor: &BackendExecutor) -> LibraryHandle {
         let (commands, receiver) = async_channel::unbounded();
-        let handle = LibraryHandle { id: self.id, commands, subscriptions: self.subscriptions.clone(), runtime: self.runtime.clone(), event_tx: self.event_tx.clone(), sync_wake: self.sync_wake.clone() };
-        let account_observer = super::workers::observe_account_changes(self.account.clone(), handle.commands.clone(), self.sync_wake.clone(), self.event_tx.clone());
-        let remote = super::workers::observe_remote_changes(self.remote_changes.clone(), self.sync_wake.clone());
-        let sync = super::workers::run_sync_scheduler(
-            self.sync.clone(),
-            self.sync_requests.take().expect("a library session has one sync receiver"),
-            #[cfg(not(target_arch = "wasm32"))]
-            self.assets.clone(),
-            super::worker_state::WorkerState::new(handle.commands.clone()),
-        );
-        let assets = super::workers::run_asset_scheduler(self.sync.clone(), self.asset_requests.take().expect("a library session has one asset receiver"), super::worker_state::WorkerState::new(handle.commands.clone()));
-        let events = self.event_rx.take().expect("a library session has one event receiver");
-        let event_commands = handle.commands.clone();
-
+        let handle = LibraryHandle { id: self.id, commands };
+        // Subscribe before spawning so startup cannot miss an account change.
+        let observers = super::workers::observe_account(self.account.clone(), self.events.clone());
+        let library = LibraryActor::new(self).run(receiver, observers);
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            use crate::executor::LibraryExecutor;
-            self.workers.account_observer = Some(LibraryExecutor::spawn_local(account_observer));
-            self.workers.remote = Some(LibraryExecutor::spawn_local(remote));
-            self.workers.sync = Some(LibraryExecutor::spawn_local(sync));
-            self.workers.assets = Some(LibraryExecutor::spawn_local(assets));
-            LibraryExecutor::spawn_local_detached(async move {
-                // Keep the dedicated executor alive until the actor retires.
-                let _executor = library_executor;
-                LibraryActor::new(self).run(receiver, events, event_commands).await;
-            });
-        }
+        crate::executor::LibraryExecutor::spawn_local_detached(async move {
+            // Keep the dedicated executor alive until the library retires.
+            let _executor = library_executor;
+            library.await;
+        });
         #[cfg(target_arch = "wasm32")]
-        {
-            self.workers.account_observer = Some(executor.spawn(account_observer));
-            self.workers.remote = Some(executor.spawn(remote));
-            self.workers.sync = Some(executor.spawn(sync));
-            self.workers.assets = Some(executor.spawn(assets));
-            executor.spawn_detached(async move {
-                LibraryActor::new(self).run(receiver, events, event_commands).await;
-            });
-        }
+        executor.spawn_detached(library);
         handle
     }
 
     pub(crate) fn emit(&self, event: LibraryEvent) {
-        let _ = self.event_tx.try_send(event);
+        self.events.emit(event);
+        self.drain_events();
+    }
+
+    pub(crate) fn drain_events(&self) {
+        self.coordination.borrow_mut().drain(&self.events);
+    }
+
+    pub(crate) fn directory_imports_active(&self) -> bool {
+        self.drain_events();
+        self.coordination.borrow().directory_imports_active()
     }
 
     pub fn id(&self) -> &LibraryId {
         &self.id
     }
 
-    /// True while the local filesystem scanner is scheduled or actively
-    /// walking this library.
-    pub(crate) fn discovery_enabled(&self) -> bool {
-        self._scanner.enabled()
-    }
-
     pub fn scanner_running(&self) -> bool {
-        self.filesystem_scanning.get() || self.runtime.has_directory_imports()
+        self.filesystem_scanning.get() || self.directory_imports_active()
     }
 
-    #[cfg(all(test, feature = "scanner", not(target_os = "android")))]
-    pub(crate) fn shares_scanner_with(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self._scanner, &other._scanner)
-    }
-
-    /// Enables the initial filesystem scan for a handle opened in deferred mode.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) async fn start_scanner(&self) {
-        if self.assets.local_access_enabled() {
-            ({
-                async move {
-                    let snapshot = match self.db.scan_snapshot() {
-                        Ok(snapshot) => snapshot,
-                        Err(error) => {
-                            log::warn!("could not create filesystem scan snapshot: {error}");
-                            return;
-                        }
-                    };
-                    self.emit(LibraryEvent::ScanStarted);
-                    let discovery = self._scanner.discover(&snapshot);
-                    let inspected = self._scanner.inspect(&discovery, &snapshot, &self.cpu).await;
-                    match self.db.apply_filesystem_scan(&snapshot, &discovery, &inspected) {
-                        Ok(library_database::ScanApplyResult::Applied) => {
-                            self.emit(LibraryEvent::ContentsChanged);
-                            self.sync_wake.wake();
-                        }
-                        Ok(library_database::ScanApplyResult::Stale) => log::debug!("filesystem scan became stale before apply"),
-                        Err(error) => log::warn!("could not apply filesystem scan: {error}"),
-                    }
-                    self.emit(LibraryEvent::ScanComplete);
-                }
-            })
-            .await;
+    /// Walks the library folder and applies what it finds, walking again while
+    /// the database changed underneath. The scanning flag clears once applied.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) async fn scan_folder(&self) -> Result<(), BackendError> {
+        if !self.assets.local_access_enabled() || !self._scanner.enabled() {
+            self.filesystem_scanning.set(false);
+            return Ok(());
         }
+        self.filesystem_scanning.set(true);
+        loop {
+            let snapshot = self.db.scan_snapshot()?;
+            self.emit(LibraryEvent::ScanStarted);
+            match futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(self.scan_once(snapshot))).await.unwrap_or_else(|_| Err(BackendError::message("library scan panicked")))? {
+                library_database::ScanApplyResult::Applied => break,
+                // Coalesce changes while the actor keeps serving requests.
+                library_database::ScanApplyResult::Stale => crate::executor::sleep(std::time::Duration::from_millis(250)).await,
+            }
+        }
+        self.filesystem_scanning.set(false);
+        self.emit(LibraryEvent::ContentsChanged);
+        self.emit(LibraryEvent::ScanComplete { busy: self.scanner_running() });
+        // A completed scan can leave lifecycle and metadata mutations
+        // that need a sync pass before dependent asset work is ready.
+        self.events.sync.wake();
+        Ok(())
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn scan_once(&self, snapshot: library_database::ScanSnapshot) -> Result<library_database::ScanApplyResult, BackendError> {
+        // Walking directories and fingerprinting files is blocking I/O.
+        // Keep it off the library thread.
+        let (mut snapshot, mut discovery) = crate::executor::run_blocking({
+            let scanner = self._scanner.clone();
+            move || {
+                let discovery = scanner.discover(&snapshot);
+                (snapshot, discovery)
+            }
+        })
+        .await
+        .map_err(BackendError::operation)?;
+        let mut readable = discovery.readable;
+        for files in discovery.files.chunks(filesystem_scanner::filesystem_scan::PUBLISH_BATCH_SIZE) {
+            let chunk = library_database::FilesystemScan { files: files.to_vec(), readable: discovery.readable, ..Default::default() };
+            let inspected = self._scanner.inspect(&chunk, &snapshot, &self.cpu).await;
+            readable &= inspected.readable;
+            if !inspected.books.is_empty() {
+                let result = self.db.apply_filesystem_scan_batch(&mut snapshot, &discovery, &inspected, false, Some(metadata_contract::matching::same_author)).map_err(BackendError::operation)?;
+                if result == library_database::ScanApplyResult::Stale {
+                    return Ok(result);
+                }
+                discovery.directories.clear();
+                self.emit(LibraryEvent::ContentsChanged);
+                self.events.sync.wake();
+            }
+            // Deliver queries and partial contents before inspecting another batch.
+            tokio::task::yield_now().await;
+        }
+        let result = self.db.apply_filesystem_scan_batch(&mut snapshot, &discovery, &library_database::InspectedFilesystemScan { readable, books: vec![] }, true, Some(metadata_contract::matching::same_author)).map_err(BackendError::operation)?;
+        if result == library_database::ScanApplyResult::Applied && !discovery.readable {
+            return Err(BackendError::message("filesystem scan was incomplete"));
+        }
+        Ok(result)
+    }
+
 
     pub(crate) fn download_state(&self, content_hash: ContentHash) -> Result<DownloadState, BackendError> {
         let durable = self.persistent_download_state(content_hash)?;
-        Ok(match (&durable, self.subscriptions.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).latest_downloads.get(&content_hash).cloned()) {
+        self.drain_events();
+        Ok(match (&durable, self.coordination.borrow().download_state(&content_hash).cloned()) {
             (DownloadState::Queued, Some(state @ DownloadState::Downloading(_))) => state,
             _ => durable,
         })
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn queue_download(&self, content_hash: ContentHash) -> Result<DownloadState, BackendError> {
         let state = self.download_state(content_hash)?;
         if matches!(state, DownloadState::Downloaded | DownloadState::Downloading(_)) {
@@ -977,23 +632,19 @@ impl LibrarySession {
             return Err(BackendError::message("sign in before downloading this book"));
         }
         {
-            let mut subscribers = self.subscriptions.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            if matches!(subscribers.latest_downloads.get(&content_hash), Some(DownloadState::Downloaded)) {
-                subscribers.latest_downloads.remove(&content_hash);
-            }
+            self.coordination.borrow_mut().reset_download(&content_hash);
         }
         self.request_downloads(&[content_hash])?;
         Ok(DownloadState::Queued)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn request_downloads(&self, hashes: &[ContentHash]) -> Result<(), BackendError> {
         if hashes.is_empty() {
             return Ok(());
         }
         self.sync.clone().request_downloads(hashes).map_err(BackendError::operation)?;
-        // Enqueue and wake together: the next pass plans exactly these
-        // hashes first instead of discovering them in the drain.
-        self.asset_wake.wake_hashes(hashes.to_vec());
+        self.events.assets.wake();
         Ok(())
     }
 }
@@ -1002,129 +653,6 @@ impl LibrarySession {
 #[path = "concurrency_tests.rs"]
 mod concurrency_tests;
 
-#[cfg(all(test, feature = "scanner", not(target_arch = "wasm32")))]
-mod background_scan_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn subject_compaction_reaches_client_responses_and_reacts_to_finished_filter() {
-        use library_database::LibraryBrowseData;
-        use library_model::{LibraryBrowseQuery, LibraryFileTypeFilter};
-        let root = tempfile::tempdir().unwrap();
-        #[derive(Clone, Debug)]
-        struct SignedOut;
-        impl account_client::SessionPersistence for SignedOut {
-            fn load_account_session(&self) -> std::io::Result<Option<account_client::Session>> {
-                Ok(None)
-            }
-            fn save_account_session(&self, _: &account_client::Session) -> std::io::Result<()> {
-                unreachable!("signed-out fixture")
-            }
-            fn clear_account_session(&self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let server: account_client::ServerUrl = "http://127.0.0.1:1".parse().unwrap();
-        let account = library_runtime::account::LibraryAccountSession::load(SignedOut, server.clone()).unwrap();
-        let session = LibrarySession::open(crate::library::LibraryRuntimeSpec {
-            config: crate::library::LibraryOpenConfig {
-                id: LibraryId::new_v4(),
-                display_name: "Fixture".into(),
-                root: root.path().to_string_lossy().into_owned(),
-                database_locator: root.path().join("library.sqlite").to_string_lossy().into_owned(),
-                default_sync_server_url: server,
-                metadata_server_url: "http://127.0.0.1:1".into(),
-                asset_storage_enabled: true,
-                reset_cloud_presence: false,
-            },
-            account: account.library_account(),
-            notification_interest: Default::default(),
-            remote_changes: Default::default(),
-        })
-        .unwrap();
-        let session = Rc::new(session);
-        let library = &session;
-        async fn wire_value<T: serde::de::DeserializeOwned>(library: &Rc<LibrarySession>, command: LibraryCommand) -> T {
-            let reply = crate::library::commands::dispatch_library_request_in_session(library.clone(), command).await.unwrap();
-            client_runtime::wire::decode_worker_payload(reply.into_wire().unwrap()).unwrap()
-        }
-        library_database::execute_owner_fixture_sql(
-            &library.db,
-            "
-         DETACH curated; ATTACH ':memory:' AS curated;
-         CREATE TABLE curated.taxonomy_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-         CREATE TABLE curated.concept(concept_id INTEGER PRIMARY KEY,preferred_label TEXT NOT NULL);
-         INSERT INTO curated.concept VALUES(920001,'History'),(920002,'U.S.'),(920003,'Period');
-         CREATE TABLE curated.unified_concept_route(route_id INTEGER PRIMARY KEY,concept_id INTEGER NOT NULL,parent_route_id INTEGER NOT NULL);
-         INSERT INTO curated.unified_concept_route VALUES(1,920001,0),(2,920002,1),(3,920003,2);
-         INSERT INTO book(content_hash,title,format,read_progress) VALUES
-            (printf('%064x',911),'General history',1,100),
-            (printf('%064x',912),'Specific history',1,0);
-         INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded)
-            SELECT '00000000-0000-0000-0000-000000000000',row_id,title,title,1 FROM book;
-         INSERT INTO book_unified_concept(book_row_id,concept_id,mapper_version)
-            SELECT row_id,CASE title WHEN 'General history' THEN 920002 ELSE 920003 END,1 FROM book;
-         ",
-        )
-        .unwrap();
-        let mut query = LibraryBrowseQuery {
-            location: library_model::BrowseLocation::Subject(library_model::ROOT_SUBJECT_ROUTE_ID),
-            search: String::new(),
-            file_types: vec![LibraryFileTypeFilter::All],
-            chip_sort: Default::default(),
-            book_sort: Default::default(),
-            languages: Vec::new(),
-            hide_finished: false,
-            include_direct_child_books: false,
-        };
-        let unfiltered: LibraryBrowseData = wire_value(library, LibraryCommand::Session(SessionCommand::Ready(ReadyCommand::Browse { query: query.clone() }))).await;
-        assert!(unfiltered.contents.children.is_empty(), "small subject subtrees are compacted before filtering");
-        assert_eq!(unfiltered.contents.books.iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), ["General history", "Specific history"]);
-        query.hide_finished = true;
-        let filtered: LibraryBrowseData = wire_value(library, LibraryCommand::Session(SessionCommand::Ready(ReadyCommand::Browse { query: query.clone() }))).await;
-        assert!(filtered.contents.children.is_empty());
-        assert_eq!(filtered.contents.books[0].title, "Specific history", "the finished filter hides only the completed book");
-        assert_eq!(filtered.format_counts, unfiltered.format_counts, "facets still describe all books in the location");
-        assert_eq!(library.browse_contents(&query, true).unwrap(), filtered.contents);
-        query.location = library_model::BrowseLocation::Subject(2);
-        let collapsed: LibraryBrowseData = wire_value(library, LibraryCommand::Session(SessionCommand::Ready(ReadyCommand::Browse { query: query.clone() }))).await;
-        assert!(collapsed.contents.children.is_empty() && collapsed.contents.books.is_empty(), "the original narrow route is no longer browsable");
-        query.location = library_model::BrowseLocation::Subject(library_model::ROOT_SUBJECT_ROUTE_ID);
-        let grouped: LibraryBrowseData = wire_value(library, LibraryCommand::Session(SessionCommand::Ready(ReadyCommand::Browse { query: query.clone() }))).await;
-        assert!(grouped.contents.children.is_empty());
-        assert_eq!(grouped.contents.books.iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), ["Specific history"], "small subtrees also compact at the root");
-        query.location = library_model::BrowseLocation::Folder(sync_common::ROOT_DIR_ID);
-        let folder: LibraryBrowseData = wire_value(library, LibraryCommand::Session(SessionCommand::Ready(ReadyCommand::Browse { query }))).await;
-        assert_eq!(folder.contents.books.iter().map(|book| book.title.as_str()).collect::<Vec<_>>(), ["Specific history"]);
-        assert_eq!(folder.format_counts, unfiltered.format_counts, "folder facets also retain finished books");
-    }
-}
-
-#[cfg(test)]
-mod activity_subscription_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn subscription_reports_thumbnail_cancellation_and_overlapping_work() {
-        let runtime = Arc::new(crate::library::session::LibraryRuntime::default());
-        let (events, changes) = async_channel::unbounded();
-        let first = runtime.begin_thumbnail_generation(events.clone());
-        assert!(matches!(changes.try_recv(), Ok(LibraryEvent::TransferStatusChanged)));
-        let mut work = Box::pin(async {
-            let _activity = runtime.begin_thumbnail_generation(events);
-            std::future::pending::<()>().await;
-        });
-        assert!(futures_util::poll!(work.as_mut()).is_pending());
-        assert!(matches!(changes.try_recv(), Ok(LibraryEvent::TransferStatusChanged)));
-        drop(work);
-        assert!(matches!(changes.try_recv(), Ok(LibraryEvent::TransferStatusChanged)));
-        assert_eq!(runtime.thumbnail_generations_running(), 1);
-        drop(first);
-        assert!(matches!(changes.try_recv(), Ok(LibraryEvent::TransferStatusChanged)));
-        assert_eq!(runtime.thumbnail_generations_running(), 0);
-        assert!(changes.try_recv().is_err());
-    }
-}
 
 #[cfg(all(test, feature = "watcher", not(target_arch = "wasm32")))]
 mod watcher_recovery_tests {
@@ -1134,9 +662,9 @@ mod watcher_recovery_tests {
     fn watcher_can_register_after_library_folder_appears() {
         let parent = tempfile::tempdir().unwrap();
         let root = parent.path().join("library");
-        let (sender, _receiver) = async_channel::bounded(1);
-        assert!(start_filesystem_watcher(root.to_str().unwrap(), sender.clone()).is_err());
+        let (scan, _requests) = library_runtime::scheduler::SyncScheduler::new();
+        assert!(start_filesystem_watcher(root.to_str().unwrap(), scan.clone()).is_err());
         std::fs::create_dir(&root).unwrap();
-        assert!(start_filesystem_watcher(root.to_str().unwrap(), sender).is_ok());
+        assert!(start_filesystem_watcher(root.to_str().unwrap(), scan).is_ok());
     }
 }

@@ -1,0 +1,1 @@
+SELECT content_hash FROM asset_revision WHERE physical_name=?1

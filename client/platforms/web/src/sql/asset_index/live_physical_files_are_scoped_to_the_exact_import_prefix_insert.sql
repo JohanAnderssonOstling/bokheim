@@ -1,1 +1,0 @@
-INSERT INTO asset_file VALUES(?1,?2)

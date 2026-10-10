@@ -1,8 +1,8 @@
 WITH input AS (
     SELECT *
     FROM UNNEST(
-        $2::text[], $3::text[], $4::text[], $5::bytea[],
-        $6::text[], $7::bigint[], $8::bigint[], $9::smallint[], $10::text[]
+        $2::text[], $3::bytea[], $4::text[], $5::bytea[],
+        $6::bytea[], $7::bigint[], $8::bigint[], $9::smallint[], $10::text[]
     ) AS rows(kind, entity_key, entity_subkey, value, content_hash, changed_at, replica_seq, version_rank, replica_id)
 ), reduced AS (
     SELECT DISTINCT ON (kind, entity_key, entity_subkey) *

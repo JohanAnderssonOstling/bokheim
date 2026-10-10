@@ -1,11 +1,14 @@
 //! Sync outbox snapshots and acknowledgements.
 
-use std::collections::HashSet;
-use crate::transactions::WriteOutcome::Commit;
+use crate::query_methods::query_rows;
 pub(crate) use crate::sync::SyncOutboxSql;
+use crate::transactions::WriteOutcome::Commit;
 pub(crate) use crate::{Database, DatabaseError};
+use content_address::ContentHash;
 pub(crate) use library_replica::{LibraryStateEntry, StatePublication};
+use std::collections::HashSet;
 pub(crate) use sync_common::ReplicaSeq;
+use sync_common::StateKey;
 
 // Sync outbox snapshots and acknowledgements.
 //
@@ -16,7 +19,7 @@ pub(crate) use sync_common::ReplicaSeq;
 #[derive(Clone, Debug)]
 pub(crate) struct OutboxRow {
     pub(crate) state_kind: String,
-    pub(crate) state_key: String,
+    pub(crate) state_key: StateKey,
     pub(crate) body: Vec<u8>,
     pub(crate) changed_at: i64,
     pub(crate) replica_seq: i64,
@@ -45,26 +48,35 @@ pub(crate) fn decode_outbox_row(row: OutboxRow) -> Result<StatePublication, Data
     Ok(sync_common::Publication { publisher_seq, state: sync_common::Versioned { value: body, version } })
 }
 
-/// Pending state stays durable while its exact local book version is
-/// uploading (including rejected/retryable jobs). Only completion releases it.
-pub(crate) fn book_ready(mutation: &StatePublication, pending: &HashSet<String>) -> bool {
-    mutation.state.value.upload_dependency().is_none_or(|hash| !pending.contains(hash.as_str()))
+/// All book state waits for its draft to complete. Non-removal state also
+/// waits for the book bytes when cloud storage is enabled.
+struct PublicationDependencies {
+    drafts: HashSet<ContentHash>,
+    uploads: HashSet<ContentHash>,
+}
+
+fn book_ready(mutation: &StatePublication, pending: &PublicationDependencies) -> bool {
+    mutation.state.value.book().is_none_or(|hash| !pending.drafts.contains(&hash)) && mutation.state.value.upload_dependency().is_none_or(|hash| !pending.uploads.contains(&hash))
 }
 
 /// Content hashes whose exact local book version is still uploading. Pending
 /// state stays durable until completion releases it.
-pub(crate) fn outbox_pending_uploads(connection: &rusqlite::Connection) -> Result<HashSet<String>, DatabaseError> {
+fn outbox_pending_uploads(connection: &rusqlite::Connection) -> Result<PublicationDependencies, DatabaseError> {
     let mut cloud_storage_enabled: Option<i64> = None;
     connection.sync_cloud_storage_enabled(|row| {
         cloud_storage_enabled = row.get(0)?;
         Ok(())
     })?;
+    let mut pending = PublicationDependencies { drafts: HashSet::new(), uploads: HashSet::new() };
+    connection.sync_pending_book_drafts(|row| {
+        pending.drafts.insert(row.get::<_, ContentHash>(0)?);
+        Ok(())
+    })?;
     if cloud_storage_enabled == Some(0) {
-        return Ok(HashSet::new());
+        return Ok(pending);
     }
-    let mut pending = HashSet::new();
     connection.sync_pending_uploads(|row| {
-        pending.insert(row.get::<_, String>(0)?);
+        pending.uploads.insert(row.get::<_, ContentHash>(0)?);
         Ok(())
     })?;
     Ok(pending)
@@ -78,20 +90,16 @@ impl Database {
                 use crate::sync::apply::registers::*;
                 let conn: &Connection = tx;
 
-                let pending = conn
-                    .prepare("SELECT state_kind,state_key,state_subkey,replica_seq FROM sync_outbox WHERE body IS NULL ORDER BY replica_seq")?
-                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?)))?
-                    .collect::<Result<Vec<_>, _>>()?;
+                let pending = query_rows(|callback| conn.outbox_pending_snapshots(callback), |r| Ok((r.get::<_, String>(0)?, r.get::<_, StateKey>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?)))?.collect::<Result<Vec<_>, _>>()?;
                 for (kind, key, subkey, seq) in pending {
                     let Some((bytes, _)) = canonical_body(conn, &kind, &key, &subkey)? else {
                         continue;
                     };
-                    let current = read_version(conn, &kind, &key, &subkey)?.ok_or_else(|| DatabaseError::message("queued register has no version"))?;
+                    let current = publication_version(conn, &kind, &key, &subkey)?.ok_or_else(|| DatabaseError::message("queued register has no version"))?;
                     let version = sync_common::wire::encode(&current).map_err(DatabaseError::operation)?;
                     // Recovery forwards the exact retained version, never a newer edit.
-                    conn.execute("UPDATE sync_outbox SET body=?1,changed_at=?2,winning_version=?3 WHERE replica_seq=?4", params![bytes, storage_i64(current.changed_at, "publication timestamp")?, version, seq])?;
+                    conn.outbox_freeze_snapshot(&bytes, &(storage_i64(current.changed_at, "publication timestamp")?), &version, &seq)?;
                 }
-                ()
             });
             Ok(Commit(read(tx)?))
         })
@@ -166,10 +174,10 @@ impl Database {
     }
 
     /// Enqueues one reading-position change directly into the durable outbox.
-    pub fn enqueue_outbox_reading_change(&self, state_key: &str, body: &[u8], changed_at: i64) -> Result<(), DatabaseError> {
+    pub fn enqueue_outbox_reading_change(&self, state_key: &ContentHash, body: &[u8], changed_at: i64) -> Result<(), DatabaseError> {
         self.with_write_transaction(|tx| {
             let body: LibraryStateEntry = sync_common::wire::decode(body, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)?;
-            if !matches!(&body,LibraryStateEntry::ReadingPosition { content_hash,.. } if content_hash.as_str()==state_key) {
+            if !matches!(&body,LibraryStateEntry::ReadingPosition { content_hash,.. } if content_hash==state_key) {
                 return Err(DatabaseError::message("reading identity mismatch"));
             }
             crate::sync::apply::registers::accept_value(tx, &body, u64::try_from(changed_at).map_err(DatabaseError::operation)?)?;

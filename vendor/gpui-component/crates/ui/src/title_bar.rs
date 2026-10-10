@@ -1,4 +1,5 @@
 use std::rc::Rc;
+use crate::menu::OpenContextMenu;
 
 use crate::{
     ActiveTheme, Icon, IconName, InteractiveElementExt as _, Sizable as _, StyledExt, h_flex,
@@ -271,6 +272,11 @@ impl RenderOnce for TitleBar {
                 .border_color(cx.theme().title_bar_border)
                 .bg(cx.theme().tokens.title_bar)
                 .refine_style(&self.style)
+                .when(is_linux && is_client_decorated && !is_web, |this| {
+                    this.focusable().tab_index(0)
+                        .focus(|style| style.border_color(cx.theme().primary))
+                        .on_action(|_: &OpenContextMenu, window, _| window.show_window_menu(gpui::point(px(12.), TITLE_BAR_HEIGHT)))
+                })
                 .when(is_linux, |this| {
                     this.on_double_click(|_, window, _| window.zoom_window())
                 })

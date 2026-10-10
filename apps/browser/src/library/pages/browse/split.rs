@@ -24,22 +24,16 @@ struct BrowsePane {
 impl BrowseSplitPlane {
     pub(crate) fn open_folder(&mut self, directory_id: sync_common::DirId, title: String, cx: &mut Context<Self>) {
         let path = if directory_id == sync_common::ROOT_DIR_ID { Vec::new() } else { vec![BrowseCrumb { location: library_model::BrowseLocation::Folder(directory_id), label: title }] };
-        self.panes[0].page.update(cx, |page, cx| page.open_split_path(path, cx));
+        self.panes[0].page.update(cx, |page, cx| page.open_path(path, cx));
     }
 
-    /// Opens a subject; the backend supplies its display trail.
-    pub(crate) fn open_subject(&mut self, location: library_model::BrowseLocation, label: String, cx: &mut Context<Self>) {
-        self.panes[0].page.update(cx, |page, cx| page.open_split_path(vec![BrowseCrumb { location, label }], cx));
+    /// Opens a subject or an author; the backend supplies its display trail.
+    pub(crate) fn open_location(&mut self, location: library_model::BrowseLocation, label: String, cx: &mut Context<Self>) {
+        self.panes[0].page.update(cx, |page, cx| page.open_path(vec![BrowseCrumb { location, label }], cx));
     }
 
     pub(crate) fn open_book_detail(&mut self, book: library_model::BookCardRow, path: Vec<BrowseCrumb>, cx: &mut Context<Self>) {
         self.panes[0].page.update(cx, |page, cx| page.open_book_detail(book, path, cx));
-    }
-
-    pub(crate) fn clear_cached_book_detail(&mut self, cx: &mut Context<Self>) {
-        for pane in &self.panes {
-            pane.page.update(cx, |page, cx| page.clear_cached_book_detail(cx));
-        }
     }
 
     pub(crate) fn new(kind: BrowseKind, library: LibraryContext, cx: &mut Context<Self>) -> Self {
@@ -59,7 +53,7 @@ impl BrowseSplitPlane {
             plane.close_page(source, cx);
         });
         if !path.is_empty() {
-            page.update(cx, |page, cx| page.open_split_path(path, cx));
+            page.update(cx, |page, cx| page.open_path(path, cx));
         }
         let insert_at = index.min(self.panes.len());
         self.panes.insert(insert_at, BrowsePane { page, _subscriptions: vec![subscription, close_subscription] });
@@ -69,22 +63,22 @@ impl BrowseSplitPlane {
 
     fn add_page(&mut self, source: Entity<BrowsePage>, side: BrowseSplitSide, path: Vec<BrowseCrumb>, cx: &mut Context<Self>) {
         let Some(source_index) = self.panes.iter().position(|pane| pane.page == source) else { return };
-        // The adjacent pane on the requested side, if one is already open,
-        // is navigated in place — "open left/right" means "show it over
-        // there", not "add yet another pane every time it's asked for".
-        let adjacent = match side {
-            BrowseSplitSide::Left => source_index.checked_sub(1),
-            BrowseSplitSide::Right => Some(source_index + 1),
-        };
-        if let Some(pane) = adjacent.and_then(|index| self.panes.get(index)) {
-            pane.page.update(cx, |page, cx| page.open_split_path(path, cx));
-            return;
-        }
+        // Where a new pane on that side would go. The adjacent pane there, if
+        // one is already open, is navigated in place — "open left/right"
+        // means "show it over there", not "add yet another pane every time
+        // it's asked for".
         let index = match side {
             BrowseSplitSide::Left => source_index,
             BrowseSplitSide::Right => source_index + 1,
         };
-        self.add_page_at(index, path, cx);
+        let adjacent = match side {
+            BrowseSplitSide::Left => index.checked_sub(1),
+            BrowseSplitSide::Right => Some(index),
+        };
+        match adjacent.and_then(|adjacent| self.panes.get(adjacent)) {
+            Some(pane) => pane.page.update(cx, |page, cx| page.open_path(path, cx)),
+            None => self.add_page_at(index, path, cx),
+        }
     }
 
     fn close_page(&mut self, page: Entity<BrowsePage>, cx: &mut Context<Self>) {

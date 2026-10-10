@@ -5,7 +5,6 @@ mod navigation;
 mod search;
 
 use std::{rc::Rc, sync::Arc};
-use web_time::Instant;
 
 use gpui::prelude::*;
 use gpui::{App, Context, Window};
@@ -49,8 +48,6 @@ impl ReaderView {
         locator: BookLocator, title: String, _app: app::AppClient, library: Rc<LibraryClient>, book: Arc<crate::book::NativeBook>, preparation: html_view_core::RendererPreparation, close_reader: crate::CloseReader, window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let reader_started = Instant::now();
-        startup_phase!("phase=reader_view_begin");
         let search_input = cx.new(|cx| InputState::new(window, cx));
         let search_subscription = cx.subscribe_in(&search_input, window, |this, input, event: &InputEvent, _window, cx| match event {
             InputEvent::Change => {
@@ -99,6 +96,8 @@ impl ReaderView {
             image_preview: None,
             context_sheet: None,
             focus,
+            sidebar_focus: cx.focus_handle().tab_index(0).tab_stop(true),
+            settings_navigation: Default::default(),
             renderer_subscription: None,
             document_tap_subscription: None,
             reading_positions,
@@ -106,14 +105,10 @@ impl ReaderView {
             _search_subscription: search_subscription,
         };
         reader.finish_load(preparation, window, cx);
-        startup_phase!("phase=reader_view_ready phase_ms={}", reader_started.elapsed().as_millis());
         reader
     }
 
     fn finish_load(&mut self, preparation: html_view_core::RendererPreparation, window: &mut Window, cx: &mut Context<Self>) {
-        let finish_started = Instant::now();
-        startup_phase!("phase=finish_load_begin");
-        let renderer_started = Instant::now();
         let renderer = match HtmlView::create_from_preparation(preparation, window, cx) {
             Ok(renderer) => renderer,
             Err(error) => {
@@ -129,14 +124,12 @@ impl ReaderView {
             // the event first.
             view.set_wheel_scroll_enabled(false);
         });
-        startup_phase!("phase=renderer_entity_ready elapsed_ms={} phase_ms={}", finish_started.elapsed().as_millis(), renderer_started.elapsed().as_millis());
         self.renderer_subscription = Some(cx.subscribe_in(&renderer, window, |this, _, event: &RendererEvent, window, cx| {
             this.handle_renderer_event(event, window, cx);
         }));
         self.document_tap_subscription = Some(cx.subscribe_in(&renderer, window, |this, _, _: &DocumentTap, window, cx| {
             this.toggle_mobile_controls(window, cx);
         }));
-        startup_phase!("phase=initial_preferences_embedded elapsed_ms={}", finish_started.elapsed().as_millis());
         self.load_state = LoadState::Ready(renderer);
         self.install_document_progress_weights(cx);
         // The window focused the page container before there was a document to
@@ -145,9 +138,7 @@ impl ReaderView {
         self.focus_document(window, cx);
         self.load_reader_state(cx);
         self.load_database_toc(cx);
-        startup_phase!("phase=reader_state_requested elapsed_ms={}", finish_started.elapsed().as_millis());
         crate::invalidation::notify(cx, Component::ReaderShell, "reader_ready");
-        startup_phase!("phase=finish_load_complete elapsed_ms={}", finish_started.elapsed().as_millis());
     }
 
     /// Installs weights obtained from container metadata. For EPUB these are
@@ -155,7 +146,7 @@ impl ReaderView {
     /// and parsing every chapter. The renderer command retains its historical
     /// name, but consumes generic relative weights.
     fn install_document_progress_weights(&mut self, cx: &mut Context<Self>) {
-        let weights = self.book.document_weights.clone();
+        let weights = self.book.document_weights().to_vec();
         self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::SetDocumentTextLengths(weights), cx));
     }
 }

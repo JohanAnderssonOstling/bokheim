@@ -507,24 +507,15 @@ impl HtmlView {
     }
 
     fn new_with_renderer(window: &mut Window, cx: &mut Context<Self>, make_renderer: impl FnOnce(Rc<GpuiHost>, GpuiTextCache) -> Result<RendererSession<GpuiTextCache>, String>) -> Result<Self, String> {
-        let startup_started = Instant::now();
         let (messages, receiver) = async_channel::unbounded();
         let host = Rc::new(GpuiHost::new(messages, cx.background_executor().clone()));
-        println!("HTML_VIEW_STARTUP phase=host_ready elapsed_ms={}", startup_started.elapsed().as_millis());
-        let shaper_started = Instant::now();
         let shaper = GpuiTextCache::new(window.text_system().clone());
-        println!("HTML_VIEW_STARTUP phase=shaper_ready elapsed_ms={} phase_ms={}", startup_started.elapsed().as_millis(), shaper_started.elapsed().as_millis());
-        let renderer_started = Instant::now();
         let renderer = make_renderer(host.clone(), shaper)?;
-        println!("HTML_VIEW_STARTUP phase=renderer_ready elapsed_ms={} phase_ms={}", startup_started.elapsed().as_millis(), renderer_started.elapsed().as_millis());
         Ok(Self::from_renderer(host, receiver, renderer, window, cx))
     }
 
     fn from_renderer(host: Rc<GpuiHost>, receiver: async_channel::Receiver<HostMessage>, mut renderer: RendererSession<GpuiTextCache>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let startup_started = Instant::now();
-        let snapshot_started = Instant::now();
         renderer.emit_state_snapshot();
-        println!("HTML_VIEW_STARTUP phase=snapshot_emitted elapsed_ms={} phase_ms={}", startup_started.elapsed().as_millis(), snapshot_started.elapsed().as_millis());
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         cx.spawn(async move |this, cx| {
@@ -535,7 +526,7 @@ impl HtmlView {
             }
         })
         .detach();
-        let view = Self {
+        Self {
             host,
             renderer,
             focus,
@@ -551,9 +542,7 @@ impl HtmlView {
             pointer_active: false,
             pointer_tap_start: None,
             wheel_scroll_enabled: true,
-        };
-        println!("HTML_VIEW_STARTUP phase=view_ready elapsed_ms={}", startup_started.elapsed().as_millis());
-        view
+        }
     }
 
     pub fn apply(&mut self, command: RendererCommand, _cx: &mut Context<Self>) {
@@ -622,12 +611,10 @@ impl HtmlView {
 
     /// Follows the document's link history, reporting whether it moved.
     pub fn navigate_history_back(&mut self, _cx: &mut Context<Self>) -> bool {
-        
         self.renderer.navigate_history_back()
     }
 
     pub fn navigate_history_forward(&mut self, _cx: &mut Context<Self>) -> bool {
-        
         self.renderer.navigate_history_forward()
     }
 

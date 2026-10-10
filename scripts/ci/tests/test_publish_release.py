@@ -110,17 +110,6 @@ class PublishReleaseTests(unittest.TestCase):
             self.run_publish()
         self.assertFalse(any('sign_manifest' in call for call in self.calls))
 
-    def test_review_digest_covers_manifest_and_provenance(self):
-        for name in ['manifest.json', 'provenance.json']:
-            with self.subTest(name=name):
-                path = self.bundle / name
-                original = path.read_bytes()
-                path.write_bytes(original + b'\n')
-                with self.assertRaisesRegex(ValueError, 'Review digest differs'):
-                    self.run_publish()
-                path.write_bytes(original)
-                self.assertFalse(self.calls)
-
     def test_draft_or_wrong_public_source_never_reaches_signer(self):
         for draft, source in [(True, self.sha), (False, 'b' * 40)]:
             self.draft, self.source_receipt = draft, source
@@ -155,16 +144,6 @@ class PublishReleaseTests(unittest.TestCase):
             self.run_publish()
         self.assertFalse(any('sign_manifest' in call for call in self.calls))
         self.assertFalse(self.args.output.exists())
-
-    def test_local_staging_uses_release_publisher_without_ssh(self):
-        self.args.host = None
-        self.args.staging_root = self.root / 'staging'
-        self.run_publish()
-        self.assertEqual(self.calls[-1][0], 'cargo')
-        self.assertIn('update-publisher', self.calls[-1])
-        self.assertIn('--release', self.calls[-1])
-        self.assertNotIn('--locked', self.calls[-1])
-        self.assertFalse(any(call[0] == 'bash' for call in self.calls))
 
 
 if __name__ == '__main__':

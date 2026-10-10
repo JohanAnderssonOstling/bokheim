@@ -15,9 +15,17 @@ use super::{GlobalRoute, Libraries, LibraryRoute, Navigate, Route};
 /// The rail's destinations, in the order it draws them. The keyboard walks this
 /// same list, so a shortcut can never land somewhere other than the neighbour
 /// the reader can see.
-pub(crate) const RAIL_ROUTES: [Route; 5] = [Route::Library(LibraryRoute::Home), Route::Library(LibraryRoute::Folders), Route::Library(LibraryRoute::Subjects), Route::Library(LibraryRoute::Authors), Route::Global(GlobalRoute::Settings)];
+pub(crate) const RAIL_ROUTES: [Route; 7] = [
+    Route::Library(LibraryRoute::Home),
+    Route::Library(LibraryRoute::Books),
+    Route::Library(LibraryRoute::Folders),
+    Route::Library(LibraryRoute::Subjects),
+    Route::Library(LibraryRoute::Authors),
+    Route::Library(LibraryRoute::Catalog),
+    Route::Global(GlobalRoute::Settings),
+];
 
-const PRIMARY_ROUTES: [Route; 5] = [Route::Library(LibraryRoute::Home), Route::Library(LibraryRoute::Folders), Route::Library(LibraryRoute::Subjects), Route::Library(LibraryRoute::Authors), Route::Global(GlobalRoute::Settings)];
+const PRIMARY_ROUTES: [Route; 7] = RAIL_ROUTES;
 
 /// Where the keyboard is inside the open library switcher.
 ///
@@ -44,9 +52,11 @@ fn route_definition(route: Route) -> (&'static str, Icon) {
     use components::NavigationIcon;
     let (label, icon) = match route {
         Route::Library(LibraryRoute::Home) => ("Home", NavigationIcon::House),
+        Route::Library(LibraryRoute::Books) => ("All books", NavigationIcon::BookOpen),
         Route::Library(LibraryRoute::Authors) => ("Authors", NavigationIcon::User),
         Route::Library(LibraryRoute::Folders) => ("Folders", NavigationIcon::Folder),
         Route::Library(LibraryRoute::Subjects) => ("Subjects", NavigationIcon::Tags),
+        Route::Library(LibraryRoute::Catalog) => ("Catalog", NavigationIcon::Building2),
         Route::Library(LibraryRoute::Trash) => ("Trash", NavigationIcon::Trash2),
         Route::Global(GlobalRoute::Settings) => ("Settings", NavigationIcon::Settings),
     };

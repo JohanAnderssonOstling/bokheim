@@ -19,15 +19,16 @@ use js_sys::{Array, Uint8Array};
 use wasm_bindgen::prelude::*;
 use web_sys::MessagePort;
 
-use super::{byte_reply, error_message, object, BytesFuture, BytesOperation, Port};
+use super::{BytesFuture, BytesOperation, Port, byte_reply, error_message, object};
+use client_platform_runtime::byte_budget::{ByteBudget, Reservation};
 use client_platform_runtime::coordinator::SyncJobs;
-use client_platform_runtime::pending::{take_matching, OnDrop};
+use client_platform_runtime::pending::{OnDrop, take_matching};
 use client_platform_web::transport::protocol::SyncEvent;
 
 type Reply = oneshot::Sender<Result<Vec<u8>, String>>;
 type Pending = Rc<RefCell<Option<(u32, Reply)>>>;
 struct Request {
-    _bytes: client_platform_runtime::byte_budget::Reservation,
+    _bytes: Reservation,
     port: MessagePort,
     bytes: Vec<u8>,
 }
@@ -76,10 +77,8 @@ struct State {
     policy: SyncJobs<Request>,
     jobs: HashMap<String, Rc<Job>>,
 }
-type Runner = Box<dyn Fn(Vec<u8>, BytesOperation) -> BytesFuture>;
 struct Service {
-    budget: client_platform_runtime::byte_budget::ByteBudget,
-    run: Runner,
+    budget: ByteBudget,
     state: RefCell<State>,
 }
 impl Service {
@@ -130,13 +129,13 @@ impl Service {
         let job = Rc::new(Job { port: Port::listen(port, message, malformed), pending, next: Cell::new(0), abort });
         self.state.borrow_mut().jobs.insert(key.clone(), job.clone());
         let storage = job.clone();
-        let running = (self.run)(bytes, Rc::new(move |bytes| storage.storage(bytes)));
+        let storage: BytesOperation = Rc::new(move |bytes| storage.storage(bytes));
         let service = self.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let result = tokio::select! {
                 biased;
                 error = aborted => Err(error.unwrap_or_else(|_| "Sync pass ended".into())),
-                result = running => result,
+                result = library_sync::run(&bytes, storage) => result,
             };
             let kind = if result.is_ok() { "done" } else { "error" };
             let (result, _) = byte_reply(&[("kind", kind.into())], result);
@@ -152,44 +151,27 @@ impl Service {
 }
 
 /// Sync passes receive their storage endpoint directly as a Rust operation.
-#[cfg_attr(feature = "web-runtime-tests", wasm_bindgen)]
 pub struct SyncService(Rc<Service>);
 impl SyncService {
     pub fn request_bytes(&self, key: String, bytes: Vec<u8>, port: MessagePort) {
-        self.enqueue(key, bytes.len(), || bytes, port);
-    }
-    fn enqueue(&self, key: String, size: usize, bytes: impl FnOnce() -> Vec<u8>, port: MessagePort) {
+        let size = bytes.len();
         let Some(reservation) = self.0.budget.reserve(size) else {
             let error = if size > self.0.budget.limit() { "Sync request exceeds configured input byte limit" } else { "Sync input queue byte limit exceeded; retry after queued work completes" };
             let _ = port.post_message(&object(&[("kind", "error".into()), ("error", error.into())]));
             port.close();
             return;
         };
-        let start = self.0.state.borrow_mut().policy.request(key.clone(), Request { _bytes: reservation, port, bytes: bytes() });
+        let start = self.0.state.borrow_mut().policy.request(key.clone(), Request { _bytes: reservation, port, bytes });
         match start {
             Err((error, request)) => Service::reply(request, &object(&[("kind", "error".into()), ("error", error.into())])),
             Ok(true) => self.0.execute(key),
             Ok(false) => {}
         }
     }
-    pub fn new(limit: usize) -> Self {
-        Self::with_options(SyncOptions { jobs: limit, ..Default::default() })
-    }
-    pub fn with_runner(run: impl Fn(Vec<u8>, BytesOperation) -> BytesFuture + 'static, limit: usize) -> Self {
-        Self::build(run, SyncOptions { jobs: limit, ..Default::default() })
-    }
     pub fn with_options(options: SyncOptions) -> Self {
-        Self::build(|bytes, storage| Box::pin(async move { crate::sync::run(&bytes, storage).await }), options)
+        Self(Rc::new(Service { budget: ByteBudget::new(options.bytes), state: RefCell::new(State { policy: SyncJobs::new(options.jobs), jobs: HashMap::new() }) }))
     }
-    fn build(run: impl Fn(Vec<u8>, BytesOperation) -> BytesFuture + 'static, options: SyncOptions) -> Self {
-        Self(Rc::new(Service { budget: client_platform_runtime::byte_budget::ByteBudget::new(options.bytes), run: Box::new(run), state: RefCell::new(State { policy: SyncJobs::new(options.jobs), jobs: HashMap::new() }) }))
-    }
-}
-#[cfg_attr(feature = "web-runtime-tests", wasm_bindgen)]
-impl SyncService {
-    pub fn request(&self, key: String, bytes: Uint8Array, port: MessagePort) {
-        self.enqueue(key, bytes.length() as usize, || bytes.to_vec(), port);
-    }
+
     pub fn fail(&self, error: JsValue) {
         let error = error_message(&error);
         let (jobs, requests) = {
@@ -207,35 +189,4 @@ impl SyncService {
             Service::reply(request, &result);
         }
     }
-    #[cfg_attr(feature = "web-runtime-tests", wasm_bindgen(getter))]
-    #[cfg(feature = "web-runtime-tests")]
-    pub fn count(&self) -> usize {
-        self.0.state.borrow().policy.count()
-    }
-}
-
-#[cfg(feature = "web-runtime-tests")]
-pub async fn cancellation_contract() -> Result<bool, JsValue> {
-    let ran = Rc::new(Cell::new(false));
-    let observed = ran.clone();
-    let service = SyncService::with_runner(
-        move |_, _| {
-            let ran = observed.clone();
-            Box::pin(async move {
-                ran.set(true);
-                Ok(Vec::new())
-            })
-        },
-        2,
-    );
-    let channel = web_sys::MessageChannel::new()?;
-    let followup = web_sys::MessageChannel::new()?;
-    service.request("library".into(), Uint8Array::new_with_length(0), channel.port1());
-    service.request("library".into(), Uint8Array::new_with_length(0), followup.port1());
-    let job = Rc::downgrade(service.0.state.borrow().jobs.get("library").unwrap());
-    service.fail("coordinator stopped".into());
-    crate::executor::sleep(std::time::Duration::ZERO).await;
-    channel.port2().close();
-    followup.port2().close();
-    Ok(!ran.get() && service.count() == 0 && service.0.state.borrow().jobs.is_empty() && job.upgrade().is_none())
 }

@@ -1,0 +1,862 @@
+{
+  "scope": "Proposals only; live taxonomy unchanged. Selected childless categories transfer all codes to their existing parents. Regional report/serial groupings and publication/study formats would be absorbed.",
+  "before_concepts": 15673,
+  "proposed_reduction": 38,
+  "groups": [
+    {
+      "name": "Music exercises and teaching aids",
+      "sources": [
+        {
+          "id": 766,
+          "label": "Exercises",
+          "target": 55223,
+          "target_label": "Teaching Practice",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [
+              [
+                766,
+                "MUS016000"
+              ]
+            ],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 836,
+          "label": "Exams & Exercises",
+          "target": 835,
+          "target_label": "Printed pedagogical aids",
+          "codes": {
+            "lcc_selector": [
+              [
+                836,
+                "MT9"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 837,
+          "label": "Teaching & Supervision Manuals",
+          "target": 835,
+          "target_label": "Printed pedagogical aids",
+          "codes": {
+            "lcc_selector": [
+              [
+                837,
+                "MT10"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 7547,
+          "label": "Studies & exercises",
+          "target": 851,
+          "target_label": "Singing & vocal technique",
+          "codes": {
+            "lcc_selector": [
+              [
+                7547,
+                "MT885"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 8127,
+          "label": "Methods & Exercises",
+          "target": 849,
+          "target_label": "Kindergarten",
+          "codes": {
+            "lcc_selector": [
+              [
+                8127,
+                "MT925"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        }
+      ],
+      "tradeoff": "Fold exercise, examination and teaching-manual leaves into their respective music teaching/performance parents."
+    },
+    {
+      "name": "Subject-specific museums and exhibitions",
+      "sources": [
+        {
+          "id": 13260,
+          "label": "Buddhist Museums & Exhibitions",
+          "target": 5756,
+          "target_label": "History & Sacred Places",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                13260,
+                "BQ",
+                107.0,
+                "[]",
+                "BQ",
+                109.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 53304,
+          "label": "Technology Museums",
+          "target": 55103,
+          "target_label": "Technology Context",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                53304,
+                "T",
+                179.0,
+                "[]",
+                "T",
+                183.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 13664,
+          "label": "Medical Museums & Exhibitions",
+          "target": 2725,
+          "target_label": "Medicine",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                13664,
+                "R",
+                871.0,
+                "[]",
+                "R",
+                891.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 6250,
+          "label": "Aviation Museums & Collecting",
+          "target": 405,
+          "target_label": "Aeronautical Engineering",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                6250,
+                "TL",
+                506.0,
+                "[[\"A\",\"1\"]]",
+                "TL",
+                506.0,
+                "[[\"Z\",\"\"]]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 8121,
+          "label": "Vehicle Museums & Collecting",
+          "target": 407,
+          "target_label": "Motor vehicles. Cycles",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                8121,
+                "TL",
+                7.0,
+                "[[\"A\",\"1\"]]",
+                "TL",
+                7.0,
+                "[[\"Z\",\"\"]]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 8325,
+          "label": "Exhibitions. Museums",
+          "target": 386,
+          "target_label": "Power resources",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                8325,
+                "TJ",
+                163.155,
+                "[[\"A\",\"1\"]]",
+                "TJ",
+                163.155,
+                "[[\"Z\",\"\"]]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 12850,
+          "label": "Museums & Exhibitions",
+          "target": 5071,
+          "target_label": "Prehistoric",
+          "codes": {
+            "lcc_selector": [
+              [
+                12850,
+                "GN800-GN802"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                12850,
+                "GN",
+                800.0,
+                "[]",
+                "GN",
+                802.9,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 8517,
+          "label": "Museums & Exhibitions",
+          "target": 3694,
+          "target_label": "World War I",
+          "codes": {
+            "lcc_selector": [
+              [
+                8517,
+                "D503"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 13731,
+          "label": "Drama Museums & Libraries",
+          "target": 55255,
+          "target_label": "Drama Studies",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                13731,
+                "PN",
+                1620.0,
+                "[[\"A\",\"1\"]]",
+                "PN",
+                1620.0,
+                "[[\"Z\",\"\"]]"
+              ]
+            ]
+          }
+        }
+      ],
+      "tradeoff": "Fold domain-specific museum/exhibition material into the corresponding field or study parent; general museum studies remains."
+    },
+    {
+      "name": "Regional library reports and catalogs",
+      "sources": [
+        {
+          "id": 6316,
+          "label": "Asian Library Reports",
+          "target": 4747,
+          "target_label": "Library Reports, History & Data",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                6316,
+                "Z",
+                845.0,
+                "[]",
+                "Z",
+                846.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 7054,
+          "label": "African Library Reports",
+          "target": 4747,
+          "target_label": "Library Reports, History & Data",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                7054,
+                "Z",
+                857.0,
+                "[]",
+                "Z",
+                858.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 7419,
+          "label": "New Zealand Library Reports",
+          "target": 4747,
+          "target_label": "Library Reports, History & Data",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                7419,
+                "Z",
+                872.0,
+                "[]",
+                "Z",
+                873.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 8130,
+          "label": "South American Library Reports",
+          "target": 4747,
+          "target_label": "Library Reports, History & Data",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                8130,
+                "Z",
+                763.0,
+                "[]",
+                "Z",
+                786.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 8304,
+          "label": "North American Library Reports",
+          "target": 4747,
+          "target_label": "Library Reports, History & Data",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                8304,
+                "Z",
+                730.7,
+                "[]",
+                "Z",
+                736.0,
+                "[[\"Z\",\"\"]]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 8521,
+          "label": "Australian Library Reports",
+          "target": 4747,
+          "target_label": "Library Reports, History & Data",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                8521,
+                "Z",
+                870.0,
+                "[]",
+                "Z",
+                871.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 10064,
+          "label": "European Library Reports",
+          "target": 4747,
+          "target_label": "Library Reports, History & Data",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                10064,
+                "Z",
+                789.0,
+                "[]",
+                "Z",
+                841.82,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 6509,
+          "label": "U.S. Library Catalogs",
+          "target": 4746,
+          "target_label": "Library catalogs & bulletins",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                6509,
+                "Z",
+                881.0,
+                "[[\"A\",\"1\"]]",
+                "Z",
+                881.0,
+                "[[\"Z\",\"\"]]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 8094,
+          "label": "European Library Catalogs",
+          "target": 4746,
+          "target_label": "Library catalogs & bulletins",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                8094,
+                "Z",
+                918.0,
+                "[]",
+                "Z",
+                953.0,
+                "[]"
+              ]
+            ]
+          }
+        }
+      ],
+      "tradeoff": "Fold seven regional library report groups and two regional catalog groups into their existing report/catalog parents."
+    },
+    {
+      "name": "Regional education serials",
+      "sources": [
+        {
+          "id": 6546,
+          "label": "Scandinavian Education Serials",
+          "target": 2195,
+          "target_label": "Serials & Societies",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                6546,
+                "L",
+                46.0,
+                "[]",
+                "L",
+                48.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 7215,
+          "label": "German Education Serials",
+          "target": 2195,
+          "target_label": "Serials & Societies",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                7215,
+                "L",
+                31.0,
+                "[]",
+                "L",
+                33.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 8418,
+          "label": "British Education Serials",
+          "target": 2195,
+          "target_label": "Serials & Societies",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                8418,
+                "L",
+                16.0,
+                "[]",
+                "L",
+                18.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 9175,
+          "label": "Asian Education Serials",
+          "target": 2195,
+          "target_label": "Serials & Societies",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                9175,
+                "L",
+                60.0,
+                "[]",
+                "L",
+                71.0,
+                "[]"
+              ]
+            ]
+          }
+        }
+      ],
+      "tradeoff": "Fold Scandinavian, German, British and Asian education serials into Serials & Societies."
+    },
+    {
+      "name": "Study, exam and textbook buckets",
+      "sources": [
+        {
+          "id": 53173,
+          "label": "Computing Exercises & Exams",
+          "target": 11661,
+          "target_label": "Computing Education & Research",
+          "codes": {
+            "lcc_selector": [
+              [
+                53173,
+                "QA76.28"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 6169,
+          "label": "Public Health Study & Exams",
+          "target": 6152,
+          "target_label": "Study & Reference",
+          "codes": {
+            "lcc_selector": [
+              [
+                6169,
+                "RA430"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 13544,
+          "label": "Textbooks",
+          "target": 55017,
+          "target_label": "Science Education & Popular Works",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                13544,
+                "Q",
+                160.0,
+                "[]",
+                "Q",
+                161.2,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 53352,
+          "label": "Elementary Mathematics Textbooks",
+          "target": 4934,
+          "target_label": "Basic Math",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                53352,
+                "QA",
+                101.0,
+                "[]",
+                "QA",
+                107.2,
+                "[]"
+              ]
+            ]
+          }
+        }
+      ],
+      "tradeoff": "Fold computing/public-health study and exams, science textbooks and elementary mathematics textbooks into current subject/reference parents."
+    },
+    {
+      "name": "General science topic buckets",
+      "sources": [
+        {
+          "id": 13550,
+          "label": "Topics",
+          "target": 4779,
+          "target_label": "Science & Nature",
+          "codes": {
+            "lcc_selector": [
+              [
+                13550,
+                "Q172"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 13551,
+          "label": "Subject Topics",
+          "target": 4779,
+          "target_label": "Science & Nature",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                13551,
+                "Q",
+                172.5,
+                "[[\"A\",\"\"]]",
+                "Q",
+                172.5,
+                "[[\"Z\",\"\"]]"
+              ]
+            ]
+          }
+        }
+      ],
+      "tradeoff": "Fold Topics and Subject Topics into Science & Nature."
+    },
+    {
+      "name": "Research, collections and religious reference leaves",
+      "sources": [
+        {
+          "id": 8829,
+          "label": "Psychical Research Reports",
+          "target": 3309,
+          "target_label": "Psychical Research",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                8829,
+                "BF",
+                1029.0,
+                "[]",
+                "BF",
+                1030.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 6114,
+          "label": "Research & Authorship",
+          "target": 6106,
+          "target_label": "Foundations & Professional Study",
+          "codes": {
+            "lcc_selector": [
+              [
+                6114,
+                "Z669.7"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 9016,
+          "label": "English Lit. Study Collections",
+          "target": 3924,
+          "target_label": "Literary History & Criticism",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                9016,
+                "PR",
+                13.0,
+                "[]",
+                "PR",
+                14.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 5529,
+          "label": "Religion Reference",
+          "target": 55069,
+          "target_label": "Sacred Texts & Theology",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [
+              [
+                5529,
+                "REL054000"
+              ]
+            ],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 5732,
+          "label": "Bible Reference",
+          "target": 4551,
+          "target_label": "Bible",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [
+              [
+                5732,
+                "REL006160"
+              ],
+              [
+                5732,
+                "REL006650"
+              ],
+              [
+                5732,
+                "REL006660"
+              ],
+              [
+                5732,
+                "REL006670"
+              ],
+              [
+                5732,
+                "REL006680"
+              ]
+            ],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        }
+      ],
+      "tradeoff": "Fold selected psychical research reports, library research/authorship, English literary study collections, religion reference and Bible reference into existing parents."
+    }
+  ],
+  "matcher_validation": {
+    "probes": 172771,
+    "changed_destinations": 280,
+    "unexpected_changes": [],
+    "coverage_losses": 0,
+    "coverage_gains": 0,
+    "limit": "Selector and boundary probes; complete observed-code cache unavailable."
+  },
+  "proposed_after_concepts": 15635,
+  "validation": {
+    "exact_row_remapping": true,
+    "integrity_check": "ok",
+    "foreign_key_violations": 0,
+    "range_multiplicity_preserved": true
+  },
+  "recommendation": "Next batch: absorb all 38 selected leaves into their current parents. The 13 regional library report/catalog and education serial categories lose their separate geographic navigation; all source codes remain."
+}

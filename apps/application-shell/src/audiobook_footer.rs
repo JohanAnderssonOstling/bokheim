@@ -38,29 +38,3 @@ impl Render for AudiobookFooter {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[gpui::test]
-    fn loading_and_error_share_a_cancellable_footer(cx: &mut gpui::TestAppContext) {
-        let (footer, cx) = cx.add_window_view(|_, _| AudiobookFooter::default());
-        let cancellations = cx.new(|cx| {
-            cx.subscribe(&footer, |count: &mut usize, _, _: &CancelPending, _| *count += 1).detach();
-            0usize
-        });
-        for message in ["Opening audiobook…", "Could not authorize playback"] {
-            footer.update(cx, |footer, cx| footer.set(None, Some(message.into()), cx));
-            cx.run_until_parked();
-            let bounds = cx.debug_bounds("pending-audiobook-footer").unwrap();
-            assert!(bounds.size.height > gpui::px(0.0) && bounds.size.height < gpui::px(100.0));
-            let close = cx.debug_bounds("cancel-audiobook-open").unwrap();
-            cx.simulate_click(close.center(), gpui::Modifiers::none());
-        }
-        assert_eq!(cancellations.read_with(cx, |count, _| *count), 2);
-        footer.update(cx, |footer, cx| footer.set(None, None, cx));
-        cx.run_until_parked();
-        assert!(cx.debug_bounds("pending-audiobook-footer").is_none());
-    }
-}

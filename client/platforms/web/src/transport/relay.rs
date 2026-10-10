@@ -71,9 +71,7 @@ impl Relay {
 /// Tab ports survive database host changes. Clients restore subscriptions when
 /// the replacement sends readiness, but never automatically replay writes.
 #[derive(Clone)]
-#[cfg_attr(feature = "web-runtime-tests", wasm_bindgen)]
 pub struct ClientRelay(Rc<Relay>);
-#[cfg_attr(feature = "web-runtime-tests", wasm_bindgen)]
 impl ClientRelay {
     pub fn connect(&self, port: MessagePort) -> Result<(), JsValue> {
         let id = self.0.next.get();
@@ -110,10 +108,6 @@ impl ClientRelay {
         for client in clients.values() {
             let _ = client.tab.raw.post_message(&failure(error));
         }
-    }
-    #[cfg(feature = "web-runtime-tests")]
-    pub fn client_count(&self) -> usize {
-        self.0.clients.borrow().len()
     }
 }
 impl ClientRelay {

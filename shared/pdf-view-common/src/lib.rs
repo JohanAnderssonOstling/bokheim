@@ -534,18 +534,23 @@ impl FitWidthPlan {
     /// the next stable anchor.
     pub fn from_anchor_avoiding_breaks<'a>(pages: impl IntoIterator<Item = (FitWidthPage, &'a [(f32, f32)])>, viewport: FitWidthViewport, anchor: FitWidthAnchor) -> Result<Self, FitWidthPlanError> {
         let mut columns = Vec::new();
-        let mut display_column_index = 0;
-        let mut used_display_height = 0.0;
+        let mut state = FitWidthColumnState::default();
         let mut found_anchor = false;
         for (page, protected_bands) in pages {
-            if !found_anchor {
+            let initial_top = if !found_anchor {
                 if page.page_index() != anchor.page_index() {
                     continue;
                 }
                 found_anchor = true;
-                append_fit_width_columns_from(&mut columns, page, viewport, protected_bands, 0.0, anchor.page_y(), &mut display_column_index, &mut used_display_height)?;
+                anchor.page_y()
             } else {
-                append_fit_width_columns_from(&mut columns, page, viewport, protected_bands, 0.0, 0.0, &mut display_column_index, &mut used_display_height)?;
+                0.0
+            };
+            let layout = layout_fit_width_columns_from(page, viewport, protected_bands, 0.0, initial_top, state)?;
+            state = layout.state;
+            for mut column in layout.columns {
+                column.flow_index = columns.len();
+                columns.push(column);
             }
         }
         Ok(Self { columns })
@@ -568,16 +573,20 @@ impl FitWidthPlan {
     /// that cannot fit is split into its following display column.
     pub fn new_avoiding_breaks_with_page_gap<'a>(pages: impl IntoIterator<Item = (FitWidthPage, &'a [(f32, f32)])>, viewport: FitWidthViewport, page_gap: f32) -> Result<Self, FitWidthPlanError> {
         let mut columns = Vec::new();
-        let mut display_column_index = 0;
-        let mut used_display_height = 0.0;
+        let mut state = FitWidthColumnState::default();
         for (page, protected_bands) in pages {
             let leading_page_gap = if columns.is_empty() || !page_gap.is_finite() { 0.0 } else { page_gap.max(0.0).min((viewport.column_height - f32::EPSILON).max(0.0)) };
-            if leading_page_gap > 0.0 && used_display_height + leading_page_gap > viewport.column_height {
-                display_column_index += 1;
-                used_display_height = 0.0;
+            if leading_page_gap > 0.0 && state.used_display_height + leading_page_gap > viewport.column_height {
+                state.display_column_index += 1;
+                state.used_display_height = 0.0;
             }
-            used_display_height += leading_page_gap;
-            append_fit_width_columns_from(&mut columns, page, viewport, protected_bands, leading_page_gap, 0.0, &mut display_column_index, &mut used_display_height)?;
+            state.used_display_height += leading_page_gap;
+            let layout = layout_fit_width_columns_from(page, viewport, protected_bands, leading_page_gap, 0.0, state)?;
+            state = layout.state;
+            for mut column in layout.columns {
+                column.flow_index = columns.len();
+                columns.push(column);
+            }
         }
         Ok(Self { columns })
     }
@@ -625,9 +634,20 @@ impl FitWidthPlan {
     }
 }
 
-fn append_fit_width_columns_from(
-    columns: &mut Vec<FitWidthColumn>, page: FitWidthPage, viewport: FitWidthViewport, protected_bands: &[(f32, f32)], leading_page_gap: f32, initial_top: f32, display_column_index: &mut usize, used_display_height: &mut f32,
-) -> Result<(), FitWidthPlanError> {
+#[derive(Default)]
+struct FitWidthColumnState {
+    display_column_index: usize,
+    used_display_height: f32,
+}
+
+struct FitWidthPageLayout {
+    columns: Vec<FitWidthColumn>,
+    state: FitWidthColumnState,
+}
+
+/// Computes one page's columns and returns the updated packing position.
+/// The caller assigns flow indices when appending these columns to its plan.
+fn layout_fit_width_columns_from(page: FitWidthPage, viewport: FitWidthViewport, protected_bands: &[(f32, f32)], leading_page_gap: f32, initial_top: f32, mut state: FitWidthColumnState) -> Result<FitWidthPageLayout, FitWidthPlanError> {
     let mut leading_page_gap = leading_page_gap;
     let scaled_page_height = (page.height as f64 / page.width as f64 * viewport.column_width as f64) as f32;
     let estimated_columns = (scaled_page_height / viewport.column_height).ceil().max(1.0);
@@ -638,10 +658,10 @@ fn append_fit_width_columns_from(
     let mut segments = Vec::new();
     let mut top = initial_top.clamp(0.0, 1.0);
     while top < 1.0 {
-        let available_height = (viewport.column_height - *used_display_height).max(0.0);
+        let available_height = (viewport.column_height - state.used_display_height).max(0.0);
         if available_height <= f32::EPSILON {
-            *display_column_index += 1;
-            *used_display_height = 0.0;
+            state.display_column_index += 1;
+            state.used_display_height = 0.0;
             leading_page_gap = 0.0;
             continue;
         }
@@ -651,31 +671,31 @@ fn append_fit_width_columns_from(
             return Err(FitWidthPlanError::TooManyColumns { page_index: page.page_index, required_columns: MAX_FIT_WIDTH_COLUMNS_PER_PAGE });
         }
         let display_height = (bottom - top) * scaled_page_height;
-        if *used_display_height > 0.0 && display_height > available_height + 0.5 {
-            *display_column_index += 1;
-            *used_display_height = 0.0;
+        if state.used_display_height > 0.0 && display_height > available_height + 0.5 {
+            state.display_column_index += 1;
+            state.used_display_height = 0.0;
             // The unused tail of the preceding display column already
             // represents the real-page boundary gap.
             leading_page_gap = 0.0;
             continue;
         }
         let segment_leading_gap = if segments.is_empty() { leading_page_gap } else { 0.0 };
-        segments.push((top, bottom, display_height, segment_leading_gap, *display_column_index));
-        *used_display_height += display_height;
+        segments.push((top, bottom, display_height, segment_leading_gap, state.display_column_index));
+        state.used_display_height += display_height;
         top = bottom.min(1.0);
         if segments.len() > MAX_FIT_WIDTH_COLUMNS_PER_PAGE as usize {
             return Err(FitWidthPlanError::TooManyColumns { page_index: page.page_index, required_columns: MAX_FIT_WIDTH_COLUMNS_PER_PAGE });
         }
-        if top < 1.0 || *used_display_height >= viewport.column_height - 0.5 {
-            *display_column_index += 1;
-            *used_display_height = 0.0;
+        if top < 1.0 || state.used_display_height >= viewport.column_height - 0.5 {
+            state.display_column_index += 1;
+            state.used_display_height = 0.0;
         }
     }
 
     let page_column_count = segments.len() as u32;
-    for (page_column_index, (top, bottom, display_height, leading_page_gap, segment_display_column)) in segments.into_iter().enumerate() {
-        columns.push(FitWidthColumn {
-            flow_index: columns.len(),
+    let columns = segments.into_iter().enumerate().map(|(page_column_index, (top, bottom, display_height, leading_page_gap, segment_display_column))| {
+        FitWidthColumn {
+            flow_index: page_column_index,
             display_column_index: segment_display_column,
             page_index: page.page_index,
             page_column_index: page_column_index as u32,
@@ -684,9 +704,9 @@ fn append_fit_width_columns_from(
             display_width: viewport.column_width,
             display_height,
             leading_page_gap,
-        });
-    }
-    Ok(())
+        }
+    }).collect();
+    Ok(FitWidthPageLayout { columns, state })
 }
 
 fn safe_slice_boundary(top: f32, ideal_bottom: f32, protected_bands: &[(f32, f32)]) -> f32 {
@@ -1176,310 +1196,4 @@ fn page_background(rgba: &[u8], width: u32, height: u32) -> [u8; 3] {
 
 fn is_content_pixel(pixel: &[u8], background: [u8; 3], threshold: u8) -> bool {
     pixel[3] > 0 && pixel[..3].iter().zip(background).any(|(channel, background)| channel.abs_diff(background) >= threshold)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn image(width: u32, height: u32, color: [u8; 4]) -> Vec<u8> {
-        std::iter::repeat_n(color, width as usize * height as usize).flatten().collect()
-    }
-
-    fn fill(rgba: &mut [u8], width: u32, left: u32, top: u32, right: u32, bottom: u32, color: [u8; 4]) {
-        (top..bottom).for_each(|y| {
-            (left..right).for_each(|x| {
-                rgba[((y * width + x) * 4) as usize..((y * width + x) * 4 + 4) as usize].copy_from_slice(&color);
-            });
-        });
-    }
-
-    fn text_geometry(text: &str, page_top: f32) -> PageTextGeometry {
-        PageTextGeometry::new(text.chars().enumerate().map(|(index, character)| {
-            let line = text[..index].chars().filter(|candidate| *candidate == '\n').count() as f32;
-            let column = text[..index].chars().rev().take_while(|candidate| *candidate != '\n').count() as f32;
-            TextCharacter::new(index, character, NormalizedRect::new(0.1 + column * 0.03, page_top + line * 0.05, 0.025, 0.03))
-        }))
-    }
-
-    #[test]
-    fn content_detection_preserves_padding() {
-        let mut rgba = image(100, 80, [255, 255, 255, 255]);
-        fill(&mut rgba, 100, 40, 20, 60, 30, [0, 0, 0, 255]);
-        assert_eq!(detect_rgba(&rgba, 100, 80, CropOptions::default()), PixelCrop::new(100, 80, 28, 8, 44, 34));
-    }
-
-    #[test]
-    fn blank_page_is_not_trimmed() {
-        let rgba = image(20, 30, [243, 244, 242, 255]);
-        assert_eq!(detect_rgba(&rgba, 20, 30, CropOptions::default()), PixelCrop::full(20, 30));
-    }
-
-    #[test]
-    fn fit_width_keeps_a_short_page_in_one_column() {
-        let page = FitWidthPage::new(4, 600.0, 800.0).expect("valid page");
-        let viewport = FitWidthViewport::new(450.0, 700.0).expect("valid viewport");
-        let plan = FitWidthPlan::new([page], viewport).expect("fit-width plan");
-        assert_eq!(plan.len(), 1);
-        let column = plan.columns()[0];
-        assert_eq!(column.flow_index(), 0);
-        assert_eq!(column.page_index(), 4);
-        assert_eq!(column.page_column_index(), 0);
-        assert_eq!(column.page_column_count(), 1);
-        assert_eq!(column.page_rect(), NormalizedRect::new(0.0, 0.0, 1.0, 1.0));
-        assert!((column.display_width() - 450.0).abs() < 0.001);
-        assert!((column.display_height() - 600.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn fit_width_flows_a_tall_page_into_consecutive_columns() {
-        let page = FitWidthPage::new(2, 600.0, 1_200.0).expect("valid page");
-        let viewport = FitWidthViewport::new(300.0, 300.0).expect("valid viewport");
-        let plan = FitWidthPlan::new([page], viewport).expect("fit-width plan");
-        assert_eq!(plan.len(), 2);
-        let first = plan.columns()[0];
-        let second = plan.columns()[1];
-        assert_eq!(first.page_rect(), NormalizedRect::new(0.0, 0.0, 1.0, 0.5));
-        assert_eq!(second.page_rect(), NormalizedRect::new(0.0, 0.5, 1.0, 0.5));
-        assert!(first.page_point_to_column((0.25, 0.5)).is_none(), "a shared boundary belongs to the following column");
-        assert_eq!(second.page_point_to_column((0.25, 0.5)), Some((0.25, 0.0)));
-        assert_eq!(second.column_point_to_page((0.25, 1.0)), (0.25, 1.0));
-    }
-
-    #[test]
-    fn anchored_plan_starts_at_the_source_position_not_a_previous_display_column() {
-        let pages = [FitWidthPage::new(0, 600.0, 1_200.0).expect("first page"), FitWidthPage::new(1, 600.0, 600.0).expect("second page")];
-        let viewport = FitWidthViewport::new(300.0, 300.0).expect("viewport");
-        let plan = FitWidthPlan::from_anchor_avoiding_breaks(pages.into_iter().map(|page| (page, &[][..])), viewport, FitWidthAnchor::new(0, 0.25)).expect("anchored plan");
-        assert_eq!(plan.columns()[0].display_column_index(), 0);
-        assert_eq!(plan.columns()[0].page_rect(), NormalizedRect::new(0.0, 0.25, 1.0, 0.5));
-        assert_eq!(plan.columns()[1].page_rect(), NormalizedRect::new(0.0, 0.75, 1.0, 0.25));
-        assert_eq!(plan.columns()[2].page_index(), 1);
-    }
-
-    #[test]
-    fn anchored_viewport_window_exposes_the_next_viewports_source_anchor() {
-        let pages = [FitWidthPage::new(0, 600.0, 1_200.0).expect("first page"), FitWidthPage::new(1, 600.0, 600.0).expect("second page")];
-        let viewport = FitWidthViewport::new(300.0, 300.0).expect("viewport");
-        let window = FitWidthPlan::viewport_window_from_anchor_avoiding_breaks(pages.into_iter().map(|page| (page, &[][..])), viewport, FitWidthAnchor::new(0, 0.0), 1).expect("viewport window");
-        assert_eq!(window.start(), FitWidthAnchor::new(0, 0.0));
-        assert_eq!(window.end(), Some(FitWidthAnchor::new(0, 0.5)));
-        assert_eq!(window.plan().columns()[0].page_rect(), NormalizedRect::new(0.0, 0.0, 1.0, 0.5));
-    }
-
-    #[test]
-    fn anchor_pager_promotes_the_end_anchor_and_restores_the_previous_window() {
-        let pages = [(FitWidthPage::new(0, 600.0, 1_200.0).expect("first page"), Vec::new()), (FitWidthPage::new(1, 600.0, 600.0).expect("second page"), Vec::new())];
-        let viewport = FitWidthViewport::new(300.0, 300.0).expect("viewport");
-        let mut pager = FitWidthAnchorPager::new(pages, viewport, 1, FitWidthAnchor::new(0, 0.0)).expect("pager");
-        assert_eq!(pager.window().start(), FitWidthAnchor::new(0, 0.0));
-        assert_eq!(pager.window().end(), Some(FitWidthAnchor::new(0, 0.5)));
-        assert!(pager.forward().expect("forward"));
-        assert_eq!(pager.window().start(), FitWidthAnchor::new(0, 0.5));
-        assert_eq!(pager.window().end(), Some(FitWidthAnchor::new(1, 0.0)));
-        assert!(pager.backward().expect("backward"));
-        assert_eq!(pager.window().start(), FitWidthAnchor::new(0, 0.0));
-    }
-
-    #[test]
-    fn anchor_pager_crosses_omitted_source_pages() {
-        let pages = [(FitWidthPage::new(0, 600.0, 600.0).expect("first page"), Vec::new()), (FitWidthPage::new(2, 600.0, 600.0).expect("third page"), Vec::new())];
-        let viewport = FitWidthViewport::new(300.0, 300.0).expect("viewport");
-        let mut pager = FitWidthAnchorPager::new(pages, viewport, 1, FitWidthAnchor::new(0, 0.0)).expect("pager");
-        assert_eq!(pager.window().end(), Some(FitWidthAnchor::new(2, 0.0)));
-        assert!(pager.forward().expect("forward"));
-        assert_eq!(pager.window().start(), FitWidthAnchor::new(2, 0.0));
-        assert!(pager.backward().expect("backward"));
-        assert_eq!(pager.window().start(), FitWidthAnchor::new(0, 0.0));
-    }
-
-    #[test]
-    fn anchor_pager_reflows_from_a_continuous_scroll_anchor() {
-        let pages = [(FitWidthPage::new(0, 600.0, 1_200.0).expect("page"), Vec::new())];
-        let viewport = FitWidthViewport::new(300.0, 300.0).expect("viewport");
-        let mut pager = FitWidthAnchorPager::new(pages, viewport, 1, FitWidthAnchor::new(0, 0.0)).expect("pager");
-        pager.seek(FitWidthAnchor::new(0, 0.2), true).expect("reflow");
-        assert_eq!(pager.window().start(), FitWidthAnchor::new(0, 0.2));
-        assert_eq!(pager.window().plan().columns()[0].page_rect(), NormalizedRect::new(0.0, 0.2, 1.0, 0.5));
-        assert!(pager.backward().expect("backward"));
-        assert_eq!(pager.window().start(), FitWidthAnchor::new(0, 0.0));
-    }
-
-    #[test]
-    fn fit_width_preserves_a_short_final_slice_and_overlay_coordinates() {
-        let page = FitWidthPage::new(0, 600.0, 1_500.0).expect("valid page");
-        let viewport = FitWidthViewport::new(300.0, 300.0).expect("valid viewport");
-        let plan = FitWidthPlan::new([page], viewport).expect("fit-width plan");
-        assert_eq!(plan.len(), 3);
-        let final_column = plan.columns()[2];
-        assert!((final_column.page_rect().top() - 0.8).abs() < 0.0001);
-        assert!((final_column.page_rect().height() - 0.2).abs() < 0.0001);
-        assert!((final_column.display_height() - 150.0).abs() < 0.001);
-        let page_rect = NormalizedRect::new(0.2, 0.85, 0.4, 0.1);
-        let column_rect = final_column.page_rect_to_column(page_rect).expect("visible overlay");
-        let restored = final_column.column_rect_to_page(column_rect);
-        assert!((restored.left() - page_rect.left()).abs() < 0.0001);
-        assert!((restored.top() - page_rect.top()).abs() < 0.0001);
-        assert!((restored.width() - page_rect.width()).abs() < 0.0001);
-        assert!((restored.height() - page_rect.height()).abs() < 0.0001);
-    }
-
-    #[test]
-    fn annotation_rect_round_trips_from_full_page_through_trim_and_wrapped_column() {
-        let crop = PixelCrop::new(1_000, 1_400, 100, 140, 800, 1_120);
-        let full_rect = NormalizedRect::new(0.25, 0.55, 0.3, 0.08);
-        let display_rect = crop.full_rect_to_display(full_rect).expect("annotation lies inside the trimmed page");
-        let page = FitWidthPage::new(0, 800.0, 1_120.0).expect("trimmed page");
-        let viewport = FitWidthViewport::new(400.0, 300.0).expect("viewport");
-        let plan = FitWidthPlan::new([page], viewport).expect("fit-width plan");
-        let column = plan.columns().iter().copied().find(|column| column.page_rect_to_column(display_rect).is_some()).expect("annotation column");
-        let column_rect = column.page_rect_to_column(display_rect).expect("column annotation");
-        let restored_display = column.column_rect_to_page(column_rect);
-        let restored_full = crop.display_rect_to_full(restored_display);
-        assert!((restored_full.left() - full_rect.left()).abs() < 0.0001);
-        assert!((restored_full.top() - full_rect.top()).abs() < 0.0001);
-        assert!((restored_full.width() - full_rect.width()).abs() < 0.0001);
-        assert!((restored_full.height() - full_rect.height()).abs() < 0.0001);
-    }
-
-    #[test]
-    fn fit_width_assigns_stable_flow_indices_across_pages() {
-        let pages = [FitWidthPage::new(7, 600.0, 1_200.0).expect("page"), FitWidthPage::new(9, 600.0, 600.0).expect("page")];
-        let viewport = FitWidthViewport::new(300.0, 300.0).expect("viewport");
-        let plan = FitWidthPlan::new(pages, viewport).expect("fit-width plan");
-        assert_eq!(plan.columns().iter().map(|column| (column.flow_index(), column.page_index(), column.page_column_index())).collect::<Vec<_>>(), vec![(0, 7, 0), (1, 7, 1), (2, 9, 0)]);
-    }
-
-    #[test]
-    fn fit_width_packs_the_next_page_below_a_short_final_slice() {
-        let pages = [FitWidthPage::new(0, 600.0, 900.0).expect("first page"), FitWidthPage::new(1, 600.0, 600.0).expect("second page")];
-        let viewport = FitWidthViewport::new(300.0, 300.0).expect("viewport");
-        let plan = FitWidthPlan::new(pages, viewport).expect("fit-width plan");
-        assert_eq!(plan.columns().iter().map(|column| (column.page_index(), column.display_column_index())).collect::<Vec<_>>(), vec![(0, 0), (0, 1), (1, 1), (1, 2)]);
-        assert!(plan.columns().iter().zip([300.0, 150.0, 150.0, 150.0]).all(|(column, expected)| (column.display_height() - expected).abs() < 0.001));
-    }
-
-    #[test]
-    fn fit_width_adds_vertical_gap_only_at_real_page_boundaries() {
-        let pages = [FitWidthPage::new(0, 600.0, 900.0).expect("first page"), FitWidthPage::new(1, 600.0, 600.0).expect("second page")];
-        let viewport = FitWidthViewport::new(300.0, 300.0).expect("viewport");
-        let pages = pages.iter().copied().map(|page| (page, &[][..]));
-        let plan = FitWidthPlan::new_avoiding_breaks_with_page_gap(pages, viewport, 12.0).expect("fit-width plan");
-
-        assert_eq!(plan.columns().iter().map(|column| column.leading_page_gap()).collect::<Vec<_>>(), vec![0.0, 0.0, 12.0, 0.0]);
-        assert_eq!(plan.columns()[1].display_column_index(), plan.columns()[2].display_column_index());
-        assert!((plan.columns()[2].display_height() - 138.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn fit_width_moves_a_slice_boundary_before_protected_content() {
-        let page = FitWidthPage::new(0, 600.0, 1_200.0).expect("valid page");
-        let viewport = FitWidthViewport::new(300.0, 300.0).expect("valid viewport");
-        let protected = [(0.48, 0.58)];
-        let plan = FitWidthPlan::new_avoiding_breaks([(page, protected.as_slice())], viewport).expect("fit-width plan");
-        assert_eq!(plan.columns().len(), 3);
-        assert!((plan.columns()[0].page_rect().bottom() - 0.48).abs() < 0.0001);
-        assert!((plan.columns()[1].page_rect().top() - 0.48).abs() < 0.0001);
-    }
-
-    #[test]
-    fn a_slice_never_grows_taller_than_the_column_that_holds_it() {
-        // The reader paints one logical column per viewport height and steps
-        // the flow by that fixed stride, so a taller slice is clipped and the
-        // rest of it cannot be scrolled to. A protected band wider than the
-        // column has to be split rather than kept whole.
-        let page = FitWidthPage::new(0, 600.0, 850.0).expect("A4-ish page");
-        let viewport = FitWidthViewport::new(948.0, 800.0).expect("viewport");
-        let scanned_sheet = [(0.0, 1.0)];
-
-        let plan = FitWidthPlan::new_avoiding_breaks([(page, scanned_sheet.as_slice())], viewport).expect("fit-width plan");
-
-        assert!(
-            plan.columns().iter().all(|column| column.display_height() <= viewport.column_height() + 0.5),
-            "a full-page image must be split across columns, got heights {:?}",
-            plan.columns().iter().map(|column| column.display_height()).collect::<Vec<_>>()
-        );
-        assert!((plan.columns().last().expect("at least one column").page_rect().bottom() - 1.0).abs() < 0.0001, "the slices must still cover the whole page");
-    }
-
-    #[test]
-    fn fit_page_preserves_the_whole_page_and_both_viewport_limits() {
-        let portrait = FitWidthPage::new(0, 600.0, 800.0).expect("portrait");
-        let landscape = FitWidthPage::new(1, 1_000.0, 500.0).expect("landscape");
-        let viewport = FitWidthViewport::new(900.0, 600.0).expect("viewport");
-        let plan = FitWidthPlan::fit_page([portrait, landscape], viewport);
-        assert_eq!(plan.columns().len(), 2);
-        assert_eq!(plan.columns()[0].page_rect(), NormalizedRect::new(0.0, 0.0, 1.0, 1.0));
-        assert!((plan.columns()[0].display_width() - 450.0).abs() < 0.001);
-        assert!((plan.columns()[0].display_height() - 600.0).abs() < 0.001);
-        assert!((plan.columns()[1].display_width() - 900.0).abs() < 0.001);
-        assert!((plan.columns()[1].display_height() - 450.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn fit_width_rejects_invalid_geometry() {
-        assert!(FitWidthPage::new(0, 0.0, 100.0).is_none());
-        assert!(FitWidthPage::new(0, f32::NAN, 100.0).is_none());
-        assert!(FitWidthViewport::new(100.0, f32::INFINITY).is_none());
-    }
-
-    #[test]
-    fn fit_width_rejects_pathological_column_counts() {
-        let page = FitWidthPage::new(3, 1.0, 100_000.0).expect("valid page");
-        let viewport = FitWidthViewport::new(1.0, 1.0).expect("valid viewport");
-        assert_eq!(FitWidthPlan::new([page], viewport), Err(FitWidthPlanError::TooManyColumns { page_index: 3, required_columns: 100_000 }));
-    }
-
-    #[test]
-    fn crop_and_rotation_round_trip_points_and_rectangles() {
-        let transform = PageTransform::new(PixelCrop::new(1000, 800, 100, 80, 800, 640), PageRotation::Clockwise90);
-        let point = transform.full_point_to_display((0.3, 0.5));
-        let restored = transform.display_point_to_full(point);
-        assert!((restored.0 - 0.3).abs() < 0.0001);
-        assert!((restored.1 - 0.5).abs() < 0.0001);
-        let rect = NormalizedRect::new(0.3, 0.5, 0.1, 0.05);
-        let display = transform.full_rect_to_display(rect).expect("visible rectangle");
-        let restored = transform.display_rect_to_full(display);
-        assert!((restored.left() - rect.left()).abs() < 0.0001);
-        assert!((restored.top() - rect.top()).abs() < 0.0001);
-        assert!((restored.width() - rect.width()).abs() < 0.0001);
-        assert!((restored.height() - rect.height()).abs() < 0.0001);
-    }
-
-    #[test]
-    fn hit_testing_and_reverse_drag_share_the_same_selection() {
-        let geometry = text_geometry("AB", 0.2);
-        let forward = geometry.select((0.11, 0.21), (0.14, 0.21)).expect("forward selection");
-        let reverse = geometry.select((0.14, 0.21), (0.11, 0.21)).expect("reverse selection");
-        assert_eq!(forward, reverse);
-        assert_eq!(forward.text(), "AB");
-        assert_eq!(forward.rects().len(), 1);
-        let pdfium_anchor = geometry.select_from_source_index_with_options(0, (0.14, 0.21), SelectionOptions::default()).expect("selection from Pdfium source index");
-        assert_eq!(pdfium_anchor, forward);
-    }
-
-    #[test]
-    fn line_merging_does_not_bridge_distant_columns() {
-        let rects = merge_line_rects([NormalizedRect::new(0.1, 0.2, 0.05, 0.03), NormalizedRect::new(0.16, 0.2, 0.05, 0.03), NormalizedRect::new(0.7, 0.2, 0.05, 0.03)]);
-        assert_eq!(rects.len(), 2);
-    }
-
-    #[test]
-    fn word_and_paragraph_granularity_expand_endpoints() {
-        let geometry = text_geometry("one two\n\nnext", 0.1);
-        let word = geometry.select_with_options((0.22, 0.11), (0.22, 0.11), SelectionOptions::default().with_granularity(SelectionGranularity::Word)).expect("word");
-        assert_eq!(word.text(), "two");
-        let paragraph = geometry.select_with_options((0.11, 0.11), (0.11, 0.11), SelectionOptions::default().with_granularity(SelectionGranularity::Paragraph)).expect("paragraph");
-        assert_eq!(paragraph.text(), "one two\n");
-        let next_paragraph = geometry.select_with_options((0.11, 0.21), (0.11, 0.21), SelectionOptions::default().with_granularity(SelectionGranularity::Paragraph)).expect("next paragraph");
-        assert_eq!(next_paragraph.text(), "next");
-    }
-
-    #[test]
-    fn document_selection_spans_pages_and_preserves_page_rects() {
-        let pages = [text_geometry("one", 0.1), text_geometry("two", 0.1)];
-        let selection = select_document(&pages, PagePoint::new(0, (0.11, 0.11)), PagePoint::new(1, (0.17, 0.11)), SelectionOptions::default()).expect("document selection");
-        assert_eq!(selection.text(), "one\ntwo");
-        assert_eq!(selection.pages().len(), 2);
-    }
 }

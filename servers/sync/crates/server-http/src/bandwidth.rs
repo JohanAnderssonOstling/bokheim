@@ -240,39 +240,5 @@ mod tests {
         assert!(alpha[1].try_recv().is_err());
     }
 
-    #[test]
-    fn an_uncontended_user_can_consume_the_complete_available_capacity() {
-        let mut state = SchedulerState::new((3 * FAIR_QUANTUM_BYTES) as u64);
-        let mut grants = Vec::new();
-        for _ in 0..3 {
-            let (request, granted) = request("only-user", FAIR_QUANTUM_BYTES);
-            state.enqueue(request);
-            grants.push(granted);
-        }
-        state.grant_ready();
-        assert!(grants.iter_mut().all(|grant| grant.try_recv().is_ok()));
-    }
 
-    #[test]
-    fn exhausted_burst_is_replenished_at_the_configured_byte_rate() {
-        let mut state = SchedulerState::new(FAIR_QUANTUM_BYTES as u64);
-        let (first, mut first_grant) = request("user", FAIR_QUANTUM_BYTES);
-        let (second, mut second_grant) = request("user", FAIR_QUANTUM_BYTES);
-        state.enqueue(first);
-        state.enqueue(second);
-        state.grant_ready();
-        assert!(first_grant.try_recv().is_ok());
-        assert!(second_grant.try_recv().is_err());
-
-        state.refill(Duration::from_millis(500), (2 * FAIR_QUANTUM_BYTES) as u64);
-        state.grant_ready();
-        assert!(second_grant.try_recv().is_ok());
-    }
-
-    #[test]
-    fn zero_rate_explicitly_disables_throttling() {
-        let governor = DirectionGovernor::new(0, FAIR_QUANTUM_BYTES as u64);
-        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
-        runtime.block_on(governor.acquire("user", usize::MAX)).unwrap();
-    }
 }

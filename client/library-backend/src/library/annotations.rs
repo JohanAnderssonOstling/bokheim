@@ -2,10 +2,10 @@
 
 use crate::library::LibrarySession;
 use crate::BackendError;
-use book_model::ReaderAnnotation;
+use book_model::Annotation;
 
 impl LibrarySession {
-    pub fn upsert_annotation(&self, annotation: &ReaderAnnotation) -> Result<(), BackendError> {
+    pub fn upsert_annotation(&self, annotation: &Annotation) -> Result<(), BackendError> {
         self.db.upsert_annotation(annotation).map_err(BackendError::operation)?;
         Ok(())
     }

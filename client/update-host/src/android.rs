@@ -70,16 +70,23 @@ impl AndroidHost {
         Ok(InstallRequest { path, version, bytes: artifact.bytes, sha256: artifact.sha256.clone() })
     }
 
-    pub fn tick(&mut self) -> Result<UpdateView, String> {
+    pub fn check_for_updates(&mut self) -> Result<(), String> {
         let lock = UpdateLock::acquire(&self.inner.root)?;
         self.inner.coordinator.reload()?;
         self.acknowledge_committed()?;
         let client = update_client::blocking::client("Bokheim-Android-update/1")?;
-        self.inner.coordinator.check_for_updates(&self.inner.root, &lock, &client, now())?;
-        if self.inner.coordinator.preparation_due(now()) {
+        self.inner.coordinator.check_for_updates(&self.inner.root, &lock, &client, now())
+    }
+
+    pub fn prepare(&mut self) -> Result<UpdateView, String> {
+        let lock = UpdateLock::acquire(&self.inner.root)?;
+        self.inner.coordinator.reload()?;
+        if self.inner.coordinator.needs_preparation() {
             let workspace = self.inner.workspace_bytes()?;
-            if let Err(error) = self.inner.coordinator.prepare_next(&self.inner.root, &lock, &client, now(), workspace, 0) {
-                self.inner.coordinator.preparation_failed(now(), WaitReason::Retry, error)?;
+            let client = update_client::blocking::client("Bokheim-Android-update/1")?;
+            if let Err(error) = self.inner.coordinator.prepare(&self.inner.root, &lock, &client, now(), workspace, 0) {
+                self.inner.coordinator.preparation_failed(now(), WaitReason::Retry, error.clone())?;
+                return Err(error);
             }
         }
         Ok(self.view())
@@ -250,7 +257,7 @@ mod tests {
         fn approved(&self) -> AndroidHost {
             let mut host = self.host("1.0.0");
             let manifest = Manifest { protocol_version: 1, channel: "stable".into(), sequence: 1,
-                issued_at_unix: now(), expires_at_unix: now()+3600, taxonomy: None,
+                issued_at_unix: now(), expires_at_unix: now()+3600, taxonomy: None, catalog: None,
                 application: Some(ApplicationRelease { version: "2.0.0".parse().unwrap(), name: "Test".into(),
                     schema_version: library_database::LIBRARY_SCHEMA_VERSION as u32, taxonomy_format_versions: vec![1],
                     artifacts: [("android-aarch64-apk".into(), Artifact { url: "https://example.org/releases/2/app.apk".into(), bytes: 3, sha256: hex(digest(&SHA256, b"apk").as_ref()) })].into() }) };

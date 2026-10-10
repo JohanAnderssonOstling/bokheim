@@ -1,5 +1,6 @@
 //! Translates backend library updates into GPUI events.
 
+use library_backend::{BookDownloadStatus, DownloadState};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -17,7 +18,7 @@ pub(crate) struct LibraryCoversChanged {
 }
 
 pub(crate) struct LibraryDownloadChanged {
-    pub(crate) status: app::BookDownloadStatus,
+    pub(crate) status: BookDownloadStatus,
 }
 
 impl LibraryCoversChanged {
@@ -28,8 +29,7 @@ impl LibraryCoversChanged {
 
 pub(crate) struct LibraryUpdateBridge {
     library: LibraryClient,
-    downloads: HashMap<ContentHash, app::DownloadState>,
-    download_watches: HashMap<ContentHash, Task<()>>,
+    downloads: HashMap<ContentHash, DownloadState>,
     scanning: Option<bool>,
     importing: bool,
     book_count: Option<usize>,
@@ -77,7 +77,7 @@ impl LibraryUpdateBridge {
                 cx.defer_update(bridge.clone(), move |bridge, cx| bridge.apply(batch, cx));
             }
         });
-        let mut bridge = Self { library, downloads: HashMap::new(), download_watches: HashMap::new(), scanning: None, importing: false, book_count: None, _updates: task, _book_count_request: None };
+        let mut bridge = Self { library, downloads: HashMap::new(), scanning: None, importing: false, book_count: None, _updates: task, _book_count_request: None };
         bridge.refresh_book_count(cx);
         bridge
     }
@@ -104,64 +104,31 @@ impl LibraryUpdateBridge {
         self.book_count
     }
 
-    pub(crate) fn download_state(&self, content_hash: ContentHash) -> Option<app::DownloadState> {
+    pub(crate) fn download_state(&self, content_hash: ContentHash) -> Option<DownloadState> {
         self.downloads.get(&content_hash).cloned()
     }
 
-    /// Book rows bootstrap the display only once. From then on this bridge's
-    /// backend subscription owns the state; a later browse response cannot
-    /// roll progress or completion back to an older row snapshot.
-    pub(crate) fn track_download(&mut self, content_hash: ContentHash, downloaded: bool, requested: bool, cx: &mut Context<Self>) {
+    /// Book rows bootstrap the display only once. From then on the update
+    /// stream owns the state; a later browse response cannot roll progress or
+    /// completion back to an older row snapshot.
+    pub(crate) fn track_download(&mut self, content_hash: ContentHash, downloaded: bool, requested: bool) {
         self.downloads.entry(content_hash).or_insert_with(|| {
             if downloaded {
-                app::DownloadState::Downloaded
+                DownloadState::Downloaded
             } else if requested {
-                app::DownloadState::Queued
+                DownloadState::Queued
             } else {
-                app::DownloadState::NotDownloaded
+                DownloadState::NotDownloaded
             }
         });
-        if requested {
-            self.watch_download(content_hash, cx);
-        }
     }
 
-    pub(crate) fn watch_download(&mut self, content_hash: ContentHash, cx: &mut Context<Self>) {
-        if self.download_watches.contains_key(&content_hash) {
-            return;
-        }
-        let library = self.library.clone();
-        let task = cx.spawn(async move |bridge, cx| {
-            let (states, initial) = match library.download_changes(content_hash).await {
-                Ok(subscription) => subscription,
-                Err(error) => {
-                    log::warn!("cannot subscribe to download status for {content_hash}: {error}");
-                    cx.defer_update(bridge, move |bridge, _| {
-                        bridge.download_watches.remove(&content_hash);
-                    });
-                    return;
-                }
-            };
-            cx.defer_update(bridge.clone(), move |bridge, cx| bridge.set_download_state(content_hash, initial, cx));
-            while let Ok(state) = states.recv().await {
-                cx.defer_update(bridge.clone(), move |bridge, cx| bridge.set_download_state(content_hash, state, cx));
-            }
-            cx.defer_update(bridge, move |bridge, _| {
-                bridge.download_watches.remove(&content_hash);
-            });
-        });
-        self.download_watches.insert(content_hash, task);
-    }
-
-    fn set_download_state(&mut self, content_hash: ContentHash, state: app::DownloadState, cx: &mut Context<Self>) {
-        if matches!(self.downloads.get(&content_hash), Some(app::DownloadState::Downloaded)) && matches!(state, app::DownloadState::Queued | app::DownloadState::Downloading(_)) {
-            return;
-        }
+    fn set_download_state(&mut self, content_hash: ContentHash, state: DownloadState, cx: &mut Context<Self>) {
         if self.downloads.get(&content_hash) == Some(&state) {
             return;
         }
         self.downloads.insert(content_hash, state.clone());
-        cx.emit(LibraryDownloadChanged { status: app::BookDownloadStatus::new(content_hash, state) });
+        cx.emit(LibraryDownloadChanged { status: BookDownloadStatus::new(content_hash, state) });
         cx.notify();
     }
 
@@ -202,9 +169,7 @@ impl LibraryUpdateBridge {
             cx.emit(LibraryCoversChanged { content_hashes: covers.into() });
         }
         for status in downloads {
-            if !self.download_watches.contains_key(&status.content_hash) {
-                self.set_download_state(status.content_hash, status.state, cx);
-            }
+            self.set_download_state(status.content_hash, status.state, cx);
         }
     }
 }
@@ -217,7 +182,7 @@ struct UpdateBatch {
     covers: Vec<ContentHash>,
     /// Kept per book: each status names a different book, or supersedes an
     /// earlier status for the same one.
-    downloads: Vec<app::BookDownloadStatus>,
+    downloads: Vec<BookDownloadStatus>,
     scanning: Option<bool>,
 }
 
@@ -232,12 +197,5 @@ impl UpdateBatch {
             }
             LibraryUpdate::Scanning(scanning) => self.scanning = Some(scanning),
         }
-    }
-}
-
-#[cfg(test)]
-impl LibraryUpdateBridge {
-    pub(crate) fn for_test(library: LibraryClient, cx: &mut impl AppContext) -> Entity<Self> {
-        cx.new(|_| Self { library, downloads: HashMap::new(), download_watches: HashMap::new(), scanning: Some(false), importing: false, book_count: Some(0), _updates: Task::ready(()), _book_count_request: None })
     }
 }

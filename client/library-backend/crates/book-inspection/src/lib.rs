@@ -1,35 +1,44 @@
-//! Portable EPUB and PDF metadata inspection.
+//! Portable book metadata inspection: EPUB, MOBI and PDF documents, and M4B
+//! and MP3-folder audiobooks.
 
+use book_content::{Book, BookFormat as ContainerFormat, DeclaredMetadata, TocEntry};
+use book_content::{IdentifierScheme, MetadataCredit, MetadataProperty};
 use book_model::{
-    marc_relator_code_from_metadata_role, BookDate, BookFormat, BookMetadata, BookMetadataError, BookRecord, BookSubject, BookTocEntry, Contributor, Identifier, LanguageTag, PublisherCredit, Scheme, Scope, AUTHOR_MARC_RELATOR_CODE,
+    marc_relator_code_from_metadata_role, unique_book_year, BookFormat, BookMetadata, BookMetadataError, BookRecord, BookSubject, BookTocEntry, Contributor, Identifier, LanguageTag, Scheme, Scope, AUTHOR_MARC_RELATOR_CODE,
 };
-use epub_provider::EpubProvider;
 use std::io::{Read, Seek};
 use std::path::Path;
 use std::time::Instant;
 
 pub type MetadataResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+mod book;
+pub use book::{AudiobookMetadata, InspectedBook, inspect_book_reader, inspect_book_reader_with_hash};
 pub mod evidence;
-#[cfg(feature = "mobi")]
 mod mobi;
-#[cfg(feature = "mobi")]
-pub use mobi::{inspect_mobi_metadata_reader, inspect_mobi_pages_reader};
-mod epub_evidence;
-pub use book_enrichment::related_isbn;
-pub use book_enrichment::title_identity::normalize_with_filename;
+pub use mobi::{inspect_mobi_metadata_reader, inspect_mobi_pages_reader, inspect_mobi_reader};
+mod document_evidence;
+mod filename_identity;
+mod filename_identifiers;
+mod filename_isbn;
+mod title_identity;
+mod identity_evidence;
+pub use title_identity::{normalize_with_filename, title_readings};
 mod pdf;
 mod pdf_ranges;
 pub use pdf::{inspect_pdf, inspect_pdf_metadata, inspect_pdf_pages_reader, inspect_pdf_reader, InspectedPdf};
 
 /// Inspection cache version for a format. Matches the extractor contract:
-/// EPUB and PDF evidence versions with the shared extractor, others are 1.
+/// EPUB/MOBI include the shared declared-metadata projection; PDF follows
+/// the shared evidence extractor.
 /// Shared by explicit import and the filesystem scanner, which both cache
 /// results keyed on this value.
 pub fn inspection_version(format: BookFormat) -> i64 {
     match format {
-        BookFormat::Epub | BookFormat::Pdf => i64::from(evidence::INSPECTION_VERSION),
-        _ => 1,
+        BookFormat::Epub => i64::from(evidence::INSPECTION_VERSION) + 2,
+        BookFormat::Pdf => i64::from(evidence::INSPECTION_VERSION) + 1,
+        BookFormat::Mobi => 5,
+        _ => 3,
     }
 }
 
@@ -56,20 +65,17 @@ pub struct EpubInspectionTimings {
 /// metadata parser; ordinary library scans can continue to omit the TOC.
 pub fn inspect_epub(path: &Path) -> MetadataResult<InspectedEpub> {
     let container_started = Instant::now();
-    let provider = open_epub(path)?;
-    let mut metadata = epub_metadata_from_provider(path, &provider)?;
+    let mut provider = open_epub(path)?;
+    let mut metadata = metadata_from_book(path, &mut provider)?;
     let container_ms = u64::try_from(container_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let evidence_started = Instant::now();
-    inspect_epub_pages(&provider, &mut metadata);
+    inspect_epub_pages(&mut provider, &mut metadata);
     let evidence_ms = u64::try_from(evidence_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let toc_started = Instant::now();
-    let mut count = 0;
-    let toc = provider.toc()?.unwrap_or_default().into_iter().filter_map(|entry| book_toc_entry(entry, 0, &mut count)).collect();
+    let toc = book_toc_entries(provider.toc()?.unwrap_or_default());
     let toc_ms = u64::try_from(toc_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     Ok(InspectedEpub { metadata, toc, timings: EpubInspectionTimings { container_ms, evidence_ms, toc_ms } })
 }
-
-
 
 /// Reads EPUB metadata from any seekable byte source. Browser ingestion uses
 /// this entry point, while native scanning passes a file through
@@ -78,18 +84,19 @@ pub fn inspect_epub_reader<R>(source_name: &Path, reader: R) -> MetadataResult<I
 where
     R: Read + Seek + Send + 'static,
 {
-    let provider = EpubProvider::try_from_reader(reader)?;
-    if provider.document_uris()?.is_empty() {
-        return Err("EPUB book contains no readable documents".into());
-    }
-    let mut metadata = epub_metadata_from_provider(source_name, &provider)?;
-    inspect_epub_pages(&provider, &mut metadata);
-    let mut count = 0;
-    let toc = provider.toc()?.unwrap_or_default().into_iter().filter_map(|entry| book_toc_entry(entry, 0, &mut count)).collect();
+    let mut provider = Book::open_reader(ContainerFormat::Epub, reader)?;
+    let mut metadata = metadata_from_book(source_name, &mut provider)?;
+    inspect_epub_pages(&mut provider, &mut metadata);
+    let toc = book_toc_entries(provider.toc()?.unwrap_or_default());
     Ok(InspectedEpub { metadata, toc, timings: EpubInspectionTimings::default() })
 }
 
-fn book_toc_entry(entry: epub_provider::TocEntry, depth: usize, count: &mut usize) -> Option<BookTocEntry> {
+fn book_toc_entries(entries: Vec<TocEntry>) -> Vec<BookTocEntry> {
+    let mut count = 0;
+    entries.into_iter().filter_map(|entry| book_toc_entry(entry, 0, &mut count)).collect()
+}
+
+fn book_toc_entry(entry: TocEntry, depth: usize, count: &mut usize) -> Option<BookTocEntry> {
     const MAX_TOC_DEPTH: usize = 32;
     const MAX_TOC_ENTRIES: usize = 8_192;
     const MAX_TOC_TEXT_BYTES: usize = 4_096;
@@ -110,7 +117,7 @@ fn book_toc_entry(entry: epub_provider::TocEntry, depth: usize, count: &mut usiz
 /// Reads all metadata relevant to indexing. Formats without useful embedded
 fn fallback_metadata(path: &Path) -> BookRecord {
     let title = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or("Untitled").to_owned();
-    BookRecord { metadata: book_model::BookDetails { title: title, subtitle: None, contributors: Vec::new(), book: Default::default() }, description: String::new() }
+    BookRecord { metadata: book_model::BookDetails { title, subtitle: None, contributors: Vec::new(), book: Default::default() }, description: String::new() }
 }
 
 fn author_credit(name: String) -> Result<Contributor, BookMetadataError> {
@@ -199,11 +206,7 @@ fn author_names(raw: &str) -> Vec<String> {
 
 fn is_author_tool(name: &str) -> bool {
     let lowered = name.trim().to_ascii_lowercase();
-    book_enrichment::filename_identity::unusable_title(name) || AUTHOR_TOOL_PREFIXES.iter().any(|prefix| lowered.starts_with(prefix))
-}
-
-fn non_empty_optional(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.trim().is_empty())
+    filename_identity::unusable_title(name) || AUTHOR_TOOL_PREFIXES.iter().any(|prefix| lowered.starts_with(prefix))
 }
 
 /// The blurb a reader should be given, where a book states two.
@@ -225,50 +228,51 @@ fn non_empty_optional(value: Option<String>) -> Option<String> {
 /// keeps no id for `dc:description`, and nothing else in the wild calls itself
 /// a long description. The value is markup either way — a description arriving
 /// as HTML is the normal case, not this convention's doing.
-fn long_description(properties: &[epub_provider::EpubMetadataProperty]) -> Option<String> {
+fn long_description(properties: &[MetadataProperty]) -> Option<String> {
     let property = properties.iter().find(|property| property.property.rsplit(':').next() == Some("long-description"))?;
     let collapsed = property.value.split_whitespace().collect::<Vec<_>>().join(" ");
     (!collapsed.is_empty()).then_some(collapsed)
 }
 
-pub fn open_epub(path: &Path) -> MetadataResult<EpubProvider> {
-    let provider = std::fs::File::open(path).and_then(EpubProvider::try_from_reader)?;
-    if provider.document_uris()?.is_empty() {
-        return Err("EPUB book contains no readable documents".into());
-    }
+pub fn open_epub(path: &Path) -> MetadataResult<Book> {
+    let provider = Book::open_reader(ContainerFormat::Epub, std::fs::File::open(path)?)?;
     Ok(provider)
 }
 
-pub fn epub_metadata_from_provider(path: &Path, provider: &EpubProvider) -> MetadataResult<BookRecord> {
-    let metadata = provider.metadata()?;
+pub fn metadata_from_book(path: &Path, provider: &mut Book) -> MetadataResult<BookRecord> {
+    metadata_from_declared(path, provider.metadata()?)
+}
+
+fn metadata_from_declared(path: &Path, metadata: DeclaredMetadata) -> MetadataResult<BookRecord> {
     let mut authors = metadata
         .creators
         .iter()
         .filter(|creator| marc_relator_code_from_metadata_role(creator.role.as_str()) == AUTHOR_MARC_RELATOR_CODE && !is_author_tool(&creator.name))
-        .map(|creator| author_credit(creator.name.clone()))
-        .collect::<Result<Vec<_>, _>>()?;
+        .flat_map(|creator| author_names(&creator.name))
+        .filter_map(author_from_field)
+        .collect::<Vec<_>>();
     if authors.is_empty() {
-        authors.extend(metadata.creators.first().filter(|creator| !is_author_tool(&creator.name)).map(|creator| author_credit(creator.name.clone())).transpose()?);
+        authors.extend(metadata.creators.first().into_iter().flat_map(|creator| author_names(&creator.name)).filter_map(author_from_field));
     }
 
     let mut identifiers = metadata
         .identifiers
         .into_iter()
-        .map(|identifier| {
+        .filter_map(|identifier| {
             let mut scheme = match identifier.scheme {
-                epub_provider::IdentifierScheme::Unspecified => Scheme::Unspecified,
-                epub_provider::IdentifierScheme::ISBN => Scheme::Isbn,
-                epub_provider::IdentifierScheme::ASIN => Scheme::Asin,
-                epub_provider::IdentifierScheme::DOI => Scheme::Doi,
-                epub_provider::IdentifierScheme::ISSN => Scheme::Issn,
-                epub_provider::IdentifierScheme::OCLC => Scheme::Oclc,
-                epub_provider::IdentifierScheme::LCCN => Scheme::Lccn,
-                epub_provider::IdentifierScheme::UUID => Scheme::Uuid,
-                epub_provider::IdentifierScheme::CALIBRE => Scheme::Calibre,
-                epub_provider::IdentifierScheme::GOOG => Scheme::Google,
-                epub_provider::IdentifierScheme::GOODREADS => Scheme::Goodreads,
-                epub_provider::IdentifierScheme::KOBO => Scheme::Kobo,
-                epub_provider::IdentifierScheme::Other(value) => Scheme::Other(value),
+                IdentifierScheme::Unspecified => Scheme::Unspecified,
+                IdentifierScheme::ISBN => Scheme::Isbn,
+                IdentifierScheme::ASIN => Scheme::Asin,
+                IdentifierScheme::DOI => Scheme::Doi,
+                IdentifierScheme::ISSN => Scheme::Issn,
+                IdentifierScheme::OCLC => Scheme::Oclc,
+                IdentifierScheme::LCCN => Scheme::Lccn,
+                IdentifierScheme::UUID => Scheme::Uuid,
+                IdentifierScheme::CALIBRE => Scheme::Calibre,
+                IdentifierScheme::GOOG => Scheme::Google,
+                IdentifierScheme::GOODREADS => Scheme::Goodreads,
+                IdentifierScheme::KOBO => Scheme::Kobo,
+                IdentifierScheme::Other(value) => Scheme::Other(value),
             };
             // Some producers emit a bare, checksum-valid ISBN without a
             // scheme, or attach an incorrect proprietary scheme. The value is
@@ -283,38 +287,67 @@ pub fn epub_metadata_from_provider(path: &Path, provider: &EpubProvider) -> Meta
                 // Preserve the raw declaration without treating invalid placeholders
                 // as usable ISBN identity or suppressing fallback extraction.
                 scheme = Scheme::Unspecified;
+            } else if scheme == Scheme::Asin {
+                let asin = value.trim().to_ascii_uppercase();
+                if asin.len() != 10 || !asin.starts_with('B') || !asin.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+                    return None;
+                }
+                value = asin;
             }
-            Identifier::new(value, scheme, Scope::Book).map_err(Into::into)
+            Some(Identifier::new(value, scheme, Scope::Book).map_err(Into::into))
         })
         .collect::<Result<Vec<_>, BookMetadataError>>()?;
-    let contributor = |creator: epub_provider::EpubCreator| Contributor::new(creator.name, marc_relator_code_from_metadata_role(creator.role.as_str()));
+    let contributor = |creator: MetadataCredit| Contributor::new(creator.name, marc_relator_code_from_metadata_role(creator.role.as_str())).ok();
     let non_author_contributors =
-        metadata.contributors.into_iter().chain(metadata.creators.into_iter().filter(|creator| marc_relator_code_from_metadata_role(creator.role.as_str()) != AUTHOR_MARC_RELATOR_CODE)).map(contributor).collect::<Result<Vec<_>, _>>()?;
+        metadata.contributors.into_iter().chain(metadata.creators.into_iter().filter(|creator| marc_relator_code_from_metadata_role(creator.role.as_str()) != AUTHOR_MARC_RELATOR_CODE)).filter_map(contributor).collect::<Vec<_>>();
     let long_description = long_description(&metadata.properties);
-    if let Some(isbn) = (|path: &str| -> Option<String> {
+    for property in &metadata.properties {
+        if let Some(isbn) = from_metadata_value(&property.value) {
+            book_model::push_isbn(&mut identifiers, isbn, Scope::Book)?;
+        }
+    }
+    if let Some(isbn) = metadata.source_path.as_deref().and_then(|path: &str| -> Option<String> {
         let file_name = path.rsplit('/').next()?;
         let stem = file_name.strip_suffix(".opf").or_else(|| file_name.strip_suffix(".OPF"))?;
         let stem = stem.trim().trim_start_matches(|character: char| matches!(character, '_' | '-'));
         let stem = stem.strip_prefix("ISBN").or_else(|| stem.strip_prefix("isbn")).map(|value| value.trim_start_matches(|character: char| matches!(character, '_' | '-' | ':' | ' '))).unwrap_or(stem);
-        book_enrichment::filename_isbn::from_filename_single(stem)
-    })(provider.package_document_path())
-    {
+        filename_isbn::from_filename_single(stem)
+    }) {
         book_model::push_isbn(&mut identifiers, isbn, Scope::Book)?;
     }
     let title = if metadata.title.trim().is_empty() { fallback_metadata(path).metadata.title } else { metadata.title };
     let subtitle = metadata.alternate_titles.iter().find(|title| title.title_type.as_deref().is_some_and(|kind| kind.eq_ignore_ascii_case("subtitle"))).map(|title| title.value.clone());
     let mut book = BookMetadata {
         identifiers,
-        publishers: metadata.publishers.into_iter().map(PublisherCredit::new).collect::<Result<Vec<_>, _>>()?,
-        // Optional source metadata must not reject an otherwise readable EPUB.
+        publishers: metadata.publishers,
+        // Optional source metadata must not reject an otherwise readable book.
         languages: metadata.languages.into_iter().filter_map(|value| LanguageTag::parse(value).ok()).collect(),
-        dates: metadata.dates.into_iter().filter_map(|date| BookDate::new(non_empty_optional(date.id), date.value, non_empty_optional(date.event), "epub:package:date").ok()).collect(),
-        subjects: metadata.subjects.into_iter().map(|subject| BookSubject::new(subject.id, subject.value, subject.source, subject.authority, subject.code)).collect::<Result<Vec<_>, _>>()?,
+        year: unique_book_year(
+            metadata.dates.iter().filter(|date| date.event.as_deref().is_none_or(|event| event.trim().is_empty() || event.eq_ignore_ascii_case("publication") || event.eq_ignore_ascii_case("book"))).map(|date| date.value.as_str()),
+        ),
+        subjects: metadata
+            .subjects
+            .into_iter()
+            .filter_map(|subject| {
+                let mut authority = subject.authority;
+                let mut code = subject.code;
+                if authority.is_none() {
+                    if evidence::usable_lcc(&subject.value) {
+                        authority = Some("lcc".to_owned());
+                        code = Some(subject.value.clone());
+                    } else if !subject_projection::unified_subject_paths(subject_projection::BISAC_SYSTEM_ID, &subject.value).is_empty() {
+                        authority = Some("bisac".to_owned());
+                        code = Some(subject.value.clone());
+                    }
+                }
+                BookSubject::new(subject.id, subject.value, subject.source, authority, code).ok()
+            })
+            .collect(),
     };
     book.infer_embedded_subject_isbns()?;
     let contributors = authors.into_iter().chain(non_author_contributors).collect();
     let description = long_description.unwrap_or(metadata.description);
-    let mut book = BookRecord { metadata: book_model::BookDetails { title: title, subtitle: subtitle, contributors: contributors, book: book }, description: description };
+    let mut book = BookRecord { metadata: book_model::BookDetails { title, subtitle, contributors, book }, description };
     book.normalize_title();
     Ok(book)
 }
@@ -333,40 +366,6 @@ mod tests {
         let inspected = inspect_epub_pages_reader(Path::new("book.epub"), std::io::Cursor::new(bytes.to_vec())).unwrap();
         assert_eq!(inspected.title, "OCR priority fixture");
         assert!(inspected.book.identifiers.is_empty());
-    }
-
-    #[test]
-    fn a_long_description_beside_a_teaser_is_the_one_a_reader_gets() {
-        let property = |name: &str, value: &str| epub_provider::EpubMetadataProperty {
-            id: Some("long-description".to_owned()),
-            property: name.to_owned(),
-            value: value.to_owned(),
-            refines: Some("#description".to_owned()),
-            scheme: None,
-            language: None,
-        };
-        // Indented across several lines, which is how Standard Ebooks writes it
-        // and why the modelled property cannot carry it.
-        let emma = property("se:long-description", "\n\t\t\t<p><i>Emma</i> is one of Jane Austen’s best-loved novels.</p>\n\t\t\t<p>The novel provides a light-hearted insight.</p>\n\t\t");
-        assert_eq!(
-            long_description(std::slice::from_ref(&emma)).as_deref(),
-            Some("<p><i>Emma</i> is one of Jane Austen’s best-loved novels.</p> <p>The novel provides a light-hearted insight.</p>"),
-            "the paragraphs survive; the indentation between them does not"
-        );
-
-        let other = property("belongs-to-collection", "Novels");
-        assert_eq!(long_description(&[other.clone()]), None, "a book that states one description keeps it");
-        assert_eq!(long_description(&[]), None);
-        assert_eq!(long_description(&[other, property("se:long-description", " \n\t ")]), None, "a refinement that says nothing is not an improvement on the line that does");
-    }
-
-    #[test]
-    fn malformed_identifier_wrapper_retains_only_complete_isbn_values() {
-        assert_eq!(from_metadata_value("urn:uuid:isbn 0-330-26272-6").as_deref(), Some("0330262726"));
-        assert_eq!(from_metadata_value("URN:UUID:ISBN: 0-330-26272-6").as_deref(), Some("0330262726"));
-        assert!(from_metadata_value("urn:uuid:12345678-1234-1234-1234-123456789abc").is_none());
-        assert!(from_metadata_value("https://example.org/0330262726").is_none());
-        assert!(from_metadata_value("urn:uuid:isbn 0-330-26272-7").is_none());
     }
 
     #[test]
@@ -394,26 +393,25 @@ mod tests {
     }
 }
 
-fn inspect_epub_pages(provider: &EpubProvider, book: &mut BookRecord) {
-    let sections = epub_evidence::inspect(provider, book);
+fn inspect_epub_pages(provider: &mut Book, book: &mut BookRecord) {
+    let sections = document_evidence::inspect(provider, book);
     evidence::apply_evidence(book, &sections, "epub");
 }
 
 /// Page evidence alone, for inspection tools.
 pub fn inspect_epub_pages_reader<R: Read + Seek + Send + 'static>(source_name: &Path, reader: R) -> MetadataResult<BookRecord> {
-    let provider = EpubProvider::try_from_reader(reader)?;
-    let mut book = epub_metadata_from_provider(source_name, &provider)?;
+    let mut provider = Book::open_reader(ContainerFormat::Epub, reader)?;
+    let mut book = metadata_from_book(source_name, &mut provider)?;
     book.book.identifiers.clear();
-    inspect_epub_pages(&provider, &mut book);
+    inspect_epub_pages(&mut provider, &mut book);
     Ok(book)
 }
 
 /// Package metadata and navigation only; page inspection is a separate stage.
 pub fn inspect_epub_metadata_with_toc(path: &Path) -> MetadataResult<InspectedEpub> {
-    let provider = open_epub(path)?;
-    let metadata = epub_metadata_from_provider(path, &provider)?;
-    let mut count = 0;
-    let toc = provider.toc()?.unwrap_or_default().into_iter().filter_map(|entry| book_toc_entry(entry, 0, &mut count)).collect();
+    let mut provider = open_epub(path)?;
+    let metadata = metadata_from_book(path, &mut provider)?;
+    let toc = book_toc_entries(provider.toc()?.unwrap_or_default());
     Ok(InspectedEpub { metadata, toc, timings: EpubInspectionTimings::default() })
 }
 
@@ -431,15 +429,30 @@ mod title_tests {
             archive.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
             archive.write_all(text.as_bytes()).unwrap();
         }
-        let provider = EpubProvider::try_from_reader(archive.finish().unwrap()).unwrap();
-        epub_metadata_from_provider(Path::new("fixture.epub"), &provider).unwrap()
+        let mut provider = Book::open_reader(ContainerFormat::Epub, archive.finish().unwrap()).unwrap();
+        metadata_from_book(Path::new("fixture.epub"), &mut provider).unwrap()
     }
 
     #[test]
-    fn epub_declared_subtitle_is_stored_separately_without_needing_a_colon() {
-        let book = metadata(r##"<dc:title id="main">Moby Dick</dc:title><dc:title id="sub">Or, The Whale</dc:title><meta refines="#sub" property="title-type">subtitle</meta>"##);
-        assert_eq!(book.title, "Moby Dick");
-        assert_eq!(book.subtitle(), Some("Or, The Whale"));
+    fn epub_publisher_names_are_preserved_as_strings() {
+        let book = metadata("<dc:title>Example</dc:title><dc:publisher>Oxford University Press</dc:publisher><dc:publisher>Éditions Gallimard</dc:publisher>");
+        assert_eq!(book.book.publishers, vec!["Oxford University Press", "Éditions Gallimard"]);
+    }
+
+    #[test]
+    fn epub_year_uses_publication_dates_and_leaves_missing_or_conflicting_years_absent() {
+        for (dates, expected) in [
+            ("<dc:date>2004-03-15</dc:date>", Some(2004)),
+            (r#"<dc:date event="modification">2025-01-01</dc:date><dc:date event="publication">2004-03-15</dc:date>"#, Some(2004)),
+            ("<dc:date>2004</dc:date><dc:date>2004-03-15</dc:date>", Some(2004)),
+            ("<dc:date>2004</dc:date><dc:date>2005</dc:date>", None),
+            (r#"<dc:date event="modification">2025-01-01</dc:date>"#, None),
+            ("<dc:date>unknown</dc:date>", None),
+            ("", None),
+        ] {
+            let book = metadata(&format!("<dc:title>Example</dc:title>{dates}"));
+            assert_eq!(book.book.year, expected, "{dates}");
+        }
     }
 
     #[test]

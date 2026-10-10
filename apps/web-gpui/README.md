@@ -37,26 +37,6 @@ exclusive database-worker lock prevents overlapping ownership. Interrupted
 requests fail without automatically replaying writes; subscriptions reconnect.
 Network requests execute asynchronously in the shared coordinator.
 
-Startup checks:
-
-```sh
-node --test apps/web-gpui/scripts/compatibility.test.mjs
-# Requires Playwright; optionally set CHROMIUM_PATH and FIREFOX_PATH:
-node apps/web-gpui/scripts/compatibility.browser-test.mjs
-```
-
-After building an optimized release bundle, run the Chromium Settings async
-regression from the repository root:
-
-```sh
-BOKHEIM_TEST_DIST=/absolute/path/to/release/dist \
-  node apps/web-gpui/scripts/settings-async.browser-test.mjs
-```
-
-It serves that bundle with cross-origin isolation, delays database-worker
-replies until after Settings opens, and checks that the account form still opens
-without a GPUI borrow panic. `CHROMIUM_PATH` overrides the Chromium executable.
-
 Browser Back dispatches the same `DismissSettings` action as native Android:
 the focused page dismisses its modal/search or climbs one breadcrumb level,
 the shell handles its overlays and global pages, and the application closes
@@ -76,15 +56,7 @@ returns to it with `history.forward()` while GPUI consumes Back. It does not
 push replacement entries during `popstate`, which Chromium would mark as
 skippable by the next toolbar Back. Reloads reuse an existing guard. Browser
 history jumps can bypass it, and a directly opened tab with no preceding page
-stays open when Back is unhandled. Run the Chromium/Firefox history regression:
-
-```sh
-node apps/web-gpui/scripts/browser-back.browser-test.mjs
-# After building the release bundle, verify the GPUI callback in Firefox:
-node apps/web-gpui/scripts/browser-back-app.browser-test.mjs
-# Linux with xdotool and an isolated X11 display (for example Xvfb):
-node apps/web-gpui/scripts/browser-back-toolbar.browser-test.mjs
-```
+stays open when Back is unhandled.
 
 The web build includes the shared audiobook player. Audiobooks open in a bottom
 dock; clicking its title expands the full player, and Back minimizes it without
@@ -120,21 +92,6 @@ node apps/audiobook-player/src/web_audio.browser-test.mjs /path/to/book.m4b
 RUSTC_BOOTSTRAP=1 cargo check --release -p web-gpui --target wasm32-unknown-unknown
 ```
 
-To check importing, dock controls with an import notification visible,
-expand/minimize continuity, paused restoration after reload, explicit Play,
-and durable Close in the complete served WASM app:
-
-```sh
-BOKHEIM_TEST_URL=http://127.0.0.1:4173 \
-  node apps/web-gpui/scripts/audiobook-dock.browser-test.mjs /path/to/folder-containing-one-m4b
-```
-
-This test requires Playwright Firefox (optionally set `FIREFOX_PATH`) and a folder
-containing exactly one M4B at least 90 seconds long. It uses a fresh browser context. Set `BROWSER=chromium`
-and optionally `CHROMIUM_PATH` to run the same full-app check in Chromium.
-Neither automated test proves which controls a physical phone displays on its
-lock screen; that needs a device check after playback starts.
-
 ## PDF reading
 
 The web build uses PDFium WASM with the regular GPUI PDF reader, including page
@@ -168,29 +125,6 @@ The build packages checksum-verified PDFium 7902 assets in the immutable release
 bundle. The worker adapts a character-box output argument ordering bug in
 `pdfium-render` 0.9.3; the Rust dependency is pinned so an upgrade cannot silently
 invalidate that adapter. Native PDFium loading remains unchanged.
-
-Run the browser worker test from the repository root:
-
-```sh
-bash apps/web-gpui/scripts/test-pdf-worker.sh
-```
-
-It builds a small harness using the production worker and PDF session code, then
-checks two page rasters, selection, search, repeated open/close, invalid files,
-UI responsiveness, and worker initialization failure. It requires Playwright
-Chromium; `PLAYWRIGHT_MODULE` and `CHROMIUM_PATH` override their locations.
-`PDF_TEST_TARGET` and `PDF_TEST_DIST` select isolated build and output directories.
-
-To test the regular reader in a served production bundle (requires Python Pillow):
-
-```sh
-node apps/web-gpui/scripts/pdf.browser-test.mjs
-```
-
-This uses a disposable browser context and generated PDF to check import, page
-colors, selection/copy, search, navigation, saved-position restoration, and close.
-It defaults to Firefox (`FIREFOX_PATH`); `BROWSER=chromium` selects Chromium.
-`BOKHEIM_TEST_URL` overrides the local server URL.
 
 ## Remote EPUB reading
 
@@ -271,48 +205,8 @@ bundle share that coordinator. A newer bundle waits for the user to close older
 tabs before it can acquire database ownership and migrate local data. Existing
 tabs keep running; deployment retains their immutable assets for later requests.
 
-Run the full-app Chromium regression after an optimized release build:
-
-```sh
-BOKHEIM_TEST_DIST=/path/to/release node apps/web-gpui/scripts/deployment.browser-test.mjs
-```
-
-It serves the compiled application under two deployment identities and checks
-that the older tab keeps running, the newer tab reports the storage conflict,
-and closing the older tab allows the newer deployment to open on reload.
-This checks bundle isolation and ownership, not historical schema migration.
-`PLAYWRIGHT_MODULE` and `CHROMIUM_PATH` select the browser test installation.
-
-## Authentication form checks
+## Authentication
 
 The web Settings page opens a real HTML authentication dialog so password
 managers can discover the username and password fields. It submits through the
 existing Rust account client.
-
-From the repository root, run the standalone Chromium/Firefox form checks and,
-after building the optimized web release, the full-app Firefox check:
-
-```sh
-node apps/browser/web/authentication.browser-test.mjs
-node apps/web-gpui/scripts/authentication.browser-test.mjs
-```
-
-These scripts accept `PLAYWRIGHT_MODULE`, `CHROMIUM_PATH` (standalone test), and
-`FIREFOX_PATH` to select installed tooling. The full-app test intercepts login
-requests and uses dummy credentials. These checks cover DOM autofill values and
-submission, not a password manager extension's actual autofill or save prompts;
-verify those separately with the extension enabled on the intended site origin.
-
-## Local EPUB reader regression
-
-With the optimized web app served locally, run:
-
-```sh
-node apps/web-gpui/scripts/epub-local.browser-test.mjs
-```
-
-This imports a generated EPUB through the directory chooser, verifies that its
-chapter renders through a local book capability without a prefetched
-remote prefix, then closes and reopens it. It uses Firefox and Python Pillow;
-`PLAYWRIGHT_MODULE`, `FIREFOX_PATH`, and `BOKHEIM_TEST_URL` select the tooling and
-local server. `EPUB_TEST_SCREENSHOT` optionally records the rendered reader.

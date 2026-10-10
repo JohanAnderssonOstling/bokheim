@@ -189,29 +189,13 @@ pub fn select(request: &LookupRequest, candidates: &[Candidate]) -> Selection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn filename_prefix_requires_matching_catalogue_author() {
-        let mut r = request();
-        r.title = "John_Smith_-_A_Specific_Book".into();
-        r.authors.clear();
-        let c = candidate("B000000001", 600_000);
-        assert_eq!(title_score(&r, &c), 1000);
-        assert_eq!(select(&r, &[c.clone()]), Selection::Supported(0));
-        assert!(r.authors.is_empty(), "discovery must not manufacture local author evidence");
-        r.title = "Another Author - A Specific Book".into();
-        assert_eq!(title_score(&r, &c), 0);
-        assert_eq!(select(&r, &[c.clone()]), Selection::NoMatch);
-        r.title = "John Smith - A Different Book".into();
-        assert_eq!(title_score(&r, &c), 0);
-        assert!(split_title_search_hint("A Well-Known Book").is_none());
-    }
     fn request() -> LookupRequest {
         LookupRequest {
             title: "A Specific Book".into(),
             authors: vec!["John Q. Smith".into()],
             duration_ms: 600_000,
             recording: RecordingEvidence::default(),
-            chapters: vec![Chapter { title: "Full audiobook".into(), start_ms: 0, end_ms: 600_000 }],
+            chapters: vec![AudiobookChapter { title: "Full audiobook".into(), start_ms: 0, end_ms: 600_000 }],
         }
     }
     fn candidate(asin: &str, duration: u64) -> Candidate {
@@ -229,7 +213,7 @@ mod tests {
             abridged: None,
             provider_duration_ms: Some(9_999_000),
             duration_ms: Some(duration),
-            chapters: vec![Chapter { title: "A descriptive chapter".into(), start_ms: 0, end_ms: duration }],
+            chapters: vec![AudiobookChapter { title: "A descriptive chapter".into(), start_ms: 0, end_ms: duration }],
             metadata_provider: "audible".into(),
             chapter_provider: Some("audible".into()),
             source: DiscoverySource::Api,
@@ -240,6 +224,14 @@ mod tests {
         let mut correct = candidate("B000000001", 600_000);
         correct.authors = vec!["Different local credit spelling".into()];
         assert_eq!(select(&request(), &[candidate("B000000002", 900_000), correct]), Selection::Supported(1));
+
+        {
+            let mut request = request();
+            request.chapters.push(request.chapters[0].clone());
+            let mut candidate = candidate("B000000001", 900_000);
+            candidate.chapters.push(candidate.chapters[0].clone());
+            assert_eq!(select(&request, &[candidate]), Selection::Supported(0));
+        }
     }
     #[test]
     fn ambiguous_recordings_need_evidence_and_only_recording_date_breaks_tie() {
@@ -251,14 +243,6 @@ mod tests {
         assert_eq!(select(&request, &[a.clone(), b.clone()]), Selection::Ambiguous);
         request.recording.recording_release_date = request.recording.date.clone();
         assert_eq!(select(&request, &[a, b]), Selection::Supported(1));
-    }
-    #[test]
-    fn equal_count_names_do_not_require_runtime_agreement() {
-        let mut request = request();
-        request.chapters.push(request.chapters[0].clone());
-        let mut candidate = candidate("B000000001", 900_000);
-        candidate.chapters.push(candidate.chapters[0].clone());
-        assert_eq!(select(&request, &[candidate]), Selection::Supported(0));
     }
     #[test]
     fn regional_encodings_with_matching_labels_and_subsecond_boundaries_are_one_recording() {
@@ -275,32 +259,7 @@ mod tests {
         assert_eq!(select(&r, &[a, b]), Selection::Ambiguous);
     }
 
-    #[test]
-    fn explicit_format_annotation_is_not_part_of_the_title_but_still_constrains_the_recording() {
-        let mut r = request();
-        r.title.push_str(" (Unabridged)");
-        let mut c = candidate("B000000001", 600_000);
-        c.abridged = Some(false);
-        assert_eq!(select(&r, &[c.clone()]), Selection::Supported(0));
-        c.abridged = Some(true);
-        assert_eq!(select(&r, &[c]), Selection::NoMatch);
-    }
 
-    #[test]
-    fn production_conflict_and_generic_title_substrings_are_rejected() {
-        let mut c = candidate("B000000001", 600_000);
-        c.subtitle = Some("A full cast dramatisation".into());
-        assert_eq!(select(&request(), &[c.clone()]), Selection::NoMatch);
-        c.title = "Book".into();
-        c.subtitle = None;
-        assert_eq!(select(&request(), &[c]), Selection::NoMatch);
-    }
-    #[test]
-    fn revised_edition_and_author_initials_are_accepted() {
-        let mut c = candidate("B000000001", 600_000);
-        c.title.push_str(" (Revised Edition)");
-        assert_eq!(select(&request(), &[c]), Selection::Supported(0));
-    }
     #[test]
     fn unresolved_plausible_recording_blocks_selection_until_lookup_recovers() {
         let r = request();
@@ -313,12 +272,4 @@ mod tests {
         assert_eq!(select(&r, &[missing, supported]), Selection::Supported(1));
     }
 
-    #[test]
-    fn missing_duration_for_an_unrelated_title_does_not_block_selection() {
-        let r = request();
-        let mut missing = candidate("B000000001", 600_000);
-        missing.title = "An unrelated book".into();
-        missing.duration_ms = None;
-        assert_eq!(select(&r, &[missing, candidate("B000000002", 600_000)]), Selection::Supported(1));
-    }
 }

@@ -13,7 +13,7 @@ pub async fn upload(book: &VerifiedBook, url: &reqwest::Url, token: &str) -> Res
     let status = client_platform_web::transport::upload::put_blob(
         &file,
         url.as_str(),
-        &[("authorization", &bearer), ("x-bokheim-trace-id", &trace_id), ("x-bokheim-content-checksum", book.checksum.as_str()), ("content-type", "application/octet-stream")],
+        &[("authorization", &bearer), ("x-bokheim-trace-id", &trace_id), ("content-type", "application/octet-stream")],
     )
     .await
     .map_err(TransferError::retryable)?;

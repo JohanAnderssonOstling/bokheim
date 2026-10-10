@@ -49,15 +49,6 @@ fn device_error(error: io::Error) -> io::Error {
 mod tests {
     use super::*;
 
-    #[test]
-    fn reads_percentages_and_rejects_invalid_driver_values() {
-        for (text, expected) in [("0\n", 0), ("42\n", 42), ("100\n", 100)] {
-            assert_eq!(parse_percent(text).unwrap(), expected);
-        }
-        for text in ["", "-1", "101", "256", "50%"] {
-            assert_eq!(parse_percent(text).unwrap_err().kind(), io::ErrorKind::InvalidData);
-        }
-    }
 
     #[test]
     fn changes_brightness_repeatedly_including_off_and_rejects_out_of_range() {

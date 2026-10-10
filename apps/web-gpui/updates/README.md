@@ -21,18 +21,3 @@ There is no browser approval, staged bundle selection, custom artifact cache,
 database snapshot, rollback journal or separate browser update feed. Website
 publication delivers code and its taxonomy together. Native update consent and
 signed distribution remain separate.
-
-Verification:
-
-    node apps/web-gpui/scripts/startup.browser-test.mjs
-
-PLAYWRIGHT_MODULE and FIREFOX_PATH can select local Playwright/Firefox installs.
-
-After building an optimized release, exercise the actual application in Chromium:
-
-    BOKHEIM_TEST_DIST=/path/to/release node apps/web-gpui/scripts/deployment.browser-test.mjs
-
-This serves the same compiled application under two immutable deployment identities
-and checks slow startup, older-tab ownership, new-bundle selection and startup
-failure recovery. PLAYWRIGHT_MODULE and CHROMIUM_PATH select local installations.
-WASM_BINDGEN and CARGO_TARGET_DIR can select local build tools/artifacts.

@@ -1,6 +1,7 @@
 //! EPUB annotation, footnote, and image overlays.
 
 use crate::invalidation::notify;
+use book_model::AnnotationStyle;
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, IntoElement, Window, px};
 use ui_components as components;
@@ -8,6 +9,18 @@ use ui_components as components;
 use crate::epub::{LoadState, ReaderView};
 use crate::invalidation::Component;
 use crate::shell::{annotation_editor, chrome};
+use crate::shell::annotation_editor::AnnotationEditorTarget;
+
+impl AnnotationEditorTarget for ReaderView {
+    fn save_annotation_changes(&mut self, style: Option<AnnotationStyle>, color: Option<u32>, cx: &mut Context<Self>) {
+        self.save_selected_annotation(style, color, cx);
+    }
+
+    fn dismiss_annotation_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_annotation_popup(cx);
+        self.focus_document(window, cx);
+    }
+}
 
 impl ReaderView {
     pub(super) fn render_annotation_popup(&self, entity: &Entity<Self>, sidebar_visible: bool, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -32,19 +45,7 @@ impl ReaderView {
         }
         .or_else(|| self.annotation_popup_anchor.map(annotation_editor::Passage::from_point));
         let geometry = annotation_editor::geometry(passage, f32::from(viewport.width), f32::from(viewport.height), sidebar_width, components::reader_toolbar_size_px(window), column_count.max(1));
-        Some(annotation_editor::standard_editor(
-            "reader-annotation-popup",
-            entity,
-            &annotation,
-            geometry,
-            &self.annotation_note_input,
-            components::browser_theme(cx),
-            |style, color, this, cx| this.save_selected_annotation(style, color, cx),
-            |window, this, cx| {
-                this.close_annotation_popup(cx);
-                this.focus_document(window, cx);
-            },
-        ))
+        Some(annotation_editor::standard_editor("reader-annotation-popup", entity, &annotation, geometry, &self.annotation_note_input, components::browser_theme(cx)))
     }
 
     pub(super) fn render_footnote(&self, cx: &mut Context<Self>) -> Option<AnyElement> {

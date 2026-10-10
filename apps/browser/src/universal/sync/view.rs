@@ -9,13 +9,15 @@
 //! as something *a library* is doing, and a list beneath the libraries made the
 //! reader match names between two lists to find that out.
 
-use std::collections::HashSet;
-use std::path::Path;
 use super::*;
 use crate::services::format_storage_bytes;
 use gpui_component::Disableable;
+#[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+use gpui_component::button::Button;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::menu::DropdownMenu as _;
+use std::collections::HashSet;
+use std::path::Path;
 
 const LEGEND_LIBRARY_LIMIT: usize = 4;
 
@@ -115,9 +117,6 @@ struct LibraryRow {
     status: LibrarySyncStatus,
     server_bytes: Option<u64>,
     local_bytes: Option<u64>,
-    thumbnail_download_coverage: Option<(u64, u64)>,
-    /// What the library is doing at this moment, if anything.
-    activities: Vec<LibraryActivitySummary>,
 }
 
 impl LibraryRow {
@@ -157,18 +156,11 @@ impl SyncPage {
                 // A supported server that lists no share for a library is
                 // reporting zero; an unsupported server reports nothing at all.
                 let server_bytes = state.server_storage_usage.as_ref().map(|usage| usage.iter().find(|entry| entry.library_id == *library.library_id()).map(|entry| entry.used_bytes).unwrap_or_default());
-                let activity_jobs = self.activity_jobs.read(cx);
-                // Both halves of the work a library is doing report on the
-                // library itself. The uploads used to be listed under the quota
-                // instead, which is where the bytes are, not where the job is.
-                let activities = activity_jobs.summaries(library.library_id()).into_iter().chain(activity_jobs.server_summaries(library.library_id())).collect();
                 LibraryRow {
                     name: library.library_name().to_owned(),
                     status,
                     server_bytes,
                     local_bytes,
-                    thumbnail_download_coverage: activity_jobs.thumbnail_download_coverage(library.library_id()),
-                    activities,
                     #[cfg(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
                     local_path: library.local_path().map(str::to_owned),
                 }
@@ -199,6 +191,18 @@ impl SyncPage {
         }))
     }
 
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    fn access_action(&self, entity: &Entity<Self>, id: &'static str, label: &'static str, icon: IconName, action: fn(&mut Self, &mut Context<Self>)) -> Button {
+        let page = entity.clone();
+        components::primary_action_button(id, label, icon, self.is_busy()).on_click(move |_, _, cx| page.update(cx, action))
+    }
+
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    fn access_link(&self, entity: &Entity<Self>, id: &'static str, label: &'static str, flow: AccountFlow, theme: components::BrowserTheme) -> Button {
+        let page = entity.clone();
+        components::link_button(id, label, theme, self.is_busy()).on_click(move |_, window, cx| page.update(cx, |page, cx| page.set_flow(flow, window, cx)))
+    }
+
     /// The sign-in, registration, verification and password-reset forms.
     ///
     /// Only reachable while signed out, so it is kept apart from the page the
@@ -216,12 +220,8 @@ impl SyncPage {
         let form = components::access_form();
         match self.flow {
             AccountFlow::SignIn => {
-                let login = entity.clone();
                 let register = entity.clone();
-                let reset = entity.clone();
-                let mut actions = components::action_row().child(components::primary_action_button("account-sign-in", "Sign in", IconName::Globe, self.is_busy()).on_click(move |_, _, cx| {
-                    login.update(cx, |page, cx| page.start_login(cx));
-                }));
+                let mut actions = components::action_row().child(self.access_action(entity, "account-sign-in", "Sign in", IconName::Globe, Self::start_login));
                 actions = actions.child(components::secondary_action_button("account-register", "Create account", IconName::User, self.is_busy()).on_click(move |_, window, cx| {
                     register.update(cx, |page, cx| page.set_flow(AccountFlow::Register, window, cx));
                 }));
@@ -235,59 +235,39 @@ impl SyncPage {
                 // the screen a returning user sees carries one action, not
                 // three. It stays a link: it is the way out, not the way on.
                 if self.login_failed {
-                    form = form.child(components::link_button("account-request-reset", "Forgot your password?", theme, self.is_busy()).on_click(move |_, window, cx| {
-                        reset.update(cx, |page, cx| page.set_flow(AccountFlow::RequestPasswordReset, window, cx));
-                    }));
+                    form = form.child(self.access_link(entity, "account-request-reset", "Forgot your password?", AccountFlow::RequestPasswordReset, theme));
                 }
                 form
             }
-            AccountFlow::Register => {
-                let register = entity.clone();
-                let sign_in = entity.clone();
-                form.child(components::section_header("Create account", "", theme))
-                    .children(feedback)
-                    .child(Input::new(&self.authentication.email))
-                    .child(self.password_input(&self.authentication.registration_password, "toggle-registration-password", entity))
-                    .child(components::form_hint(format!("At least {} characters.", account_contract::PASSWORD_MIN_CHARACTERS), theme))
-                    .child(components::action_row().child(components::primary_action_button("account-register", "Create account", IconName::User, self.is_busy()).on_click(move |_, _, cx| {
-                        register.update(cx, |page, cx| page.start_registration(cx));
-                    })))
-                    .child(components::link_button("account-sign-in", "Already have an account? Sign in", theme, self.is_busy()).on_click(move |_, window, cx| {
-                        sign_in.update(cx, |page, cx| page.set_flow(AccountFlow::SignIn, window, cx));
-                    }))
-            }
+            AccountFlow::Register => form
+                .child(components::section_header("Create account", "", theme))
+                .children(feedback)
+                .child(Input::new(&self.authentication.email))
+                .child(self.password_input(&self.authentication.registration_password, "toggle-registration-password", entity))
+                .child(components::form_hint(format!("At least {} characters.", account_contract::PASSWORD_MIN_CHARACTERS), theme))
+                .child(components::action_row().child(self.access_action(entity, "account-register", "Create account", IconName::User, Self::start_registration)))
+                .child(self.access_link(entity, "account-sign-in", "Already have an account? Sign in", AccountFlow::SignIn, theme)),
             AccountFlow::VerifyEmail => {
-                let verify = entity.clone();
                 let resend = entity.clone();
-                let start_over = entity.clone();
-                let mut actions = components::action_row().child(components::primary_action_button("account-verify", "Verify email", IconName::ArrowRight, self.is_busy()).on_click(move |_, _, cx| {
-                    verify.update(cx, |page, cx| page.start_verify_email(cx));
-                }));
+                let mut actions = components::action_row().child(self.access_action(entity, "account-verify", "Verify email", IconName::ArrowRight, Self::start_verify_email));
                 actions = actions.child(components::secondary_action_button("account-resend", "Resend PIN", IconName::Redo2, self.is_busy()).on_click(move |_, _, cx| {
                     resend.update(cx, |page, cx| page.start_resend_verification(cx));
                 }));
-                form.child(components::section_header("Check your email", "", theme)).children(feedback).child(OtpInput::new(&self.authentication.verification_pin)).child(actions).child(
-                    components::link_button("account-restart-registration", "Wrong address? Start over", theme, self.is_busy()).on_click(move |_, window, cx| {
-                        start_over.update(cx, |page, cx| page.set_flow(AccountFlow::Register, window, cx));
-                    }),
-                )
+                form.child(components::section_header("Check your email", "", theme)).children(feedback).child(OtpInput::new(&self.authentication.verification_pin)).child(actions).child(self.access_link(
+                    entity,
+                    "account-restart-registration",
+                    "Wrong address? Start over",
+                    AccountFlow::Register,
+                    theme,
+                ))
             }
-            AccountFlow::RequestPasswordReset => {
-                let request = entity.clone();
-                let sign_in = entity.clone();
-                form.child(components::section_header("Reset your password", "", theme))
-                    .children(feedback)
-                    .child(Input::new(&self.authentication.email))
-                    .child(components::action_row().child(components::primary_action_button("account-request-reset", "Email me a reset token", IconName::Redo2, self.is_busy()).on_click(move |_, _, cx| {
-                        request.update(cx, |page, cx| page.start_password_reset_request(cx));
-                    })))
-                    .child(components::link_button("account-sign-in", "Back to sign in", theme, self.is_busy()).on_click(move |_, window, cx| {
-                        sign_in.update(cx, |page, cx| page.set_flow(AccountFlow::SignIn, window, cx));
-                    }))
-            }
+            AccountFlow::RequestPasswordReset => form
+                .child(components::section_header("Reset your password", "", theme))
+                .children(feedback)
+                .child(Input::new(&self.authentication.email))
+                .child(components::action_row().child(self.access_action(entity, "account-request-reset", "Email me a reset token", IconName::Redo2, Self::start_password_reset_request)))
+                .child(self.access_link(entity, "account-sign-in", "Back to sign in", AccountFlow::SignIn, theme)),
             AccountFlow::ResetPassword => {
-                let reset = entity.clone();
-                let sign_in = entity.clone();
                 // The token is a pasted string, not the six-digit PIN, so it is
                 // a plain input rather than the OTP boxes — drawing them alike
                 // invites people to type six of its characters and give up.
@@ -296,12 +276,8 @@ impl SyncPage {
                     .child(Input::new(&self.authentication.reset_token))
                     .child(self.password_input(&self.authentication.new_password, "toggle-new-password", entity))
                     .child(components::form_hint(format!("At least {} characters.", account_contract::PASSWORD_MIN_CHARACTERS), theme))
-                    .child(components::action_row().child(components::primary_action_button("account-reset-password", "Set new password", IconName::Redo2, self.is_busy()).on_click(move |_, _, cx| {
-                        reset.update(cx, |page, cx| page.start_password_reset(cx));
-                    })))
-                    .child(components::link_button("account-sign-in", "Back to sign in", theme, self.is_busy()).on_click(move |_, window, cx| {
-                        sign_in.update(cx, |page, cx| page.set_flow(AccountFlow::SignIn, window, cx));
-                    }))
+                    .child(components::action_row().child(self.access_action(entity, "account-reset-password", "Set new password", IconName::Redo2, Self::start_password_reset)))
+                    .child(self.access_link(entity, "account-sign-in", "Back to sign in", AccountFlow::SignIn, theme))
             }
         }
     }
@@ -327,7 +303,7 @@ impl SyncPage {
     /// never uploaded — so library shares are taken from the used bytes in
     /// descending order and stop once those are accounted for. The remainder of
     /// the track is free space.
-    fn storage_segments(&self, usage: AccountStorageUsage, theme: components::BrowserTheme, state: &SyncState) -> Vec<(SharedString, u64, gpui::Hsla)> {
+    fn storage_segments(&self, usage: StorageUsageResponse, theme: components::BrowserTheme, state: &SyncState) -> Vec<(SharedString, u64, gpui::Hsla)> {
         let mut segments: Vec<(SharedString, u64, gpui::Hsla)> = Vec::new();
         let mut other_bytes = 0_u64;
         for (index, (name, bytes)) in state.server_storage_usage.as_ref().map(|usage| usage.iter()).into_iter().flatten().filter(|library| library.used_bytes > 0).map(|library| (library.library_name.clone(), library.used_bytes)).enumerate()
@@ -406,7 +382,7 @@ impl SyncPage {
             theme,
         ));
         if usage.quota_bytes > 0 {
-            let segments = self.storage_segments(usage, theme, &state).into_iter().map(|(label, bytes, color)| (bytes as f32 / usage.quota_bytes as f32, color, SharedString::from(format!("{label} {}", format_storage_bytes(bytes)))));
+            let segments = self.storage_segments(usage, theme, state).into_iter().map(|(label, bytes, color)| (bytes as f32 / usage.quota_bytes as f32, color, SharedString::from(format!("{label} {}", format_storage_bytes(bytes)))));
             storage = storage.child(components::storage_meter(segments, theme));
         }
         storage
@@ -509,13 +485,6 @@ impl SyncPage {
         }
         let mut usage_rows = Vec::with_capacity(rows.len());
         for row in rows {
-            let activity = row.activities.iter().map(|activity| {
-                let color = match activity.state {
-                    ActivityState::Running => theme.accent,
-                    ActivityState::Waiting => theme.warning,
-                };
-                components::library_activity_note(color, activity.text.clone(), activity.count.clone().map(SharedString::from), activity.progress, theme)
-            });
             let local_bytes = row.local_bytes.map(format_storage_bytes).unwrap_or_else(|| if row.status.state == LibrarySyncState::Unavailable { "Unavailable".to_owned() } else { "Calculating…".to_owned() });
             let (status, status_color) = match row.status.state {
                 LibrarySyncState::Checking => ("Loading status…", theme.text_muted),
@@ -563,13 +532,9 @@ impl SyncPage {
                 .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(status));
             let meta = if compact { div().w_full().flex().items_center().gap(px(12.0)).child(size).child(state.flex_1()).child(toggle) } else { div().flex_none().flex().items_center().gap(px(12.0)).child(size).child(state).child(toggle) };
             let heading = if compact { div().w_full().flex().flex_col().gap(px(6.0)).child(title).child(meta) } else { div().w_full().flex().items_center().gap(px(14.0)).child(title).child(meta) };
-            let mut summary = div().w_full().px(px(components::SPACE_MD)).py(px(12.0)).flex().flex_col().gap(px(8.0)).child(heading).children(activity);
+            let mut summary = div().w_full().px(px(components::SPACE_MD)).py(px(12.0)).flex().flex_col().gap(px(8.0)).child(heading);
             if is_expanded {
                 let mut facts: Vec<(SharedString, gpui::AnyElement)> = Vec::new();
-                if let Some((ready, available)) = row.thumbnail_download_coverage.filter(|(_, available)| *available > 0) {
-                    facts.push(("Thumbnails on this device".into(), SharedString::from(format!("{ready} / {available}")).into_any_element()));
-                }
-
                 #[cfg(all(feature = "filesystem-libraries", any(target_os = "linux", target_os = "macos", target_os = "windows")))]
                 if let Some(path) = row.local_path.as_ref() {
                     let destination = std::path::PathBuf::from(path);

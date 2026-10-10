@@ -37,17 +37,6 @@ extern "C" {
 fn js_error(error: JsValue) -> String {
     javascript_error_detail(&error).unwrap_or_else(|| format!("{error:?}"))
 }
-/// Adopt immutable bytes without copying them through the database worker.
-/// The job owns uncommitted files, so an interrupted inspection preserves them.
-pub async fn adopt_staged(physical: String, length: u64) -> Result<FileWriter, String> {
-    let source = prepare_physical(physical.clone()).await?;
-    let actual = source.length;
-    if actual != length {
-        return Err("Staged file size changed".into());
-    }
-    Ok(FileWriter { name: "unpublished".into(), physical, length, committed: false, owned: false, _source: source })
-}
-
 const VFS_NAME: &str = "bokheim-opfs-sahpool-v1";
 const VFS_DIRECTORY: &str = ".bokheim-opfs-sahpool-v1";
 const TRANSIENT_FILE_CAPACITY: u32 = 8;
@@ -184,7 +173,6 @@ pub struct FileWriter {
     physical: String,
     length: u64,
     committed: bool,
-    owned: bool,
     _source: FileReader,
 }
 
@@ -205,7 +193,7 @@ async fn create_asset_writer(name: String, physical: String) -> Result<FileWrite
     let (sender, receiver) = tokio::sync::oneshot::channel();
     wasm_bindgen_futures::spawn_local(async move {
         let source = FileReader::new(physical.clone(), 0);
-        let writer = FileWriter { name, physical, length: 0, committed: false, owned: true, _source: source };
+        let writer = FileWriter { name, physical, length: 0, committed: false, _source: source };
         let result = create_asset(&writer.physical).await.map_err(js_error).map(|()| writer);
         let _ = sender.send(result);
     });
@@ -226,10 +214,10 @@ impl FileReader {
         Self::new(self.physical.clone(), self.length)
     }
 
-    pub fn checksum(&self) -> Result<Option<sync_common::ContentHash>, String> {
+    pub fn content_hash(&self) -> Result<Option<sync_common::ContentHash>, String> {
         use rusqlite::OptionalExtension;
-        let value: Option<String> = with_index(|index| index.query_row(include_str!("sql/web_storage/checksum_select.sql"), [&self.physical], |row| row.get(0)).optional())?;
-        Ok(value.and_then(|v| v.parse().ok()))
+        let value: Option<sync_common::ContentHash> = with_index(|index| index.query_row(include_str!("sql/web_storage/content_hash_select.sql"), [&self.physical], |row| row.get(0)).optional())?;
+        Ok(value)
     }
 
     pub async fn upload_file(&self) -> Result<web_sys::Blob, String> {
@@ -338,24 +326,24 @@ impl FileWriter {
         Ok(())
     }
 
-    pub fn publish_verified_as(mut self, name: String, checksum: sync_common::ContentHash) -> Result<(), String> {
+    pub fn publish_verified_as(mut self, name: String, content_hash: sync_common::ContentHash) -> Result<(), String> {
         self.name = name;
-        self.commit_verified(checksum)
+        self.commit_verified(content_hash)
     }
     pub fn commit(self) -> Result<(), String> {
         self.commit_revision(None)
     }
-    pub fn commit_verified(self, checksum: sync_common::ContentHash) -> Result<(), String> {
-        self.commit_revision(Some(checksum))
+    pub fn commit_verified(self, content_hash: sync_common::ContentHash) -> Result<(), String> {
+        self.commit_revision(Some(content_hash))
     }
-    fn commit_revision(mut self, checksum: Option<sync_common::ContentHash>) -> Result<(), String> {
+    fn commit_revision(mut self, content_hash: Option<sync_common::ContentHash>) -> Result<(), String> {
         let previous = physical_name(&self.name)?;
         flush_staged(&self.physical).map_err(js_error)?;
         with_index(|index| {
             let tx = index.unchecked_transaction()?;
             super::asset_index::publish(&tx, &self.name, &self.physical, self.length)?;
-            if let Some(checksum) = checksum {
-                tx.execute(include_str!("sql/web_storage/commit_revision_insert.sql"), rusqlite::params![self.physical, checksum.as_str()])?;
+            if let Some(content_hash) = content_hash {
+                tx.execute(include_str!("sql/web_storage/commit_revision_insert.sql"), rusqlite::params![self.physical, content_hash])?;
             }
             tx.execute(include_str!("sql/web_storage/commit_revision_delete.sql"), [])?;
             tx.commit()
@@ -370,7 +358,7 @@ impl FileWriter {
 
 impl Drop for FileWriter {
     fn drop(&mut self) {
-        if !self.committed && self.owned {
+        if !self.committed {
             retire(self.physical.clone());
         }
     }
@@ -421,20 +409,4 @@ pub async fn purge_library(library: sync_common::LibraryId) -> Result<(), String
         super::asset_index::purge_library(&tx, &library.to_string())?;
         tx.commit()
     })
-}
-
-/// Once all outcomes are checkpointed, discard failed/unreferenced copies.
-/// Committed assets remain pinned by the durable index.
-pub fn cleanup_staged_import(prefix: &str, files: u32) -> Result<(), String> {
-    if !prefix.starts_with("__libraries/") || !prefix.ends_with('/') {
-        return Err("invalid staged import prefix".into());
-    }
-    let live = with_index(|index| super::asset_index::live_physical_files(index, &prefix))?;
-    for index in 0..files {
-        let physical = format!("{prefix}{index}");
-        if !live.contains(&physical) {
-            retire(physical);
-        }
-    }
-    Ok(())
 }

@@ -28,8 +28,11 @@ impl PdfReaderView {
         .detach();
     }
 
-    /// Unconditionally claim both OS-window and document focus on pointer hover.
+    /// Reclaim document focus on hover without interrupting sidebar keyboard input.
     pub(super) fn reclaim_hover_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar_focus.contains_focused(window, cx) {
+            return;
+        }
         window.activate_window();
         self.focus_document(window, cx);
     }

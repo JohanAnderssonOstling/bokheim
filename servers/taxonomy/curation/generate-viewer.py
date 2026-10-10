@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Generate a self-contained HTML viewer for the curated taxonomy."""
 
+import argparse
 import json
 import re
 import sqlite3
@@ -8,11 +9,12 @@ import csv
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-DATABASE = HERE.resolve().parents[3] / 'shared/subject-projection' / "data" / "unified-taxonomy-v2.sqlite3"
+DATA_DIRECTORY = HERE.parents[2] / 'shared/subject-projection' / 'data'
+DATABASE = DATA_DIRECTORY / "unified-taxonomy-v2.sqlite3"
 OUTPUT = HERE / "taxonomy-viewer.html"
-USAGE = HERE.resolve().parents[3] / 'shared/subject-projection' / "data" / "taxonomy-usage-openlibrary-2026-07-31.tsv"
-BISAC_SOURCE = HERE.resolve().parents[3] / 'shared/subject-projection' / "data" / "bisac-2021.csv"
-LCC_SOURCE = HERE.resolve().parents[3] / 'shared/subject-projection' / "data" / "lcc-2024-outline.csv"
+USAGE = DATA_DIRECTORY / "taxonomy-usage-openlibrary-2026-07-31.tsv"
+BISAC_SOURCE = DATA_DIRECTORY / "bisac-2021.csv"
+LCC_SOURCE = DATA_DIRECTORY / "lcc-2024-outline.csv"
 
 
 def readable_code_names():
@@ -156,7 +158,30 @@ def history_period_orders(nodes, children):
     return orders
 
 
-def load_taxonomy():
+def install_viewer_range_view(connection):
+    columns = {row[1] for row in connection.execute('PRAGMA table_info(lcc_range)')}
+    if 'start_letters' in columns:
+        # Current format stores numeric boundaries and JSON Cutter components.
+        def endpoint(letters, number, cutters):
+            return (letters + (format(number, '.15g') if number is not None else '')
+                    + ''.join('.' + letters + digits for letters, digits in json.loads(cutters)))
+        connection.create_function('viewer_endpoint', 3, endpoint)
+        connection.execute(
+            'CREATE TEMP VIEW viewer_lcc_range AS SELECT concept_id,'
+            'viewer_endpoint(start_letters,start_number,start_cutters) AS start_code,'
+            'viewer_endpoint(end_letters,end_number,end_cutters) AS end_code FROM main.lcc_range'
+        )
+    elif 'start_code' in columns:
+        connection.execute('CREATE TEMP VIEW viewer_lcc_range AS SELECT concept_id,start_code,end_code FROM main.lcc_range')
+    else:
+        connection.execute(
+            'CREATE TEMP VIEW viewer_lcc_range AS SELECT concept_id,'
+            'class_letters || start_value AS start_code,'
+            'class_letters || end_value AS end_code FROM main.lcc_range'
+        )
+
+
+def load_taxonomy(include_usage=True):
     connection = sqlite3.connect(DATABASE)
     code_names = readable_code_names()
     # Format 6 stores selectors by system and numeric LCC ranges separately.
@@ -166,9 +191,7 @@ def load_taxonomy():
     ).fetchone():
         connection.execute(
             "CREATE TEMP VIEW lcc_selector AS "
-            "SELECT concept_id,selector FROM source_selector WHERE system_id='lcc' "
-            "UNION ALL SELECT concept_id,class_letters || start_value || '..' || "
-            "class_letters || end_value FROM lcc_range"
+            "SELECT concept_id,selector FROM source_selector WHERE system_id='lcc'"
         )
         connection.execute(
             "CREATE TEMP VIEW bisac_selector AS "
@@ -176,14 +199,15 @@ def load_taxonomy():
         )
     # Both tables contain active curated assignments. Parent ranges (including
     # Law's broad coverage) remain active alongside exact selectors and children.
+    install_viewer_range_view(connection)
     connection.execute(
         "CREATE TEMP VIEW viewer_lcc_selector AS "
         "SELECT concept_id,selector FROM lcc_selector "
-        "UNION ALL SELECT concept_id,start_code || '-' || end_code FROM main.lcc_range"
+        "UNION ALL SELECT concept_id,start_code || '-' || end_code FROM viewer_lcc_range"
     )
     sort_orders = lcc_sort_orders(connection)
     direct_hits = {}
-    if USAGE.exists():
+    if include_usage and USAGE.exists():
         with USAGE.open(encoding="utf-8") as source:
             next(source, None)
             for line in source:
@@ -213,10 +237,11 @@ def load_taxonomy():
             f"{selector} — {readable_name}" if readable_name else selector
         )
     original_labels = {}
-    for concept_id, label in connection.execute(
-        "SELECT concept_id,label FROM source_label ORDER BY concept_id,ordinal"
-    ):
-        original_labels.setdefault(concept_id, []).append(label)
+    if connection.execute("SELECT 1 FROM sqlite_master WHERE name='source_label'").fetchone():
+        for concept_id, label in connection.execute(
+            "SELECT concept_id,label FROM source_label ORDER BY concept_id,ordinal"
+        ):
+            original_labels.setdefault(concept_id, []).append(label)
     all_nodes = {}
     for concept_id, label in connection.execute("SELECT concept_id, preferred_label FROM concept ORDER BY rowid"):
         all_nodes[concept_id] = {"l": label, "h": direct_hits.get(concept_id, 0), "s": selector_counts.get(concept_id, 0), "q": selector_values.get(concept_id, []), "o": original_labels.get(concept_id, [])}
@@ -254,11 +279,14 @@ def load_taxonomy():
 
     roots = sorted((concept_id for concept_id in nodes if concept_id not in parented), key=lambda concept_id: (nodes[concept_id]["l"].casefold(), concept_id))
     connection.close()
-    return {"nodes": nodes, "roots": roots}
+    return {"nodes": nodes, "roots": roots, "has_usage": include_usage and USAGE.exists()}
 
 
 def main():
-    data = json.dumps(load_taxonomy(), ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--without-usage', action='store_true', help='Hide counts when a classification cache refresh is unavailable')
+    args = parser.parse_args()
+    data = json.dumps(load_taxonomy(include_usage=not args.without_usage), ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
     document = TEMPLATE.replace("__TAXONOMY_DATA__", data)
     OUTPUT.write_text(document, encoding="utf-8")
     print(f"wrote {OUTPUT}")
@@ -289,7 +317,8 @@ mark{background:#e7dca7}.empty{color:var(--muted);padding:30px 10px}@media(max-w
 const DATA=__TAXONOMY_DATA__,nodes=DATA.nodes,content=document.querySelector('#content'),status=document.querySelector('#status'),search=document.querySelector('#search'),stateKey='bokheim-taxonomy-path-v1';
 let currentPath=[];
 const esc=value=>value.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-function addMetrics(entry,n){const metrics=document.createElement('span');metrics.className='metrics';for(const [label,value,title] of [['C',n.b,'Child book hits'],['D',n.h,'Direct book hits'],['#',n.s,'LCC and BISAC selector codes']]){const metric=document.createElement('span');metric.className='metric';metric.title=title;metric.textContent=`${label} ${value.toLocaleString()}`;metrics.append(metric)}entry.append(metrics)}
+if(!DATA.has_usage)document.querySelector('header p').textContent='Classification counts await refresh. # = LCC and BISAC selector codes.';
+function addMetrics(entry,n){const metrics=document.createElement('span');metrics.className='metrics';const values=[['#',n.s,'LCC and BISAC selector codes']];if(DATA.has_usage)values.unshift(['C',n.b,'Child classification uses'],['D',n.h,'Direct classification uses']);for(const [label,value,title] of values){const metric=document.createElement('span');metric.className='metric';metric.title=title;metric.textContent=`${label} ${value.toLocaleString()}`;metrics.append(metric)}entry.append(metrics)}
 function addDetails(label,n){if(n.o.length&&!(n.o.length===1&&n.o[0]===n.l)){const original=document.createElement('small');original.className='original';original.textContent=`Original: ${n.o.join(' · ')}`;label.append(original)}if(n.q.length){const codes=document.createElement('small');codes.className='codes';codes.textContent=n.q.join(' · ');label.append(codes)}}
 function codeTitle(n){return n.q.length?`${n.l} — ${n.q.join(', ')}`:n.l}
 function savePath(){localStorage.setItem(stateKey,JSON.stringify(currentPath))}

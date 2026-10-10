@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use sync_common::StateKey;
 use crate::sync::LibraryNameOutcome;
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use std::collections::HashMap;
@@ -48,7 +49,7 @@ pub(super) fn storage_rejection(change: &OpaquePublication, server_now_ms: u64) 
     // The quota ledger charges a lifecycle's book, so it must be named and be
     // the book's own.
     if change.state.value.address.kind == "book_lifecycle" {
-        let identity = change.state.value.address.entity_key.parse::<ContentHash>().ok();
+        let identity = change.state.value.address.entity_key.book();
         match change.state.value.book {
             None => return Some(MutationRejectionReason::InvalidPayload),
             Some(book) if identity.is_some_and(|identity| identity != book) => return Some(MutationRejectionReason::InvalidPayload),
@@ -60,7 +61,7 @@ pub(super) fn storage_rejection(change: &OpaquePublication, server_now_ms: u64) 
 
 #[derive(Debug)]
 struct StoredLifecycleReference {
-    content_hash: Option<String>,
+    content_hash: Option<Vec<u8>>,
     changed_at: i64,
     version_rank: i16,
     replica_id: String,
@@ -92,14 +93,14 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: 
            AND field.library_id=lifecycle.library_id AND field.kind<>'book_lifecycle' AND field.content_hash=lifecycle.entity_key"
     )
     .bind(library_id.to_string())
-    .bind(lifecycles.iter().map(|c| c.state.value.address.entity_key.clone()).collect::<Vec<_>>())
+    .bind(lifecycles.iter().map(|c| c.state.value.address.entity_key.as_bytes().to_vec()).collect::<Vec<_>>())
     .execute(&mut **tx)
     .await?;
     // A losing purge has already removed the sender's entire local book.
     // Redeliver all surviving fields, even those behind its cursor. Preserve
     // the canonical value/version; only delivery revisions advance. The caller
     // still holds the library lock, including the field update.
-    let purged = lifecycles.iter().filter(|c| c.state.version.conflict_rank == ConflictRank::Purge && result.accepted.contains(&c.publisher_seq)).map(|c| c.state.value.address.entity_key.clone()).collect::<Vec<_>>();
+    let purged = lifecycles.iter().filter(|c| c.state.version.conflict_rank == ConflictRank::Purge && result.accepted.contains(&c.publisher_seq)).map(|c| c.state.value.address.entity_key.as_bytes().to_vec()).collect::<Vec<_>>();
     if !purged.is_empty() {
         sqlx::query(
             "UPDATE sync_state field SET server_seq=nextval('sync_server_sequence')
@@ -114,8 +115,8 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: 
         .await?;
     }
     let mut fields = Vec::new();
-    let owners = changes.iter().filter_map(|c| c.state.value.book.map(|book| book.to_string())).collect::<Vec<_>>();
-    let existing: HashSet<String> = sqlx::query_scalar::<_, String>("SELECT entity_key FROM sync_state WHERE library_id=$1 AND kind='book_lifecycle' AND entity_subkey='' AND version_rank<>2 AND entity_key=ANY($2)")
+    let owners = changes.iter().filter_map(|c| c.state.value.book.map(|book| book.as_bytes().to_vec())).collect::<Vec<_>>();
+    let existing: HashSet<Vec<u8>> = sqlx::query_scalar::<_, Vec<u8>>("SELECT entity_key FROM sync_state WHERE library_id=$1 AND kind='book_lifecycle' AND entity_subkey='' AND version_rank<>2 AND entity_key=ANY($2)")
         .bind(library_id.to_string())
         .bind(owners)
         .fetch_all(&mut **tx)
@@ -127,9 +128,9 @@ pub(super) async fn insert_changes(tx: &mut Transaction<'_, Postgres>, user_id: 
             result.rejected.push(MutationRejection { publisher_seq: change.publisher_seq, reason });
             continue;
         }
-        let owner = change.state.value.book.as_ref().map(ContentHash::as_str);
-        if owner.is_some_and(|hash| !existing.contains(hash)) {
-            let failed_creation = lifecycles.iter().filter(|c| Some(c.state.value.address.entity_key.as_str()) == owner).find_map(|c| result.rejected.iter().find(|r| r.publisher_seq == c.publisher_seq).map(|r| r.reason.clone()));
+        let owner = change.state.value.book;
+        if owner.as_ref().is_some_and(|hash| !existing.contains(hash.as_bytes().as_slice())) {
+            let failed_creation = lifecycles.iter().filter(|c| c.state.value.address.entity_key.book() == owner).find_map(|c| result.rejected.iter().find(|r| r.publisher_seq == c.publisher_seq).map(|r| r.reason.clone()));
             if let Some(reason) = failed_creation {
                 result.rejected.push(MutationRejection { publisher_seq: change.publisher_seq, reason });
             } else {
@@ -160,9 +161,9 @@ async fn insert_admitted_changes(tx: &mut Transaction<'_, Postgres>, user_id: &s
     // The server reads only declared lifecycle facts. It never decodes the
     // opaque value to maintain quota references.
     let mut lifecycle_deltas = Vec::new();
-    let mut lifecycle_winners = HashMap::<(&str, &str, &str), &OpaquePublication>::new();
+    let mut lifecycle_winners = HashMap::<(&str, &StateKey, &str), &OpaquePublication>::new();
     for change in accepted.iter().copied().filter(|change| change.state.value.address.kind == "book_lifecycle") {
-        let cell = (change.state.value.address.kind.as_str(), change.state.value.address.entity_key.as_str(), change.state.value.address.entity_subkey.as_str());
+        let cell = (change.state.value.address.kind.as_str(), &change.state.value.address.entity_key, change.state.value.address.entity_subkey.as_str());
         lifecycle_winners
             .entry(cell)
             .and_modify(|winner| {
@@ -175,7 +176,7 @@ async fn insert_admitted_changes(tx: &mut Transaction<'_, Postgres>, user_id: &s
     for change in lifecycle_winners.into_values() {
         let existing = sqlx::query(include_str!("sql/sync/get_lifecycle_reference_state.sql"))
             .bind(library_id.to_string())
-            .bind(&change.state.value.address.entity_key)
+            .bind(change.state.value.address.entity_key.as_bytes())
             .bind(&change.state.value.address.entity_subkey)
             .fetch_optional(&mut **tx)
             .await?
@@ -198,8 +199,8 @@ async fn insert_admitted_changes(tx: &mut Transaction<'_, Postgres>, user_id: &s
         // A lifecycle holds its book's bytes unless it is a purge.
         let held = change.state.value.book.filter(|_| change.state.version.conflict_rank != ConflictRank::Purge);
         if let Some(hash) = existing.as_ref().filter(|stored| stored.version_rank != i16::from(u8::from(ConflictRank::Purge))).and_then(|stored| stored.content_hash.as_ref()) {
-            lifecycle_deltas.push((ContentHash::new(hash), -1));
-            if !held.is_some_and(|next| next.as_str() == hash) {
+            lifecycle_deltas.push((ContentHash::try_from(hash.as_slice()).map_err(decode_err)?, -1));
+            if !held.is_some_and(|next| next.as_bytes().as_slice() == hash) {
                 sqlx::query(include_str!("sql/cloud_storage/delete_claim.sql")).bind(library_id.to_string()).bind(hash).execute(&mut **tx).await?;
             }
         }
@@ -218,10 +219,10 @@ async fn insert_admitted_changes(tx: &mut Transaction<'_, Postgres>, user_id: &s
             return Ok(InsertChangesResult { accepted: Vec::new(), rejected });
         }
         let kinds = rows.iter().map(|change| change.state.value.address.kind.clone()).collect::<Vec<_>>();
-        let keys = rows.iter().map(|change| change.state.value.address.entity_key.clone()).collect::<Vec<_>>();
+        let keys = rows.iter().map(|change| change.state.value.address.entity_key.as_bytes().to_vec()).collect::<Vec<_>>();
         let subkeys = rows.iter().map(|change| change.state.value.address.entity_subkey.clone()).collect::<Vec<_>>();
         let values = rows.iter().map(|change| change.state.value.bytes.clone()).collect::<Vec<_>>();
-        let books = rows.iter().map(|change| change.state.value.book.map(|book| book.to_string())).collect::<Vec<_>>();
+        let books = rows.iter().map(|change| change.state.value.book.map(|book| book.as_bytes().to_vec())).collect::<Vec<_>>();
         let changed = rows.iter().map(|change| i64::try_from(change.state.version.changed_at)).collect::<Result<Vec<_>, _>>().map_err(decode_err)?;
         let versions = rows.iter().map(|change| (change).state.version.clone()).collect::<Vec<_>>();
         let sequences = versions.iter().map(|version| i64::try_from(version.replica_seq.get())).collect::<Result<Vec<_>, _>>().map_err(decode_err)?;
@@ -287,13 +288,13 @@ fn decode_change(row: &PgRow) -> Result<StateDelivery, FetchChangesError> {
     let replica_id = ReplicaId::parse_str(&row.try_get::<String, _>("replica_id")?).map_err(|_| corrupt("invalid replica identity"))?;
     let replica_seq = ReplicaSeq::new(u64::try_from(row.try_get::<i64, _>("replica_seq")?).map_err(|_| corrupt("negative replica sequence"))?).map_err(|_| corrupt("invalid replica sequence"))?;
     let revision = LibraryRevision::new(u64::try_from(raw).map_err(|_| corrupt("negative library revision"))?).map_err(|_| corrupt("invalid library revision"))?;
-    let book = row.try_get::<Option<String>, _>("content_hash")?.map(|hash| hash.parse::<ContentHash>().map_err(|_| corrupt("invalid book hash"))).transpose()?;
+    let book = row.try_get::<Option<Vec<u8>>, _>("content_hash")?.map(|hash| ContentHash::try_from(hash.as_slice()).map_err(|_| corrupt("invalid book hash"))).transpose()?;
     let conflict_rank = u8::try_from(row.try_get::<i16, _>("version_rank")?).ok().and_then(|rank| ConflictRank::try_from(rank).ok()).ok_or_else(|| corrupt("invalid conflict rank"))?;
     let version = VersionKey::new(changed_at, conflict_rank, replica_id, replica_seq);
     let value = sync_common::OpaqueStateEntry {
         address: StateAddress {
             kind: row.try_get("kind")?,
-            entity_key: row.try_get("entity_key")?,
+            entity_key: StateKey::from_storage(&row.try_get::<String,_>("kind")?, &row.try_get::<Vec<u8>,_>("entity_key")?).map_err(|_| corrupt("invalid register key"))?,
             entity_subkey: row.try_get("entity_subkey")?,
         },
         bytes: row.try_get("value")?, book,
@@ -361,86 +362,4 @@ pub(super) async fn validate_owned_cursor(tx: &mut Transaction<'_, Postgres>, li
 pub(super) async fn fetch_owned_changes(tx: &mut Transaction<'_, Postgres>, library: &LibraryId, since: SyncCursor) -> Result<FetchChangesPage, FetchChangesError> {
     let head = sqlx::query_scalar(include_str!("sql/sync/validate_owned_cursor.sql")).bind(library.to_string()).fetch_one(&mut **tx).await?;
     fetch_page(tx, library, since, head).await
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::test_support::isolated_pool;
-    use super::{cursor_is_ahead, decode_lifecycle_reference, storage_rejection};
-    use sync_common::{LibraryRevision, MAX_LWW_FUTURE_SKEW_MS, MutationRejectionReason, ReplicaSeq, SyncCursor, OpaquePublication};
-
-    fn cursor(lifecycle: u64, field: u64) -> SyncCursor {
-        SyncCursor { lifecycle_revision: LibraryRevision::new(lifecycle).ok(), field_revision: LibraryRevision::new(field).ok() }
-    }
-
-    fn reading_mutation(changed_at: u64) -> OpaquePublication {
-
-        sync_common::Publication { publisher_seq: ReplicaSeq::new(1).unwrap(), state: sync_common::Versioned { version: sync_common::VersionKey::new(changed_at, sync_common::ConflictRank::Update, sync_common::ReplicaId::nil(), ReplicaSeq::new(1).unwrap()), value: sync_common::OpaqueStateEntry { address: sync_common::StateAddress { kind: "reading_position".to_owned(), entity_key: "1".to_owned(), entity_subkey: String::new() }, bytes: vec![1, 2, 3], book: None } } }
-    }
-
-    #[test]
-    fn a_cursor_may_equal_but_never_exceed_the_server_head() {
-        assert!(!cursor_is_ahead(SyncCursor::default(), 0));
-        assert!(!cursor_is_ahead(cursor(10, 10), 10));
-        assert!(!cursor_is_ahead(cursor(10, 4), 10));
-        assert!(cursor_is_ahead(cursor(11, 10), 10));
-        assert!(cursor_is_ahead(cursor(8, 9), 10), "fields cannot pass the lifecycle cursor");
-    }
-
-    #[test]
-    fn server_admission_rejects_future_wall_clock() {
-        let server_now = 1_000_000;
-        assert_eq!(storage_rejection(&reading_mutation(server_now + MAX_LWW_FUTURE_SKEW_MS + 1), server_now), Some(MutationRejectionReason::TimestampTooFarFuture),);
-        assert_eq!(storage_rejection(&reading_mutation(server_now), server_now), None);
-    }
-
-    /// The declared reference is the whole of what the service knows about a
-    /// book's bytes, so a lifecycle mutation that omits it cannot be stored:
-    /// its row would leave the quota ledger unable to say what the cell holds.
-    /// Retrying cannot fix a malformed payload, so the rejection is permanent.
-    #[test]
-    fn server_admission_requires_a_lifecycle_to_name_its_own_book() {
-        let server_now = 1_000_000;
-        let mut lifecycle = reading_mutation(server_now);
-        lifecycle.state.value.address.kind = "book_lifecycle".to_owned();
-        lifecycle.state.value.address.entity_key = "a".repeat(64);
-
-        assert_eq!(storage_rejection(&lifecycle, server_now), Some(MutationRejectionReason::InvalidPayload));
-        assert!(!MutationRejectionReason::InvalidPayload.is_transient(), "a client cannot make a malformed payload valid by retrying it");
-
-        lifecycle.state.value.book = Some(sync_common::ContentHash::new(&"b".repeat(64)));
-        assert_eq!(storage_rejection(&lifecycle, server_now), Some(MutationRejectionReason::InvalidPayload), "the ledger must not charge another book's hash");
-        lifecycle.state.value.book = Some(sync_common::ContentHash::new(&"a".repeat(64)));
-        assert_eq!(storage_rejection(&lifecycle, server_now), None);
-
-        // Every other kind is opaque and carries no accounting at all.
-        assert_eq!(storage_rejection(&reading_mutation(server_now), server_now), None);
-    }
-
-    const LWW_TRIGGER_SQL: &str = include_str!("../schema/03_sync.sql");
-
-    #[test]
-    fn postgres_winner_order_matches_the_shared_version_key() {
-        let comparison = LWW_TRIGGER_SQL.split("IF (").nth(1).expect("LWW predicate");
-        let comparison = comparison.split(')').next().expect("LWW tuple").split_whitespace().collect::<String>();
-        assert_eq!(comparison, "NEW.changed_at,NEW.version_rank,NEW.replica_idCOLLATE\"C\",NEW.replica_seq");
-        assert!(!LWW_TRIGGER_SQL.contains("hlc_"));
-    }
-
-    #[tokio::test]
-    #[ignore = "requires SYNC_E2E_DATABASE_URL"]
-    async fn malformed_lifecycle_reference_metadata_is_not_defaulted() {
-        let Some(pool) = crate::test_support::isolated_pool("lifecycle_decode", 2).await else { return };
-        let row = sqlx::query(
-            "SELECT NULL::text AS content_hash,
-                    'not-a-timestamp'::text AS changed_at, 0::smallint AS version_rank,
-                    'replica'::text AS replica_id, 1::bigint AS replica_seq,
-                    'event'::text AS event_id",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-
-        assert!(matches!(decode_lifecycle_reference(row), Err(sqlx::Error::Decode(_))), "invalid persisted winner metadata must abort accounting instead of becoming a default value");
-    }
 }

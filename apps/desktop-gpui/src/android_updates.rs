@@ -2,15 +2,14 @@
 use browser_ui::{UpdateAction, UpdateControls, UpdateView};
 use gpui::{App, AppContext, Entity};
 use linux_update_host::android::AndroidHost;
-use std::{
-    path::Path,
-    sync::{Arc, Mutex, OnceLock},
-    time::Duration,
-};
+use std::{cell::RefCell, path::Path, sync::OnceLock};
 
 type Bridge = dyn Fn(&str) -> Result<String, String> + Send + Sync;
 static BRIDGE: OnceLock<Box<Bridge>> = OnceLock::new();
-static HOST: OnceLock<Arc<Mutex<AndroidHost>>> = OnceLock::new();
+thread_local! {
+    // Startup owns the host until healthy() commits; the worker then takes it.
+    static HOST: RefCell<Option<AndroidHost>> = const { RefCell::new(None) };
+}
 
 fn command(value: serde_json::Value) -> Result<String, String> {
     BRIDGE.get().ok_or("Android update bridge is unavailable")?(&value.to_string())
@@ -29,19 +28,24 @@ pub fn initialize(data: &Path, bridge: impl Fn(&str) -> Result<String, String> +
     };
     let mut host = AndroidHost::open(data, env!("CARGO_PKG_VERSION"), config, &format!("android-{}-apk", std::env::consts::ARCH))?;
     let trial = host.startup(|path| command(serde_json::json!({ "action": "prepare", "path": path })).map(|_| ()))?;
-    HOST.set(Arc::new(Mutex::new(host))).map_err(|_| "Android update host already initialized")?;
+    HOST.with_borrow_mut(|slot| {
+        if slot.is_some() {
+            return Err("Android update host already initialized");
+        }
+        *slot = Some(host);
+        Ok(())
+    })?;
     Ok(trial)
 }
 
 pub fn healthy() -> Result<(), String> {
-    if let Some(host) = HOST.get() {
-        host.lock().map_err(|_| "Android update host lock poisoned")?.healthy()?;
-    }
-    Ok(())
+    HOST.with_borrow_mut(|host| host.as_mut().map_or(Ok(()), AndroidHost::healthy))
 }
 
 pub fn bind(cx: &mut App) -> Option<Entity<UpdateControls>> {
-    let host = HOST.get()?.clone();
+    if !HOST.with_borrow(|host| host.is_some()) {
+        return None;
+    }
     let (actions, requests) = std::sync::mpsc::channel();
     let (views, received) = async_channel::unbounded();
     let controls = cx.new(|_| {
@@ -54,23 +58,17 @@ pub fn bind(cx: &mut App) -> Option<Entity<UpdateControls>> {
     });
     let weak = controls.downgrade();
     let worker = crate::blocking_worker::BlockingWorker::new(cx.background_executor(), 1);
+    // The startup callback commits healthy() before this task transfers ownership.
     cx.spawn(async move |_| {
+        let Some(mut host) = HOST.with_borrow_mut(Option::take) else { return };
         let _ = worker
             .dispatch(move || {
-                let mut retry_delay = Duration::from_secs(1);
+                let mut action = None;
                 loop {
-                    let action = match requests.recv_timeout(retry_delay) {
-                        Ok(action) => Some(action),
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
-                        Err(_) => break,
-                    };
                     let result = (|| {
-                        let mut host = host.lock().map_err(|_| "Android update host lock poisoned".to_string())?;
                         match action {
                             Some(UpdateAction::Update) => {
                                 host.approve()?;
-                                // Show approval before the blocking APK download starts.
-                                views.try_send(Ok(host.view())).map_err(|_| "update UI closed".to_owned())?;
                             }
                             Some(UpdateAction::Install) => {
                                 let mut request = serde_json::to_value(host.install_request()?).map_err(|e| e.to_string())?;
@@ -80,14 +78,18 @@ pub fn bind(cx: &mut App) -> Option<Entity<UpdateControls>> {
                                 }
                             }
                             Some(UpdateAction::GrantPermission) => {
-                                command(serde_json::json!({"action":"grantPermission"}))?;
+                                if command(serde_json::json!({"action":"permission"}))? != "true" {
+                                    command(serde_json::json!({"action":"grantPermission"}))?;
+                                }
                             }
                             Some(UpdateAction::Restart) => {
                                 command(serde_json::json!({"action":"restart"}))?;
                             }
-                            None => {}
+                            None => host.check_for_updates()?,
                         }
-                        let mut view = host.tick()?;
+                        // Show availability or approval before the blocking download.
+                        views.try_send(Ok(host.view())).map_err(|_| "update UI closed".to_owned())?;
+                        let mut view = host.prepare()?;
                         if view == (UpdateView::Ready { action: UpdateAction::Install }) && command(serde_json::json!({"action":"permission"}))? != "true" {
                             view = UpdateView::NeedsPermission;
                         }
@@ -95,19 +97,21 @@ pub fn bind(cx: &mut App) -> Option<Entity<UpdateControls>> {
                     })();
                     match result {
                         Ok(view) => {
-                            retry_delay = Duration::from_secs(1);
-                            if views.send_blocking(Ok(view)).is_err() {
+                            if views.try_send(Ok(view)).is_err() {
                                 break;
                             }
                         }
                         Err(error) => {
-                            log::warn!("Android update work will retry: {error}");
-                            if views.try_send(Err(())).is_err() {
+                            log::warn!("Android update work failed: {error}");
+                            if views.try_send(Ok(host.view())).is_err() || views.try_send(Err(())).is_err() {
                                 break;
                             }
-                            retry_delay = Duration::from_secs(30);
                         }
                     }
+                    action = match requests.recv() {
+                        Ok(action) => Some(action),
+                        Err(_) => break,
+                    };
                 }
             })
             .recv()

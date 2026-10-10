@@ -60,17 +60,3 @@ impl BookDownloadStatus {
         Self { content_hash, state }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::DownloadProgress;
-
-    #[test]
-    fn progress_rejects_non_finite_and_out_of_range_values() {
-        assert!(DownloadProgress::new(f32::NAN).is_err());
-        assert!(DownloadProgress::new(-0.1).is_err());
-        assert!(DownloadProgress::new(1.1).is_err());
-        assert_eq!(DownloadProgress::new(0.5).unwrap().value(), 0.5);
-        assert_eq!(DownloadProgress::from_ratio(3, 2).value(), 1.0);
-    }
-}

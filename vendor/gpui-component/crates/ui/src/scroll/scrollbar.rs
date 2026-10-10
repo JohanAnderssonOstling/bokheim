@@ -373,21 +373,6 @@ impl Scrollbar {
         self
     }
 
-    /// Set maximum frames per second for scrolling by drag. Default is 120 FPS.
-    ///
-    /// If you have very high CPU usage, consider reducing this value to improve performance.
-    ///
-    /// Available values: 30..120
-    pub(crate) fn max_fps(mut self, max_fps: usize) -> Self {
-        self.max_fps = max_fps.clamp(30, 120);
-        self
-    }
-
-    // Get the width of the scrollbar.
-    pub(crate) const fn width() -> Pixels {
-        WIDTH
-    }
-
     fn style_for_active(cx: &App) -> (Background, Hsla, Hsla, Pixels, Pixels, Pixels) {
         (
             cx.theme().tokens.scrollbar_thumb_hover.into(),

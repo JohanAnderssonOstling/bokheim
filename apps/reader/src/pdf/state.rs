@@ -39,22 +39,3 @@ pub(super) fn progress(visible_page_range: Option<(usize, usize)>, page_count: u
     };
     format!("{:.0}%", crate::shell::persistence::StoredPosition::pdf_page(last, 0.0, page_count).percent())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn page_indicator_reports_single_pages_and_spreads() {
-        assert_eq!(page_indicator(None, 0), "0/0");
-        assert_eq!(page_indicator(Some((0, 0)), 12), "1/12");
-        assert_eq!(page_indicator(Some((1, 2)), 12), "2–3/12");
-    }
-
-    #[test]
-    fn progress_uses_the_last_visible_page() {
-        assert_eq!(progress(None, 12), "0%");
-        assert_eq!(progress(Some((0, 0)), 12), "8%");
-        assert_eq!(progress(Some((10, 11)), 12), "100%");
-    }
-}

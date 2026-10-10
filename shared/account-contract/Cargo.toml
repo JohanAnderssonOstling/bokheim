@@ -8,5 +8,3 @@ publish = false
 serde = { version = "1", features = ["derive"] }
 sync-common = { path = "../sync-common", default-features = false }
 
-[dev-dependencies]
-wire = { package = "protobuf-wire", path = "../protobuf-wire" }

@@ -195,8 +195,3 @@ impl BrowserSession {
         .await
     }
 }
-
-#[cfg(feature = "browser-tests")]
-pub async fn document_count() -> PdfResult<usize> {
-    request(|| Ok(DOCUMENTS.with(|documents| documents.borrow().len()))).await
-}

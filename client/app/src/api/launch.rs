@@ -1,9 +1,9 @@
 //! Platform startup configuration; running operations go through client handles.
 
-#[cfg(test)]
-use crate::LibraryId;
 use crate::app::{AppDataLocation, BackendContext};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use sync_common::LibraryId;
 
 #[derive(Clone, Debug)]
 pub struct BackendLaunch {

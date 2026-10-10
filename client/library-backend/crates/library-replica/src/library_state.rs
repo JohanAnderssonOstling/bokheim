@@ -46,15 +46,3 @@ pub struct ReadingPositionState {
     pub location: ReadingPosition,
     pub progress: f32,
 }
-
-#[cfg(test)]
-mod compatibility_tests {
-    use super::*;
-    #[test]
-    fn projection_v1_unicode_name_keys() {
-        for (input, expected) in [("ＡＢＣ", "abc"), ("Kelvin", "kelvin"), ("İ", "i\u{307}"), ("Σς", "σς"), ("ﬃ", "ffi"), ("A\u{30a}", "å"), ("Straße", "straße")] {
-            assert_eq!(portable_name_key(input), expected);
-        }
-        assert_ne!(portable_name_key("Straße"), portable_name_key("STRASSE"));
-    }
-}

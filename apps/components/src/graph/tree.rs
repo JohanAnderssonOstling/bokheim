@@ -1,39 +1,26 @@
-//! The folder or subject tree the graph draws.
+//! The tree a graph draws.
 
-/// One node. Nodes are indexed by position: node 0 is the library root.
-pub struct GraphNode {
-    pub name: String,
-    pub parent: Option<usize>,
-    /// Filled in by [`GraphTree::new`], in name order.
-    pub children: Vec<usize>,
-    /// Books in this node and everything beneath it, after filters.
-    pub books: usize,
-}
-
+/// Nodes by index: node 0 is the root, and every other node names its parent.
+/// Children keep the order the caller lists them in.
 pub struct GraphTree {
-    pub nodes: Vec<GraphNode>,
+    pub parents: Vec<Option<usize>>,
+    pub children: Vec<Vec<usize>>,
 }
 
 impl GraphTree {
-    /// Links each node into its parent's children, sorted by name.
-    pub fn new(mut nodes: Vec<GraphNode>) -> Self {
-        for id in 1..nodes.len() {
-            if let Some(parent) = nodes[id].parent {
-                nodes[parent].children.push(id);
+    pub fn new(parents: Vec<Option<usize>>) -> Self {
+        let mut children = vec![Vec::new(); parents.len()];
+        for (node, parent) in parents.iter().enumerate() {
+            if let Some(parent) = parent {
+                children[*parent].push(node);
             }
         }
-        let sort_keys: Vec<String> = nodes.iter().map(|node| node.name.to_lowercase()).collect();
-        for id in 0..nodes.len() {
-            let mut children = std::mem::take(&mut nodes[id].children);
-            children.sort_by(|a, b| sort_keys[*a].cmp(&sort_keys[*b]).then_with(|| a.cmp(b)));
-            nodes[id].children = children;
-        }
-        Self { nodes }
+        Self { parents, children }
     }
 
     /// The path from the root to `id`, both included.
     pub fn ancestry(&self, id: usize) -> Vec<usize> {
-        let mut path: Vec<usize> = std::iter::successors(Some(id), |&node| self.nodes[node].parent).collect();
+        let mut path: Vec<usize> = std::iter::successors(Some(id), |&node| self.parents[node]).collect();
         path.reverse();
         path
     }

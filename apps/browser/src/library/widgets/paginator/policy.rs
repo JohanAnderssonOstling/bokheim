@@ -13,7 +13,7 @@ pub(super) const COLUMN_GAP: f32 = ui_components::SPACE_SM;
 
 /// The nominal height assigned to a child. During intrinsic compaction this
 /// also caps measurement, allowing a shorter child to reduce its row height.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy)]
 pub(crate) struct PaginatorSizing {
     aspect_ratio: Option<f32>,
     rems: Rems,
@@ -102,7 +102,7 @@ impl PaginatorWidthPolicy {
 
 /// Geometry shared by all children in a group. Groups never share rows, so
 /// their widths, sizing policies, and gaps resolve independently.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy)]
 pub(crate) struct PaginatorGroupPolicy {
     pub(crate) width: PaginatorWidthPolicy,
     pub(crate) intrinsic: bool,
@@ -167,11 +167,6 @@ impl PaginatorGroupPolicy {
         self
     }
 
-    pub(crate) fn with_grid_rules(mut self) -> Self {
-        self.grid_rules = true;
-        self
-    }
-
     /// Limit card growth before expanding the gaps in wrapped groups.
     pub(crate) fn with_maximum_width(mut self, width: PaginatorWidthPolicy) -> Self {
         self.maximum_width = Some(width);
@@ -211,28 +206,6 @@ impl PaginatorGroupPolicy {
         self.column_gap = gap;
         self
     }
-}
-
-/// A one-row horizontal shelf of ordinary book cards.
-///
-/// The cards are the ordinary book cards at their ordinary width: a shelf that
-/// sized its covers differently would be a second visual language for the same
-/// object.
-///
-/// Rows start flush with their heading. Cards grow up to 25%, then spare
-/// width expands the gaps.
-pub(crate) fn shelf_card_policy(cover_text: CoverText) -> PaginatorGroupPolicy {
-    let (extra_height, fixed_height) = text_block_height(cover_text);
-    let gap = px(ui_components::BOOK_GRID_BOOK_GAP);
-    PaginatorGroupPolicy::new(
-        PaginatorWidthPolicy::pixels(px(ui_components::BOOK_CARD_WIDTH)),
-        PaginatorSizing::aspect_ratio(ui_components::BOOK_COVER_ASPECT_RATIO).with_rems(Rems(extra_height)).with_pixels(px(fixed_height)).with_padding(px(ui_components::BOOK_CARD_PADDING)),
-        gap,
-    )
-    .with_gap(gap)
-    .with_maximum_width(PaginatorWidthPolicy::pixels(px(ui_components::BOOK_CARD_MAXIMUM_WIDTH)))
-    .with_minimum_columns(2)
-    .flush_edges()
 }
 
 /// The text block's contribution to a card's reserved height, under either
@@ -299,6 +272,12 @@ pub(crate) fn browse_section_card_policy() -> PaginatorGroupPolicy {
     PaginatorGroupPolicy::new(width, sizing, px(ui_components::SPACE_MD)).with_gap(px(ui_components::SPACE_MD)).with_edge_inset(px(ui_components::CONTENT_INSET)).flush_edges()
 }
 
+/// Home's shelves: the same cards, each with the row to itself. Any width wider
+/// than the window does that — see `SHELF_ROW_WIDTH_REM`.
+pub(crate) fn browse_shelf_card_policy() -> PaginatorGroupPolicy {
+    PaginatorGroupPolicy { width: PaginatorWidthPolicy::new(Rems(ui_components::SHELF_ROW_WIDTH_REM)), ..browse_section_card_policy() }
+}
+
 /// A cover-only book row inside a browse section card. The cell width
 /// includes the normal book-card padding around the artwork.
 pub(crate) fn browse_section_cover_policy() -> PaginatorGroupPolicy {
@@ -313,64 +292,4 @@ pub(crate) fn browse_section_cover_policy() -> PaginatorGroupPolicy {
 pub(crate) fn browse_section_item_policy() -> PaginatorGroupPolicy {
     let width = PaginatorWidthPolicy::pixels(px(section_cover_cell_width()));
     PaginatorGroupPolicy::new(width, PaginatorSizing::pixels(Pixels::ZERO).with_nested(browse_section_body_height), Pixels::ZERO).with_gap(Pixels::ZERO).with_maximum_width(width).pack_start()
-}
-
-/// How tall the cards on a shelf resolve to, given the width of the row they
-/// sit in. The carousel fills its row, so the row's width is theirs.
-///
-/// Two named functions rather than one taking `cover_text`: the nested-height
-/// slot on [`PaginatorSizing`] is a bare function pointer, which cannot close
-/// over an argument, so the setting has to be baked in at the point
-/// `shelf_rows_policy` picks which one to hand it.
-fn shelf_cards_height(cover_text: CoverText, row_width: Pixels, rem_size: Pixels) -> Pixels {
-    let policy = shelf_card_policy(cover_text);
-    policy.sizing.height(super::geometry::group_geometry(policy, 0, row_width, rem_size).child_width, rem_size)
-}
-
-fn shelf_cards_height_always(row_width: Pixels, rem_size: Pixels) -> Pixels {
-    shelf_cards_height(CoverText::Always, row_width, rem_size)
-}
-
-fn shelf_cards_height_cover_only(row_width: Pixels, rem_size: Pixels) -> Pixels {
-    shelf_cards_height(CoverText::CoverOnly, row_width, rem_size)
-}
-
-/// The page those shelves stack on: one full-width row each.
-///
-/// A declared width wider than the window is what gives each row the line to
-/// itself — the paginator clamps it to the content area before taking the column
-/// count, so exactly one column fits at exactly the page's width.
-///
-/// A row is its heading, the gap under it, and the cards themselves. The cards
-/// are asked rather than restated: they stretch up to a quarter wider than
-/// nominal on a wide window, and a cover is sized by aspect ratio, so a row
-/// holding their nominal height would clip the bottom of every stretched cover
-/// and the title under it.
-pub(crate) fn shelf_rows_policy(cover_text: CoverText) -> PaginatorGroupPolicy {
-    let cards: fn(Pixels, Pixels) -> Pixels = match cover_text {
-        CoverText::Always => shelf_cards_height_always,
-        CoverText::CoverOnly => shelf_cards_height_cover_only,
-    };
-    PaginatorGroupPolicy::new(
-        PaginatorWidthPolicy::new(Rems(ui_components::SHELF_ROW_WIDTH_REM)),
-        PaginatorSizing::rems(Rems(ui_components::SHELF_HEADING_HEIGHT_REM)).with_pixels(px(ui_components::CAROUSEL_CONTENT_GAP)).with_nested(cards),
-        px(ui_components::SHELF_ROW_GAP),
-    )
-    .flush_edges()
-}
-
-/// The names on the author index. An entry is at least
-/// `AUTHOR_INDEX_ENTRY_WIDTH_REM` wide, which decides how many columns fit; the
-/// row's slack then widens every entry rather than the gaps, so the columns stay
-/// an even rhythm down the page. Entries are rows of a list, so they sit flush
-/// on top of each other and their own rules separate them.
-pub(crate) fn author_index_entry_policy() -> PaginatorGroupPolicy {
-    PaginatorGroupPolicy::new(PaginatorWidthPolicy::new(Rems(ui_components::AUTHOR_INDEX_ENTRY_WIDTH_REM)), PaginatorSizing::rems(Rems(ui_components::AUTHOR_INDEX_ENTRY_HEIGHT_REM)), Pixels::ZERO)
-        .with_gap(px(ui_components::AUTHOR_INDEX_COLUMN_GAP))
-        .flush_edges()
-}
-
-/// The heading over each letter of the author index.
-pub(crate) fn author_index_letter_sizing() -> PaginatorSizing {
-    PaginatorSizing::rems(Rems(ui_components::AUTHOR_INDEX_LETTER_HEIGHT_REM)).with_pixels(px(ui_components::AUTHOR_INDEX_LETTER_FIXED_HEIGHT))
 }

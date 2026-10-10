@@ -3,6 +3,7 @@ mod client;
 #[cfg(all(feature = "kobo", not(target_arch = "wasm32")))]
 mod device;
 mod libraries;
+mod opds;
 mod preferences;
 mod sync;
 

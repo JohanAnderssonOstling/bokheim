@@ -122,7 +122,7 @@ def publish(args):
                     'Prepared package differs from reviewed hash or size')
         (stage / 'manifest.json').write_bytes(payload)
         (stage / 'provenance.json').write_bytes(provenance)
-        command('cargo', 'run', '--release', '-p', 'update-client', '--example', 'sign_manifest', '--',
+        command('cargo', 'run', '--release', '-p', 'update-protocol', '--example', 'sign_manifest', '--',
                 str(stage / 'manifest.json'), str(args.key.resolve()), key_id, str(stage / 'manifest.signed.json'))
         envelope = json.loads(read_regular(stage / 'manifest.signed.json'))
         require(envelope['payload'].encode() == payload and envelope['key_id'] == key_id, 'Signer output differs from reviewed payload')

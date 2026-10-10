@@ -1,0 +1,46 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!-- Hand-made in the shape of a Calibre content server acquisition feed:
+     old-style cover/thumbnail rels, facets, a next page, a navigation entry
+     without rel, a DRM-only entry and a buy-only entry. -->
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/terms/" xmlns:opds="http://opds-spec.org/2010/catalog">
+  <id>calibre-library:newest</id>
+  <title>By newest</title>
+  <updated>2026-10-07T12:00:00+00:00</updated>
+  <link rel="self" type="application/atom+xml;profile=opds-catalog;kind=acquisition" href="/opds/navcatalog/4e6577657374?library_id=Calibre"/>
+  <link rel="next" type="application/atom+xml;profile=opds-catalog;kind=acquisition" href="/opds/navcatalog/4e6577657374?library_id=Calibre&amp;offset=2"/>
+  <link rel="search" type="application/atom+xml" href="/opds/search/{searchTerms}?library_id=Calibre"/>
+  <link rel="http://opds-spec.org/facet" opds:facetGroup="Sort by" opds:activeFacet="true" title="Newest" href="/opds/navcatalog/4e6577657374?library_id=Calibre"/>
+  <link rel="http://opds-spec.org/facet" opds:facetGroup="Sort by" title="Title" href="/opds/navcatalog/4f7469746c65?library_id=Calibre"/>
+  <entry>
+    <title>The Hobbit</title>
+    <author><name>J. R. R. Tolkien</name></author>
+    <id>urn:uuid:7c1f1f3e-0000-4000-8000-000000000012</id>
+    <updated>2026-10-01T10:00:00+00:00</updated>
+    <dc:language>eng</dc:language>
+    <content type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><p>In a hole in the ground there lived a hobbit.</p></div></content>
+    <link type="application/epub+zip" rel="http://opds-spec.org/acquisition" href="/get/epub/12/Calibre"/>
+    <link type="application/pdf" rel="http://opds-spec.org/acquisition" href="/get/pdf/12/Calibre"/>
+    <link type="image/jpeg" rel="http://opds-spec.org/cover" href="/get/cover/12/Calibre"/>
+    <link type="image/jpeg" rel="http://opds-spec.org/thumbnail" href="/get/thumb/12/Calibre"/>
+  </entry>
+  <entry>
+    <title>Protected Book</title>
+    <author><name>A. Publisher</name></author>
+    <id>urn:uuid:7c1f1f3e-0000-4000-8000-000000000013</id>
+    <updated>2026-10-01T10:00:00+00:00</updated>
+    <link type="application/vnd.adobe.adept+xml" rel="http://opds-spec.org/acquisition" href="/get/acsm/13/Calibre"/>
+  </entry>
+  <entry>
+    <title>For Sale</title>
+    <id>urn:uuid:7c1f1f3e-0000-4000-8000-000000000014</id>
+    <updated>2026-10-01T10:00:00+00:00</updated>
+    <link type="application/epub+zip" rel="http://opds-spec.org/acquisition/buy" href="https://shop.example.org/book/14"/>
+  </entry>
+  <entry>
+    <title>Authors</title>
+    <id>calibre:authors</id>
+    <updated>2026-10-01T10:00:00+00:00</updated>
+    <content type="text">Books sorted by author</content>
+    <link type="application/atom+xml;profile=opds-catalog;kind=navigation" href="/opds/navcatalog/4f617574686f7273?library_id=Calibre"/>
+  </entry>
+</feed>

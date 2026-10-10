@@ -4,7 +4,7 @@ use crate::invalidation::notify;
 use book_model::{AnnotationAnchor, AnnotationStyle};
 use gpui::{Context, Window};
 use html_view_core::RendererCommand;
-use library_backend::ReaderAnnotation;
+use library_backend::Annotation;
 
 use crate::epub::{ReaderView, Selection, marks};
 use crate::invalidation::Component;
@@ -36,7 +36,21 @@ impl ReaderView {
         let Some(Selection { cfi_range, text: exact_text }) = self.selection.take() else { return };
         self.annotation_note_input.update(cx, |input, cx| input.set_value(String::new(), window, cx));
         let now = crate::shell::marks::now_millis();
-        let annotation = ReaderAnnotation { id: uuid::Uuid::new_v4().to_string(), state: book_model::AnnotationState { content_hash: self.locator.content_hash(), detail: book_model::AnnotationDetail { anchor: AnnotationAnchor::epub_cfi(cfi_range), exact_text: exact_text, style: AnnotationStyle::Highlight, color: ui_components::READER_ANNOTATION_DEFAULT_COLOR.to_owned(), note: String::new(), created_at: u64::try_from(now).expect("annotation timestamps must be nonnegative"), toc_ordinal: self.toc.ordinal_of_active().map(|ordinal| ordinal as i64), progress: None }, modified_at: u64::try_from(now).expect("annotation timestamps must be nonnegative"), deleted: false } };
+        let now = u64::try_from(now).expect("annotation timestamps must be nonnegative");
+        let annotation = Annotation {
+            id: uuid::Uuid::new_v4().to_string(),
+            content_hash: self.locator.content_hash(),
+            anchor: AnnotationAnchor::epub_cfi(cfi_range),
+            exact_text,
+            style: AnnotationStyle::Highlight,
+            color: ui_components::READER_ANNOTATION_DEFAULT_COLOR,
+            note: String::new(),
+            created_at: now,
+            toc_ordinal: self.toc.ordinal_of_active().map(|ordinal| ordinal as i64),
+            progress: Some(book_model::layout_fraction_progress(self.progress.fraction)),
+            modified_at: now,
+            deleted: false,
+        };
         let overlay = marks::renderer_annotation(&annotation).expect("new EPUB annotation has an EPUB anchor");
         let annotation_id = annotation.id.clone();
         self.marks.append(annotation, "save reader annotation");
@@ -69,7 +83,7 @@ impl ReaderView {
     }
 
     /// Writes the open annotation back while leaving the editor open.
-    pub(in crate::epub) fn save_selected_annotation(&mut self, style: Option<AnnotationStyle>, color: Option<&'static str>, cx: &mut Context<Self>) {
+    pub(in crate::epub) fn save_selected_annotation(&mut self, style: Option<AnnotationStyle>, color: Option<u32>, cx: &mut Context<Self>) {
         let note = self.annotation_note_input.read(cx).value().to_string();
         let Some(annotation) = self.marks.update_selected(note, style, color, "update reader annotation") else { return };
         if let Some(overlay) = marks::renderer_annotation(&annotation) {

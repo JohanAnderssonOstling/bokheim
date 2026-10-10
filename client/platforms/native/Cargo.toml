@@ -20,8 +20,7 @@ futures-util = { version = "0.3", features = ["sink"], optional = true }
 tempfile = "3"
 blake3 = "1"
 libc = "0.2"
-rusqlite = { version = "0.40.0", features = ["bundled", "hooks"] }
-log = "0.4"
+rusqlite = { version = "0.40.0", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"

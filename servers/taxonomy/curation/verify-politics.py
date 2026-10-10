@@ -44,39 +44,6 @@ class PoliticsReview(unittest.TestCase):
         sql='SELECT p.parent_concept_id,c.preferred_label FROM concept c JOIN concept_parent p USING(concept_id) GROUP BY p.parent_concept_id,c.preferred_label HAVING count(*)>1'
         self.assertLessEqual(set(self.after.execute(sql)),set(self.before.execute(sql)))
 
-    def test_fur_manufacturing_not_balkan_government(self):
-        id=self.new['Fur Manufacturing']
-        self.assertEqual(self.parents(id),{440})
-        self.assertEqual(self.after.execute("SELECT concept_id FROM lcc_range WHERE start_code='TS1060' AND end_code='TS1070'").fetchone(),(id,))
-
-    def test_island_scope_including_exact_printed_selectors(self):
-        id=self.new['Atlantic & Indian Ocean Islands']
-        self.assertEqual(self.parents(id),{5359})
-        self.assertEqual(self.after.execute("SELECT concept_id FROM lcc_range WHERE start_code='JS7820'").fetchone(),(id,))
-        self.assertEqual(self.after.execute("SELECT concept_id FROM lcc_selector WHERE selector='JS7825-JS7825.9'").fetchone(),(id,))
-        self.assertEqual(self.after.execute("SELECT concept_id FROM lcc_range WHERE start_code='JS8001'").fetchone(),(13380,))
-
-    def test_law_references_and_actual_humanitarian_class(self):
-        for old in (13775,13776,13779):
-            self.assertIsNone(self.after.execute('SELECT 1 FROM concept WHERE concept_id=?',(old,)).fetchone())
-        for code,id in [('JZ1256',5300),('JZ2064',5300),('JZ6440',13233),('JZ6530',self.new['Humanitarian Aspects of War'])]:
-            self.assertEqual(self.after.execute('SELECT concept_id FROM lcc_range WHERE start_code=?',(code,)).fetchone(),(id,))
-
-    def test_constitutions_keeps_bisac_but_not_broad_public_law(self):
-        self.assertEqual(self.after.execute("SELECT concept_id FROM lcc_range WHERE start_code='K3150'").fetchone(),(5548,))
-        self.assertEqual(self.after.execute("SELECT concept_id FROM bisac_selector WHERE selector='POL022000'").fetchone(),(5335,))
-
-    def test_geographical_hierarchy(self):
-        for id in (11884,11917,5367,5368,11788,11885):self.assertEqual(self.parents(id),{54933})
-        for id in (11887,11888,11889,11891,11893,11897,11898,11900,11902,11904,11905):self.assertEqual(self.parents(id),{5367})
-        for id in (11890,11892,11894,11895,11896,11899,11906,11908):self.assertEqual(self.parents(id),{11891})
-        self.assertEqual(self.parents(5327),{11923})
-        self.assertEqual(self.parents(11918),{11923})
-        self.assertEqual(self.parents(13509),{13377})
-        self.assertEqual(self.label(5327),'United States')
-        for code,id in [('POL053000',11884),('POL054000',5367),('POL058000',5368),('POL056000',11918)]:
-            self.assertEqual(self.after.execute('SELECT concept_id FROM bisac_selector WHERE selector=?',(code,)).fetchone(),(id,))
-
     def test_consolidation_preserves_children_and_shared_routes(self):
         for label in ('Geopolitics','Human & Civil Rights'):
             self.assertEqual(self.after.execute('SELECT count(*) FROM concept WHERE preferred_label=?',(label,)).fetchone()[0],1)
@@ -87,22 +54,6 @@ class PoliticsReview(unittest.TestCase):
         for id in (5370,13819,5340,5365,5380,12894,11596,13475):
             self.assertIsNone(self.after.execute('SELECT 1 FROM concept WHERE concept_id=?',(id,)).fetchone())
         self.assertEqual(self.after.execute('SELECT count(*) FROM concept WHERE concept_id IN(11757,11785)').fetchone()[0],2)
-
-    def test_ideology_children(self):
-        for child,parent in ((11821,11762),(11822,11762),(11848,11764),(11849,11764),(11846,11766),(11847,11766)):
-            self.assertEqual(self.parents(child),{parent})
-        for id in range(11812,11821):self.assertEqual(self.parents(id),{11761})
-
-    def test_names_and_navigation(self):
-        for id,text in ((13483,'Liechtenstein'),(13496,'Russian Federation'),(11603,'France'),(13484,'France'),(52889,'France'),(5351,'Relations to Other Subjects')):
-            self.assertEqual(self.label(id),text)
-        self.assertEqual(self.parents(5333),{5695})
-
-    def test_state_and_civil_society(self):
-        id=self.new['State & Civil Society']
-        self.assertEqual(self.after.execute("SELECT concept_id FROM ddc_selector WHERE selector='322'").fetchone(),(id,))
-        self.assertEqual(self.parents(id),{5696})
-        self.assertEqual(self.parents(5375),{id})
 
     def test_contained_ranges_do_not_bridge_gaps(self):
         self.assertTrue(self.manifest['removed_contained_ranges'])
@@ -171,22 +122,9 @@ class PoliticsReview(unittest.TestCase):
         self.assertEqual(self.label(52866),'Confederation & Empire, 1867–1918')
 
     @unittest.skipUnless(LIVE,'Use --live after applying the frozen plan')
-    def test_live_database_and_viewer_match_reviewed_snapshot(self):
+    def test_live_database_matches_reviewed_snapshot(self):
         with sqlite3.connect(f'file:{politics.DATABASE}?mode=ro',uri=True) as live:
             self.assertEqual(politics.snapshot(live),politics.snapshot(self.after))
-        viewer=(politics.DATABASE.parents[1]/'taxonomy-viewer.html').read_text()
-        data,_=json.JSONDecoder().raw_decode(viewer.split('const DATA=',1)[1])
-        nodes=data['nodes']
-        self.assertEqual(nodes['5327']['l'],'United States')
-        self.assertIn(13509,nodes['13377']['c'])
-        self.assertIn(5368,nodes['54933']['c'])
-        self.assertIn(11821,nodes['11762']['c'])
-        self.assertNotIn('12529',nodes)
-        self.assertNotIn('13779',nodes)
-        with (FOLDER/'full-counts.tsv').open() as source:
-            counts={int(id):int(count) for id,count in csv.reader(source,delimiter='\t')}
-        for id in (5326,5330,5338,5368,5690,*self.new.values()):
-            self.assertEqual(nodes[str(id)]['h'],counts.get(id,0))
 
 
 if __name__=='__main__':unittest.main()

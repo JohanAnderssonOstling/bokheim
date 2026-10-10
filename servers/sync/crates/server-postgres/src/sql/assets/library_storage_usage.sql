@@ -12,19 +12,18 @@
 -- everywhere whose bytes have not yet been released — are attributed to no
 -- library and appear as the difference between this total and used_bytes.
 WITH referenced AS (
-    SELECT DISTINCT state.library_id, COALESCE(revision.blob_hash, state.content_hash) AS content_hash
+    SELECT DISTINCT state.library_id, state.content_hash AS content_hash
     FROM sync_state AS state
     JOIN libraries AS library
       ON library.id = state.library_id
      AND library.user_id = $1
      AND library.deleted_at IS NULL
      AND library.cloud_storage_enabled
-    LEFT JOIN user_book_revision AS revision ON revision.user_id=$1 AND revision.content_hash=state.content_hash
     WHERE state.kind = 'book_lifecycle'
       AND state.version_rank <> 2
       AND state.content_hash IS NOT NULL
     UNION
-    SELECT claim.library_id, claim.blob_hash FROM library_blob_claim claim
+    SELECT claim.library_id, claim.content_hash FROM library_blob_claim claim
     JOIN libraries library ON library.id=claim.library_id AND library.deleted_at IS NULL AND library.cloud_storage_enabled
     WHERE claim.user_id=$1
 ),

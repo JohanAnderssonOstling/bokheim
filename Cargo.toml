@@ -7,34 +7,35 @@ members = [
     "client/library-backend/crates/library-database",
     "client/library-backend/crates/library-replica",
     "client/app/crates/library-registry",
-    "client/library-backend/crates/book-metadata",
     "client/library-backend/crates/thumbnail",
     "client/preferences",
     "client/library-model",
-    "client/test-support",
     "shared/content-address",
     "shared/pdf-view-common",
     "shared/pdf-reader-core",
-    "shared/reader-style",
-    "shared/outbound-http",
     "shared/book-model",
-    "shared/audiobook-folder",
-    "shared/epub",
+    "shared/audiobook-archive",
+    "client/library-backend/crates/audiobook-folder",
+    "client/book-content",
     "client/library-backend/crates/book-inspection",
     "shared/subject-projection",
+    "shared/subject-taxonomy",
     "shared/account-contract",
-    "client/library-backend/crates/metadata-client",
+    "client/library-backend/crates/library-enrichment",
+    "client/library-backend/crates/library-opds",
     "client/library-backend/crates/cpu-host",
     "shared/wire",
     "shared/protobuf-wire",
     "shared/metadata-contract",
-    "shared/update-client",
+    "shared/update-protocol",
+    "client/update-client",
     "client/update-host",
     "shared/sync-common",
     "apps/desktop-gpui",
     "apps/web-gpui",
     "apps/web-backend-worker",
     "apps/kobo-device",
+    "servers/catalog",
     "servers/metadata",
     "servers/updates",
     "servers/taxonomy/curation"
@@ -76,6 +77,8 @@ encoding_rs = "0.8"
 reqwest = { version = "0.12.28", default-features = false, features = ["charset", "http2", "system-proxy"] }
 
 [patch.crates-io]
+mobi = { path = "vendor/mobi" }
+async_zip = { path = "vendor/async_zip" }
 zip = { path = "vendor/zip" }
 gpui = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", rev = "cb2f5b981889d421153d5804526929e32c0788fd", version = "=0.2.2" }
 pdfium-render = { path = "vendor/pdfium-render" }
@@ -89,3 +92,10 @@ gpui_platform = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", re
 [patch."https://github.com/longbridge/gpui-component"]
 gpui-component = { path = "vendor/gpui-component/crates/ui" }
 gpui-component-assets = { path = "vendor/gpui-component/crates/assets" }
+
+# Local engine changes for separate image loading.
+[patch."https://github.com/JohanAnderssonOstling/HtmlEngine"]
+html-engine = { path = "../HtmlEngine/crates/html" }
+
+[patch."https://github.com/JohanAnderssonOstling/HtmlViewCore"]
+html-view-core = { path = "../HtmlViewCore/crates/html-view-core" }

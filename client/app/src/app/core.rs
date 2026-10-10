@@ -1,35 +1,26 @@
-use std::sync::Mutex;
-use crate::library::LibraryDirectory;
-pub(super) use super::data::{AppDataLocation, BackendContext, LibraryEntry, LibraryRegistry};
-use crate::executor::{BackendExecutor, BackendTask};
-pub(super) use crate::LibraryId;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(super) use super::data::AppDataLocation;
+pub(super) use super::data::{BackendContext, LibraryEntry, LibraryRegistry};
+use crate::executor::{BackendExecutor, BackendOutput, BackendSend, BackendTask};
+use crate::AppStartupState;
+use library_backend::library::LibraryDirectory;
 use serde::Serialize;
 pub(super) use std::collections::HashSet;
 pub(super) use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(all(test, not(target_arch = "wasm32")))]
 use std::time::Duration;
+pub(super) use sync_common::LibraryId;
+use tokio::sync::watch;
 
-pub(super) const BACKGROUND_SYNC_RETRY_INTERVAL: Duration = Duration::from_secs(30);
-
-pub(super) use crate::library::{LibrarySyncState, LibrarySyncStatus};
 pub(super) use crate::BackendError;
 pub(super) use crate::DeviceAccountSession;
+pub(super) use library_backend::{LibrarySyncState, LibrarySyncStatus};
 
 #[derive(Clone, Debug, serde::Deserialize, Serialize)]
 pub struct LibraryListState {
     pub libraries: Vec<LibraryEntry>,
     pub sync_statuses: Vec<LibrarySyncStatus>,
-}
-
-pub(super) fn subscribe_event(subscribers: &mut Vec<async_channel::Sender<()>>) -> async_channel::Receiver<()> {
-    let (sender, receiver) = async_channel::bounded(1);
-    subscribers.push(sender);
-    receiver
-}
-
-/// One unread notification is sufficient. A full channel remains subscribed.
-pub(super) fn invalidate_events(subscribers: &mut Vec<async_channel::Sender<()>>) {
-    subscribers.retain(|sender| !matches!(sender.try_send(()), Err(async_channel::TrySendError::Closed(()))));
 }
 
 pub(crate) struct AppState {
@@ -39,22 +30,17 @@ pub(crate) struct AppState {
     /// owns the in-memory directory of resource-bearing sessions.
     pub(super) library_directory: Arc<LibraryDirectory>,
     pub(super) account: DeviceAccountSession,
-    pub(super) library_list_subscribers: Mutex<Vec<async_channel::Sender<()>>>,
-    pub(super) account_scheduler: SyncScheduler,
-    pub(super) remote_changes: crate::notification_interest::RemoteChanges,
-    notification_task: Option<BackendTask<()>>,
+    library_list_changed: watch::Sender<()>,
+    /// Coalesces requests for a full account-maintenance pass.
+    pub(super) account_wake: watch::Sender<()>,
+    account_task: Option<BackendTask<()>>,
     pub(super) notification_interest: crate::notification_interest::NotificationInterest,
 }
 
-pub(super) use crate::sync::SyncScheduler;
-
 impl Drop for AppState {
     fn drop(&mut self) {
-        self.account_scheduler.stop();
-        self.notification_task.take();
-        for (_, handle) in self.library_directory.handles.lock().unwrap_or_else(|error| error.into_inner()).drain() {
-            handle.shutdown();
-        }
+        self.account_task.take();
+        self.library_directory.shutdown();
     }
 }
 
@@ -64,50 +50,71 @@ pub(crate) struct AppBackend {
 }
 
 impl AppBackend {
+    /// The storage owner applies registry policy and the corresponding
+    /// directory or account changes together, before publishing the result.
+    pub(super) fn with_storage<T: BackendOutput>(&self, operation: impl FnOnce(&Self) -> Result<T, BackendError> + BackendSend + 'static) -> Result<T, BackendError> {
+        use client_platform_runtime::storage_queue::{self, Priority};
+        let this = self.clone();
+        storage_queue::run_sync(Priority::Interactive, move || operation(&this)).map_err(BackendError::message)?
+    }
+
+    pub(crate) fn startup_state(&self) -> Result<AppStartupState, BackendError> {
+        Ok(AppStartupState {
+            libraries: self.libraries().map_err(BackendError::operation)?,
+            browsing_preferences: self.browsing_preferences().map_err(BackendError::operation)?,
+            account_status: self.account_status().map_err(BackendError::operation)?,
+            reader_preferences: self.reader_preferences().map_err(BackendError::operation)?,
+        })
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn run_native_worker(self, worker: crate::runtime::native::AppWorker) {
         let executor = self.state.executor.clone();
         executor.block_on(worker.serve(self));
     }
 
-    pub fn initialize(location: AppDataLocation) -> Result<Self, BackendError> {
-        Self::new(BackendContext::initialize(location).map_err(BackendError::message)?)
-    }
-
     pub fn new(context: BackendContext) -> Result<Self, BackendError> {
         let executor = BackendExecutor::new().map_err(BackendError::operation)?;
         let notification_interest = crate::notification_interest::NotificationInterest::default();
-        let remote_changes = crate::notification_interest::RemoteChanges::default();
-        let (account_scheduler, account_wake_rx) = SyncScheduler::new();
+        let library_directory = Arc::new(LibraryDirectory::default());
+        let (account_wake, account_requests) = watch::channel(());
         let api_server = crate::api_server_url();
         let account = DeviceAccountSession::load(context.clone(), api_server).map_err(BackendError::operation)?;
-        let notification_task = executor.spawn(super::notifications::run(account.clone(), account_scheduler.clone(), notification_interest.clone(), remote_changes.clone()));
-        let state = Arc::new(AppState {
+        let state = Arc::new_cyclic(|weak| AppState {
+            account_task: Some(super::account::start(&executor, weak, account.clone(), account_wake.clone(), account_requests, notification_interest.clone(), library_directory.clone())),
             executor: executor.clone(),
             registry: context.registry,
-            library_directory: Arc::new(LibraryDirectory::default()),
+            library_directory,
             account: account.clone(),
-            library_list_subscribers: Mutex::new(Vec::new()),
-            account_scheduler: account_scheduler.clone(),
-            remote_changes: remote_changes.clone(),
-            notification_task: Some(notification_task),
+            library_list_changed: watch::channel(()).0,
+            account_wake,
             notification_interest: notification_interest.clone(),
         });
-        let weak = Arc::downgrade(&state);
-        super::account::tasks::start_maintenance(&executor, &weak, account_wake_rx);
+        // Libraries attach the catalog when they open, so activate it first.
+        super::catalog::start(&context.app_data_dir, &executor);
         let core = Self { state };
         core.open_registered_libraries()?;
         core.start_pending_local_purges();
-        core.state.account_scheduler.request_remote_refresh();
+        core.state.account_wake.send_replace(());
         Ok(core)
     }
 
-    pub(crate) fn library_list_changes(&self) -> async_channel::Receiver<()> {
-        subscribe_event(&mut self.state.library_list_subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
+    pub(crate) fn library_list_changes(&self) -> watch::Receiver<()> {
+        self.state.library_list_changed.subscribe()
+    }
+
+    pub(crate) fn notification_interest(&self, browsing: bool) -> async_channel::Receiver<()> {
+        let (sender, receiver) = async_channel::bounded(1);
+        let interest = self.state.notification_interest.view(browsing);
+        self.state.executor.spawn_detached(async move {
+            let _interest = interest;
+            sender.closed().await;
+        });
+        receiver
     }
 
     pub(super) fn send_library_list_changed(&self) {
-        invalidate_events(&mut self.state.library_list_subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+        self.state.library_list_changed.send_replace(());
     }
 
     /// Runtime routing may resolve an already-open actor here. It cannot open
@@ -130,6 +137,42 @@ mod library_client_lifecycle_tests {
     use super::*;
 
     #[tokio::test]
+    async fn library_list_watch_tracks_lifecycle_for_independent_subscribers() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = AppBackend::new(BackendContext::initialize(AppDataLocation::native_path(root.path())).unwrap()).unwrap();
+        let (client, worker) = crate::runtime::native::channel(&backend);
+        let exercise = async move {
+            let mut changes = client.library_list_changes().await.unwrap();
+            let mut other = client.library_list_changes().await.unwrap();
+            assert!(!changes.has_changed().unwrap());
+
+            let entry = client.create_library_with_asset_storage("Books".to_owned(), false).await.unwrap();
+            let id = *entry.library_id();
+            changes.changed().await.unwrap();
+            assert!(other.has_changed().unwrap());
+            other.changed().await.unwrap();
+            assert_eq!(client.libraries().await.unwrap().len(), 1);
+
+            client.rename_library(id, "First name".to_owned()).await.unwrap();
+            client.rename_library(id, "Final name".to_owned()).await.unwrap();
+            changes.changed().await.unwrap();
+            assert!(!changes.has_changed().unwrap(), "unread changes should coalesce");
+            assert!(other.has_changed().unwrap(), "each subscriber tracks changes independently");
+            assert_eq!(client.libraries().await.unwrap()[0].library_name(), "Final name");
+
+            drop(other);
+            client.delete_library(id).await.unwrap();
+            changes.changed().await.unwrap();
+            assert!(client.libraries().await.unwrap().is_empty());
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(worker.serve(backend), exercise);
+        })
+        .await
+        .expect("library list subscriptions must remain live through creation, rename, and deletion");
+    }
+
+    #[tokio::test]
     async fn library_calls_bypass_the_app_worker_and_retired_clients_stay_retired() {
         let root = tempfile::tempdir().unwrap();
         let backend = AppBackend::new(BackendContext::initialize(AppDataLocation::native_path(root.path())).unwrap()).unwrap();
@@ -140,15 +183,8 @@ mod library_client_lifecycle_tests {
         let old = client.library(id);
         assert_eq!(tokio::time::timeout(Duration::from_secs(5), old.book_count()).await.unwrap().unwrap(), 0);
         let (updates, _) = old.updates().await.unwrap();
-        let hash = crate::ContentHash::new(&format!("{:064x}", 1));
-        let (downloads, _) = old.download_changes(hash).await.unwrap();
         backend.library_directory().retire(&id).unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while updates.recv().await.is_ok() {}
-            while downloads.recv().await.is_ok() {}
-        })
-        .await
-        .expect("retirement must close subscriptions even while the old client is retained");
+        tokio::time::timeout(Duration::from_secs(5), async { while updates.recv().await.is_ok() {} }).await.expect("retirement must close subscriptions even while the old client is retained");
         assert!(tokio::time::timeout(Duration::from_secs(5), old.book_count()).await.unwrap().is_err());
         backend.open_registered_library(&id).unwrap();
         let fresh = client.library(id);
@@ -170,6 +206,41 @@ mod library_client_lifecycle_tests {
         assert_ne!(destination.library_id(), unavailable.library_id());
         assert!(backend.library_directory().get(destination.library_id()).is_ok());
         assert_eq!(backend.libraries().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_imports_choose_one_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = AppBackend::new(BackendContext::initialize(AppDataLocation::native_path(root.path())).unwrap()).unwrap();
+        let start = Arc::new(std::sync::Barrier::new(6));
+        let clients = (0..6)
+            .map(|_| {
+                let backend = backend.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    *backend.ensure_import_library().unwrap().library_id()
+                })
+            })
+            .collect::<Vec<_>>();
+        let ids = clients.into_iter().map(|client| client.join().unwrap()).collect::<Vec<_>>();
+        assert!(ids.iter().all(|id| id == &ids[0]));
+        assert_eq!(backend.libraries().unwrap().len(), 1);
+        assert_eq!(backend.library_directory().all().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_libraries_while_transport_survives() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = AppBackend::new(BackendContext::initialize(AppDataLocation::native_path(root.path())).unwrap()).unwrap();
+        let id = *backend.ensure_import_library().unwrap().library_id();
+        let (client, worker) = crate::runtime::native::channel(&backend);
+        let library = client.library(id);
+        let (updates, _) = library.updates().await.unwrap();
+        drop(worker);
+        drop(backend);
+        tokio::time::timeout(Duration::from_secs(5), async { while updates.recv().await.is_ok() {} }).await.expect("application shutdown must close libraries even while a transport retains the directory");
+        assert!(library.book_count().await.is_err());
     }
 
     #[tokio::test]

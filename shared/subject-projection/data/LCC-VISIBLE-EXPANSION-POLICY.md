@@ -39,17 +39,20 @@ the proposed named-author concepts are excluded from the visible hierarchy.
 Named authors belong in the author/creator index, where identity, aliases, and
 works can be represented properly, rather than in the subject taxonomy.
 
-An explicitly approved exception (2026-09-07) retains the 50 reviewed American
-author shelves listed in `reports/20260907-american-top50-author-installation.md`.
-These are LCC browsing subjects beneath their existing American literature era
-nodes, covering works by and material about each author; they do not provide
-creator identity or attribution. Keep the era selectors for residual coverage.
-The subsequently approved 100 largest local author-code groups in English
-Literature, 1961–2000 are also retained: 100 selectors form 99 subjects after
-combining Marion Chesney and M. C. Beaton. The exact scope and evidence are in
-`reports/20260907-english-top100-author-installation.md`.
-These bounded exceptions do not enable automatic named-author expansion in
-other schedules or for additional authors.
+The author-shelf exceptions approved on 2026-09-07 were absorbed into their
+current era parents at the user's request on 2026-10-07: 50 American subjects
+and 99 English subjects. All classification selectors and range boundaries
+remain on the surviving era concepts. The English shelves now resolve through
+the existing 20th Century subject, rather than the historical 1961–2000 parent
+that was absorbed in an earlier period compaction. Do not recreate these named
+author leaves during future imports or maintenance.
+
+The installation reports `reports/20260907-american-top50-author-installation.md`
+and `reports/20260907-english-top100-author-installation.md` document historical
+states. The current absorption mapping and validation are recorded in
+`reports/20261007-author-shelves-absorption.json`. These shelves covered both
+works by and material about authors; absorption does not assign creator
+identity. Established Goethe and Shakespeare topics remain outside this batch.
 
 Against the 2016 MDSConnect snapshot and the current unified taxonomy, this
 rule covers 31 existing LCC leaves and excludes 2,327 confirmed immediate-child

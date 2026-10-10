@@ -2,7 +2,7 @@
 const handles = new Map();
 const opening = new Map();
 async function stagedFile(name, create = false) {
-    if (!/^__libraries\/[0-9a-f-]{36}\/(?:imports\/[0-9a-f-]{36}\/\d+|(?:book|thumbnail)\/[0-9a-f-]{36})$/.test(name)) throw Error('Invalid staged file path');
+    if (!/^__libraries\/[0-9a-f-]{36}\/(?:book|thumbnail)\/[0-9a-f-]{36}$/.test(name)) throw Error('Invalid staged file path');
     const parts = name.split('/');
     let directory = await navigator.storage.getDirectory();
     for (const component of parts.slice(0, -1)) directory = await directory.getDirectoryHandle(component, {create});
@@ -61,7 +61,7 @@ export async function listAssets() {
     return names;
 }
 export async function removeAsset(name) {
-    if (!/^__libraries\/[0-9a-f-]{36}\/(?:imports\/[0-9a-f-]{36}\/\d+|(?:book|thumbnail)\/[0-9a-f-]{36})$/.test(name)) throw Error('Invalid asset file path');
+    if (!/^__libraries\/[0-9a-f-]{36}\/(?:book|thumbnail)\/[0-9a-f-]{36}$/.test(name)) throw Error('Invalid asset file path');
     const parts = name.split('/');
     try {
         let directory = await navigator.storage.getDirectory();

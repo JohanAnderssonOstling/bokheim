@@ -90,7 +90,7 @@ mod fixture {
         rusqlite::Connection::open(data.join("app-state-v1.sqlite3"))?.execute_batch("CREATE TABLE setting(v); INSERT INTO setting VALUES('old')")?;
         let artifact = Artifact { url: "https://example.org/releases/2/app.zip".into(), bytes: bytes.len() as u64, sha256: hex(digest(&SHA256, &bytes).as_ref()) };
         let manifest = Manifest {
-            protocol_version: 1, channel: "stable".into(), sequence: 1, issued_at_unix: now(), expires_at_unix: now() + 3600, taxonomy: None,
+            protocol_version: 1, channel: "stable".into(), sequence: 1, issued_at_unix: now(), expires_at_unix: now() + 3600, taxonomy: None, catalog: None,
             application: Some(ApplicationRelease { version: "2.0.0".parse()?, name: "Fixture".into(),
                 schema_version: library_database::LIBRARY_SCHEMA_VERSION as u32, taxonomy_format_versions: vec![1],
                 artifacts: [("windows-x86_64-zip".into(), artifact)].into() }),

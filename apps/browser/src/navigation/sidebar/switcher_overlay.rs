@@ -4,7 +4,7 @@ use gpui::prelude::*;
 use gpui::{Context, Entity, KeyDownEvent, MouseButton, PathPromptOptions, PromptLevel, SharedString, Window};
 use gpui::{Focusable, Subscription};
 use gpui_component::Disableable;
-use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::button::ButtonVariants;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::PopupMenu;
@@ -22,7 +22,6 @@ struct LibraryChoice {
 pub(super) struct LibraryNameDialog {
     id: Option<LibraryId>,
     folders: Option<Vec<gpui::SelectedDirectory>>,
-    trace: crate::services::library_add_trace::Trace,
     estimate: Option<(u64, u64, u64)>,
     asset_storage_enabled: bool,
     input: Entity<InputState>,
@@ -57,21 +56,18 @@ impl Sidebar {
 
     fn open_library_name_dialog(&mut self, id: LibraryId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(library) = self.libraries(cx).into_iter().find(|library| library.id == id) else { return };
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Library name"));
-        input.update(cx, |input, cx| input.set_value(library.name, window, cx));
-        let subscription = cx.subscribe_in(&input, window, |navigation, _, event, _, cx| {
-            if matches!(event, InputEvent::PressEnter { .. }) {
-                navigation.submit_library_name(cx);
-            }
-            cx.notify();
-        });
-        input.focus_handle(cx).focus(window, cx);
-        self.library_name_dialog = Some(LibraryNameDialog { id: Some(id), folders: None, trace: Default::default(), estimate: Some((0, 0, 0)), asset_storage_enabled: true, input, busy: false, error: None, _subscription: subscription });
-        cx.notify();
+        self.begin_library_name(Some(id), library.name, window, cx);
     }
 
     pub(crate) fn open_create_library_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_library_name(None, SharedString::default(), window, cx);
+    }
+
+    fn begin_library_name(&mut self, id: Option<LibraryId>, name: SharedString, window: &mut Window, cx: &mut Context<Self>) {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Library name"));
+        if id.is_some() {
+            input.update(cx, |input, cx| input.set_value(name, window, cx));
+        }
         let subscription = cx.subscribe_in(&input, window, |navigation, _, event, _, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
                 navigation.submit_library_name(cx);
@@ -79,7 +75,7 @@ impl Sidebar {
             cx.notify();
         });
         input.focus_handle(cx).focus(window, cx);
-        self.library_name_dialog = Some(LibraryNameDialog { id: None, folders: None, trace: Default::default(), estimate: Some((0, 0, 0)), asset_storage_enabled: true, input, busy: false, error: None, _subscription: subscription });
+        self.library_name_dialog = Some(LibraryNameDialog { id, folders: None, estimate: Some((0, 0, 0)), asset_storage_enabled: true, input, busy: false, error: None, _subscription: subscription });
         cx.notify();
     }
 
@@ -99,9 +95,7 @@ impl Sidebar {
         }
         if let Some(folders) = dialog.folders.take() {
             let enabled = dialog.asset_storage_enabled;
-            let trace = dialog.trace.clone();
-            trace.mark("review_confirmed");
-            self.libraries.update(cx, |libraries, cx| libraries.create_selected_libraries(folders, enabled, trace, cx));
+            self.libraries.update(cx, |libraries, cx| libraries.create_selected_libraries(folders, enabled, cx));
             self.library_name_dialog = None;
             self.switcher_open = false;
             cx.notify();
@@ -369,7 +363,6 @@ impl Sidebar {
 
     fn review_library_folders(&mut self, mut directories: Vec<gpui::SelectedDirectory>, window: &mut Window, cx: &mut Context<Self>) {
         use crate::navigation::folder_creation::{estimate_selected_files, retain_eligible_files};
-        let trace = crate::services::library_add_trace::Trace::start();
         for directory in &mut directories {
             retain_eligible_files(directory);
         }
@@ -381,7 +374,6 @@ impl Sidebar {
         let dialog = self.library_name_dialog.as_mut().unwrap();
         dialog.input.update(cx, |input, cx| input.set_value(title, window, cx));
         dialog.folders = Some(directories);
-        dialog.trace = trace;
         dialog.estimate = locators.is_empty().then_some((books, bytes, unavailable));
         let input_id = dialog.input.entity_id();
         if !locators.is_empty() {

@@ -94,18 +94,29 @@ impl WindowsHost {
         self.coordinator.approve(now())
     }
 
-    pub fn tick(&mut self) -> Result<UpdateView, String> {
+    pub fn check_for_updates(&mut self) -> Result<(), String> {
         let lock = UpdateLock::acquire(&self.root)?;
         self.coordinator.reload()?;
         if let Some(journal) = Journal::load(&self.root)? {
             if journal.state == State::Committed { self.acknowledge(&journal)?; }
         }
         let client = update_client::blocking::client("Bokheim-Windows-update/1")?;
-        self.coordinator.check_for_updates(&self.root, &lock, &client, now())?;
-        if self.coordinator.preparation_due(now()) {
+        self.coordinator.check_for_updates(&self.root, &lock, &client, now())
+    }
+
+    pub fn view(&self) -> UpdateView {
+        self.coordinator.view(now())
+    }
+
+    pub fn prepare(&mut self) -> Result<UpdateView, String> {
+        let lock = UpdateLock::acquire(&self.root)?;
+        self.coordinator.reload()?;
+        if self.coordinator.needs_preparation() {
             let workspace = self.database_workspace()?;
-            if let Err(error) = self.coordinator.prepare_next(&self.root, &lock, &client, now(), workspace, 0) {
-                self.coordinator.preparation_failed(now(), WaitReason::Retry, error)?;
+            let client = update_client::blocking::client("Bokheim-Windows-update/1")?;
+            if let Err(error) = self.coordinator.prepare(&self.root, &lock, &client, now(), workspace, 0) {
+                self.coordinator.preparation_failed(now(), WaitReason::Retry, error.clone())?;
+                return Err(error);
             }
         }
         Ok(self.coordinator.view(now()))
@@ -377,7 +388,7 @@ mod tests {
             }
             let bytes = zip.finish().unwrap().into_inner();
             let artifact = Artifact { url: "https://example.org/releases/2/app.zip".into(), bytes: bytes.len() as u64, sha256: hex(digest(&SHA256, &bytes).as_ref()) };
-            let manifest = Manifest { protocol_version: 1, channel: "stable".into(), sequence: 1, issued_at_unix: now(), expires_at_unix: now()+3600, taxonomy: None,
+            let manifest = Manifest { protocol_version: 1, channel: "stable".into(), sequence: 1, issued_at_unix: now(), expires_at_unix: now()+3600, taxonomy: None, catalog: None,
                 application: Some(ApplicationRelease { version: "2.0.0".parse().unwrap(), name: "Release".into(), schema_version: library_database::LIBRARY_SCHEMA_VERSION as u32, taxonomy_format_versions: vec![1], artifacts: [("windows-x86_64-zip".into(), artifact)].into() }) };
             let payload = serde_json::to_string(&manifest).unwrap(); let mut message = SIGNATURE_CONTEXT.to_vec(); message.extend_from_slice(payload.as_bytes());
             let envelope = serde_json::to_vec(&SignedManifest { key_id: "test".into(), payload, signature: hex(self.key.sign(&message).as_ref()) }).unwrap();

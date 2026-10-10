@@ -19,7 +19,7 @@ def commands():
         ['python3', '-m', 'unittest', 'discover', '-s', 'scripts/ci/tests'],
         ['python3', 'shared/pdfium/prepare.py', '--target', 'x86_64-unknown-linux-gnu'],
         ['cargo', 'test', '--release', '--no-fail-fast', *sum((['-p', p] for p in packages), [])],
-        ['cargo', 'test', '--release', '--no-fail-fast', '-p', 'update-client', '--features', 'native-state'],
+        ['cargo', 'test', '--release', '--no-fail-fast', '-p', 'update-protocol', '-p', 'update-client', '--features', 'update-client/native-state'],
         ['cargo', 'test', '--release', '--no-fail-fast', '-p', 'update-publisher'],
         ['bash', 'client/app/tests/run_sync_e2e.sh'],
     ]

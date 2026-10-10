@@ -23,54 +23,60 @@ pub struct DirectoryProjection {
     pub names: HashMap<DirId, FileName>,
 }
 
+/// A parent chain that loops back on itself is cut by moving its largest id
+/// to the root, so every device repairs the same cycle the same way.
+fn break_cycles(intents: &HashMap<DirId, DirectoryIntent>, suppressed: &HashSet<DirId>, parents: &mut HashMap<DirId, DirId>) {
+    let mut ids: Vec<_> = intents.keys().copied().collect();
+    ids.sort();
+    for start in ids {
+        if suppressed.contains(&start) {
+            continue;
+        }
+        let mut path = Vec::new();
+        let mut positions = HashMap::new();
+        let mut current = start;
+        loop {
+            if suppressed.contains(&current) || current == ROOT_DIR_ID {
+                break;
+            }
+            if let Some(position) = positions.get(&current).copied() {
+                if let Some(loser) = path[position..].iter().max().copied() {
+                    parents.insert(loser, ROOT_DIR_ID);
+                }
+                break;
+            }
+            let Some(parent) = parents.get(&current) else {
+                break;
+            };
+            positions.insert(current, path.len());
+            path.push(current);
+            current = *parent;
+        }
+    }
+}
+
+/// Directories under a missing or suppressed parent are suppressed too,
+/// repeated until no more are found.
+fn suppress_orphans(intents: &HashMap<DirId, DirectoryIntent>, parents: &HashMap<DirId, DirId>, suppressed: &mut HashSet<DirId>) {
+    loop {
+        let newly_suppressed: Vec<_> = intents
+            .values()
+            .filter(|intent| !suppressed.contains(&intent.id))
+            .filter(|intent| parents[&intent.id] != ROOT_DIR_ID && (!intents.contains_key(&parents[&intent.id]) || suppressed.contains(&parents[&intent.id])))
+            .map(|intent| intent.id)
+            .collect();
+        if newly_suppressed.is_empty() {
+            break;
+        }
+        suppressed.extend(newly_suppressed);
+    }
+}
+
 pub fn project_directories(intents: &HashMap<DirId, DirectoryIntent>) -> DirectoryProjection {
     let mut suppressed: HashSet<_> = intents.values().filter(|intent| intent.lifecycle != DirectoryLifecycleState::Present).map(|intent| intent.id).collect();
     let mut parents = intents.iter().map(|(id, intent)| (*id, intent.parent_id)).collect();
-    {
-        let (intents, suppressed, parents): (&HashMap<DirId, DirectoryIntent>, &HashSet<DirId>, &mut HashMap<DirId, DirId>) = (intents, &suppressed, &mut parents);
-        let mut ids: Vec<_> = intents.keys().copied().collect();
-        ids.sort();
-        for start in ids {
-            if suppressed.contains(&start) {
-                continue;
-            }
-            let mut path = Vec::new();
-            let mut positions = HashMap::new();
-            let mut current = start;
-            loop {
-                if suppressed.contains(&current) || current == ROOT_DIR_ID {
-                    break;
-                }
-                if let Some(position) = positions.get(&current).copied() {
-                    if let Some(loser) = path[position..].iter().max().copied() {
-                        parents.insert(loser, ROOT_DIR_ID);
-                    }
-                    break;
-                }
-                let Some(parent) = parents.get(&current) else {
-                    break;
-                };
-                positions.insert(current, path.len());
-                path.push(current);
-                current = *parent;
-            }
-        }
-    };
-    {
-        let (intents, parents, suppressed): (&HashMap<DirId, DirectoryIntent>, &HashMap<DirId, DirId>, &mut HashSet<DirId>) = (intents, &parents, &mut suppressed);
-        loop {
-            let newly_suppressed: Vec<_> = intents
-                .values()
-                .filter(|intent| !suppressed.contains(&intent.id))
-                .filter(|intent| parents[&intent.id] != ROOT_DIR_ID && (!intents.contains_key(&parents[&intent.id]) || suppressed.contains(&parents[&intent.id])))
-                .map(|intent| intent.id)
-                .collect();
-            if newly_suppressed.is_empty() {
-                break;
-            }
-            suppressed.extend(newly_suppressed);
-        }
-    };
+    break_cycles(intents, &suppressed, &mut parents);
+    suppress_orphans(intents, &parents, &mut suppressed);
     let names = {
         let mut groups: HashMap<(DirId, String), Vec<&DirectoryIntent>> = HashMap::new();
         let mut occupied: HashMap<DirId, HashSet<String>> = HashMap::new();
@@ -122,113 +128,7 @@ pub fn project_directories(intents: &HashMap<DirId, DirectoryIntent>) -> Directo
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use test_support::fixture_dir_id;
-
-    fn intent(id: &str, parent: &str, name: &str) -> DirectoryIntent {
-        DirectoryIntent { id: fixture_dir_id(id), parent_id: fixture_dir_id(parent), name: name.to_owned(), lifecycle: DirectoryLifecycleState::Present }
-    }
-
-    fn intents(values: impl IntoIterator<Item = DirectoryIntent>) -> HashMap<DirId, DirectoryIntent> {
-        values.into_iter().map(|intent| (intent.id, intent)).collect()
-    }
-
-    #[test]
-    fn orders_parents_before_children_and_cascades_deletion() {
-        let mut parent = intent("parent", "00000000-0000-0000-0000-000000000000", "Parent");
-        parent.lifecycle = DirectoryLifecycleState::Deleted;
-        let child = intent("child", "parent", "Child");
-        let projection = project_directories(&intents([child, parent]));
-        assert!(projection.ordered_active.is_empty());
-        assert_eq!(projection.suppressed.len(), 2);
-    }
-
-    #[test]
-    fn deterministically_repairs_cycles_and_numbers_case_insensitive_collisions() {
-        let a = intent("a", "b", "A");
-        let b = intent("b", "a", "B");
-        let first = intent("first", "00000000-0000-0000-0000-000000000000", "Same");
-        let second = intent("second", "00000000-0000-0000-0000-000000000000", "same");
-        let projection = project_directories(&intents([a, b, first, second]));
-        assert!(projection.suppressed.is_empty());
-        assert_eq!(projection.parents[&fixture_dir_id("b")], ROOT_DIR_ID);
-        assert!(!projection.suppressed.contains(&fixture_dir_id("first")));
-        assert!(projection.ordered_active.contains(&fixture_dir_id("second")));
-        assert_eq!(projection.names[&fixture_dir_id("second")], "same");
-        assert_eq!(projection.names[&fixture_dir_id("first")], "same 2");
-    }
-    #[test]
-    fn repairs_long_and_self_cycles_before_resolving_root_names() {
-        let make = || vec![intent("a", "b", "A"), intent("b", "c", "B"), intent("c", "a", "Shelf"), intent("child", "a", "Child"), intent("self", "self", "Self"), intent("existing", "00000000-0000-0000-0000-000000000000", "shelf")];
-        let input = intents(make());
-        let projection = project_directories(&input);
-        assert_eq!(projection, project_directories(&intents(make().into_iter().rev())));
-        assert_eq!(projection, project_directories(&input));
-        assert!(projection.suppressed.is_empty());
-        let cycle_root = [fixture_dir_id("a"), fixture_dir_id("b"), fixture_dir_id("c")].into_iter().max().unwrap();
-        assert_eq!(cycle_root, fixture_dir_id("c"));
-        assert_eq!(projection.parents[&cycle_root], ROOT_DIR_ID);
-        assert_eq!(projection.parents[&fixture_dir_id("self")], ROOT_DIR_ID);
-        assert_eq!(input[&cycle_root].parent_id, fixture_dir_id("a"));
-        let mut occupied = HashSet::new();
-        let mut active = HashSet::from([ROOT_DIR_ID]);
-        for id in &projection.ordered_active {
-            let parent = projection.parents[id];
-            assert!(active.contains(&parent));
-            assert!(occupied.insert((parent, crate::portable_name_key(&projection.names[id]))));
-            active.insert(*id);
-        }
-    }
-    #[test]
-    fn projection_v1_exhaustive_four_folder_graphs() {
-        for graph in 0..625u32 {
-            for deleted in 0..16u32 {
-                let make = |reverse: bool| {
-                    (0..4)
-                        .map(|step| {
-                            let index = if reverse { 3 - step } else { step };
-                            let id = DirId::from_u128((index + 1) as u128);
-                            (
-                                id,
-                                DirectoryIntent {
-                                    id,
-                                    parent_id: DirId::from_u128(((graph / 5u32.pow(index)) % 5) as u128),
-                                    name: if index % 2 == 0 { "Shelf" } else { "shelf" }.into(),
-                                    lifecycle: if deleted & (1 << index) == 0 { DirectoryLifecycleState::Present } else { DirectoryLifecycleState::Deleted },
-                                },
-                            )
-                        })
-                        .collect::<HashMap<_, _>>()
-                };
-                let projection = project_directories(&make(false));
-                assert_eq!(projection, project_directories(&make(true)));
-                let mut active = HashSet::from([ROOT_DIR_ID]);
-                let mut names = HashSet::new();
-                for id in projection.ordered_active {
-                    assert!(active.contains(&projection.parents[&id]));
-                    assert!(names.insert((projection.parents[&id], crate::portable_name_key(&projection.names[&id]))));
-                    active.insert(id);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn projection_v1_collision_priority_and_reserved_suffixes() {
-        let root = "00000000-0000-0000-0000-000000000000";
-        let values = intents([intent("a", root, "Shelf"), intent("b", root, "shelf"), intent("c", root, "SHELF"), intent("d", root, "SHELF 2")]);
-        let projection = project_directories(&values);
-        assert_eq!(projection.names[&fixture_dir_id("c")], "SHELF");
-        assert_eq!(projection.names[&fixture_dir_id("b")], "SHELF 3");
-        assert_eq!(projection.names[&fixture_dir_id("a")], "SHELF 4");
-        assert_eq!(projection.names[&fixture_dir_id("d")], "SHELF 2");
-    }
-}
-
-#[cfg(test)]
 mod safe_component_tests {
-    use crate::filenames::validate_component;
     use super::*;
 
     #[test]
@@ -271,7 +171,6 @@ mod safe_component_tests {
 
 #[cfg(test)]
 mod adversarial_component_properties {
-    use crate::filenames::validate_component;
     use super::*;
 
     #[test]

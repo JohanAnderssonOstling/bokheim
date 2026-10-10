@@ -4,7 +4,7 @@
 
 use std::rc::Rc;
 
-use app_preferences::{ReaderFontFamily, ReaderPreferencePatch, ReaderTextAlignment};
+use app_preferences::{DEFAULT_READER_MARGIN_PX, ReaderFontFamily, ReaderPreferencePatch, ReaderTextAlignment};
 
 /// The shared, synchronized description of how a PDF's layout is decided. The
 /// reader carries `pdf_page_count` and `pdf_zoom` alongside it, so each mode
@@ -41,9 +41,9 @@ pub struct ReaderPreferences {
     pub text_alignment: ReaderTextAlignment,
     #[serde(default = "default_line_height")]
     pub line_height: f32,
-    #[serde(default)]
+    #[serde(default = "default_reader_margin")]
     pub horizontal_margin_px: f32,
-    #[serde(default)]
+    #[serde(default = "default_reader_margin")]
     pub vertical_margin_px: f32,
     #[serde(default)]
     pub min_column_gap_px: f32,
@@ -83,8 +83,8 @@ impl Default for ReaderPreferences {
             font_family: ReaderFontFamily::default(),
             text_alignment: ReaderTextAlignment::default(),
             line_height: default_line_height(),
-            horizontal_margin_px: 0.0,
-            vertical_margin_px: 0.0,
+            horizontal_margin_px: default_reader_margin(),
+            vertical_margin_px: default_reader_margin(),
             min_column_gap_px: 0.0,
             max_column_count: default_max_column_count(),
             pdf_page_count: default_pdf_page_count(),
@@ -94,6 +94,10 @@ impl Default for ReaderPreferences {
             audiobook_speed: default_audiobook_speed(),
         }
     }
+}
+
+fn default_reader_margin() -> f32 {
+    DEFAULT_READER_MARGIN_PX
 }
 
 fn default_pdf_trim_margins() -> bool {

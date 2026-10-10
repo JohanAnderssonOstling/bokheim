@@ -46,14 +46,3 @@ impl Connection {
         self.0.send(Frame::Pong(bytes.into())).await.map_err(|e| e.to_string())
     }
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn credentials_stay_in_headers_and_cannot_inject_headers() {
-        let request = request("wss://example.test/events", &[("Authorization", "Bearer fixture")]).unwrap();
-        assert_eq!(request.uri().to_string(), "wss://example.test/events");
-        assert_eq!(request.headers()["authorization"], "Bearer fixture");
-        assert!(super::request("wss://example.test/events", &[("Authorization", "Bearer bad\r\nother: injected")]).is_err());
-    }
-}

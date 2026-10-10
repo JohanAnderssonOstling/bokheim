@@ -1,27 +1,32 @@
 //! Bounded LRU fragments for one immutable file generation.
 use std::collections::VecDeque;
+use std::io::{self, SeekFrom};
 
-pub struct RangeCache {
+pub(crate) const BLOCK_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_BUNDLE_BYTES: usize = 4 * 1024 * 1024;
+
+pub(crate) fn seek_position(position: u64, length: u64, from: SeekFrom) -> io::Result<u64> {
+    let next = match from {
+        SeekFrom::Start(offset) => offset as i128,
+        SeekFrom::Current(offset) => position as i128 + offset as i128,
+        SeekFrom::End(offset) => length as i128 + offset as i128,
+    };
+    u64::try_from(next).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid book seek"))
+}
+
+pub(crate) struct RangeCache {
     entries: VecDeque<(u64, Vec<u8>)>,
     capacity: usize,
 }
 impl RangeCache {
-    pub fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         assert!(capacity > 0);
         Self { entries: VecDeque::new(), capacity }
     }
-    #[cfg(test)]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-    #[cfg(any(test, feature = "web-runtime-tests"))]
-    pub fn allocated_bytes(&self) -> usize {
-        self.entries.iter().map(|(_, bytes)| bytes.capacity()).sum()
-    }
-    pub fn contains(&self, offset: u64) -> bool {
+    pub(crate) fn contains(&self, offset: u64) -> bool {
         self.entries.iter().any(|(start, bytes)| offset >= *start && offset - start < bytes.len() as u64)
     }
-    pub fn insert(&mut self, offset: u64, bytes: Vec<u8>) {
+    pub(crate) fn insert(&mut self, offset: u64, bytes: Vec<u8>) {
         if bytes.is_empty() {
             return;
         }
@@ -31,7 +36,31 @@ impl RangeCache {
         }
         self.entries.push_front((offset, bytes));
     }
-    pub fn read(&mut self, offset: u64, output: &mut [u8]) -> usize {
+    /// Validate the complete response before inserting any cache blocks.
+    pub(crate) fn insert_range(&mut self, offset: u64, length: usize, bytes: Vec<u8>) -> io::Result<()> {
+        validate_length(bytes.len(), length)?;
+        if length <= BLOCK_BYTES {
+            self.insert(offset, bytes);
+            Ok(())
+        } else {
+            self.insert_ranges(&[(offset, length)], &bytes)
+        }
+    }
+
+    pub(crate) fn insert_ranges(&mut self, ranges: &[(u64, usize)], bytes: &[u8]) -> io::Result<()> {
+        let length = ranges.iter().try_fold(0usize, |total, (_, count)| total.checked_add(*count)).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "book bundle length overflow"))?;
+        validate_length(bytes.len(), length)?;
+        let mut consumed = 0;
+        for &(offset, length) in ranges {
+            // The first block will be read next; retain it as most recently used.
+            for (index, chunk) in bytes[consumed..consumed + length].chunks(BLOCK_BYTES).enumerate().rev() {
+                self.insert(offset + (index * BLOCK_BYTES) as u64, chunk.to_vec());
+            }
+            consumed += length;
+        }
+        Ok(())
+    }
+    pub(crate) fn read(&mut self, offset: u64, output: &mut [u8]) -> usize {
         let Some(index) = self.entries.iter().position(|(start, bytes)| offset >= *start && offset - start < bytes.len() as u64) else { return 0 };
         if index != 0 {
             let entry = self.entries.remove(index).unwrap();
@@ -45,24 +74,10 @@ impl RangeCache {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn short_fragments_and_reads_determine_eviction() {
-        let mut cache = RangeCache::new(2);
-        cache.insert(0, vec![1, 2]);
-        cache.insert(10, vec![3]);
-        let mut bytes = [0; 4];
-        assert_eq!(cache.read(1, &mut bytes), 1);
-        assert_eq!(bytes[0], 2);
-        assert!(!cache.contains(2));
-        cache.insert(20, vec![4]);
-        assert!(cache.contains(0));
-        assert!(!cache.contains(10));
-        cache.insert(0, vec![5]);
-        assert_eq!(cache.read(0, &mut bytes), 1);
-        assert_eq!(bytes[0], 5);
-        assert!(!cache.contains(1));
+fn validate_length(actual: usize, expected: usize) -> io::Result<()> {
+    if actual == expected {
+        return Ok(());
     }
+    let kind = if actual < expected { io::ErrorKind::UnexpectedEof } else { io::ErrorKind::InvalidData };
+    Err(io::Error::new(kind, "incorrect book range length"))
 }

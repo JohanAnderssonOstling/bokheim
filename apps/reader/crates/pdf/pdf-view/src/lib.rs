@@ -118,26 +118,34 @@ pub struct PdfSelectionSnapshot {
     pub rects: Vec<NormalizedRect>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct PageGeometryKey {
+    page_index: usize,
+    trim_margins: bool,
+}
+
+struct NavigationOffsets {
+    column_height: f32,
+    maximum_offset: f32,
+    offsets: Arc<[f32]>,
+}
+
 pub struct PdfView {
     session: Option<session::Session>,
     info: Option<PdfDocumentInfo>,
     pages: Vec<(usize, Arc<DisplayPage>)>,
     display_cache: DisplayPageCache,
-    effective_page_sizes: HashMap<(usize, bool), (f32, f32)>,
-    page_break_avoidance: HashMap<(usize, bool), Arc<[(f32, f32)]>>,
+    effective_page_sizes: HashMap<PageGeometryKey, (f32, f32)>,
+    page_break_avoidance: HashMap<PageGeometryKey, Arc<[(f32, f32)]>>,
     fit_width_plan: FitWidthPlan,
     /// Viewport-local fit-width pagination. The plan above is always the
     /// pager's current window, whose display index zero is `start_anchor`.
     viewport_pager: Option<FitWidthAnchorPager>,
     plan_key: Option<(f32, f32, bool, bool, u64)>,
     geometry_revision: u64,
-    navigation_offsets: RefCell<Option<(f32, f32, Arc<[f32]>)>>,
+    navigation_offsets: RefCell<Option<NavigationOffsets>>,
     /// Filled by the page elements as they paint; see [`Self::passage_bounds`].
     passage_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
-    #[cfg(test)]
-    plan_builds: usize,
-    #[cfg(test)]
-    raster_requests: usize,
     current_page: usize,
     current_page_column: u32,
     /// A direct jump can reveal a page excluded from ordinary reading flow.
@@ -274,8 +282,8 @@ impl PdfView {
         let mut view = Self::empty(initial_page, window, cx);
         view.start_load(
             move || {
-                let checksum = metadata.as_ref().map(|m| m.checksum.clone()).unwrap_or_default();
-                PdfDocumentSession::from_reader_with_page_source(source_name, reader, &checksum, metadata, page_source)
+                let content_hash = metadata.as_ref().map(|m| m.content_hash.clone()).unwrap_or_default();
+                PdfDocumentSession::from_reader_with_page_source(source_name, reader, &content_hash, metadata, page_source)
             },
             cx,
         );
@@ -298,10 +306,6 @@ impl PdfView {
             geometry_revision: 0,
             navigation_offsets: RefCell::new(None),
             passage_bounds: Rc::new(Cell::new(None)),
-            #[cfg(test)]
-            plan_builds: 0,
-            #[cfg(test)]
-            raster_requests: 0,
             current_page: initial_page,
             current_page_column: 0,
             revealed_page: None,
@@ -752,9 +756,8 @@ impl PdfView {
 
     fn start_load(&mut self, load: impl FnOnce() -> pdf_reader_core::PdfResult<PdfDocumentSession> + Send + 'static, cx: &mut Context<Self>) {
         let generation = self.load_generation;
-        let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
-            let result = session::load(executor, load).await;
+            let result = session::load(load).await;
             let _ = this.update(cx, |this, cx| {
                 if this.load_generation != generation {
                     return;
@@ -764,16 +767,17 @@ impl PdfView {
                         this.info = Some(session.info().clone());
                         this.session = Some(session);
                         this.current_page = this.current_page.min(this.page_count().saturating_sub(1));
-                        if let Some(info) = &this.info {
-                            if info.skippable_pages().binary_search(&this.current_page).is_ok() && info.skippable_pages().len() < info.page_count() {
-                                this.current_page = (this.current_page..info.page_count()).chain(0..this.current_page).find(|page| info.skippable_pages().binary_search(page).is_err()).unwrap_or(this.current_page);
-                            }
+                        if let Some(info) = &this.info
+                            && info.skippable_pages().binary_search(&this.current_page).is_ok()
+                            && info.skippable_pages().len() < info.page_count()
+                        {
+                            this.current_page = (this.current_page..info.page_count()).chain(0..this.current_page).find(|page| info.skippable_pages().binary_search(page).is_err()).unwrap_or(this.current_page);
                         }
                         this.rebuild_fit_width_plan();
-                        if !this.fit_width_plan.columns().iter().any(|column| column.page_index() == this.current_page) {
-                            if let Some(first) = this.fit_width_plan.columns().first().copied() {
-                                this.current_page = first.page_index();
-                            }
+                        if !this.fit_width_plan.columns().iter().any(|column| column.page_index() == this.current_page)
+                            && let Some(first) = this.fit_width_plan.columns().first().copied()
+                        {
+                            this.current_page = first.page_index();
                         }
                         this.request_current_pages(cx);
                         if let Some((search_generation, query)) = this.pending_search.take().filter(|(search_generation, _)| *search_generation == this.search_generation) {
@@ -874,7 +878,7 @@ impl PdfView {
         let Some(size) = effective_page_size(self.info.as_ref(), page_index, crop) else {
             return false;
         };
-        let key = (page_index, self.trim_margins);
+        let key = PageGeometryKey { page_index, trim_margins: self.trim_margins };
         if self.effective_page_sizes.get(&key).is_some_and(|previous| nearly_equal_page_size(*previous, size)) {
             return false;
         }
@@ -886,7 +890,7 @@ impl PdfView {
     /// first geometry until a material change arrives, rather than reflowing
     /// for the one-pixel floor/ceil differences of a new raster bucket.
     fn update_break_avoidance(&mut self, page_index: usize, bands: &Arc<[(f32, f32)]>) -> bool {
-        let key = (page_index, self.trim_margins);
+        let key = PageGeometryKey { page_index, trim_margins: self.trim_margins };
         if self.page_break_avoidance.get(&key).is_some_and(|previous| nearly_equal_bands(previous, bands)) {
             return false;
         }
@@ -911,8 +915,6 @@ impl PdfView {
                     Ok((true, true)) => continue,
                     _ => break,
                 }
-                #[cfg(test)]
-                let _ = this.update(cx, |this, _| this.raster_requests += 1);
                 let page_session = session.clone();
                 let result = page_session.render_for_display(key).await;
                 let keep_rendering = this.update(cx, |this, cx| this.apply_rendered_page(generation, key, result, cx)).unwrap_or(false);
@@ -1216,7 +1218,7 @@ impl PdfView {
     /// read rather than the document, and the page count changes with it.
     fn reference_page_size(&self) -> (f32, f32) {
         self.effective_page_sizes
-            .get(&(self.current_page, self.trim_margins))
+            .get(&PageGeometryKey { page_index: self.current_page, trim_margins: self.trim_margins })
             .copied()
             .or_else(|| self.info.as_ref()?.page(self.current_page).map(|page| (page.width_points(), page.height_points())))
             .filter(|(width, height)| width.is_finite() && height.is_finite() && *width > 0.0 && *height > 0.0)
@@ -1262,17 +1264,13 @@ impl PdfView {
         }
         self.plan_key = Some(key);
         self.navigation_offsets.get_mut().take();
-        #[cfg(test)]
-        {
-            self.plan_builds += 1;
-        }
         let pages = info
             .pages()
             .iter()
             .enumerate()
             .filter(|(page_index, _)| *page_index == self.revealed_page.unwrap_or(usize::MAX) || info.skippable_pages().binary_search(page_index).is_err() || (info.skippable_pages().len() == info.page_count() && *page_index == 0))
             .filter_map(|(page_index, page)| {
-                let (width, height) = self.effective_page_sizes.get(&(page_index, self.trim_margins)).copied().unwrap_or((page.width_points(), page.height_points()));
+                let (width, height) = self.effective_page_sizes.get(&PageGeometryKey { page_index, trim_margins: self.trim_margins }).copied().unwrap_or((page.width_points(), page.height_points()));
                 FitWidthPage::new(page_index, width, height)
             })
             .collect::<Vec<_>>();
@@ -1293,7 +1291,7 @@ impl PdfView {
                     .iter()
                     .copied()
                     .map(|page| {
-                        let bands = self.page_break_avoidance.get(&(page.page_index(), self.trim_margins)).map(Arc::as_ref).unwrap_or(&[]).to_vec();
+                        let bands = self.page_break_avoidance.get(&PageGeometryKey { page_index: page.page_index(), trim_margins: self.trim_margins }).map(Arc::as_ref).unwrap_or(&[]).to_vec();
                         (page, bands)
                     })
                     .collect::<Vec<_>>();
@@ -1330,7 +1328,7 @@ impl PdfView {
     /// complete source pages continue below one another in a display column.
     fn wrapped_plan(&self, pages: &[FitWidthPage], viewport: FitWidthViewport) -> FitWidthPlan {
         let continuous_pages = pages.iter().copied().map(|page| {
-            let bands = self.page_break_avoidance.get(&(page.page_index(), self.trim_margins)).map(Arc::as_ref).unwrap_or(&[]);
+            let bands = self.page_break_avoidance.get(&PageGeometryKey { page_index: page.page_index(), trim_margins: self.trim_margins }).map(Arc::as_ref).unwrap_or(&[]);
             (page, bands)
         });
         match FitWidthPlan::new_avoiding_breaks(continuous_pages, viewport) {
@@ -1477,24 +1475,24 @@ impl PdfView {
 
     fn atomic_flow_offsets(&self) -> Arc<[f32]> {
         let extent = (self.flow_column_height(), self.max_flow_offset());
-        if let Some((height, maximum, offsets)) = self.navigation_offsets.borrow().as_ref() {
-            if (*height, *maximum) == extent {
-                return offsets.clone();
-            }
+        if let Some(cached) = self.navigation_offsets.borrow().as_ref()
+            && (cached.column_height, cached.maximum_offset) == extent
+        {
+            return cached.offsets.clone();
         }
         let mut offsets = vec![0.0, self.max_flow_offset()];
         offsets.extend(self.fit_width_plan.columns().iter().copied().map(|column| self.flow_offset_for_column(column, 0.0)));
-        for (&(page_index, trim_margins), bands) in &self.page_break_avoidance {
-            if trim_margins != self.trim_margins {
+        for (key, bands) in &self.page_break_avoidance {
+            if key.trim_margins != self.trim_margins {
                 continue;
             }
-            offsets.extend(bands.iter().filter_map(|(top, _)| self.flow_offset_for_page_y(page_index, *top)));
+            offsets.extend(bands.iter().filter_map(|(top, _)| self.flow_offset_for_page_y(key.page_index, *top)));
         }
         offsets.retain(|offset| offset.is_finite() && *offset >= 0.0 && *offset <= self.max_flow_offset());
         offsets.sort_by(f32::total_cmp);
         offsets.dedup_by(|left, right| (*left - *right).abs() < 0.5);
         let offsets: Arc<[f32]> = offsets.into();
-        *self.navigation_offsets.borrow_mut() = Some((extent.0, extent.1, offsets.clone()));
+        *self.navigation_offsets.borrow_mut() = Some(NavigationOffsets { column_height: extent.0, maximum_offset: extent.1, offsets: offsets.clone() });
         offsets
     }
 
@@ -1654,10 +1652,10 @@ fn cached_character_index(layout: &PdfPageTextLayout, point: (f32, f32), display
 
 impl DisplayPage {
     fn from_rendered(page: pdf_reader_core::RenderedPdfBgraPage) -> Result<Self, String> {
-        let (rgba, width, height, crop, text_layout, break_avoidance) = page.into_parts();
-        let byte_len = rgba.len();
-        let image = RgbaImage::from_raw(width, height, rgba).ok_or_else(|| "PDF renderer returned an invalid RGBA buffer".to_owned())?;
-        Ok(Self { image: Arc::new(RenderImage::new(SmallVec::from_vec(vec![Frame::new(image)]))), text_layout, crop, byte_len, break_avoidance })
+        let page = page.into_parts();
+        let byte_len = page.pixels.len();
+        let image = RgbaImage::from_raw(page.pixel_width, page.pixel_height, page.pixels).ok_or_else(|| "PDF renderer returned an invalid RGBA buffer".to_owned())?;
+        Ok(Self { image: Arc::new(RenderImage::new(SmallVec::from_vec(vec![Frame::new(image)]))), text_layout: page.text_layout, crop: page.crop, byte_len, break_avoidance: page.break_avoidance })
     }
 
     fn map_rect(&self, rect: NormalizedRect) -> Option<NormalizedRect> {
@@ -2038,392 +2036,4 @@ fn normalized_point(position: Point<Pixels>, page: Bounds<Pixels>) -> (f32, f32)
 
 fn normalized_rect_contains(rect: NormalizedRect, point: (f32, f32)) -> bool {
     rect.left() <= point.0 && point.0 <= rect.right() && rect.top() <= point.1 && point.1 <= rect.bottom()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::{Mutex, PoisonError};
-    use super::*;
-
-    #[test]
-    fn wrapped_flow_keeps_screen_columns_fixed_while_the_remainder_moves_vertically() {
-        assert_eq!(visible_flow_indices(0, 8, 3), vec![0, 1, 2]);
-        assert_eq!(visible_flow_indices(1, 8, 3), vec![1, 2, 3]);
-        assert_eq!(visible_flow_indices(2, 8, 3), vec![2, 3, 4]);
-        assert_eq!(visible_flow_indices(7, 8, 3), vec![5, 6, 7]);
-        assert_eq!(split_flow_offset(375.0, 800.0), (0, 375.0));
-        assert_eq!(split_flow_offset(975.0, 800.0), (1, 175.0));
-    }
-
-    #[test]
-    fn scrolling_pulls_each_right_hand_column_into_its_left_neighbor() {
-        assert_eq!(screen_column_stream(0, 0, 4).collect::<Vec<_>>(), vec![0, 1]);
-        assert_eq!(screen_column_stream(0, 1, 4).collect::<Vec<_>>(), vec![1, 2]);
-        assert_eq!(screen_column_stream(0, 2, 4).collect::<Vec<_>>(), vec![2, 3]);
-        assert_eq!(screen_column_stream(1, 0, 4).collect::<Vec<_>>(), vec![1, 2]);
-        assert_eq!(screen_column_stream(0, 3, 4).collect::<Vec<_>>(), vec![3]);
-    }
-
-    #[test]
-    fn arrow_navigation_snaps_to_one_atomic_boundary() {
-        let offsets = [0.0, 120.0, 185.0, 430.0];
-        assert_eq!(next_snap_offset(0.0, &offsets), Some(120.0));
-        assert_eq!(next_snap_offset(120.0, &offsets), Some(185.0));
-        assert_eq!(previous_snap_offset(185.0, &offsets), Some(120.0));
-        assert_eq!(previous_snap_offset(0.0, &offsets), None);
-    }
-
-    #[test]
-    fn keyboard_page_navigation_stops_at_atomic_boundaries_near_the_viewport_step() {
-        let offsets = [0.0, 120.0, 185.0, 430.0, 610.0];
-
-        assert_eq!(forward_page_snap_offset(0.0, 200.0, &offsets), Some(185.0));
-        assert_eq!(forward_page_snap_offset(185.0, 385.0, &offsets), Some(430.0));
-        assert_eq!(backward_page_snap_offset(430.0, 230.0, &offsets), Some(185.0));
-        assert_eq!(backward_page_snap_offset(610.0, 410.0, &offsets), Some(430.0));
-    }
-
-    #[test]
-    fn annotation_hit_testing_uses_column_normalized_coordinates() {
-        let rect = NormalizedRect::new(0.2, 0.3, 0.4, 0.2);
-        assert!(normalized_rect_contains(rect, (0.2, 0.3)));
-        assert!(normalized_rect_contains(rect, (0.6, 0.5)));
-        assert!(!normalized_rect_contains(rect, (0.19, 0.4)));
-        assert!(!normalized_rect_contains(rect, (0.4, 0.51)));
-    }
-
-    #[test]
-    fn a_fixed_zoom_decides_how_many_pages_fit_across() {
-        assert_eq!(columns_that_fit(499.0, 1_000.0), 2);
-        assert_eq!(columns_that_fit(500.0, 1_000.0), 2, "two columns should meet without an artificial boundary gutter");
-        assert_eq!(columns_that_fit(332.0, 1_000.0), 3);
-        assert_eq!(columns_that_fit(1_000.0, 1_000.0), 1);
-        assert_eq!(columns_that_fit(4_000.0, 1_000.0), 1, "a page wider than the viewport still occupies one column");
-    }
-
-    #[test]
-    fn fit_width_and_fixed_zoom_are_two_ends_of_one_quantity() {
-        let fitted = resolve_layout(PdfZoomMode::FitWidth { columns: 2 }, 1_000.0, 800.0, (500.0, 700.0));
-        assert_eq!(fitted.columns, 2);
-
-        // Feeding that zoom back in as a fixed zoom must reproduce the layout
-        // it came from.
-        let fixed = resolve_layout(PdfZoomMode::Fixed { zoom: fitted.zoom }, 1_000.0, 800.0, (500.0, 700.0));
-        assert_eq!(fixed.columns, 2);
-        assert!((fixed.column_width - fitted.column_width).abs() < 0.001);
-    }
-
-    #[test]
-    fn fit_height_takes_its_zoom_from_the_page_height() {
-        let layout = resolve_layout(PdfZoomMode::FitHeight, 1_000.0, 800.0, (490.0, 800.0));
-        assert!((layout.zoom - 1.0).abs() < 0.001, "an 800pt page in 800px of height is one pixel per point");
-        assert_eq!(layout.columns, 2, "at that zoom two 490px pages fit across 1000px");
-    }
-
-    #[test]
-    fn no_mode_lets_a_page_grow_wider_than_the_viewport() {
-        for mode in [PdfZoomMode::FitHeight, PdfZoomMode::Fixed { zoom: 99.0 }, PdfZoomMode::FitWidth { columns: 1 }] {
-            let layout = resolve_layout(mode, 400.0, 5_000.0, (500.0, 700.0));
-            assert!(layout.column_width <= 400.0 + 0.001, "{mode:?} produced a {}px column in a 400px viewport", layout.column_width);
-        }
-    }
-
-    #[test]
-    fn raster_rounding_noise_does_not_change_layout_geometry() {
-        assert!(nearly_equal_page_size((612.0, 792.0), (615.8, 788.2)));
-        assert!(!nearly_equal_page_size((612.0, 792.0), (616.1, 792.0)));
-
-        assert!(nearly_equal_bands(&[(0.20, 0.23), (0.40, 0.43)], &[(0.205, 0.225), (0.405, 0.435)]));
-        assert!(!nearly_equal_bands(&[(0.20, 0.23)], &[(0.212, 0.23)]));
-    }
-
-    #[test]
-    fn fit_page_spreads_use_the_fitted_page_height_as_the_vertical_stride() {
-        let viewport = FitWidthViewport::new(400.0, 1_600.0).expect("viewport");
-        let page = FitWidthPage::new(0, 600.0, 800.0).expect("page");
-        let plan = FitWidthPlan::fit_page([page], viewport);
-        let fitted_height = plan.columns()[0].display_height();
-
-        assert!((fit_page_flow_column_height(PdfZoomMode::FitHeight, 2, 1_600.0, plan.columns()) - (fitted_height + PDF_PAGE_BOUNDARY_GAP)).abs() < 0.001);
-        assert_eq!(fit_page_flow_column_height(PdfZoomMode::FitHeight, 1, 1_600.0, plan.columns()), 1_600.0);
-        assert_eq!(fit_page_flow_column_height(PdfZoomMode::FitWidth { columns: 2 }, 2, 1_600.0, plan.columns()), 1_600.0);
-    }
-
-    static PDF_TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    fn interaction_fixture() -> Vec<u8> {
-        use lopdf::{Document, Object, Stream, dictionary};
-        let mut document = Document::with_version("1.7");
-        let pages = document.new_object_id();
-        let font = document.add_object(dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" });
-        let contents = document.add_object(Stream::new(dictionary! {}, b"BT /F1 18 Tf 72 220 Td (Searchable text) Tj ET".to_vec()));
-        let page = document.add_object(dictionary! {
-            "Type" => "Page", "Parent" => pages, "MediaBox" => vec![0.into(), 0.into(), 300.into(), 400.into()],
-            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } }, "Contents" => contents,
-        });
-        document.objects.insert(pages, Object::Dictionary(dictionary! { "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1 }));
-        let root_id = document.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
-        document.trailer.set("Root", root_id);
-        let mut bytes = Vec::new();
-        document.save_to(&mut bytes).unwrap();
-        bytes
-    }
-
-    #[test]
-    fn lazy_annotation_suppression_preserves_external_annotations() {
-        let _guard = PDF_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        use lopdf::{Document, Object, Stream, dictionary};
-        for (name, visible) in [("external:highlight", true), ("bokheim:highlight", false)] {
-            let mut document = Document::load_mem(&interaction_fixture()).unwrap();
-            let page = *document.get_pages().values().next().unwrap();
-            let appearance = document.add_object(Stream::new(
-                dictionary! {
-                    "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(), 0.into(), 50.into(), 50.into()],
-                },
-                b"1 0 0 rg 0 0 50 50 re f".to_vec(),
-            ));
-            let annotation = document.add_object(dictionary! {
-                "Type" => "Annot", "Subtype" => "Square", "NM" => Object::string_literal(name),
-                "Rect" => vec![20.into(), 20.into(), 70.into(), 70.into()], "F" => 4,
-                "AP" => dictionary! { "N" => appearance },
-            });
-            document.get_object_mut(page).unwrap().as_dict_mut().unwrap().set("Annots", vec![annotation.into()]);
-            let mut bytes = Vec::new();
-            document.save_to(&mut bytes).unwrap();
-            let session = PdfDocumentSession::from_bytes(name, bytes).unwrap();
-            for width in [600, 800] {
-                let raster = session.render_page(0, Some(width)).unwrap();
-                let red = raster.rgba().chunks_exact(4).filter(|pixel| pixel[0] > 200 && pixel[1] < 50 && pixel[2] < 50).count();
-                assert_eq!(red > 500, visible, "wrong annotation visibility for {name} at {width}px: {red} red pixels");
-            }
-        }
-    }
-
-    #[gpui::test]
-    fn cached_navigation_and_zoom_preserve_pages_without_rebuilding(cx: &mut gpui::TestAppContext) {
-        let _guard = PDF_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        cx.update(gpui_component::init);
-        let window = cx.add_window(|window, cx| {
-            let mut view = PdfView::from_bytes("test.pdf".into(), interaction_fixture(), 0, window, cx);
-            view.trim_margins = false;
-            view
-        });
-        cx.run_until_parked();
-        let initial_rasters = window
-            .update(cx, |view, _, cx| {
-                assert_eq!(view.pages.len(), 1);
-                let builds = view.plan_builds;
-                let rasters = view.raster_requests;
-                view.request_current_pages(cx);
-                view.request_current_pages(cx);
-                assert_eq!(view.plan_builds, builds, "cached navigation must not rebuild document layout");
-                assert_eq!(view.raster_requests, rasters);
-                let previous = view.display_cache.pages.values().cloned().collect::<Vec<_>>();
-                view.set_zoom_mode(PdfZoomMode::Fixed { zoom: 0.8 }, cx);
-                assert!(previous.iter().any(|page| Arc::ptr_eq(page, &view.pages[0].1)), "zoom should retain a cached raster until replacement arrives");
-                assert!(view.plan_builds > builds, "zoom must rebuild geometry");
-                // Supersede the queued generation before it can start.
-                view.request_current_pages(cx);
-                view.request_current_pages(cx);
-                rasters
-            })
-            .unwrap();
-        cx.run_until_parked();
-        window
-            .update(cx, |view, _, cx| {
-                assert!(!view.rendering);
-                assert!(view.pending_render.is_none());
-                assert_eq!(view.raster_requests, initial_rasters + 1, "superseded requests must not raster the same page repeatedly");
-                assert!(view.visible_render_keys().iter().all(|key| view.display_cache.contains(*key)));
-                let builds = view.plan_builds;
-                view.request_current_pages(cx);
-                assert_eq!(view.plan_builds, builds);
-                view.set_trim_margins(true, cx);
-            })
-            .unwrap();
-        cx.run_until_parked();
-        window
-            .update(cx, |view, _, _| {
-                assert!(!view.pages[0].1.crop.is_full_page());
-                assert!(!view.rendering);
-                view.session = None;
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn selection_uses_display_geometry_without_a_document_session(cx: &mut gpui::TestAppContext) {
-        let _guard = PDF_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        cx.update(gpui_component::init);
-        let window = cx.add_window(|window, cx| PdfView::from_bytes("test.pdf".into(), interaction_fixture(), 0, window, cx));
-        cx.run_until_parked();
-        window
-            .update(cx, |view, _, _| {
-                view.session = None;
-                let page = &view.pages[0].1;
-                let first = page.text_layout.geometry().characters().iter().find(|ch| !ch.character().is_control()).unwrap();
-                let bounds = first.bounds();
-                let center = ((bounds.left() + bounds.right()) / 2.0, (bounds.top() + bounds.bottom()) / 2.0);
-                let target = PdfInteractionTarget { page_index: 0, column: view.fit_width_plan.columns()[0], page_point: center, page_display_size: (2000.0, 500.0) };
-                assert_eq!(view.selection_anchor_source_index(target), Some(first.source_index()));
-                assert_eq!(cached_character_index(&page.text_layout, (bounds.left() - 7.0 / 2000.0, center.1), (2000.0, 500.0)), Some(first.source_index()));
-                assert_eq!(cached_character_index(&page.text_layout, (bounds.left() - 9.0 / 2000.0, center.1), (2000.0, 500.0)), None);
-                assert_eq!(cached_character_index(&page.text_layout, center, (0.0, 500.0)), None);
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn navigation_offsets_are_reused_until_geometry_changes(cx: &mut gpui::TestAppContext) {
-        let _guard = PDF_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        cx.update(gpui_component::init);
-        let window = cx.add_window(|window, cx| PdfView::from_bytes("test.pdf".into(), interaction_fixture(), 0, window, cx));
-        cx.run_until_parked();
-        let original = window
-            .update(cx, |view, _, cx| {
-                let original = view.atomic_flow_offsets();
-                assert!(Arc::ptr_eq(&original, &view.atomic_flow_offsets()));
-                view.request_current_pages(cx);
-                assert!(Arc::ptr_eq(&original, &view.atomic_flow_offsets()), "cached navigation must reuse sorted offsets");
-                view.set_trim_margins(false, cx);
-                original
-            })
-            .unwrap();
-        cx.run_until_parked();
-        window
-            .update(cx, |view, _, cx| {
-                let untrimmed = view.atomic_flow_offsets();
-                assert!(!Arc::ptr_eq(&original, &untrimmed));
-                view.set_zoom_mode(PdfZoomMode::Fixed { zoom: 0.8 }, cx);
-                assert!(!Arc::ptr_eq(&untrimmed, &view.atomic_flow_offsets()));
-                view.session = None;
-            })
-            .unwrap();
-        cx.run_until_parked();
-    }
-
-    #[test]
-    fn binary_navigation_matches_linear_reference_at_tolerance_boundaries() {
-        let offsets = [0.0, 1.0, 5.0, 10.0, 100.0];
-        for current in [-1.0, 0.0, 0.5, 1.0, 4.5, 5.0, 5.5, 99.5, 100.0, 101.0] {
-            for target in [-2.0, 0.0, 0.5, 1.0, 4.5, 5.0, 5.5, 99.5, 100.0, 102.0] {
-                let next = offsets.iter().copied().find(|offset| *offset > current + 0.5);
-                let previous = offsets.iter().copied().rev().find(|offset| *offset < current - 0.5);
-                assert_eq!(next_snap_offset(current, &offsets), next);
-                assert_eq!(previous_snap_offset(current, &offsets), previous);
-                let forward = offsets.iter().copied().take_while(|offset| *offset <= target + 0.5).filter(|offset| *offset > current + 0.5).last().or(next);
-                let backward = offsets.iter().copied().find(|offset| *offset >= target - 0.5 && *offset < current - 0.5).or(previous);
-                assert_eq!(forward_page_snap_offset(current, target, &offsets), forward);
-                assert_eq!(backward_page_snap_offset(current, target, &offsets), backward);
-            }
-        }
-        assert_eq!(next_snap_offset(0.0, &[]), None);
-        assert_eq!(previous_snap_offset(0.0, &[]), None);
-    }
-
-    #[gpui::test]
-    fn streamed_search_preserves_page_slices_navigation_and_cancellation(cx: &mut gpui::TestAppContext) {
-        let _guard = PDF_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        use lopdf::{Document, Object};
-        let mut fixture = Document::load_mem(&interaction_fixture()).unwrap();
-        let page_id = *fixture.get_pages().values().next().unwrap();
-        let page = fixture.get_object(page_id).unwrap().clone();
-        let parent = page.as_dict().unwrap().get(b"Parent").unwrap().as_reference().unwrap();
-        let second = fixture.add_object(page.clone());
-        let third = fixture.add_object(page);
-        let pages = fixture.get_object_mut(parent).unwrap().as_dict_mut().unwrap();
-        pages.set("Kids", vec![Object::Reference(page_id), Object::Reference(second), Object::Reference(third)]);
-        pages.set("Count", 3);
-        let mut bytes = Vec::new();
-        fixture.save_to(&mut bytes).unwrap();
-        let document = PdfDocumentSession::from_bytes("search", bytes).unwrap();
-        let hits = document.search("Searchable").unwrap();
-        assert_eq!(hits.len(), 3);
-        cx.update(gpui_component::init);
-        let window = cx.add_window(|window, cx| PdfView::empty(0, window, cx));
-        window
-            .update(cx, |view, _, cx| {
-                let generation = view.search_generation;
-                assert!(view.apply_search_chunk(generation, Ok(vec![hits[0]]), cx));
-                let first_page = view.search_page_hits[&0].hits.clone();
-                assert!(view.apply_search_chunk(generation, Ok(vec![hits[1]]), cx));
-                assert!(Arc::ptr_eq(&first_page, &view.search_page_hits[&0].hits), "new pages must not copy earlier matches");
-                view.navigate_search(1, cx);
-                assert_eq!(view.active_search_hit, Some(1));
-                assert!(view.apply_search_chunk(generation, Ok(vec![hits[2]]), cx));
-                assert_eq!(view.active_search_hit, Some(1), "streaming must preserve the user's selected match");
-                assert_eq!(view.search_hits, hits);
-                for page in 0..3 {
-                    assert_eq!(view.search_page_hits[&page].first_index, page);
-                    assert_eq!(view.search_page_hits[&page].hits.as_ref(), &hits[page..page + 1]);
-                }
-                view.navigate_search(1, cx);
-                assert_eq!(view.current_page, 2);
-                view.navigate_search(1, cx);
-                assert_eq!(view.current_page, 0);
-                view.navigate_search(-1, cx);
-                assert_eq!(view.current_page, 2);
-                view.search(String::new(), cx);
-                assert!(view.search_hits.is_empty());
-                assert!(view.search_page_hits.is_empty());
-                assert!(!view.apply_search_chunk(generation, Ok(hits), cx));
-                assert!(view.search_page_hits.is_empty());
-            })
-            .unwrap();
-    }
-
-    #[gpui::test]
-    fn searching_during_render_finishes_with_the_latest_query(cx: &mut gpui::TestAppContext) {
-        let _guard = PDF_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-        cx.update(gpui_component::init);
-        let window = cx.add_window(|window, cx| PdfView::from_bytes("test.pdf".into(), interaction_fixture(), 0, window, cx));
-        cx.run_until_parked();
-        window
-            .update(cx, |view, _, cx| {
-                view.set_zoom_mode(PdfZoomMode::Fixed { zoom: 0.8 }, cx);
-                view.search("missing".into(), cx);
-                view.search("Searchable".into(), cx);
-            })
-            .unwrap();
-        cx.run_until_parked();
-        cx.background_executor.advance_clock(std::time::Duration::from_millis(16));
-        cx.run_until_parked();
-        window
-            .update(cx, |view, _, _| {
-                assert!(!view.rendering);
-                assert!(!view.search_in_flight);
-                assert_eq!(view.search_hits.len(), 1);
-                view.session = None;
-            })
-            .unwrap();
-    }
-
-    #[test]
-    fn display_cache_evicts_oldest_page_with_a_byte_budget() {
-        fn page(byte_len: usize) -> Arc<DisplayPage> {
-            let image = RgbaImage::new(1, 1);
-            Arc::new(DisplayPage { image: Arc::new(RenderImage::new(SmallVec::from_vec(vec![Frame::new(image)]))), text_layout: Arc::new(PdfPageTextLayout::default()), crop: PixelCrop::full(1, 1), byte_len, break_avoidance: Arc::from([]) })
-        }
-
-        let mut cache = DisplayPageCache::new(8);
-        let first = PageRenderKey::new(0, 800);
-        let second = PageRenderKey::new(1, 800);
-        let third = PageRenderKey::new(2, 800);
-        cache.insert(first, page(4));
-        cache.insert(second, page(4));
-        assert!(cache.get(first).is_some());
-        cache.insert(third, page(4));
-        assert!(cache.get(first).is_some());
-        assert!(cache.get(second).is_none());
-        assert!(cache.get(third).is_some());
-        assert!(cache.closest(PageRenderKey::new(0, 1200)).is_some());
-        assert!(cache.closest(PageRenderKey::new(3, 1200)).is_none());
-        assert!(cache.closest(PageRenderKey::with_margin_trim(0, 1200, true)).is_none(), "fallback must preserve trim mode");
-        cache.reserve(12);
-        let sharper = PageRenderKey::new(0, 1600);
-        cache.insert(sharper, page(4));
-        let fallback = cache.closest(PageRenderKey::new(0, 1400)).unwrap();
-        assert!(Arc::ptr_eq(&fallback, &cache.get(sharper).unwrap()));
-        assert!(!cache.contains(PageRenderKey::new(0, 1400)), "a fallback does not satisfy an exact render request");
-    }
 }

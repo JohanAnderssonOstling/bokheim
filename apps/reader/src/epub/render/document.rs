@@ -1,12 +1,12 @@
 //! EPUB document surface and its selection/table/image context menu.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, ClickEvent, Context, Entity, IntoElement, Point, Pixels, px};
-use gpui_component::menu::ContextMenuExt;
+use gpui::{AnyElement, App, ClickEvent, Context, Entity, IntoElement, Pixels, Point, Window, px};
+use gpui_component::menu::{ContextMenuExt, OpenContextMenu};
 use ui_components as components;
 
-use crate::epub::{LoadState, ReaderView};
-use crate::shell::context_sheet::{ContextAction, ContextActions};
+use crate::epub::{EpubContextCommand, LoadState, ReaderView, TableCopyFormat};
+use crate::shell::context_sheet::{ContextAction, ContextActionTarget, ContextActions};
 
 /// Keeps glyph ink and logical-to-framebuffer rounding inside the Kobo panel.
 /// This is a renderer guard band, not an authored EPUB margin.
@@ -35,6 +35,7 @@ impl ReaderView {
         };
 
         let context_target = entity.clone();
+        let keyboard_target = entity.clone();
         let document = components::reader_content()
             .id("epub-reader-document")
             .px(px(horizontal_margin + if cfg!(feature = "kobo") { KOBO_READER_EDGE_INSET } else { 0.0 }))
@@ -51,51 +52,94 @@ impl ReaderView {
                 }
             }));
         if mobile {
-            document.into_any_element()
+            document.on_action(cx.listener(|reader, _: &OpenContextMenu, window, cx| reader.open_keyboard_context_sheet(window.mouse_position(), cx))).into_any_element()
         } else {
-            document.context_menu(move |menu, window, cx| {
-                let position = window.mouse_position();
-                context_target.read(cx).context_actions_at(position, &context_target, cx).popup(menu)
-            }).into_any_element()
+            document
+                .context_menu(move |menu, window, cx| {
+                    let position = window.mouse_position();
+                    context_target.read(cx).context_actions_at(position, cx).popup(menu, &context_target)
+                })
+                .keyboard_menu(move |menu, window, cx| {
+                    keyboard_target.read(cx).keyboard_context_actions(window.mouse_position(), cx).popup(menu, &keyboard_target)
+                })
+                .into_any_element()
         }
     }
 }
 
 impl ReaderView {
-    fn context_actions_at(&self, position: Point<Pixels>, entity: &Entity<Self>, cx: &gpui::App) -> ContextActions {
+    fn context_actions_at(&self, position: Point<Pixels>, cx: &App) -> ContextActions<EpubContextCommand> {
+        self.context_actions(position, false, cx)
+    }
+
+    fn keyboard_context_actions(&self, pointer: Point<Pixels>, cx: &App) -> ContextActions<EpubContextCommand> {
+        let position = match &self.load_state {
+            LoadState::Ready(renderer) => renderer.read(cx).selection_bounds().map(|bounds| bounds.center()).unwrap_or(pointer),
+            _ => pointer,
+        };
+        self.context_actions(position, true, cx)
+    }
+
+    fn context_actions(&self, position: Point<Pixels>, keyboard: bool, cx: &App) -> ContextActions<EpubContextCommand> {
         let mut actions = ContextActions::default();
         let LoadState::Ready(renderer) = &self.load_state else { return actions };
-        if self.selection.is_some() && renderer.read(cx).selection_contains(position) {
-            let highlight = entity.clone();
-            let cite = entity.clone();
-            actions.add_section(vec![
-                ContextAction::new("Highlight", move |window, cx| highlight.update(cx, |reader, cx| reader.highlight_selection(window, cx))),
-                ContextAction::new("Cite", move |_, cx| cite.update(cx, |reader, cx| reader.copy_selection_citation(cx))),
-            ]);
+        if self.selection.is_some() && (keyboard || renderer.read(cx).selection_contains(position)) {
+            actions.add_section(vec![ContextAction { label: "Highlight", command: EpubContextCommand::Highlight }, ContextAction { label: "Cite", command: EpubContextCommand::Cite }]);
         }
         if renderer.read(cx).table_at(position) {
-            let markdown = renderer.clone();
-            let plain = renderer.clone();
-            let styled = renderer.clone();
             actions.add_section(vec![
-                ContextAction::new("Copy Table as Markdown", move |_, cx| { markdown.update(cx, |view, _| view.copy_table_at(position)); }),
-                ContextAction::new("Copy Table as Unstyled HTML", move |_, cx| { plain.update(cx, |view, _| view.copy_table_unstyled_html_at(position)); }),
-                ContextAction::new("Copy Table as Styled HTML", move |_, cx| { styled.update(cx, |view, _| view.copy_table_styled_html_at(position)); }),
+                ContextAction { label: "Copy Table as Markdown", command: EpubContextCommand::CopyTable { view: renderer.clone(), position, format: TableCopyFormat::Markdown } },
+                ContextAction { label: "Copy Table as Unstyled HTML", command: EpubContextCommand::CopyTable { view: renderer.clone(), position, format: TableCopyFormat::UnstyledHtml } },
+                ContextAction { label: "Copy Table as Styled HTML", command: EpubContextCommand::CopyTable { view: renderer.clone(), position, format: TableCopyFormat::StyledHtml } },
             ]);
         }
         if renderer.read(cx).image_at(position) {
-            let image = renderer.clone();
-            actions.add_section(vec![ContextAction::new("Copy Image", move |_, cx| { image.update(cx, |view, _| view.copy_image_at(position)); })]);
+            actions.add_section(vec![ContextAction { label: "Copy Image", command: EpubContextCommand::CopyImage { view: renderer.clone(), position } }]);
         }
         actions
     }
 
+    fn open_keyboard_context_sheet(&mut self, pointer: Point<Pixels>, cx: &mut Context<Self>) {
+        let actions = self.keyboard_context_actions(pointer, cx);
+        self.show_context_sheet(actions, cx);
+    }
+
     fn open_context_sheet(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
-        let actions = self.context_actions_at(position, &cx.entity(), cx);
+        let actions = self.context_actions_at(position, cx);
+        self.show_context_sheet(actions, cx);
+    }
+
+    fn show_context_sheet(&mut self, actions: ContextActions<EpubContextCommand>, cx: &mut Context<Self>) {
         if !actions.is_empty() {
             self.context_sheet = Some(actions);
             self.chrome.hide(cx);
             cx.notify();
         }
+    }
+}
+
+impl ContextActionTarget for ReaderView {
+    type Command = EpubContextCommand;
+
+    fn run_context_action(&mut self, command: Self::Command, window: &mut Window, cx: &mut Context<Self>) {
+        match command {
+            EpubContextCommand::Highlight => self.highlight_selection(window, cx),
+            EpubContextCommand::Cite => self.copy_selection_citation(cx),
+            EpubContextCommand::CopyTable { view, position, format } => {
+                view.update(cx, |view, _| match format {
+                    TableCopyFormat::Markdown => view.copy_table_at(position),
+                    TableCopyFormat::UnstyledHtml => view.copy_table_unstyled_html_at(position),
+                    TableCopyFormat::StyledHtml => view.copy_table_styled_html_at(position),
+                });
+            }
+            EpubContextCommand::CopyImage { view, position } => {
+                view.update(cx, |view, _| view.copy_image_at(position));
+            }
+        }
+    }
+
+    fn dismiss_context_actions(&mut self, cx: &mut Context<Self>) {
+        self.context_sheet = None;
+        cx.notify();
     }
 }

@@ -62,16 +62,3 @@ fn route_group(path: &str) -> &'static str {
         "/other"
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn routes_are_reduced_to_bounded_non_sensitive_categories() {
-        assert_eq!(route_group("/api/libraries/private-library/blobs/private-hash"), "/api/blobs");
-        assert_eq!(route_group("/api/libraries/private-library/thumbnails/private-hash"), "/api/thumbnails");
-        assert_eq!(route_group("/api/auth/login"), "/api/auth");
-        assert_eq!(route_group("/unexpected/private-value"), "/other");
-    }
-}

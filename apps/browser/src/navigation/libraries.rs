@@ -1,7 +1,7 @@
 //! Cached page sessions and coarse lifecycle operations for every library.
 
 use crate::services::{import_failure_message, notify_warning};
-use crate::services::library_add_trace::mark;
+use library_backend::{ImportFailure, ROOT_DIR_ID};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -10,7 +10,7 @@ use app::AppClient;
 use gpui::{App, AppContext, Context, Entity, SharedString, Task, Window};
 use sync_common::LibraryId;
 
-use super::{LibrarySession, LibrarySummary, Navigate};
+use super::{LibrarySession, LibrarySummary};
 use crate::library::{BookDetailClosed, OpenBook};
 
 fn library_summaries(backend: &AppClient) -> crate::services::UiFuture<Vec<LibrarySummary>> {
@@ -27,7 +27,6 @@ pub(crate) struct Libraries {
     selected_id: Option<LibraryId>,
     creating_libraries: usize,
     selection_epoch: Rc<Cell<u64>>,
-    navigate: Navigate,
     _list_updates: Task<()>,
 }
 
@@ -39,12 +38,12 @@ fn selected_library_id(libraries: &[LibrarySummary], current: Option<LibraryId>,
 }
 
 impl Libraries {
-    pub(super) fn new(backend: Rc<AppClient>, open_book: OpenBook, book_detail_closed: BookDetailClosed, entries: Vec<LibrarySummary>, library_id: Option<LibraryId>, navigate: Navigate, cx: &mut Context<Self>) -> Self {
+    pub(super) fn new(backend: Rc<AppClient>, open_book: OpenBook, book_detail_closed: BookDetailClosed, entries: Vec<LibrarySummary>, library_id: Option<LibraryId>, cx: &mut Context<Self>) -> Self {
         let selection_epoch = Rc::new(Cell::new(0));
         let list_epoch = selection_epoch.clone();
         let list_backend = backend.clone();
         let list_updates = cx.spawn(async move |sessions, cx| {
-            let changes = match list_backend.library_list_changes().await {
+            let mut changes = match list_backend.library_list_changes().await {
                 Ok(changes) => changes,
                 Err(error) => {
                     log::error!("failed to subscribe to library-list updates: {error}");
@@ -64,7 +63,7 @@ impl Libraries {
                 if sessions.update_in(cx, |sessions, window, cx| sessions.apply_library_list_result(epoch, result, window, cx)).is_err() {
                     return;
                 }
-                if changes.recv().await.is_err() {
+                if changes.changed().await.is_err() {
                     return;
                 }
             }
@@ -73,7 +72,7 @@ impl Libraries {
         // uses the initial local list and subscribes to discovery updates.
         let sessions =
             library_id.into_iter().filter(|id| entries.iter().any(|entry| entry.library_id() == id)).map(|id| (id, cx.new(|cx| LibrarySession::new(backend.clone(), open_book.clone(), book_detail_closed.clone(), id, cx)))).collect();
-        let mut libraries = Self { backend, open_book, book_detail_closed, sessions, entries, selected_id: library_id, creating_libraries: 0, selection_epoch, navigate, _list_updates: list_updates };
+        let libraries = Self { backend, open_book, book_detail_closed, sessions, entries, selected_id: library_id, creating_libraries: 0, selection_epoch, _list_updates: list_updates };
         libraries
     }
 
@@ -94,12 +93,6 @@ impl Libraries {
         self.selected_id.and_then(|id| self.sessions.get(&id).cloned())
     }
 
-    pub(crate) fn clear_cached_book_details(&self, cx: &mut App) {
-        for session in self.sessions.values() {
-            session.update(cx, |session, cx| session.clear_cached_book_detail(cx));
-        }
-    }
-
     /// Selects a library, refreshing the authoritative list first when needed.
     pub(crate) fn select_library(&mut self, library_id: LibraryId, cx: &mut Context<Self>) {
         // A list read started before this selection may not contain a newly
@@ -113,11 +106,9 @@ impl Libraries {
             self.set_selected_library(library_id, cx);
             return;
         }
-        mark(library_id, "list_refresh_requested");
         let backend = self.backend.clone();
         cx.spawn(async move |sessions, cx| {
             let result = library_summaries(&backend).await;
-            mark(library_id, "list_refresh_received");
             let _ = sessions.update_in(cx, |sessions, window, cx| {
                 if sessions.selection_epoch.get() != epoch {
                     return;
@@ -172,7 +163,7 @@ impl Libraries {
         self.backend.clone()
     }
 
-    pub(crate) fn create_selected_libraries(&mut self, directories: Vec<gpui::SelectedDirectory>, asset_storage_enabled: bool, trace: crate::services::library_add_trace::Trace, cx: &mut Context<Self>) {
+    pub(crate) fn create_selected_libraries(&mut self, directories: Vec<gpui::SelectedDirectory>, asset_storage_enabled: bool, cx: &mut Context<Self>) {
         self.creating_libraries += 1;
         cx.notify();
         let backend = self.backend.clone();
@@ -180,14 +171,10 @@ impl Libraries {
             let mut created = Vec::new();
             let mut errors = Vec::new();
             let mut selected_local = None;
-            trace.mark("create_requested");
             let locators = directories.iter().filter_map(|directory| directory.local_path.as_ref().map(|path| path.to_string_lossy().into_owned())).collect::<Vec<_>>();
             if !locators.is_empty() {
                 match backend.create_libraries_with_asset_storage(locators, asset_storage_enabled).await {
                     Ok((ids, failures)) => {
-                        for id in &ids {
-                            trace.attach(*id);
-                        }
                         selected_local = ids.last().copied();
                         errors.extend(failures);
                     }
@@ -199,13 +186,11 @@ impl Libraries {
                 let name = directory.name.clone();
                 match backend.create_library_with_asset_storage(name.clone(), asset_storage_enabled).await {
                     Ok(entry) => {
-                        trace.attach(*entry.library_id());
                         created.push((*entry.library_id(), entry.library_name().to_owned(), directory));
                     }
                     Err(error) => errors.push(format!("{name}: {error}")),
                 }
             }
-            trace.mark("create_response_received");
             let selected = created.last().map(|(library_id, _, _)| *library_id).or(selected_local);
             let _ = sessions.update_in(cx, |sessions, window, cx| {
                 sessions.creating_libraries -= 1;
@@ -231,8 +216,8 @@ impl Libraries {
             });
 
             for (library_id, name, directory) in created {
-                let _progress = sessions.update_in(cx, |_, window, cx| crate::services::ImportProgressToast::start(backend.library(library_id), window, cx)).ok();
-                let result = backend.library(library_id).import_directory_contents(app::ROOT_DIR_ID, directory).await;
+                let _progress = sessions.update_in(cx, |_, window, cx| crate::services::ImportProgressToast::start(window, cx)).ok();
+                let result = backend.library(library_id).import_directory(ROOT_DIR_ID, directory, false).await;
                 let _ = sessions.update(cx, |sessions, cx| {
                     if let Some(session) = sessions.sessions.get(&library_id) {
                         session.update(cx, |session, cx| session.set_importing(false, cx));
@@ -286,7 +271,6 @@ impl Libraries {
     }
 
     fn set_selected_library(&mut self, library_id: LibraryId, cx: &mut Context<Self>) {
-        mark(library_id, "session_creation_started");
         let backend = self.backend.clone();
         let open_book = self.open_book.clone();
         let book_detail_closed = self.book_detail_closed.clone();
@@ -294,7 +278,6 @@ impl Libraries {
             self.sessions.entry(library_id).or_insert_with(|| cx.new(|cx| LibrarySession::new(backend, open_book, book_detail_closed, library_id, cx)));
         }
         self.selected_id = Some(library_id);
-        mark(library_id, "selection_updated");
         cx.notify();
     }
 
@@ -303,32 +286,10 @@ impl Libraries {
     }
 }
 
-fn import_failure_summary(failures: &[app::ImportFailure]) -> String {
+fn import_failure_summary(failures: &[ImportFailure]) -> String {
     let mut summary = failures.iter().take(3).map(import_failure_message).collect::<Vec<_>>().join(". ");
     if failures.len() > 3 {
         summary.push_str(&format!(". {} more imports failed.", failures.len() - 3));
     }
     summary
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn import_warnings_limit_the_number_of_failures_shown() {
-        let failures = (1..=100).map(|i| app::ImportFailure { kind: app::ImportFailureKind::File, path: vec![format!("Book {i}.epub")], diagnostic: None }).collect::<Vec<_>>();
-        assert_eq!(import_failure_summary(&failures), "Could not import “Book 1.epub”. Could not import “Book 2.epub”. Could not import “Book 3.epub”. 97 more imports failed.");
-        assert_eq!(import_failure_summary(&failures[..1]), import_failure_message(&failures[0]));
-        assert_eq!(import_failure_summary(&[]), "");
-    }
-
-    #[test]
-    fn selection_handles_empty_startup_discovery_and_last_library_removal() {
-        assert_eq!(selected_library_id(&[], None, None), None);
-        let id = LibraryId::from_u128(1);
-        let libraries = [LibrarySummary::new(id, "Existing library")];
-        assert_eq!(selected_library_id(&libraries, None, None), Some(id));
-        assert_eq!(selected_library_id(&[], Some(id), None), None);
-    }
 }

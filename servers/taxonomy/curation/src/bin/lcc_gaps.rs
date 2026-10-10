@@ -1,6 +1,6 @@
 //! Stream unresolved LCC classifications with parser and outline evidence.
 use std::{collections::BTreeMap, path::Path};
-use subject_projection::{canonical_lcc_notation, lcc_subject_path, read_unified_taxonomy_sqlite, UnifiedTaxonomy};
+use subject_projection::{canonical_lcc_notation, lcc_subject_path, read_unified_taxonomy_sqlite, UnifiedTaxonomy, LCC_SYSTEM_ID};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().collect::<Vec<_>>();
@@ -12,8 +12,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut counts = BTreeMap::<&str, (u64, i64)>::new();
     for row in query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))? {
         let (code, uses) = row?;
-        let ids = taxonomy.lcc_match_candidates(&code);
-        let assigned = ids.len() == 1 || (ids.len() > 1 && !taxonomy.matching_concept_ids(subject_projection::LCC_SYSTEM_ID, &code).is_empty());
+        let ids = taxonomy.match_candidates(LCC_SYSTEM_ID, &code);
+        let assigned = ids.len() == 1 || (ids.len() > 1 && !taxonomy.matching_concept_ids(LCC_SYSTEM_ID, &code).is_empty());
         let canonical = (!assigned).then(|| canonical_lcc_notation(&code)).flatten();
         let status = match ids.len() {
             _ if assigned => "matched",

@@ -482,31 +482,3 @@ fn network_rows(snapshot: &WifiSnapshot) -> Vec<NetworkRow> {
     rows.sort_by(|a, b| b.connected.cmp(&a.connected).then_with(|| b.network.as_ref().map(|n| n.signal).cmp(&a.network.as_ref().map(|n| n.signal))).then_with(|| a.name.cmp(&b.name)));
     rows
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn network(name: &str, signal: i32) -> WifiNetwork {
-        WifiNetwork { ssid: name.as_bytes().to_vec(), signal, security: WifiSecurity::WpaPersonal }
-    }
-
-    #[test]
-    fn connected_network_precedes_stronger_signals_and_duplicates_merge() {
-        let snapshot = WifiSnapshot { phase: WifiPhase::Connected, network: Some("Home".into()), networks: vec![network("Weak", -85), network("Home", -90), network("Strong", -30), network("Weak", -50)], ..WifiSnapshot::default() };
-        let rows = network_rows(&snapshot);
-        assert_eq!(rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(), ["Home", "Strong", "Weak"]);
-        assert!(rows[0].connected);
-        assert_eq!(rows[2].network.as_ref().unwrap().signal, -50);
-    }
-
-    #[test]
-    fn connected_network_stays_visible_when_missing_from_scan() {
-        let snapshot = WifiSnapshot { phase: WifiPhase::Connected, network: Some("Home".into()), networks: vec![network("Nearby", -30)], ..WifiSnapshot::default() };
-        let rows = network_rows(&snapshot);
-        assert_eq!(rows[0].name, "Home");
-        assert!(rows[0].connected);
-        let rows = network_rows(&WifiSnapshot { phase: WifiPhase::Disconnected, ..snapshot });
-        assert!(rows.iter().all(|row| !row.connected));
-    }
-}

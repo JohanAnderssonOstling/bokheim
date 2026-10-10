@@ -17,13 +17,13 @@ pub(crate) fn parse_uuid_column(value: String, column: usize) -> rusqlite::Resul
 }
 
 pub(crate) fn read_book_card_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookCardRow> {
-    let raw_content_hash: String = row.get("content_hash")?;
+    let raw_content_hash: ContentHash = row.get("content_hash")?;
     let title: Option<String> = row.get("title")?;
     let duration_column = row.as_ref().column_index("audiobook_duration_ms")?;
     let duration_ms: Option<i64> = row.get(duration_column)?;
     Ok(BookCardRow {
-        content_hash: ContentHash::new(&raw_content_hash),
-        title: title.unwrap_or_else(|| format!("Untitled ({raw_content_hash})")),
+        source: library_model::BookSource::Library { content_hash: raw_content_hash },
+        title: super::text::display_title(title.as_deref()).to_owned(),
         subtitle: row.get("subtitle")?,
         author: row.get::<_, Option<String>>("author")?.unwrap_or_default(),
         progress: row.get::<_, Option<f32>>("progress")?.unwrap_or_default(),

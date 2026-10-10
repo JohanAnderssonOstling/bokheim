@@ -1,10 +1,16 @@
-use std::rc::Rc;
+use std::{cell::Cell, rc::Rc};
 use gpui::prelude::*;
-use gpui::{App, ClickEvent, ElementId, IntoElement, MouseButton, SharedString, Window, div, px};
+use gpui::{App, ClickEvent, ElementId, Hsla, IntoElement, MouseButton, Pixels, SharedString, Window, div, px};
 use gpui_component::menu::PopupMenuItem;
 use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
 
-use crate::{TEXT_SM, browser_theme};
+use crate::{BrowserTheme, TEXT_SM, browser_theme};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitSide {
+    Left,
+    Right,
+}
 
 /// Build a text-only popup menu item with the project's common layout.
 pub fn menu_item<L, F>(label: L, on_click: F) -> PopupMenuItem
@@ -49,17 +55,17 @@ where
 /// icons do. A hand-drawn arrow there would stack after that column instead
 /// of in it.
 ///
-/// Marked `disabled` at the item level: that's what a plain menu item does
-/// for its own click and hover fill, and both would be wrong here — the row
-/// has two handlers, not one, and highlighting the whole row on hover would
-/// hide which half is about to fire. Each half draws its own hover instead.
-pub fn menu_item_with_split_actions(left_label: impl Into<SharedString>, right_label: impl Into<SharedString>, on_left: impl Fn(&mut Window, &mut App) + 'static, on_right: impl Fn(&mut Window, &mut App) + 'static) -> PopupMenuItem {
+/// Up/Down selects this row, Left/Right chooses a half, and Enter activates it.
+pub fn menu_item_with_split_actions(left_label: impl Into<SharedString>, right_label: impl Into<SharedString>, on_click: impl Fn(SplitSide, &mut Window, &mut App) + 'static) -> PopupMenuItem {
     let left_label = left_label.into();
     let right_label = right_label.into();
-    let on_left = Rc::new(on_left);
-    let on_right = Rc::new(on_right);
+    let on_click = Rc::new(on_click);
 
-    PopupMenuItem::element(move |_, cx| {
+    let side = Rc::new(Cell::new(SplitSide::Left));
+    let render_side = side.clone();
+    let select_side = side.clone();
+    let activate = on_click.clone();
+    PopupMenuItem::element_with_selection(move |selected, _, cx| {
         let theme = browser_theme(cx);
         // Matches the color, radius and text-swap every other row uses on
         // hover — the framework's own accent tokens, not this app's
@@ -72,40 +78,46 @@ pub fn menu_item_with_split_actions(left_label: impl Into<SharedString>, right_l
             .flex()
             .flex_1()
             .items_stretch()
-            .child(split_action_half("menu-split-action-left", None, left_label.clone(), theme, accent, accent_text, radius, on_left.clone()))
+            .child(split_action_half("menu-split-action-left", SplitSide::Left, left_label.clone(), theme, accent, accent_text, radius, selected && render_side.get() == SplitSide::Left, render_side.clone(), on_click.clone()))
             .child(div().flex_none().w(px(1.0)).my(px(2.0)).bg(theme.rule))
-            .child(split_action_half("menu-split-action-right", Some(IconName::ArrowRight), right_label.clone(), theme, accent, accent_text, radius, on_right.clone()))
+            .child(split_action_half("menu-split-action-right", SplitSide::Right, right_label.clone(), theme, accent, accent_text, radius, selected && render_side.get() == SplitSide::Right, render_side.clone(), on_click.clone()))
             .into_any_element()
     })
     .icon(IconName::ArrowLeft)
-    .disabled(true)
+    .on_select_side(move |right, _, _| select_side.set(if right { SplitSide::Right } else { SplitSide::Left }))
+    .on_click(move |_, window, cx| activate(side.get(), window, cx))
 }
 
 #[allow(clippy::too_many_arguments)]
-fn split_action_half(
-    id: impl Into<ElementId>, trailing_arrow: Option<IconName>, label: SharedString, theme: crate::BrowserTheme, accent: gpui::Hsla, accent_text: gpui::Hsla, radius: gpui::Pixels, on_click: Rc<dyn Fn(&mut Window, &mut App)>,
-) -> impl IntoElement {
+fn split_action_half<F>(id: impl Into<ElementId>, side: SplitSide, label: SharedString, theme: BrowserTheme, accent: Hsla, accent_text: Hsla, radius: Pixels, selected: bool, active_side: Rc<Cell<SplitSide>>, on_click: Rc<F>) -> impl IntoElement
+where
+    F: Fn(SplitSide, &mut Window, &mut App) + 'static,
+{
     div()
         .id(id.into())
         .flex_1()
         .flex()
         .items_center()
-        .when(trailing_arrow.is_some(), |row| row.justify_end().ml(px(6.0)))
-        .when(trailing_arrow.is_none(), |row| row.mr(px(6.0)))
+        .when(side == SplitSide::Right, |row| row.justify_end().ml(px(6.0)))
+        .when(side == SplitSide::Left, |row| row.mr(px(6.0)))
         .gap(px(6.0))
         .py(px(4.0))
         .rounded(radius)
         .cursor_pointer()
         .text_size(gpui::rems(TEXT_SM))
         .text_color(theme.text)
+        .when(selected, |row| row.bg(accent).text_color(accent_text))
         .hover(move |style| style.bg(accent).text_color(accent_text))
+        .on_hover(move |hovered, window, _| {
+            if *hovered && active_side.replace(side) != side { window.refresh(); }
+        })
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(move |_: &ClickEvent, window, cx| {
             cx.stop_propagation();
-            on_click(window, cx);
+            on_click(side, window, cx);
         })
         .child(label)
-        .children(trailing_arrow.map(|icon| Icon::new(icon).xsmall()))
+        .when(side == SplitSide::Right, |row| row.child(Icon::new(IconName::ArrowRight).xsmall()))
 }
 
 /// Build a non-interactive popup menu section heading.

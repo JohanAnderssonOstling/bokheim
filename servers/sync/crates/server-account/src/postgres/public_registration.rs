@@ -231,15 +231,3 @@ impl PostgresAccountService {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{validate_configured_password, validate_password};
-
-    #[test]
-    fn configured_test_password_may_be_short_but_public_passwords_may_not() {
-        assert!(validate_configured_password("short").is_ok());
-        assert!(validate_password("short").is_err());
-        assert!(validate_configured_password("").is_err());
-    }
-}

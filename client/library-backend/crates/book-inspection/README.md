@@ -1,7 +1,20 @@
 # Local book inspection
 
 This crate has no client, database, UI, metadata-server or network dependency.
-Library ingestion (`book-metadata`) calls `inspect_epub` / `inspect_pdf` (or their seekable-reader equivalents).
+Library ingestion calls `inspect_book_reader`, which dispatches EPUB, MOBI and PDF
+to the document inspectors below and reads M4B and MP3-folder audiobooks itself
+(`src/book.rs`, with CUE and NFO sidecars in `src/book/`).
+EPUB and MOBI parsers return the shared `book_content::DeclaredMetadata`.
+`metadata_from_book` projects either format through the same identifier, credit,
+publisher, language, date, and subject rules. Declared date/subject provenance and
+textual format properties remain available. EPUB package-name evidence comes
+from the metadata's optional source path, rather than an EPUB-only `Book` method.
+
+Document evidence consumes `Book::inspect_documents()`, which exposes document
+paths, navigation, and bounded HTML prefix reads for both formats. EPUB keeps
+its archive access lazy; MOBI uses its prepared virtual documents. The bounded
+non-seekable MOBI frontmatter entry point retains its input/text limits.
+
 Accepted local classifications and electronic ISBNs flow through their existing
 metadata enrichment and subject projection paths.
 

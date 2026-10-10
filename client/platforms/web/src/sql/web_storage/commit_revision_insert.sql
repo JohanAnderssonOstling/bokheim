@@ -1,1 +1,1 @@
-INSERT INTO asset_revision VALUES(?1,?2) ON CONFLICT(physical_name) DO UPDATE SET checksum=excluded.checksum
+INSERT INTO asset_revision VALUES(?1,?2) ON CONFLICT(physical_name) DO UPDATE SET content_hash=excluded.content_hash

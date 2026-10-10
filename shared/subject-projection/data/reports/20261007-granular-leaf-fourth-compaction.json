@@ -1,0 +1,214 @@
+{
+  "scope": "Absorb 31 approved leaves into their existing parents, retaining all classification mappings and surviving IDs.",
+  "before_concepts": 15931,
+  "after_concepts": 15900,
+  "merges": {
+    "7968": {
+      "into": 2330,
+      "old_label": "Class Schedules",
+      "surviving_label": "Teaching Principles & Practice"
+    },
+    "7180": {
+      "into": 2330,
+      "old_label": "Information services",
+      "surviving_label": "Teaching Principles & Practice"
+    },
+    "7993": {
+      "into": 2330,
+      "old_label": "Classroom observation",
+      "surviving_label": "Teaching Principles & Practice"
+    },
+    "8715": {
+      "into": 2330,
+      "old_label": "Interaction analysis in education",
+      "surviving_label": "Teaching Principles & Practice"
+    },
+    "8284": {
+      "into": 2330,
+      "old_label": "Minor works",
+      "surviving_label": "Teaching Principles & Practice"
+    },
+    "7468": {
+      "into": 2326,
+      "old_label": "Class reunions",
+      "surviving_label": "Student Life & Customs"
+    },
+    "8515": {
+      "into": 2326,
+      "old_label": "Student Correspondence",
+      "surviving_label": "Student Life & Customs"
+    },
+    "9191": {
+      "into": 2326,
+      "old_label": "Time management",
+      "surviving_label": "Student Life & Customs"
+    },
+    "8449": {
+      "into": 2326,
+      "old_label": "Student Union Centers",
+      "surviving_label": "Student Life & Customs"
+    },
+    "9975": {
+      "into": 2326,
+      "old_label": "Student Recreation",
+      "surviving_label": "Student Life & Customs"
+    },
+    "7748": {
+      "into": 2324,
+      "old_label": "School sites",
+      "surviving_label": "School Facilities & Architecture"
+    },
+    "7991": {
+      "into": 2324,
+      "old_label": "School Building Care",
+      "surviving_label": "School Facilities & Architecture"
+    },
+    "9475": {
+      "into": 2324,
+      "old_label": "Vandalism",
+      "surviving_label": "School Facilities & Architecture"
+    },
+    "6629": {
+      "into": 2321,
+      "old_label": "College credits",
+      "surviving_label": "Higher education"
+    },
+    "7853": {
+      "into": 2321,
+      "old_label": "Student & Credit Transfers",
+      "surviving_label": "Higher education"
+    },
+    "7632": {
+      "into": 2321,
+      "old_label": "Trustees",
+      "surviving_label": "Higher education"
+    },
+    "9040": {
+      "into": 2321,
+      "old_label": "University Telecommunications",
+      "surviving_label": "Higher education"
+    },
+    "9517": {
+      "into": 2321,
+      "old_label": "Information resources management",
+      "surviving_label": "Higher education"
+    },
+    "8536": {
+      "into": 2321,
+      "old_label": "College Reminiscences",
+      "surviving_label": "Higher education"
+    },
+    "9019": {
+      "into": 2321,
+      "old_label": "Humor & Satire",
+      "surviving_label": "Higher education"
+    },
+    "8938": {
+      "into": 2321,
+      "old_label": "Higher Education Associations",
+      "surviving_label": "Higher education"
+    },
+    "6221": {
+      "into": 2321,
+      "old_label": "Seminars",
+      "surviving_label": "Higher education"
+    },
+    "7063": {
+      "into": 2321,
+      "old_label": "Lectures in college teaching",
+      "surviving_label": "Higher education"
+    },
+    "7749": {
+      "into": 2321,
+      "old_label": "Fieldwork",
+      "surviving_label": "Higher education"
+    },
+    "9802": {
+      "into": 2316,
+      "old_label": "Societies & Documents",
+      "surviving_label": "Child study"
+    },
+    "7019": {
+      "into": 443,
+      "old_label": "Technical editing",
+      "surviving_label": "Technical Communication"
+    },
+    "7813": {
+      "into": 443,
+      "old_label": "Translating",
+      "surviving_label": "Technical Communication"
+    },
+    "7797": {
+      "into": 450,
+      "old_label": "Patent literature",
+      "surviving_label": "Patents. Trademarks"
+    },
+    "7192": {
+      "into": 653,
+      "old_label": "Styles",
+      "surviving_label": "Furniture"
+    },
+    "8261": {
+      "into": 653,
+      "old_label": "Furniture Design Collections",
+      "surviving_label": "Furniture"
+    },
+    "9575": {
+      "into": 659,
+      "old_label": "Conservation & restoration",
+      "surviving_label": "Tapestries"
+    }
+  },
+  "deferred_matcher_conflicts": {
+    "7355": {
+      "proposed_parent": 2330,
+      "label": "Computer network resources",
+      "code": "LB1044.87",
+      "actual_destination": 6806,
+      "actual_label": "Audiovisual Teaching"
+    },
+    "9846": {
+      "proposed_parent": 2322,
+      "label": "School-Day Reminiscences",
+      "code": "LB1602",
+      "actual_destination": 53251,
+      "actual_label": "Primary Vocational Education & Study Methods"
+    },
+    "9827": {
+      "proposed_parent": 450,
+      "label": "Patent Practice Manuals",
+      "code": "T339",
+      "actual_destination": 7093,
+      "actual_label": "History of patents"
+    }
+  },
+  "validation": {
+    "integrity_check": "ok",
+    "foreign_key_violations": 0,
+    "acyclic": true,
+    "exact_row_remapping": true,
+    "production_matcher": {
+      "probes": 172066,
+      "changed_destinations": 96,
+      "unexpected_changes": 0,
+      "coverage_losses": 0,
+      "coverage_gains": 0,
+      "scope": "Stored selectors, structured range endpoints and full spans, adjacent numeric boundaries, and Cutter/year probes. Does not replace a full observed-code cache audit."
+    },
+    "full_usage_refresh": "Unavailable: local OpenLibrary code-usage cache is absent. Viewer regenerated without usage counts; historical TSV retained.",
+    "rust_tests": {
+      "command": "cargo test --offline -p subject-projection --lib",
+      "passed": 34,
+      "failed": 0
+    },
+    "viewer": {
+      "subjects": 15900,
+      "usage_counts_visible": false,
+      "selector_counts_verified": true,
+      "structured_cutter_boundaries_verified": true
+    }
+  },
+  "before_sha256": "68ce103e5df7c0ac87d833a63377766a5e0d16d1096f099b83f6c62a064e8a57",
+  "after_sha256": "972fee6b2b6968c63195a3f4a49e72ee911c394dad99bfc554418a06f40205b4",
+  "recoverable_before_snapshot": "/tmp/taxonomy-compaction-20261007/before.sqlite3"
+}

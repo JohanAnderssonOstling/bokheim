@@ -1,4 +1,4 @@
-//! Process-wide foreground-interest and remote-change hints for library work.
+//! Process-wide foreground interest for library work.
 
 use tokio::sync::watch;
 
@@ -87,24 +87,6 @@ impl NotificationInterest {
         self.acquire(InterestKind::Work)
     }
     pub fn subscribe(&self) -> watch::Receiver<InterestState> {
-        self.0.subscribe()
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct RemoteChanges(watch::Sender<u64>);
-
-impl Default for RemoteChanges {
-    fn default() -> Self {
-        Self(watch::channel(0).0)
-    }
-}
-
-impl RemoteChanges {
-    pub fn request(&self) {
-        self.0.send_modify(|generation| *generation = generation.wrapping_add(1));
-    }
-    pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.0.subscribe()
     }
 }

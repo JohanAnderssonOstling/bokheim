@@ -20,8 +20,6 @@ use std::rc::Rc;
 use futures_channel::oneshot;
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
-#[cfg(feature = "web-runtime-tests")]
-use web_sys::Worker;
 
 use super::{error_message, BytesFuture};
 use crate::transport::endpoint::{OwnedEndpoint, WorkerEndpoint};
@@ -157,15 +155,8 @@ impl Service {
 }
 
 /// CPU scheduling, pending replies and worker callbacks owned by Rust.
-#[cfg_attr(feature = "web-runtime-tests", wasm_bindgen)]
 pub struct CpuService(Rc<Service>);
-#[cfg_attr(feature = "web-runtime-tests", wasm_bindgen)]
 impl CpuService {
-    #[cfg(feature = "web-runtime-tests")]
-    pub fn request(&self, bytes: Uint8Array, source: JsValue) -> js_sys::Promise {
-        let response = self.request_source(bytes.to_vec(), source);
-        wasm_bindgen_futures::future_to_promise(async move { response.await.map(|bytes| Uint8Array::from(bytes.as_slice()).into()).map_err(|error| js_sys::Error::new(&error).into()) })
-    }
 
     pub fn fail(&self, error: JsValue) {
         self.0.fail(error);
@@ -211,10 +202,6 @@ impl CpuService {
         })
     }
 
-    #[cfg(feature = "web-runtime-tests")]
-    pub fn new(create_worker: impl Fn() -> Result<Worker, JsValue> + 'static, limit: usize) -> Self {
-        Self::with_options(move || create_worker().map(Into::into), CpuWorkerOptions { jobs: limit, ..Default::default() })
-    }
 
     pub fn with_options(create_worker: impl Fn() -> Result<WorkerEndpoint, JsValue> + 'static, options: CpuWorkerOptions) -> Self {
         Self(Rc::new(Service {

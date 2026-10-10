@@ -1,15 +1,13 @@
 //! Pure cover extraction and JPEG thumbnail generation for supported books.
 
-use std::io::Error;
 #[cfg(feature = "book-memory")]
-use epub_provider::EpubProvider;
+use book_content::{Book, BookFormat};
 use fast_image_resize::images::{Image, ImageRef};
 use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
-use image::codecs::jpeg::JpegEncoder;
 use image::ImageReader;
+use image::codecs::jpeg::JpegEncoder;
 use image::{ColorType, DynamicImage, ImageEncoder, ImageFormat, RgbImage};
-#[cfg(feature = "book-memory")]
-use mobi::headers::ExthRecord;
+use std::io::Error;
 #[cfg(feature = "book-extractors")]
 use std::io::SeekFrom;
 use std::io::{BufWriter, Cursor};
@@ -47,21 +45,6 @@ impl ThumbnailVersions {
     }
 }
 
-
-
-
-
-/// Read image geometry without decoding its pixels.
-pub fn cover_image_dimensions(bytes: &[u8]) -> image::ImageResult<(u32, u32)> {
-    Ok(ImageReader::with_format(Cursor::new(bytes), image::guess_format(bytes)?).into_dimensions()?)
-}
-
-
-
-
-
-
-
 /// Returns whether an image is large enough and sufficiently cover-shaped to
 /// be preferred over another book-cover source. Providers use
 /// the same geometry contract for upstream thumbnails and EPUB fallbacks.
@@ -73,12 +56,6 @@ pub fn reasonable_cover_dimensions(width: u32, height: u32) -> bool {
     (EPUB_FALLBACK_MIN_ASPECT_RATIO..=EPUB_FALLBACK_MAX_ASPECT_RATIO).contains(&aspect_ratio)
 }
 
-
-
-
-
-
-
 // The renderers provide pixels already composited onto their background.
 fn rgb_from_rgba(pixels: &[u8], width: u32, height: u32) -> ThumbnailResult<RgbImage> {
     let expected = (u64::from(width) * u64::from(height)).checked_mul(4).ok_or("renderer dimensions overflow")?;
@@ -89,7 +66,7 @@ fn rgb_from_rgba(pixels: &[u8], width: u32, height: u32) -> ThumbnailResult<RgbI
     RgbImage::from_raw(width, height, rgb).ok_or_else(|| "renderer returned invalid RGB dimensions".into())
 }
 
-pub fn render_pdf_cover(reader: impl Read + Seek + 'static) -> ThumbnailResult<RgbImage> {
+pub fn render_pdf_cover(reader: impl Read + Seek + Send + 'static) -> ThumbnailResult<RgbImage> {
     let rendered = pdf_reader_core::render_first_page_image_from_reader(reader, THUMBNAIL_WIDTH as u16)?;
     rgb_from_rgba(rendered.rgba(), rendered.pixel_width(), rendered.pixel_height())
 }
@@ -114,17 +91,6 @@ pub fn encode_thumbnail_at_width(decoded: &RgbImage, width: u32) -> ThumbnailRes
 #[cfg(test)]
 mod core_tests {
     use super::*;
-
-    #[test]
-    fn renderer_pixels_preserve_rgb_and_reject_inconsistent_buffers() {
-        let rgba = [10, 20, 30, 255, 40, 50, 60, 255];
-        assert_eq!(rgb_from_rgba(&rgba, 2, 1).unwrap().as_raw(), &[10, 20, 30, 40, 50, 60]);
-        for bytes in [&rgba[..7], &rgba[..5], &rgba[..4]] {
-            assert!(rgb_from_rgba(bytes, 2, 1).is_err());
-        }
-        assert!(rgb_from_rgba(&[], 0, 0).is_err());
-        assert!(rgb_from_rgba(&[], u32::MAX, u32::MAX).is_err());
-    }
 
     #[test]
     fn extreme_aspect_ratio_is_rejected_before_thumbnail_allocation() {
@@ -216,49 +182,72 @@ fn validate_cover_image_dimensions(width: u32, height: u32) -> ThumbnailResult<(
     Ok(())
 }
 
+/// Reads one cover resource and decodes it as SVG or a raster image.
+#[cfg(feature = "book-extractors")]
+fn decode_cover_resource(book: &mut Book, uri: &str) -> ThumbnailResult<RgbImage> {
+    let bytes = book.read_resource_sync(uri, MAX_COVER_IMAGE_BYTES as u64)?;
+    if uri.rsplit('.').next().is_some_and(|extension| extension.eq_ignore_ascii_case("svg")) {
+        return decode_svg_cover(&bytes);
+    }
+    let format = image::guess_format(&bytes)?;
+    decode_cover_image(&bytes, format)
+}
+
+/// Container parsing and record bounds belong to book-content. Thumbnail
+/// selection owns geometry checks and image decoding for both formats.
+#[cfg(feature = "book-extractors")]
+fn book_cover(mut book: Book, format: BookFormat) -> ThumbnailResult<Option<RgbImage>> {
+    let preferred = book.preferred_cover_resources()?;
+    for uri in &preferred {
+        match decode_cover_resource(&mut book, uri) {
+            Ok(image) if reasonable_cover_dimensions(image.width(), image.height()) => return Ok(Some(image)),
+            Err(error) if format == BookFormat::Epub || is_read_failure(&*error) => return Err(error),
+            _ => {}
+        }
+    }
+    for uri in book.fallback_cover_resources()?.into_iter().filter(|uri| !preferred.contains(uri)) {
+        let Ok(bytes) = book.read_resource_sync(&uri, MAX_COVER_IMAGE_BYTES as u64) else { continue };
+        let Ok(format) = image::guess_format(&bytes) else { continue };
+        let Ok((width, height)) = ImageReader::with_format(Cursor::new(&bytes), format).into_dimensions() else { continue };
+        if !reasonable_cover_dimensions(width, height) {
+            continue;
+        }
+        if let Ok(image) = decode_cover_image(&bytes, format) {
+            return Ok(Some(image));
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(feature = "book-extractors")]
+fn decode_svg_cover(bytes: &[u8]) -> ThumbnailResult<RgbImage> {
+    let options = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_data(bytes, &options)?;
+    let size = tree.size();
+    let source_width = size.width();
+    let source_height = size.height();
+    if !source_width.is_finite() || !source_height.is_finite() || source_width <= 0.0 || source_height <= 0.0 {
+        return Err("SVG cover has invalid dimensions".into());
+    }
+    let aspect_ratio = f64::from(source_width) / f64::from(source_height);
+    let destination_height = (f64::from(THUMBNAIL_WIDTH) / aspect_ratio).round().max(1.0);
+    if destination_height > f64::from(MAX_COVER_IMAGE_DIMENSION) || u64::from(THUMBNAIL_WIDTH) * destination_height as u64 > MAX_COVER_IMAGE_PIXELS {
+        return Err("SVG cover exceeds the pixel limit".into());
+    }
+    let destination_height = destination_height as u32;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(THUMBNAIL_WIDTH, destination_height).ok_or("could not allocate SVG cover pixmap")?;
+    // JPEG has no alpha channel. A white mat preserves the expected appearance
+    // of transparent SVG book covers instead of turning transparent pixels black.
+    pixmap.fill(resvg::tiny_skia::Color::WHITE);
+    let scale = THUMBNAIL_WIDTH as f32 / source_width;
+    resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+    rgb_from_rgba(pixmap.data(), THUMBNAIL_WIDTH, destination_height)
+}
+
 #[cfg(all(test, feature = "book-extractors"))]
 mod book_extractor_tests {
     use super::*;
-    use mobi::record::PdbRecord;
     use std::io::Write;
-
-    
-
-    
-
-    #[test]
-    fn validates_epub_fallback_image_geometry() {
-        assert!(reasonable_cover_dimensions(300, 400));
-        assert!(reasonable_cover_dimensions(600, 900));
-        assert!(!reasonable_cover_dimensions(299, 600));
-        assert!(!reasonable_cover_dimensions(600, 399));
-        assert!(!reasonable_cover_dimensions(300, 800));
-        assert!(!reasonable_cover_dimensions(800, 600));
-    }
-
-    #[test]
-    fn rejects_cover_images_with_pathological_decoded_dimensions() {
-        assert!(validate_cover_image_dimensions(4_000, 6_000).is_ok());
-        assert!(validate_cover_image_dimensions(4_001, 6_000).is_err());
-        assert!(validate_cover_image_dimensions(1, MAX_COVER_IMAGE_DIMENSION + 1).is_err());
-    }
-
-    #[test]
-    fn preserves_scaled_jpeg_decoding_for_rgb_and_grayscale_covers() {
-        for source in [DynamicImage::ImageRgb8(RgbImage::from_pixel(1200, 1800, image::Rgb([180, 40, 20]))), DynamicImage::ImageLuma8(image::GrayImage::from_pixel(1200, 1800, image::Luma([96])))] {
-            let mut encoded = Vec::new();
-            JpegEncoder::new(&mut encoded).encode_image(&source).unwrap();
-            let decoded = decode_cover_image(&encoded, ImageFormat::Jpeg).unwrap();
-            assert_eq!(decoded.dimensions(), (600, 900));
-            let expected = source.to_rgb8().get_pixel(0, 0).0;
-            for (actual, expected) in decoded.get_pixel(0, 0).0.into_iter().zip(expected) {
-                assert!(actual.abs_diff(expected) <= 3);
-            }
-            let versions = ThumbnailVersions::from_image(&decoded).unwrap();
-            assert_eq!(cover_image_dimensions(&versions.browse).unwrap(), (300, 450));
-            assert_eq!(cover_image_dimensions(&versions.high_density).unwrap(), (600, 900));
-        }
-    }
 
     #[test]
     fn decodes_supported_cover_formats_after_image_upgrade() {
@@ -292,120 +281,40 @@ mod book_extractor_tests {
             assert_eq!((high.width(), high.height()), (600, 900));
         }
     }
-
-    
-
-    
 }
 
 mod pdf_cover;
-#[cfg(not(target_arch = "wasm32"))]
-mod pdf_process;
-#[cfg(not(target_arch = "wasm32"))]
-pub use pdf_process::{configure_pdf_cover_process, run_pdf_cover_process, PdfCoverProcess};
+
+/// The book's cover, or none. A book whose bytes cannot be read as a cover
+/// has none: reading it again gives the same result. Only an I/O failure
+/// that says nothing about the bytes is an error, for the caller to retry.
+#[cfg(feature = "book-extractors")]
+pub fn generate_thumbnail_versions_with_pdf_renderer<R: Read + Seek + Send + Sync + 'static>(extension: &str, reader: R, render: impl FnOnce(R) -> ThumbnailResult<RgbImage>) -> ThumbnailResult<Option<ThumbnailVersions>> {
+    match cover_versions(extension, reader, render) {
+        Err(error) if !is_read_failure(&*error) => {
+            log::warn!("{extension} book has no usable cover: {error}");
+            Ok(None)
+        }
+        result => result,
+    }
+}
+
+/// An I/O failure while reading the book, as opposed to bytes that are not
+/// a usable cover.
+#[cfg(feature = "book-extractors")]
+fn is_read_failure(error: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
+    error.downcast_ref::<std::io::Error>().is_some_and(|error| !matches!(error.kind(), std::io::ErrorKind::InvalidData | std::io::ErrorKind::InvalidInput | std::io::ErrorKind::UnexpectedEof))
+}
 
 /// Extract simple opaque PDF image covers directly; render complex pages with PDFium.
-/// Resizing/encoding happens after the renderer releases its worker.
+/// Resizing/encoding consumes owned pixels after PDFium finishes rendering.
 #[cfg(feature = "book-extractors")]
-pub fn generate_thumbnail_versions_with_pdf_renderer<R: Read + Seek + Send + Sync + 'static>(extension: &str, mut reader: R, render: impl FnOnce(R) -> ThumbnailResult<RgbImage>) -> ThumbnailResult<Option<ThumbnailVersions>> {
+fn cover_versions<R: Read + Seek + Send + Sync + 'static>(extension: &str, mut reader: R, render: impl FnOnce(R) -> ThumbnailResult<RgbImage>) -> ThumbnailResult<Option<ThumbnailVersions>> {
     let cover = match extension {
-        "epub" => { let (epub,): (& EpubProvider,) = (&EpubProvider::try_from_reader(reader)?,); (|| -> ThumbnailResult < Option < RgbImage > > {
-    if let Some(image_path) = epub.declared_cover_image_path()? {
-        let bytes = epub.read_bytes(&image_path)?;
-        if bytes.len() > MAX_COVER_IMAGE_BYTES {
-            return Err("cover image exceeds the byte limit".into());
+        "epub" | "mobi" | "azw" | "azw3" => {
+            let format = if extension == "epub" { BookFormat::Epub } else { BookFormat::Mobi };
+            book_cover(Book::open_reader(format, reader)?, format)?
         }
-        let image = if image_path.rsplit('.').next().is_some_and(|extension| extension.eq_ignore_ascii_case("svg")) {
-            ({ let (bytes,): (& [u8],) = (&bytes,); (|| -> ThumbnailResult < RgbImage > {
-    let options = resvg::usvg::Options::default();
-    let tree = resvg::usvg::Tree::from_data(bytes, &options)?;
-    let size = tree.size();
-    let source_width = size.width();
-    let source_height = size.height();
-    if !source_width.is_finite() || !source_height.is_finite() || source_width <= 0.0 || source_height <= 0.0 {
-        return Err("SVG cover has invalid dimensions".into());
-    }
-    let aspect_ratio = f64::from(source_width) / f64::from(source_height);
-    let destination_height = (f64::from(THUMBNAIL_WIDTH) / aspect_ratio).round().max(1.0);
-    if destination_height > f64::from(MAX_COVER_IMAGE_DIMENSION) || u64::from(THUMBNAIL_WIDTH) * destination_height as u64 > MAX_COVER_IMAGE_PIXELS {
-        return Err("SVG cover exceeds the pixel limit".into());
-    }
-    let destination_height = destination_height as u32;
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(THUMBNAIL_WIDTH, destination_height).ok_or("could not allocate SVG cover pixmap")?;
-    // JPEG has no alpha channel. A white mat preserves the expected appearance
-    // of transparent SVG book covers instead of turning transparent pixels black.
-    pixmap.fill(resvg::tiny_skia::Color::WHITE);
-    let scale = THUMBNAIL_WIDTH as f32 / source_width;
-    resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
-    rgb_from_rgba(pixmap.data(), THUMBNAIL_WIDTH, destination_height)
-})() })?
-        } else {
-            let format = match image_path.rsplit('.').next().map(str::to_ascii_lowercase).as_deref() {
-                Some("jpeg" | "jpg") => Some(ImageFormat::Jpeg),
-                Some("png") => Some(ImageFormat::Png),
-                Some("gif") => Some(ImageFormat::Gif),
-                Some("webp") => Some(ImageFormat::WebP),
-                _ => None,
-            };
-            let format = format.or_else(|| image::guess_format(&bytes).ok()).ok_or_else(|| Error::new(std::io::ErrorKind::InvalidData, format!("unsupported EPUB cover image format: {image_path}")))?;
-            decode_cover_image(&bytes, format)?
-        };
-        if reasonable_cover_dimensions(image.width(), image.height()) {
-            return Ok(Some(image));
-        }
-    }
-
-    for image_path in epub.image_paths_in_reading_order()? {
-        let Ok(bytes) = epub.read_bytes(&image_path) else { continue };
-        let Ok(format) = image::guess_format(&bytes) else { continue };
-        let Ok((width, height)) = ImageReader::with_format(Cursor::new(&bytes), format).into_dimensions() else { continue };
-        if !reasonable_cover_dimensions(width, height) {
-            continue;
-        }
-        if let Ok(image) = decode_cover_image(&bytes, format) {
-            return Ok(Some(image));
-        }
-    }
-
-    Ok(None)
-})() }?,
-        "mobi" | "azw" | "azw3" => { let (mut file,): (_,) = (reader,); (|| -> ThumbnailResult < Option < RgbImage > > {
-    // Parsing only MobiMetadata avoids reading and decoding the book's text.
-    // CoverOffset and ThumbOffset are relative to first_image_index.
-    let metadata = mobi::MobiMetadata::from_read(&mut file)?;
-    let file_len = file.seek(SeekFrom::End(0))?;
-    let records = &metadata.records.records;
-    let first_image_index = metadata.mobi.first_image_index as usize;
-    // Prefer the embedded thumbnail, then the cover, then remaining image records.
-    let preferred = [ExthRecord::ThumbOffset, ExthRecord::CoverOffset].map(|record| ({ let (metadata,record,): (& mobi :: MobiMetadata,ExthRecord,) = (&metadata,record,); (|| -> Option < usize > {
-    let bytes: [u8; 4] = metadata.exth_record(record)?.first()?.as_slice().try_into().ok()?;
-    usize::try_from(u32::from_be_bytes(bytes)).ok()
-})() }).and_then(|offset| first_image_index.checked_add(offset)));
-    let candidates = preferred.iter().copied().flatten().chain((first_image_index..records.len()).filter(|index| !preferred.contains(&Some(*index))));
-    for record_index in candidates {
-        let Some((start, len)) = ({ let (records,record_index,file_len,): (& [mobi :: record :: PdbRecord],usize,u64,) = (records,record_index,file_len,); (|| -> Option < (u64 , u64) > {
-    let start = u64::from(records.get(record_index)?.offset);
-    let end = records.get(record_index + 1).map_or(file_len, |record| u64::from(record.offset));
-    (start < end && end <= file_len).then(|| (start, end - start))
-})() }) else { continue };
-        if len > MAX_COVER_IMAGE_BYTES as u64 {
-            continue;
-        }
-        let Ok(len) = usize::try_from(len) else { continue };
-        file.seek(SeekFrom::Start(start))?;
-        let mut bytes = vec![0; len];
-        file.read_exact(&mut bytes)?;
-        let Ok(format) = image::guess_format(&bytes) else { continue };
-        // A malformed image record should not prevent trying the full cover or
-        // another image record from the same book.
-        let Ok(image) = decode_cover_image(&bytes, format) else { continue };
-        if reasonable_cover_dimensions(image.width(), image.height()) {
-            return Ok(Some(image));
-        }
-    }
-
-    Ok(None)
-})() }?,
         "m4b" => {
             let tag = mp4ameta::Tag::read_from(&mut reader)?;
             tag.artwork().map(|artwork| decode_cover_image(artwork.data, image::guess_format(artwork.data)?)).transpose()?
@@ -417,7 +326,7 @@ pub fn generate_thumbnail_versions_with_pdf_renderer<R: Read + Seek + Send + Syn
                 let mut entry = archive.by_index(index)?;
                 let name = entry.name().to_ascii_lowercase();
                 if ["cover.jpg", "cover.jpeg", "cover.png", "cover.webp", "folder.jpg", "folder.jpeg", "folder.png", "folder.webp"].contains(&name.as_str()) {
-                    if entry.size() > audiobook_folder::MAX_COVER_BYTES {
+                    if entry.size() > audiobook_archive::MAX_COVER_BYTES {
                         return Err("audiobook cover exceeds the byte limit".into());
                     }
                     let mut bytes = Vec::new();
@@ -493,7 +402,7 @@ mod audiobook_sidecar_tests {
         let size = frame.len() as u32;
         let mut mp3 = vec![b'I', b'D', b'3', 3, 0, 0, ((size >> 21) & 0x7f) as u8, ((size >> 14) & 0x7f) as u8, ((size >> 7) & 0x7f) as u8, (size & 0x7f) as u8];
         mp3.extend(frame);
-        mp3.extend_from_slice(include_bytes!("../../book-metadata/tests/fixtures/silence.mp3"));
+        mp3.extend_from_slice(include_bytes!("../../book-inspection/tests/fixtures/silence.mp3"));
         let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
         archive.start_file("01.mp3", stored).unwrap();

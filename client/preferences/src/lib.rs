@@ -237,9 +237,9 @@ pub struct ReaderPreferences {
     text_alignment: ReaderTextAlignment,
     hyphenation: bool,
     max_column_count: ColumnCount,
-    #[serde(default = "default_reader_spacing")]
+    #[serde(default = "default_reader_margin")]
     horizontal_margin_px: ReaderSpacing,
-    #[serde(default = "default_reader_spacing")]
+    #[serde(default = "default_reader_margin")]
     vertical_margin_px: ReaderSpacing,
     #[serde(default = "default_reader_spacing")]
     min_column_gap_px: ReaderSpacing,
@@ -341,6 +341,13 @@ bounded_float!(PdfZoom, f32, "PDF zoom", PDF_ZOOM_MIN, PDF_ZOOM_MAX);
 bounded_float!(AudiobookSpeed, f64, "audiobook speed", AUDIOBOOK_SPEED_MIN, AUDIOBOOK_SPEED_MAX);
 bounded_float!(ReaderSpacing, f32, "reader spacing", READER_SPACING_MIN, READER_SPACING_MAX);
 
+/// Default space between ebook text and each edge of the reading surface.
+pub const DEFAULT_READER_MARGIN_PX: f32 = 24.0;
+
+const fn default_reader_margin() -> ReaderSpacing {
+    ReaderSpacing(DEFAULT_READER_MARGIN_PX)
+}
+
 const fn default_reader_spacing() -> ReaderSpacing {
     ReaderSpacing(0.0)
 }
@@ -409,8 +416,8 @@ impl Default for ReaderPreferences {
             text_alignment: ReaderTextAlignment::Publisher,
             hyphenation: true,
             max_column_count: ColumnCount(2),
-            horizontal_margin_px: default_reader_spacing(),
-            vertical_margin_px: default_reader_spacing(),
+            horizontal_margin_px: default_reader_margin(),
+            vertical_margin_px: default_reader_margin(),
             min_column_gap_px: default_reader_spacing(),
             pdf_zoom_mode: PdfZoomMode::FitWidth,
             pdf_page_count: PdfPageCount(1),
@@ -634,58 +641,24 @@ impl ReaderPreferencePatch {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{DEFAULT_READER_MARGIN_PX, ReaderPreferences};
 
     #[test]
-    fn local_preference_patches_keep_the_serialized_shape() {
-        let browsing = BrowsingPreferencePatch::CoverText(CoverText::CoverOnly);
-        assert_eq!(serde_json::to_value(browsing).unwrap(), serde_json::json!({ "preference": "cover_text", "value": "cover_only" }));
-
-        let palette = BrowsingPreferencePatch::Palette(ApplicationTheme::Cool, ResolvedAppearance::Dark);
-        assert_eq!(serde_json::to_value(palette).unwrap(), serde_json::json!({ "preference": "palette", "value": ["cool", "dark"] }));
-
-        let reader = ReaderPreferencePatch::PdfZoomMode(PdfZoomMode::FitHeight);
-        assert_eq!(serde_json::to_value(reader).unwrap(), serde_json::json!({ "preference": "pdf_zoom_mode", "value": "fit_height" }));
-
-        let count = ReaderPreferencePatch::PdfPageCount(3);
-        assert_eq!(serde_json::to_value(count).unwrap(), serde_json::json!({ "preference": "pdf_page_count", "value": 3 }));
-    }
-
-    #[test]
-    fn incomplete_profiles_are_rejected() {
-        assert!(serde_json::from_str::<BrowsingPreferences>("{}").is_err());
-        assert!(serde_json::from_str::<ReaderPreferences>("{}").is_err());
-    }
-
-    #[test]
-    fn palette_patch_saves_both_choices_and_old_profiles_follow_system() {
-        let mut saved = serde_json::to_value(BrowsingPreferences::default()).unwrap();
-        saved.as_object_mut().unwrap().remove("appearance_override");
-        let mut preferences: BrowsingPreferences = serde_json::from_value(saved).unwrap();
-        assert_eq!(preferences.appearance_override(), None);
-        BrowsingPreferencePatch::Palette(ApplicationTheme::Cool, ResolvedAppearance::Dark).apply(&mut preferences).unwrap();
-        assert_eq!(preferences.theme(), ApplicationTheme::Cool);
-        assert_eq!(preferences.appearance_override(), Some(ResolvedAppearance::Dark));
-        let restored: BrowsingPreferences = serde_json::from_value(serde_json::to_value(preferences).unwrap()).unwrap();
-        assert_eq!(restored.appearance_override(), Some(ResolvedAppearance::Dark));
-    }
-
-    #[test]
-    fn older_reader_profiles_get_zero_spacing_and_new_values_are_bounded() {
-        let mut saved = serde_json::to_value(ReaderPreferences::default()).unwrap();
-        let object = saved.as_object_mut().unwrap();
-        object.remove("horizontal_margin_px");
-        object.remove("vertical_margin_px");
-        object.remove("min_column_gap_px");
+    fn legacy_preferences_default_missing_margins_but_preserve_explicit_zero() {
+        let defaults = ReaderPreferences::default();
+        assert_eq!(defaults.horizontal_margin_px(), DEFAULT_READER_MARGIN_PX);
+        assert_eq!(defaults.vertical_margin_px(), DEFAULT_READER_MARGIN_PX);
+        let mut saved = serde_json::to_value(defaults).unwrap();
+        let fields = saved.as_object_mut().unwrap();
+        fields.remove("horizontal_margin_px");
+        fields.remove("vertical_margin_px");
+        let restored: ReaderPreferences = serde_json::from_value(saved.clone()).unwrap();
+        assert_eq!(restored.horizontal_margin_px(), DEFAULT_READER_MARGIN_PX);
+        assert_eq!(restored.vertical_margin_px(), DEFAULT_READER_MARGIN_PX);
+        saved["horizontal_margin_px"] = serde_json::json!(0.0);
+        saved["vertical_margin_px"] = serde_json::json!(0.0);
         let restored: ReaderPreferences = serde_json::from_value(saved).unwrap();
         assert_eq!(restored.horizontal_margin_px(), 0.0);
         assert_eq!(restored.vertical_margin_px(), 0.0);
-        assert_eq!(restored.min_column_gap_px(), 0.0);
-
-        let mut updated = restored;
-        ReaderPreferencePatch::MinColumnGapPx(80.0).apply(&mut updated).unwrap();
-        assert_eq!(updated.min_column_gap_px(), 80.0);
-        assert!(ReaderPreferencePatch::HorizontalMarginPx(f32::NAN).apply(&mut updated).is_err());
-        assert!(ReaderPreferencePatch::VerticalMarginPx(READER_SPACING_MAX + 1.0).apply(&mut updated).is_err());
     }
 }

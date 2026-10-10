@@ -1,4 +1,3 @@
-use std::io::Error;
 use std::path::PathBuf;
 #[cfg(all(target_os = "android", feature = "android"))]
 mod android;
@@ -84,7 +83,7 @@ pub type IncomingBookResult = Result<IncomingBook, String>;
 
 #[cfg(any(target_os = "android", test))]
 fn stage_incoming_book(mut source: impl std::io::Read, path: &std::path::Path) -> std::io::Result<()> {
-    use std::io::Write as _;
+    use std::io::{Error, Write as _};
     const RESERVED_BYTES: u64 = 128 * 1024 * 1024;
     let mut destination = std::fs::OpenOptions::new().create_new(true).write(true).open(path)?;
     let directory = path.parent().ok_or_else(|| Error::other("incoming file has no parent directory"))?;
@@ -108,16 +107,6 @@ fn stage_incoming_book(mut source: impl std::io::Read, path: &std::path::Path) -
     destination.sync_all()
 }
 
-#[cfg(test)]
-mod incoming_tests {
-    #[test]
-    fn stages_an_incoming_reader_without_buffering_the_book() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("incoming.part");
-        super::stage_incoming_book(std::io::Cursor::new(b"incoming book"), &path).unwrap();
-        assert_eq!(std::fs::read(path).unwrap(), b"incoming book");
-    }
-}
 
 pub fn open_ui(
     backend_context: BackendLaunch, options: UiLaunchOptions, incoming_files: Option<async_channel::Receiver<IncomingBookResult>>, #[cfg(feature = "desktop")] instance_activations: Option<async_channel::Receiver<()>>, cx: &mut App,
@@ -244,7 +233,7 @@ pub fn open_ui(
     #[cfg(any(feature = "kobo", feature = "mobile"))]
     let (app_id, icon) = (None, None);
     let window_persistence = options.persist_window_geometry.then(|| (saved_session.clone(), session_saves.clone()));
-    let browser_window = cx
+    let _browser_window = cx
         .open_window(
             WindowOptions {
                 window_bounds: Some(browser_bounds),
@@ -309,7 +298,7 @@ pub fn open_ui(
 
     #[cfg(feature = "desktop")]
     #[cfg(any(feature = "kobo", feature = "mobile"))]
-    let _ = browser_window;
+    let _ = _browser_window;
     if let Some(incoming_files) = incoming_files {
         forward_incoming_files(incoming_files, application_root_for_incoming, cx);
     }

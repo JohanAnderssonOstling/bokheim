@@ -2,9 +2,9 @@
 
 use crate::browse::{invalid_integer_column, parse_uuid_column, BrowseRow, FoldersSql};
 use crate::{Database, DatabaseError};
-use library_model::{BookCardRow, BrowseLocation};
+use library_model::BrowseLocation;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use sync_common::DirId;
+use sync_common::{DirId, ROOT_DIR_ID};
 
 impl Database {
     pub(super) fn browse_folder(&self, directory_id: DirId, query: &library_model::LibraryBrowseQuery, downloaded_only: bool) -> Result<super::LibraryBrowseData, DatabaseError> {
@@ -44,7 +44,8 @@ impl Database {
             };
             let (language_counts, format_counts) = self.library_facets(&options)?;
             let path = self.browse_directory_path(&directory_id)?;
-            Ok(super::LibraryBrowseData { contents, sections, path, language_counts, format_counts })
+            let ancestors = self.folder_ancestors(&path, &options)?;
+            Ok(super::LibraryBrowseData { contents, sections, path, ancestors, language_counts, format_counts, feed: None })
         })
     }
 
@@ -84,6 +85,21 @@ impl Database {
         })
     }
 
+    /// The children of the root and of each folder on `path` above the last.
+    /// Their counts need the whole library's tree, not only the subtree below
+    /// the page's folder, so it is counted once from the root.
+    fn folder_ancestors(&self, path: &[library_model::BrowsePathSegment], options: &super::BrowseOptions) -> Result<Vec<(BrowseLocation, Vec<BrowseRow>)>, DatabaseError> {
+        let Some((_, above)) = path.split_last() else { return Ok(Vec::new()) };
+        let options = super::BrowseOptions { search: String::new(), ..options.clone() };
+        let tree = self.folder_tree(&ROOT_DIR_ID.to_string(), &options)?;
+        let mut ancestors = Vec::with_capacity(above.len() + 1);
+        for location in std::iter::once(BrowseLocation::Folder(ROOT_DIR_ID)).chain(above.iter().map(|segment| segment.id)) {
+            let BrowseLocation::Folder(id) = location else { continue };
+            ancestors.push((location, self.folder_children(&[id.to_string()], &tree.counts, &options)?));
+        }
+        Ok(ancestors)
+    }
+
     pub fn browse_directory_path(&self, directory_id: &DirId) -> Result<Vec<library_model::BrowsePathSegment>, DatabaseError> {
         Ok(self.dir_path_components(directory_id)?.into_iter().map(|component| library_model::BrowsePathSegment { id: BrowseLocation::Folder(component.id), name: component.name }).collect())
     }
@@ -116,7 +132,7 @@ impl Database {
             for folder in folders.iter_mut() {
                 let (total, downloaded) = match folder.id {
                     BrowseLocation::Folder(id) => counts.get(&id.to_string()).copied().unwrap_or_default(),
-                    BrowseLocation::Subject(_) => (0, 0),
+                    BrowseLocation::Subject(_) | BrowseLocation::Author(_) | BrowseLocation::Home(_) | BrowseLocation::Books | BrowseLocation::Catalog(_) | BrowseLocation::Opds { .. } => (0, 0),
                 };
                 folder.book_count = if options.downloaded_only { downloaded } else { total };
                 folder.downloaded_book_count = downloaded;

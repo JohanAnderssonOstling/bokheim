@@ -15,13 +15,6 @@ ON CONFLICT(singleton) DO UPDATE SET remote_library_name = excluded.remote_libra
 INSERT INTO sync_metadata(singleton, server_library_created) VALUES (1, :value)
 ON CONFLICT(singleton) DO UPDATE SET server_library_created = excluded.server_library_created;
 
--- name: owner_transfer_history?
-SELECT transfer_history_json FROM library_local_state WHERE singleton = 1 AND transfer_history_json IS NOT NULL;
-
--- name: owner_save_transfer_history!
--- param: entries_json: &str
-UPDATE library_local_state SET transfer_history_json=:entries_json WHERE singleton=1;
-
 -- name: owner_sync_initialized ->
 SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'sync_metadata' AND type = 'table');
 
@@ -36,25 +29,21 @@ ON CONFLICT(singleton) DO UPDATE SET cloud_storage_enabled = excluded.cloud_stor
 -- name: owner_reset_remote_books!
 UPDATE book_transfer SET server_has_book = 0 WHERE server_has_book;
 
--- name: owner_reset_rejected_book_uploads!
-UPDATE book_transfer SET upload_rejected_reason = NULL, upload_rejected_at = NULL WHERE upload_rejected_at IS NOT NULL;
-
 -- name: owner_cloud_storage_candidates?
--- Each book's recorded local versions, newest first; Rust keeps the newest
--- one in a live folder and queues it for upload.
-SELECT b.content_hash, bd.dir_id, bd.checksum, bd.size_bytes
+-- Verified local placements; Rust keeps one live placement per content hash
+-- and queues its immutable bytes for upload.
+SELECT b.content_hash, bd.dir_id, bd.size_bytes
 FROM book_dir bd
 JOIN book b ON b.row_id = bd.book_row_id AND b.deleted_at IS NULL
-WHERE bd.deleted_at IS NULL AND bd.checksum IS NOT NULL AND bd.size_bytes > 0
-ORDER BY bd.checksum_seq DESC;
+WHERE bd.deleted_at IS NULL AND bd.size_bytes > 0
+ORDER BY b.content_hash, bd.dir_id;
 
 -- name: owner_queue_book_upload!
--- param: content_hash: &str
--- param: checksum: &str
+-- param: content_hash: &ContentHash
 -- param: size_bytes: i64
-INSERT INTO book_transfer(content_hash, upload_id, upload_checksum, upload_size)
-SELECT content_hash, (SELECT COALESCE(MAX(MAX(COALESCE(upload_id, 0), COALESCE(upload_prepared, 0))), 0) + 1 FROM book_transfer), :checksum, :size_bytes FROM book WHERE content_hash = :content_hash
-ON CONFLICT(content_hash) DO UPDATE SET upload_id = excluded.upload_id, upload_checksum = excluded.upload_checksum, upload_size = excluded.upload_size
+INSERT INTO book_transfer(content_hash, upload_id, upload_size)
+SELECT content_hash, (SELECT COALESCE(MAX(MAX(COALESCE(upload_id, 0), COALESCE(upload_prepared, 0))), 0) + 1 FROM book_transfer), :size_bytes FROM book WHERE content_hash = :content_hash
+ON CONFLICT(content_hash) DO UPDATE SET upload_id = excluded.upload_id, upload_size = excluded.upload_size
 WHERE upload_id IS NULL;
 
 -- name: owner_refresh_book_uploads!

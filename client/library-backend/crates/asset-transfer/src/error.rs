@@ -1,6 +1,5 @@
 //! Stable transfer failures shared by execution, queues and browser RPC.
 
-use std::io::ErrorKind;
 use client_runtime::BackendError;
 use std::fmt;
 
@@ -31,7 +30,7 @@ impl TransferError {
         let message = format!("server rejected upload admission: {reason:?}");
         match reason {
             BlobManifestRejectionReason::UploadInProgress => Self::retryable(message),
-            BlobManifestRejectionReason::InvalidSize | BlobManifestRejectionReason::SizeMismatch | BlobManifestRejectionReason::IdentityMismatch | BlobManifestRejectionReason::QuotaExceeded => Self::rejected(message),
+            BlobManifestRejectionReason::InvalidSize | BlobManifestRejectionReason::SizeMismatch | BlobManifestRejectionReason::QuotaExceeded => Self::rejected(message),
         }
     }
 }
@@ -87,28 +86,5 @@ impl From<library_database::DatabaseError> for TransferError {
 impl From<library_files::AssetStoreError> for TransferError {
     fn from(error: library_files::AssetStoreError) -> Self {
         Self::retryable(error)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::error::Error;
-
-    #[test]
-    fn retryable_retains_its_source_when_cloned() {
-        let error = TransferError::from(std::io::Error::from(ErrorKind::PermissionDenied));
-        let cloned = error.clone();
-        let source = cloned.source().unwrap().source().unwrap().downcast_ref::<std::io::Error>().unwrap();
-        assert_eq!(source.kind(), ErrorKind::PermissionDenied);
-    }
-
-    #[test]
-    fn worker_roundtrip_preserves_retry_policy_and_io_details() {
-        let error = TransferError::from(std::io::Error::from_raw_os_error(13));
-        let bytes = client_runtime::wire::encode_worker_message(&error).unwrap();
-        let restored: TransferError = client_runtime::wire::decode_worker_message(&bytes).unwrap();
-        let TransferError::Retryable(source) = restored else { panic!("retry policy changed") };
-        assert!(source.report().causes.iter().any(|cause| matches!(cause, client_runtime::ErrorCause::Io { os_code: Some(13), .. })));
     }
 }

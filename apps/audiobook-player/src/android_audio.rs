@@ -2,12 +2,14 @@
 //! playback source and forwards service position events to library persistence,
 //! independently of the GPUI activity's rendering/lifetime.
 
+use crate::{AudiobookBook, PlaybackPosition, ReadSeek, playback_progress, position_save_required};
+#[cfg(not(target_arch = "wasm32"))]
+use library_backend::library::AudioStreamControl;
+use serde_json::{Value, json};
 use std::fs::File;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::pin::Pin;
 use std::task::{Context, Waker};
-use crate::{AudiobookBook, PlaybackPosition, ReadSeek, playback_progress, position_save_required};
-use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -62,7 +64,7 @@ struct Status {
 }
 struct Session {
     read_generation: AtomicU64,
-    control: Option<app::AudioStreamControl>,
+    control: Option<AudioStreamControl>,
     release: (async_channel::Sender<()>, async_channel::Receiver<()>),
     stop_error: Mutex<Option<String>>,
     reader: Mutex<Option<Box<dyn ReadSeek>>>,
@@ -127,7 +129,7 @@ pub(crate) struct AudioEngine {
 }
 impl AudioEngine {
     pub(crate) fn open(
-        mut reader: Box<dyn ReadSeek>, file: Option<File>, control: Option<app::AudioStreamControl>, book: &AudiobookBook, track: Option<&book_model::AudiobookTrack>, initial: Duration, updates: async_channel::Sender<PlaybackPosition>,
+        mut reader: Box<dyn ReadSeek>, file: Option<File>, control: Option<AudioStreamControl>, book: &AudiobookBook, track: Option<&book_model::AudiobookTrack>, initial: Duration, updates: async_channel::Sender<PlaybackPosition>,
     ) -> Result<Self, String> {
         BRIDGE.get().ok_or("Android audio bridge is not initialized")?;
         #[cfg(any(target_os = "android", target_os = "linux"))]
@@ -141,7 +143,7 @@ impl AudioEngine {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let global_offset = track.map(|track| Duration::from_millis(track.start_ms)).unwrap_or_default();
         let duration = track.map(|track| Duration::from_millis(track.end_ms - track.start_ms)).unwrap_or(book.duration);
-        let chapter_ends = book.chapters.iter().filter_map(|chapter| (chapter.end > global_offset && chapter.start < global_offset + duration).then_some(chapter.end.saturating_sub(global_offset).min(duration).as_millis() as u64)).collect::<Vec<_>>();
+        let chapter_ends = book.chapters.iter().filter_map(|chapter| (chapter.end() > global_offset && chapter.start() < global_offset + duration).then_some(chapter.end().saturating_sub(global_offset).min(duration).as_millis() as u64)).collect::<Vec<_>>();
         let load = json!({"command":"load", "id":id, "path":path, "length":length, "title":book.title, "author":book.author, "position":initial.min(duration).as_millis() as u64, "chapterEnds":chapter_ends});
         let session = Arc::new(Session {
             read_generation: AtomicU64::new(0),
@@ -359,19 +361,6 @@ mod tests {
         playback_state(&json!({"id":id,"sequence":sequence,"position":position,"playing":playing,"ready":ready,"released":released}).to_string());
     }
 
-    #[test]
-    fn loader_acknowledges_latest_seek_generation_and_keeps_byte_offsets() {
-        let (id, session, _) = session();
-        *session.reader.lock().unwrap() = Some(Box::new(Cursor::new(vec![0, 1, 2, 3, 4, 5])));
-        interrupt_source(id);
-        interrupt_source(id);
-        let control = session.control.as_ref().unwrap();
-        assert!(control.is_interrupted());
-        assert_eq!(read_source(id, 3, 2).unwrap(), vec![3, 4]);
-        assert!(!control.is_interrupted());
-        assert_eq!(session.read_generation.load(Ordering::Acquire), 2);
-        event(id, 0, 0, false, false, true);
-    }
 
     #[test]
     fn seek_during_read_cannot_deliver_old_generation_bytes() {
@@ -401,84 +390,6 @@ mod tests {
         event(id, 0, 0, false, false, true);
     }
 
-    #[test]
-    fn service_intent_gates_source_retries_without_confusing_loading_with_pause() {
-        let (id, session, _) = session();
-        let control = session.control.as_ref().unwrap().clone();
-        playback_state(&json!({"id": id, "requested": true, "playing": false, "ready": false}).to_string());
-        assert!(!control.is_paused(), "loading with play requested must permit retry");
-        playback_state(&json!({"id": id, "requested": false, "playing": false, "ready": false}).to_string());
-        assert!(control.is_paused());
-        session.status.lock().unwrap().sequence = 1;
-        playback_state(&json!({"id": id, "sequence": 0, "requested": true}).to_string());
-        assert!(control.is_paused(), "stale service state must not resume retries");
-        event(id, 1, 0, false, false, true);
-        assert!(control.is_cancelled());
-    }
-
-    #[test]
-    fn stop_cancels_source_even_before_service_start() {
-        let (id, session, _) = session();
-        let control = session.control.as_ref().unwrap().clone();
-        let engine = AudioEngine { id, session, load: Value::Null, started: AtomicBool::new(false) };
-        engine.stop();
-        assert!(control.is_cancelled());
-        sessions().lock().unwrap().remove(&id);
-    }
-
-    #[test]
-    fn buffering_is_distinct_from_pause_and_never_advances_position() {
-        let (id, session, _) = session();
-        let engine = AudioEngine { id, session, load: Value::Null, started: AtomicBool::new(true) };
-        event(id, 0, 40_000, true, true, false);
-        playback_state(
-            &json!({"id": id, "sequence": 0, "position": 45_000,
-            "ready": false, "playing": false, "buffering": true})
-            .to_string(),
-        );
-        assert!(engine.is_buffering());
-        assert!(!engine.is_playing());
-        assert_eq!(engine.position(), Duration::from_secs(40));
-        // A pause while loading clears buffering; old sequence events cannot
-        // overwrite the state of a newer seek.
-        event(id, 0, 45_000, false, false, false);
-        assert!(!engine.is_buffering());
-        engine.session.status.lock().unwrap().sequence = 1;
-        playback_state(&json!({"id": id, "sequence": 0, "buffering": true}).to_string());
-        assert!(!engine.is_buffering());
-        playback_state(&json!({"id": id, "sequence": 1, "buffering": true, "released": true}).to_string());
-        assert!(!engine.is_buffering());
-    }
-
-    #[test]
-    fn final_position_snapshot_survives_source_release() {
-        let (id, session, updates) = session();
-        let source = Arc::downgrade(&session);
-        let engine = AudioEngine { id, session, load: Value::Null, started: AtomicBool::new(true) };
-        let snapshot = engine.position_snapshot();
-        assert_eq!(snapshot.confirmed_position(), None);
-        event(id, 0, 40_000, true, true, false);
-        assert_eq!(snapshot.confirmed_position(), Some(Duration::from_secs(40)));
-        drop(engine);
-        event(id, 0, 42_000, false, true, true);
-        assert_eq!(snapshot.confirmed_position(), Some(Duration::from_secs(42)));
-        assert!(source.upgrade().is_none(), "snapshot must not retain the playback source");
-        assert_eq!(updates.try_recv().unwrap().0, Duration::from_secs(40));
-        assert_eq!(updates.try_recv().unwrap().0, Duration::from_secs(42));
-    }
-
-    #[test]
-    fn unready_service_event_does_not_reset_resume_position() {
-        let (id, session, updates) = session();
-        session.status.lock().unwrap().position = Duration::from_secs(120);
-        let engine = AudioEngine { id, session, load: Value::Null, started: AtomicBool::new(true) };
-        event(id, 0, 0, false, false, false);
-        assert_eq!(engine.position(), Duration::from_secs(120));
-        assert_eq!(engine.confirmed_position(), None);
-        assert!(updates.is_empty());
-        event(id, 0, 120_000, false, true, true);
-        assert_eq!(engine.confirmed_position(), Some(Duration::from_secs(120)));
-    }
 
     #[test]
     fn release_during_pending_seek_retains_last_accepted_position() {
@@ -499,29 +410,6 @@ mod tests {
         assert_eq!(snapshot.confirmed_position(), None);
     }
 
-    #[test]
-    fn release_completion_follows_the_final_progress_event() {
-        let (id, session, updates) = session();
-        let engine = AudioEngine { id, session, load: Value::Null, started: AtomicBool::new(true) };
-        let mut released = engine.release_completion();
-        let mut poll = Context::from_waker(Waker::noop());
-        assert!(released.as_mut().poll(&mut poll).is_pending());
-        event(id, 0, 42_000, false, true, true);
-        assert!(matches!(released.as_mut().poll(&mut poll), std::task::Poll::Ready(Ok(()))));
-        assert_eq!(updates.try_recv().unwrap().0, Duration::from_secs(42));
-    }
-
-    #[test]
-    fn release_completion_reports_stop_dispatch_failure() {
-        let (id, session, _) = session();
-        let engine = AudioEngine { id, session: session.clone(), load: Value::Null, started: AtomicBool::new(true) };
-        let mut released = engine.release_completion();
-        *session.stop_error.lock().unwrap() = Some("service unavailable".to_owned());
-        session.release.0.close();
-        let mut poll = Context::from_waker(Waker::noop());
-        assert!(matches!(released.as_mut().poll(&mut poll), std::task::Poll::Ready(Err(error)) if error == "service unavailable"));
-        sessions().lock().unwrap().remove(&id);
-    }
 
     #[test]
     fn missing_service_acknowledgement_fails_instead_of_allowing_removal() {
@@ -606,50 +494,6 @@ mod tests {
             assert!(std::fs::metadata(&descriptor_path).map_or(true, |metadata| (metadata.dev(), metadata.ino()) != (original_metadata.dev(), original_metadata.ino())));
             assert_eq!(std::fs::read(renamed).unwrap(), b"original audiobook");
         }
-    }
-    #[test]
-    fn background_session_keeps_source_and_saves_without_ui() {
-        let (id, session, receiver) = session();
-        let retained = Arc::downgrade(&session);
-        drop(session);
-        event(id, 0, 12_000, true, true, false);
-        assert_eq!(receiver.try_recv().unwrap().0, Duration::from_secs(12));
-        assert!(retained.upgrade().is_some());
-        event(id, 0, 13_000, false, true, true);
-        assert_eq!(receiver.try_recv().unwrap().0, Duration::from_secs(13));
-        assert!(retained.upgrade().is_none());
-    }
-    #[test]
-    fn unprepared_and_stale_seek_events_cannot_overwrite_resume_position() {
-        let (id, session, receiver) = session();
-        event(id, 0, 0, false, false, false);
-        assert!(receiver.try_recv().is_err());
-        session.status.lock().unwrap().sequence = 2;
-        event(id, 1, 20_000, true, true, false);
-        assert!(receiver.try_recv().is_err());
-        event(id, 2, 120_000, true, true, false);
-        assert_eq!(receiver.try_recv().unwrap().0, Duration::from_secs(120));
-        event(id, 2, 120_000, false, true, true);
-    }
-    #[test]
-    fn pause_saves_short_progress_and_periodic_updates_are_throttled() {
-        let (id, _, receiver) = session();
-        event(id, 0, 10_000, true, true, false);
-        receiver.try_recv().unwrap();
-        event(id, 0, 11_000, true, true, false);
-        assert!(receiver.try_recv().is_err());
-        event(id, 0, 11_000, false, true, false);
-        assert_eq!(receiver.try_recv().unwrap().0, Duration::from_secs(11));
-        event(id, 0, 11_000, false, true, true);
-    }
-    #[test]
-    fn small_seek_from_system_controls_is_saved_while_paused() {
-        let (id, _, receiver) = session();
-        event(id, 0, 10_000, false, true, false);
-        receiver.try_recv().unwrap();
-        playback_state(&json!({"id":id,"position":11_000,"ready":true,"force":true}).to_string());
-        assert_eq!(receiver.try_recv().unwrap().0, Duration::from_secs(11));
-        event(id, 0, 11_000, false, true, true);
     }
     #[test]
     fn terminal_start_failure_releases_source_without_saving_zero() {

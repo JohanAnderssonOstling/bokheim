@@ -1,197 +1,290 @@
 //! Event delivery owned by one concrete library session.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use async_channel::{Receiver, Sender};
+use std::collections::{HashMap, HashSet};
 
+use crate::scheduler::SyncScheduler;
 use library_model::{BookDownloadStatus, DownloadState, LibraryUpdate};
 use sync_common::ContentHash;
 
 #[derive(Clone, Debug)]
 pub enum LibraryEvent {
+    /// Book bytes are now present on the server; lifecycle metadata can publish.
+    BooksUploaded,
+    /// Metadata acknowledgement may have made covers uploadable.
+    AssetWorkAvailable,
+    /// File replay finished and admitted uploads; enrichment can look again.
+    FilesPrepared,
     ThumbnailGenerated { content_hash: ContentHash },
     DownloadStatusChanged { content_hash: ContentHash, state: DownloadState },
-    TransferStatusChanged,
-    StorageChanged,
     ContentsChanged,
+    /// A committed write whose notification is suppressed during a directory import.
+    ContentsCommitted,
+    /// A presentation update that does not schedule another worker pass.
+    Update(LibraryUpdate),
     ImportStarted,
-    ImportComplete,
+    /// `busy`: another import or a scan is still running.
+    ImportComplete { busy: bool },
     ScanStarted,
-    ScanComplete,
+    /// `busy`: a folder import is still running.
+    ScanComplete { busy: bool },
 }
 
-pub type LibraryEventSender = async_channel::Sender<LibraryEvent>;
-pub type LibraryEventReceiver = async_channel::Receiver<LibraryEvent>;
-
-
-
-/// UI subscriptions live with the session, never in global application state.
-#[derive(Clone, Default)]
-pub struct LibraryEventSubscriptions {
-    pub subscribers: Arc<Mutex<LibraryEventSubscribers>>,
+/// Send-only capability for workers and callbacks. Mutable coordination stays
+/// on the owning library thread; emitting an event never accesses that state.
+#[derive(Clone)]
+pub struct LibraryEventRouter {
+    sender: Sender<LibraryEvent>,
+    pub sync: SyncScheduler,
+    pub assets: SyncScheduler,
+    pub files: SyncScheduler,
+    pub enrichment: SyncScheduler,
 }
 
-#[derive(Default)]
-pub struct LibraryEventSubscribers {
-    pub closed: bool,
-    updates: Vec<async_channel::Sender<LibraryUpdate>>,
-    pub downloads: Vec<(ContentHash, async_channel::Sender<DownloadState>)>,
-    pub latest_downloads: HashMap<ContentHash, DownloadState>,
-}
-
-impl LibraryEventSubscriptions {
-    /// Retirement is permanent, including subscriptions made through stale handles.
-    pub fn close(&self) {
-        let mut subscribers = self.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        subscribers.closed = true;
-        for sender in subscribers.updates.drain(..) {
-            sender.close();
-        }
-        for (_, sender) in subscribers.downloads.drain(..) {
-            sender.close();
-        }
-    }
-
-    pub fn subscribe_updates(&self) -> async_channel::Receiver<LibraryUpdate> {
+impl LibraryEventRouter {
+    pub fn new(sync: SyncScheduler, assets: SyncScheduler, files: SyncScheduler, enrichment: SyncScheduler) -> (Self, LibraryEventState) {
         let (sender, receiver) = async_channel::unbounded();
-        let mut subscribers = self.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !subscribers.closed {
-            subscribers.updates.push(sender);
-        }
-        receiver
+        (Self { sender, sync, assets, files, enrichment }, LibraryEventState { receiver, updates: Vec::new(), latest_downloads: HashMap::new(), directory_imports: HashSet::new(), closed: false })
     }
 
-    pub fn subscribe_download(&self, content_hash: ContentHash) -> async_channel::Receiver<DownloadState> {
-        let (sender, receiver) = async_channel::unbounded();
-        let mut subscribers = self.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if subscribers.closed {
-            return receiver;
-        }
-        subscribers.downloads.retain(|(_, sender)| !sender.is_closed());
-        subscribers.downloads.push((content_hash, sender));
-        receiver
+    /// Announces that the set of books or folders changed.
+    ///
+    /// A write site cannot tell whether it is alone or the four-thousandth
+    /// commit of an import, so it must not decide how often this is worth
+    /// saying. An import in flight brackets itself and announces its result
+    /// once when it finishes; every commit inside that bracket is the same
+    /// announcement repeated, and each one costs every open view a full reload.
+    pub fn notify_contents_changed(&self) {
+        self.emit(LibraryEvent::ContentsCommitted);
     }
 
-    
-
-    
-
-    
-
-    pub fn publish(&self, event: LibraryEvent, busy: bool) {
-        let mut subscribers = self.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let update = match event {
-            LibraryEvent::ThumbnailGenerated { content_hash } => LibraryUpdate::Covers(vec![content_hash]),
-            LibraryEvent::DownloadStatusChanged { content_hash, state } => {
-                if subscribers.latest_downloads.get(&content_hash) == Some(&state) {
-                    return;
-                }
-                if subscribers.latest_downloads.get(&content_hash).is_some_and(|previous| matches!((previous, &state), (DownloadState::Downloaded, DownloadState::Queued | DownloadState::Downloading(_)))) {
-                    return;
-                }
-                subscribers.latest_downloads.insert(content_hash, state.clone());
-                subscribers.downloads.retain(|(subscribed_hash, sender)| *subscribed_hash != content_hash || sender.try_send(state.clone()).is_ok());
-                LibraryUpdate::Download(BookDownloadStatus::new(content_hash, state))
-            }
-            LibraryEvent::TransferStatusChanged | LibraryEvent::StorageChanged => return,
-            LibraryEvent::ScanStarted | LibraryEvent::ImportStarted => LibraryUpdate::Scanning(busy),
-            LibraryEvent::ContentsChanged => LibraryUpdate::Contents,
-            LibraryEvent::ScanComplete | LibraryEvent::ImportComplete => {
-                send_update(&mut subscribers.updates, LibraryUpdate::Scanning(busy));
-                LibraryUpdate::Contents
-            }
-        };
-        send_update(&mut subscribers.updates, update);
+    pub fn emit(&self, event: LibraryEvent) {
+        let _ = self.sender.try_send(event);
     }
 
     pub fn publish_update(&self, update: LibraryUpdate) {
-        send_update(&mut self.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).updates, update);
+        self.emit(LibraryEvent::Update(update));
+    }
+
+    fn route(&self, event: &LibraryEvent) {
+        match event {
+            LibraryEvent::BooksUploaded => self.sync.wake(),
+            LibraryEvent::AssetWorkAvailable | LibraryEvent::ThumbnailGenerated { .. } => self.assets.wake(),
+            LibraryEvent::FilesPrepared => self.enrichment.wake(),
+            LibraryEvent::ContentsChanged | LibraryEvent::ImportComplete { .. } | LibraryEvent::ScanComplete { .. } => {
+                self.assets.wake();
+                self.files.wake();
+            }
+            LibraryEvent::DownloadStatusChanged { content_hash, state: DownloadState::Downloaded } => {
+                self.assets.wake_hashes(vec![*content_hash]);
+                self.files.wake();
+            }
+            _ => {}
+        }
     }
 }
 
-fn send_update(subscribers: &mut Vec<async_channel::Sender<LibraryUpdate>>, update: LibraryUpdate) {
+
+/// Exclusively owned by the library session. Download observations and import
+/// tracking are operational state, independent of subscriber bookkeeping.
+pub struct LibraryEventState {
+    receiver: Receiver<LibraryEvent>,
+    closed: bool,
+    updates: Vec<Sender<LibraryUpdate>>,
+    latest_downloads: HashMap<ContentHash, DownloadState>,
+    directory_imports: HashSet<uuid::Uuid>,
+}
+
+impl LibraryEventState {
+    pub fn receiver(&self) -> Receiver<LibraryEvent> {
+        self.receiver.clone()
+    }
+
+    /// Apply queued events before reading coordination state or replying to a
+    /// command. No borrow of this state may span an await.
+    pub fn drain(&mut self, router: &LibraryEventRouter) {
+        while let Ok(event) = self.receiver.try_recv() {
+            self.apply(event, router);
+        }
+    }
+
+    pub fn close(&mut self) {
+        self.closed = true;
+        self.receiver.close();
+        while self.receiver.try_recv().is_ok() {}
+        for sender in self.updates.drain(..) {
+            sender.close();
+        }
+    }
+
+    pub fn subscribe_updates(&mut self) -> Receiver<LibraryUpdate> {
+        let (sender, receiver) = async_channel::unbounded();
+        if !self.closed {
+            self.updates.push(sender);
+        }
+        receiver
+    }
+
+    pub fn directory_imports_active(&self) -> bool {
+        !self.directory_imports.is_empty()
+    }
+
+    pub fn begin_directory_import(&mut self, id: uuid::Uuid, router: &LibraryEventRouter) {
+        if !self.closed && self.directory_imports.insert(id) {
+            self.apply(LibraryEvent::ImportStarted, router);
+        }
+    }
+
+    pub fn finish_directory_import(&mut self, id: uuid::Uuid, scanning: bool, router: &LibraryEventRouter) {
+        if !self.closed && self.directory_imports.remove(&id) {
+            self.apply(LibraryEvent::ImportComplete { busy: scanning || self.directory_imports_active() }, router);
+            router.sync.wake();
+        }
+    }
+
+    pub fn download_state(&self, hash: &ContentHash) -> Option<&DownloadState> {
+        self.latest_downloads.get(hash)
+    }
+
+    pub fn reset_download(&mut self, hash: &ContentHash) {
+        if matches!(self.latest_downloads.get(hash), Some(DownloadState::Downloaded)) {
+            self.latest_downloads.remove(hash);
+        }
+    }
+
+    pub fn apply(&mut self, event: LibraryEvent, router: &LibraryEventRouter) {
+        if self.closed {
+            return;
+        }
+        let event = match event {
+            LibraryEvent::ContentsCommitted => {
+                if self.directory_imports_active() {
+                    return;
+                }
+                router.sync.wake();
+                LibraryEvent::ContentsChanged
+            }
+            event => event,
+        };
+        router.route(&event);
+        let update = match event {
+            LibraryEvent::Update(update) => update,
+            LibraryEvent::ThumbnailGenerated { content_hash } => LibraryUpdate::Covers(vec![content_hash]),
+            LibraryEvent::DownloadStatusChanged { content_hash, state } => {
+                if self.latest_downloads.get(&content_hash) == Some(&state) {
+                    return;
+                }
+                if self.latest_downloads.get(&content_hash).is_some_and(|previous| matches!((previous, &state), (DownloadState::Downloaded, DownloadState::Queued | DownloadState::Downloading(_)))) {
+                    return;
+                }
+                self.latest_downloads.insert(content_hash, state.clone());
+                LibraryUpdate::Download(BookDownloadStatus::new(content_hash, state))
+            }
+            LibraryEvent::AssetWorkAvailable | LibraryEvent::FilesPrepared | LibraryEvent::ContentsCommitted => return,
+            LibraryEvent::ScanStarted | LibraryEvent::ImportStarted => LibraryUpdate::Scanning(true),
+            LibraryEvent::ContentsChanged | LibraryEvent::BooksUploaded => LibraryUpdate::Contents,
+            LibraryEvent::ScanComplete { busy } | LibraryEvent::ImportComplete { busy } => {
+                send_update(&mut self.updates, LibraryUpdate::Scanning(busy));
+                LibraryUpdate::Contents
+            }
+        };
+        send_update(&mut self.updates, update);
+    }
+}
+
+impl Drop for LibraryEventState {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+fn send_update(subscribers: &mut Vec<Sender<LibraryUpdate>>, update: LibraryUpdate) {
     subscribers.retain(|sender| sender.try_send(update.clone()).is_ok());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduler::SyncRequest;
+    use library_model::DownloadProgress;
 
-    #[test]
-    fn retirement_closes_existing_and_future_subscriptions() {
-        let subscriptions = LibraryEventSubscriptions::default();
-        let retained = subscriptions.clone();
-        let hash = ContentHash::new(&format!("{:064x}", 1));
-        let updates = retained.subscribe_updates();
-        let downloads = retained.subscribe_download(hash);
-        subscriptions.publish_update(LibraryUpdate::Contents);
-
-        subscriptions.close();
-        subscriptions.close(); // Repeated shutdown and actor drop are harmless.
-        assert!(updates.is_closed());
-        assert!(downloads.is_closed());
-        assert!(matches!(updates.try_recv(), Ok(LibraryUpdate::Contents)));
-        assert!(matches!(updates.try_recv(), Err(async_channel::TryRecvError::Closed)));
-        assert!(matches!(downloads.try_recv(), Err(async_channel::TryRecvError::Closed)));
-        assert!(retained.subscribe_updates().is_closed());
-        assert!(retained.subscribe_download(hash).is_closed());
+    fn fixture() -> (LibraryEventRouter, LibraryEventState, Receiver<SyncRequest>) {
+        let (sync, requests) = SyncScheduler::new();
+        let (assets, _) = SyncScheduler::new();
+        let (files, _) = SyncScheduler::new();
+        let (enrichment, _) = SyncScheduler::new();
+        let (router, state) = LibraryEventRouter::new(sync, assets, files, enrichment);
+        (router, state, requests)
     }
 
     #[test]
-    fn current_download_is_shared_and_terminal_states_do_not_regress() {
-        let subscriptions = LibraryEventSubscriptions::default();
-        let hash = ContentHash::new(&format!("{:064x}", 7));
-        let updates = subscriptions.subscribe_updates();
-        let book = subscriptions.subscribe_download(hash);
-        subscriptions.publish(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Queued }, false);
-        subscriptions.publish(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Downloaded }, false);
-        subscriptions.publish(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Queued }, false);
-        assert_eq!(subscriptions.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).latest_downloads.get(&hash).cloned(), Some(DownloadState::Downloaded));
-        assert_eq!(book.try_recv().unwrap(), DownloadState::Queued);
-        assert_eq!(book.try_recv().unwrap(), DownloadState::Downloaded);
-        assert!(book.try_recv().is_err());
-        assert!(matches!(updates.try_recv(), Ok(LibraryUpdate::Download(_))));
-        assert!(matches!(updates.try_recv(), Ok(LibraryUpdate::Download(_))));
+    fn import_bracket_suppresses_commits_and_duplicate_completions() {
+        let (router, mut state, sync) = fixture();
+        let updates = state.subscribe_updates();
+        let first = uuid::Uuid::from_u128(1);
+        let second = uuid::Uuid::from_u128(2);
+        state.begin_directory_import(first, &router);
+        state.begin_directory_import(second, &router);
+        assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::Scanning(true));
+        assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::Scanning(true));
+        router.notify_contents_changed();
+        state.drain(&router);
         assert!(updates.try_recv().is_err());
+        assert!(sync.try_recv().is_err());
+
+        state.finish_directory_import(first, false, &router);
+        assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::Scanning(true));
+        assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::Contents);
+        assert!(state.directory_imports_active());
+        assert!(sync.try_recv().is_ok());
+        state.finish_directory_import(first, false, &router);
+        assert!(updates.try_recv().is_err());
+        assert!(sync.try_recv().is_err());
+
+        state.finish_directory_import(second, false, &router);
+        assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::Scanning(false));
+        assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::Contents);
+        assert!(!state.directory_imports_active());
+        router.notify_contents_changed();
+        state.drain(&router);
+        assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::Contents);
     }
 
     #[test]
-    fn retry_resets_progress_and_new_request_can_follow_eviction() {
-        let subscriptions = LibraryEventSubscriptions::default();
-        let hash = ContentHash::new(&format!("{:064x}", 8));
-        let book = subscriptions.subscribe_download(hash);
-        subscriptions.publish(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Downloading(library_model::DownloadProgress::ZERO) }, false);
-        subscriptions.publish(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Queued }, false);
-        assert_eq!(subscriptions.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).latest_downloads.get(&hash).cloned(), Some(DownloadState::Queued));
-        subscriptions.publish(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Downloaded }, false);
-        { let mut subscribers = subscriptions.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if matches!(subscribers.latest_downloads.get(&hash), Some(DownloadState::Downloaded)) { subscribers.latest_downloads.remove(&hash); } }
-        subscriptions.publish(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Queued }, false);
-        assert_eq!(subscriptions.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).latest_downloads.get(&hash).cloned(), Some(DownloadState::Queued));
-        assert_eq!(book.try_recv().unwrap(), DownloadState::Downloading(library_model::DownloadProgress::ZERO));
-        assert_eq!(book.try_recv().unwrap(), DownloadState::Queued);
-        assert_eq!(book.try_recv().unwrap(), DownloadState::Downloaded);
-        assert_eq!(book.try_recv().unwrap(), DownloadState::Queued);
+    fn queued_progress_is_owned_without_subscribers_and_cannot_regress_completion() {
+        let (router, mut state, _) = fixture();
+        let hash = ContentHash::from_bytes([7; 32]);
+        let downloading = DownloadState::Downloading(DownloadProgress::ZERO);
+        router.emit(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: downloading.clone() });
+        state.drain(&router);
+        assert_eq!(state.download_state(&hash), Some(&downloading));
+
+        let updates = state.subscribe_updates();
+        router.emit(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Downloaded });
+        router.emit(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: downloading });
+        state.drain(&router);
+        assert_eq!(state.download_state(&hash), Some(&DownloadState::Downloaded));
+        assert_eq!(updates.try_recv().unwrap(), LibraryUpdate::Download(BookDownloadStatus::new(hash, DownloadState::Downloaded)));
+        assert!(updates.try_recv().is_err());
+
+        state.reset_download(&hash);
+        router.emit(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Queued });
+        state.drain(&router);
+        assert_eq!(state.download_state(&hash), Some(&DownloadState::Queued));
     }
 
     #[test]
-    fn subscription_snapshot_orders_events_across_initialization() {
-        let subscriptions = LibraryEventSubscriptions::default();
-        let hash = ContentHash::new(&format!("{:064x}", 9));
-        let durable_before_event = DownloadState::NotDownloaded;
-        subscriptions.publish(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Queued }, false);
-        let (events, initial) = { let content_hash = hash; let durable = durable_before_event; {
-        let (sender, receiver) = async_channel::unbounded();
-        let mut subscribers = subscriptions.subscribers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let initial = subscribers.latest_downloads.get(&content_hash).cloned().unwrap_or(durable);
-        if !subscribers.closed {
-            subscribers.downloads.retain(|(_, sender)| !sender.is_closed());
-            subscribers.downloads.push((content_hash, sender));
-        }
-        (receiver, initial)
-    } };
-        assert_eq!(initial, DownloadState::Queued);
-        assert!(events.try_recv().is_err());
-        subscriptions.publish(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Downloaded }, false);
-        assert_eq!(events.try_recv().unwrap(), DownloadState::Downloaded);
+    fn close_discards_pending_events_and_rejects_stale_emitters() {
+        let (router, mut state, sync) = fixture();
+        let updates = state.subscribe_updates();
+        router.emit(LibraryEvent::BooksUploaded);
+        state.close();
+        state.drain(&router);
+        router.emit(LibraryEvent::BooksUploaded);
+        state.drain(&router);
+        assert!(updates.is_closed());
+        assert!(state.subscribe_updates().is_closed());
+        assert!(router.sender.is_closed());
+        assert!(sync.try_recv().is_err());
     }
 }

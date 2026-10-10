@@ -47,12 +47,6 @@ class ImportTests(unittest.TestCase):
                 self.assertEqual(db.execute("SELECT title_key FROM lc_title WHERE lc_record_id='old' ORDER BY title_key").fetchall(),[('revolution francaise',),('revolution francaise a history',)])
                 self.assertEqual(db.execute('SELECT count(*) FROM lc_record_isbn').fetchone()[0],0)
 
-    def test_isbn_validation_and_qualifiers(self):
-        self.assertEqual(loc.isbn13('0-306-40615-2 (hardcover)'), 9780306406157)
-        self.assertEqual(loc.isbn13('080442957X'), 9780804429573)
-        for value in ('9780306406158', '978030640615700', 'garbage', '1234567890'):
-            self.assertIsNone(loc.isbn13(value))
-
     def test_resume_keeps_completed_parts_and_replays_partial_part(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); src = root/'source.sqlite'
@@ -75,6 +69,10 @@ class ImportTests(unittest.TestCase):
                 loc.import_dump(src,root/'wrong-source.sqlite',[first,second],resume_building=stage)
 
     def test_import_preserves_source_and_extracts_only_valid_isbns_and_050a(self):
+        self.assertEqual(loc.isbn13('0-306-40615-2 (hardcover)'), 9780306406157)
+        self.assertEqual(loc.isbn13('080442957X'), 9780804429573)
+        for value in ('9780306406158', '978030640615700', 'garbage', '1234567890'):
+            self.assertIsNone(loc.isbn13(value))
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             src = root/'source.sqlite'

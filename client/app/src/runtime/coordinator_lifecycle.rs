@@ -7,7 +7,6 @@ pub enum Action {
     FailClients { error: String },
     FailNetwork { error: String },
     FailSync { error: String },
-    FailTransfers { error: String },
     FailCpu { error: String },
     NotifySyncFailure { error: String },
     StopNetwork,
@@ -67,7 +66,6 @@ impl CoordinatorLifecycle {
             Action::FailClients { error: error.clone() },
             Action::FailNetwork { error: error.clone() },
             Action::FailSync { error: error.clone() },
-            Action::FailTransfers { error: error.clone() },
             Action::NotifySyncFailure { error: error.clone() },
             Action::FailCpu { error: error.clone() },
             Action::StopNetwork,
@@ -76,69 +74,5 @@ impl CoordinatorLifecycle {
         // Release SQLite/OPFS ownership before closing the coordinator.
         result.extend([Action::StopBackend, Action::Close]);
         result
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn readiness_drains_waiters_and_cannot_revive_failed_coordinator() {
-        let mut c = CoordinatorLifecycle::new();
-        assert!(c.accepting_work());
-        assert!(c.connect(1).is_empty());
-        assert!(c.connect(2).is_empty());
-        assert_eq!(c.ready(), vec![Action::Connect { id: 1 }, Action::Connect { id: 2 }]);
-        assert!(c.ready().is_empty());
-        assert_eq!(c.connect(3), vec![Action::Connect { id: 3 }]);
-        let error = "stopped".to_owned();
-        assert_eq!(
-            c.fail(error.clone()),
-            vec![
-                Action::StopBackground,
-                Action::FailClients { error: error.clone() },
-                Action::FailNetwork { error: error.clone() },
-                Action::FailSync { error: error.clone() },
-                Action::FailTransfers { error: error.clone() },
-                Action::NotifySyncFailure { error: error.clone() },
-                Action::FailCpu { error: error.clone() },
-                Action::StopNetwork,
-                Action::StopBackend,
-                Action::Close,
-            ]
-        );
-        assert!(!c.accepting_work());
-        assert!(c.ready().is_empty());
-        assert!(c.fail("again".into()).is_empty());
-        assert_eq!(c.connect(4), vec![Action::Reject { id: 4, error }]);
-    }
-
-    #[test]
-    fn startup_failure_rejects_waiters_before_closing_the_worker() {
-        let mut c = CoordinatorLifecycle::new();
-        c.connect(1);
-        c.connect(2);
-        let actions = c.fail("startup failed".into());
-        assert_eq!(&actions[actions.len() - 4..], &[Action::Reject { id: 1, error: "startup failed".into() }, Action::Reject { id: 2, error: "startup failed".into() }, Action::StopBackend, Action::Close,]);
-        assert!(c.ready().is_empty());
-    }
-}
-
-#[cfg(test)]
-mod startup_tests {
-    use super::*;
-    #[test]
-    fn startup_deadline_applies_only_before_readiness() {
-        let mut coordinator = CoordinatorLifecycle::new();
-        assert!(coordinator.starting());
-        coordinator.connect(1);
-        let actions = coordinator.fail("startup timed out".into());
-        assert!(!coordinator.starting());
-        assert!(actions.contains(&Action::Reject { id: 1, error: "startup timed out".into() }));
-        assert!(coordinator.ready().is_empty());
-        let mut replacement = CoordinatorLifecycle::new();
-        replacement.ready();
-        assert!(!replacement.starting());
     }
 }

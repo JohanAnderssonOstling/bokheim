@@ -1,3 +1,17 @@
+-- name: all_book_ids?
+-- Every visible book once, regardless of how many placements it has.
+SELECT book.row_id FROM book
+WHERE book.deleted_at IS NULL
+  AND EXISTS(SELECT 1 FROM library_book_presence presence
+             WHERE presence.book_row_id=book.row_id);
+
+-- name: library_book_hashes?
+-- Every visible book's hash, to mark catalog books already in the library.
+SELECT book.content_hash FROM book
+WHERE book.deleted_at IS NULL
+  AND EXISTS(SELECT 1 FROM library_book_presence presence
+             WHERE presence.book_row_id=book.row_id);
+
 -- name: matching_books?
 -- param: book_ids: &str
 -- param: downloaded_only: i32

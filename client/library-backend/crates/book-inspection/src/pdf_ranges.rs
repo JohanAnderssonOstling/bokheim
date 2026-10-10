@@ -2,15 +2,15 @@ pub(super) use pdf_range_reader::{document_root, load_edges, metadata};
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Cursor, Result};
-    use std::path::Path;
     use lopdf::dictionary;
     use lopdf::{Dictionary, Document, Object, Stream};
     use pdf_range_reader::{load, load_edges};
+    use std::io::{Cursor, Result};
     use std::io::{Read, Seek, SeekFrom};
+    use std::path::Path;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
     #[test]
     fn edge_inspection_reads_final_copyright_without_middle_page_streams() {

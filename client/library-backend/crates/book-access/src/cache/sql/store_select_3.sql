@@ -1,1 +1,0 @@
-SELECT rowid,length(bytes) FROM block ORDER BY used,rowid LIMIT 1

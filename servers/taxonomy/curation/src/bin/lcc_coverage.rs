@@ -1,6 +1,6 @@
 //! Audit exact-selector conflicts and optional SQLite code_usage classifications.
 use std::path::Path;
-use subject_projection::{read_unified_taxonomy_sqlite, UnifiedTaxonomy};
+use subject_projection::{read_unified_taxonomy_sqlite, UnifiedTaxonomy, LCC_SYSTEM_ID};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().collect::<Vec<_>>();
@@ -17,11 +17,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut query = db.prepare("SELECT notation FROM code_usage WHERE scheme=2 ORDER BY notation")?;
         for row in query.query_map([], |row| row.get::<_, String>(0))? {
             let code = row?;
-            let ids = taxonomy.lcc_match_candidates(&code);
+            let ids = taxonomy.match_candidates(LCC_SYSTEM_ID, &code);
             let kind = match ids.len() {
                 0 => "unmatched",
                 1 => "matched",
-                _ if !taxonomy.matching_concept_ids(subject_projection::LCC_SYSTEM_ID, &code).is_empty() => "matched",
+                _ if !taxonomy.matching_concept_ids(LCC_SYSTEM_ID, &code).is_empty() => "matched",
                 _ => "ambiguous",
             };
             output.write_record([kind, &code, &ids.iter().map(i64::to_string).collect::<Vec<_>>().join("|")])?;

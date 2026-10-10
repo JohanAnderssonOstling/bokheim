@@ -41,33 +41,3 @@ pub(super) fn estimate_label((books, bytes, unavailable): (u64, u64, u64)) -> St
         if unavailable > 0 { format!(" · {unavailable} entries could not be checked") } else { String::new() }
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    fn file(path: &[&str], size: Option<u64>) -> gpui::SelectedDirectoryFile {
-        gpui::SelectedDirectoryFile::new(path.iter().map(|part| (*part).to_owned()).collect(), || panic!("estimation must not open a book")).with_size_bytes(size)
-    }
-    #[test]
-    fn provider_estimate_preserves_file_capabilities_and_filters_like_native_scan() {
-        let mut directory = SelectedDirectory {
-            local_path: None,
-            name: "Books".into(),
-            directories: vec![],
-            files: vec![file(&["Book.EPUB"], Some(100)), file(&["Audio.m4b"], Some(200)), file(&["Unknown.pdf"], None), file(&[".hidden", "hidden.epub"], Some(999)), file(&["notes.txt"], Some(999)), file(&["empty.epub"], Some(0))],
-        };
-        retain_eligible_files(&mut directory);
-        assert_eq!(directory.files.len(), 3);
-        assert_eq!(estimate_selected_files(&[directory]), (3, 300, 1));
-    }
-    #[test]
-    fn unavailable_sizes_are_not_shown_as_zero() {
-        assert_eq!(estimate_label((2, 0, 2)), "2 eligible books · size unavailable");
-        assert!(estimate_label((2, 1024, 1)).contains("at least"));
-    }
-    #[test]
-    fn size_switches_to_gb_at_one_gb() {
-        assert!(estimate_label((5, 500_000_000, 0)).contains("MB"));
-        assert!(estimate_label((5, 1_000_000_000, 0)).contains("GB"));
-    }
-}

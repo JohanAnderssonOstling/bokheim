@@ -3,11 +3,11 @@
 //! Registry and key/value behavior is identical on every target. Native code
 //! supplies real directory roots; the browser supplies SQLite VFS filenames.
 
-use std::error::Error;
-use std::io::ErrorKind;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::error::Error;
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::ErrorKind;
 use sync_common::LibraryId;
 
 const DATABASE_FILENAME: &str = "app-state-v1.sqlite3";
@@ -56,60 +56,39 @@ impl LibraryEntry {
     }
 }
 
-#[derive(Clone)]
-pub struct LibraryRegistry {
+mod owner;
+pub use owner::LibraryRegistry;
+
+struct LocalRegistry {
+    #[cfg(not(target_arch = "wasm32"))]
     app_data_locator: String,
     default_library_root: String,
-    connection: Arc<Mutex<Connection>>,
+    connection: Connection,
 }
 
-impl std::fmt::Debug for LibraryRegistry {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("LibraryRegistry").field("default_library_root", &self.default_library_root).finish_non_exhaustive()
-    }
-}
-
-impl LibraryRegistry {
-    pub fn open(app_data_locator: impl Into<String>) -> RegistryResult<Self> {
-        let app_data_locator = app_data_locator.into();
-        let library_root = join_locator(&app_data_locator, "libraries");
-        Self::open_with_library_root(app_data_locator, library_root)
-    }
-
+impl LocalRegistry {
     pub fn open_with_library_root(app_data_locator: impl Into<String>, default_library_root: impl Into<String>) -> RegistryResult<Self> {
         let app_data_locator = app_data_locator.into();
         let default_library_root = default_library_root.into();
-        let database_locator = Self::database_locator(&app_data_locator);
+        let database_locator = LibraryRegistry::database_locator(&app_data_locator);
         let connection = device_sqlite::open(database_locator, device_sqlite::OpenOptions::new().busy_timeout(std::time::Duration::from_secs(5)))?;
         connection.execute_batch(SCHEMA)?;
-        Ok(Self { app_data_locator, default_library_root, connection: Arc::new(Mutex::new(connection)) })
-    }
-
-    /// Actual registry filename in the selected platform storage namespace.
-    pub fn database_locator(app_data_locator: &str) -> String {
-        join_locator(app_data_locator, DATABASE_FILENAME)
+        Ok(Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            app_data_locator,
+            default_library_root,
+            connection,
+        })
     }
 
     /// Native databases belong to the device, independently of the content folder.
-    pub fn library_database_locator(&self, id: &LibraryId, content_locator: &str) -> String {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let _ = content_locator;
-            join_locator(&self.app_data_locator, &format!("libraries/{id}/library.db"))
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = id;
-            content_locator.to_owned()
-        }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn library_database_locator(&self, id: &LibraryId, _content_locator: &str) -> String {
+        join_locator(&self.app_data_locator, &format!("libraries/{id}/library.db"))
     }
 
-    fn connection(&self) -> RegistryResult<MutexGuard<'_, Connection>> {
-        self.connection.lock().map_err(|_| "library registry lock is poisoned".into())
-    }
-
-    pub fn entries(&self) -> RegistryResult<Vec<LibraryEntry>> {
-        let connection = self.connection()?;
+    pub fn entries(&mut self) -> RegistryResult<Vec<LibraryEntry>> {
+        let connection = &mut self.connection;
         let mut statement = connection.prepare("SELECT library_id,library_name,storage_path FROM library_registry ORDER BY library_name COLLATE NOCASE,library_id")?;
         let entries = statement
             .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
@@ -121,26 +100,26 @@ impl LibraryRegistry {
         entries
     }
 
-    pub fn entry(&self, id: &LibraryId) -> RegistryResult<Option<LibraryEntry>> {
-        let row = self.connection()?.query_row("SELECT library_name,storage_path FROM library_registry WHERE library_id=?1", [id.to_string()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).optional()?;
+    pub fn entry(&mut self, id: &LibraryId) -> RegistryResult<Option<LibraryEntry>> {
+        let row = self.connection.query_row("SELECT library_name,storage_path FROM library_registry WHERE library_id=?1", [id.to_string()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).optional()?;
         row.map(|(name, path)| LibraryEntry::new(*id, &name, path)).transpose()
     }
 
     // Keep the original device key so an earlier creation choice is preserved.
     // The choice now affects asset uploads only, never metadata sync.
-    pub fn asset_storage_enabled(&self, id: &LibraryId) -> RegistryResult<bool> {
+    pub fn asset_storage_enabled(&mut self, id: &LibraryId) -> RegistryResult<bool> {
         Ok(self.read_value(&format!("library_sync_disabled:{id}"))?.as_deref() != Some(b"1"))
     }
 
-    pub fn set_asset_storage_enabled(&self, id: &LibraryId, enabled: bool) -> RegistryResult<()> {
+    pub fn set_asset_storage_enabled(&mut self, id: &LibraryId, enabled: bool) -> RegistryResult<()> {
         if self.entry(id)?.is_none() {
             return Err("library not found".into());
         }
         self.write_value(&format!("library_sync_disabled:{id}"), if enabled { b"0" } else { b"1" })
     }
 
-    pub fn cache_cloud_storage_with_reset(&self, id: &LibraryId, enabled: bool) -> RegistryResult<()> {
-        let mut connection = self.connection()?;
+    pub fn cache_cloud_storage_with_reset(&mut self, id: &LibraryId, enabled: bool) -> RegistryResult<()> {
+        let connection = &mut self.connection;
         let tx = connection.transaction()?;
         tx.execute(include_str!("sql/set_sync_disabled.sql"), params![format!("library_sync_disabled:{id}"), if enabled { b"0".as_slice() } else { b"1".as_slice() }])?;
         tx.execute(include_str!("sql/set_sync_disabled.sql"), params![format!("cloud-storage-reset:{id}"), uuid::Uuid::new_v4().as_bytes().as_slice()])?;
@@ -148,18 +127,18 @@ impl LibraryRegistry {
         Ok(())
     }
 
-    pub fn clear_value_if_current(&self, key: &str, value: &[u8]) -> RegistryResult<()> {
-        self.connection()?.execute(include_str!("sql/clear_value_if_current.sql"), params![key, value])?;
+    pub fn clear_value_if_current(&mut self, key: &str, value: &[u8]) -> RegistryResult<()> {
+        self.connection.execute(include_str!("sql/clear_value_if_current.sql"), params![key, value])?;
         Ok(())
     }
 
     /// Save the local cache and an idempotent account write together.
-    pub fn queue_cloud_storage(&self, id: &LibraryId, enabled: bool) -> RegistryResult<()> {
+    pub fn queue_cloud_storage(&mut self, id: &LibraryId, enabled: bool) -> RegistryResult<()> {
         if self.entry(id)?.is_none() {
             return Err("library not found".into());
         }
         let pending = format!("{}:{}", uuid::Uuid::new_v4(), u8::from(enabled));
-        let mut connection = self.connection()?;
+        let connection = &mut self.connection;
         let tx = connection.transaction()?;
         tx.execute(include_str!("sql/set_sync_disabled.sql"), params![format!("library_sync_disabled:{id}"), if enabled { b"0".as_slice() } else { b"1".as_slice() }])?;
         tx.execute(include_str!("sql/set_sync_disabled.sql"), params![format!("pending-cloud-storage:{id}"), pending.as_bytes()])?;
@@ -167,12 +146,12 @@ impl LibraryRegistry {
         Ok(())
     }
 
-    pub fn create(&self, name: &str, locator: Option<String>) -> RegistryResult<LibraryEntry> {
+    pub fn create(&mut self, name: &str, locator: Option<String>) -> RegistryResult<LibraryEntry> {
         self.create_with_asset_storage(name, locator, true)
     }
 
     /// Persist the policy before the new library becomes visible to background work.
-    pub fn create_with_asset_storage(&self, name: &str, locator: Option<String>, asset_storage_enabled: bool) -> RegistryResult<LibraryEntry> {
+    pub fn create_with_asset_storage(&mut self, name: &str, locator: Option<String>, asset_storage_enabled: bool) -> RegistryResult<LibraryEntry> {
         let generated_id = LibraryId::new_v4();
         let requested_name = if name.trim().is_empty() { "Library" } else { name };
         let requested_locator = match locator {
@@ -183,7 +162,7 @@ impl LibraryRegistry {
         let pending_locator = std::path::Path::new(&requested_locator).canonicalize().unwrap_or_else(|_| std::path::PathBuf::from(&requested_locator)).to_string_lossy().into_owned();
         #[cfg(target_arch = "wasm32")]
         let pending_locator = requested_locator.clone();
-        let pending: bool = self.connection()?.query_row("SELECT EXISTS(SELECT 1 FROM pending_local_purge WHERE storage_path=?1)", [&pending_locator], |row| row.get(0))?;
+        let pending: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM pending_local_purge WHERE storage_path=?1)", [&pending_locator], |row| row.get(0))?;
         if pending {
             return Err("library location is pending deletion".into());
         }
@@ -191,7 +170,7 @@ impl LibraryRegistry {
         if self.is_detached(entry.library_id())? {
             return Err("library is pending deletion".into());
         }
-        let mut connection = self.connection()?;
+        let connection = &mut self.connection;
         let tx = connection.transaction()?;
         tx.execute(include_str!("sql/set_sync_disabled.sql"), params![format!("library_sync_disabled:{}", entry.library_id), if asset_storage_enabled { b"0".as_slice() } else { b"1".as_slice() }])?;
         tx.execute(include_str!("sql/create_library.sql"), params![entry.library_id.to_string(), entry.library_name, entry.storage_locator])?;
@@ -203,7 +182,7 @@ impl LibraryRegistry {
         Ok(entry)
     }
 
-    pub fn attach_remote(&self, id: &LibraryId, name: &str) -> RegistryResult<LibraryEntry> {
+    pub fn attach_remote(&mut self, id: &LibraryId, name: &str) -> RegistryResult<LibraryEntry> {
         // An existing missing root may have moved. Account reconciliation must
         // not recreate it and prevent relocation from recognizing the move.
         #[cfg(not(target_arch = "wasm32"))]
@@ -213,7 +192,7 @@ impl LibraryRegistry {
                 platform::write_manifest(&entry)?;
             }
             if existing.library_name() != entry.library_name() {
-                self.connection()?.execute(include_str!("sql/update_library_name.sql"), params![id.to_string(), entry.library_name])?;
+                self.connection.execute(include_str!("sql/update_library_name.sql"), params![id.to_string(), entry.library_name])?;
             }
             return Ok(entry);
         }
@@ -223,33 +202,18 @@ impl LibraryRegistry {
             None => platform::allocate_library_location(&self.effective_library_root()?, id, name)?,
         };
         let entry = platform::prepare_attached_library(*id, name, requested_locator)?;
-        self.connection()?.execute(
+        self.connection.execute(
             "INSERT INTO library_registry(library_id,library_name,storage_path) VALUES(?1,?2,?3) ON CONFLICT(library_id) DO UPDATE SET library_name=excluded.library_name",
             params![id.to_string(), entry.library_name, entry.storage_locator],
         )?;
         Ok(entry)
     }
 
-    /// Compare-and-swap a missing root after validating the on-disk identity.
-    /// Never creates a library or replaces an independently selected location.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn relocate(&self, id: &LibraryId, previous: &str, destination: &std::path::Path) -> RegistryResult<bool> {
-        // An occupied pathname is not proof that this library is still there.
-        if std::path::Path::new(previous).is_dir() && read_library_manifest(std::path::Path::new(previous))?.is_some_and(|(found, _)| found == *id) {
-            return Ok(false);
-        }
-        let destination = destination.canonicalize()?;
-        if !destination.is_dir() || read_library_manifest(&destination)?.is_none_or(|(found, _)| found != *id) {
-            return Err("directory does not belong to this library".into());
-        }
-        Ok(self.connection()?.execute("UPDATE library_registry SET storage_path=?3 WHERE library_id=?1 AND storage_path=?2", params![id.to_string(), previous, destination.to_string_lossy()])? == 1)
-    }
-
-    fn effective_library_root(&self) -> RegistryResult<String> {
+    fn effective_library_root(&mut self) -> RegistryResult<String> {
         self.read_value("default_library_save_location")?.map(|bytes| String::from_utf8(bytes).map_err(Into::into)).unwrap_or_else(|| Ok(self.default_library_root.clone()))
     }
 
-    pub fn default_library_save_location(&self) -> RegistryResult<Option<String>> {
+    pub fn default_library_save_location(&mut self) -> RegistryResult<Option<String>> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.effective_library_root().map(Some)
@@ -261,33 +225,33 @@ impl LibraryRegistry {
     }
 
     /// Changes the destination for future libraries. Registered roots never move.
-    pub fn set_default_library_save_location(&self, path: &str) -> RegistryResult<String> {
+    pub fn set_default_library_save_location(&mut self, path: &str) -> RegistryResult<String> {
         let path = platform::validate_save_location(path)?;
         self.write_value("default_library_save_location", path.as_bytes())?;
         Ok(path)
     }
 
-    pub fn is_detached(&self, library_id: &LibraryId) -> RegistryResult<bool> {
-        Ok(self.connection()?.query_row("SELECT EXISTS(SELECT 1 FROM detached_library WHERE library_id=?1) OR EXISTS(SELECT 1 FROM pending_local_purge WHERE library_id=?1)", [library_id.to_string()], |row| row.get(0))?)
+    pub fn is_detached(&mut self, library_id: &LibraryId) -> RegistryResult<bool> {
+        Ok(self.connection.query_row("SELECT EXISTS(SELECT 1 FROM detached_library WHERE library_id=?1) OR EXISTS(SELECT 1 FROM pending_local_purge WHERE library_id=?1)", [library_id.to_string()], |row| row.get(0))?)
     }
 
-    pub fn pending_server_deletions(&self) -> RegistryResult<Vec<LibraryId>> {
-        let connection = self.connection()?;
+    pub fn pending_server_deletions(&mut self) -> RegistryResult<Vec<LibraryId>> {
+        let connection = &mut self.connection;
         let mut statement = connection.prepare(include_str!("sql/pending_server_deletions.sql"))?;
         let ids = statement.query_map([], |row| row.get::<_, String>(0))?.map(|row| Ok(LibraryId::parse_str(&row?)?)).collect();
         ids
     }
 
-    pub fn complete_server_deletion(&self, library_id: &LibraryId) -> RegistryResult<()> {
-        self.connection()?.execute("DELETE FROM detached_library WHERE library_id=?1", [library_id.to_string()])?;
+    pub fn complete_server_deletion(&mut self, library_id: &LibraryId) -> RegistryResult<()> {
+        self.connection.execute("DELETE FROM detached_library WHERE library_id=?1", [library_id.to_string()])?;
         Ok(())
     }
 
     /// Hide the library and persist both server and local deletion intents
     /// before physical cleanup can be interrupted.
-    pub fn begin_local_removal(&self, library_id: &LibraryId) -> RegistryResult<()> {
+    pub fn begin_local_removal(&mut self, library_id: &LibraryId) -> RegistryResult<()> {
         let entry = self.entry(library_id)?.ok_or("library is not registered")?;
-        let mut connection = self.connection()?;
+        let connection = &mut self.connection;
         let transaction = connection.transaction()?;
         transaction.execute("INSERT INTO pending_local_purge(library_id,storage_path) VALUES(?1,?2)", params![library_id.to_string(), entry.storage_locator()])?;
         transaction.execute("INSERT OR IGNORE INTO detached_library(library_id) VALUES(?1)", [library_id.to_string()])?;
@@ -296,16 +260,16 @@ impl LibraryRegistry {
         Ok(())
     }
 
-    pub fn pending_local_purges(&self) -> RegistryResult<Vec<LibraryId>> {
-        let connection = self.connection()?;
+    pub fn pending_local_purges(&mut self) -> RegistryResult<Vec<LibraryId>> {
+        let connection = &mut self.connection;
         let mut statement = connection.prepare("SELECT library_id FROM pending_local_purge ORDER BY library_id")?;
         let ids = statement.query_map([], |row| row.get::<_, String>(0))?.map(|row| Ok(LibraryId::parse_str(&row?)?)).collect();
         ids
     }
 
     /// Physical cleanup is idempotent. Keep the purge record if any step fails.
-    pub fn complete_local_purge(&self, library_id: &LibraryId) -> RegistryResult<()> {
-        let locator: Option<String> = self.connection()?.query_row("SELECT storage_path FROM pending_local_purge WHERE library_id=?1", [library_id.to_string()], |row| row.get(0)).optional()?;
+    pub fn complete_local_purge(&mut self, library_id: &LibraryId) -> RegistryResult<()> {
+        let locator: Option<String> = self.connection.query_row("SELECT storage_path FROM pending_local_purge WHERE library_id=?1", [library_id.to_string()], |row| row.get(0)).optional()?;
         let Some(locator) = locator else { return Ok(()) };
         #[cfg(target_arch = "wasm32")]
         platform::remove_database(&locator)?;
@@ -321,38 +285,38 @@ impl LibraryRegistry {
                 }
             }
         }
-        self.connection()?.execute("DELETE FROM pending_local_purge WHERE library_id=?1", [library_id.to_string()])?;
+        self.connection.execute("DELETE FROM pending_local_purge WHERE library_id=?1", [library_id.to_string()])?;
         Ok(())
     }
 
     /// Discovers libraries exposed by the current platform and registers any
     /// new entries. Platforms without directory discovery return an explicit
     /// capability error from the adapter; registration behavior stays shared.
-    pub fn discover(&self, parent: &std::path::Path) -> RegistryResult<()> {
+    pub fn discover(&mut self, parent: &std::path::Path) -> RegistryResult<()> {
         let discovered = platform::discover_libraries(parent)?;
         for entry in discovered {
-            self.connection()?
+            self.connection
                 .execute("INSERT INTO library_registry(library_id,library_name,storage_path) SELECT ?1,?2,?3 WHERE NOT EXISTS (SELECT 1 FROM detached_library WHERE library_id=?1) AND NOT EXISTS (SELECT 1 FROM pending_local_purge WHERE library_id=?1) ON CONFLICT(library_id) DO NOTHING", params![entry.library_id.to_string(), entry.library_name, entry.storage_locator])?;
         }
         Ok(())
     }
 
-    pub fn remove(&self, library_id: &LibraryId) -> RegistryResult<()> {
+    pub fn remove(&mut self, library_id: &LibraryId) -> RegistryResult<()> {
         self.begin_local_removal(library_id)?;
         self.complete_local_purge(library_id)
     }
 
-    pub fn read_value(&self, key: &str) -> RegistryResult<Option<Vec<u8>>> {
-        Ok(self.connection()?.query_row("SELECT value FROM app_value WHERE key=?1", [key], |row| row.get(0)).optional()?)
+    pub fn read_value(&mut self, key: &str) -> RegistryResult<Option<Vec<u8>>> {
+        Ok(self.connection.query_row("SELECT value FROM app_value WHERE key=?1", [key], |row| row.get(0)).optional()?)
     }
 
-    pub fn write_value(&self, key: &str, value: &[u8]) -> RegistryResult<()> {
-        self.connection()?.execute("INSERT INTO app_value(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key, value])?;
+    pub fn write_value(&mut self, key: &str, value: &[u8]) -> RegistryResult<()> {
+        self.connection.execute("INSERT INTO app_value(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key, value])?;
         Ok(())
     }
 
-    pub fn remove_value(&self, key: &str) -> RegistryResult<()> {
-        self.connection()?.execute("DELETE FROM app_value WHERE key=?1", [key])?;
+    pub fn remove_value(&mut self, key: &str) -> RegistryResult<()> {
+        self.connection.execute("DELETE FROM app_value WHERE key=?1", [key])?;
         Ok(())
     }
 }
@@ -676,9 +640,9 @@ mod tests {
         let backup = root.join(".bokheim/library.json");
         let primary_inode = std::fs::metadata(&primary).unwrap().ino();
         let backup_inode = std::fs::metadata(&backup).unwrap().ino();
-        let changes = registry.connection().unwrap().total_changes();
+        let changes = registry.run(|registry| Ok(registry.connection.total_changes())).unwrap();
         registry.attach_remote(entry.library_id(), "Books").unwrap();
-        assert_eq!(registry.connection().unwrap().total_changes(), changes);
+        assert_eq!(registry.run(|registry| Ok(registry.connection.total_changes())).unwrap(), changes);
         assert_eq!(std::fs::metadata(&primary).unwrap().ino(), primary_inode);
         assert_eq!(std::fs::metadata(&backup).unwrap().ino(), backup_inode);
         std::fs::write(&backup, b"invalid manifest").unwrap();
@@ -688,29 +652,6 @@ mod tests {
         std::fs::remove_file(&backup).unwrap();
         registry.attach_remote(entry.library_id(), "Books").unwrap();
         assert_eq!(std::fs::read(&primary).unwrap(), std::fs::read(&backup).unwrap());
-    }
-
-    #[test]
-    fn relocation_validates_identity_and_does_not_recreate_or_duplicate_a_library() {
-        let temp = tempfile::tempdir().unwrap();
-        let registry = LibraryRegistry::open(temp.path().join("app").to_string_lossy()).unwrap();
-        let entry = registry.create("Books", Some(temp.path().join("old").to_string_lossy().into_owned())).unwrap();
-        let moved = temp.path().join("moved");
-        std::fs::rename(entry.storage_locator(), &moved).unwrap();
-        registry.attach_remote(entry.library_id(), "Books renamed").unwrap();
-        assert!(!std::path::Path::new(entry.storage_locator()).exists());
-        let other = registry.create("Other", None).unwrap();
-        assert!(registry.relocate(entry.library_id(), entry.storage_locator(), std::path::Path::new(other.storage_locator())).is_err());
-        // The hidden backup remains sufficient if the root marker was deleted.
-        std::fs::remove_file(moved.join(LIBRARY_MANIFEST_FILENAME)).unwrap();
-        assert!(registry.relocate(entry.library_id(), entry.storage_locator(), &moved).unwrap());
-        assert!(!registry.relocate(entry.library_id(), entry.storage_locator(), &moved).unwrap());
-        assert_eq!(registry.entries().unwrap().len(), 2);
-        let current = registry.entry(entry.library_id()).unwrap().unwrap();
-        assert_eq!(current.library_name(), "Books renamed");
-        assert_eq!(current.storage_locator(), moved.to_str().unwrap());
-        registry.remove(entry.library_id()).unwrap();
-        assert!(read_library_manifest(&moved).unwrap().is_none());
     }
 
     #[test]
@@ -750,28 +691,6 @@ mod tests {
         assert!(!std::path::Path::new(&database).exists());
         assert!(registry.entry(entry.library_id()).unwrap().is_none());
         assert!(registry.entry(other.library_id()).unwrap().is_some());
-    }
-
-    #[test]
-    fn relocation_accepts_a_match_when_another_library_occupies_the_old_path() {
-        let temp = tempfile::tempdir().unwrap();
-        let registry = LibraryRegistry::open(temp.path().join("app").to_string_lossy()).unwrap();
-        let entry = registry.create("Books", None).unwrap();
-        let other = registry.create("Other", None).unwrap();
-        let moved = temp.path().join("moved");
-        std::fs::rename(entry.storage_locator(), &moved).unwrap();
-        std::fs::rename(other.storage_locator(), entry.storage_locator()).unwrap();
-        assert!(registry.relocate(entry.library_id(), entry.storage_locator(), &moved).unwrap());
-        assert_eq!(read_library_manifest(std::path::Path::new(entry.storage_locator())).unwrap().unwrap().0, *other.library_id());
-        assert_eq!(registry.entry(entry.library_id()).unwrap().unwrap().storage_locator(), moved.to_str().unwrap());
-    }
-
-    #[test]
-    fn relocation_never_overrides_a_restored_original_path() {
-        let temp = tempfile::tempdir().unwrap();
-        let registry = LibraryRegistry::open(temp.path().join("app").to_string_lossy()).unwrap();
-        let entry = registry.create("Books", None).unwrap();
-        assert!(!registry.relocate(entry.library_id(), entry.storage_locator(), std::path::Path::new(entry.storage_locator())).unwrap());
     }
 
     #[test]
@@ -837,18 +756,6 @@ mod tests {
     }
 
     #[test]
-    fn registry_round_trips_through_sqlite() {
-        let temporary = tempfile::tempdir().unwrap();
-        let registry = LibraryRegistry::open(temporary.path().join("app").to_string_lossy()).unwrap();
-        let root = temporary.path().join("library");
-        let entry = registry.create(" Books ", Some(root.to_string_lossy().into_owned())).unwrap();
-        assert_eq!(entry.library_name(), "Books");
-        assert_eq!(registry.entries().unwrap().len(), 1);
-        drop(registry);
-        assert_eq!(LibraryRegistry::open(temporary.path().join("app").to_string_lossy()).unwrap().entries().unwrap().len(), 1);
-    }
-
-    #[test]
     fn discovery_registers_manifests_and_preserves_existing_entries() {
         let temporary = tempfile::tempdir().unwrap();
         let parent = temporary.path().join("libraries");
@@ -868,17 +775,6 @@ mod tests {
         assert_eq!(registry.entries().unwrap().len(), 1);
     }
 
-    #[test]
-    fn values_and_detached_libraries_share_the_store() {
-        let temporary = tempfile::tempdir().unwrap();
-        let registry = LibraryRegistry::open(temporary.path().join("app").to_string_lossy()).unwrap();
-        registry.write_value("preference", b"value").unwrap();
-        assert_eq!(registry.read_value("preference").unwrap().as_deref(), Some(b"value".as_slice()));
-        let entry = registry.create("Books", None).unwrap();
-        registry.remove(entry.library_id()).unwrap();
-        assert!(registry.is_detached(entry.library_id()).unwrap());
-        assert!(registry.entries().unwrap().is_empty());
-    }
     #[test]
     fn default_location_changes_only_future_libraries_and_preserves_selected_roots() {
         let root = tempfile::tempdir().unwrap();

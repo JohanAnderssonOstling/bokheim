@@ -1,12 +1,11 @@
 //! Import storage lifecycle. The caller retains the content lease and metadata commit.
-use super::{AssetStore, AssetStoreError, CopiedBook, ImportProgressObserver};
+use super::{AssetStore, AssetStoreError, CopiedBook};
 use library_model::RelativeBookPath;
 
 #[derive(Default)]
 pub struct ImportOptions {
     /// Native imports may write directly to a collision-free destination.
     pub direct: bool,
-    pub progress: Option<ImportProgressObserver>,
 }
 
 impl AssetStore {
@@ -19,7 +18,7 @@ impl AssetStore {
                 let mut occupied = occupied;
                 let store = self.clone();
                 return client_platform_runtime::executor::run_blocking(move || {
-                    use crate::asset_store::native::{placement_path, write_import_bytes, DirectBook, DIRECT_IMPORTS};
+                    use crate::asset_store::native::{DIRECT_IMPORTS, DirectBook, placement_path, write_import_bytes};
                     let requested = relative.file_name();
                     let directory = placement_path(&store.0, &relative).parent().expect("a book path has a folder").canonicalize()?;
                     occupied.extend(std::fs::read_dir(&directory)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?);
@@ -41,7 +40,7 @@ impl AssetStore {
                         // No temporary filename, rename, hard link, or second copy is involved.
                         let cleanup = tempfile::TempPath::try_from_path(path)?;
                         let mut file = tempfile::NamedTempFile::from_parts(file, cleanup);
-                        write_import_bytes(file.as_file_mut(), source.as_mut(), &directory, options.progress.as_ref())?;
+                        write_import_bytes(file.as_file_mut(), source.as_mut(), &directory)?;
                         return Ok((name, CopiedBook { inner: super::imp::CopiedBook { temporary_path: file.into_temp_path(), direct: Some(direct) } }));
                     }
                     unreachable!("numeric name suffix space is unbounded")
@@ -49,7 +48,7 @@ impl AssetStore {
                 .await
                 .map_err(AssetStoreError::operation)?;
             }
-            Ok((name, self.stage_book(relative, source, options.progress).await?))
+            Ok((name, self.stage_book(relative, source).await?))
         }
         #[cfg(target_arch = "wasm32")]
         {

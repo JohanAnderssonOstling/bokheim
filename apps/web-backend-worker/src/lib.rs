@@ -132,7 +132,19 @@ fn install_request_handler(port: MessagePort) -> oneshot::Receiver<()> {
             handler_port.close();
             return;
         }
-        let request = match decode_worker_message::<AppWorkerClientMessage>(&js_sys::Uint8Array::new(&event.data()).to_vec()) {
+        // An import request carries the picked files beside its bytes; they
+        // wait under the request's token until the import takes them.
+        let data = event.data();
+        let bytes = if data.is_instance_of::<js_sys::Uint8Array>() {
+            data
+        } else {
+            let field = |name: &str| js_sys::Reflect::get(&data, &JsValue::from_str(name)).unwrap_or(JsValue::UNDEFINED);
+            if let (Some(token), Ok(files)) = (field("token").as_string(), field("files").dyn_into::<js_sys::Array>()) {
+                client_platform_web::transport::import_io::hold_selected_files(token, &files);
+            }
+            field("request")
+        };
+        let request = match decode_worker_message::<AppWorkerClientMessage>(&js_sys::Uint8Array::new(&bytes).to_vec()) {
             Ok(AppWorkerClientMessage::Request(request)) => Ok(request),
             Ok(AppWorkerClientMessage::CancelSubscription { id }) => {
                 if let Some(cancellation) = cancellations.borrow_mut().remove(&id) {
@@ -158,10 +170,6 @@ fn install_request_handler(port: MessagePort) -> oneshot::Receiver<()> {
             let (id, dispatch) = match (request, backend) {
                 (Ok(request), Some(backend)) => {
                     let id = request.id;
-                    if request.is_resolve_book() {
-                        let _ = post_message(&port, &AppWorkerStartupMessage::Diagnostic { message: format!("resolve_book phase=request_received request_id={id}") });
-                    }
-                    web_sys::console::info_1(&JsValue::from_str(&format!("backend phase=request_received id={id}")));
                     let dispatch = if let Some(cancelled) = playback_cancel.take() {
                         match select(Box::pin(backend.dispatch(request)), cancelled).await {
                             Either::Left((result, pending)) => {
@@ -206,7 +214,7 @@ fn install_request_handler(port: MessagePort) -> oneshot::Receiver<()> {
     disconnected
 }
 
-async fn forward_subscription(events: WorkerSubscription, id: u64, port: MessagePort, alive: Rc<Cell<bool>>, mut cancelled: std::pin::Pin<Box<oneshot::Receiver<()>>>) {
+async fn forward_subscription(mut events: WorkerSubscription, id: u64, port: MessagePort, alive: Rc<Cell<bool>>, mut cancelled: std::pin::Pin<Box<oneshot::Receiver<()>>>) {
     loop {
         match select(Box::pin(events.next_value()), cancelled).await {
             Either::Left((Some(payload), pending_cancel)) => {

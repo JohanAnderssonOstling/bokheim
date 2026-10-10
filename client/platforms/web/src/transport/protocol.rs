@@ -80,35 +80,10 @@ impl SyncEvent {
     }
 }
 
-pub enum TransferEvent {
-    Cancel,
-    Complete,
-    Progress(f64),
-}
-impl TransferEvent {
-    pub fn decode(message: &JsValue) -> Result<Self, String> {
-        match field(message, "kind").as_string().as_deref() {
-            Some("cancel") => Ok(Self::Cancel),
-            Some("progress") => Ok(Self::Progress(progress_fraction(message)?)),
-            Some("result") => {
-                let _ = byte_payload(message)?;
-                Ok(Self::Complete)
-            }
-            Some("error") => {
-                failure(message)?;
-                Ok(Self::Complete)
-            }
-            _ => Err("Invalid transfer response".into()),
-        }
-    }
-}
-
-/// Commands from the coordinator to a caller-owned storage/transfer capability.
+/// Commands from the coordinator to a caller-owned storage capability.
 pub enum BridgeEvent {
     Complete(Result<Vec<u8>, String>),
     Storage { id: u32, bytes: Vec<u8> },
-    Run,
-    Progress(f64),
 }
 impl BridgeEvent {
     pub fn decode(message: &JsValue) -> Result<Self, String> {
@@ -116,36 +91,7 @@ impl BridgeEvent {
             Some("done" | "result") => Ok(Self::Complete(byte_result(message)?)),
             Some("error") => Ok(Self::Complete(Err(failure(message)?))),
             Some("storage") => Ok(Self::Storage { id: request_id(message)?, bytes: bytes(&field(message, "bytes"))? }),
-            Some("run") => Ok(Self::Run),
-            Some("progress") => Ok(Self::Progress(progress_fraction(message)?)),
             _ => Err("Invalid worker bridge message".into()),
-        }
-    }
-}
-
-fn progress_fraction(message: &JsValue) -> Result<f64, String> {
-    let fraction = field(message, "fraction").as_f64().ok_or("Missing transfer progress")?;
-    if fraction.is_finite() && (0.0..=1.0).contains(&fraction) {
-        Ok(fraction)
-    } else {
-        Err("Invalid transfer progress".into())
-    }
-}
-
-pub enum ImportCommand {
-    Initialize(web_sys::MessagePort),
-    Submit { id: String, job: JsValue },
-}
-impl ImportCommand {
-    pub fn decode(message: &JsValue) -> Result<Self, String> {
-        match field(message, "transport").as_string().as_deref() {
-            Some("initialize_import") => field(message, "database").dyn_into().map(Self::Initialize).map_err(|_| "Missing import database port".into()),
-            Some("import_submit") => {
-                let job = field(message, "job");
-                let id = field(&job, "id").as_string().filter(|id| !id.is_empty()).ok_or("Missing import job id")?;
-                Ok(Self::Submit { id, job })
-            }
-            _ => Err("Invalid import command".into()),
         }
     }
 }
@@ -160,7 +106,6 @@ fn failure(message: &JsValue) -> Result<String, String> {
 pub enum WorkerRequest {
     Cpu { bytes: Vec<u8>, source: JsValue },
     Sync { key: String, bytes: Vec<u8> },
-    Transfer { key: String },
 }
 impl WorkerRequest {
     /// The reply port is validated separately so malformed requests can be rejected.
@@ -172,7 +117,6 @@ impl WorkerRequest {
                 Ok(Self::Cpu { bytes: bytes(&field(message, "bytes"))?, source })
             }
             Some("sync_request") => Ok(Self::Sync { key: key()?, bytes: bytes(&field(message, "bytes"))? }),
-            Some("transfer_request") => Ok(Self::Transfer { key: key()? }),
             _ => Err("Invalid worker request".into()),
         }
     }

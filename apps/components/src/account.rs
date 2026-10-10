@@ -19,8 +19,6 @@ const METER_HEIGHT: f32 = 10.0;
 const ACCOUNT_AVATAR_SIZE_REM: f32 = 1.5;
 /// How much header an address may take before it truncates.
 const ACCOUNT_CHIP_MAX_WIDTH_REM: f32 = 16.0;
-const EVENT_DOT_SIZE: f32 = 8.0;
-const PROGRESS_HEIGHT: f32 = 3.0;
 /// Keeps a library row the height it had when its name was a button, so the
 /// list reads at the same rhythm as the rest of the account section.
 const LIBRARY_NAME_HEIGHT_REM: f32 = 2.5;
@@ -131,33 +129,6 @@ pub fn library_usage_list(rows: impl IntoIterator<Item = Div>, theme: BrowserThe
 /// group, which would read as something that failed to load.
 pub fn library_usage_empty(text: impl Into<SharedString>, theme: BrowserTheme) -> Div {
     div().w_full().px(px(SPACE_MD)).py(px(SPACE_SM)).min_h(gpui::rems(LIBRARY_NAME_HEIGHT_REM)).flex().items_center().text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(text.into())
-}
-
-/// What a library is doing right now, drawn under its name in the usage list.
-///
-/// It carries the same dot-and-progress vocabulary the account activity list
-/// used, so a job reads the same whether it is running, queued or has failed;
-/// the colour is the caller's, because only the caller knows which of those a
-/// line is reporting.
-/// `count` is what the job has done of what it has to do — "42 / 128" — kept
-/// out of the sentence and in a column of its own, so several jobs on one
-/// library are read down rather than hunted for in the middle of each line.
-///
-/// The track is drawn whether or not there is a fraction to put in it, so the
-/// lines stay a column; an empty track says the job has no denominator, which
-/// is itself worth knowing.
-pub fn library_activity_note(state_color: Hsla, text: impl Into<SharedString>, count: Option<SharedString>, progress: Option<f32>, theme: BrowserTheme) -> Div {
-    let track = div().min_w(px(48.0)).flex_1().h(px(PROGRESS_HEIGHT)).flex().flex_row().overflow_hidden().bg(theme.rule);
-    div()
-        .w_full()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(SPACE_SM))
-        .child(div().w(px(EVENT_DOT_SIZE)).h(px(EVENT_DOT_SIZE)).flex_none().rounded(px(EVENT_DOT_SIZE / 2.0)).bg(state_color))
-        .child(div().min_w_0().text_size(gpui::rems(TEXT_XS)).text_color(theme.text).child(text.into()))
-        .child(track.children(progress.map(|progress| div().h_full().w(relative(progress.clamp(0.0, 1.0))).bg(state_color))))
-        .children(count.map(|count| div().flex_none().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(count)))
 }
 
 /// The name a library is read by in the server-storage list. Nothing is done to

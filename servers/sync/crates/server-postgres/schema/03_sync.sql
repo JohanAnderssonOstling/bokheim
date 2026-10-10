@@ -67,7 +67,11 @@ CREATE FUNCTION enforce_lww_order() RETURNS trigger
 DECLARE
     republished_seq bigint;
 BEGIN
-    IF (NEW.changed_at, NEW.version_rank, NEW.replica_id COLLATE "C", NEW.replica_seq)
+    -- Completed book additions are first-write-wins.
+    -- A competing publication receives the accepted value below, even when
+    -- its authored timestamp is newer.
+    IF OLD.kind != 'book_add'
+       AND (NEW.changed_at, NEW.version_rank, NEW.replica_id COLLATE "C", NEW.replica_seq)
        > (OLD.changed_at, OLD.version_rank, OLD.replica_id COLLATE "C", OLD.replica_seq)
     THEN
         RETURN NEW;
@@ -114,10 +118,10 @@ CREATE TABLE sync_library_revision (
 CREATE TABLE sync_state (
     library_id text NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
     kind text NOT NULL,
-    entity_key text NOT NULL,
+    entity_key bytea NOT NULL,
     entity_subkey text NOT NULL DEFAULT '',
     value bytea NOT NULL,
-    content_hash text,
+    content_hash bytea,
     changed_at bigint NOT NULL,
     replica_id text NOT NULL,
     replica_seq bigint NOT NULL,

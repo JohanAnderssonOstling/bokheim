@@ -5,10 +5,6 @@ use std::path::Path;
 /// OPFS must never wait synchronously for another same-worker borrower.
 pub const SINGLE_OWNER: bool = true;
 
-pub fn initialize(connection: &Connection, initialize: fn(&Connection) -> rusqlite::Result<()>) -> rusqlite::Result<()> {
-    initialize(connection)
-}
-
 pub fn open_additional(path: &Path) -> rusqlite::Result<Connection> {
     Connection::open(path)
 }

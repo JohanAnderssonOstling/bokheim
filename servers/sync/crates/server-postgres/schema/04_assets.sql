@@ -21,14 +21,14 @@ CREATE TABLE user_storage_account (
 -- never raw-SQL arithmetic, so it doesn't need the same treatment as the quota
 -- columns above.
 CREATE TABLE blob_object (
-    content_hash text PRIMARY KEY,
+    content_hash bytea PRIMARY KEY,
     size_bytes bigint NOT NULL,
     created_at timestamp with time zone NOT NULL DEFAULT now()
 );
 
 CREATE TABLE user_blob_charge (
     user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    content_hash text NOT NULL REFERENCES blob_object(content_hash) ON DELETE RESTRICT,
+    content_hash bytea NOT NULL REFERENCES blob_object(content_hash) ON DELETE RESTRICT,
     charged_at timestamp with time zone NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, content_hash)
 );
@@ -38,7 +38,7 @@ CREATE TABLE user_blob_charge (
 -- same arithmetic-underflow risk as the quota columns above.
 CREATE TABLE user_blob_reference (
     user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    content_hash text NOT NULL,
+    content_hash bytea NOT NULL,
     reference_count bigint NOT NULL CHECK (reference_count > 0),
     PRIMARY KEY (user_id, content_hash)
 );
@@ -47,7 +47,7 @@ CREATE TABLE book_upload_reservation (
     id text PRIMARY KEY,
     user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     library_id text NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
-    content_hash text NOT NULL,
+    content_hash bytea NOT NULL,
     size_bytes bigint NOT NULL,
     expires_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone NOT NULL DEFAULT now(),
@@ -56,24 +56,13 @@ CREATE TABLE book_upload_reservation (
 
 CREATE INDEX idx_book_upload_reservation_expiry ON book_upload_reservation USING btree (expires_at);
 
--- Permanent publication identities are account scoped. Blob checksums remain
--- global, immutable addresses of verified bytes.
-CREATE TABLE user_book_revision (
-    user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    content_hash text NOT NULL,
-    blob_hash text NOT NULL REFERENCES blob_object(content_hash) ON DELETE RESTRICT,
-    PRIMARY KEY (user_id, content_hash)
-);
-CREATE INDEX idx_user_book_revision_blob ON user_book_revision(user_id, blob_hash);
-
 CREATE TABLE library_blob_claim (
     library_id text NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
     user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    content_hash text NOT NULL,
-    blob_hash text NOT NULL REFERENCES blob_object(content_hash),
+    content_hash bytea NOT NULL REFERENCES blob_object(content_hash),
     PRIMARY KEY(library_id, content_hash)
 );
-CREATE INDEX library_blob_claim_user_blob ON library_blob_claim(user_id, blob_hash);
+CREATE INDEX library_blob_claim_user_hash ON library_blob_claim(user_id, content_hash);
 
 CREATE TABLE cloud_storage_change (
  library_id text NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,

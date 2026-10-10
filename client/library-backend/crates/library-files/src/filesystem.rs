@@ -3,8 +3,8 @@
 //! This module deliberately exposes bytes, paths, and directory entries only.
 //! It does not classify books or persist scan decisions.
 
-use std::fs::File;
-use std::io::Error;
+use std::fs::{self, File};
+use std::io::{self, Error, ErrorKind};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
@@ -92,7 +92,7 @@ pub fn fingerprint(path: impl AsRef<Path>) -> std::io::Result<u64> {
 
 /// Fingerprint the ordered tracks as one scanned placement. Both the scanner
 /// and download publisher use this so a fresh download is already up to date.
-pub fn audiobook_fingerprint(folder: &Path, tracks: &[audiobook_folder::Track]) -> std::io::Result<u64> {
+pub fn audiobook_fingerprint(folder: &Path, tracks: &[audiobook_archive::Track]) -> std::io::Result<u64> {
     let mut hasher = blake3::Hasher::new();
     for track in tracks {
         hasher.update(track.name.as_bytes());
@@ -111,4 +111,84 @@ pub fn audiobook_fingerprint(folder: &Path, tracks: &[audiobook_folder::Track]) 
         hasher.update(&fingerprint(&cover.path)?.to_le_bytes());
     }
     Ok(u64::from_le_bytes(hasher.finalize().as_bytes()[..8].try_into().unwrap()))
+}
+
+/// Places a file or complete folder before any book inspection begins.
+/// A path already in this directory is a retry and stays in place.
+pub fn place_into_directory(source: &Path, directory: &Path, occupied: &[String], moving: bool) -> io::Result<PathBuf> {
+    let metadata = fs::symlink_metadata(source)?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err(Error::other("only regular files and folders can be added to a library"));
+    }
+    let source = source.canonicalize()?;
+    let directory = directory.canonicalize()?;
+    if source.parent() == Some(directory.as_path()) {
+        return Ok(source);
+    }
+    if directory.starts_with(&source) {
+        return Err(Error::other("a folder cannot be placed inside itself"));
+    }
+    let name = source.file_name().and_then(OsStr::to_str).ok_or_else(|| Error::other("invalid file name"))?;
+    let mut names = occupied.to_vec();
+    names.extend(fs::read_dir(&directory)?.map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned())).collect::<Result<Vec<_>, _>>()?);
+    let candidates: Box<dyn Iterator<Item = String> + '_> = if metadata.is_dir() {
+        Box::new(library_replica::folder_name_candidates(name, names.iter().map(String::as_str)))
+    } else {
+        Box::new(library_replica::file_name_candidates(name, names.iter().map(String::as_str)))
+    };
+    let mut staging = None;
+    for name in candidates {
+        let destination = directory.join(name);
+        if destination.symlink_metadata().is_ok() {
+            continue;
+        }
+        if moving && staging.is_none() {
+            match client_platform_native::filesystem::rename_noclobber(&source, &destination) {
+                Ok(()) => return Ok(destination),
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                Err(error) if error.kind() == ErrorKind::CrossesDevices => {}
+                Err(error) => return Err(error),
+            }
+        }
+        // A complete file or folder is copied under a hidden directory on the
+        // destination filesystem. The scanner skips it, including after a crash.
+        if staging.is_none() {
+            let temporary = tempfile::Builder::new().prefix(".bokheim-copy-").tempdir_in(&directory)?;
+            copy_entry(&source, &temporary.path().join("contents"))?;
+            staging = Some(temporary);
+        }
+        let staged = staging.as_ref().unwrap().path().join("contents");
+        match client_platform_native::filesystem::rename_noclobber(&staged, &destination) {
+            Ok(()) => {
+                // Cross-filesystem moves delete the original only after the
+                // completed copy has been renamed into its final location.
+                if moving {
+                    if metadata.is_dir() { fs::remove_dir_all(&source)?; } else { fs::remove_file(&source)?; }
+                }
+                return Ok(destination);
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("numeric name suffix space is unbounded")
+}
+
+fn copy_entry(source: &Path, destination: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.is_dir() {
+        fs::create_dir(destination)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            copy_entry(&entry.path(), &destination.join(entry.file_name()))?;
+        }
+    } else if metadata.is_file() {
+        let mut reader = File::open(source)?;
+        let mut writer = fs::OpenOptions::new().write(true).create_new(true).open(destination)?;
+        io::copy(&mut reader, &mut writer)?;
+        fs::set_permissions(destination, metadata.permissions())?;
+    } else {
+        return Err(Error::other("cannot copy symbolic links or special files"));
+    }
+    Ok(())
 }

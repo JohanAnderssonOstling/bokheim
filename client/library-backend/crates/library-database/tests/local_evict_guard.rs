@@ -14,16 +14,15 @@ fn import() -> ImportCommit {
         file_name: "book.epub".into(),
         format: book_model::BookFormat::Epub,
         content_hash: hash,
-        checksum: hash,
         size_bytes: 10,
         inspection_version: 1,
-        inspection: Some(book_metadata::InspectedBook {
+        inspection: Some(book_inspection::InspectedBook {
             pdf: None,
             audiobook: None,
             metadata: book_model::BookRecord { metadata: book_model::BookDetails { title: "Original".into(), subtitle: None, contributors: vec![book_model::Contributor::new("Original Author", book_model::MarcRelatorCode(*b"aut")).unwrap()], book: Default::default() }, description: String::new() },
             toc: vec![book_model::BookTocEntry { title: "Chapter".into(), target: "ch1".into(), children: vec![] }],
         }),
-        published: library_database::PublishedImport { name: "book.epub".into(), relative_path: "/book.epub".into(), published: false, fingerprint: None },
+        published: library_model::PublishedStagedBook { name: "book.epub".into(), relative_path: "/book.epub".into(), published: false, fingerprint: None },
         request_thumbnail: false,
         restore_paths: vec![],
     }
@@ -37,7 +36,7 @@ fn downloaded_book() -> (Database, ContentHash) {
     let hash = commit.content_hash;
     db.commit_import(commit).unwrap();
     db.sync_request_book_downloads(&[hash], library_model::TransferOrigin::UserInitiated).unwrap();
-    db.complete_local_book_request(hash).unwrap();
+    db.complete_local_book_request(&hash).unwrap();
     assert!(db.is_book_downloaded(&hash).unwrap(), "setup must leave the book downloaded");
     (db, hash)
 }

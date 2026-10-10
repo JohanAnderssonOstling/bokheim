@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-web-runtime-tests = ["client-platform-runtime/web-runtime-tests"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 futures-channel = "0.3"

@@ -1,23 +1,20 @@
-//! Browsing the library by folder or by subject.
+//! Browsing the library's books, folders, subjects, authors and recent activity.
 
-/// The shelf pages reuse this module's search field, so the browse page and the
-/// author index search alike rather than growing two of them.
-pub(super) mod controls;
+mod cards;
+mod controls;
 mod detail;
+mod drag_drop;
+mod feed_actions;
 mod folder_actions;
 mod folder_picker;
 mod graph;
 mod layout;
 mod listing;
+mod navigator;
 mod page;
 mod search;
 mod section_card;
 mod split;
 
-pub(crate) use folder_picker::{FolderPicker, FolderPickerEvent};
 pub(crate) use listing::{BrowseCrumb, BrowseKind};
-pub(crate) use page::BrowsePage;
 pub(crate) use split::BrowseSplitPlane;
-
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod tests;

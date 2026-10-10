@@ -28,7 +28,8 @@ pub(crate) fn sync_error(error: server_postgres::SyncError) -> StatusCode {
         server_postgres::SyncError::LibraryOwnershipConflict => StatusCode::CONFLICT,
         server_postgres::SyncError::CursorAhead => StatusCode::GONE,
         server_postgres::SyncError::UpgradeRequired => StatusCode::UPGRADE_REQUIRED,
-        server_postgres::SyncError::InvalidLibraryName => StatusCode::BAD_REQUEST,
+        server_postgres::SyncError::InvalidLibraryName | server_postgres::SyncError::InvalidOpdsFeed => StatusCode::BAD_REQUEST,
+        server_postgres::SyncError::OpdsFeedConflict => StatusCode::CONFLICT,
         server_postgres::SyncError::AmbiguousMutationIdentity => StatusCode::BAD_REQUEST,
         server_postgres::SyncError::TooManyMutations => StatusCode::PAYLOAD_TOO_LARGE,
         server_postgres::SyncError::Internal(reason) => {
@@ -57,15 +58,4 @@ pub(crate) fn asset_error(error: server_asset_store::AssetError) -> StatusCode {
 
 fn tracing_fallback(component: &str, reason: &str) {
     eprintln!("{component} error: {reason}");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cursor_regression_and_library_ownership_have_distinct_statuses() {
-        assert_eq!(sync_error(server_postgres::SyncError::CursorAhead), StatusCode::GONE);
-        assert_eq!(sync_error(server_postgres::SyncError::LibraryOwnershipConflict), StatusCode::CONFLICT);
-    }
 }

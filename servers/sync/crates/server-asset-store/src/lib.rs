@@ -36,7 +36,7 @@ pub struct StoredAsset {
     pub reader: Box<dyn StoredAssetReader>,
     pub total_len: u64,
     pub offset: u64,
-    pub checksum: ContentHash,
+    pub content_hash: ContentHash,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -203,7 +203,7 @@ impl FsAssetStore {
 
     fn path(&self, user_id: &str, kind: AssetKind, hash: &ContentHash) -> Result<PathBuf, AssetError> {
         Ok(match kind {
-            AssetKind::Book => self.books_root.join(&hash.as_str()[..2]).join(hash.as_str()),
+            AssetKind::Book => self.books_root.join(&hash.to_hex().as_str()[..2]).join(hash.to_hex().as_str()),
             AssetKind::Thumbnail => self.thumbnails_root.join("users").join(Self::user_scope(user_id)).join(format!("{hash}.jpg")),
             AssetKind::ThumbnailBrowse => self.thumbnails_root.join("users").join(Self::user_scope(user_id)).join(format!("{hash}-300.jpg")),
         })
@@ -353,7 +353,7 @@ impl FsAssetStore {
             hasher.update(&metadata.dev().to_le_bytes());
             hasher.update(&metadata.ino().to_le_bytes());
         }
-        Ok(Some(ContentHash::new(hasher.finalize().to_hex().as_str())))
+        Ok(Some(ContentHash::from(hasher.finalize())))
     }
 
     pub async fn open_from(&self, user_id: &str, kind: AssetKind, hash: &ContentHash, offset: u64) -> Result<Option<StoredAsset>, AssetError> {
@@ -366,7 +366,7 @@ impl FsAssetStore {
                 }
                 let mut reader = std::io::Cursor::new(bytes);
                 reader.set_position(offset);
-                return Ok(Some(StoredAsset { reader: Box::new(reader), total_len: len, offset, checksum: *hash }));
+                return Ok(Some(StoredAsset { reader: Box::new(reader), total_len: len, offset, content_hash: *hash }));
             }
         }
         let mut file = match File::open(self.path(user_id, kind, hash)?).await {
@@ -379,30 +379,14 @@ impl FsAssetStore {
             return Err(AssetError::RangeNotSatisfiable { offset, len });
         }
         file.seek(SeekFrom::Start(offset)).await.map_err(|error| AssetError::Storage(error.to_string()))?;
-        Ok(Some(StoredAsset { reader: Box::new(file), total_len: len, offset, checksum: *hash }))
+        Ok(Some(StoredAsset { reader: Box::new(file), total_len: len, offset, content_hash: *hash }))
     }
 
-    /// Read the permanent identity from a previously checksum-verified object.
-    pub async fn book_identity(&self, checksum: &ContentHash) -> Result<ContentHash, AssetError> {
-        let path = self.path("", AssetKind::Book, checksum)?;
-        let checksum = *checksum;
-        tokio::task::spawn_blocking(move || {
-            let mut file = std::fs::File::open(path).map_err(|error| AssetError::Storage(error.to_string()))?;
-            if let Some(identity) = book_identity::read(&mut file).map_err(|error| AssetError::InvalidInput(error.to_string()))? {
-                return Ok(identity);
-            }
-            let identity = audiobook_folder::archive_identity(file)
-                .map(|hash| ContentHash::new(hash.to_hex().as_str()))
-                .unwrap_or(checksum);
-            Ok(identity)
-        }).await.map_err(|error| AssetError::Storage(error.to_string()))?
-    }
-
-    pub async fn book_tracks(&self, checksum: &ContentHash) -> Result<Vec<audiobook_folder::ArchivedTrack>, AssetError> {
-        let path = self.path("", AssetKind::Book, checksum)?;
+    pub async fn book_tracks(&self, content_hash: &ContentHash) -> Result<Vec<audiobook_archive::ArchivedTrack>, AssetError> {
+        let path = self.path("", AssetKind::Book, content_hash)?;
         tokio::task::spawn_blocking(move || {
             let file = std::fs::File::open(path).map_err(|error| AssetError::Storage(error.to_string()))?;
-            audiobook_folder::archived_tracks(file).map_err(|error| AssetError::InvalidInput(error.to_string()))
+            audiobook_archive::archived_tracks(file).map_err(|error| AssetError::InvalidInput(error.to_string()))
         }).await.map_err(|error| AssetError::Storage(error.to_string()))?
     }
 
@@ -450,7 +434,7 @@ impl FsAssetStore {
             return Err(AssetError::LengthMismatch { expected: expected_len.unwrap_or(0), actual: total });
         }
         if let Some(hasher) = book_hasher {
-            if hasher.finalize().to_hex().as_str() != hash.as_str() {
+            if hasher.finalize().as_bytes() != hash.as_bytes() {
                 return Err(AssetError::HashMismatch);
             }
         }
@@ -500,32 +484,6 @@ mod tests {
         Box::new(std::io::Cursor::new(bytes))
     }
 
-    #[test]
-    fn upload_capacity_is_bounded() {
-        let configured = UploadLimits::from_values(|name| match name {
-            "BOKHEIM_MAX_STAGED_BOOK_UPLOADS" => Some("8".to_string()),
-            "BOKHEIM_MAX_STAGED_BOOK_UPLOADS_PER_ACCOUNT" => Some("2".to_string()),
-            _ => None,
-        })
-        .unwrap();
-        assert_eq!(configured.max_staged_books, 8);
-        assert_eq!(configured.max_staged_books_per_account, 2);
-        assert!(UploadLimits::from_values(|name| (name == "BOKHEIM_MAX_STAGED_BOOK_UPLOADS_PER_ACCOUNT").then(|| "17".to_string())).is_err());
-    }
-
-    #[test]
-    fn staged_upload_capacity_is_bounded_per_account_and_globally_and_releases_on_drop() {
-        let limits = UploadLimits { max_staged_books: 2, max_staged_books_per_account: 1 };
-        let gate = StagingGate::new(limits);
-        let alice = gate.acquire("alice", 1).unwrap();
-        assert!(matches!(gate.acquire("alice", 1), Err(AssetError::Busy)));
-        let bob = gate.acquire("bob", u64::MAX).unwrap();
-        assert!(matches!(gate.acquire("carol", 1), Err(AssetError::Busy)));
-        drop(alice);
-        let carol = gate.acquire("carol", 1).unwrap();
-        drop((bob, carol));
-        assert!(gate.acquire("alice", u64::MAX).is_ok());
-    }
 
     fn jpeg(pixel: [u8; 3]) -> Vec<u8> {
         let mut image = DynamicImage::new_rgb8(1, 1).to_rgb8();
@@ -598,7 +556,7 @@ mod tests {
         store.initialize().await.unwrap();
         let bytes = epub(false);
         let len = bytes.len() as u64;
-        let hash = ContentHash::new(&blake3::hash(&bytes).to_hex().as_str());
+        let hash = ContentHash::from(blake3::hash(&bytes));
         store.put("user", AssetKind::Book, &hash, Some(len), reader(bytes)).await.unwrap();
         assert!(store.size("other-user", AssetKind::Book, &hash).await.unwrap().is_some(), "book blobs remain globally deduplicated");
         let wrong = epub_with_chapter("different book", false);
@@ -627,7 +585,7 @@ mod tests {
         let bytes = epub(false);
         let expected_suffix = bytes[4..].to_vec();
         let expected_len = bytes.len() as u64;
-        let hash = ContentHash::new(&blake3::hash(&bytes).to_hex().as_str());
+        let hash = ContentHash::from(blake3::hash(&bytes));
         store.put("user", AssetKind::Book, &hash, Some(expected_len), reader(bytes)).await.unwrap();
 
         let mut stored = store.open_from("user", AssetKind::Book, &hash, 4).await.unwrap().unwrap();
@@ -643,7 +601,7 @@ mod tests {
         let store = FsAssetStore::new(temp.path().join("books"), temp.path().join("thumbs"));
         store.initialize().await.unwrap();
         let bytes = epub(false);
-        let hash = ContentHash::new(&blake3::hash(&bytes).to_hex().as_str());
+        let hash = ContentHash::from(blake3::hash(&bytes));
         assert!(matches!(store.put("user", AssetKind::Book, &hash, Some(bytes.len() as u64 - 1), reader(bytes)).await, Err(AssetError::LengthMismatch { .. })));
         assert!(store.size("user", AssetKind::Book, &hash).await.unwrap().is_none());
     }

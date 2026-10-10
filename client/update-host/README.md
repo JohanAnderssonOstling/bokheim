@@ -7,8 +7,9 @@ non-AppImage installations can receive compatible taxonomy-only offers.
 
 ## Lifecycle
 
-1. The running app discovers offers in a background worker. Update consent is
-   persisted before downloading. Hash-verified staging ends at Restart.
+1. The app checks for offers once at startup in a background worker, then waits
+   for user actions. Update consent is persisted before downloading all approved
+   artifacts. Unfinished downloads resume at startup. Hash-verified staging ends at Restart.
 2. The next launch acquires desktop ownership before opening libraries. It checks
    staging again, creates SQLite backups including committed WAL pages, and makes
    separate candidate copies of every device-local library database. The registry
@@ -31,7 +32,8 @@ non-AppImage installations can receive compatible taxonomy-only offers.
    and removes obsolete staging/backups, retaining the active taxonomy image.
 
 Candidate migration preparation has a 30-minute limit before it is stopped and
-recovered. Normal download/discovery errors retry with persisted backoff. Storage
+recovered. Discovery errors wait for the next launch. Download errors wait for an
+explicit Retry or the next launch; no background polling runs. Storage
 and installation-permission blockers are exposed through the shared Settings row.
 Space preflight uses signed artifact lengths, actual SQLite page counts/sizes,
 backup/candidate/journal workspace, existing AppImage size and per-volume free

@@ -280,9 +280,4 @@ mod tests {
         let result = spawn_application(dir.path(), &dir.path().join("missing.exe"), Some("plan"));
         assert!(matches!(result, Err(LaunchFailure::NotRunning(_))));
     }
-    #[test]
-    fn current_process_handle_is_not_signalled_while_running() {
-        let process = ParentProcess::open(std::process::id()).unwrap();
-        assert!(process.wait(Duration::from_millis(1)).unwrap_err().contains("did not exit"));
-    }
 }

@@ -1,0 +1,934 @@
+{
+  "scope": "Proposed only; live taxonomy unchanged. Absorb selected childless categories into their existing parents, retaining all classification codes. Semantic tradeoffs require user selection.",
+  "before_concepts": 15751,
+  "proposed_reduction": 38,
+  "groups": [
+    {
+      "name": "Directories & general resources",
+      "sources": [
+        {
+          "id": 6207,
+          "label": "National Ed Directories",
+          "target": 54994,
+          "target_label": "Reference & Documents",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                6207,
+                "L",
+                905.0,
+                "[]",
+                "L",
+                991.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 7041,
+          "label": "U.S. Ed Directories",
+          "target": 54994,
+          "target_label": "Reference & Documents",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                7041,
+                "L",
+                901.0,
+                "[]",
+                "L",
+                903.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 6928,
+          "label": "Directories. Registers",
+          "target": 405,
+          "target_label": "Aeronautical Engineering",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                6928,
+                "TL",
+                512.0,
+                "[]",
+                "TL",
+                512.7,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 13662,
+          "label": "Medical Directories",
+          "target": 2725,
+          "target_label": "Medicine",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                13662,
+                "R",
+                711.0,
+                "[]",
+                "R",
+                713.97,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 52846,
+          "label": "Advertising Directories",
+          "target": 5106,
+          "target_label": "Advertising",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                52846,
+                "HF",
+                5804.0,
+                "[]",
+                "HF",
+                5808.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 53460,
+          "label": "Directories",
+          "target": 55043,
+          "target_label": "Business Learning & Reference",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                53460,
+                "HF",
+                5030.0,
+                "[]",
+                "HF",
+                5335.22,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 52972,
+          "label": "Computer Science Information Services",
+          "target": 12684,
+          "target_label": "Computer Science Resources",
+          "codes": {
+            "lcc_selector": [
+              [
+                52972,
+                "QA76.162"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 52974,
+          "label": "Computer Science Directories",
+          "target": 12684,
+          "target_label": "Computer Science Resources",
+          "codes": {
+            "lcc_selector": [
+              [
+                52974,
+                "QA76.215"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 8255,
+          "label": "Minor works",
+          "target": 4691,
+          "target_label": "Book History",
+          "codes": {
+            "lcc_selector": [
+              [
+                8255,
+                "Z4.Z9"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 7175,
+          "label": "Information services",
+          "target": 4370,
+          "target_label": "Authorship",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                7175,
+                "PN",
+                142.0,
+                "[]",
+                "PN",
+                142.5,
+                "[]"
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Manuals",
+      "sources": [
+        {
+          "id": 6858,
+          "label": "Laboratory manuals",
+          "target": 264,
+          "target_label": "Electronics",
+          "codes": {
+            "lcc_selector": [
+              [
+                6858,
+                "TK7818"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 8505,
+          "label": "Laboratory manuals",
+          "target": 5046,
+          "target_label": "Neurophysiology & Psychology",
+          "codes": {
+            "lcc_selector": [
+              [
+                8505,
+                "QP357"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 6788,
+          "label": "Treatises. Manuals",
+          "target": 1050,
+          "target_label": "Wood engraving",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                6788,
+                "NE",
+                1220.0,
+                "[]",
+                "NE",
+                1227.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 8159,
+          "label": "Surveying Field Manuals",
+          "target": 293,
+          "target_label": "Surveying",
+          "codes": {
+            "lcc_selector": [
+              [
+                8159,
+                "TA551"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 7636,
+          "label": "Soil Measurement Manuals",
+          "target": 282,
+          "target_label": "Engineering Geology & Geomechanics",
+          "codes": {
+            "lcc_selector": [
+              [
+                7636,
+                "TA710.5"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 9184,
+          "label": "Art Technique Manuals",
+          "target": 1038,
+          "target_label": "Technique & materials",
+          "codes": {
+            "lcc_selector": [
+              [
+                9184,
+                "ND1500"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 6236,
+          "label": "Elementary Teaching Manuals",
+          "target": 2322,
+          "target_label": "Primary Education",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                6236,
+                "LB",
+                1560.2,
+                "[]",
+                "LB",
+                1565.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 8677,
+          "label": "Manuals of instruction",
+          "target": 2327,
+          "target_label": "Secondary Education",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                8677,
+                "LB",
+                1612.2,
+                "[]",
+                "LB",
+                1619.0,
+                "[]"
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Ancient Greek author filing detail",
+      "sources": [
+        {
+          "id": 6999,
+          "label": "Editions",
+          "target": 4255,
+          "target_label": "Ancient Greek Authors",
+          "codes": {
+            "lcc_selector": [
+              [
+                6999,
+                "PA3825"
+              ],
+              [
+                6999,
+                "PA3851"
+              ],
+              [
+                6999,
+                "PA3973"
+              ],
+              [
+                6999,
+                "PA4367"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                6999,
+                "PA",
+                3890.0,
+                "[[\"A\",\"1\"]]",
+                "PA",
+                3890.0,
+                "[[\"A\",\"99\"]]"
+              ],
+              [
+                6999,
+                "PA",
+                4018.0,
+                "[]",
+                "PA",
+                4023.0,
+                "[]"
+              ],
+              [
+                6999,
+                "PA",
+                4413.0,
+                "[[\"A\",\"1\"]]",
+                "PA",
+                4413.0,
+                "[[\"Y\",\"9\"]]"
+              ],
+              [
+                6999,
+                "PA",
+                4494.0,
+                "[[\"A\",\"1\"]]",
+                "PA",
+                4494.0,
+                "[[\"Z\",\"\"]]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 7178,
+          "label": "Selected orations",
+          "target": 4255,
+          "target_label": "Ancient Greek Authors",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                7178,
+                "PA",
+                3949.0,
+                "[[\"A\",\"3\"]]",
+                "PA",
+                3949.0,
+                "[[\"A\",\"88\"]]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 7223,
+          "label": "Language. Style",
+          "target": 4255,
+          "target_label": "Ancient Greek Authors",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                7223,
+                "PA",
+                4499.0,
+                "[[\"A\",\"\"]]",
+                "PA",
+                4499.0,
+                "[[\"Z\",\"8\"]]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 8077,
+          "label": "Interpretation & criticism",
+          "target": 4255,
+          "target_label": "Ancient Greek Authors",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                8077,
+                "PA",
+                3829.0,
+                "[]",
+                "PA",
+                3849.0,
+                "[]"
+              ],
+              [
+                8077,
+                "PA",
+                3952.0,
+                "[]",
+                "PA",
+                3964.0,
+                "[]"
+              ],
+              [
+                8077,
+                "PA",
+                3977.0,
+                "[]",
+                "PA",
+                3992.0,
+                "[]"
+              ],
+              [
+                8077,
+                "PA",
+                4416.0,
+                "[]",
+                "PA",
+                4434.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 8242,
+          "label": "Particular orations",
+          "target": 4255,
+          "target_label": "Ancient Greek Authors",
+          "codes": {
+            "lcc_selector": [
+              [
+                8242,
+                "PA3950"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 8470,
+          "label": "Criticism & interpretation",
+          "target": 4255,
+          "target_label": "Ancient Greek Authors",
+          "codes": {
+            "lcc_selector": [
+              [
+                8470,
+                "PA4497"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                8470,
+                "PA",
+                3902.0,
+                "[]",
+                "PA",
+                3926.0,
+                "[[\"Z\",\"8\"]]"
+              ],
+              [
+                8470,
+                "PA",
+                4035.0,
+                "[]",
+                "PA",
+                4209.0,
+                "[]"
+              ],
+              [
+                8470,
+                "PA",
+                4382.0,
+                "[]",
+                "PA",
+                4389.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 9285,
+          "label": "Greek Fable Criticism",
+          "target": 4255,
+          "target_label": "Ancient Greek Authors",
+          "codes": {
+            "lcc_selector": [
+              [
+                9285,
+                "PA3858"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 9328,
+          "label": "Separate works",
+          "target": 4255,
+          "target_label": "Ancient Greek Authors",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                9328,
+                "PA",
+                3891.0,
+                "[]",
+                "PA",
+                3893.0,
+                "[[\"V\",\"5\"]]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 9674,
+          "label": "Fragments & lost works",
+          "target": 4255,
+          "target_label": "Ancient Greek Authors",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                9674,
+                "PA",
+                3893.0,
+                "[[\"Z\",\"5\"]]",
+                "PA",
+                3893.0,
+                "[[\"Z\",\"5\"],[\"Z\",\"\"]]"
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Photographic collection periods",
+      "sources": [
+        {
+          "id": 53258,
+          "label": "Photographic Collections through 1900",
+          "target": 12571,
+          "target_label": "Photographic Collections",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                53258,
+                "TR",
+                650.0,
+                "[]",
+                "TR",
+                652.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 53259,
+          "label": "Photographic Collections, 1901–1950",
+          "target": 12571,
+          "target_label": "Photographic Collections",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                53259,
+                "TR",
+                653.0,
+                "[]",
+                "TR",
+                653.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 53260,
+          "label": "Photographic Collections, 1951–2000",
+          "target": 12571,
+          "target_label": "Photographic Collections",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                53260,
+                "TR",
+                654.0,
+                "[]",
+                "TR",
+                654.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 53261,
+          "label": "Photographic Collections since 2001",
+          "target": 12571,
+          "target_label": "Photographic Collections",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                53261,
+                "TR",
+                655.0,
+                "[]",
+                "TR",
+                655.0,
+                "[]"
+              ]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Recreation facility operations",
+      "sources": [
+        {
+          "id": 6853,
+          "label": "Financial & business aspects",
+          "target": 4670,
+          "target_label": "Recreation Facilities",
+          "codes": {
+            "lcc_selector": [
+              [
+                6853,
+                "GV182.15"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 8036,
+          "label": "Public relations",
+          "target": 4670,
+          "target_label": "Recreation Facilities",
+          "codes": {
+            "lcc_selector": [
+              [
+                8036,
+                "GV182.2"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 10051,
+          "label": "Facility planning. Standards",
+          "target": 4670,
+          "target_label": "Recreation Facilities",
+          "codes": {
+            "lcc_selector": [
+              [
+                10051,
+                "GV182.3"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "Sociology reference detail",
+      "sources": [
+        {
+          "id": 52909,
+          "label": "Sociology Periodicals",
+          "target": 13838,
+          "target_label": "Reference",
+          "codes": {
+            "lcc_selector": [
+              [
+                52909,
+                "HM1"
+              ],
+              [
+                52909,
+                "HM7"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                52909,
+                "HM",
+                401.0,
+                "[]",
+                "HM",
+                417.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 52910,
+          "label": "Sociology Museums & Exhibitions",
+          "target": 13838,
+          "target_label": "Reference",
+          "codes": {
+            "lcc_selector": [
+              [
+                52910,
+                "HM41"
+              ],
+              [
+                52910,
+                "HM43"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                52910,
+                "HM",
+                581.0,
+                "[]",
+                "HM",
+                582.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 52911,
+          "label": "Sociology Directories & Institutions",
+          "target": 13838,
+          "target_label": "Reference",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                52911,
+                "HM",
+                418.0,
+                "[]",
+                "HM",
+                429.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 52912,
+          "label": "Sociology Special Works",
+          "target": 13838,
+          "target_label": "Reference",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                52912,
+                "HM",
+                583.0,
+                "[]",
+                "HM",
+                608.0,
+                "[]"
+              ]
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "matcher_validation": {
+    "probes": 172771,
+    "changed_destinations": 379,
+    "unexpected_changes": [],
+    "log": "Processed 100000\nProbes=172771 changed=379 losses=0 gains=0\n",
+    "limit": "Boundary/selector probes, not a full observed-code cache audit."
+  },
+  "proposed_after_concepts": 15713,
+  "recommendation": "Start with the 10 directory/resource leaves and 8 manual leaves. The 9 Ancient Greek filing/study leaves are the next literature-focused option. Photographic periods and operational/reference detail involve explicit choices about browsing granularity.",
+  "retained_greek_children": [
+    "Translations (9456), including Modern Translations (9080)",
+    "Plutarch’s Parallel Lives (8537)",
+    "Moralia (9712)"
+  ]
+}

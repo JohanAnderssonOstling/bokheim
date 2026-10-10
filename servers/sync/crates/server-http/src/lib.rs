@@ -140,6 +140,8 @@ pub fn router_with_operational_limits(
         .route("/api/libraries/:library_id/cloud-storage", axum::routing::put(sync::set_cloud_storage))
         .route("/api/libraries", post(sync::create_library).put(sync::rename_library))
         .route("/api/libraries/:library_id", delete(sync::delete_library))
+        .route("/api/opds-feeds", get(sync::list_opds_feeds).put(sync::put_opds_feed))
+        .route("/api/opds-feeds/:id", delete(sync::delete_opds_feed))
         .route("/api/libraries/:library_id/blobs/:hash", head(assets::head_blob).get(assets::get_blob).put(assets::put_blob))
         .route("/api/libraries/:library_id/blobs/:hash/playback", post(playback::issue))
         .route("/api/playback/:ticket", get(playback::read).head(playback::read).delete(playback::revoke))
@@ -160,8 +162,8 @@ fn browser_cors_layer() -> CorsLayer {
     CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::HEAD, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
-        .allow_headers([header::HeaderName::from_static("x-bokheim-trace-id"), header::HeaderName::from_static("x-bokheim-content-checksum"), header::ACCEPT, header::AUTHORIZATION, header::CONTENT_TYPE, header::IF_RANGE, header::RANGE])
-        .expose_headers([header::HeaderName::from_static("x-bokheim-content-checksum"), header::ACCEPT_RANGES, header::CONTENT_LENGTH, header::CONTENT_RANGE, header::CONTENT_TYPE, header::ETAG])
+        .allow_headers([header::HeaderName::from_static("x-bokheim-trace-id"), header::ACCEPT, header::AUTHORIZATION, header::CONTENT_TYPE, header::IF_RANGE, header::RANGE])
+        .expose_headers([header::ACCEPT_RANGES, header::CONTENT_LENGTH, header::CONTENT_RANGE, header::CONTENT_TYPE, header::ETAG])
 }
 
 async fn live() -> (StatusCode, &'static str) {
@@ -198,7 +200,7 @@ mod tests {
                     .uri("/api/auth/login")
                     .header(header::ORIGIN, "http://localhost:4173")
                     .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
-                    .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "accept,content-type,x-bokheim-content-checksum,x-bokheim-trace-id")
+                    .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "accept,content-type,x-bokheim-trace-id")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -211,7 +213,6 @@ mod tests {
         let allowed_headers = response.headers().get(header::ACCESS_CONTROL_ALLOW_HEADERS).unwrap().to_str().unwrap();
         assert!(allowed_headers.contains("accept"));
         assert!(allowed_headers.contains("content-type"));
-        assert!(allowed_headers.contains("x-bokheim-content-checksum"));
         assert!(allowed_headers.contains("x-bokheim-trace-id"));
     }
 }

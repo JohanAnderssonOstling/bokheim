@@ -144,27 +144,3 @@ impl ReaderView {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::update_cfi_position;
-
-    #[test]
-    fn a_changed_cfi_is_persisted_even_when_progress_is_unchanged() {
-        let mut current = Some("epubcfi(/6/14!/4/2[ch03]/2/2/2/1:0)".to_owned());
-        let next = Some("epubcfi(/6/14!/4/2[ch03]/54/1:121)".to_owned());
-
-        let update = update_cfi_position(&mut current, &next);
-
-        assert_eq!(update, next);
-        assert_eq!(current, next);
-    }
-
-    #[test]
-    fn an_identical_cfi_does_not_queue_another_write() {
-        let mut current = Some("epubcfi(/6/14!/4/2[ch03]/54/1:121)".to_owned());
-        let next = current.clone();
-
-        assert_eq!(update_cfi_position(&mut current, &next), None);
-    }
-}

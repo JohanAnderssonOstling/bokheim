@@ -1,4 +1,5 @@
-//! Upload admission is synchronous; optional enrichment has its own background lane.
+//! Prepare local files synchronously; `library_enrichment` finalizes book
+//! additions in its own lane.
 pub(crate) use crate::library::LibrarySession;
 pub(crate) use crate::BackendError;
 
@@ -8,22 +9,12 @@ impl LibrarySession {
             return Err(BackendError::message("waiting for library scan"));
         }
         let snapshot = self.db.upload_preparation_snapshot().map_err(BackendError::operation)?;
-        // Only durable local file work may delay admission. Thumbnail creation
-        // and remote metadata providers are optional follow-up work: neither
-        // must hold the book bytes or its lifecycle record off the server.
+        // File preparation and enrichment are separate gates. Prepared files
+        // remain withheld from upload until enrichment finalizes the addition.
         let batch = self.db.prepared_upload_batch(&snapshot.hashes()).map_err(BackendError::operation)?;
         self.db.finish_upload_preparation(&batch).map_err(BackendError::operation)?;
-        self.sync_wake.wake();
-        self.asset_wake.wake();
-        Ok(())
-    }
-
-    pub(crate) async fn run_enrichment(&self) -> Result<(), BackendError> {
-        let snapshot = self.db.upload_preparation_snapshot().map_err(BackendError::operation)?;
-        let scope = self.db.prepared_upload_batch(&snapshot.hashes()).map_err(BackendError::operation)?.hashes();
-        if self.enrich_books(&scope).await? > 0 {
-            self.sync_wake.wake();
-        }
+        self.events.sync.wake();
+        self.events.assets.wake();
         Ok(())
     }
 }

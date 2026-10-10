@@ -25,6 +25,11 @@ Generate the self-contained viewer with:
 python3 servers/taxonomy/curation/generate-viewer.py
 ```
 
+After curation, if the local classification cache is unavailable, generate with
+`--without-usage`. This hides historical counts and shows that counts await a
+refresh. The generator reads the current structured LCC boundaries and also
+accepts the older range layouts; original labels appear when stored.
+
 Open `servers/taxonomy/curation/taxonomy-viewer.html` in a browser. It reads
 `data/unified-taxonomy-v2.sqlite3` and the OpenLibrary usage TSV. The complete
 classification graph is stored separately in `data/master-taxonomy-v2.sqlite3`.

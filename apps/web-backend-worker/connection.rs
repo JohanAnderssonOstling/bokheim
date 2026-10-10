@@ -7,7 +7,7 @@ pub fn configuration(broker_url: &str) -> app::host::web::WebConfiguration {
         broker_name: "bokheim-backend-hosted-v3".into(),
         lifetime_lock: format!("bokheim-tab-{}", uuid::Uuid::new_v4()),
         worker_name_prefix: "bokheim-tab-worker".into(),
-        workers: [("database", "web_backend_database_worker_loader.js?endpoint"), ("cpu", "cpu_worker_loader.js?endpoint"), ("import", "import_worker_loader.js?endpoint")]
+        workers: [("database", "web_backend_database_worker_loader.js?endpoint"), ("cpu", "cpu_worker_loader.js?endpoint")]
             .into_iter()
             .map(|(role, script)| (role.into(), format!("{base}{script}")))
             .collect(),

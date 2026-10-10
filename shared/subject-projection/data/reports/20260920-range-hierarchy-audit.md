@@ -2,7 +2,7 @@
 
 **A containment tree alone cannot preserve the current classifier.** Nested overlaps are useful and can stay compact, but the stored rules also contain crossing overlaps and subject priorities that do not follow geometric containment. Adding `parent_range_id` and selecting the deepest match would change assignments.
 
-This audit is read-only. The source taxonomy and production matching behavior were not changed. The audit tool is an ignored release-mode test in `src/range_audit.rs`.
+This audit is read-only. The source taxonomy and production matching behavior were not changed. The audit used an ignored release-mode test that was subsequently removed during test pruning.
 
 The audited snapshot has release 18, format 11, 16,686 concepts and **13,640 LCC ranges**. Its runtime revision is `9:21c106d3-2b70-5458-bbc4-86ccc4757a36`. Source edits were occurring concurrently, so the final audit used a frozen SQLite snapshot, not a changing source database. Snapshot SHA-256: `1d4105563caa6bed15346bf6e58e1f4d1c200600ee37e60908aedf9908760439`.
 
@@ -71,12 +71,4 @@ Artifacts in the workspace:
 - [Exact-key conflicts and current results](../../../../target/range-hierarchy-audit/selector-conflicts.json)
 - [Frozen database](../../../../target/range-hierarchy-audit/taxonomy.sqlite3)
 
-Reproduce from the workspace root, preserving the original artifacts:
-
-```sh
-TAXONOMY_AUDIT_INPUT="$PWD/target/range-hierarchy-audit/taxonomy.sqlite3" \
-TAXONOMY_AUDIT_DIR="$PWD/target/range-hierarchy-audit-rerun" \
-cargo test --release -p subject-projection --lib runtime::range_audit::audit -- --ignored --nocapture
-```
-
-Omit `TAXONOMY_AUDIT_INPUT` to audit the current bundled taxonomy instead. Validation: the release audit passed, including the production-comparator cross-checks, in 10.12 seconds.
+The manual audit test was subsequently removed during test pruning. Original validation: the release audit passed, including the production-comparator cross-checks, in 10.12 seconds.

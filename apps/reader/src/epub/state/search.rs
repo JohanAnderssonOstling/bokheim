@@ -48,7 +48,7 @@ impl ReaderView {
         }
         let request = self.search.current_request();
         let provider = self.book.provider.clone();
-        let documents = self.book.document_uris.clone();
+        let documents = self.book.document_uris().to_vec();
         let cancellation = self.search.cancellation.clone();
         let executor = cx.background_executor().clone();
         self.with_renderer(cx, |renderer, cx| {

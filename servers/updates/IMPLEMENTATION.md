@@ -158,7 +158,7 @@ Android release unit suite: 41 passed, including four installer tests and three
 helper/service-boundary tests. Missing production signing was verified to fail
 `requireReleaseSigning` as intended. The Android Rust release
 cross-check passed after fixing a JNI string conversion and restoring the missing
-workspace `blake3 = "1"` declaration required by `book-metadata`. No Android device
+workspace `blake3 = "1"` declaration required by `book-inspection`. No Android device
 was attached at last check. AppImage packaging no longer embeds the legacy GitHub
 zsync update URL; the signed feed owns in-app discovery.
 The latest native host suite has 7 passing release tests, including Android APK

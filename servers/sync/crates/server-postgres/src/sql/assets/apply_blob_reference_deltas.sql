@@ -1,5 +1,5 @@
 WITH input AS MATERIALIZED (
-    SELECT * FROM UNNEST($2::TEXT[], $3::BIGINT[]) AS value(content_hash, delta)
+    SELECT * FROM UNNEST($2::BYTEA[], $3::BIGINT[]) AS value(content_hash, delta)
 ),
 valid AS MATERIALIZED (
     SELECT COALESCE(BOOL_AND(input.delta > 0 OR COALESCE(reference.reference_count, 0) >= -input.delta), TRUE) AS ok
@@ -42,8 +42,7 @@ released AS MATERIALIZED (
     WHERE charge.user_id=$1
       AND charge.content_hash=removed.content_hash
       AND object.content_hash=charge.content_hash
-      AND NOT EXISTS(SELECT 1 FROM library_blob_claim WHERE user_id=$1 AND blob_hash=charge.content_hash)
-      AND NOT EXISTS(SELECT 1 FROM user_book_revision AS revision WHERE revision.user_id=$1 AND revision.blob_hash=charge.content_hash)
+      AND NOT EXISTS(SELECT 1 FROM library_blob_claim WHERE user_id=$1 AND content_hash=charge.content_hash)
     RETURNING object.size_bytes
 ),
 account AS (

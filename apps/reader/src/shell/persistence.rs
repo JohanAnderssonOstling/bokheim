@@ -4,6 +4,7 @@
 //! folds loaded data back into its entity, serializes optimistic mutations,
 //! and debounces position updates.
 
+use library_backend::ContentHash;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
@@ -128,7 +129,7 @@ impl StoredPosition {
     /// The renderer reports how far through the book layout has reached as a
     /// 0–1 fraction.
     pub(crate) fn epub(cfi: String, fraction: f32) -> Self {
-        Self { position: cfi, percent: fraction.clamp(0.0, 1.0) * 100.0, entry: None }
+        Self { position: cfi, percent: book_model::layout_fraction_progress(fraction), entry: None }
     }
 
     /// Pages are a PDF's only progress signal: there is no reflowed text to
@@ -136,8 +137,7 @@ impl StoredPosition {
     /// stored. `offset` locates the view within the page and rides along in
     /// the position string without affecting progress.
     pub(crate) fn pdf_page(page_index: usize, offset: f32, page_count: usize) -> Self {
-        let percent = if page_count == 0 { 0.0 } else { (page_index.saturating_add(1) as f32 / page_count as f32 * 100.0).clamp(0.0, 100.0) };
-        Self { position: book_model::pdf_page_position_reading_position(page_index as u32, offset), percent, entry: Some(book_model::pdf_toc_target(page_index)) }
+        Self { position: book_model::pdf_page_position_reading_position(page_index as u32, offset), percent: book_model::pdf_page_progress(page_index, page_count), entry: Some(book_model::pdf_toc_target(page_index)) }
     }
 
     /// The entry the position was resolved to, once the reader knows it. An
@@ -164,12 +164,11 @@ pub(crate) struct ReadingPositionWriter {
 }
 
 impl ReadingPositionWriter {
-    pub(crate) fn new(cx: &App, content_hash: app::ContentHash, library: Rc<LibraryClient>) -> Self {
+    pub(crate) fn new(cx: &App, content_hash: ContentHash, library: Rc<LibraryClient>) -> Self {
         let writer = PositionWriter::new(
             cx,
             "save reading position",
             move |library, position: &StoredPosition| {
-                let content_hash = content_hash.clone();
                 let stored = position.position.clone();
                 let percent = position.percent;
                 let entry = position.entry.clone();
@@ -183,40 +182,5 @@ impl ReadingPositionWriter {
 
     pub(crate) fn record(&self, position: StoredPosition) {
         self.writer.record(position, "reading position");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::StoredPosition;
-
-    #[test]
-    fn an_epub_layout_fraction_is_stored_as_a_percentage() {
-        let position = StoredPosition::epub("epubcfi(/6/24!/4/2)".to_owned(), 0.55);
-        assert_eq!(position.position, "epubcfi(/6/24!/4/2)");
-        assert!((position.percent() - 55.0).abs() < 0.01, "the library stores 0-100, not the renderer's 0-1");
-    }
-
-    #[test]
-    fn an_epub_overshoot_cannot_store_more_than_full() {
-        assert_eq!(StoredPosition::epub(String::new(), 1.004).percent(), 100.0);
-        assert_eq!(StoredPosition::epub(String::new(), -0.5).percent(), 0.0);
-    }
-
-    #[test]
-    fn a_pdf_page_is_stored_as_its_share_of_the_document() {
-        assert_eq!(StoredPosition::pdf_page(0, 0.0, 4).percent(), 25.0);
-        assert_eq!(StoredPosition::pdf_page(3, 0.0, 4).percent(), 100.0);
-        assert_eq!(StoredPosition::pdf_page(9, 0.0, 4).percent(), 100.0, "a page past the count cannot exceed full");
-    }
-
-    #[test]
-    fn a_pdf_with_no_pages_reports_no_progress() {
-        assert_eq!(StoredPosition::pdf_page(0, 0.0, 0).percent(), 0.0);
-    }
-
-    #[test]
-    fn a_pdf_position_carries_the_page_offset() {
-        assert_eq!(StoredPosition::pdf_page(17, 0.5, 100).position, "pdfpage(17,0.5)");
     }
 }

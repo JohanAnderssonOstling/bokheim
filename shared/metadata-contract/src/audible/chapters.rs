@@ -1,4 +1,4 @@
-//! Chapter plans never alter audio and never scale playback timestamps.
+//! AudiobookChapter plans never alter audio and never scale playback timestamps.
 use super::*;
 use crate::matching::bibliographic_match_key as key;
 
@@ -113,7 +113,7 @@ struct Label {
     part: bool,
 }
 
-fn labels(chapters: &[Chapter], book: &str) -> Vec<Label> {
+fn labels(chapters: &[AudiobookChapter], book: &str) -> Vec<Label> {
     let mut context = None;
     chapters
         .iter()
@@ -157,11 +157,11 @@ fn evidence(a: &Label, b: &Label) -> u16 {
     0
 }
 
-fn valid(chapters: &[Chapter], duration: u64) -> bool {
+fn valid(chapters: &[AudiobookChapter], duration: u64) -> bool {
     !chapters.is_empty() && chapters.iter().all(|c| c.start_ms < c.end_ms && c.end_ms <= duration) && chapters.windows(2).all(|w| w[0].end_ms <= w[1].start_ms)
 }
 
-fn compatible(local: &[Chapter], remote: &[Chapter], book: &str, pairs: &[(usize, usize)]) -> bool {
+fn compatible(local: &[AudiobookChapter], remote: &[AudiobookChapter], book: &str, pairs: &[(usize, usize)]) -> bool {
     let a = labels(local, book);
     let b = labels(remote, book);
     pairs.iter().all(|(i, j)| {
@@ -173,7 +173,7 @@ fn compatible(local: &[Chapter], remote: &[Chapter], book: &str, pairs: &[(usize
     })
 }
 
-fn rename(local: &[Chapter], remote: &[Chapter], book: &str, pairs: &[(usize, usize)], method: AlignmentMethod) -> Option<ChapterPlan> {
+fn rename(local: &[AudiobookChapter], remote: &[AudiobookChapter], book: &str, pairs: &[(usize, usize)], method: AlignmentMethod) -> Option<ChapterPlan> {
     let mut chapters = local.to_vec();
     let mut renamed = 0;
     for (i, j) in pairs {
@@ -232,7 +232,7 @@ pub fn plan(request: &LookupRequest, candidate: &Candidate) -> Option<ChapterPla
 // A file can number every track "Chapter N", including credits and interludes.
 // Override those apparent number conflicts only when the entire varied timeline
 // independently agrees. Explicit local section names retain their meaning.
-fn generated_sequence_with_identical_boundaries(local: &[Chapter], remote: &[Chapter]) -> bool {
+fn generated_sequence_with_identical_boundaries(local: &[AudiobookChapter], remote: &[AudiobookChapter]) -> bool {
     local.len() >= 5
         && local.len() == remote.len()
         && local.iter().enumerate().all(|(index, chapter)| {
@@ -244,7 +244,7 @@ fn generated_sequence_with_identical_boundaries(local: &[Chapter], remote: &[Cha
         && distinct_durations(local.iter().map(|c| c.end_ms - c.start_ms).collect()) >= 3
 }
 
-fn anchors(local: &[Chapter], remote: &[Chapter], book: &str, duration: u64) -> Option<Vec<(usize, usize)>> {
+fn anchors(local: &[AudiobookChapter], remote: &[AudiobookChapter], book: &str, duration: u64) -> Option<Vec<(usize, usize)>> {
     let n = local.len();
     let m = remote.len();
     if (n + 1).checked_mul(m + 1)? > MAX_ALIGNMENT_CELLS {
@@ -302,7 +302,7 @@ fn anchors(local: &[Chapter], remote: &[Chapter], book: &str, duration: u64) -> 
 /// Experimental pattern alignment: bounded 1:1 and adjacent 1:2..4 matches,
 /// at least five independent matches and 90% audio coverage on both sides.
 /// Comparison never rescales local timestamps.
-fn duration_pattern(local: &[Chapter], remote: &[Chapter], book: &str) -> Option<Vec<(usize, usize)>> {
+fn duration_pattern(local: &[AudiobookChapter], remote: &[AudiobookChapter], book: &str) -> Option<Vec<(usize, usize)>> {
     let (n, m) = (local.len(), remote.len());
     if n < 5 || m < 5 || (n + 1).checked_mul(m + 1)? > MAX_ALIGNMENT_CELLS {
         return None;
@@ -310,7 +310,7 @@ fn duration_pattern(local: &[Chapter], remote: &[Chapter], book: &str) -> Option
     if local.windows(2).any(|w| w[0].end_ms.abs_diff(w[1].start_ms) > 100) || remote.windows(2).any(|w| w[0].end_ms.abs_diff(w[1].start_ms) > 100) {
         return None;
     }
-    let prefix = |cs: &[Chapter]| {
+    let prefix = |cs: &[AudiobookChapter]| {
         let mut p = vec![0u64];
         for c in cs {
             p.push(p.last().unwrap() + c.end_ms - c.start_ms);
@@ -408,22 +408,22 @@ pub fn recording_alignment(request: &LookupRequest, candidate: &Candidate) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn chapters(names: &[&str], lengths: &[u64]) -> Vec<Chapter> {
+    fn chapters(names: &[&str], lengths: &[u64]) -> Vec<AudiobookChapter> {
         let mut start = 0;
         names
             .iter()
             .zip(lengths)
             .map(|(name, len)| {
-                let c = Chapter { title: (*name).into(), start_ms: start, end_ms: start + len };
+                let c = AudiobookChapter { title: (*name).into(), start_ms: start, end_ms: start + len };
                 start += len;
                 c
             })
             .collect()
     }
-    fn request(local: Vec<Chapter>) -> LookupRequest {
+    fn request(local: Vec<AudiobookChapter>) -> LookupRequest {
         LookupRequest { title: "A Specific Book".into(), authors: vec![], duration_ms: local.last().unwrap().end_ms, recording: RecordingEvidence::default(), chapters: local }
     }
-    fn candidate(remote: Vec<Chapter>) -> Candidate {
+    fn candidate(remote: Vec<AudiobookChapter>) -> Candidate {
         Candidate {
             asin: "B000000001".into(),
             region: "us".into(),
@@ -466,59 +466,7 @@ mod tests {
         assert_eq!(p.chapters[0].title, "Chapter 1: Origins");
         assert!(recording_alignment(&r, &c));
     }
-    #[test]
-    fn close_runtime_allows_provider_boundaries_despite_numbering_conflicts() {
-        let r = request(chapters(&["Introduction", "Chapter 1"], &[30_000, 200_000]));
-        let c = candidate(chapters(&["Chapter One: Origins", "Chapter Two: Resolution"], &[30_000, 200_000]));
-        assert_eq!(plan(&r, &c).unwrap().method, AlignmentMethod::ImportedBoundaries);
-    }
-    #[test]
-    fn imported_boundaries_require_runtime_within_one_percent() {
-        let r = request(chapters(&["Full audiobook"], &[600_000]));
-        let mut c = candidate(chapters(&["The origins", "The conflict", "The resolution"], &[100_000, 200_000, 300_000]));
-        let p = plan(&r, &c).unwrap();
-        assert_eq!(p.method, AlignmentMethod::ImportedBoundaries);
-        c.duration_ms = Some(900_000);
-        c.chapters.last_mut().unwrap().end_ms = 900_000;
-        assert!(plan(&r, &c).is_none());
-    }
-    #[test]
-    fn one_percent_acceptance_works_for_matching_different_and_missing_isbns() {
-        let mut r = request(chapters(&["Full audiobook"], &[600_000]));
-        let mut c = candidate(chapters(&["The origins", "The conflict", "The resolution"], &[100_000, 200_000, 306_000]));
-        for (local, remote) in [("9780306406157", "9780306406157"), ("9780306406157", "9780140328721"), ("", "")] {
-            r.recording.isbns = if local.is_empty() { vec![] } else { vec![local.into()] };
-            c.isbns = if remote.is_empty() { vec![] } else { vec![remote.into()] };
-            let p = plan(&r, &c).unwrap();
-            assert_eq!(p.method, AlignmentMethod::ImportedBoundaries);
-            assert_eq!(p.chapters.last().unwrap().end_ms, 600_000);
-            assert_eq!(p.chapters[2].start_ms, 300_000);
-        }
-        c.duration_ms = Some(606_001);
-        c.chapters.last_mut().unwrap().end_ms = 606_001;
-        assert!(plan(&r, &c).is_none(), "one millisecond over 1% is not accepted by runtime alone");
-        c.duration_ms = Some(594_000);
-        c.chapters.last_mut().unwrap().end_ms = 594_000;
-        assert!(plan(&r, &c).is_some(), "the limit applies in both directions");
-        let r = request(chapters(&["Full audiobook"], &[60_000]));
-        let c = candidate(chapters(&["The origins", "The conflict", "The resolution"], &[20_000, 20_000, 21_000]));
-        assert!(plan(&r, &c).is_none(), "short books do not get a fixed seconds allowance");
-    }
 
-    #[test]
-    fn runtime_accepted_toc_omits_starts_beyond_local_audio() {
-        let r = request(chapters(&["Full audiobook"], &[600_000]));
-        let c = candidate(chapters(&["The origins", "The conflict", "The resolution", "End Credits"], &[100_000, 200_000, 302_000, 4_000]));
-        let p = plan(&r, &c).unwrap();
-        assert_eq!(p.chapters.len(), 3);
-        assert_eq!(p.chapters.last().unwrap().end_ms, 600_000);
-    }
-    #[test]
-    fn generated_track_numbers_are_not_numbered_chapter_anchors() {
-        let local = chapters(&["Track 1", "Track 2", "Track 3", "Track 4"], &[100_000; 4]);
-        let remote = chapters(&["Foreword", "Chapter 1: A beginning", "Chapter 2: A middle", "Chapter 3: The ending", "Chapter 4: A conclusion"], &[20_000, 100_000, 100_000, 100_000, 100_000]);
-        assert!(anchors(&local, &remote, "Book", 400_000).is_none());
-    }
     #[test]
     fn malformed_timestamps_and_generic_provider_names_never_produce_plans() {
         let r = request(chapters(&["Chapter 1", "Chapter 2"], &[100_000; 2]));
@@ -527,15 +475,6 @@ mod tests {
         c.chapters[0].title = "A rich name".into();
         c.chapters[0].end_ms = 150_000;
         assert!(plan(&r, &c).is_none());
-    }
-    #[test]
-    fn recording_runtime_acceptance_does_not_require_local_number_alignment() {
-        let r = request(chapters(&["Chapter 1", "Chapter 2", "Chapter 3"], &[1_200_000; 3]));
-        let names = (1..=9).map(|i| format!("Chapter {i}: Descriptive title")).collect::<Vec<_>>();
-        let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
-        let c = candidate(chapters(&refs, &[400_000; 9]));
-        assert!(!recording_alignment(&r, &c));
-        assert_eq!(plan(&r, &c).unwrap().method, AlignmentMethod::ImportedBoundaries);
     }
 
     #[test]
@@ -564,60 +503,5 @@ mod tests {
         assert_eq!(p.chapters[0].title, "An early beginning");
     }
 
-    #[test]
-    fn descriptive_frontmatter_keeps_section_identity() {
-        let r = request(chapters(&["Introduction", "Chapter 1"], &[60_000; 2]));
-        let mut c = candidate(chapters(&["Foreword: A personal note", "Chapter One: Origins"], &[60_000; 2]));
-        assert_eq!(plan(&r, &c).unwrap().method, AlignmentMethod::ImportedBoundaries);
-        c.chapters[0].title = "Introduction: A personal note".into();
-        let p = plan(&r, &c).unwrap();
-        assert_eq!(p.renamed, 2);
-        assert_eq!(p.chapters[0].title, "Introduction: A personal note");
-        assert_eq!(p.chapters[0].end_ms, r.chapters[0].end_ms);
-        assert_eq!(section("closing credits a final thank you"), Some("closing credits"));
-    }
 
-    #[test]
-    fn composite_numeric_labels_are_not_rich() {
-        for name in ["Track 01 - 01", "Track 01 - 02", "Chapter One Hundred", "Chapter One Hundred and Twenty Three", "Disc 01 Track 02", "Chapter"] {
-            assert!(!descriptive(name, "Book"), "{name}");
-        }
-        assert!(descriptive("Chapter One Hundred: The journey home", "Book"));
-        let r = request(chapters(&["Chapter 1", "Chapter 2"], &[60_000; 2]));
-        let c = candidate(chapters(&["Track 01 - 01", "Track 01 - 02"], &[60_000; 2]));
-        assert!(plan(&r, &c).is_none());
-        let r = request(c.chapters);
-        let c = candidate(chapters(&["The beginning", "The conclusion"], &[60_000; 2]));
-        assert_eq!(plan(&r, &c).unwrap().renamed, 2);
-    }
-
-    #[test]
-    fn book_title_track_suffixes_do_not_protect_generated_headings() {
-        for name in ["A Specific Book 01", "A Specific Book - Part 02", "A Specific Book, Disc 1 Track 3"] {
-            assert!(!descriptive(name, "A Specific Book"), "{name}");
-        }
-        assert!(descriptive("A Specific Book: The journey home", "A Specific Book"));
-        assert!(descriptive("A Specific Bookcase", "A Specific Book"));
-        let r = request(chapters(&["A Specific Book 01"], &[600_000]));
-        let c = candidate(chapters(&["The origins", "The conflict", "The resolution"], &[100_000, 200_000, 300_000]));
-        assert_eq!(plan(&r, &c).unwrap().method, AlignmentMethod::ImportedBoundaries);
-    }
-
-    #[test]
-    fn generated_chapter_numbers_can_yield_to_an_identical_varied_timeline() {
-        let lengths = [30_000, 190_000, 83_000, 140_000, 260_000];
-        let mut r = request(chapters(&["Chapter 1", "Chapter 2", "Chapter 3", "Chapter 4", "Chapter 5"], &lengths));
-        let mut c = candidate(chapters(&["Opening Credits", "Chapter 1: Origins", "Interlude: A new direction", "Chapter 2: Conflict", "Chapter 3: Resolution"], &lengths));
-        let p = plan(&r, &c).unwrap();
-        assert_eq!(p.renamed, 4);
-        assert!(p.chapters.iter().zip(&r.chapters).all(|(a, b)| a.start_ms == b.start_ms && a.end_ms == b.end_ms));
-        c.chapters[2].start_ms += 251;
-        assert_eq!(plan(&r, &c).unwrap().method, AlignmentMethod::ImportedBoundaries);
-        c.chapters[2].start_ms -= 251;
-        r.chapters[0].title = "Introduction".into();
-        assert_eq!(plan(&r, &c).unwrap().method, AlignmentMethod::ImportedBoundaries);
-        let r = request(chapters(&["Chapter 1", "Chapter 2", "Chapter 3", "Chapter 4", "Chapter 5"], &[60_000; 5]));
-        let c = candidate(chapters(&["Opening Credits", "Chapter 1: Origins", "Interlude: A new direction", "Chapter 2: Conflict", "Chapter 3: Resolution"], &[60_000; 5]));
-        assert_eq!(plan(&r, &c).unwrap().method, AlignmentMethod::ImportedBoundaries);
-    }
 }

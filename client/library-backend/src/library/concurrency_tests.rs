@@ -1,6 +1,9 @@
 use super::*;
-use crate::library::{PendingCommand, ReadyCommand, RuntimeCommand, SessionCommand};
-use crate::test_database::raw;
+use crate::library::{LibraryDirectory, LibraryNotifications, ReadyCommand, LibraryCommand};
+use library_runtime::interest::{InterestState, NotificationInterest};
+use std::sync::Arc;
+use sync_common::api::notifications::NotificationMessage;
+use web_time::Instant;
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -17,9 +20,9 @@ impl account_client::SessionPersistence for Account {
     }
 }
 
-fn fixture(root: &std::path::Path, url: account_client::ServerUrl) -> (LibraryActor, LibraryHandle, LibraryEventReceiver, LibraryEventSender, async_channel::Receiver<LibraryActorCommand>) {
+fn fixture(root: &std::path::Path, url: account_client::Url) -> (LibraryActor, LibraryHandle, async_channel::Receiver<LibraryActorCommand>) {
     let account = library_runtime::account::LibraryAccountSession::load(Account(account_client::Session::try_new(url.clone(), "user".into(), "reader@example.com".into(), "a".repeat(43)).unwrap()), url.clone()).unwrap();
-    let mut session = LibrarySession::open(super::super::LibraryRuntimeSpec {
+    let session = LibrarySession::open(super::super::LibraryRuntimeSpec {
         config: super::super::LibraryOpenConfig {
             id: LibraryId::new_v4(),
             display_name: "Concurrency".into(),
@@ -32,38 +35,200 @@ fn fixture(root: &std::path::Path, url: account_client::ServerUrl) -> (LibraryAc
         },
         account: account.library_account(),
         notification_interest: Default::default(),
-        remote_changes: Default::default(),
     })
     .unwrap();
-    let events = session.event_rx.take().unwrap();
-    let event_tx = session.event_tx.clone();
     let (commands, inbox) = async_channel::unbounded();
-    let handle = LibraryHandle { id: session.id, commands, subscriptions: session.subscriptions.clone(), runtime: session.runtime.clone(), event_tx: session.event_tx.clone(), sync_wake: session.sync_wake.clone() };
+    let handle = LibraryHandle { id: session.id, commands };
     let actor = LibraryActor::new(session);
-    (actor, handle, events, event_tx, inbox)
-}
-
-fn enqueue(handle: &LibraryHandle, command: SessionCommand) -> async_channel::Receiver<Result<client_runtime::reply::Reply, BackendError>> {
-    let (reply, receiver) = async_channel::bounded(1);
-    handle.commands.try_send(LibraryActorCommand::Ui { command, reply }).unwrap_or_else(|_| panic!("actor open"));
-    receiver
+    (actor, handle, inbox)
 }
 
 #[tokio::test]
-async fn folder_replay_runs_while_enrichment_is_stalled() {
+async fn remote_notifications_route_to_the_requested_library_and_reconnect_refreshes_all() {
+    use library_runtime::scheduler::SyncRequest;
+
+    let first_root = tempfile::tempdir().unwrap();
+    let second_root = tempfile::tempdir().unwrap();
+    let (mut first_actor, first, first_inbox) = fixture(first_root.path(), "http://127.0.0.1:1".parse().unwrap());
+    let (mut second_actor, second, second_inbox) = fixture(second_root.path(), "http://127.0.0.1:1".parse().unwrap());
+    let directory = Arc::new(LibraryDirectory::default());
+    directory.insert(first.clone()).unwrap();
+    directory.insert(second.clone()).unwrap();
+    let notifications = LibraryNotifications::new(directory.clone(), first_actor.session.account.clone(), InterestState::default());
+
+    notifications.receive(&NotificationMessage::LibraryChanged { library_id: first.id() }, true).unwrap();
+    first_actor.handle_command(first_inbox.try_recv().unwrap());
+    assert!(matches!(first_actor.requests.as_ref().unwrap().sync.try_recv(), Ok(SyncRequest::RefreshRemote)));
+    assert!(second_inbox.is_empty(), "a library notification must not wake other libraries");
+    assert!(second_actor.requests.as_ref().unwrap().sync.is_empty());
+
+    let hello = NotificationMessage::Hello { heartbeat_seconds: 5, timeout_seconds: 15 };
+    notifications.receive(&hello, false).unwrap();
+    assert!(first_inbox.is_empty(), "reader-only connections must not reconcile on Hello");
+    assert!(second_inbox.is_empty());
+    for message in [hello, NotificationMessage::LibrariesChanged, NotificationMessage::Reconcile] {
+        notifications.receive(&message, true).unwrap();
+        first_actor.handle_command(first_inbox.try_recv().unwrap());
+        second_actor.handle_command(second_inbox.try_recv().unwrap());
+        assert!(matches!(first_actor.requests.as_ref().unwrap().sync.try_recv(), Ok(SyncRequest::RefreshRemote)));
+        assert!(matches!(second_actor.requests.as_ref().unwrap().sync.try_recv(), Ok(SyncRequest::RefreshRemote)));
+    }
+
+    notifications.receive(&NotificationMessage::LibraryChanged { library_id: LibraryId::new_v4() }, true).unwrap();
+    assert!(first_inbox.is_empty());
+    assert!(second_inbox.is_empty());
+
+    directory.retire(&first.id()).unwrap();
+    notifications.receive(&NotificationMessage::LibraryChanged { library_id: first.id() }, true).unwrap();
+    notifications.receive(&NotificationMessage::Reconcile, true).unwrap();
+    assert!(directory.try_get(&first.id()).unwrap().is_none());
+    assert!(first_actor.requests.as_ref().unwrap().sync.is_empty());
+    second_actor.handle_command(second_inbox.try_recv().unwrap());
+    assert!(matches!(second_actor.requests.as_ref().unwrap().sync.try_recv(), Ok(SyncRequest::RefreshRemote)));
+}
+
+#[tokio::test]
+async fn foreground_resume_reconciles_libraries_without_a_socket_and_does_not_poll() {
+    use library_runtime::scheduler::SyncRequest;
+
+    let first_root = tempfile::tempdir().unwrap();
+    let second_root = tempfile::tempdir().unwrap();
+    let (mut first_actor, first, first_inbox) = fixture(first_root.path(), "http://127.0.0.1:1".parse().unwrap());
+    let (mut second_actor, second, second_inbox) = fixture(second_root.path(), "http://127.0.0.1:1".parse().unwrap());
+    let account = first_actor.session.account.clone();
+    let directory = Arc::new(LibraryDirectory::default());
+    directory.insert(first).unwrap();
+    directory.insert(second).unwrap();
+    let interest = NotificationInterest::default();
+    let activity = interest.subscribe();
+    let mut notifications = LibraryNotifications::new(directory, account.clone(), *activity.borrow());
+    let now = Instant::now();
+    let view = interest.view(false);
+    assert!(!activity.borrow().enabled(), "reader-only foreground activity needs no socket");
+    assert!(!notifications.observe_activity_at(*activity.borrow(), now + Duration::from_secs(1)));
+    assert!(first_inbox.is_empty());
+    assert!(second_inbox.is_empty());
+
+    // A deactivate/reactivate pair can coalesce into one activity update.
+    drop(view);
+    let view = interest.view(false);
+    assert!(notifications.observe_activity_at(*activity.borrow(), now + Duration::from_secs(31)));
+    first_actor.handle_command(first_inbox.try_recv().unwrap());
+    second_actor.handle_command(second_inbox.try_recv().unwrap());
+    assert!(matches!(first_actor.requests.as_ref().unwrap().sync.try_recv(), Ok(SyncRequest::RefreshRemote)));
+    assert!(matches!(second_actor.requests.as_ref().unwrap().sync.try_recv(), Ok(SyncRequest::RefreshRemote)));
+    assert!(!notifications.observe_activity_at(*activity.borrow(), now + Duration::from_secs(40)));
+
+    drop(view);
+    let view = interest.view(false);
+    assert!(!notifications.observe_activity_at(*activity.borrow(), now + Duration::from_secs(45)), "rapid resumes are throttled");
+    assert!(first_inbox.is_empty());
+    assert!(second_inbox.is_empty());
+    drop(view);
+    let view = interest.view(false);
+    assert!(notifications.observe_activity_at(*activity.borrow(), now + Duration::from_secs(65)));
+    first_actor.handle_command(first_inbox.try_recv().unwrap());
+    second_actor.handle_command(second_inbox.try_recv().unwrap());
+    assert!(matches!(first_actor.requests.as_ref().unwrap().sync.try_recv(), Ok(SyncRequest::RefreshRemote)));
+    assert!(matches!(second_actor.requests.as_ref().unwrap().sync.try_recv(), Ok(SyncRequest::RefreshRemote)));
+
+    let token = account.require().unwrap().token().to_owned();
+    assert!(account.refresh_after_unauthorized(token).await.unwrap().is_none());
+    drop(view);
+    let _view = interest.view(false);
+    assert!(!notifications.observe_activity_at(*activity.borrow(), now + Duration::from_secs(100)), "signed-out resumes do not trigger discovery or library refresh");
+    assert!(first_inbox.is_empty());
+    assert!(second_inbox.is_empty());
+}
+
+#[tokio::test]
+async fn subscription_registers_with_initial_state_and_receives_callback_events() {
     let root = tempfile::tempdir().unwrap();
-    let (mut actor, handle, events, _, inbox) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
+    let (mut actor, handle, inbox) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
+    actor.session.begin_directory_import(uuid::Uuid::from_u128(1));
+    let events = actor.session.events.clone();
+    let hash = ContentHash::from_bytes([3; 32]);
+    let exercise = async {
+        let (updates, scanning) = handle.subscribe_updates().await.unwrap();
+        assert!(scanning, "the subscription snapshot includes the active import");
+        // Callback capabilities can cross threads without sharing actor state.
+        std::thread::spawn(move || events.emit(LibraryEvent::ThumbnailGenerated { content_hash: hash })).join().unwrap();
+        assert_eq!(updates.recv().await.unwrap(), library_model::LibraryUpdate::Covers(vec![hash]));
+        handle.shutdown();
+        assert!(updates.recv().await.is_err());
+    };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(actor.serve(inbox), exercise);
+    }).await.expect("subscription and event delivery must make progress");
+}
+
+#[tokio::test]
+async fn retirement_stops_buffered_updates_without_polling_the_actor() {
+    use crate::library::subscriptions::LibraryUpdates;
+    let root = tempfile::tempdir().unwrap();
+    let (mut actor, handle, _inbox) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
+    let (reply, result) = async_channel::bounded(1);
+    actor.handle_command(LibraryActorCommand::SubscribeUpdates { reply });
+    let (updates, _) = result.try_recv().unwrap().unwrap();
+    let updates = LibraryUpdates::new(updates, handle.commands.clone());
+    actor.session.emit(LibraryEvent::ContentsChanged);
+    handle.shutdown();
+    assert_eq!(updates.try_recv(), Err(async_channel::TryRecvError::Closed));
+    assert!(updates.recv().await.is_err());
+    assert!(handle.subscribe_updates().await.is_err());
+}
+
+#[tokio::test]
+async fn retirement_cancels_a_subscription_still_waiting_in_the_inbox() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+    let root = tempfile::tempdir().unwrap();
+    let (_actor, handle, inbox) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
+    let mut subscribing = std::pin::pin!(handle.subscribe_updates());
+    assert!(matches!(subscribing.as_mut().poll(&mut Context::from_waker(Waker::noop())), Poll::Pending));
+    assert_eq!(inbox.len(), 1);
+    handle.shutdown();
+    assert!(tokio::time::timeout(Duration::from_secs(1), subscribing).await.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn mutations_publish_queued_events_before_acknowledgement() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut actor, _handle, _inbox) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
+    let (reply, result) = async_channel::bounded(1);
+    actor.handle_command(LibraryActorCommand::SubscribeUpdates { reply });
+    let (updates, _) = result.try_recv().unwrap().unwrap();
+
+    let (reply, result) = async_channel::bounded(1);
+    actor.handle_command(LibraryActorCommand::Ui {
+        command: LibraryCommand::Ready(ReadyCommand::CreateDirectory { parent_id: sync_common::ROOT_DIR_ID, name: "Shelf".into() }),
+        reply,
+    });
+    assert!(result.try_recv().unwrap().is_ok());
+    assert_eq!(updates.try_recv().unwrap(), library_model::LibraryUpdate::Contents);
+
+    let events = actor.session.events.clone();
+    let (reply, result) = async_channel::bounded(1);
+    actor.submit(OperationKind::Read, PendingReply::new(reply), async move {
+        events.emit(LibraryEvent::ContentsChanged);
+        Ok(())
+    });
+    actor.operations.next().await.unwrap();
+    assert!(result.try_recv().unwrap().is_ok());
+    assert_eq!(updates.try_recv().unwrap(), library_model::LibraryUpdate::Contents);
+}
+
+#[tokio::test]
+async fn folder_replay_follows_renames_while_the_actor_serves() {
+    let root = tempfile::tempdir().unwrap();
+    let (actor, handle, inbox) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
     actor.session.filesystem_scanning.set(false);
-    let folder = actor.session.create_directory(&sync_common::ROOT_DIR_ID, "Before").unwrap();
-    crate::asset_workflow::prepare_directory(&actor.session.assets, &actor.session.db, folder.id).await.unwrap();
+    let folder = actor.session.placement.create_directory(&sync_common::ROOT_DIR_ID, "Before").unwrap();
+    library_placement::prepare_directory(&actor.session.assets, &actor.session.db, folder.id).await.unwrap();
     assert!(root.path().join("Before").is_dir());
-    // A held enrichment batch must not be replaced, completed, or awaited
-    // before either the first replay or a subsequent wake can make progress.
-    actor.enrichment_job.task = Some(Box::pin(std::future::pending()));
-    let event_commands = handle.commands.clone();
     let exercise = async {
         for name in ["After", "Again"] {
-            handle.dispatch(LibraryCommand::Session(SessionCommand::Ready(ReadyCommand::RenameDirectory { directory_id: folder.id, name: name.into() }))).await.unwrap();
+            handle.dispatch(LibraryCommand::Ready(ReadyCommand::RenameDirectory { directory_id: folder.id, name: name.into() })).await.unwrap();
             while !root.path().join(name).is_dir() {
                 tokio::task::yield_now().await;
             }
@@ -73,185 +238,140 @@ async fn folder_replay_runs_while_enrichment_is_stalled() {
         handle.shutdown();
     };
     tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(actor.run(inbox, events, event_commands), exercise);
+        tokio::join!(actor.run(inbox, async {}), exercise);
     })
     .await
-    .expect("physical renames must not wait for enrichment");
+    .expect("each rename reaches the disk");
 }
 
 #[tokio::test]
-async fn retiring_before_first_poll_discards_queued_commands_and_replies() {
-    let root = tempfile::tempdir().unwrap();
-    let (actor, handle, events, _, inbox) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
-    let response = enqueue(&handle, SessionCommand::Ready(ReadyCommand::CreateDirectory { parent_id: sync_common::ROOT_DIR_ID, name: "Must not run".into() }));
-    let database = actor.session.db.clone();
-    handle.shutdown();
-    actor.run(inbox, events, handle.commands.clone()).await;
-    assert!(response.recv().await.is_err());
-    assert_eq!(raw(&database).query_row("SELECT count(*) FROM dir WHERE name='Must not run'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
-}
-
-#[tokio::test]
-async fn unpolled_staged_preparation_does_not_leak_import_activity() {
-    let root = tempfile::tempdir().unwrap();
-    let (actor, _, _, _, _) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
-    let work = super::super::commands::prepare_library_request(
-        actor.session.clone(),
-        SessionCommand::Pending(PendingCommand::PrepareStagedDirectoryImport {
-            activity: uuid::Uuid::new_v4(),
-            job: uuid::Uuid::new_v4().to_string(),
-            parent_id: sync_common::ROOT_DIR_ID,
-            name: Some("Unstarted".into()),
-            directories: vec![],
-        }),
-    )
-    .unwrap();
-    assert!(actor.session.runtime.has_directory_imports());
-    drop(work);
-    assert!(!actor.session.runtime.has_directory_imports());
-}
-
-#[tokio::test]
-async fn staged_preparation_hands_off_only_after_success() {
-    let root = tempfile::tempdir().unwrap();
-    let (actor, _, _, _, _) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
-    for valid in [false, true] {
-        let activity = uuid::Uuid::new_v4();
-        let work = super::super::commands::prepare_library_request(
-            actor.session.clone(),
-            SessionCommand::Pending(PendingCommand::PrepareStagedDirectoryImport {
-                activity,
-                job: if valid { uuid::Uuid::new_v4().to_string() } else { "invalid journal".into() },
-                parent_id: sync_common::ROOT_DIR_ID,
-                name: None,
-                directories: vec![],
-            }),
-        )
-        .unwrap();
-        let PreparedRequest::Pending(operation) = work else { panic!("preparation must run beside commands") };
-        assert_eq!(operation.future.await.is_ok(), valid);
-        assert_eq!(actor.session.runtime.has_directory_imports(), valid);
-        actor.session.finish_directory_import(activity);
-        assert!(!actor.session.runtime.has_directory_imports());
+async fn external_import_leaves_failed_imports_on_disk_for_retry() {
+    for moving in [false, true] {
+    let library = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let source = external.path().join("broken.epub");
+    std::fs::write(&source, b"invalid EPUB").unwrap();
+    let (actor, _, _) = fixture(library.path(), "http://127.0.0.1:1".parse().unwrap());
+    let shelf = actor.session.placement.create_directory(&sync_common::ROOT_DIR_ID, "Shelf").unwrap();
+    let failures = actor.session.import_paths(shelf.id, vec![source.clone()], moving).await.unwrap();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(source.exists(), !moving);
+    let moved = library.path().join("Shelf/broken.epub");
+    assert_eq!(std::fs::read(&moved).unwrap(), b"invalid EPUB");
+    let failures = actor.session.import_paths(shelf.id, vec![moved.clone()], true).await.unwrap();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(std::fs::read(&moved).unwrap(), b"invalid EPUB");
+    assert!(!library.path().join("Shelf/broken 2.epub").exists());
     }
 }
 
 #[tokio::test]
-async fn create_folder_materializes_before_returning_without_queued_work() {
-    let root = tempfile::tempdir().unwrap();
-    let (actor, _, _, _, _) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
-    std::fs::create_dir(root.path().join("Shelf")).unwrap();
-    std::fs::write(root.path().join("Shelf/keep.txt"), "existing data").unwrap();
-    let folder = actor.session.create_directory(&sync_common::ROOT_DIR_ID, "Shelf").unwrap();
-    let relative = actor.session.db.directory_relative_path_string(&folder.id).unwrap().unwrap();
-    assert_ne!(relative, "Shelf");
-    assert_eq!(std::fs::read_to_string(root.path().join(&relative).join(".biblos_uuid")).unwrap(), folder.id.to_string());
-    let child = actor.session.create_directory(&folder.id, "Child").unwrap();
-    assert_eq!(std::fs::read_to_string(root.path().join(&relative).join("Child/.biblos_uuid")).unwrap(), child.id.to_string());
-    assert!(!actor.session.db.has_pending_file_work().unwrap());
-    assert_eq!(std::fs::read_to_string(root.path().join("Shelf/keep.txt")).unwrap(), "existing data");
-    // An unavailable parent must fail before creating a database record.
-    std::fs::rename(root.path().join(&relative), root.path().join("Moved externally")).unwrap();
-    assert!(actor.session.create_directory(&folder.id, "Cannot create").is_err());
-    assert_eq!(raw(&actor.session.db).query_row("SELECT count(*) FROM dir WHERE name='Cannot create'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
-    assert!(!actor.session.db.has_pending_file_work().unwrap());
-}
-
-#[cfg(feature = "scanner")]
-#[tokio::test]
-async fn scan_recovers_folder_created_before_database_registration() {
-    let root = tempfile::tempdir().unwrap();
-    let (mut actor, _, _, _, _) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
-    let id = DirId::new_v4();
-    actor.session.assets.create_directory("Recovered", id).unwrap();
-    assert!(actor.session.db.directory_relative_path_string(&id).unwrap().is_none());
-    actor.begin_scan();
-    let result = actor.scan_job.task.as_mut().unwrap().await;
-    actor.finish_scan(result);
-    assert_eq!(actor.session.db.directory_relative_path_string(&id).unwrap().as_deref(), Some("Recovered"));
-    assert!(!actor.session.db.has_pending_file_work().unwrap());
-}
-
-#[cfg(feature = "scanner")]
-#[tokio::test]
-async fn invalid_book_finishes_scan_with_a_file_error() {
-    let root = tempfile::tempdir().unwrap();
-    let (mut actor, _, _, _, _) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
-    std::fs::write(root.path().join("Broken.epub"), b"not a zip archive").unwrap();
-    actor.begin_scan();
-    let result = actor.scan_job.task.as_mut().unwrap().await;
-    actor.finish_scan(result);
-    assert!(!actor.session.scanner_running());
-    assert!(!actor.session.db.needs_scan().unwrap());
-    let failures = actor.session.db.scan_failures().unwrap();
-    assert_eq!(failures.len(), 1);
-    assert_eq!(failures[0].0, "Broken.epub");
-    assert!(!failures[0].1.is_empty());
+async fn external_import_places_nested_books_before_registration() {
+    for moving in [false, true] {
+    let library = tempfile::tempdir().unwrap();
+    let external = tempfile::tempdir().unwrap();
+    let source = external.path().join("Books");
+    std::fs::create_dir_all(source.join("Nested")).unwrap();
+    let bytes = include_bytes!("../../crates/book-inspection/tests/fixtures/back-matter-evidence.epub");
+    std::fs::write(source.join("Nested/book.epub"), bytes).unwrap();
+    std::fs::write(source.join("notes.txt"), b"sidecar").unwrap();
+    let (actor, _, _) = fixture(library.path(), "http://127.0.0.1:1".parse().unwrap());
+    let shelf = actor.session.placement.create_directory(&sync_common::ROOT_DIR_ID, "Shelf").unwrap();
+    let failures = actor.session.import_paths(shelf.id, vec![source.clone()], moving).await.unwrap();
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(source.exists(), !moving);
+    assert_eq!(std::fs::read(library.path().join("Shelf/Books/Nested/book.epub")).unwrap(), bytes);
+    assert_eq!(std::fs::read(library.path().join("Shelf/Books/notes.txt")).unwrap(), b"sidecar");
+    let hash = ContentHash::from(blake3::hash(bytes));
+    let mut paths: Vec<_> = actor.session.db.book_paths(&hash).unwrap().iter().map(|path| path.to_string()).collect();
+    paths.sort();
+    paths.dedup();
+    assert_eq!(paths, vec!["/Shelf/Books/Nested/book.epub"]);
+    let failures = actor.session.import_paths(shelf.id, vec![library.path().join("Shelf/Books")], true).await.unwrap();
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(!library.path().join("Shelf/Books 2").exists());
+    }
 }
 
 #[tokio::test]
-async fn queued_download_is_durable_and_repeated_requests_share_one_transfer() {
-    let root = tempfile::tempdir().unwrap();
-    let (actor, _, _, _, _) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
-    let hash = ContentHash::new(&"e".repeat(64));
-    raw(&actor.session.db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'Remote',1)", [hash.as_str()]).unwrap();
-    raw(&actor.session.db).execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT ?1,row_id,'remote.epub','',0 FROM book", [sync_common::ROOT_DIR_ID.to_string()]).unwrap();
-    assert_eq!(actor.session.queue_download(hash).unwrap(), DownloadState::Queued);
-    assert!(actor.operations.is_empty());
-    assert!(actor.session.db.is_book_download_requested(&hash).unwrap());
-    assert_eq!(actor.session.sync.transfer_queue.statuses()[0].total_items, 1);
-    assert_eq!(actor.session.queue_download(hash).unwrap(), DownloadState::Queued);
-    assert_eq!(actor.session.sync.transfer_queue.statuses()[0].total_items, 1, "repeated requests share one queued transfer");
+async fn selected_import_copies_all_files_before_shared_inspection() {
+    use crate::{DirectoryImport, DirectoryImportFile, DirectoryImportReader, ImportSource};
+    use std::io::Cursor;
+
+    struct InterruptedReader(bool);
+    impl std::io::Read for InterruptedReader {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            if self.0 { return Err(std::io::Error::other("copy interrupted")); }
+            self.0 = true;
+            let count = bytes.len().min(4);
+            bytes[..count].copy_from_slice(&b"data"[..count]);
+            Ok(count)
+        }
+    }
+
+    let library = tempfile::tempdir().unwrap();
+    let (actor, _, _) = fixture(library.path(), "http://127.0.0.1:1".parse().unwrap());
+    let shelf = actor.session.placement.create_directory(&sync_common::ROOT_DIR_ID, "Shelf").unwrap();
+    let bytes = include_bytes!("../../crates/book-inspection/tests/fixtures/back-matter-evidence.epub");
+    let destination = library.path().join("Shelf");
+    let directory = DirectoryImport {
+        name: "Selected books".into(),
+        directories: vec![],
+        files: vec![
+            DirectoryImportFile {
+                path: vec!["broken.epub".into()],
+                source: ImportSource::new(Box::new(|| Box::pin(async { Ok(Box::new(Cursor::new(b"invalid EPUB")) as DirectoryImportReader) }))),
+            },
+            DirectoryImportFile {
+                path: vec!["book.epub".into()],
+                source: ImportSource::new(Box::new(move || Box::pin(async move {
+                    assert!(!destination.join("broken.epub").exists(), "copy the whole selection before publication or inspection");
+                    Ok(Box::new(Cursor::new(bytes)) as DirectoryImportReader)
+                }))),
+            },
+            DirectoryImportFile {
+                path: vec!["interrupted.epub".into()],
+                source: ImportSource::new(Box::new(|| Box::pin(async { Ok(Box::new(InterruptedReader(false)) as DirectoryImportReader) }))),
+            },
+        ],
+    };
+    let failures = actor.session.import_selected_directory(shelf.id, directory, false, &|| false).await.unwrap();
+    assert_eq!(failures.len(), 2);
+    assert_eq!(std::fs::read(library.path().join("Shelf/broken.epub")).unwrap(), b"invalid EPUB");
+    assert_eq!(std::fs::read(library.path().join("Shelf/book.epub")).unwrap(), bytes);
+    assert!(!library.path().join("Shelf/interrupted.epub").exists());
+    let hash = ContentHash::from(blake3::hash(bytes));
+    let paths = actor.session.db.book_paths(&hash).unwrap();
+    assert!(!paths.is_empty());
+    assert!(paths.iter().all(|path| path.as_str() == "/Shelf/book.epub"));
+    assert!(std::fs::read_dir(library.path().join("Shelf")).unwrap().all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".bokheim-copy-")));
 }
 
 #[tokio::test]
-async fn stalled_enrichment_does_not_hold_new_upload_admission() {
-    let root = tempfile::tempdir().unwrap();
-    let (mut actor, _, _, _, _) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
-    actor.enrichment_job.task = Some(Box::pin(std::future::pending()));
-    let hash = ContentHash::new(&"f".repeat(64));
-    raw(&actor.session.db).execute("INSERT INTO book(content_hash,title,format) VALUES(?1,'New book',1)", [hash.as_str()]).unwrap();
-    actor.admit_and_enrich();
-    assert_eq!(raw(&actor.session.db).query_row("SELECT COUNT(*) FROM book_transfer WHERE content_hash=?1 AND upload_prepared IS NOT NULL", [hash.as_str()], |row| row.get::<_, i64>(0)).unwrap(), 1);
-    assert!(actor.enrichment_job.task.is_some());
-    assert!(actor.enrichment_job.pending);
-}
+async fn selected_folder_import_uses_shared_folder_collision_handling() {
+    use crate::{DirectoryImport, DirectoryImportFile, DirectoryImportReader, ImportSource};
+    use std::io::Cursor;
 
-#[tokio::test]
-async fn import_progress_bypasses_unpolled_actor_and_rejects_retired_handle() {
-    let root = tempfile::tempdir().unwrap();
-    let (actor, handle, _events, _, inbox) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
-    let activity = uuid::Uuid::new_v4();
-    actor.session.begin_directory_import(activity);
-    tokio::time::timeout(Duration::from_secs(1), async {
-        handle.dispatch(LibraryCommand::Runtime(RuntimeCommand::AdvanceDirectoryImport { activity, total: 3, succeeded: 1, failed: 1 })).await.unwrap();
-        let progress = handle.dispatch(LibraryCommand::Runtime(RuntimeCommand::ImportProgress { activity })).await.unwrap().take::<Option<library_model::DirectoryImportProgress>>().unwrap().unwrap();
-        assert_eq!((progress.total, progress.succeeded, progress.failed), (3, 1, 1));
-        handle.dispatch(LibraryCommand::Runtime(RuntimeCommand::FinishDirectoryImport { activity })).await.unwrap();
-        assert!(handle.dispatch(LibraryCommand::Runtime(RuntimeCommand::ImportProgress { activity })).await.unwrap().take::<Option<library_model::DirectoryImportProgress>>().unwrap().is_none());
-    })
-    .await
-    .expect("shared progress must not need the actor to be polled");
-    assert!(inbox.is_empty());
-    handle.shutdown();
-    assert!(handle.dispatch(LibraryCommand::Runtime(RuntimeCommand::DirectoryImportProgress)).await.is_err());
-}
-
-#[tokio::test]
-async fn stored_import_rejects_changed_length_without_consuming_source() {
-    use crate::library::commands::dispatch_library_request_in_session;
-    use crate::library::{ImportBookSource, StagedImportMetadata};
-    let root = tempfile::tempdir().unwrap();
-    let (actor, _, _, _, _) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
-    let staged = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(staged.path(), b"changed bytes").unwrap();
-    let command = LibraryCommand::Session(SessionCommand::Pending(PendingCommand::ImportBook {
-        parent_id: sync_common::ROOT_DIR_ID,
-        file_name: "book.epub".into(),
-        source: ImportBookSource::Stored { location: staged.path().to_owned(), staged: Some(StagedImportMetadata { length: 1, hash: ContentHash::new(&"a".repeat(64)) }) },
-    }));
-    let result = dispatch_library_request_in_session(actor.session.clone(), command).await;
-    assert!(matches!(result, Err(error) if error.to_string().contains("staged import length changed")));
-    assert_eq!(std::fs::read(staged.path()).unwrap(), b"changed bytes");
-    assert_eq!(actor.session.book_count().unwrap(), 0);
+    let library = tempfile::tempdir().unwrap();
+    let (actor, _, _) = fixture(library.path(), "http://127.0.0.1:1".parse().unwrap());
+    let shelf = actor.session.placement.create_directory(&sync_common::ROOT_DIR_ID, "Shelf").unwrap();
+    let existing = actor.session.placement.create_directory(&shelf.id, "Books").unwrap();
+    let bytes = include_bytes!("../../crates/book-inspection/tests/fixtures/back-matter-evidence.epub");
+    let directory = DirectoryImport {
+        name: "Books".into(),
+        directories: vec![vec!["Nested".into()], vec!["Empty".into()]],
+        files: vec![DirectoryImportFile {
+            path: vec!["Nested".into(), "book.epub".into()],
+            source: ImportSource::new(Box::new(move || Box::pin(async move { Ok(Box::new(Cursor::new(bytes)) as DirectoryImportReader) }))),
+        }],
+    };
+    let failures = actor.session.import_selected_directory(shelf.id, directory, true, &|| false).await.unwrap();
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(library.path().join("Shelf/Books 2/Empty").is_dir());
+    assert_eq!(std::fs::read(library.path().join("Shelf/Books 2/Nested/book.epub")).unwrap(), bytes);
+    assert_eq!(actor.session.db.child_directory(&shelf.id, "Books").unwrap(), Some(existing.id));
+    let hash = ContentHash::from(blake3::hash(bytes));
+    let paths = actor.session.db.book_paths(&hash).unwrap();
+    assert!(!paths.is_empty());
+    assert!(paths.iter().all(|path| path.as_str() == "/Shelf/Books 2/Nested/book.epub"));
 }

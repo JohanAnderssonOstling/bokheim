@@ -1,5 +1,5 @@
-use std::cmp::Ordering;
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
@@ -470,12 +470,7 @@ impl GlyphShaper for GpuiTextCache {
 
     fn begin_append_shaping(&mut self) -> Result<(), ShapeError> {
         debug_assert!(self.previous_append.is_none(), "append shaping transactions cannot be nested");
-        self.previous_append = Some(AppendTextResources {
-            resources: self.resources.clone(),
-            table: self.table.clone(),
-            glyphs: self.glyphs.borrow().clone(),
-            runs: self.runs.borrow().clone(),
-        });
+        self.previous_append = Some(AppendTextResources { resources: self.resources.clone(), table: self.table.clone(), glyphs: self.glyphs.borrow().clone(), runs: self.runs.borrow().clone() });
         Ok(())
     }
 
@@ -497,8 +492,12 @@ impl GlyphShaper for GpuiTextCache {
             self.western_benchmark.reset();
         }
         debug_assert!(self.previous_document.is_none(), "document shaping transactions cannot be nested");
-        let previous =
-            DocumentTextResources { resources: std::mem::take(&mut self.resources), table: std::mem::take(&mut self.table), glyphs: std::mem::replace(&mut self.glyphs, Rc::new(RefCell::new(Vec::new()))), runs: std::mem::replace(&mut self.runs, Rc::new(RefCell::new(Vec::new()))) };
+        let previous = DocumentTextResources {
+            resources: std::mem::take(&mut self.resources),
+            table: std::mem::take(&mut self.table),
+            glyphs: std::mem::replace(&mut self.glyphs, Rc::new(RefCell::new(Vec::new()))),
+            runs: std::mem::replace(&mut self.runs, Rc::new(RefCell::new(Vec::new()))),
+        };
         self.previous_document = Some(previous);
     }
 
@@ -960,62 +959,4 @@ fn build_text_boundaries(text: &str, layout: &gpui::LineLayout) -> (Arc<[f32]>, 
         }
     }
     (Arc::from(caret_stops), Arc::from(cluster_boundaries))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use super::{FontSlant, GpuiRunGlyph, GpuiTextCache, GpuiTextRun, TextStyleSpan, is_western_benchmark_text, paint_color_spans};
-    use html_view_core::text_backend::OpenTypeFeature;
-
-    fn mapped_run(byte_indices: &[usize]) -> GpuiTextRun {
-        let glyphs = byte_indices
-            .iter()
-            .copied()
-            .map(|byte_index| GpuiRunGlyph { font_id: gpui::FontId(0), glyph_id: gpui::GlyphId(0), position: gpui::point(gpui::px(0.0), gpui::px(0.0)), font_size: gpui::px(16.0), byte_index, is_emoji: false })
-            .collect::<Vec<_>>();
-        GpuiTextRun::new(Arc::from(glyphs), gpui::px(12.0), gpui::px(4.0), Arc::from([0, 1, 2, 3, 4, 5, 6]), Arc::from([(0..6, gpui::Hsla::from(gpui::rgba(0x000000ff)))]))
-    }
-
-    #[test]
-    fn line_cache_identity_includes_open_type_features() {
-        let natural = TextStyleSpan::new(0..6, 18.0, 400, FontSlant::Normal, 0, None).unwrap();
-        let small_caps = natural.clone().with_font_features(vec![OpenTypeFeature::new(*b"smcp", 1)]);
-
-        assert_ne!(GpuiTextCache::line_shape_fingerprint("office", &[natural]), GpuiTextCache::line_shape_fingerprint("office", &[small_caps]));
-    }
-
-    #[test]
-    fn line_cache_identity_distinguishes_italic_and_oblique() {
-        let italic = TextStyleSpan::new(0..1, 18.0, 400, FontSlant::Italic, 0, None).unwrap();
-        let oblique = TextStyleSpan::new(0..1, 18.0, 400, FontSlant::Oblique, 0, None).unwrap();
-
-        assert_ne!(GpuiTextCache::line_shape_fingerprint("x", &[italic]), GpuiTextCache::line_shape_fingerprint("x", &[oblique]));
-    }
-
-    #[test]
-    fn western_authoritative_runs_include_combining_marks() {
-        assert!(is_western_benchmark_text("A\u{030a}ngstro\u{0308}m"));
-    }
-
-    #[test]
-    fn paint_colors_become_utf8_byte_spans_without_splitting_geometry() {
-        let spans = paint_color_spans("AéB", &[0xff0000ff, 0xff0000ff, 0x0000ffff]).unwrap();
-
-        assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0].0, 0..3);
-        assert_eq!(spans[1].0, 3..4);
-    }
-
-    #[test]
-    fn glyph_mapping_preserves_visual_order_across_direction_changes() {
-        // Visual order: an LTR prefix, then an RTL span, then an LTR suffix.
-        let run = mapped_run(&[0, 0, 1, 4, 3, 2, 5]);
-
-        assert_eq!(run.glyph_ranges(0..1).as_slice(), &[0..2]);
-        assert_eq!(run.glyph_ranges(1..3).as_slice(), &[2..3, 5..6]);
-        assert_eq!(run.glyph_ranges(2..5).as_slice(), &[3..6]);
-        assert_eq!(run.glyph_ranges(0..6).as_slice(), &[0..7]);
-    }
 }

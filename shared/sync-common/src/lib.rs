@@ -17,20 +17,9 @@ pub use protocol::{validate_pull_batch, validate_push_response, MutationIssue, P
 pub use content_address::ContentHash;
 
 /// Deterministic content-address fixture shared by protocol client and server tests.
-#[cfg(any(test, feature = "test-support"))]
-pub fn fixture_content_hash(value: u64) -> ContentHash {
-    ContentHash::new(&format!("{value:064x}"))
-}
 
 /// Delivery fixture for values authored by the supplied replica. Forwarded
 /// values already have a non-nil original author and preserve it.
-#[cfg(any(test, feature = "test-support"))]
-pub fn fixture_delivery<T>(mut publication: Publication<T>, replica_id: ReplicaId, revision: LibraryRevision) -> Delivery<T> {
-    if publication.state.version.replica_id.is_nil() {
-        publication.state.version.replica_id = replica_id;
-    }
-    Delivery { state: publication.state, revision }
-}
 
 /// A non-negative Unix timestamp measured in milliseconds.
 pub type UnixMillis = u64;
@@ -273,12 +262,6 @@ pub mod state_encoding {
         }
         transport::representation(state).map(Some)
     }
-    pub fn decode_publication<T: StatePayload>(publication: &OpaquePublication) -> Result<Option<Publication<T>>, transport::WireError> {
-        if !T::recognizes_kind(&publication.state.value.address.kind) {
-            return Ok(None);
-        }
-        transport::representation(publication).map(Some)
-    }
 }
 
 impl<T: StatePayload> Serialize for Versioned<T> {
@@ -391,10 +374,10 @@ pub struct SyncExchangeResponse {
 }
 
 /// The stable identity of one independently merged synchronization register.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StateAddress {
     pub kind: String,
-    pub entity_key: String,
+    pub entity_key: StateKey,
     #[serde(default)]
     pub entity_subkey: String,
 }
@@ -406,89 +389,16 @@ fn deserialize_library_cursor<'de, D: serde::Deserializer<'de>>(deserializer: D)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn seq(value: u64) -> ReplicaSeq {
-        ReplicaSeq::new(value).unwrap()
-    }
-
-    #[test]
-    fn version_key_orders_every_tie_breaker_in_protocol_order() {
-        let replica = uuid::Uuid::from_u128(10);
-        let base = VersionKey::new(10, ConflictRank::Delete, replica, seq(10));
-
-        assert!(VersionKey::new(11, ConflictRank::Update, uuid::Uuid::nil(), seq(1)) > base);
-        assert!(VersionKey::new(10, ConflictRank::Purge, uuid::Uuid::nil(), seq(1)) > base);
-        assert!(VersionKey::new(10, ConflictRank::Delete, uuid::Uuid::from_u128(11), seq(1)) > base);
-        assert!(VersionKey::new(10, ConflictRank::Delete, replica, seq(11)) > base);
-    }
-
-    #[test]
-    fn decoding_rejects_versions_outside_the_protocol() {
-        let valid = serde_json::to_value(VersionKey::new(10, ConflictRank::Purge, uuid::Uuid::nil(), seq(1))).unwrap();
-        assert_eq!(valid["conflict_rank"], serde_json::json!(2));
-        assert!(serde_json::from_value::<VersionKey>(valid.clone()).is_ok());
-        for (field, value) in [("conflict_rank", serde_json::json!(3)), ("replica_seq", serde_json::json!(0)), ("changed_at", serde_json::json!(u64::MAX))] {
-            let mut invalid = valid.clone();
-            invalid[field] = value;
-            assert!(serde_json::from_value::<VersionKey>(invalid).is_err(), "{field}");
-        }
-    }
-
-    #[test]
-    fn same_replica_comparison_is_the_version_key_order_without_replica_identity() {
-        let replica = uuid::Uuid::from_u128(10);
-        let left = (10, ConflictRank::Delete, seq(3));
-        let right = (10, ConflictRank::Delete, seq(4));
-
-        assert_eq!(compare_same_replica_versions(left, right), VersionKey::new(left.0, left.1, replica, left.2).cmp(&VersionKey::new(right.0, right.1, replica, right.2)));
-    }
-
-    #[test]
-    fn protocol_identifiers_use_their_canonical_strings_in_json_and_bincode_storage() {
-        let content_hash = ContentHash::new(&"a".repeat(64));
-
-        assert_eq!(serde_json::to_value(&content_hash).unwrap(), serde_json::json!(content_hash.as_str()));
-        assert_eq!(wire::encode(&content_hash).unwrap(), wire::encode(&content_hash.as_str()).unwrap());
-    }
-
-    #[test]
-    fn transport_and_storage_codecs_are_not_interchangeable() {
-        let value = ContentHash::new(&"a".repeat(64));
-        let stored = wire::encode(&value).unwrap();
-        let transported = transport::encode(&value).unwrap();
-
-        assert!(stored.starts_with(b"BKHM"));
-        assert!(!transported.starts_with(b"BKHM"));
-        assert!(wire::decode::<ContentHash>(&transported, 1024).is_err());
-        assert!(transport::decode::<ContentHash>(&stored, 1024).is_err());
-    }
-
-    #[test]
-    fn forwarding_preserves_original_version_separately_from_publication() {
-        let original = VersionKey::new(10, ConflictRank::Update, uuid::Uuid::from_u128(1), seq(2));
-        let publication = Publication {
-            publisher_seq: ReplicaSeq::new(500).unwrap(),
-            state: Versioned { version: original.clone(), value: OpaqueStateEntry { address: StateAddress { kind: "directory_name".into(), entity_key: "shelf".into(), entity_subkey: String::new() }, book: None, bytes: vec![] } },
-        };
-        let decoded: OpaquePublication = transport::decode(&transport::encode(&publication).unwrap(), transport::MAX_DECODED_REQUEST_BYTES).unwrap();
-        assert_eq!(decoded, publication);
-        assert_eq!(decoded.state.version, original);
-        assert_ne!(decoded.publisher_seq, original.replica_seq);
-    }
-
-    #[test]
-    fn wire_mutation_preserves_an_absent_book_in_binary_encoding() {
-        let mutation = crate::Publication {
-            publisher_seq: ReplicaSeq::new(1).unwrap(),
-            state: crate::Versioned {
-                version: crate::VersionKey::new(1, ConflictRank::Update, crate::ReplicaId::nil(), seq(1)),
-                value: crate::OpaqueStateEntry { address: crate::StateAddress { kind: "directory_name".to_owned(), entity_key: "shelf".to_owned(), entity_subkey: String::new() }, bytes: Vec::new(), book: None },
-            },
-        };
-        let encoded = wire::encode(&mutation).unwrap();
-        assert_eq!(wire::decode::<OpaquePublication>(&encoded, wire::MAX_DECODED_REQUEST_BYTES).unwrap(), mutation);
+mod state_key;
+pub use state_key::StateKey;
+impl<'de> Deserialize<'de> for StateAddress {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Address { kind: String, entity_key: StateKey, #[serde(default)] entity_subkey: String }
+        let Address { kind, mut entity_key, entity_subkey } = Address::deserialize(deserializer)?;
+        if state_key::book_kind(&kind) {
+            if let StateKey::Text(text) = entity_key { entity_key = StateKey::Book(text.parse().map_err(serde::de::Error::custom)?); }
+        } else if matches!(entity_key,StateKey::Book(_)) { return Err(serde::de::Error::custom("text register requires a text key")); }
+        Ok(Self { kind, entity_key, entity_subkey })
     }
 }

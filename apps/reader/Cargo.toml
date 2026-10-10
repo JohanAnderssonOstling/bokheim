@@ -11,12 +11,12 @@ mobile = ["ui-components/mobile"]
 packaged-pdfium = ["pdf-reader-core/packaged-pdfium"]
 
 [dependencies]
+futures-lite = "2"
 library-backend = { path = "../../client/library-backend" }
 content-address = { path = "../../shared/content-address" }
 app-preferences = { path = "../../client/preferences" }
 app = { path = "../../client/app", default-features = false }
 async-channel = "2"
-futures-util = "0.3"
 ui-components = { path = "../components" }
 audiobook-player = { path = "../audiobook-player", default-features = false }
 gpui.workspace = true
@@ -25,20 +25,15 @@ gpui_kobo = { workspace = true, optional = true }
 html-view-core.workspace = true
 html-view-gpui = { path = "crates/html/crates/html-view-gpui" }
 html.workspace = true
-html-book = { path = "crates/html/crates/html-book" }
+book-content = { path = "../../client/book-content" }
 library-model = { path = "../../client/library-model" }
 book-model = { path = "../../shared/book-model", default-features = false }
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "js"] }
 web-time = "1"
-smallvec = "1"
-sync-common = { path = "../../shared/sync-common" }
 pdf-reader-core = { path = "../../shared/pdf-reader-core" }
 pdf-view-gpui = { path = "crates/pdf/pdf-view" }
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-futures-util = "0.3"
-
 [dev-dependencies]
-gpui = { workspace = true, features = ["test-support"] }
+zip.workspace = true

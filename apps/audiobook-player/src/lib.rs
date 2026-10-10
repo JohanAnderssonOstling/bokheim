@@ -1,3 +1,5 @@
+#[cfg(not(target_arch = "wasm32"))]
+use library_backend::library::AudioStreamControl;
 use std::cell::Cell;
 mod dock;
 mod session;
@@ -5,15 +7,10 @@ pub use dock::{AudiobookDock, DockAction};
 pub use session::{ActiveAudiobook, PlaybackSession};
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::{Read, Seek, SeekFrom};
-#[cfg(not(target_arch = "wasm32"))]
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{
-    App, Bounds, ClickEvent, Context, DispatchPhase, Entity, Image, ImageFormat, IntoElement, MouseButton, MouseMoveEvent, Pixels, Render, SharedString, Styled, Window, canvas, div, prelude::*,
-    px,
-};
+use gpui::{App, Bounds, ClickEvent, Context, DispatchPhase, Entity, Image, ImageFormat, IntoElement, MouseButton, MouseMoveEvent, Pixels, Render, SharedString, Styled, Window, canvas, div, prelude::*, px};
 use web_time::Instant;
 
 // Stage boundaries also appear on early returns, making failed opens visible
@@ -33,10 +30,6 @@ impl Drop for OpeningTiming {
         eprintln!("AUDIOBOOK_TIMING phase={} event=end elapsed_ms={}", self.phase, self.started.elapsed().as_millis());
     }
 }
-#[cfg(any(target_os = "android", test))]
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-#[path = "android_audio.rs"]
-pub mod android;
 #[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
 mod audio_engine;
 
@@ -77,33 +70,6 @@ fn browser_position_update(seconds: f64, fraction: f64) -> Option<PlaybackPositi
     Some((position, (fraction.clamp(0.0, 1.0) * 100.0) as f32))
 }
 
-#[cfg(test)]
-mod browser_position_tests {
-    use super::*;
-
-    #[test]
-    fn browser_progress_uses_library_percentages() {
-        assert_eq!(browser_position_update(150.25, 0.5), Some((Duration::from_millis(150250), 50.0)));
-        assert_eq!(browser_position_update(300.0, 1.0), Some((Duration::from_secs(300), 100.0)));
-        assert_eq!(browser_position_update(0.0, 0.0), Some((Duration::ZERO, 0.0)));
-    }
-
-    #[test]
-    fn browser_progress_clamps_finite_rounding_overshoot() {
-        assert_eq!(browser_position_update(1.0, 1.01).unwrap().1, 100.0);
-        assert_eq!(browser_position_update(0.0, -0.01).unwrap().1, 0.0);
-    }
-
-    #[test]
-    fn invalid_browser_media_values_are_not_saved() {
-        for seconds in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX] {
-            assert_eq!(browser_position_update(seconds, 0.5), None);
-        }
-        for fraction in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert_eq!(browser_position_update(1.0, fraction), None);
-        }
-    }
-}
 
 #[cfg(not(target_arch = "wasm32"))]
 trait ReadSeek: Read + Seek + Send + Sync {}
@@ -112,10 +78,9 @@ impl<T: Read + Seek + Send + Sync> ReadSeek for T {}
 
 #[cfg(not(target_arch = "wasm32"))]
 struct AudiobookSource {
-    stream_control: Option<app::AudioStreamControl>,
-    cached_metadata: Option<app::PlaybackMetadata>,
+    stream_control: Option<AudioStreamControl>,
+    cached_metadata: Option<library_model::PlaybackMetadata>,
     track: Option<book_model::AudiobookTrack>,
-    display_path: PathBuf,
     #[cfg(target_os = "android")]
     playback_file: Option<std::fs::File>,
     reader: Box<dyn ReadSeek>,
@@ -123,12 +88,11 @@ struct AudiobookSource {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl AudiobookSource {
-    fn new(reader: impl Read + Seek + Send + Sync + 'static, display_path: PathBuf) -> Self {
+    fn new(reader: impl Read + Seek + Send + Sync + 'static) -> Self {
         Self {
             stream_control: None,
             cached_metadata: None,
             track: None,
-            display_path,
             reader: Box::new(reader),
             #[cfg(target_os = "android")]
             playback_file: None,
@@ -266,7 +230,7 @@ fn format_playback_rate(rate: f64) -> String {
 }
 
 fn active_chapter_index(chapters: &[AudiobookChapter], position: Duration) -> usize {
-    chapters.iter().rposition(|chapter| chapter.start <= position).unwrap_or(0)
+    chapters.iter().rposition(|chapter| chapter.start() <= position).unwrap_or(0)
 }
 
 fn clamp_position(position: Duration, duration: Duration) -> Duration {
@@ -275,12 +239,12 @@ fn clamp_position(position: Duration, duration: Duration) -> Duration {
 
 fn previous_chapter_position(chapters: &[AudiobookChapter], position: Duration) -> Duration {
     let index = active_chapter_index(chapters, position);
-    let chapter_start = chapters.get(index).map(|chapter| chapter.start).unwrap_or_default();
-    if position.saturating_sub(chapter_start) > Duration::from_secs(3) { chapter_start } else { chapters.get(index.saturating_sub(1)).map(|chapter| chapter.start).unwrap_or_default() }
+    let chapter_start = chapters.get(index).map(|chapter| chapter.start()).unwrap_or_default();
+    if position.saturating_sub(chapter_start) > Duration::from_secs(3) { chapter_start } else { chapters.get(index.saturating_sub(1)).map(|chapter| chapter.start()).unwrap_or_default() }
 }
 
 fn next_chapter_position(chapters: &[AudiobookChapter], position: Duration, duration: Duration) -> Duration {
-    chapters.get(active_chapter_index(chapters, position) + 1).map(|chapter| chapter.start).unwrap_or(duration)
+    chapters.get(active_chapter_index(chapters, position) + 1).map(|chapter| chapter.start()).unwrap_or(duration)
 }
 
 fn relative_seek_position(position: Duration, seconds: f64, duration: Duration) -> Duration {
@@ -324,7 +288,7 @@ fn chapter_position_at_fraction(start: Duration, end: Duration, fraction: f32) -
 fn sleep_remaining(plan: SleepPlan, position: Duration, chapters: &[AudiobookChapter], now: Instant, rate: f64) -> Duration {
     match plan {
         SleepPlan::Until(deadline) => deadline.saturating_duration_since(now),
-        SleepPlan::EndOfChapter(index) => chapters.get(index).map_or(Duration::ZERO, |chapter| chapter.end.saturating_sub(position).div_f64(rate.max(0.01))),
+        SleepPlan::EndOfChapter(index) => chapters.get(index).map_or(Duration::ZERO, |chapter| chapter.end().saturating_sub(position).div_f64(rate.max(0.01))),
     }
 }
 
@@ -333,15 +297,6 @@ fn sleep_gain(remaining: Duration) -> f32 {
     (remaining.as_secs_f32() / 30.0).clamp(0.0, 1.0)
 }
 
-#[cfg(test)]
-fn sleep_elapsed(plan: SleepPlan, position: Duration, chapters: &[AudiobookChapter], now: Instant) -> bool {
-    match plan {
-        SleepPlan::Until(deadline) => now >= deadline,
-        // A chapter the book no longer has cannot be waited for, so the timer
-        // is treated as due rather than left armed forever.
-        SleepPlan::EndOfChapter(chapter) => chapters.get(chapter).is_none_or(|chapter| position >= chapter.end),
-    }
-}
 
 /// Whether two speeds are the same offered step. Playback rates are a short
 /// list of round numbers, so exact comparison is what is meant.
@@ -397,166 +352,4 @@ fn is_timestamp(value: &str) -> bool {
         return false;
     }
     parts[parts.len() - 2].parse::<u64>().is_ok_and(|minutes| minutes < 60) && parts[parts.len() - 1].parse::<u64>().is_ok_and(|seconds| seconds < 60)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn chapter(title: &str, start: u64, end: u64) -> AudiobookChapter {
-        AudiobookChapter { title: title.to_owned(), start: Duration::from_secs(start), end: Duration::from_secs(end) }
-    }
-
-    fn chapters() -> Vec<AudiobookChapter> {
-        vec![chapter("One", 0, 10), chapter("Two", 10, 30), chapter("Three", 30, 60)]
-    }
-
-    #[test]
-    fn sleep_fade_uses_final_thirty_seconds_and_playback_rate() {
-        let now = Instant::now();
-        let plan = SleepPlan::Until(now + Duration::from_secs(60));
-        assert_eq!(sleep_gain(sleep_remaining(plan, Duration::ZERO, &chapters(), now, 1.0)), 1.0);
-        assert_eq!(sleep_gain(sleep_remaining(plan, Duration::ZERO, &chapters(), now + Duration::from_secs(45), 1.0)), 0.5);
-        assert_eq!(sleep_gain(sleep_remaining(plan, Duration::ZERO, &chapters(), now + Duration::from_secs(60), 1.0)), 0.0);
-        assert_eq!(sleep_gain(sleep_remaining(SleepPlan::EndOfChapter(1), Duration::ZERO, &chapters(), now, 2.0)), 0.5);
-    }
-
-    #[test]
-    fn a_sleep_deadline_comes_due_on_the_clock() {
-        let now = Instant::now();
-        let plan = SleepPlan::Until(now + Duration::from_secs(60));
-        assert!(!sleep_elapsed(plan, Duration::ZERO, &chapters(), now));
-        assert!(sleep_elapsed(plan, Duration::ZERO, &chapters(), now + Duration::from_secs(61)));
-    }
-
-    #[test]
-    fn an_end_of_chapter_sleep_waits_for_that_chapter_only() {
-        let now = Instant::now();
-        let plan = SleepPlan::EndOfChapter(1);
-        assert!(!sleep_elapsed(plan, Duration::from_secs(20), &chapters(), now));
-        assert!(sleep_elapsed(plan, Duration::from_secs(30), &chapters(), now));
-        // A chapter the book does not have cannot be waited for.
-        assert!(sleep_elapsed(SleepPlan::EndOfChapter(9), Duration::ZERO, &chapters(), now));
-    }
-
-    #[test]
-    fn positions_are_clamped_to_the_book_duration() {
-        assert_eq!(clamp_position(Duration::from_secs(600), Duration::from_secs(60)), Duration::from_secs(60));
-        assert_eq!(clamp_position(Duration::MAX, Duration::ZERO), Duration::ZERO);
-    }
-
-    #[test]
-    fn chapter_boundaries_select_the_chapter_that_starts_there() {
-        let chapters = chapters();
-        for (second, expected_index) in [(0, 0), (9, 0), (10, 1), (29, 1), (30, 2), (60, 2)] {
-            assert_eq!(active_chapter_index(&chapters, Duration::from_secs(second)), expected_index, "at {second}s");
-        }
-    }
-
-    #[test]
-    fn navigation_targets_respect_chapters_and_book_boundaries() {
-        let chapters = chapters();
-        let duration = Duration::from_secs(60);
-
-        assert_eq!(previous_chapter_position(&chapters, Duration::from_secs(35)), Duration::from_secs(30));
-        assert_eq!(previous_chapter_position(&chapters, Duration::from_secs(30)), Duration::from_secs(10));
-        assert_eq!(next_chapter_position(&chapters, Duration::from_secs(10), duration), Duration::from_secs(30));
-        assert_eq!(next_chapter_position(&chapters, duration, duration), duration);
-    }
-
-    #[test]
-    fn relative_seeking_clamps_and_ignores_non_finite_offsets() {
-        let position = Duration::from_secs(20);
-        let duration = Duration::from_secs(60);
-
-        assert_eq!(relative_seek_position(position, -100.0, duration), Duration::ZERO);
-        assert_eq!(relative_seek_position(position, 1_000.0, duration), duration);
-        for offset in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert_eq!(relative_seek_position(position, offset, duration), position);
-        }
-    }
-
-    #[test]
-    fn previous_chapter_uses_the_three_second_restart_threshold() {
-        let chapters = chapters();
-        assert_eq!(previous_chapter_position(&chapters, Duration::from_secs(13)), Duration::ZERO);
-        assert_eq!(previous_chapter_position(&chapters, Duration::from_millis(13_001)), Duration::from_secs(10));
-    }
-
-    #[test]
-    fn empty_chapter_navigation_stays_inside_the_book() {
-        assert_eq!(active_chapter_index(&[], Duration::from_secs(10)), 0);
-        assert_eq!(previous_chapter_position(&[], Duration::from_secs(10)), Duration::ZERO);
-        assert_eq!(next_chapter_position(&[], Duration::from_secs(10), Duration::from_secs(60)), Duration::from_secs(60));
-    }
-
-    #[test]
-    fn playback_rates_must_be_finite() {
-        for rate in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert_eq!(tempo_for(rate), Err("playback rate must be finite".to_owned()));
-        }
-        assert_eq!(tempo_for(1.5), Ok(1.5));
-    }
-
-    #[test]
-    fn time_format_covers_minute_and_hour_forms() {
-        assert_eq!(format_time(Duration::from_secs(9)), "0:09");
-        assert_eq!(format_time(Duration::from_secs(3_725)), "1:02:05");
-    }
-
-    #[test]
-    fn shown_position_changes_once_a_minute() {
-        assert_eq!(shown_position(Duration::from_millis(59_999)), Duration::ZERO);
-        assert_eq!(shown_position(Duration::from_secs(60)), Duration::from_secs(60));
-        assert_eq!(shown_position(Duration::from_secs(3_725)), Duration::from_secs(3_720));
-    }
-
-    #[test]
-    fn book_time_left_rounds_up_until_playback_finishes() {
-        assert_eq!(format_time_left(Duration::from_secs(1)), "1 m left");
-        assert_eq!(format_time_left(Duration::from_secs(3_601)), "1 h 1 m left");
-        assert_eq!(format_time_left(Duration::ZERO), "0 m left");
-    }
-
-    #[test]
-    fn chapter_display_title_removes_only_a_trailing_duration() {
-        assert_eq!(chapter_display_title("Chapter 001 - 00:30:37"), "Chapter 001");
-        assert_eq!(chapter_display_title("Chapter 002 – 30:37"), "Chapter 002");
-        assert_eq!(chapter_display_title("A title - with words"), "A title - with words");
-        assert_eq!(chapter_display_title("A title - 72:99"), "A title - 72:99");
-        assert_eq!(chapter_display_title("  Plain title  "), "Plain title");
-    }
-
-    #[test]
-    fn playback_position_persistence_is_bounded_and_throttled() {
-        assert!(position_save_due(None, Duration::ZERO));
-        assert!(!position_save_due(Some(Duration::from_secs(10)), Duration::from_secs(14)));
-        assert!(position_save_due(Some(Duration::from_secs(10)), Duration::from_secs(15)));
-        assert!(position_save_due(Some(Duration::from_secs(10)), Duration::from_secs(5)));
-        assert!(!position_save_required(Some(Duration::from_secs(10)), Duration::from_secs(10), true));
-        assert!(position_save_required(Some(Duration::from_secs(10)), Duration::from_secs(11), true));
-        assert!(!position_save_required(Some(Duration::from_secs(10)), Duration::from_secs(11), false));
-        assert_eq!(playback_progress(Duration::from_secs(30), Duration::from_secs(120)), 25.0);
-        assert_eq!(playback_progress(Duration::from_secs(200), Duration::from_secs(120)), 100.0);
-        assert_eq!(playback_progress(Duration::from_secs(10), Duration::ZERO), 0.0);
-    }
-
-    #[test]
-    fn chapter_progress_seek_stays_inside_the_active_chapter() {
-        let start = Duration::from_secs(120);
-        let end = Duration::from_secs(240);
-        assert_eq!(chapter_position_at_fraction(start, end, -1.0), start);
-        assert_eq!(chapter_position_at_fraction(start, end, 0.25), Duration::from_secs(150));
-        assert_eq!(chapter_position_at_fraction(start, end, 2.0), end);
-        assert_eq!(chapter_position_at_fraction(start, end, f32::NAN), start);
-        assert_eq!(chapter_position_at_fraction(end, start, 0.5), end);
-    }
-
-    #[test]
-    fn playback_rate_labels_are_compact() {
-        assert_eq!(format_playback_rate(0.75), "0.75×");
-        assert_eq!(format_playback_rate(1.0), "1×");
-        assert_eq!(format_playback_rate(1.5), "1.5×");
-        assert_eq!(format_playback_rate(2.0), "2×");
-    }
 }

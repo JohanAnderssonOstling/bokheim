@@ -1,6 +1,6 @@
 WITH input AS MATERIALIZED (
     SELECT content_hash, size_bytes
-    FROM UNNEST($2::TEXT[], $3::BIGINT[]) AS value(content_hash, size_bytes)
+    FROM UNNEST($2::BYTEA[], $3::BIGINT[]) AS value(content_hash, size_bytes)
 ),
 claimed AS (
     INSERT INTO user_blob_charge(user_id, content_hash)

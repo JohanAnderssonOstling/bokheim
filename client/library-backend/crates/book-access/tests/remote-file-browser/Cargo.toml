@@ -16,8 +16,12 @@ js-sys = "0.3"
 web-sys = { version = "0.3", features = ["WorkerGlobalScope"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["stream"] }
 serde = { version = "1", features = ["derive"] }
-crossbeam-channel = "0.5"
-futures-util = "0.3"
-futures-channel = "0.3"
 tokio = { version = "1", features = ["sync", "macros"] }
-epub_provider = { path = "../../../../../../shared/epub" }
+book-content = { path = "../../../../../book-content" }
+
+# Match the application’s vendored container and browser PDF patches.
+[patch.crates-io]
+mobi = { path = "../../../../../../vendor/mobi" }
+async_zip = { path = "../../../../../../vendor/async_zip" }
+zip = { path = "../../../../../../vendor/zip" }
+pdfium-render = { path = "../../../../../../vendor/pdfium-render" }

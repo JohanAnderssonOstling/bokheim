@@ -54,7 +54,7 @@ kobo-device = { path = "../kobo-device", optional = true }
 log = "0.4"
 reader-ui = { path = "../reader", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-update-client = { path = "../../shared/update-client", features = ["blocking"], optional = true }
+update-client = { path = "../../client/update-client", features = ["blocking"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["net", "rt", "time"] }

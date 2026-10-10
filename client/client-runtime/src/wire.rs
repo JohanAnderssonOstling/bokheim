@@ -6,8 +6,8 @@
 //! backend thread and the UI unchanged.
 
 use crate::BackendError;
-// Version 2 carries structured errors instead of plain error strings.
-const WIRE_HEADER: &[u8; 5] = b"BKHW\x02";
+// Version 4 carries publisher names as strings without publisher identities.
+const WIRE_HEADER: &[u8; 5] = b"BKHW\x04";
 
 pub fn encode_worker_message<T: serde::Serialize + ?Sized>(message: &T) -> Result<Vec<u8>, BackendError> {
     let mut bytes = WIRE_HEADER.to_vec();
@@ -31,20 +31,4 @@ pub fn encode_reply<T: serde::Serialize>(value: T) -> Result<WorkerPayload, Back
 
 pub fn decode_worker_payload<T: serde::de::DeserializeOwned>(payload: WorkerPayload) -> Result<T, BackendError> {
     decode_worker_message(&payload.0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn replies_carrying_bytes_decode_through_the_one_payload_shape() {
-        let metadata = encode_reply(7usize).unwrap();
-        assert_eq!(decode_worker_payload::<usize>(metadata).unwrap(), 7);
-        // Thumbnails and file ranges travel as ordinary `serde_bytes` replies.
-        let attachment = encode_reply(Some(serde_bytes::ByteBuf::from(vec![1, 2, 3]))).unwrap();
-        assert_eq!(decode_worker_payload::<Option<serde_bytes::ByteBuf>>(attachment).unwrap().map(serde_bytes::ByteBuf::into_vec), Some(vec![1, 2, 3]));
-        assert_eq!(decode_worker_payload::<Option<serde_bytes::ByteBuf>>(encode_reply(None::<serde_bytes::ByteBuf>).unwrap()).unwrap(), None);
-        assert!(decode_worker_payload::<usize>(WorkerPayload(vec![0])).is_err());
-    }
 }

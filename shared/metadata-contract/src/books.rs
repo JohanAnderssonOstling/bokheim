@@ -21,10 +21,22 @@ pub struct BookFacts {
     /// so the server only needs to report what it found.
     pub record: book_model::BookRecord,
     pub audiobook: bool,
+    /// Other ways to read the book's title and local filenames, parsed on the
+    /// device and unconfirmed. The server tries each as an alternative lookup.
     #[serde(default)]
-    pub filenames: Vec<String>,
+    pub readings: Vec<TitleReading>,
     #[serde(default)]
     pub recording: Option<crate::audible::LookupRequest>,
+}
+
+/// One reading of a title or filename. `surname` is set instead of
+/// `authors` when only a surname was written, as in `Smith_Some_Title`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct TitleReading {
+    pub title: String,
+    pub authors: Vec<String>,
+    pub surname: Option<String>,
+    pub year: Option<i32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

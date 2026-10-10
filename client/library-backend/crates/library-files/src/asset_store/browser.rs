@@ -1,11 +1,11 @@
 //! Browser OPFS stores book bytes; folder and trash changes are metadata-only.
 
+pub(crate) use super::AssetStoreError;
+use crate::hashing::HashService;
+pub(crate) use book_access::BoxedBookReader;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::hashing::HashService;
-pub(crate) use super::AssetStoreError;
-pub(crate) use book_access::BoxedBookReader;
 pub(crate) use sync_common::ContentHash;
 
 #[derive(Clone, Debug)]
@@ -66,18 +66,15 @@ pub(crate) fn name(handle: &Handle, asset_name: String) -> String {
 
 pub(crate) struct StagedBook {
     pub(crate) writer: client_platform_web::web_storage::FileWriter,
-    pub(crate) content_hash: String,
-    pub(crate) checksum: ContentHash,
+    pub(crate) content_hash: ContentHash,
     pub(crate) size_bytes: u64,
     pub(crate) destination: String,
 }
 
-pub(crate) fn finish_staged_write(handle: &Handle, writer: client_platform_web::web_storage::FileWriter, content_hash: String) -> Result<StagedBook, AssetStoreError> {
-    let checksum = ContentHash::new(&content_hash);
+pub(crate) fn finish_staged_write(handle: &Handle, writer: client_platform_web::web_storage::FileWriter, content_hash: ContentHash) -> Result<StagedBook, AssetStoreError> {
     let size_bytes = std::io::Seek::seek(&mut writer.open_reader(), std::io::SeekFrom::End(0))?;
-    let content_hash = book_identity::read(&mut writer.open_reader())?.map(|identity| identity.to_string()).unwrap_or(content_hash);
     let destination = name(handle, format!("book/{content_hash}"));
-    Ok(StagedBook { writer, content_hash, checksum, size_bytes, destination })
+    Ok(StagedBook { writer, content_hash, size_bytes, destination })
 }
 
 pub(crate) async fn stage_book(handle: &Handle, source: &mut (dyn std::io::Read + Send)) -> Result<StagedBook, AssetStoreError> {
@@ -101,28 +98,36 @@ pub(crate) async fn stage_book(handle: &Handle, source: &mut (dyn std::io::Read 
     finish_staged_write(handle, writer, content_hash)
 }
 
+/// Copies a picked browser file into book storage, hashing it on the way.
+pub(crate) async fn stage_browser_file(handle: &Handle, file: &web_sys::File) -> Result<StagedBook, AssetStoreError> {
+    const CHUNK: u64 = 1024 * 1024;
+    let mut writer = client_platform_web::web_storage::begin_write(&name(handle, "book/staged".into())).await.map_err(AssetStoreError::operation)?;
+    let mut hasher = handle.hash_service.start().await.map_err(AssetStoreError::operation)?;
+    let size = file.size() as u64;
+    let mut copied = 0_u64;
+    while copied < size {
+        let end = (copied + CHUNK).min(size);
+        let blob = file.slice_with_f64_and_f64(copied as f64, end as f64).map_err(|error| AssetStoreError::operation(format!("{error:?}")))?;
+        let buffer = wasm_bindgen_futures::JsFuture::from(blob.array_buffer()).await.map_err(|error| AssetStoreError::operation(format!("could not read the selected file: {error:?}")))?;
+        let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
+        if bytes.is_empty() {
+            return Err(AssetStoreError::operation("the selected file ended unexpectedly"));
+        }
+        writer.write_all(&bytes).map_err(AssetStoreError::operation)?;
+        hasher.update(&bytes).await.map_err(AssetStoreError::operation)?;
+        copied += bytes.len() as u64;
+    }
+    if copied == 0 {
+        return Err(AssetStoreError::operation("book is empty"));
+    }
+    let content_hash = hasher.finish().await.map_err(AssetStoreError::operation)?;
+    finish_staged_write(handle, writer, content_hash)
+}
+
 impl StagedBook {
     pub(crate) async fn commit(self) -> Result<(), AssetStoreError> {
-        self.writer.publish_verified_as(self.destination, self.checksum).map_err(AssetStoreError::operation)
+        self.writer.publish_verified_as(self.destination, self.content_hash).map_err(AssetStoreError::operation)
     }
-}
-
-
-
-pub(crate) struct AsyncWriter(pub(crate) client_platform_web::web_storage::FileWriter);
-
-impl AsyncWriter {
-    
-    pub(crate) async fn write_all(&mut self, bytes: &[u8]) -> Result<(), AssetStoreError> {
-        self.0.write_all(bytes).map_err(AssetStoreError::operation)
-    }
-    pub(crate) async fn commit_verified(self, checksum: ContentHash) -> Result<(), AssetStoreError> {
-        self.0.commit_verified(checksum).map_err(AssetStoreError::operation)
-    }
-}
-
-pub(crate) async fn begin_stream_write(handle: &Handle, asset_name: String) -> Result<AsyncWriter, AssetStoreError> {
-    client_platform_web::web_storage::begin_write(&name(handle, asset_name)).await.map(AsyncWriter).map_err(AssetStoreError::operation)
 }
 
 pub(crate) fn write_capacity(_handle: &Handle) -> Result<Option<u64>, AssetStoreError> {
@@ -150,5 +155,3 @@ pub(crate) fn remove(handle: &Handle, asset_name: String) -> Result<bool, AssetS
 pub(crate) fn exists(handle: &Handle, asset_name: String) -> Result<bool, AssetStoreError> {
     client_platform_web::web_storage::file_exists(&name(handle, asset_name)).map_err(AssetStoreError::operation)
 }
-
-

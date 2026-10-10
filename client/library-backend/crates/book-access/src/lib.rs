@@ -2,9 +2,12 @@
 
 use std::io::{Read, Seek};
 pub use sync_common::ContentHash;
+mod async_source;
 #[cfg(feature = "pdf")]
 pub mod pdf_bundle;
-pub mod range_cache;
+pub use async_source::{AsyncBookReader, AsyncBookSource, BoxedAsyncBookReader};
+mod range_cache;
+mod range_reader;
 pub mod remote_file;
 use client_platform_runtime::executor as time;
 pub use remote_file::{RemoteFile, RemoteFileError};
@@ -17,8 +20,3 @@ pub type BundleFetch = Box<dyn FnMut(Vec<(u64, usize)>) -> std::io::Result<Vec<u
 pub use futures_util::future::BoxFuture as FetchFuture;
 #[cfg(target_arch = "wasm32")]
 pub use futures_util::future::LocalBoxFuture as FetchFuture;
-
-#[cfg(feature = "sqlite-cache")]
-pub mod cache;
-#[cfg(feature = "sqlite-cache")]
-pub mod storage;

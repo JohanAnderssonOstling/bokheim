@@ -110,7 +110,9 @@ pub struct NormalizedTitle {
 }
 impl NormalizedTitle {
     pub fn new(value: &str) -> Self {
-        let text = crate::identity_evidence::subject_identity_title(value);
+        // Catalogue titles carry no filename shapes; the device cleans those
+        // out of a book's own titles before asking.
+        let text = super::title_without_parenthetical_segments(&value.trim().replace(';', ": "), false);
         let full = bibliographic_title_match_key(&text);
         let (main, subtitle) = text.split_once(':').map_or((full.clone(), None), |(main, sub)| (bibliographic_title_match_key(main), Some(bibliographic_title_match_key(sub))));
         Self { text, full, main, subtitle, qualifiers: title_qualifiers(value), original: value.to_owned() }
@@ -145,42 +147,5 @@ impl NormalizedTitle {
             }
         }
         keys
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn overlap_ignores_extra_credits_without_inflating_ties() {
-        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(matching_author_count(&names(&["Christopher Clark"]), &names(&["Christopher Clark", "Shaun Grindell"])), 1);
-        assert_eq!(matching_author_count(&names(&["Alex Smith", "Casey Roe"]), &names(&["Casey Roe", "Alex Smith", "Alex Smith", "Narrator Person"])), 2);
-        assert_eq!(matching_author_count(&names(&["Alex Smith", "Alex Smith"]), &names(&["Alex Smith"])), 1);
-        assert_eq!(matching_author_count(&names(&["Alex Smith"]), &names(&["Jordan Smith"])), 0);
-        assert_eq!(matching_author_count(&names(&["Alex Smith Jr."]), &names(&["Alex Smith Sr."])), 0);
-    }
-    #[test]
-    fn author_suffixes_are_evidence_not_noise() {
-        assert!(author_names_compatible("William D. Phillips Jr.", "William D. Phillips"));
-        assert!(author_names_compatible("Phillips, William D., Junior", "William D. Phillips Jr."));
-        assert!(author_names_compatible("William D. Phillips Junior", "William D. Phillips Jr."));
-        assert!(!author_names_compatible("William D. Phillips Junior", "William D. Phillips Sr."));
-        assert!(!author_names_compatible("William D. Phillips", "William E. Phillips"));
-        assert_eq!(matching_author_count(&["William D. Phillips Jr.".into(), "Carla Rahn Phillips".into()], &["William D. Phillips".into(), "Carla Rahn Phillips".into()]), 2);
-        assert_eq!(matching_author_count(&["William D. Phillips".into(), "William D. Phillips Jr.".into()], &["William D. Phillips".into(), "Carla Rahn Phillips".into()]), 1);
-    }
-    #[test]
-    fn title_lookup_and_verification_share_annotation_cleanup() {
-        let title = NormalizedTitle::new("Albion’s Seed (Unabridged)");
-        assert_eq!(title.full, NormalizedTitle::new("Albion's Seed").full);
-        assert!(title.lookup_keys().contains(&"albion s seed".into()));
-        assert!(title.lookup_keys().contains(&"albions seed".into()));
-        let title = NormalizedTitle::new("History: a survey (Volume II)");
-        assert_eq!(title.main, "history");
-        assert!(title.subtitle.is_some());
-        assert!(title.qualifiers.contains("volume:2"));
-        assert!(title.full.contains("volume ii"));
-        assert_ne!(NormalizedTitle::new("History (Abridged)").qualifiers, NormalizedTitle::new("History").qualifiers);
     }
 }

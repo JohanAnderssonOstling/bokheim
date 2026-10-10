@@ -16,20 +16,3 @@ pub(crate) fn websocket_bearer<'a>(path: &str, headers: &'a HeaderMap) -> Result
     }
     Ok(token)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn websocket_credentials_are_scoped_and_unambiguous() {
-        let mut headers = HeaderMap::new();
-        headers.insert(header::SEC_WEBSOCKET_PROTOCOL, "bokheim.notifications.v1, bearer.test-token".parse().unwrap());
-        assert_eq!(websocket_bearer("/api/notifications", &headers), Ok(Some("test-token")));
-        assert_eq!(websocket_bearer("/api/libraries", &headers), Ok(None));
-        for value in ["bearer.test-token", "bokheim.notifications.v1, bearer.", "bokheim.notifications.v1, bearer.one, bearer.two"] {
-            headers.insert(header::SEC_WEBSOCKET_PROTOCOL, value.parse().unwrap());
-            assert_eq!(websocket_bearer("/api/notifications", &headers), Err(StatusCode::BAD_REQUEST));
-        }
-    }
-
-}

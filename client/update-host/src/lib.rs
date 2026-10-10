@@ -84,16 +84,7 @@ pub fn prepare_candidate(job_path: &Path, version: &str) -> Result<(), String> {
         (|| -> Result<(), library_database::DatabaseError> {
             let db = library_database::Database::open(&path)?;
             db.initialize_library()?;
-            let integrity: String = db.connection.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
-            if integrity != "ok" {
-                return Err(library_database::DatabaseError::message(integrity));
-            }
-            let violations: i64 = db.connection.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| r.get(0))?;
-            if violations != 0 {
-                return Err(library_database::DatabaseError::message("migrated library has invalid relationships"));
-            }
-            db.connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
-            Ok(())
+            db.check_migrated()
         })()
         .map_err(|e| e.to_string())?;
     }
@@ -242,7 +233,7 @@ impl Host {
         let installed = self.actual_device()?;
         journal.commit(&self.root)?;
         // After this commit, bookkeeping failure must not crash a usable app.
-        // The journal remains authoritative and polling retries the acknowledgement.
+        // The journal remains authoritative; startup work retries the acknowledgement.
         if let Err(error) = self.coordinator.activated(installed) {
             log::warn!("committed update acknowledgement will retry: {error}");
         }
@@ -264,7 +255,7 @@ impl Host {
         self.coordinator.view(now())
     }
 
-    pub fn tick(&mut self) -> Result<UpdateView, String> {
+    pub fn check_for_updates(&mut self) -> Result<(), String> {
         let lock = UpdateLock::acquire(&self.root)?;
         self.coordinator.reload()?;
         if let Some(journal) = Journal::load(&self.root)? {
@@ -273,15 +264,22 @@ impl Host {
             }
         }
         let client = update_client::blocking::client(concat!("Bokheim-update/", env!("CARGO_PKG_VERSION")))?;
-        self.coordinator.check_for_updates(&self.root, &lock, &client, now())?;
-        if self.coordinator.preparation_due(now()) {
+        self.coordinator.check_for_updates(&self.root, &lock, &client, now())
+    }
+
+    pub fn prepare(&mut self) -> Result<UpdateView, String> {
+        let lock = UpdateLock::acquire(&self.root)?;
+        self.coordinator.reload()?;
+        if self.coordinator.needs_preparation() {
             if let Some(reason) = self.preflight()? {
                 self.coordinator.preparation_failed(now(), reason, "update needs storage or installation permission".into())?;
                 return Ok(self.coordinator.view(now()));
             }
             let workspace = self.workspace_bytes()?;
-            if let Err(error) = self.coordinator.prepare_next(&self.root, &lock, &client, now(), workspace, 0) {
-                self.coordinator.preparation_failed(now(), WaitReason::Retry, error)?;
+            let client = update_client::blocking::client(concat!("Bokheim-update/", env!("CARGO_PKG_VERSION")))?;
+            if let Err(error) = self.coordinator.prepare(&self.root, &lock, &client, now(), workspace, 0) {
+                self.coordinator.preparation_failed(now(), WaitReason::Retry, error.clone())?;
+                return Err(error);
             }
         }
         Ok(self.coordinator.view(now()))

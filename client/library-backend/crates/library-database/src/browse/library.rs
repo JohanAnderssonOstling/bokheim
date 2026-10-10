@@ -1,93 +1,18 @@
-//! Library views: home, authors, detail.
+//! Library views: book detail.
 
 use crate::books::toc::{entry_title, TocSql};
-use crate::browse::{AuthorsSql, DetailSql, HomeSql, invalid_integer_column, invalid_text_column};
+use crate::browse::{DetailSql, invalid_integer_column, invalid_text_column};
 use crate::{chapters_from_navigation, AudiobookSql, Database, DatabaseError};
-use book_model::{AUTHOR_MARC_RELATOR_CODE, AgentId, AuthorId};
-use library_model::{AuthorSort, AuthorSummary, BookCardRow, BookDetail, BookDetailAuthor, BookTocEntry, LibraryHomeView};
-use std::collections::HashMap;
+use book_model::{AUTHOR_MARC_RELATOR_CODE, AuthorId, NARRATOR_MARC_RELATOR_CODE};
+use library_model::{BookDetail, BookDetailAuthor, BookTocEntry};
 use sync_common::ContentHash;
 
-/// How far an author's shelf carousel can be paged. The shelf is one row of
-/// book cards, so a wide window draws a dozen or so at once and this is a few
-/// pages past that; the cap exists because the index loads every author's shelf
-/// in one query, not because the row runs out of space.
-const AUTHOR_SHELF_BOOK_COUNT: i32 = 40;
-
 impl Database {
-    /// Shared application projection for a library home screen. Platform hosts
-    /// supply only the user's local-download preference.
-    /// A negative limit is rejected; zero returns empty shelves.
-    pub fn browse_home(&self, limit: i32, downloaded_only: bool) -> Result<LibraryHomeView, DatabaseError> {
-        if limit < 0 {
-            return Err(DatabaseError::message("browse home limit must not be negative"));
-        }
-        let downloaded_only = i32::from(downloaded_only);
-        self.with_browse_snapshot(|| {
-            // The most recently read books: up to `limit` still in progress, then
-            // up to `limit` finished. The two groups arrive in one statement and
-            // stay in reading order within each, so a caller splits them by the
-            // same threshold the query ranked them with.
-            let mut read = Vec::new();
-            self.connection.recently_read_books(limit, downloaded_only, f64::from(library_model::FINISHED_PROGRESS_THRESHOLD), |row| {
-                read.push(row.get(0)?);
-                Ok(())
-            })?;
-            let mut added = Vec::new();
-            self.connection.recently_added_books(limit, downloaded_only, |row| {
-                added.push(row.get(0)?);
-                Ok(())
-            })?;
-            Ok(LibraryHomeView { recently_read: self.load_cards(&read)?, recently_added: self.load_cards(&added)? })
-        })
-    }
-
-    /// The author index: every credited identity with its shelf, already
-    /// ordered. One query for the whole page rather than a shelf lookup per
-    /// row, so the cost does not scale with the number of authors.
-    pub fn browse_authors(&self, sort: AuthorSort, downloaded_only: bool) -> Result<Vec<AuthorSummary>, DatabaseError> {
-        let downloaded_only = i32::from(downloaded_only);
-        self.with_browse_snapshot(|| {
-            // The books each author's shelf draws, keyed by author, in shelf order.
-            let (mut shelf_authors, mut ids) = (Vec::new(), Vec::new());
-            self.connection.author_shelf_books(downloaded_only, AUTHOR_SHELF_BOOK_COUNT, AUTHOR_MARC_RELATOR_CODE.0.to_vec(), |row| {
-                let raw_id: String = row.get(0)?;
-                shelf_authors.push(AgentId::parse_str(&raw_id).map_err(|error| invalid_text_column(0, error.to_string()))?);
-                ids.push(row.get(1)?);
-                Ok(())
-            })?;
-            let mut shelves: HashMap<AuthorId, Vec<BookCardRow>> = HashMap::new();
-            for (author, card) in shelf_authors.into_iter().zip(self.load_cards(&ids)?) {
-                shelves.entry(author).or_default().push(card);
-            }
-
-            let mut authors = Vec::new();
-            self.connection.get_authors(downloaded_only, AUTHOR_MARC_RELATOR_CODE.0.to_vec(), |row| {
-                let raw_id: String = row.get(0)?;
-                let id = AgentId::parse_str(&raw_id).map_err(|error| invalid_text_column(0, error.to_string()))?;
-                let name: String = row.get(1)?;
-                let count: i64 = row.get(2)?;
-                let count = usize::try_from(count).map_err(|_| invalid_integer_column(2, "author book count must not be negative"))?;
-                authors.push((id, name, count));
-                Ok(())
-            })?;
-            let mut authors = authors
-                .into_iter()
-                .map(|(id, name, book_count)| {
-                    let books = shelves.remove(&id).unwrap_or_default();
-                    AuthorSummary::try_new(id, name, book_count, books).map_err(|error| invalid_text_column(0, error.to_string()))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            sort.sort(&mut authors);
-            Ok(authors)
-        })
-    }
-
     /// Everything one book's page states, in one snapshot rather than a request
     /// per panel: the card, its folder trail, its credits, its navigation, and
     /// where the reader is inside it.
     pub fn browse_book_detail(&self, content_hash: &ContentHash) -> Result<BookDetail, DatabaseError> {
-        let hash = content_hash.as_str();
+        let hash = &content_hash;
         self.with_browse_snapshot(|| {
             let mut found = None;
             self.connection.book_detail_book(hash, |row| {
@@ -96,7 +21,10 @@ impl Database {
                 found = Some((row.get::<_, i64>(0)?, chapter_count));
                 Ok(())
             })?;
-            let (id, audiobook_chapter_count) = found.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            // A book the library does not hold may be in the catalog.
+            let Some((id, audiobook_chapter_count)) = found else {
+                return super::catalog::detail(content_hash).ok_or_else(|| rusqlite::Error::QueryReturnedNoRows.into());
+            };
             let book = self.load_cards(&[id])?.pop().ok_or(rusqlite::Error::QueryReturnedNoRows)?;
 
             // Empty when the book has no stored blurb.
@@ -124,13 +52,10 @@ impl Database {
                 Ok(())
             })?;
 
-            // Only narrator and translator: a reader picks an audiobook by
-            // its narrator and an edition by its translator, and nothing else in the
-            // contributor list answers a question a reader is asking.
+            // Narrators are the only non-author credits shown in book details.
             let mut credits = Vec::new();
-            let narrator = book_model::NARRATOR_MARC_RELATOR_CODE.0.to_vec();
-            let translator = book_model::TRANSLATOR_MARC_RELATOR_CODE.0.to_vec();
-            self.connection.book_detail_credits(hash, narrator, translator, |row| {
+            let narrator = NARRATOR_MARC_RELATOR_CODE.0.to_vec();
+            self.connection.book_detail_credits(hash, narrator, |row| {
                 let id: String = row.get(0)?;
                 let role: Vec<u8> = row.get(2)?;
                 credits.push(library_model::BookDetailCredit {

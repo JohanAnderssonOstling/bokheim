@@ -5,9 +5,9 @@ edition = "2021"
 publish = false
 
 [dependencies]
+update-protocol = { path = "../../../../shared/update-protocol" }
 content-address = { path = "../../../../shared/content-address" }
 book-model = { path = "../../../../shared/book-model" }
-book-metadata = { path = "../book-metadata" }
 book-inspection = { path = "../book-inspection" }
 thumbnail = { path = "../thumbnail" }
 client-runtime = { path = "../../../client-runtime" }

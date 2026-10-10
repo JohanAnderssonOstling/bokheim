@@ -1,15 +1,15 @@
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use fs2::FileExt;
-use ring::digest::{Context as Digest, SHA256};
+use reqwest::{blocking::Client, redirect::Policy};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use update_client::{Artifact, DiscoveryConfig, Manifest, SignedManifest};
+use update_protocol::{decode_hex, validate_https_url, verify, Artifact, Manifest, SignedManifest, MAX_MANIFEST_BYTES};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,11 +29,11 @@ fn component(s: &str) -> bool {
 }
 
 impl Config {
-    fn discovery(&self) -> Result<DiscoveryConfig> {
+    fn validate(&self) -> Result<BTreeMap<String, [u8; 32]>> {
         ensure!(component(&self.channel), "invalid channel");
-        let trusted_keys = self.trusted_keys.iter().map(|(id, hex)| Ok((id.clone(), update_client::decode_hex(hex).map_err(|e| anyhow!(e))?))).collect::<Result<_>>()?;
-        let config = DiscoveryConfig { endpoint: self.endpoint.clone(), channel: self.channel.clone(), trusted_keys };
-        config.validate().map_err(|e| anyhow!(e))?;
+        let trusted_keys: BTreeMap<String, [u8; 32]> = self.trusted_keys.iter().map(|(id, hex)| Ok((id.clone(), decode_hex(hex).map_err(|e| anyhow!(e))?))).collect::<Result<_>>()?;
+        ensure!(!trusted_keys.is_empty(), "update publication requires a trusted signing key");
+        validate_https_url(&self.endpoint).map_err(|e| anyhow!(e))?;
         let mut names = std::collections::BTreeSet::new();
         for (origin, name) in &self.origins {
             let url = url::Url::parse(origin)?;
@@ -41,17 +41,24 @@ impl Config {
         }
         for prefix in &self.external_artifact_prefixes {
             let url = url::Url::parse(prefix)?;
-            ensure!(url.scheme() == "https" && url.host_str().is_some()
-                && url.username().is_empty() && url.password().is_none()
-                && url.query().is_none() && url.fragment().is_none()
-                && url.as_str() == prefix && url.path().ends_with('/')
-                && url.path() != "/" && !url.path().contains('%')
-                && !url.path().contains("//")
-                && !self.origins.contains_key(&url.origin().ascii_serialization()),
-                "external artifact prefix must be a canonical HTTPS directory on an external origin");
+            ensure!(
+                url.scheme() == "https"
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+                    && url.as_str() == prefix
+                    && url.path().ends_with('/')
+                    && url.path() != "/"
+                    && !url.path().contains('%')
+                    && !url.path().contains("//")
+                    && !self.origins.contains_key(&url.origin().ascii_serialization()),
+                "external artifact prefix must be a canonical HTTPS directory on an external origin"
+            );
         }
         self.path(&self.endpoint, false)?;
-        Ok(config)
+        Ok(trusted_keys)
     }
 
     fn external(&self, raw: &str) -> Result<bool> {
@@ -59,13 +66,19 @@ impl Config {
         if self.origins.contains_key(&url.origin().ascii_serialization()) {
             return Ok(false);
         }
-        ensure!(url.scheme() == "https" && url.as_str() == raw
-            && url.username().is_empty() && url.password().is_none()
-            && url.query().is_none() && url.fragment().is_none()
-            && !url.path().contains('%') && !url.path().contains("//")
-            && url.path().split('/').skip(1).all(component)
-            && self.external_artifact_prefixes.iter().any(|prefix| raw.starts_with(prefix)),
-            "artifact URL is outside configured external directories");
+        ensure!(
+            url.scheme() == "https"
+                && url.as_str() == raw
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && !url.path().contains('%')
+                && !url.path().contains("//")
+                && url.path().split('/').skip(1).all(component)
+                && self.external_artifact_prefixes.iter().any(|prefix| raw.starts_with(prefix)),
+            "artifact URL is outside configured external directories"
+        );
         Ok(true)
     }
 
@@ -110,29 +123,14 @@ fn regular(path: &Path) -> Result<File> {
 
 fn bounded(path: &Path) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    regular(path)?.take(update_client::MAX_MANIFEST_BYTES as u64 + 1).read_to_end(&mut bytes)?;
-    ensure!(bytes.len() <= update_client::MAX_MANIFEST_BYTES, "manifest exceeds size limit");
+    regular(path)?.take(MAX_MANIFEST_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= MAX_MANIFEST_BYTES, "manifest exceeds size limit");
     Ok(bytes)
 }
 
-fn copy_verified(mut input: File, mut output: impl Write, artifact: &Artifact) -> Result<()> {
+fn copy_verified(input: File, mut output: impl Write, artifact: &Artifact) -> Result<()> {
     ensure!(input.metadata()?.len() == artifact.bytes, "artifact size mismatch: {}", artifact.url);
-    let mut digest = Digest::new(&SHA256);
-    let mut copied = 0u64;
-    let mut buffer = [0u8; 65536];
-    loop {
-        let n = input.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        copied = copied.checked_add(n as u64).context("artifact length overflow")?;
-        ensure!(copied <= artifact.bytes, "artifact grew while copying");
-        digest.update(&buffer[..n]);
-        output.write_all(&buffer[..n])?;
-    }
-    let expected = update_client::decode_hex::<32>(&artifact.sha256).map_err(|e| anyhow!(e))?;
-    ensure!(copied == artifact.bytes && digest.finish().as_ref() == expected, "artifact checksum mismatch: {}", artifact.url);
-    Ok(())
+    update_protocol::copy_verified(input, &mut output, artifact).map_err(|e| anyhow!(e))
 }
 
 fn make_public(file: &File) -> Result<()> {
@@ -152,14 +150,15 @@ fn sync_directory(path: &Path) -> Result<()> {
 fn publish(config: &Config, bundle: &Path, root: &Path, now: u64) -> Result<()> {
     // Anonymous requests prove that clients can fetch the public package. Never
     // use CI's GitHub credentials: draft/private assets must not be advertised.
-    let client = update_client::blocking::client("bokheim-update-publisher/1").map_err(|e| anyhow!(e))?;
+    let client = Client::builder().user_agent("bokheim-update-publisher/1").https_only(true).connect_timeout(Duration::from_secs(15)).timeout(Duration::from_secs(60)).redirect(Policy::limited(5)).build()?;
     publish_with_verifier(config, bundle, root, now, |artifact| {
-        update_client::blocking::download(&client, artifact, &mut std::io::sink()).map_err(|e| anyhow!(e))
+        let response = client.get(&artifact.url).timeout(Duration::from_secs(30 * 60)).send()?.error_for_status()?;
+        update_protocol::copy_verified(response, &mut std::io::sink(), artifact).map_err(|e| anyhow!(e))
     })
 }
 
 fn publish_with_verifier(config: &Config, bundle: &Path, root: &Path, now: u64, mut verify_external: impl FnMut(&Artifact) -> Result<()>) -> Result<()> {
-    let discovery = config.discovery()?;
+    let trusted_keys = config.validate()?;
     directories(root)?;
     let lock_path = root.join("publish.lock");
     if lock_path.try_exists()? {
@@ -168,7 +167,7 @@ fn publish_with_verifier(config: &Config, bundle: &Path, root: &Path, now: u64, 
     let lock = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(lock_path)?;
     lock.try_lock_exclusive().context("another publication is running")?;
     let bytes = bounded(&bundle.join("manifest.signed.json"))?;
-    let verified = update_client::verify(&bytes, &discovery, now, 0).map_err(|e| anyhow!(e))?;
+    let verified = verify(&bytes, &config.channel, &trusted_keys, now, 0).map_err(|e| anyhow!(e))?;
     let manifest = verified.manifest();
     let public = root.join("public");
     let feed = public.join(config.path(&config.endpoint, false)?);
@@ -178,11 +177,11 @@ fn publish_with_verifier(config: &Config, bundle: &Path, root: &Path, now: u64, 
         let envelope: SignedManifest = serde_json::from_slice(&previous)?;
         let old: Manifest = serde_json::from_str(&envelope.payload)?;
         // Expiration prevents discovery; it must not erase the replay floor.
-        let old = update_client::verify(&previous, &discovery, old.issued_at_unix, 0).map_err(|e| anyhow!(e))?;
+        let old = verify(&previous, &config.channel, &trusted_keys, old.issued_at_unix, 0).map_err(|e| anyhow!(e))?;
         ensure!(manifest.sequence >= old.manifest().sequence, "publication sequence would go backwards");
         ensure!(manifest.sequence != old.manifest().sequence || bytes == previous, "sequence already used for different metadata");
     }
-    let artifacts = manifest.application.iter().flat_map(|app| app.artifacts.values()).chain(manifest.taxonomy.iter().map(|t| &t.artifact));
+    let artifacts = manifest.application.iter().flat_map(|app| app.artifacts.values()).chain(manifest.taxonomy.iter().map(|t| &t.artifact)).chain(manifest.catalog.iter().map(|c| &c.artifact));
     for artifact in artifacts {
         if config.external(&artifact.url)? {
             verify_external(artifact).context("external artifact is unavailable or does not match the signed manifest")?;
@@ -253,7 +252,7 @@ fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.len() == 2 && args[0] == "--check-config" {
         let config: Config = serde_json::from_reader(File::open(&args[1])?)?;
-        config.discovery()?;
+        config.validate()?;
         println!("Publisher configuration is valid");
         return Ok(());
     }

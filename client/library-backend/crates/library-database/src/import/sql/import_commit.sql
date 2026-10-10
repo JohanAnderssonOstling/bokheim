@@ -1,7 +1,7 @@
 -- Import commit writes.
 
 -- name: has_import_inspection_select?
--- param: content_hash: &str
+-- param: content_hash: &ContentHash
 -- param: format: i64
 -- param: version: i64
 SELECT EXISTS(
@@ -10,15 +10,14 @@ SELECT EXISTS(
       AND b.format = :format AND b.deleted_at IS NULL
 );
 
--- name: provisional_author_identity_by_name?
--- param: normalized_name: &str
-SELECT id, stable_id
+-- name: provisional_author_identities?
+SELECT id, stable_id, name
 FROM author_identity
-WHERE normalized_name=:normalized_name AND is_provisional=1
-ORDER BY id LIMIT 1;
+WHERE is_provisional=1
+ORDER BY id;
 
 -- name: record_import_inspection!
--- param: content_hash: &str
+-- param: content_hash: &ContentHash
 -- param: format: i64
 -- param: version: i64
 INSERT INTO book_local_state(content_hash, inspection_format, inspection_version)
@@ -26,7 +25,7 @@ VALUES (:content_hash, :format, :version)
 ON CONFLICT(content_hash) DO UPDATE SET inspection_format = excluded.inspection_format, inspection_version = excluded.inspection_version;
 
 -- name: restore_candidates_select?
--- param: content_hash: &str
+-- param: content_hash: &ContentHash
 SELECT bd.dir_id,bd.file_name,p.relative_path
              FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id
              LEFT JOIN local_file_projection p ON p.content_hash=b.content_hash AND p.dir_id=bd.dir_id
@@ -37,7 +36,7 @@ SELECT bd.dir_id,bd.file_name,p.relative_path
 INSERT INTO sync_metadata(singleton, scan_seq) VALUES (1, :scan_seq) ON CONFLICT(singleton) DO UPDATE SET scan_seq = excluded.scan_seq;
 
 -- name: set_description!
--- param: content_hash: &str
+-- param: content_hash: &ContentHash
 -- param: description: &str
 INSERT INTO book_description(book_row_id, description)
 SELECT row_id, :description FROM book WHERE content_hash = :content_hash

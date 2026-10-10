@@ -1,14 +1,13 @@
 //! Executes durable thumbnail recovery without application handles or UI events.
 
-use std::io::SeekFrom;
-use std::sync::Arc;
 use book_access::BoxedBookReader;
 use client_platform_runtime::executor::BoxedBackendFuture;
 use client_runtime::BackendError;
-use library_database::enrichment::EnrichmentSql;
 use library_database::Database;
 use library_files::asset_store::{AssetStore, AssetStoreError};
 use library_model::BlobKind;
+use std::io::SeekFrom;
+use std::sync::Arc;
 use sync_common::ContentHash;
 pub use thumbnail::ThumbnailVersions;
 
@@ -40,16 +39,11 @@ impl ThumbnailProcessor for ThumbnailExtractor {
     }
 }
 
-/// A batch keeps its activity guard alive across pages, including cancellation.
-///
 /// Runs entirely on a library's own dedicated thread (see
 /// `client_platform_runtime::executor::LibraryExecutor`), never on the shared
 /// multi-threaded executor, so implementors — including ones holding a
 /// `&LibrarySession` — need not be `Send`.
 pub trait ThumbnailObserver {
-    type Activity;
-    fn prepare(&mut self, pending: u64);
-    fn begin(&mut self) -> Self::Activity;
     fn completed(&mut self);
     fn ready(&mut self, hash: ContentHash);
 }
@@ -60,70 +54,24 @@ pub struct ThumbnailJobs<'a, P> {
     processor: &'a P,
 }
 
-/// Selection differs; execution, progress and activity lifetime do not.
-pub enum BatchSelection {
-    Pending { after: String, now: i64 },
-    Members(Vec<ContentHash>),
-}
-
-impl BatchSelection {
-    fn next_page(&mut self, db: &Database) -> Result<Vec<ContentHash>, BackendError> {
-        match self {
-            Self::Members(hashes) => Ok(std::mem::take(hashes)),
-            Self::Pending { after, now } => loop {
-                let page = {
-                    let mut jobs = Vec::new();
-                    db.connection
-                        .thumbnail_pending_jobs(after, |row| {
-                            jobs.push((ContentHash::new(&row.get::<_, String>(0)?), row.get::<_, i64>(1)?));
-                            Ok(())
-                        })
-                        .map_err(library_database::DatabaseError::from)?;
-                    jobs
-                };
-                let Some((last, _)) = page.last() else { return Ok(Vec::new()) };
-                *after = last.as_str().to_owned();
-                let ready = page.into_iter().filter_map(|(hash, retry_after)| (retry_after <= *now).then_some(hash)).collect::<Vec<_>>();
-                // Deferred pages must not hide eligible work on later pages.
-                if !ready.is_empty() {
-                    return Ok(ready);
-                }
-            },
-        }
-    }
-}
-
 impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
     pub fn new(db: &'a Database, assets: &'a AssetStore, processor: &'a P) -> Self {
         Self { db, assets, processor }
     }
-    pub async fn run_batch(&self, observer: &mut impl ThumbnailObserver) -> Result<(), BackendError> {
-        let pending = self.db.pending_thumbnail_job_count()?;
-        observer.prepare(pending);
-        let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_err(BackendError::operation)?.as_secs() as i64;
-        self.run_selected(BatchSelection::Pending { after: String::new(), now }, observer).await
-    }
-
-    pub async fn run_selected(&self, mut selection: BatchSelection, observer: &mut impl ThumbnailObserver) -> Result<(), BackendError> {
-        let mut activity = None;
+    /// Makes covers for these books. A failure leaves the book's work pending
+    /// for a later pass; the first failure is returned once all were tried.
+    pub async fn run(&self, hashes: Vec<ContentHash>, observer: &mut impl ThumbnailObserver) -> Result<(), BackendError> {
         let mut failure = None;
-        loop {
-            let page = selection.next_page(self.db)?;
-            if page.is_empty() {
-                break;
-            }
-            for hash in page {
-                // One lifetime spans every file and database page in this pass.
-                activity.get_or_insert_with(|| observer.begin());
-                match self.recover(hash, observer).await {
-                    Ok(true) => {
-                        observer.completed();
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        log::warn!("thumbnail recovery for {hash} will retry: {error}");
-                        failure.get_or_insert(error);
-                    }
+        for hash in hashes {
+            match self.recover(hash, observer).await {
+                Ok(true) => {
+                    observer.completed();
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    let title = || self.db.browse_book_detail(&hash).ok().map(|detail| detail.book.title).unwrap_or_else(|| "Untitled".into());
+                    log::warn!("thumbnail recovery for {:?} will retry: {error}", title());
+                    failure.get_or_insert(error);
                 }
             }
         }
@@ -131,7 +79,7 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
     }
 
     pub async fn recover(&self, hash: ContentHash, observer: &mut impl ThumbnailObserver) -> Result<bool, BackendError> {
-        let outcome = async {
+        async {
             let lease = self.assets.lease_book(&hash).await.map_err(BackendError::operation)?;
             let Some(format) = self.db.thumbnail_book_format(hash)? else { return Ok(false) };
             // A book's cover is set once, so a stored cover is kept. A pending
@@ -150,17 +98,14 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
             };
             if let Some(versions) = cached {
                 self.store(hash, &versions, observer).await?;
-                self.db.connection.thumbnail_set_result(hash.as_str(), "ready").map_err(library_database::DatabaseError::from)?;
+                self.db.complete_thumbnail_work(&hash, true)?;
                 return Ok(true);
             }
-            if self.db.connection.thumbnail_has_remote(hash.as_str(), |row| row.get(0)).map_err(library_database::DatabaseError::from)? {
-                {
-                    let transaction = self.db.connection.unchecked_transaction().map_err(library_database::DatabaseError::from)?;
-                    transaction.thumbnail_discard(hash.as_str()).map_err(library_database::DatabaseError::from)?;
-                    library_database::commit(transaction)?;
-                }
+            if self.db.server_has_cover(&hash)? {
+                self.db.discard_thumbnail_work(&hash)?;
                 return Ok(true);
             }
+            let title = || self.db.browse_book_detail(&hash).ok().map(|detail| detail.book.title).unwrap_or_else(|| "Untitled".into());
             let paths = self.db.book_paths(&hash)?;
             let mut local_reader = self.assets.open_book_reader(&hash, paths.clone()).await.map_err(BackendError::operation)?;
             let local_source_available = local_reader.is_some();
@@ -173,20 +118,25 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
                             self.db.complete_thumbnail_work(&hash, true)?;
                             return Ok(true);
                         }
-                        Err(error) => log::warn!("ignoring invalid M4B sidecar cover for {hash}: {error}"),
+                        Err(error) => log::warn!("ignoring invalid M4B sidecar cover for {:?}: {error}", title()),
                     }
                 }
             }
             if format == book_model::BookFormat::Mp3Folder {
                 if let Some(reader) = local_reader.as_mut() {
-                    if let Some(bytes) = audiobook_folder::archived_cover(&mut *reader).map_err(BackendError::operation)? {
+                    // An unreadable archive has no cover here; generation below says so.
+                    let archived = audiobook_archive::archived_cover(&mut *reader).unwrap_or_else(|error| {
+                        log::warn!("ignoring unreadable MP3 folder archive for {:?}: {error}", title());
+                        None
+                    });
+                    if let Some(bytes) = archived {
                         match self.processor.decode(bytes).await {
                             Ok(versions) => {
                                 self.store(hash, &versions, observer).await?;
                                 self.db.complete_thumbnail_work(&hash, true)?;
                                 return Ok(true);
                             }
-                            Err(error) => log::warn!("ignoring invalid MP3 folder cover for {hash}: {error}"),
+                            Err(error) => log::warn!("ignoring invalid MP3 folder cover for {:?}: {error}", title()),
                         }
                     }
                     reader.seek(SeekFrom::Start(0))?;
@@ -198,7 +148,7 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
             if reader.seek(SeekFrom::End(0))? == 0 {
                 // Retire legacy empty-file jobs without making them candidates
                 // for external cover enrichment or publishing a thumbnail.
-                self.db.connection.thumbnail_discard(hash.as_str()).map_err(library_database::DatabaseError::from)?;
+                self.db.discard_thumbnail_work(&hash)?;
                 return Ok(true);
             }
             reader.seek(SeekFrom::Start(0))?;
@@ -218,15 +168,7 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
             // Both ready and no_cover make external cover enrichment eligible.
             Ok(true)
         }
-        .await;
-        if outcome.is_err() {
-            let _ = (|| -> Result<(), library_database::DatabaseError> {
-                let retry_after = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_err(library_database::DatabaseError::operation)?.as_secs().saturating_add(30) as i64;
-                self.db.connection.thumbnail_retry(hash.as_str(), retry_after)?;
-                Ok(())
-            })();
-        }
-        outcome
+        .await
     }
 
     async fn store(&self, hash: ContentHash, versions: &ThumbnailVersions, observer: &mut impl ThumbnailObserver) -> Result<(), BackendError> {
@@ -241,6 +183,3 @@ pub async fn store_thumbnail(assets: &AssetStore, hash: ContentHash, browse: &[u
     assets.write(BlobKind::Thumbnail, &hash, high_density).await?;
     assets.write_thumbnail_variant(&hash, thumbnail::BROWSE_THUMBNAIL_WIDTH, browse).await
 }
-
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod tests;

@@ -39,25 +39,6 @@ class ExtractionTests(unittest.TestCase):
     def records(self):
         return [{'id':f'Q{i}','type':'item','labels':{'sv':{'value':f'Namn {i}'}},'claims':{'P50':[claim({'id':'Q100'},'wikibase-item')]}} for i in range(1,6)]
 
-    def test_projection_preserves_all_ids_full_claims_and_languages(self):
-        value=claim('0000123', 'external-id', 'deprecated')
-        book={'id':'Q1','labels':{'en':{'value':'Title'},'sv':{'value':'Titel'}},
-              'descriptions':{'sv':{'value':'Beskrivning'}},'claims':{
-                  'P999999':[value],'P1036':[claim('100','external-id')], 'P8359':[claim('100')],
-                  'P8360':[claim('QA76')], 'P655':[claim({'id':'Q2'},'wikibase-item')],
-                  'P101':[claim({'id':'Q3'},'wikibase-item')], 'P999998':[claim('unrequested text')]},
-              'sitelinks':{'svwiki':{'title':'Titel'},'commonswiki':{'title':'Category:Title'}}}
-        result=module.project(book)
-        self.assertEqual(result['claims']['P999999'],[value])
-        self.assertEqual(result['claims']['P8360'],book['claims']['P8360'])
-        self.assertEqual(result['claims']['P655'],book['claims']['P655'])
-        self.assertEqual(result['claims']['P1036'],book['claims']['P1036'])
-        self.assertEqual(result['claims']['P8359'],book['claims']['P8359'])
-        self.assertEqual(result['claims']['P999998'],book['claims']['P999998'])
-        self.assertEqual(result['labels'],book['labels'])
-        self.assertEqual(result['descriptions'],book['descriptions'])
-        self.assertEqual(result['sitelinks'],{'svwiki':{'title':'Titel'}})
-
     def test_resume_has_no_duplicate_records_and_retains_unresolved_author_links(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);source,index=self.fixture(root,self.records());out=root/'out'

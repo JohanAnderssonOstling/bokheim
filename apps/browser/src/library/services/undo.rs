@@ -10,6 +10,7 @@
 //! taken while it was away.
 
 use std::cell::RefCell;
+use std::future::Future;
 use std::rc::Rc;
 
 use library_backend::LibraryClient;
@@ -70,6 +71,18 @@ impl UndoEntry {
         self.steps.push(step);
     }
 
+    /// Stop at the first failure, retaining undo for every completed item.
+    pub(crate) async fn record<T, F, Fut>(&mut self, items: impl IntoIterator<Item = T>, mut apply: F) -> Result<(), String>
+    where
+        F: FnMut(T) -> Fut,
+        Fut: Future<Output = Result<UndoStep, String>>,
+    {
+        for item in items {
+            self.push(apply(item).await?);
+        }
+        Ok(())
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.steps.is_empty()
     }
@@ -98,10 +111,6 @@ impl UndoStack {
         }
     }
 
-    pub(crate) fn peek_label(&self) -> Option<String> {
-        self.entries.borrow().last().map(|entry| entry.label.clone())
-    }
-
     pub(crate) fn take(&self) -> Option<UndoEntry> {
         self.entries.borrow_mut().pop()
     }
@@ -113,5 +122,55 @@ impl UndoStack {
             step.apply(library).await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::ready;
+
+    use futures_util::FutureExt;
+    use sync_common::ROOT_DIR_ID;
+
+    use super::{UndoEntry, UndoStack, UndoStep};
+
+    #[test]
+    fn partial_batch_retains_only_completed_steps_and_stops() {
+        let mut entry = UndoEntry::new("Batch");
+        let mut attempted = Vec::new();
+        let result = entry
+            .record(0..4, |item| {
+                attempted.push(item);
+                ready(if item == 2 { Err("failed".into()) } else { Ok(UndoStep::RenameDirectory { directory: ROOT_DIR_ID, name: item.to_string() }) })
+            })
+            .now_or_never()
+            .unwrap();
+        assert_eq!(result, Err("failed".into()));
+        assert_eq!(attempted, [0, 1, 2]);
+        assert_eq!(entry.steps.len(), 2);
+        assert!(matches!(&entry.steps[0], UndoStep::RenameDirectory { name, .. } if name == "0"));
+        assert!(matches!(&entry.steps[1], UndoStep::RenameDirectory { name, .. } if name == "1"));
+        let stack = UndoStack::default();
+        stack.push(entry);
+        assert_eq!(stack.take().unwrap().steps.len(), 2);
+    }
+
+    #[test]
+    fn failure_before_any_change_does_not_add_an_undo_action() {
+        let mut entry = UndoEntry::new("Batch");
+        let result = entry.record([()], |_| ready(Err("failed".into()))).now_or_never().unwrap();
+        assert!(result.is_err());
+        let stack = UndoStack::default();
+        stack.push(entry);
+        assert!(stack.take().is_none());
+    }
+
+    #[test]
+    fn successive_batches_preserve_earlier_undo_steps() {
+        let mut entry = UndoEntry::new("Batch");
+        for count in [2, 3] {
+            entry.record(0..count, |_| ready(Ok(UndoStep::TrashDirectory { directory: ROOT_DIR_ID }))).now_or_never().unwrap().unwrap();
+        }
+        assert_eq!(entry.steps.len(), 5);
     }
 }

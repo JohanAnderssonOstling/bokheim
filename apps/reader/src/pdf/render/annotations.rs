@@ -1,10 +1,10 @@
 //! PDF annotation loading, editing, navigation, and sidebar presentation.
 
 use crate::invalidation::notify;
-use book_model::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect, annotation_progress};
+use book_model::{AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect};
 use gpui::prelude::*;
 use gpui::{Context, Window};
-use library_backend::ReaderAnnotation;
+use library_backend::Annotation;
 use pdf_reader_core::NormalizedRect;
 use ui_components as components;
 
@@ -12,7 +12,35 @@ use super::PdfReaderView;
 use crate::invalidation::Component;
 use crate::pdf::marks::annotation_overlays;
 use crate::shell::annotation_editor;
+use crate::shell::annotation_editor::AnnotationEditorTarget;
 use crate::shell::persistence;
+use crate::shell::state_panel::AnnotationSidebarTarget;
+
+impl AnnotationEditorTarget for PdfReaderView {
+    fn save_annotation_changes(&mut self, style: Option<AnnotationStyle>, color: Option<u32>, cx: &mut Context<Self>) {
+        self.save_selected_annotation(style, color, cx);
+    }
+
+    fn dismiss_annotation_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_annotation_editor(cx);
+        self.focus_document(window, cx);
+    }
+}
+
+impl AnnotationSidebarTarget for PdfReaderView {
+    fn select_sidebar_annotation(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.annotation_popup_anchor = None;
+        self.select_annotation(id, window, cx);
+    }
+
+    fn go_to_annotation(&mut self, annotation: &Annotation, cx: &mut Context<Self>) {
+        self.navigate_to_annotation(annotation, cx);
+    }
+
+    fn delete_sidebar_annotation(&mut self, id: String, cx: &mut Context<Self>) {
+        self.delete_annotation(id, cx);
+    }
+}
 
 impl PdfReaderView {
     pub(super) fn load_reader_state(&self, cx: &mut Context<Self>) {
@@ -23,7 +51,7 @@ impl PdfReaderView {
             "load PDF reader state",
             move |library| {
                 let library = library.clone();
-                Box::pin(async move { Ok(library.annotations(content_hash).await?.into_iter().filter(|item| item.pdf_anchor().is_some()).collect()) })
+                Box::pin(async move { Ok(library.annotations(content_hash).await?.into_iter().filter(|item| item.anchor.pdf_anchor().is_some()).collect()) })
             },
             |this, cx, annotations| {
                 this.marks.merge_loaded(annotations);
@@ -43,9 +71,23 @@ impl PdfReaderView {
     pub(super) fn create_annotation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(selection) = self.pdf.read(cx).selection_snapshot() else { return };
         let rects = selection.rects.iter().map(|rect| PdfAnnotationRect::new(rect.left(), rect.top(), rect.width(), rect.height())).collect::<Vec<_>>();
-        let anchor = AnnotationAnchor::pdf(PdfAnnotationAnchor::new(selection.page_index as u32, rects, None));
+        let anchor = AnnotationAnchor::Pdf(PdfAnnotationAnchor::new(selection.page_index as u32, rects, None));
         let now = crate::shell::marks::now_millis();
-        let annotation = ReaderAnnotation { id: uuid::Uuid::new_v4().to_string(), state: book_model::AnnotationState { content_hash: self.locator.content_hash(), detail: book_model::AnnotationDetail { anchor: anchor, exact_text: selection.text, style: AnnotationStyle::Highlight, color: ui_components::READER_ANNOTATION_DEFAULT_COLOR.to_owned(), note: String::new(), created_at: u64::try_from(now).expect("annotation timestamps must be nonnegative"), toc_ordinal: self.toc.ordinal_at(selection.page_index).map(|ordinal| ordinal as i64), progress: annotation_progress(selection.page_index as f64 + 1.0, self.page_count as f64) }, modified_at: u64::try_from(now).expect("annotation timestamps must be nonnegative"), deleted: false } };
+        let now = u64::try_from(now).expect("annotation timestamps must be nonnegative");
+        let annotation = Annotation {
+            id: uuid::Uuid::new_v4().to_string(),
+            content_hash: self.locator.content_hash(),
+            anchor,
+            exact_text: selection.text,
+            style: AnnotationStyle::Highlight,
+            color: ui_components::READER_ANNOTATION_DEFAULT_COLOR,
+            note: String::new(),
+            created_at: now,
+            toc_ordinal: self.toc.ordinal_at(selection.page_index).map(|ordinal| ordinal as i64),
+            progress: Some(book_model::pdf_page_progress(selection.page_index, self.page_count)),
+            modified_at: now,
+            deleted: false,
+        };
         let annotation_id = annotation.id.clone();
         self.marks.prepend(annotation, "save PDF annotation");
         let note = self.marks.select(annotation_id);
@@ -75,8 +117,8 @@ impl PdfReaderView {
         notify(cx, Component::PdfShell, "annotation_editor_closed");
     }
 
-    fn save_selected_annotation(&mut self, style: Option<AnnotationStyle>, color: Option<&'static str>, cx: &mut Context<Self>) {
-        if self.marks.selected().is_some_and(ReaderAnnotation::is_external_pdf_annotation) {
+    fn save_selected_annotation(&mut self, style: Option<AnnotationStyle>, color: Option<u32>, cx: &mut Context<Self>) {
+        if self.marks.selected().is_some_and(Annotation::is_external_pdf_annotation) {
             return;
         }
         let note = self.annotation_note_input.read(cx).value().to_string();
@@ -88,7 +130,7 @@ impl PdfReaderView {
     }
 
     pub(in crate::pdf) fn delete_annotation(&mut self, id: String, cx: &mut Context<Self>) {
-        if self.marks.annotation(&id).is_some_and(ReaderAnnotation::is_external_pdf_annotation) {
+        if self.marks.annotation(&id).is_some_and(Annotation::is_external_pdf_annotation) {
             return;
         }
         if self.marks.delete(id, "delete PDF annotation") {
@@ -99,8 +141,8 @@ impl PdfReaderView {
         notify(cx, Component::PdfShell, "annotation_deleted");
     }
 
-    fn navigate_to_annotation(&self, annotation: &ReaderAnnotation, cx: &mut Context<Self>) {
-        let Some(anchor) = annotation.pdf_anchor() else { return };
+    fn navigate_to_annotation(&self, annotation: &Annotation, cx: &mut Context<Self>) {
+        let Some(anchor) = annotation.anchor.pdf_anchor() else { return };
         let Some(rect) = anchor.rects.first() else { return };
         self.pdf.update(cx, |pdf, cx| {
             pdf.reveal_annotation(anchor.page_index as usize, NormalizedRect::new(rect.left, rect.top, rect.width, rect.height), cx);
@@ -110,45 +152,21 @@ impl PdfReaderView {
     pub(super) fn render_annotations_body(&self, theme: components::BrowserTheme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let target = cx.entity();
         components::reader_state_panel(theme)
-            .children(crate::shell::state_panel::reader_state_rows(
-                &target,
-                &self.marks,
-                "Select PDF text, then use Highlight or Note.",
-                theme,
-                |annotation: &ReaderAnnotation| {
-                    let page = annotation.pdf_anchor().map(|anchor| anchor.page_index as usize);
-                    let ordinal = annotation.toc_ordinal.and_then(|ordinal| usize::try_from(ordinal).ok()).or_else(|| page.and_then(|page| self.toc.ordinal_at(page)));
-                    if let Some((ordinal, title)) = ordinal.and_then(|ordinal| self.toc.title_at_ordinal(ordinal).map(|title| (ordinal, title))) {
-                        (format!("section:{ordinal}"), title.to_owned())
-                    } else if let Some(page) = page {
-                        (format!("page:{page}"), format!("Page {}", page + 1))
-                    } else {
-                        ("other".to_owned(), "Other annotations".to_owned())
-                    }
-                },
-                |id, window, this: &mut Self, cx| {
-                    this.annotation_popup_anchor = None;
-                    this.select_annotation(id, window, cx);
-                },
-                |annotation: &ReaderAnnotation, this: &mut Self, cx| this.navigate_to_annotation(annotation, cx),
-                |id, this: &mut Self, cx| this.delete_annotation(id, cx),
-            ))
+            .children(crate::shell::state_panel::reader_state_rows(&target, &self.marks, "Select PDF text, then use Highlight or Note.", theme, |annotation: &Annotation| {
+                let page = annotation.anchor.pdf_anchor().map(|anchor| anchor.page_index as usize);
+                let ordinal = annotation.toc_ordinal.and_then(|ordinal| usize::try_from(ordinal).ok()).or_else(|| page.and_then(|page| self.toc.ordinal_at(page)));
+                if let Some((ordinal, title)) = ordinal.and_then(|ordinal| self.toc.title_at_ordinal(ordinal).map(|title| (ordinal, title))) {
+                    (format!("section:{ordinal}"), title.to_owned())
+                } else if let Some(page) = page {
+                    (format!("page:{page}"), format!("Page {}", page + 1))
+                } else {
+                    ("other".to_owned(), "Other annotations".to_owned())
+                }
+            }))
             .into_any_element()
     }
 
-    pub(super) fn render_annotation_popup(&self, annotation: ReaderAnnotation, geometry: annotation_editor::Geometry, cx: &mut Context<Self>) -> gpui::AnyElement {
-        annotation_editor::standard_editor(
-            "pdf-popup",
-            &cx.entity(),
-            &annotation,
-            geometry,
-            &self.annotation_note_input,
-            components::browser_theme(cx),
-            |style, color, this, cx| this.save_selected_annotation(style, color, cx),
-            |window, this, cx| {
-                this.close_annotation_editor(cx);
-                this.focus_document(window, cx);
-            },
-        )
+    pub(super) fn render_annotation_popup(&self, annotation: Annotation, geometry: annotation_editor::Geometry, cx: &mut Context<Self>) -> gpui::AnyElement {
+        annotation_editor::standard_editor("pdf-popup", &cx.entity(), &annotation, geometry, &self.annotation_note_input, components::browser_theme(cx))
     }
 }

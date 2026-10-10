@@ -11,7 +11,10 @@ use html::pipeline::{
     parse_html_document,
 };
 use html::resources::ResourceProvider;
-use html_book::{BookSourceFormat, BookSource};
+#[path = "../book.rs"]
+mod book;
+use book::BookSource;
+use book_content::BookFormat as BookSourceFormat;
 
 #[derive(Default)]
 struct ProfileShaper {

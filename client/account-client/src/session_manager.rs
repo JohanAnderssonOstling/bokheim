@@ -1,7 +1,7 @@
-use std::future::Future;
-use std::pin::Pin;
 use crate::{AuthError, Session};
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -10,12 +10,18 @@ pub type SessionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type SessionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 /// Persistence supplied by the application; writes complete before session readers are notified.
-pub trait SessionPersistence: Clone + std::fmt::Debug {
+pub trait SessionPersistence: Clone + std::fmt::Debug + Send + Sync + 'static {
+    /// Runs a complete state-and-persistence operation on the storage owner.
+    /// Dispatch must happen before acquiring a session state lock.
+    fn run<T: Send + 'static>(&self, operation: impl FnOnce() -> T + Send + 'static) -> std::io::Result<T> {
+        Ok(operation())
+    }
+
     fn load_account_session(&self) -> std::io::Result<Option<Session>>;
     fn save_account_session(&self, session: &Session) -> std::io::Result<()>;
     fn clear_account_session(&self) -> std::io::Result<()>;
 }
-use crate::ServerUrl;
+use crate::Url;
 
 const EXPIRY_SAFETY_WINDOW_SECONDS: i64 = 60;
 const REFRESH_WINDOW_SECONDS: i64 = 15 * 60;
@@ -53,14 +59,14 @@ impl std::error::Error for AccountSessionError {}
 #[derive(Clone, Debug)]
 pub struct AccountSession<P: SessionPersistence> {
     persistence: P,
-    server: ServerUrl,
+    server: Url,
     state: Arc<SharedSession>,
     refresh: Arc<tokio::sync::Mutex<()>>,
     changes: tokio::sync::watch::Sender<u64>,
 }
 
 impl<P: SessionPersistence> AccountSession<P> {
-    pub fn load(persistence: P, server: ServerUrl) -> Result<Self, AccountSessionError> {
+    pub fn load(persistence: P, server: Url) -> Result<Self, AccountSessionError> {
         let mut session = persistence.load_account_session().map_err(AccountSessionError::Persistence)?;
         if session.as_ref().is_some_and(|session| !Self::is_usable(session, &server)) {
             persistence.clear_account_session().map_err(AccountSessionError::Persistence)?;
@@ -79,21 +85,28 @@ impl<P: SessionPersistence> AccountSession<P> {
     }
 
     pub fn restore_if_empty(&self) -> Result<Option<Session>, AccountSessionError> {
-        let mut state = self.state.0.write().map_err(|_| AccountSessionError::Poisoned)?;
-        if state.session.is_none() {
-            if let Some(restored) = self.persistence.load_account_session().map_err(AccountSessionError::Persistence)? {
-                let usable = Self::is_usable(&restored, &self.server);
-                self.replace(&mut state, usable.then_some(restored))?;
+        self.with_storage(|this, state| {
+            if state.session.is_none() {
+                if let Some(restored) = this.persistence.load_account_session().map_err(AccountSessionError::Persistence)? {
+                    let usable = Self::is_usable(&restored, &this.server);
+                    this.replace(state, usable.then_some(restored))?;
+                }
             }
-        }
-        self.remove_expired(&mut state)?;
-        Ok(state.session.clone())
+            this.remove_expired(state)?;
+            Ok(state.session.clone())
+        })
     }
 
     pub fn current(&self) -> Result<Option<Session>, AccountSessionError> {
-        let mut state = self.state.0.write().map_err(|_| AccountSessionError::Poisoned)?;
-        self.remove_expired(&mut state)?;
-        Ok(state.session.clone())
+        // Reading a usable published session needs no persistence operation.
+        let session = self.state.0.read().map_err(|_| AccountSessionError::Poisoned)?.session.clone();
+        if session.as_ref().is_none_or(|session| !Self::is_expired(session)) {
+            return Ok(session);
+        }
+        self.with_storage(|this, state| {
+            this.remove_expired(state)?;
+            Ok(state.session.clone())
+        })
     }
 
     fn remove_expired(&self, state: &mut SessionState) -> Result<(), AccountSessionError> {
@@ -108,18 +121,29 @@ impl<P: SessionPersistence> AccountSession<P> {
     }
 
     pub fn set(&self, session: Session) -> Result<(), AccountSessionError> {
-        let mut state = self.state.0.write().map_err(|_| AccountSessionError::Poisoned)?;
-        self.replace(&mut state, Some(session))
+        self.with_storage(move |this, state| this.replace(state, Some(session)))
     }
 
     pub fn take(&self) -> Result<Option<Session>, AccountSessionError> {
-        let mut state = self.state.0.write().map_err(|_| AccountSessionError::Poisoned)?;
-        let previous = state.session.clone();
-        self.replace(&mut state, None)?;
-        Ok(previous)
+        self.with_storage(|this, state| {
+            let previous = state.session.clone();
+            this.replace(state, None)?;
+            Ok(previous)
+        })
     }
 
-    /// The state lock covers persistence as well as book to token readers.
+    fn with_storage<T: Send + 'static>(&self, operation: impl FnOnce(&Self, &mut SessionState) -> Result<T, AccountSessionError> + Send + 'static) -> Result<T, AccountSessionError> {
+        let this = self.clone();
+        self.persistence
+            .run(move || {
+                let mut state = this.state.0.write().map_err(|_| AccountSessionError::Poisoned)?;
+                operation(&this, &mut state)
+            })
+            .map_err(AccountSessionError::Persistence)?
+    }
+
+    /// Called on the storage owner: persistence completes before publishing
+    /// credentials, without holding this lock while waiting on another worker.
     fn replace(&self, state: &mut SessionState, session: Option<Session>) -> Result<(), AccountSessionError> {
         if let Some(session) = &session {
             if !Self::is_usable(session, &self.server) {
@@ -153,11 +177,12 @@ impl<P: SessionPersistence> AccountSession<P> {
         Fut: Future<Output = Result<Session, AuthError>>,
     {
         let _guard = self.refresh.lock().await;
-        let (session, generation) = {
-            let mut state = self.state.0.write().map_err(|_| AccountSessionError::Poisoned)?;
-            self.remove_expired(&mut state)?;
-            let Some(session) = state.session.clone() else { return Ok(None) };
-            (session, state.generation)
+        let Some((session, generation)) = self.with_storage(|this, state| {
+            this.remove_expired(state)?;
+            Ok(state.session.clone().map(|session| (session, state.generation)))
+        })?
+        else {
+            return Ok(None);
         };
         if rejected_token.is_some_and(|token| token != session.token()) || (rejected_token.is_none() && !session.expires_within(REFRESH_WINDOW_SECONDS)) {
             return Ok(Some(session));
@@ -173,22 +198,23 @@ impl<P: SessionPersistence> AccountSession<P> {
     }
 
     fn finish_refresh(&self, generation: u64, result: Result<Option<Session>, AuthError>) -> Result<Option<Session>, AccountSessionError> {
-        let mut state = self.state.0.write().map_err(|_| AccountSessionError::Poisoned)?;
-        self.remove_expired(&mut state)?;
-        // Neither a delayed success nor a rejection may modify a newer login/logout.
-        if state.generation != generation {
-            return Err(AccountSessionError::Changed);
-        }
-        match result {
-            Ok(session) => self.replace(&mut state, session)?,
-            Err(error) => {
-                if error.is_unauthorized() || matches!(error, AuthError::InvalidData(_)) {
-                    self.replace(&mut state, None)?;
-                }
-                return Err(AccountSessionError::Authentication(error));
+        self.with_storage(move |this, state| {
+            this.remove_expired(state)?;
+            // Neither a delayed success nor a rejection may modify a newer login/logout.
+            if state.generation != generation {
+                return Err(AccountSessionError::Changed);
             }
-        }
-        Ok(state.session.clone())
+            match result {
+                Ok(session) => this.replace(state, session)?,
+                Err(error) => {
+                    if error.is_unauthorized() || matches!(error, AuthError::InvalidData(_) | AuthError::Wire(_)) {
+                        this.replace(state, None)?;
+                    }
+                    return Err(AccountSessionError::Authentication(error));
+                }
+            }
+            Ok(state.session.clone())
+        })
     }
 
     pub async fn request<T>(&self, mut request: impl for<'a> FnMut(&'a Session) -> SessionFuture<'a, Result<T, AuthError>>) -> Result<T, AccountSessionError> {
@@ -203,7 +229,7 @@ impl<P: SessionPersistence> AccountSession<P> {
         }
     }
 
-    fn is_usable(session: &Session, server: &ServerUrl) -> bool {
+    fn is_usable(session: &Session, server: &Url) -> bool {
         session.server_url() == server && !Self::is_expired(session)
     }
 
@@ -218,8 +244,8 @@ impl<P: SessionPersistence> AccountSession<P> {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[derive(Clone, Debug, Default)]
     struct MemoryPersistence(Arc<RwLock<Option<Session>>>);

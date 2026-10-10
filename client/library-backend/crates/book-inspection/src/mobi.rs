@@ -1,120 +1,30 @@
 //! Metadata first; bounded native MOBI text inspection is an enrichment fallback.
 use super::*;
-use ::mobi::{
-    headers::{Encryption, ExthRecord},
-    Mobi, MobiMetadata,
-};
+#[cfg(test)]
+use book_content::mobi::{ExthRecord, MobiMetadata};
 use regex::Regex;
 use std::sync::OnceLock;
 
 pub fn inspect_mobi_metadata_reader(path: &Path, reader: impl Read) -> MetadataResult<BookRecord> {
-    metadata(path, &MobiMetadata::from_read(reader)?)
+    metadata_from_declared(path, book_content::mobi::read_metadata(reader)?)
 }
 
-fn metadata(path: &Path, raw: &MobiMetadata) -> MetadataResult<BookRecord> {
-    if raw.encryption() != Encryption::No {
-        return Err("DRM-protected MOBI books are not supported".into());
-    }
-    let mut book = fallback_metadata(path);
-    let title = raw.title();
-    if !title.trim().is_empty() {
-        book.title = title;
-    }
-    book.description = raw.description().unwrap_or_default();
-    for (key, values) in raw.exth.records() {
-        // These are textual bibliographic fields. Binary layout/DRM records
-        // must not become ISBNs merely because some bytes resemble digits.
-        if !matches!(
-            key,
-            ExthRecord::Title
-                | ExthRecord::Author
-                | ExthRecord::Publisher
-                | ExthRecord::Imprint
-                | ExthRecord::Description
-                | ExthRecord::Isbn
-                | ExthRecord::Asin
-                | ExthRecord::Subject
-                | ExthRecord::Subjectcode
-                | ExthRecord::Source
-                | ExthRecord::Rights
-                | ExthRecord::PublishDate
-                | ExthRecord::Language
-                | ExthRecord::Contributor
-        ) {
-            continue;
-        }
-        for value in values.into_iter().filter(|value| !value.trim().is_empty()) {
-            let source = format!("mobi:exth:{}", key.position());
-            if let Some(isbn) = book_model::from_metadata_value(&value) {
-                book_model::push_isbn(&mut book.book.identifiers, isbn, Scope::Book)?;
-            } else if *key == ExthRecord::Asin {
-                let asin = value.trim().to_ascii_uppercase();
-                if asin.len() == 10 && asin.starts_with('B') && asin.bytes().all(|b| b.is_ascii_alphanumeric()) {
-                    book.book.identifiers.push(Identifier::new(asin, Scheme::Asin, Scope::Book)?);
-                }
-            }
-            match key {
-                ExthRecord::Author => book.contributors.extend(author_names(&value).into_iter().filter_map(author_from_field)),
-                ExthRecord::Publisher | ExthRecord::Imprint => {
-                    if let Ok(publisher) = PublisherCredit::new(value) {
-                        book.book.publishers.push(publisher);
-                    }
-                }
-                ExthRecord::PublishDate => {
-                    if let Ok(date) = BookDate::new(None, value, None, &source) {
-                        book.book.dates.push(date);
-                    }
-                }
-                ExthRecord::Language => {
-                    if let Ok(language) = LanguageTag::parse(value) {
-                        book.book.languages.push(language);
-                    }
-                }
-                ExthRecord::Subject | ExthRecord::Subjectcode => {
-                    let authority = if evidence::usable_lcc(&value) {
-                        Some("lcc")
-                    } else if !subject_projection::unified_subject_paths(subject_projection::BISAC_SYSTEM_ID, &value).is_empty() {
-                        Some("bisac")
-                    } else {
-                        None
-                    };
-                    if let Ok(subject) = BookSubject::new(None, &value, &source, authority.map(str::to_owned), authority.map(|_| value.clone())) {
-                        book.book.subjects.push(subject);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    book.normalize_title();
-    Ok(book)
+/// Metadata and usable navigation, sharing one parsed MOBI container.
+pub fn inspect_mobi_reader(path: &Path, reader: impl Read + Seek + Send + 'static) -> MetadataResult<(BookRecord, Vec<BookTocEntry>)> {
+    let mut book = Book::open_reader(ContainerFormat::Mobi, reader)?;
+    let metadata = metadata_from_book(path, &mut book)?;
+    let toc = book_toc_entries(book.toc()?.unwrap_or_default());
+    Ok((metadata, toc))
+}
+
+#[cfg(test)]
+fn metadata_from_raw(path: &Path, raw: &MobiMetadata) -> MetadataResult<BookRecord> {
+    metadata_from_declared(path, book_content::mobi::declared_metadata(raw))
 }
 
 pub fn inspect_mobi_pages_reader(path: &Path, reader: impl Read) -> MetadataResult<BookRecord> {
-    // Bound input and decompression independently; inspection never expands the
-    // entire book. The existing decoder is retained, including its encoding support.
-    const MAX_INPUT: usize = 16 * 1024 * 1024;
-    let mut bytes = Vec::new();
-    reader.take((MAX_INPUT + 1) as u64).read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_INPUT {
-        return Err("MOBI exceeds the 16 MiB inspection limit".into());
-    }
-    let mut mobi = Mobi::new(&bytes)?;
-    let mut book = metadata(path, &mobi.metadata)?;
-    let start = mobi.readable_records_range().start;
-    let end = mobi.readable_records_range().end.min(start + 32);
-    if start >= end || end > mobi.metadata.records.records.len() {
-        return Err("Invalid MOBI text record range".into());
-    }
-    let offsets = &mobi.metadata.records.records;
-    if offsets.iter().any(|record| record.offset as usize > mobi.content.len()) {
-        return Err("Invalid MOBI record offsets".into());
-    }
-    if offsets[start..end].windows(2).any(|pair| pair[1].offset - pair[0].offset > 64 * 1024) {
-        return Err("Oversized MOBI text record".into());
-    }
-    mobi.metadata.mobi.first_non_book_index = end as u32;
-    let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| mobi.content_as_string_lossy())).map_err(|_| "MOBI text decoder rejected malformed content")?;
+    let (metadata, text) = book_content::mobi::inspect_text(reader)?;
+    let mut book = metadata_from_declared(path, metadata)?;
     static TAGS: OnceLock<Regex> = OnceLock::new();
     static BLOCKS: OnceLock<Regex> = OnceLock::new();
     static PAGES: OnceLock<Regex> = OnceLock::new();
@@ -165,33 +75,10 @@ pub fn inspect_mobi_pages_reader(path: &Path, reader: impl Read) -> MetadataResu
 mod tests {
     use super::*;
     #[test]
-    fn reads_all_authors_identifiers_and_book_fields() {
-        let mut raw = MobiMetadata::default();
-        for (key, value) in [
-            (ExthRecord::Author, "First Author"),
-            (ExthRecord::Author, "Second Author"),
-            (ExthRecord::Publisher, "Oxford University Press"),
-            (ExthRecord::PublishDate, "2002"),
-            (ExthRecord::Isbn, "0-19-285421-6"),
-            (ExthRecord::Asin, "B005DKR49W"),
-            (ExthRecord::Subjectcode, "B74"),
-            (ExthRecord::Language, "en"),
-        ] {
-            raw.exth.records.entry(key).or_default().push(value.as_bytes().to_vec());
-        }
-        let book = metadata(Path::new("Philosophy.mobi"), &raw).unwrap();
-        assert_eq!(book.contributors.len(), 2);
-        assert_eq!(book.book.publishers.len(), 1);
-        assert_eq!(book.book.dates.len(), 1);
-        assert!(book.book.identifiers.iter().any(|id| id.scheme() == &Scheme::Isbn));
-        assert!(book.book.identifiers.iter().any(|id| id.scheme() == &Scheme::Asin));
-        assert!(book.book.subjects.iter().any(|s| s.code() == Some("B74")));
-    }
-    #[test]
     fn invalid_asin_uuid_is_not_identity_and_mislabelled_isbn_is_recovered() {
         let mut raw = MobiMetadata::default();
         raw.exth.records.insert(ExthRecord::Asin, vec![b"9780192854216".to_vec(), b"814e491c-9ed1-43a5-b4ee-517c1a9b772c".to_vec()]);
-        let book = metadata(Path::new("book.mobi"), &raw).unwrap();
+        let book = metadata_from_raw(Path::new("book.mobi"), &raw).unwrap();
         assert_eq!(book.book.identifiers.len(), 1);
         assert_eq!(book.book.identifiers[0].scheme(), &Scheme::Isbn);
     }

@@ -1,14 +1,16 @@
 //! The page warmer and seekable parser share one bounded block cache.
-use crate::range_cache::RangeCache;
+use crate::range_cache::{seek_position, RangeCache, BLOCK_BYTES, MAX_BUNDLE_BYTES};
+use crate::range_reader::validate_prefix;
+use crate::BoxedBookReader;
 use pdf_view_common::{PdfByteRange, PdfDependencyIndex, PdfPageSource};
 use std::{
     collections::BTreeSet,
     io::{self, Read, Seek, SeekFrom},
     sync::{Arc, Mutex},
 };
-const BLOCK: u64 = 64 * 1024;
+const BLOCK: u64 = BLOCK_BYTES as u64;
 const CAPACITY: usize = 256;
-pub type Fetch = Box<dyn FnMut(Vec<(u64, usize)>) -> io::Result<Vec<u8>> + Send + Sync>;
+pub use crate::BundleFetch as Fetch;
 struct State {
     cache: RangeCache,
     fetch: Fetch,
@@ -21,10 +23,11 @@ struct Reader {
     source: Arc<Source>,
     position: u64,
 }
-pub fn open(index: PdfDependencyIndex, prefix: Vec<u8>, fetch: Fetch) -> Result<(crate::BoxedBookReader, Arc<dyn PdfPageSource>), String> {
-    if !index.valid(index.pages.len()) || prefix.len() != index.length.min(BLOCK) as usize {
-        return Err("invalid PDF page source".into());
+pub fn open(index: PdfDependencyIndex, prefix: Vec<u8>, fetch: Fetch) -> io::Result<(BoxedBookReader, Arc<dyn PdfPageSource>)> {
+    if !index.valid(index.pages.len()) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid PDF page source"));
     }
+    validate_prefix(index.length, &prefix)?;
     let mut cache = RangeCache::new(CAPACITY);
     cache.insert(0, prefix);
     let source = Arc::new(Source { index, state: Mutex::new(State { cache, fetch }) });
@@ -45,7 +48,7 @@ impl Source {
         }
         let mut state = self.state.lock().map_err(|_| io::Error::other("PDF byte cache poisoned"))?;
         let missing = blocks.into_iter().filter(|offset| !state.cache.contains(*offset)).collect::<Vec<_>>();
-        for batch in missing.chunks(64) {
+        for batch in missing.chunks(MAX_BUNDLE_BYTES / BLOCK_BYTES) {
             let mut spans: Vec<(u64, usize)> = Vec::new();
             for &offset in batch {
                 let count = (self.index.length - offset).min(BLOCK) as usize;
@@ -58,16 +61,7 @@ impl Source {
                 spans.push((offset, count));
             }
             let bytes = (state.fetch)(spans.clone())?;
-            if bytes.len() != spans.iter().map(|(_, n)| n).sum::<usize>() {
-                return Err(io::Error::other("incomplete PDF bundle"));
-            }
-            let mut consumed = 0;
-            for (offset, length) in spans {
-                for (i, chunk) in bytes[consumed..consumed + length].chunks(BLOCK as usize).enumerate() {
-                    state.cache.insert(offset + i as u64 * BLOCK, chunk.to_vec());
-                }
-                consumed += length;
-            }
+            state.cache.insert_ranges(&spans, &bytes)?;
         }
         Ok(())
     }
@@ -90,10 +84,7 @@ impl Read for Reader {
             let offset = self.position / BLOCK * BLOCK;
             let length = (self.source.index.length - offset).min(BLOCK) as usize;
             let data = (state.fetch)(vec![(offset, length)])?;
-            if data.len() != length {
-                return Err(io::Error::other("incomplete PDF range"));
-            }
-            state.cache.insert(offset, data);
+            state.cache.insert_range(offset, length, data)?;
         }
         let count = state.cache.read(self.position, bytes);
         self.position += count as u64;
@@ -102,12 +93,7 @@ impl Read for Reader {
 }
 impl Seek for Reader {
     fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
-        let next = match from {
-            SeekFrom::Start(n) => n as i128,
-            SeekFrom::End(n) => self.source.index.length as i128 + n as i128,
-            SeekFrom::Current(n) => self.position as i128 + n as i128,
-        };
-        self.position = u64::try_from(next).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid PDF seek"))?;
+        self.position = seek_position(self.position, self.source.index.length, from)?;
         Ok(self.position)
     }
 }

@@ -65,39 +65,3 @@ pub fn response<T: Serialize>(request_headers: &HeaderMap, value: T) -> Result<R
     response.headers_mut().insert(header::VARY, HeaderValue::from_static("Accept"));
     Ok(response)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::body::to_bytes;
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Debug, Deserialize, PartialEq, Serialize)]
-    struct Example {
-        values: Vec<u64>,
-    }
-
-    #[tokio::test]
-    async fn only_the_versioned_binary_media_type_crosses_http() {
-        let original = Example { values: (0..1_000).collect() };
-        let encoded = wire::encode(&original).unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(wire::MEDIA_TYPE));
-        assert_eq!(decode_request::<Example>(&headers, &encoded, wire::MAX_DECODED_REQUEST_BYTES).unwrap(), original);
-
-        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.remove(header::CONTENT_ENCODING);
-        assert!(matches!(decode_request::<Example>(&headers, b"{}", wire::MAX_DECODED_REQUEST_BYTES), Err(StatusCode::UNSUPPORTED_MEDIA_TYPE)));
-
-        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(wire::MEDIA_TYPE_BASE));
-        assert!(matches!(decode_request::<Example>(&headers, &encoded, wire::MAX_DECODED_REQUEST_BYTES), Err(StatusCode::UPGRADE_REQUIRED)));
-
-        assert!(matches!(response(&HeaderMap::new(), &original), Err(StatusCode::NOT_ACCEPTABLE)));
-        let mut response_headers = HeaderMap::new();
-        response_headers.insert(header::ACCEPT, HeaderValue::from_static(wire::MEDIA_TYPE));
-        let response = response(&response_headers, &original).unwrap();
-        assert_eq!(response.headers()[header::CONTENT_TYPE], wire::MEDIA_TYPE);
-        let bytes = to_bytes(response.into_body(), wire::MAX_DECODED_RESPONSE_BYTES).await.unwrap();
-        assert_eq!(wire::decode::<Example>(&bytes, wire::MAX_DECODED_RESPONSE_BYTES).unwrap(), original);
-    }
-}

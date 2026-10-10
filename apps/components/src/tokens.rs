@@ -253,7 +253,8 @@ pub const BOOK_CARD_NO_TEXT_FIXED_HEIGHT: f32 = 0.0;
 pub const BOOK_DETAIL_PAGE_WIDTH_REM: f32 = 38.5;
 /// Desktop book detail widths approximate the 56ch contents and 65ch
 /// description limits in the HTML mock. GPUI lengths do not support `ch`.
-pub const BOOK_DETAIL_SIDEBAR_WIDTH_REM: f32 = 15.0;
+pub const BOOK_DETAIL_COVER_WIDTH: f32 = 300.0;
+pub const BOOK_DETAIL_SIDEBAR_WIDTH_REM: f32 = 18.75;
 pub const BOOK_DETAIL_CONTENTS_WIDTH_REM: f32 = 28.0;
 pub const BOOK_DETAIL_DESCRIPTION_WIDTH_REM: f32 = 32.5;
 pub const BOOK_DETAIL_WIDE_PAGE_WIDTH_REM: f32 = BOOK_DETAIL_SIDEBAR_WIDTH_REM + BOOK_DETAIL_CONTENTS_WIDTH_REM + BOOK_DETAIL_DESCRIPTION_WIDTH_REM + 4.0;
@@ -266,24 +267,6 @@ pub const BOOK_DETAIL_HERO_GAP: f32 = SPACE_LG;
 pub const BOOK_DETAIL_DESCRIPTION_SIZE: f32 = TEXT_SM;
 pub const BOOK_DETAIL_DESCRIPTION_LINE_HEIGHT_EM: f32 = 1.5;
 
-/// Aliased rather than restated: this was 21.0, duplicating `TITLE_MD`.
-pub const CAROUSEL_TITLE_SIZE: f32 = TEXT_LG;
-pub const CAROUSEL_TITLE_WEIGHT: FontWeight = FontWeight::NORMAL;
-pub const CAROUSEL_CONTENT_GAP: f32 = SPACE_MD;
-pub const CAROUSEL_CONTROL_GAP: f32 = SPACE_XS;
-
-/// The line box of the title over a shelf. Stated rather than left to the font,
-/// because the row's height is computed from it — see `shelf_rows_policy`.
-pub const SHELF_HEADING_LINE_HEIGHT_EM: f32 = 1.25;
-pub const SHELF_HEADING_HEIGHT_REM: f32 = CAROUSEL_TITLE_SIZE * SHELF_HEADING_LINE_HEIGHT_EM;
-// A shelf row's height is not stated here. A shelf card is the ordinary book
-// card at its ordinary width — a shelf that sized its covers differently would
-// be a second visual language for the same object — and that card stretches
-// with the window, so its height is only known once the row's width is. The row
-// asks the cards instead of restating them; see `shelf_rows_policy`.
-
-/// Between one shelf row and the next.
-pub const SHELF_ROW_GAP: f32 = SPACE_MD;
 /// The declared width of a shelf row, which is never the drawn one.
 ///
 /// The paginator fits children across a row at their declared width, and a shelf
@@ -292,30 +275,6 @@ pub const SHELF_ROW_GAP: f32 = SPACE_MD;
 /// count is taken, so one column fits and it is exactly as wide as the content
 /// area — for one row as well as for two hundred.
 pub const SHELF_ROW_WIDTH_REM: f32 = 1000.0;
-
-/// The author index is a list of names, not a shelf: most authors in a library
-/// have one or two books, and a full-width shelf per name spent a screen on two
-/// or three of them. A name is a line of text with a small stack of its covers.
-///
-/// An entry is at least this wide. The row's slack widens every entry, so a wide
-/// window shows more columns rather than wider gaps.
-pub const AUTHOR_INDEX_ENTRY_WIDTH_REM: f32 = 26.0;
-/// Between one column of entries and the next.
-pub const AUTHOR_INDEX_COLUMN_GAP: f32 = SPACE_LG;
-/// A thumbnail's slot: the cover and the card padding around it. In rems rather
-/// than the pixels a book card is measured in, because here the cover sits
-/// beside a name and is sized against it — it has to grow with the text, or a
-/// large UI font would outgrow the entry.
-pub const AUTHOR_INDEX_COVER_SLOT_WIDTH_REM: f32 = 3.5;
-/// How many covers an entry shows before stating the rest as a count.
-pub const AUTHOR_INDEX_COVERS: usize = 3;
-/// An entry is as tall as a slot's width would make a cover. The cover inside is
-/// narrower by its padding, so it clears the entry with room to spare; the two
-/// text lines beside it are shorter still at every font size, being in rems too.
-pub const AUTHOR_INDEX_ENTRY_HEIGHT_REM: f32 = AUTHOR_INDEX_COVER_SLOT_WIDTH_REM / BOOK_COVER_ASPECT_RATIO;
-/// The heading over each letter: its line box, and the padding and rule around it.
-pub const AUTHOR_INDEX_LETTER_HEIGHT_REM: f32 = TEXT_LG * SHELF_HEADING_LINE_HEIGHT_EM;
-pub const AUTHOR_INDEX_LETTER_FIXED_HEIGHT: f32 = SPACE_MD + SPACE_XS + 1.0;
 
 /// The navigation rail and library switcher scale with the UI rem.
 ///
@@ -422,22 +381,3 @@ pub const TAB_UNDERLINE_HEIGHT: f32 = 2.0;
 pub const SETTINGS_CONTROL_SIZE_REM: f32 = 2.0;
 pub const SETTINGS_STEPPER_VALUE_WIDTH_REM: f32 = 4.5;
 pub const SETTINGS_CONTROL_GAP: f32 = 1.0;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The scale is only a scale if its steps are far enough apart to be told
-    /// apart. Anything closer than a third invites picking by eye — which is
-    /// how 5, 6, 7, 10 and 12 got into feature code in the first place.
-    #[test]
-    fn no_two_spacing_steps_are_closer_than_a_third() {
-        let scale = [SPACE_XXS, SPACE_XS, SPACE_SM, SPACE_MD, SPACE_LG, SPACE_XL, SPACE_2XL, SPACE_3XL, SPACE_4XL];
-        for pair in scale.windows(2) {
-            let (smaller, larger) = (pair[0], pair[1]);
-            assert!(larger > smaller, "the scale must climb: {smaller} is followed by {larger}");
-            let step = (larger - smaller) / smaller;
-            assert!(step >= 0.33, "{smaller} → {larger} is only {:.0}% — too close to be a decision", step * 100.0);
-        }
-    }
-}

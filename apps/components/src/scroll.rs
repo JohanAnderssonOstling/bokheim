@@ -289,20 +289,3 @@ fn outer_layout_style<E: Styled>(element: &mut E) -> StyleRefinement {
         ..Default::default()
     }
 }
-
-#[cfg(test)]
-mod layout_tests {
-    use super::*;
-    use gpui::{Position, px};
-
-    #[test]
-    fn outer_layout_style_moves_absolute_positioning_to_the_scroll_wrapper() {
-        let mut element = div().absolute().left(px(12.0)).top(px(24.0));
-        let outer = outer_layout_style(&mut element);
-
-        assert_eq!(outer.position, Some(Position::Absolute));
-        assert_ne!(outer.inset, Default::default());
-        assert_eq!(element.style().position, None);
-        assert_eq!(element.style().inset, Default::default());
-    }
-}

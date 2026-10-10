@@ -1,16 +1,5 @@
 //! GPUI reader surfaces embedded by the application shell.
 
-/// Records a book-open startup phase against the `book_startup` log target.
-///
-/// Book launch is profiled phase by phase on slow e-ink hardware. Routing the
-/// trace through `log` keeps it off stdout in normal runs while leaving one
-/// named seam to redirect if the device workflow needs something else.
-macro_rules! startup_phase {
-    ($($arg:tt)*) => {
-        log::debug!(target: "book_startup", $($arg)*)
-    };
-}
-
 mod book;
 mod epub;
 mod invalidation;
@@ -55,6 +44,9 @@ actions!(
         PreviousSection,
         NextSection,
         ToggleToc,
+        ToggleSidebar,
+        NextSidebarTab,
+        PreviousSidebarTab,
         FocusReaderSearch,
         ToggleSearch,
         CloseSearch,

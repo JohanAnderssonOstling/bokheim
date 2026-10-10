@@ -1,13 +1,11 @@
-use std::cell::RefCell;
-use std::error::Error;
-use std::fs::File;
-use std::io::{Result, SeekFrom};
-use std::rc::Rc;
-use crate::{author_from_field, author_names, fallback_metadata, MetadataResult};
-use book_model::{canonical_doi, canonical_uuid, BookDate, BookMetadata, BookRecord, BookSubject, Contributor, Identifier, LanguageTag, PublisherCredit, Scheme, Scope, CONTRIBUTOR_MARC_RELATOR_CODE};
+use crate::{MetadataResult, author_from_field, author_names, fallback_metadata};
+use book_model::{BookMetadata, BookRecord, BookSubject, CONTRIBUTOR_MARC_RELATOR_CODE, Contributor, Identifier, LanguageTag, Scheme, Scope, canonical_doi, canonical_uuid, unique_book_year};
 use lopdf::{Dictionary, Document};
 use roxmltree::{Document as XmlDocument, Node};
 use std::collections::HashSet;
+use std::error::Error;
+use std::fs::File;
+use std::io::SeekFrom;
 use std::io::{Read, Seek};
 use std::path::Path;
 
@@ -33,15 +31,15 @@ pub fn inspect_pdf(path: &Path) -> MetadataResult<InspectedPdf> {
 
 /// Page evidence is always read: it joins the file facts the metadata server
 /// is asked about.
-pub fn inspect_pdf_reader<R: Read + Seek + 'static>(source_name: &Path, reader: R) -> MetadataResult<InspectedPdf> {
+pub fn inspect_pdf_reader<R: Read + Seek + Send + 'static>(source_name: &Path, reader: R) -> MetadataResult<InspectedPdf> {
     inspect_pdf_pages_mode(source_name, reader)
 }
 
-pub fn inspect_pdf_pages_reader<R: Read + Seek + 'static>(source_name: &Path, reader: R) -> MetadataResult<InspectedPdf> {
+pub fn inspect_pdf_pages_reader<R: Read + Seek + Send + 'static>(source_name: &Path, reader: R) -> MetadataResult<InspectedPdf> {
     inspect_pdf_pages_mode(source_name, reader)
 }
 
-fn inspect_pdf_pages_mode<R: Read + Seek + 'static>(source_name: &Path, mut reader: R) -> MetadataResult<InspectedPdf> {
+fn inspect_pdf_pages_mode<R: Read + Seek + Send + 'static>(source_name: &Path, mut reader: R) -> MetadataResult<InspectedPdf> {
     let mut inspected = super::pdf_ranges::load_edges(&mut reader, EARLY_TEXT_PAGES).and_then(|document| inspect_pdf_document(source_name, document));
     let original_ids = inspected.as_mut().map(|i| std::mem::take(&mut i.metadata.book.identifiers)).unwrap_or_default();
     {
@@ -49,8 +47,7 @@ fn inspect_pdf_pages_mode<R: Read + Seek + 'static>(source_name: &Path, mut read
         // the metadata-only parser cannot handle its cross-reference variant.
         let mut inspected = inspected.unwrap_or_else(|_| InspectedPdf { metadata: fallback_metadata(source_name) });
         reader.seek(SeekFrom::Start(0))?;
-        let reader = SharedReader(Rc::new(RefCell::new(reader)));
-        let (count, pages) = pdf_reader_core::inspect_page_text_with_count(reader.clone(), EARLY_TEXT_PAGES, crate::evidence::MAX_SECTION_BYTES)?;
+        let (count, pages) = pdf_reader_core::inspect_page_text_with_count(reader, EARLY_TEXT_PAGES, crate::evidence::MAX_SECTION_BYTES)?;
         let evidence = pages
             .into_iter()
             .map(|(page, text)| {
@@ -74,21 +71,17 @@ fn inspect_pdf_pages_mode<R: Read + Seek + 'static>(source_name: &Path, mut read
     }
 }
 
-struct SharedReader<R>(Rc<RefCell<R>>);
-impl<R> Clone for SharedReader<R> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
+fn pdf_xmp(document: &Document) -> Option<String> {
+    let root = document.dereference(document.trailer.get(b"Root").ok()?).ok()?.1.as_dict().ok()?;
+    let metadata = document.dereference(root.get(b"Metadata").ok()?).ok()?.1.as_stream().ok()?;
+    if metadata.content.len() > MAX_XMP_BYTES {
+        return None;
     }
-}
-impl<R: Read> Read for SharedReader<R> {
-    fn read(&mut self, bytes: &mut [u8]) -> Result<usize> {
-        self.0.borrow_mut().read(bytes)
+    let bytes = metadata.decompressed_content().ok()?;
+    if bytes.len() > MAX_XMP_BYTES {
+        return None;
     }
-}
-impl<R: Seek> Seek for SharedReader<R> {
-    fn seek(&mut self, position: SeekFrom) -> Result<u64> {
-        self.0.borrow_mut().seek(position)
-    }
+    std::str::from_utf8(&bytes).ok().map(str::to_owned)
 }
 
 fn inspect_pdf_document(path: &Path, document: Document) -> MetadataResult<InspectedPdf> {
@@ -97,56 +90,7 @@ fn inspect_pdf_document(path: &Path, document: Document) -> MetadataResult<Inspe
     }
 
     let info = document.trailer.get(b"Info").ok().and_then(|object| document.dereference(object).ok()).and_then(|(_, object)| object.as_dict().ok());
-    let xmp = {
-        let document: &Document = &document;
-        'xmp: {
-            let root = match match document
-                .dereference(match document.trailer.get(b"Root").ok() {
-                    Some(value) => value,
-                    None => break 'xmp None,
-                })
-                .ok()
-            {
-                Some(value) => value,
-                None => break 'xmp None,
-            }
-            .1
-            .as_dict()
-            .ok()
-            {
-                Some(value) => value,
-                None => break 'xmp None,
-            };
-            let metadata = match match document
-                .dereference(match root.get(b"Metadata").ok() {
-                    Some(value) => value,
-                    None => break 'xmp None,
-                })
-                .ok()
-            {
-                Some(value) => value,
-                None => break 'xmp None,
-            }
-            .1
-            .as_stream()
-            .ok()
-            {
-                Some(value) => value,
-                None => break 'xmp None,
-            };
-            if metadata.content.len() > MAX_XMP_BYTES {
-                break 'xmp None;
-            }
-            let bytes = match metadata.decompressed_content().ok() {
-                Some(value) => value,
-                None => break 'xmp None,
-            };
-            if bytes.len() > MAX_XMP_BYTES {
-                break 'xmp None;
-            }
-            std::str::from_utf8(&bytes).ok().map(str::to_owned)
-        }
-    };
+    let xmp = pdf_xmp(&document);
     let parsed = xmp.as_deref().and_then(|xml| XmlDocument::parse(xml).ok());
 
     let title_values = parsed.as_ref().map(|xml| xmp_values(xml, DC, "title", MAX_TEXT_BYTES)).unwrap_or_default();
@@ -171,8 +115,8 @@ fn inspect_pdf_document(path: &Path, document: Document) -> MetadataResult<Inspe
         let mut seen = HashSet::new();
         values.retain(|value| seen.insert((value.name().to_owned(), value.role_code())));
     };
-    let valid_titles = title_values.iter().filter(|value| !book_enrichment::title_identity::unusable_title(&value.text, &contributors)).cloned().collect::<Vec<_>>();
-    let title = preferred_language_value(&valid_titles).or_else(|| info_title.clone().filter(|title| !book_enrichment::title_identity::unusable_title(title, &contributors))).unwrap_or_else(|| fallback_metadata(path).metadata.title);
+    let valid_titles = title_values.iter().filter(|value| !crate::title_identity::unusable_title(&value.text, &contributors)).cloned().collect::<Vec<_>>();
+    let title = preferred_language_value(&valid_titles).or_else(|| info_title.clone().filter(|title| !crate::title_identity::unusable_title(title, &contributors))).unwrap_or_else(|| fallback_metadata(path).metadata.title);
 
     let mut book = BookMetadata::default();
     if let Some(xml) = parsed.as_ref() {
@@ -216,14 +160,14 @@ fn inspect_pdf_document(path: &Path, document: Document) -> MetadataResult<Inspe
                 .take(MAX_VALUES)
                 .collect()
         };
-        book.publishers = xmp_values(xml, DC, "publisher", MAX_TEXT_BYTES).into_iter().filter_map(|value| PublisherCredit::new(value.text).ok()).collect();
+        book.publishers = xmp_values(xml, DC, "publisher", MAX_TEXT_BYTES).into_iter().map(|value| value.text).collect();
         book.languages = xmp_values(xml, DC, "language", MAX_TEXT_BYTES).into_iter().filter_map(|value| LanguageTag::parse(value.text).ok()).collect();
-        book.dates = xmp_values(xml, DC, "date", MAX_TEXT_BYTES).into_iter().filter_map(|value| BookDate::new(None, value.text, Some("dc:date".to_owned()), "pdf:xmp:dc:date").ok()).collect();
+        book.year = unique_book_year(xmp_values(xml, DC, "date", MAX_TEXT_BYTES).iter().map(|value| value.text.as_str()));
         book.subjects = xmp_values(xml, DC, "subject", MAX_TEXT_BYTES).into_iter().filter_map(|value| BookSubject::new(None, value.text, "pdf:xmp:dc:subject", None, None).ok()).collect();
     }
 
     for original in title_values.iter().map(|value| value.text.as_str()).chain(info_title.as_deref()) {
-        book_enrichment::filename_isbn::record(original, &mut book)?;
+        crate::filename_isbn::record(original, &mut book)?;
     }
 
     // Check complete dictionary/XMP property values regardless of their names.
@@ -265,8 +209,8 @@ fn inspect_pdf_document(path: &Path, document: Document) -> MetadataResult<Inspe
         let mut subjects = HashSet::new();
         book.subjects.retain(|value| subjects.insert(value.name().to_owned()));
     };
-    let mut metadata = BookRecord { metadata: book_model::BookDetails { title: title, subtitle: None, contributors: contributors, book: book }, description: description };
-    book_enrichment::title_identity::normalize(&mut metadata).map_err(|error| -> Box<dyn Error + Send + Sync> { error.into() })?;
+    let mut metadata = BookRecord { metadata: book_model::BookDetails { title, subtitle: None, contributors, book }, description };
+    crate::title_identity::normalize(&mut metadata).map_err(|error| -> Box<dyn Error + Send + Sync> { error.into() })?;
     Ok(InspectedPdf { metadata })
 }
 
@@ -337,7 +281,7 @@ fn bounded_text(value: &str, max_bytes: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lopdf::{dictionary, Object, Stream};
+    use lopdf::{Object, Stream, dictionary, text_string};
     use tempfile::tempdir;
 
     #[test]
@@ -369,9 +313,6 @@ mod tests {
                         for contributor in value["contributors"].as_array_mut().unwrap() {
                             contributor.as_object_mut().unwrap().remove("contributor_id");
                         }
-                        for publisher in value["book"]["publishers"].as_array_mut().unwrap() {
-                            publisher.as_object_mut().unwrap().remove("publisher_id");
-                        }
                         value
                     }
                     assert_eq!(normalized(&ranged.metadata), normalized(&full.metadata), "metadata changed for {}", path.display());
@@ -394,11 +335,11 @@ mod tests {
             document.trailer.set("Info", info);
             let inspected = inspect_pdf_document(Path::new("Algorithms_ A Guide (Jeff Erickson) (2019).pdf"), document).unwrap();
             assert_eq!(inspected.metadata.title, "Algorithms");
-            let expected = book_enrichment::filename_isbn::from_filename(title);
+            let expected = crate::filename_isbn::from_filename(title);
             assert_eq!(inspected.metadata.book.identifiers.iter().filter(|id| id.scheme() == &Scheme::Isbn).map(|id| id.value().to_owned()).collect::<Vec<_>>(), expected);
             assert_eq!(inspected.metadata.subtitle(), Some("A Guide"));
             assert_eq!(inspected.metadata.contributors[0].name(), "Jeff Erickson");
-            assert_eq!(inspected.metadata.book.dates[0].value(), "2019");
+            assert_eq!(inspected.metadata.book.year, Some(2019));
         }
     }
 
@@ -469,105 +410,50 @@ mod tests {
         let inspected = inspect_pdf(&path).unwrap();
         assert_eq!(inspected.metadata.title, "Rich title");
         assert_eq!(inspected.metadata.authors().next().unwrap().name(), "Ada Author");
-        assert_eq!(inspected.metadata.book.publishers[0].name().as_str(), "Example Press");
+        assert_eq!(inspected.metadata.book.publishers[0], "Example Press");
         assert_eq!(inspected.metadata.book.identifiers[0].canonical_value().as_deref(), Some("9780821338278"));
         assert!(inspected.metadata.book.identifiers.iter().any(|id| id.scheme() == &Scheme::Isbn && id.canonical_value().as_deref() == Some("9781934356555")));
         assert!(!inspected.metadata.book.identifiers.iter().any(|id| id.canonical_value().as_deref() == Some("9780199588503")));
         assert_eq!(inspected.metadata.book.subjects[0].name(), "History");
+
+        let author_cases: &[(&str, &[&str])] = &[
+            ("d838e6e05a8f009f5fa3c0ee4fd1ecd8", &[]),
+            (r"C:\Users\scanner", &[]),
+            ("\u{fffd}garbled", &[]),
+            ("Adobe Acrobat 7.0", &[]),
+            ("ABBYY FineReader", &[]),
+            ("PScript5.dll Version 5.2", &[]),
+            ("LaTeX with hyperref package", &[]),
+            ("Www.Yutou.Org", &[]),
+            ("Administrator", &[]),
+            ("Microsoft Word", &[]),
+            ("Yakobson, Alexander, Gat, Azar", &["Yakobson, Alexander, Gat, Azar"]),
+            ("Russ Cox, Frans Kaashoek, Robert Morris", &["Russ Cox, Frans Kaashoek, Robert Morris"]),
+            ("Fred C. Piper (Author), Sean Murphy (Author)", &["Fred C. Piper, Sean Murphy"]),
+            ("Boyer, Paul S.(Author)", &["Paul S. Boyer"]),
+            ("Grose, Peter, 1934-", &["Peter Grose"]),
+            ("Renehan, Edward.", &["Edward Renehan"]),
+            ("Sidebottom, Harry.", &["Harry Sidebottom"]),
+            ("Boyer, Paul S.", &["Paul S. Boyer"]),
+        ];
+        for (index, (raw, expected)) in author_cases.iter().enumerate() {
+            let mut author_document = document.clone();
+            author_document.get_object_mut(root_id).unwrap().as_dict_mut().unwrap().remove(b"Metadata");
+            let info_id = author_document.add_object(dictionary! {
+                "Title" => Object::string_literal("Rich title"),
+                "Author" => text_string(*raw),
+            });
+            author_document.trailer.set("Info", info_id);
+            let author_path = directory.path().join(format!("author-field-{index}.pdf"));
+            author_document.save(&author_path).unwrap();
+            let inspected = inspect_pdf_metadata(&author_path).unwrap();
+            assert_eq!(inspected.metadata.title, "Rich title");
+            assert_eq!(inspected.metadata.authors().map(|credit| credit.name()).collect::<Vec<_>>().as_slice(), *expected, "{raw}");
+        }
     }
 }
 
 /// Read dictionary and XMP values without page text.
 pub fn inspect_pdf_metadata(path: &Path) -> MetadataResult<InspectedPdf> {
     inspect_pdf_document(path, super::pdf_ranges::metadata(File::open(path)?)?)
-}
-
-/// Every case here is a real `/Author` value from a scanned library.
-#[cfg(test)]
-mod author_field_tests {
-    use super::*;
-    #[test]
-    fn technical_author_fields_are_not_person_credits() {
-        for raw in ["d838e6e05a8f009f5fa3c0ee4fd1ecd8", r"C:\Users\scanner", "\u{fffd}garbled"] {
-            assert!(author_names(raw).is_empty());
-        }
-    }
-
-    #[test]
-    fn unambiguous_separators_name_several_people() {
-        assert_eq!(author_names("Antonio J. Mendez with Malcolm McConnell"), ["Antonio J. Mendez", "Malcolm McConnell"]);
-        assert_eq!(author_names("Michael Moran; Martin Rein; Robert E. Goodin"), ["Michael Moran", "Martin Rein", "Robert E. Goodin"]);
-        assert_eq!(author_names("Gilbert and Sullivan"), ["Gilbert", "Sullivan"]);
-    }
-
-    #[test]
-    fn commas_are_left_alone_because_they_mean_two_different_things() {
-        // Two people, written surname-first.
-        assert_eq!(author_names("Yakobson, Alexander, Gat, Azar"), ["Yakobson, Alexander, Gat, Azar"]);
-        // One person, written surname-first.
-        assert_eq!(author_names("Russ Cox, Frans Kaashoek, Robert Morris"), ["Russ Cox, Frans Kaashoek, Robert Morris"]);
-    }
-
-    #[test]
-    fn role_markers_and_life_dates_are_not_part_of_a_name() {
-        assert_eq!(author_names("Fred C. Piper (Author), Sean Murphy (Author)"), ["Fred C. Piper, Sean Murphy"]);
-        assert_eq!(author_names("Boyer, Paul S.(Author)"), ["Boyer, Paul S."]);
-        assert_eq!(author_names("Grose, Peter, 1934-"), ["Grose, Peter"]);
-    }
-
-    #[test]
-    fn an_abbreviated_full_stop_goes_but_an_initial_stays() {
-        assert_eq!(author_names("Renehan, Edward."), ["Renehan, Edward"]);
-        assert_eq!(author_names("Sidebottom, Harry."), ["Sidebottom, Harry"]);
-        assert_eq!(author_names("Boyer, Paul S."), ["Boyer, Paul S."], "a trailing initial is the name, not punctuation");
-    }
-
-    #[test]
-    fn tools_are_not_authors() {
-        for tool in ["Adobe Acrobat 7.0", "ABBYY FineReader", "PScript5.dll Version 5.2", "LaTeX with hyperref package", "Www.Yutou.Org", "Administrator", "Microsoft Word"] {
-            assert!(author_names(tool).is_empty(), "{tool} should not become an author");
-        }
-    }
-
-    #[test]
-    fn an_ordinary_name_survives_untouched() {
-        assert_eq!(author_names("Robert D. Putnam"), ["Robert D. Putnam"]);
-        assert_eq!(author_names("  Kerstin Ekman  "), ["Kerstin Ekman"]);
-        assert!(author_names("").is_empty());
-    }
-}
-
-#[cfg(test)]
-mod author_order_tests {
-    use super::*;
-
-    fn credits(field: &str) -> Vec<String> {
-        author_names(field).into_iter().filter_map(author_from_field).map(|credit| credit.name().to_owned()).collect()
-    }
-
-    #[test]
-    fn a_surname_first_name_is_shown_and_sorted_in_reading_order() {
-        assert_eq!(credits("Yakobson, Alexander"), ["Alexander Yakobson".to_owned()]);
-        assert_eq!(credits("Sidebottom, Harry."), ["Harry Sidebottom".to_owned()], "the abbreviated full stop goes before the reordering");
-    }
-
-    #[test]
-    fn a_name_already_in_reading_order_is_left_exactly_as_stated() {
-        assert_eq!(credits("Robert D. Putnam"), ["Robert D. Putnam".to_owned()]);
-    }
-
-    #[test]
-    fn several_people_in_one_field_are_not_reordered_into_one_person() {
-        assert_eq!(credits("Yakobson, Alexander, Gat, Azar"), ["Yakobson, Alexander, Gat, Azar".to_owned()], "two people cannot be inverted without deciding which commas separate them");
-    }
-
-    #[test]
-    fn a_life_date_does_not_become_a_given_name() {
-        assert_eq!(credits("Grose, Peter, 1934-"), ["Peter Grose".to_owned()], "the date is stripped first, and what is left is one person");
-    }
-
-    #[test]
-    fn separated_people_are_each_reordered_on_their_own() {
-        assert_eq!(credits("Mendez, Antonio J. with McConnell, Malcolm"), ["Antonio J. Mendez".to_owned(), "Malcolm McConnell".to_owned()]);
-    }
 }

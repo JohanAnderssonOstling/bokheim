@@ -92,15 +92,12 @@ for module in Path(sys.argv[1]).glob("*/*_bg.wasm"):
 PY_VALIDATE_WASM
 
 cp "$workspace_dir/client/platforms/web/worker_transport.js" "$bundle_dir/worker_transport.js"
-cp "$workspace_dir/client/platforms/web/import_io.js" "$bundle_dir/import_io.js"
 cp "$workspace_dir/apps/web-backend-worker/web_backend_worker_loader.js" "$bundle_dir/web_backend_worker_loader.js"
 cp "$workspace_dir/apps/web-backend-worker/web_backend_database_worker_loader.js" "$bundle_dir/web_backend_database_worker_loader.js"
 
-for worker_source in coordinator.js cpu_worker_loader.js network_worker_loader.js worker_endpoint.js import_worker_loader.js import_worker.js; do
+for worker_source in coordinator.js cpu_worker_loader.js network_worker_loader.js worker_endpoint.js; do
     cp "$workspace_dir/apps/web-backend-worker/$worker_source" "$bundle_dir/$worker_source"
 done
-# Source imports resolve within the repository; packaged workers share a bundle.
-sed -i "s|../../client/platforms/web/import_io.js|./import_io.js|" "$bundle_dir/import_worker.js"
 
 
 cp "$app_dir/pdf_worker.js" "$bundle_dir/pdf_worker.js"

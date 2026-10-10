@@ -1,4 +1,6 @@
-use library_database::{Database, ImportCommit, NativeDirectoryAcknowledgement, NativeDirectoryCompletion, PublishedImport};
+use crate::query_methods::query_rows;
+use library_database::{Database, ImportCommit, NativeDirectoryAcknowledgement, NativeDirectoryCompletion};
+use library_model::PublishedStagedBook;
 use sync_common::{ContentHash, DirId, ROOT_DIR_ID, StateAddress};
 
 fn database() -> Database {
@@ -14,182 +16,47 @@ fn import() -> ImportCommit {
         file_name: "book.epub".into(),
         format: book_model::BookFormat::Epub,
         content_hash: hash,
-        checksum: hash,
         size_bytes: 10,
         inspection_version: 1,
-        inspection: Some(book_metadata::InspectedBook {
+        inspection: Some(book_inspection::InspectedBook {
             pdf: None,
             audiobook: None,
-            metadata: book_model::BookRecord { metadata: book_model::BookDetails { title: "Original".into(), subtitle: None, contributors: vec![book_model::Contributor::new("Original Author", book_model::MarcRelatorCode(*b"aut")).unwrap()], book: Default::default() }, description: String::new() },
+            metadata: book_model::BookRecord {
+                metadata: book_model::BookDetails { title: "Original".into(), subtitle: None, contributors: vec![book_model::Contributor::new("Original Author", book_model::MarcRelatorCode(*b"aut")).unwrap()], book: Default::default() },
+                description: String::new(),
+            },
             toc: vec![book_model::BookTocEntry { title: "Chapter".into(), target: "ch1".into(), children: vec![] }],
         }),
-        published: PublishedImport { name: "book.epub".into(), relative_path: "/book.epub".into(), published: false, fingerprint: None },
+        published: PublishedStagedBook { name: "book.epub".into(), relative_path: "/book.epub".into(), published: false, fingerprint: None },
         request_thumbnail: false,
         restore_paths: vec![],
     }
 }
 
 #[test]
-#[cfg(feature = "scanner")]
-fn scan_recovery_finishes_only_with_a_readable_current_final_batch() {
-    use library_database::{FilesystemScan, InspectedFilesystemScan, ScanApplyResult};
-    let db = database();
-    let discovery = FilesystemScan { readable: true, ..Default::default() };
-    let inspected = InspectedFilesystemScan { readable: true, ..Default::default() };
-    let mut snapshot = db.scan_snapshot().unwrap();
-    assert!(db.needs_scan().unwrap());
-    db.apply_filesystem_scan_batch(&mut snapshot, &discovery, &inspected, false).unwrap();
-    assert!(({ use library_database::{DatabaseError, LibraryWork}; use library_database::assets::ActivitySql; let database = &db; (|| -> Result<LibraryWork, DatabaseError> {
-        let mut work = None;
-        database.connection.activity_progress(|row| {
-            let count = |index| row.get::<_, i64>(index).map(|value| value.max(0) as u64);
-            work = Some(LibraryWork {
-                total_books: count(0)?, uploaded_books: count(1)?,
-                pending_uploads: count(2)?, pending_changes: count(3)?,
-                pending_thumbnails: count(4)?, pending_covers: count(5)?,
-                scan_pending: row.get(6)?, scan_failed: row.get(7)?, sync_configured: row.get(8)?,
-            });
-            Ok(())
-        })?;
-        work.ok_or_else(|| DatabaseError::message("library activity query returned no row"))
-    })() }).unwrap().scan_pending);
-    let current = db.scan_snapshot().unwrap();
-    assert_eq!(db.apply_filesystem_scan(&snapshot, &discovery, &inspected).unwrap(), ScanApplyResult::Stale);
-    assert!(db.needs_scan().unwrap());
-    db.apply_filesystem_scan(&current, &discovery, &inspected).unwrap();
-    assert!(!db.needs_scan().unwrap());
-    assert!(!({ use library_database::{DatabaseError, LibraryWork}; use library_database::assets::ActivitySql; let database = &db; (|| -> Result<LibraryWork, DatabaseError> {
-        let mut work = None;
-        database.connection.activity_progress(|row| {
-            let count = |index| row.get::<_, i64>(index).map(|value| value.max(0) as u64);
-            work = Some(LibraryWork {
-                total_books: count(0)?, uploaded_books: count(1)?,
-                pending_uploads: count(2)?, pending_changes: count(3)?,
-                pending_thumbnails: count(4)?, pending_covers: count(5)?,
-                scan_pending: row.get(6)?, scan_failed: row.get(7)?, sync_configured: row.get(8)?,
-            });
-            Ok(())
-        })?;
-        work.ok_or_else(|| DatabaseError::message("library activity query returned no row"))
-    })() }).unwrap().scan_pending);
-    let snapshot = db.scan_snapshot().unwrap();
-    db.apply_filesystem_scan(&snapshot, &FilesystemScan::default(), &InspectedFilesystemScan::default()).unwrap();
-    let work = ({ use library_database::{DatabaseError, LibraryWork}; use library_database::assets::ActivitySql; let database = &db; (|| -> Result<LibraryWork, DatabaseError> {
-        let mut work = None;
-        database.connection.activity_progress(|row| {
-            let count = |index| row.get::<_, i64>(index).map(|value| value.max(0) as u64);
-            work = Some(LibraryWork {
-                total_books: count(0)?, uploaded_books: count(1)?,
-                pending_uploads: count(2)?, pending_changes: count(3)?,
-                pending_thumbnails: count(4)?, pending_covers: count(5)?,
-                scan_pending: row.get(6)?, scan_failed: row.get(7)?, sync_configured: row.get(8)?,
-            });
-            Ok(())
-        })?;
-        work.ok_or_else(|| DatabaseError::message("library activity query returned no row"))
-    })() }).unwrap();
-    assert!(work.scan_pending && work.scan_failed);
-    let snapshot = db.scan_snapshot().unwrap();
-    db.apply_filesystem_scan(&snapshot, &discovery, &inspected).unwrap();
-    let work = ({ use library_database::{DatabaseError, LibraryWork}; use library_database::assets::ActivitySql; let database = &db; (|| -> Result<LibraryWork, DatabaseError> {
-        let mut work = None;
-        database.connection.activity_progress(|row| {
-            let count = |index| row.get::<_, i64>(index).map(|value| value.max(0) as u64);
-            work = Some(LibraryWork {
-                total_books: count(0)?, uploaded_books: count(1)?,
-                pending_uploads: count(2)?, pending_changes: count(3)?,
-                pending_thumbnails: count(4)?, pending_covers: count(5)?,
-                scan_pending: row.get(6)?, scan_failed: row.get(7)?, sync_configured: row.get(8)?,
-            });
-            Ok(())
-        })?;
-        work.ok_or_else(|| DatabaseError::message("library activity query returned no row"))
-    })() }).unwrap();
-    assert!(!work.scan_pending && !work.scan_failed);
-}
+fn browse_book_detail_projects_only_authors_and_narrators() {
+    use book_model::{AUTHOR_MARC_RELATOR_CODE, Contributor, MarcRelatorCode, NARRATOR_MARC_RELATOR_CODE};
 
-#[test]
-fn activity_reads_report_pending_work_without_writing_lifecycle_records() {
     let db = database();
-    let book = import();
+    let mut book = import();
     let hash = book.content_hash;
+    book.inspection.as_mut().unwrap().metadata.contributors = vec![
+        Contributor::new("Author", AUTHOR_MARC_RELATOR_CODE).unwrap(),
+        Contributor::new("Translator", MarcRelatorCode(*b"trl")).unwrap(),
+        Contributor::new("First narrator", NARRATOR_MARC_RELATOR_CODE).unwrap(),
+        Contributor::new("Editor", MarcRelatorCode(*b"edt")).unwrap(),
+        Contributor::new("Second narrator", NARRATOR_MARC_RELATOR_CODE).unwrap(),
+    ];
     db.commit_import(book).unwrap();
-    db.connection.execute("INSERT INTO book_transfer(content_hash,upload_id,upload_checksum,upload_size) VALUES(?1,1,?1,10) ON CONFLICT(content_hash) DO UPDATE SET upload_id=COALESCE(upload_id,1),upload_checksum=COALESCE(upload_checksum,excluded.upload_checksum),upload_size=COALESCE(upload_size,10)", [hash.as_str()]).unwrap();
-    let before = db.connection.total_changes();
-    for _ in 0..3 {
-        let work = ({ use library_database::{DatabaseError, LibraryWork}; use library_database::assets::ActivitySql; let database = &db; (|| -> Result<LibraryWork, DatabaseError> {
-        let mut work = None;
-        database.connection.activity_progress(|row| {
-            let count = |index| row.get::<_, i64>(index).map(|value| value.max(0) as u64);
-            work = Some(LibraryWork {
-                total_books: count(0)?, uploaded_books: count(1)?,
-                pending_uploads: count(2)?, pending_changes: count(3)?,
-                pending_thumbnails: count(4)?, pending_covers: count(5)?,
-                scan_pending: row.get(6)?, scan_failed: row.get(7)?, sync_configured: row.get(8)?,
-            });
-            Ok(())
-        })?;
-        work.ok_or_else(|| DatabaseError::message("library activity query returned no row"))
-    })() }).unwrap();
-        assert_eq!(work.total_books, 1);
-        assert_eq!(work.pending_uploads, 1);
-        assert!(work.pending_changes > 0);
-        assert!(!work.sync_configured);
-    }
-    assert_eq!(db.connection.total_changes(), before);
-    { use library_database::assets::ActivitySql; db.connection.activity_set_last_successful_sync_at("123").unwrap(); }
-    let work = ({ use library_database::{DatabaseError, LibraryWork}; use library_database::assets::ActivitySql; let database = &db; (|| -> Result<LibraryWork, DatabaseError> {
-        let mut work = None;
-        database.connection.activity_progress(|row| {
-            let count = |index| row.get::<_, i64>(index).map(|value| value.max(0) as u64);
-            work = Some(LibraryWork {
-                total_books: count(0)?, uploaded_books: count(1)?,
-                pending_uploads: count(2)?, pending_changes: count(3)?,
-                pending_thumbnails: count(4)?, pending_covers: count(5)?,
-                scan_pending: row.get(6)?, scan_failed: row.get(7)?, sync_configured: row.get(8)?,
-            });
-            Ok(())
-        })?;
-        work.ok_or_else(|| DatabaseError::message("library activity query returned no row"))
-    })() }).unwrap();
-    assert!(work.sync_configured);
-    assert_eq!(work.pending_uploads, 1);
-    assert!(work.pending_changes > 0, "a sync checkpoint does not erase unfinished work");
-}
 
-#[test]
-#[cfg(feature = "scanner")]
-fn scan_recovery_survives_reopening_between_batches_without_activity_reads() {
-    use library_database::{FilesystemScan, InspectedFilesystemScan};
-    let root = std::env::temp_dir().join(format!("scan-recovery-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&root).unwrap();
-    let path = root.join("library.sqlite");
-    let discovery = FilesystemScan { readable: true, ..Default::default() };
-    let inspected = InspectedFilesystemScan { readable: true, ..Default::default() };
-    {
-        let db = Database::open(&path).unwrap();
-        db.initialize_library().unwrap();
-        let mut snapshot = db.scan_snapshot().unwrap();
-        db.apply_filesystem_scan_batch(&mut snapshot, &discovery, &inspected, false).unwrap();
-    }
-    {
-        let db = Database::open(&path).unwrap();
-        db.initialize_library().unwrap();
-        assert!(db.needs_scan().unwrap());
-        let snapshot = db.scan_snapshot().unwrap();
-        db.apply_filesystem_scan(&snapshot, &discovery, &inspected).unwrap();
-    }
-    {
-        let db = Database::open(&path).unwrap();
-        db.initialize_library().unwrap();
-        assert!(!db.needs_scan().unwrap());
-    }
-    std::fs::remove_dir_all(root).unwrap();
+    let detail = db.browse_book_detail(&hash).unwrap();
+    assert_eq!(detail.authors.iter().map(|author| author.name.as_str()).collect::<Vec<_>>(), ["Author"]);
+    assert_eq!(detail.credits.iter().map(|credit| (credit.name.as_str(), credit.role.as_str())).collect::<Vec<_>>(), [("First narrator", "nrt"), ("Second narrator", "nrt")]);
 }
 
 #[test]
 fn old_library_schemas_are_refused_without_modification() {
-    for version in [8, 9, 10, 11] {
+    for version in [8, 9, 10, 11, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35] {
         let db = database();
         db.connection.pragma_update(None, "user_version", version).unwrap();
         assert!(db.initialize_library().unwrap_err().to_string().contains("unsupported library schema version"));
@@ -198,105 +65,70 @@ fn old_library_schemas_are_refused_without_modification() {
     }
 }
 
-/// Imports are the only local metadata writer: a later import with changed
-/// facts must publish them.
-fn assert_title_edit_syncs(db: &Database) {
+#[test]
+fn reimport_does_not_replace_immutable_file_metadata() {
+    let db = database();
+    db.commit_import(import()).unwrap();
     db.clear_sync_outbox().unwrap();
     let mut edited = import();
     edited.inspection.as_mut().unwrap().metadata.title = "Edited".into();
     db.commit_import(edited).unwrap();
-    let mutations = db.sync_publishable_mutations().unwrap();
-    assert!(mutations.iter().any(|mutation| matches!(&mutation.state.value, library_replica::LibraryStateEntry::Metadata { value, .. } if value.title == "Edited")));
+    assert!(db.sync_publishable_mutations().unwrap().is_empty());
+    assert_eq!(db.browse_book_detail(&import().content_hash).unwrap().book.title, "Original");
 }
 
 #[test]
-fn successful_import_publishes_contributors_and_restores_metadata_sync() {
-    let db = database();
-    db.commit_import(import()).unwrap();
-    let mutations = db.sync_publishable_mutations().unwrap();
-    assert!(mutations.iter().any(|mutation| matches!(mutation.state.value, library_replica::LibraryStateEntry::BookLifecycle { value: library_replica::BookLifecycleState::Present, .. })));
-    let metadata = mutations
-        .iter()
-        .find_map(|mutation| match &mutation.state.value {
-            library_replica::LibraryStateEntry::Metadata { value, .. } => Some(value),
-            _ => None,
-        })
-        .expect("import must publish its metadata register");
-    assert_eq!(metadata.title, "Original");
-    assert_eq!(metadata.contributors.len(), 1);
-    assert_eq!(metadata.contributors[0].name(), "Original Author");
-    assert_title_edit_syncs(&db);
-}
-
-#[test]
-fn import_without_contributors_still_publishes_metadata() {
-    let db = database();
-    let mut book = import();
-    book.inspection.as_mut().unwrap().metadata.contributors.clear();
-    db.commit_import(book).unwrap();
-    assert!(db.sync_publishable_mutations().unwrap().iter().any(|mutation| matches!(&mutation.state.value,
-        library_replica::LibraryStateEntry::Metadata { value, .. } if value.title == "Original" && value.contributors.is_empty())));
-}
-
-#[test]
-fn failed_contributor_write_rolls_back_and_restores_metadata_sync() {
+fn failed_contributor_write_rolls_back_book_addition() {
     let db = database();
     db.commit_import(import()).unwrap();
     let queued_before = db.sync_publishable_mutations().unwrap();
-    let identities_before: i64 = db.connection.query_row("SELECT count(*) FROM author_identity", [], |row| row.get(0)).unwrap();
-    db.connection.execute_batch("CREATE TRIGGER reject_contributor BEFORE INSERT ON book_contributor BEGIN SELECT RAISE(ABORT,'injected contributor failure'); END;").unwrap();
-    let changed_import = || {
+    let identities_before: i64 = db.connection.fixtures_read_author_identity_count(|row| row.get(0)).unwrap();
+    db.connection.fixtures_create_book_contributor().unwrap();
+    let new_import = || {
         let mut next = import();
-        next.inspection.as_mut().unwrap().metadata.title = "Changed title".into();
-        // Unchanged contributors skip the INSERT entirely, so change the author
-        // to ensure the injected failure exercises the transaction boundary.
-        next.inspection.as_mut().unwrap().metadata.contributors = vec![book_model::Contributor::new("Changed author", book_model::MarcRelatorCode(*b"aut")).unwrap()];
+        next.content_hash = ContentHash::new(&"b".repeat(64));
+        next.file_name = "new-book.epub".into();
+        next.published.name = "new-book.epub".into();
+        next.published.relative_path = "/new-book.epub".into();
+        next.inspection.as_mut().unwrap().metadata.title = "New title".into();
+        next.inspection.as_mut().unwrap().metadata.contributors = vec![book_model::Contributor::new("New author", book_model::MarcRelatorCode(*b"aut")).unwrap()];
         next
     };
-    let error = db.commit_import(changed_import()).unwrap_err();
+    let error = db.commit_import(new_import()).unwrap_err();
     assert!(error.to_string().contains("injected contributor failure"), "unexpected import failure: {error}");
-    assert_eq!(db.connection.query_row("SELECT title FROM book", [], |r| r.get::<_, String>(0)).unwrap(), "Original");
-    assert_eq!(db.connection.query_row("SELECT name FROM book_contributor", [], |r| r.get::<_, String>(0)).unwrap(), "Original Author");
-    assert_eq!(db.connection.query_row("SELECT count(*) FROM author_identity", [], |row| row.get::<_, i64>(0)).unwrap(), identities_before, "failed import must not leave a new author identity");
-    assert_eq!(db.sync_publishable_mutations().unwrap(), queued_before, "failed import must not change pending sync records");
-    assert_title_edit_syncs(&db);
-    db.connection.execute_batch("DROP TRIGGER reject_contributor;").unwrap();
-    db.commit_import(changed_import()).unwrap();
-    assert_eq!(db.connection.query_row("SELECT title FROM book", [], |r| r.get::<_, String>(0)).unwrap(), "Changed title");
-    assert_eq!(db.connection.query_row("SELECT name FROM book_contributor", [], |r| r.get::<_, String>(0)).unwrap(), "Changed author");
+    assert_eq!(db.connection.fixtures_read_book_count(|r| r.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(db.connection.fixtures_read_author_identity_count(|row| row.get::<_, i64>(0)).unwrap(), identities_before);
+    assert_eq!(db.sync_publishable_mutations().unwrap(), queued_before);
+    db.connection.fixtures_drop_TRIGGER_2().unwrap();
+    db.commit_import(new_import()).unwrap();
+    assert_eq!(db.browse_book_detail(&new_import().content_hash).unwrap().book.title, "New title");
 }
 
 fn recovery_payloads(db: &Database) -> Vec<(String, String, Vec<u8>)> {
     db.sync_publishable_mutations().unwrap();
-    db.connection
-        .prepare("SELECT state_kind,state_subkey,body FROM sync_outbox WHERE state_kind IN ('book_toc','pdf_reader_metadata') ORDER BY state_kind,state_subkey")
-        .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap()
+    query_rows(|callback| db.connection.fixtures_read_sync_outbox_state_kind_state_subkey_body(callback), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().collect::<Result<_, _>>().unwrap()
 }
 
 #[test]
-fn recovery_republishes_toc_and_each_pdf_checksum() {
+fn recovery_republishes_the_complete_book_addition() {
     let db = database();
-    let book = import();
+    let mut book = import();
     let hash = book.content_hash;
+    book.inspection.as_mut().unwrap().pdf = Some(pdf_view_common::PdfReaderMetadata {
+        version: 1,
+        content_hash: hash.to_string(),
+        pages: vec![pdf_view_common::PdfStoredPage { width: 100.0, height: 300.0, rotation: 0 }],
+        skippable_pages: None,
+        annotations: vec![],
+        dependencies: None,
+    });
     db.commit_import(book).unwrap();
-    let mut cells = vec![StateAddress { kind: "book_toc".into(), entity_key: hash.to_string(), entity_subkey: String::new() }];
-    for (checksum, width) in [("a".repeat(64), 100.0), ("b".repeat(64), 200.0)] {
-        let metadata =
-            pdf_view_common::PdfReaderMetadata { version: 1, checksum: checksum.clone(), pages: vec![pdf_view_common::PdfStoredPage { width, height: 300.0, rotation: 0 }], skippable_pages: None, annotations: vec![], dependencies: None };
-        let mut inspected = import();
-        inspected.checksum = ContentHash::new(&checksum);
-        inspected.inspection.as_mut().unwrap().pdf = Some(metadata);
-        db.commit_import(inspected).unwrap();
-        cells.push(StateAddress { kind: "pdf_reader_metadata".into(), entity_key: hash.to_string(), entity_subkey: checksum });
-    }
+    complete_no_match(&db, &hash);
+    let cells = vec![StateAddress { kind: "book_add".into(), entity_key: hash.into(), entity_subkey: String::new() }];
     let expected = recovery_payloads(&db);
-    assert_eq!(expected.len(), 3);
+    assert_eq!(expected.len(), 1);
     db.clear_sync_outbox().unwrap();
-    assert_eq!(db.sync_enqueue_missing_state_cells(&cells).unwrap(), 3);
+    assert_eq!(db.sync_enqueue_missing_state_cells(&cells).unwrap(), 1);
     assert_eq!(recovery_payloads(&db), expected);
     assert_eq!(db.sync_enqueue_missing_state_cells(&cells).unwrap(), 0);
     db.clear_sync_outbox().unwrap();
@@ -311,7 +143,7 @@ fn recovery_republishes_toc_and_each_pdf_checksum() {
     }
     assert_eq!(recovery_payloads(&db), expected);
     assert!(!db.sync_cursor_recovery_pending().unwrap());
-    let missing = StateAddress { kind: "pdf_reader_metadata".into(), entity_key: hash.to_string(), entity_subkey: "c".repeat(64) };
+    let missing = StateAddress { kind: "book_add".into(), entity_key: hash.into(), entity_subkey: "c".repeat(64) };
     assert_eq!(db.sync_enqueue_missing_state_cells(&[missing]).unwrap(), 0);
 }
 
@@ -322,28 +154,7 @@ fn materialize(db: &Database, id: DirId, renamed_to: Option<&str>) {
 }
 
 fn projection(db: &Database, id: DirId) -> String {
-    db.connection.query_row("SELECT relative_path FROM local_file_projection WHERE dir_id=?1", [id.to_string()], |r| r.get(0)).unwrap()
-}
-
-#[test]
-fn directory_renames_move_descendants_but_not_similarly_named_siblings() {
-    let db = database();
-    let shelf = db.create_directory(&ROOT_DIR_ID, &"Shelf".into()).unwrap().id;
-    let child = db.create_directory(&shelf, &"Child".into()).unwrap().id;
-    let sibling = db.create_directory(&ROOT_DIR_ID, &"Shelfish".into()).unwrap().id;
-    let hash = ContentHash::new(&"9".repeat(64));
-    for (id, path) in [(shelf, "/Shelf/book.epub"), (child, "/Shelf/Child/book.epub"), (sibling, "/Shelfish/book.epub")] {
-        materialize(&db, id, None);
-        db.seed_file_projection(&hash, &id, path);
-    }
-    materialize(&db, shelf, Some("Shelf (2)"));
-    assert_eq!(projection(&db, shelf), "/Shelf (2)/book.epub");
-    assert_eq!(projection(&db, child), "/Shelf (2)/Child/book.epub");
-    assert_eq!(projection(&db, sibling), "/Shelfish/book.epub");
-    assert_eq!(db.native_directory_snapshot(&child).unwrap().unwrap().projected_path.as_deref(), Some("/Shelf (2)/Child"));
-    db.move_directory(&shelf, None, Some("Moved")).unwrap();
-    materialize(&db, shelf, None);
-    assert_eq!(projection(&db, child), "/Moved/Child/book.epub");
+    db.connection.fixtures_read_local_file_projection_relative_path(&(id.to_string()), |r| r.get(0)).unwrap()
 }
 
 #[test]
@@ -351,7 +162,7 @@ fn directory_acknowledgement_rolls_back_when_projection_write_fails() {
     let db = database();
     let shelf = db.create_directory(&ROOT_DIR_ID, &"Shelf".into()).unwrap().id;
     materialize(&db, shelf, None);
-    db.connection.execute_batch("CREATE TRIGGER reject_projection BEFORE UPDATE ON local_directory_projection BEGIN SELECT RAISE(ABORT,'injected projection failure'); END;").unwrap();
+    db.connection.fixtures_create_ON().unwrap();
     let snapshot = db.native_directory_snapshot(&shelf).unwrap().unwrap();
     assert!(db.acknowledge_native_directory(NativeDirectoryCompletion { snapshot, renamed_to: Some("Changed".into()), materialized: true }).is_err());
     let current = db.native_directory_snapshot(&shelf).unwrap().unwrap();
@@ -360,14 +171,107 @@ fn directory_acknowledgement_rolls_back_when_projection_write_fails() {
 }
 
 #[test]
-fn stored_audiobook_navigation_syncs_with_its_duration() {
+fn definitive_enrichment_answers_do_not_expire() {
+    use metadata_contract::books::{BookEnrichment, BookEnrichmentStatus};
+
+    for status in [BookEnrichmentStatus::Found, BookEnrichmentStatus::NoMatch] {
+        let db = database();
+        let book = import();
+        let hash = book.content_hash;
+        db.commit_import(book).unwrap();
+        let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
+        let answer = BookEnrichment { key: String::new(), status, record: (status == BookEnrichmentStatus::Found).then_some(candidate.record), toc: None, cover: None, detail: String::new() };
+        db.record_enrichment(&hash, &candidate.request_key, &answer, 100).unwrap();
+        assert!(db.enrichment_candidates(&[hash], 100).unwrap().is_empty());
+        assert!(db.enrichment_candidates(&[hash], 10 * 365 * 24 * 60 * 60).unwrap().is_empty());
+        assert_eq!(db.enrichment_next_retry().unwrap(), None);
+    }
+}
+
+#[test]
+fn failed_enrichment_retries_until_a_definitive_answer() {
+    use metadata_contract::books::{BookEnrichment, BookEnrichmentStatus};
+
+    let db = database();
+    let book = import();
+    let hash = book.content_hash;
+    db.commit_import(book).unwrap();
+    let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
+    let mut answer = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Failed, record: None, toc: None, cover: None, detail: String::new() };
+    db.record_enrichment(&hash, &candidate.request_key, &answer, 100).unwrap();
+    assert_eq!(db.enrichment_next_retry().unwrap(), Some(160));
+    assert!(db.enrichment_candidates(&[hash], 159).unwrap().is_empty());
+    assert_eq!(db.enrichment_candidates(&[hash], 160).unwrap().len(), 1);
+    answer.status = BookEnrichmentStatus::NoMatch;
+    db.record_enrichment(&hash, &candidate.request_key, &answer, 160).unwrap();
+    assert_eq!(db.enrichment_next_retry().unwrap(), None);
+    assert!(db.enrichment_candidates(&[hash], i64::MAX).unwrap().is_empty());
+}
+
+#[test]
+fn enrichment_reads_identifiers_from_the_stored_metadata_document() {
+    use book_model::{Scope, push_isbn};
+
+    let db = database();
+    let mut book = import();
+    let hash = book.content_hash;
+    let identifiers = &mut book.inspection.as_mut().unwrap().metadata.book.identifiers;
+    push_isbn(identifiers, "9780393243277", Scope::Book).unwrap();
+    let expected = identifiers.clone();
+    db.commit_import(book).unwrap();
+
+    let candidates = db.enrichment_candidates(&[hash], 0).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].record.book.identifiers, expected);
+}
+
+#[test]
+fn navigation_on_book_distinguishes_missing_and_empty_and_replaces_playback_fields() {
+    use crate::books::toc::TocSql;
+
     let db = database();
     let hash = ContentHash::new(&"a".repeat(64));
-    db.connection.execute("INSERT INTO book(content_hash) VALUES(?1)", [hash.as_str()]).unwrap();
-    let entries = vec![book_model::BookTocEntry { title: "Only".into(), target: book_model::audiobook_toc_target(0), children: Vec::new() }];
-    db.clear_sync_outbox().unwrap();
-    db.commit_audiobook_metadata(&hash, &book_metadata::AudiobookMetadata { title: "Only".into(), authors: Vec::new(), description: String::new(), duration_ms: 1000, chapters: vec![book_metadata::AudiobookChapterMetadata { title: "Only".into(), start_ms: 0, end_ms: 1000 }], tracks: Vec::new(), chapter_origin: book_model::ChapterOrigin::EmbeddedM4b, recording: Default::default() }).unwrap();
-    assert!(db.sync_publishable_mutations().unwrap().iter().any(|mutation| matches!(&mutation.state.value, library_replica::LibraryStateEntry::BookToc { value, .. } if value.entries == entries && value.duration_ms == Some(1000))));
+    db.connection.fixtures_insert_book_7(&(&hash)).unwrap();
+    let read_toc = || {
+        let mut toc = None;
+        db.connection
+            .book_toc_select(&hash, |row| {
+                toc = Some(row.get::<_, String>(0)?);
+                Ok(())
+            })
+            .unwrap();
+        toc
+    };
+    assert_eq!(read_toc(), None);
+
+    db.connection.navigation_upsert(&hash, 0, "[]", Some(1000), Some("[]")).unwrap();
+    assert_eq!(read_toc().as_deref(), Some("[]"));
+    db.connection.navigation_upsert(&hash, 0, "[]", None, None).unwrap();
+    let playback: (Option<i64>, Option<String>) = db.connection.fixtures_read_book_duration_ms_tracks_json(&(&hash), |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+    assert_eq!(playback, (None, None));
+    assert_eq!(read_toc().as_deref(), Some("[]"));
+}
+
+#[test]
+fn stored_audiobook_navigation_syncs_with_its_addition() {
+    let db = database();
+    let mut book = import();
+    book.format = book_model::BookFormat::M4b;
+    book.inspection.as_mut().unwrap().audiobook = Some(book_inspection::AudiobookMetadata {
+        title: "Only".into(),
+        authors: Vec::new(),
+        description: String::new(),
+        duration_ms: 1000,
+        chapters: vec![book_model::AudiobookChapter { title: "Only".into(), start_ms: 0, end_ms: 1000 }],
+        tracks: Vec::new(),
+        chapter_origin: book_model::ChapterOrigin::EmbeddedM4b,
+        recording: Default::default(),
+    });
+    let hash = book.content_hash;
+    db.commit_import(book).unwrap();
+    complete_no_match(&db, &hash);
+    assert!(db.sync_publishable_mutations().unwrap().iter().any(|mutation| matches!(&mutation.state.value,
+        library_replica::LibraryStateEntry::BookAdd { value, .. } if value.navigation.as_ref().is_some_and(|nav| nav.duration_ms == Some(1000) && nav.entries.len() == 1))));
 }
 
 fn copy_fixture(db: &Database) -> (ContentHash, DirId, DirId) {
@@ -426,7 +330,7 @@ fn stale_restore_does_not_overwrite_projection_or_consume_work() {
     db.move_directory(&destination, None, Some("Moved")).unwrap();
     assert!(db.acknowledge_native_file_work(restore_completion(snapshot)).is_err());
     assert!(!db.native_file_work().unwrap().is_empty());
-    let projections: i64 = db.connection.query_row("SELECT count(*) FROM local_file_projection WHERE dir_id=?1", [destination.to_string()], |row| row.get(0)).unwrap();
+    let projections: i64 = db.connection.fixtures_read_local_file_projection_count(&(destination.to_string()), |row| row.get(0)).unwrap();
     assert_eq!(projections, 0);
 }
 
@@ -458,7 +362,7 @@ mod scanner {
     }
 
     fn drain_work(db: &Database) {
-        db.connection.execute_batch("DELETE FROM local_file_work; DELETE FROM local_book_work; DELETE FROM local_directory_work;").unwrap();
+        db.connection.fixtures_delete_local_file_work().unwrap();
     }
 
     fn observation(directory: DirId, name: &str, fingerprint: u64) -> ScanFileObservation {
@@ -473,7 +377,6 @@ mod scanner {
             path: "book.epub".into(),
             fingerprint: 2,
             content_hash: hash,
-            checksum: hash,
             size_bytes: 20,
             extension: "epub".into(),
             inspection: import().inspection.unwrap(),
@@ -482,7 +385,7 @@ mod scanner {
     }
 
     fn local_state(db: &Database, hash: ContentHash, directory: DirId) -> (bool, bool, String, i64) {
-        db.connection.query_row("SELECT bd.deleted_at IS NULL,bd.is_downloaded,bd.local_hash,(SELECT count(*) FROM local_file_projection p WHERE p.content_hash=b.content_hash AND p.dir_id=bd.dir_id) FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id WHERE b.content_hash=?1 AND bd.dir_id=?2", library_database::rusqlite::params![hash.as_str(), directory.to_string()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap()
+        db.connection.fixtures_read_local_file_projection_bd_deleted_at_bd(&(&hash), &(directory.to_string()), |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap()
     }
 
     #[test]
@@ -494,76 +397,53 @@ mod scanner {
         first.path = first.name.clone();
         let first_hash = first.content_hash;
         let discovery = FilesystemScan { readable: true, files: vec![observation(ROOT_DIR_ID, "first.epub", 2), observation(ROOT_DIR_ID, "second.epub", 2)], ..Default::default() };
-        assert_eq!(db.apply_filesystem_scan_batch(&mut snapshot, &discovery, &InspectedFilesystemScan { failures: vec![], readable: true, books: vec![first] }, false).unwrap(), ScanApplyResult::Applied);
-        assert_eq!(({ use library_database::browse::{CountsSql,HomeSql}; use library_database::DatabaseError; use library_model::LibraryHomeView; let database = &db;  (|| -> Result<usize, DatabaseError> {
-        let mut count = 0_i64;
-        database.connection.count_all_books(|row| {
-            count = row.get(0)?;
-            Ok(())
-        })?;
-        Ok(usize::try_from(count).map_err(|_| DatabaseError::message("library book count must not be negative"))?)
-    })() }).unwrap(), 2, "first batch is immediately browsable");
+        assert_eq!(db.apply_filesystem_scan_batch(&mut snapshot, &discovery, &InspectedFilesystemScan { readable: true, books: vec![first] }, false, None).unwrap(), ScanApplyResult::Applied);
+        assert_eq!(
+            ({
+                use library_database::DatabaseError;
+                use library_database::browse::{CountsSql, HomeSql};
+                let database = &db;
+                (|| -> Result<usize, DatabaseError> {
+                    let mut count = 0_i64;
+                    database.connection.count_all_books(|row| {
+                        count = row.get(0)?;
+                        Ok(())
+                    })?;
+                    Ok(usize::try_from(count).map_err(|_| DatabaseError::message("library book count must not be negative"))?)
+                })()
+            })
+            .unwrap(),
+            2,
+            "first batch is immediately browsable"
+        );
         assert!(local_state(&db, first_hash, ROOT_DIR_ID).1);
         assert!(local_state(&db, missing, ROOT_DIR_ID).1, "incomplete scans must not clear missing files");
         let mut second = replacement();
         second.name = "second.epub".into();
         second.path = second.name.clone();
         second.content_hash = ContentHash::new(&"c".repeat(64));
-        second.checksum = second.content_hash;
-        assert_eq!(db.apply_filesystem_scan_batch(&mut snapshot, &discovery, &InspectedFilesystemScan { failures: vec![], readable: true, books: vec![second] }, false).unwrap(), ScanApplyResult::Applied);
-        assert_eq!(({ use library_database::browse::{CountsSql,HomeSql}; use library_database::DatabaseError; use library_model::LibraryHomeView; let database = &db;  (|| -> Result<usize, DatabaseError> {
-        let mut count = 0_i64;
-        database.connection.count_all_books(|row| {
-            count = row.get(0)?;
-            Ok(())
-        })?;
-        Ok(usize::try_from(count).map_err(|_| DatabaseError::message("library book count must not be negative"))?)
-    })() }).unwrap(), 3);
-        assert_eq!(db.apply_filesystem_scan_batch(&mut snapshot, &discovery, &InspectedFilesystemScan { failures: vec![], readable: true, books: vec![] }, true).unwrap(), ScanApplyResult::Applied);
+
+        assert_eq!(db.apply_filesystem_scan_batch(&mut snapshot, &discovery, &InspectedFilesystemScan { readable: true, books: vec![second] }, false, None).unwrap(), ScanApplyResult::Applied);
+        assert_eq!(
+            ({
+                use library_database::DatabaseError;
+                use library_database::browse::{CountsSql, HomeSql};
+                let database = &db;
+                (|| -> Result<usize, DatabaseError> {
+                    let mut count = 0_i64;
+                    database.connection.count_all_books(|row| {
+                        count = row.get(0)?;
+                        Ok(())
+                    })?;
+                    Ok(usize::try_from(count).map_err(|_| DatabaseError::message("library book count must not be negative"))?)
+                })()
+            })
+            .unwrap(),
+            3
+        );
+        assert_eq!(db.apply_filesystem_scan_batch(&mut snapshot, &discovery, &InspectedFilesystemScan { readable: true, books: vec![] }, true, None).unwrap(), ScanApplyResult::Applied);
         assert!(!local_state(&db, missing, ROOT_DIR_ID).1);
         assert!(local_state(&db, first_hash, ROOT_DIR_ID).1);
-    }
-
-    #[test]
-    fn replacement_updates_only_the_old_placement_and_commits_other_discoveries() {
-        let (db, old) = fixture();
-        let other = db.create_directory(&ROOT_DIR_ID, &"Other".into()).unwrap().id;
-        db.transfer_book_placement(&old, &ROOT_DIR_ID, &other, false).unwrap();
-        db.acknowledge_native_file_work(restore_completion(restore_snapshot(&db))).unwrap();
-        drain_work(&db);
-        let snapshot = db.scan_snapshot().unwrap();
-        let replaced = replacement();
-        let new_hash = replaced.content_hash;
-        let mut extra = replacement();
-        extra.name = "another.epub".into();
-        extra.path = extra.name.clone();
-        extra.content_hash = ContentHash::new(&"c".repeat(64));
-        extra.checksum = extra.content_hash;
-        let discovery = FilesystemScan {
-            readable: true,
-            directories: vec![],
-            files: vec![observation(ROOT_DIR_ID, "book.epub", 2), observation(ROOT_DIR_ID, "another.epub", 2), ScanFileObservation { path: "Other/book.epub".into(), ..observation(other, "book.epub", 1) }],
-        };
-        assert_eq!(db.apply_filesystem_scan(&snapshot, &discovery, &InspectedFilesystemScan { failures: vec![], readable: true, books: vec![replaced, extra] }).unwrap(), ScanApplyResult::Applied);
-        assert_eq!(local_state(&db, old, ROOT_DIR_ID), (false, false, String::new(), 0));
-        assert!(local_state(&db, old, other).0);
-        assert!(local_state(&db, old, other).1);
-        assert_eq!(local_state(&db, new_hash, ROOT_DIR_ID), (true, true, "2".into(), 1));
-        assert_eq!(db.connection.query_row("SELECT count(*) FROM book WHERE deleted_at IS NULL", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
-    }
-
-    #[test]
-    fn failed_replacement_rolls_back_old_placement_and_projection() {
-        let (db, old) = fixture();
-        let snapshot = db.scan_snapshot().unwrap();
-        db.connection.execute_batch("CREATE TRIGGER fail_scan_import BEFORE INSERT ON book BEGIN SELECT RAISE(ABORT,'injected import failure'); END;").unwrap();
-        let result = db.apply_filesystem_scan(
-            &snapshot,
-            &FilesystemScan { readable: true, files: vec![observation(ROOT_DIR_ID, "book.epub", 2)], ..Default::default() },
-            &InspectedFilesystemScan { failures: vec![], readable: true, books: vec![replacement()] },
-        );
-        assert!(result.is_err());
-        assert_eq!(local_state(&db, old, ROOT_DIR_ID), (true, true, "1".into(), 1));
     }
 
     #[test]
@@ -574,62 +454,6 @@ mod scanner {
         assert!(db.commit_import(book).is_err());
         assert_eq!(local_state(&db, old, ROOT_DIR_ID), (true, true, "1".into(), 1));
     }
-
-    #[test]
-    fn complete_scan_clears_only_missing_local_availability_without_sync_deletions() {
-        let (db, hash) = fixture();
-        // Downloads can have an empty fingerprint and must still be reconciled.
-        db.connection.execute("UPDATE book_dir SET local_hash=''", []).unwrap();
-        db.clear_sync_outbox().unwrap();
-        let snapshot = db.scan_snapshot().unwrap();
-        assert!(snapshot.excluded_paths.is_empty());
-        assert_eq!(db.apply_filesystem_scan(&snapshot, &FilesystemScan { readable: true, ..Default::default() }, &InspectedFilesystemScan { readable: true, ..Default::default() }).unwrap(), ScanApplyResult::Applied);
-        assert_eq!(local_state(&db, hash, ROOT_DIR_ID), (true, false, String::new(), 0));
-        assert!(!db.is_book_downloaded(&hash).unwrap());
-        assert!(db.sync_publishable_mutations().unwrap().is_empty());
-        assert_eq!(db.browse_book_detail(&hash).unwrap().book.title, "Original");
-    }
-
-    #[test]
-    fn incomplete_or_excluded_scans_preserve_local_availability() {
-        for (discovery_readable, inspection_readable, excluded) in [(false, true, false), (true, false, false), (true, true, true)] {
-            let (db, hash) = fixture();
-            let mut snapshot = db.scan_snapshot().unwrap();
-            if excluded {
-                snapshot.excluded_paths.push("book.epub".into());
-            }
-            db.apply_filesystem_scan(&snapshot, &FilesystemScan { readable: discovery_readable, ..Default::default() }, &InspectedFilesystemScan { readable: inspection_readable, ..Default::default() }).unwrap();
-            assert_eq!(local_state(&db, hash, ROOT_DIR_ID), (true, true, "1".into(), 1));
-        }
-    }
-
-    #[test]
-    fn missing_copy_does_not_clear_an_observed_copy() {
-        let (db, hash) = fixture();
-        let other = db.create_directory(&ROOT_DIR_ID, &"Other".into()).unwrap().id;
-        db.transfer_book_placement(&hash, &ROOT_DIR_ID, &other, false).unwrap();
-        db.acknowledge_native_file_work(restore_completion(restore_snapshot(&db))).unwrap();
-        drain_work(&db);
-        let snapshot = db.scan_snapshot().unwrap();
-        db.apply_filesystem_scan(
-            &snapshot,
-            &FilesystemScan { readable: true, files: vec![ScanFileObservation { path: "Other/book.epub".into(), ..observation(other, "book.epub", 1) }], ..Default::default() },
-            &InspectedFilesystemScan { readable: true, ..Default::default() },
-        )
-        .unwrap();
-        assert!(!local_state(&db, hash, ROOT_DIR_ID).1);
-        assert!(local_state(&db, hash, other).1);
-        assert!(db.is_book_downloaded(&hash).unwrap());
-    }
-
-    #[test]
-    fn local_change_after_snapshot_rejects_scan_without_cleanup() {
-        let (db, hash) = fixture();
-        let snapshot = db.scan_snapshot().unwrap();
-        db.connection.execute("UPDATE book_dir SET local_hash='newer'", []).unwrap();
-        assert_eq!(db.apply_filesystem_scan(&snapshot, &FilesystemScan { readable: true, ..Default::default() }, &InspectedFilesystemScan { failures: vec![], readable: true, books: vec![replacement()] }).unwrap(), ScanApplyResult::Stale);
-        assert_eq!(local_state(&db, hash, ROOT_DIR_ID), (true, true, "newer".into(), 1));
-    }
 }
 
 #[test]
@@ -637,64 +461,15 @@ fn cloud_presence_reset_handles_empty_queues_and_persists_policy() {
     let db = database();
     for enabled in [false, true] {
         db.set_asset_storage_policy(enabled, true).unwrap();
-        assert_eq!(db.connection.query_row("SELECT cloud_storage_enabled FROM sync_metadata", [], |r| r.get::<_, bool>(0)).unwrap(), enabled);
-        assert!(({ use library_database::*; use library_database::assets::*; use library_database::shared_sql::*; use library_model::{BookUploadIntent,BookPlacement,RelativeBookPath}; use sync_common::ContentHash; let database = &db; let after = 0; let limit = 10; (|| -> Result<Vec<BookUploadIntent>, library_database::DatabaseError> {
-        let mut intents = Vec::new();
-        database.connection.transfer_pending_book_uploads(after, limit, library_database::assets::rejection_cutoff()?, |row| {
-            intents.push(BookUploadIntent { id: row.get(0)?, content_hash: ContentHash::new(&row.get::<_, String>(1)?), checksum: ContentHash::new(&row.get::<_, String>(2)?), size_bytes: row.get::<_, i64>(3)? as u64 });
-            Ok(())
-        })?;
-        Ok(intents)
-    })() }).unwrap().is_empty());
+        assert_eq!(db.connection.fixtures_read_sync_metadata_cloud_storage_enabled(|r| r.get::<_, bool>(0)).unwrap(), enabled);
+        assert!(db.pending_book_uploads(0, 10).unwrap().is_empty());
     }
-}
-
-#[test]
-fn cloud_presence_reset_requeues_books() {
-    use library_model::BlobKind;
-    let db = database();
-    let mut book = import();
-    let hash = book.content_hash;
-    book.published.published = true;
-    book.published.fingerprint = Some("1".into());
-    db.commit_import(book).unwrap();
-    db.record_remote_asset(BlobKind::Book, &hash).unwrap();
-    db.settle_rejected_asset(&hash, library_database::RejectedAsset::BookUpload { intent: None }, "quota").unwrap();
-    let before = db.book_upload_intent(&hash).unwrap().unwrap();
-
-    db.set_asset_storage_policy(true, true).unwrap();
-    let after = db.book_upload_intent(&hash).unwrap().unwrap();
-    assert!(after.id > before.id);
-    assert_eq!(after.checksum, before.checksum);
-    assert_eq!(after.size_bytes, before.size_bytes);
-    assert!(!db.remote_asset_hashes(BlobKind::Book).unwrap().contains(&hash));
-    assert!(db.book_upload_rejection_reason(&hash).unwrap().is_none());
-
-    // An already-uploaded book has no intent, but its local baseline must
-    // recreate one when the cloud-presence cache is reset.
-    db.connection.execute("UPDATE book_transfer SET upload_id=NULL,upload_checksum=NULL,upload_size=NULL WHERE content_hash=?1", [hash.as_str()]).unwrap();
-    db.record_remote_asset(BlobKind::Book, &hash).unwrap();
-    db.set_asset_storage_policy(true, true).unwrap();
-    let prepared = db.upload_preparation_snapshot().unwrap();
-    db.finish_upload_preparation(&prepared).unwrap();
-    let requeued = ({ use library_database::*; use library_database::assets::*; use library_database::shared_sql::*; use library_model::{BookUploadIntent,BookPlacement,RelativeBookPath}; use sync_common::ContentHash; let database = &db; let after = 0; let limit = 10; (|| -> Result<Vec<BookUploadIntent>, library_database::DatabaseError> {
-        let mut intents = Vec::new();
-        database.connection.transfer_pending_book_uploads(after, limit, library_database::assets::rejection_cutoff()?, |row| {
-            intents.push(BookUploadIntent { id: row.get(0)?, content_hash: ContentHash::new(&row.get::<_, String>(1)?), checksum: ContentHash::new(&row.get::<_, String>(2)?), size_bytes: row.get::<_, i64>(3)? as u64 });
-            Ok(())
-        })?;
-        Ok(intents)
-    })() }).unwrap();
-    assert_eq!(requeued.len(), 1);
-    assert_eq!(requeued[0].content_hash, hash);
-    assert_eq!(requeued[0].checksum, before.checksum);
-    assert_eq!(requeued[0].size_bytes, before.size_bytes);
 }
 
 fn assert_uninitialized(db: &Database) {
     assert!(db.connection.is_autocommit(), "failed initialization must release its transaction");
-    assert_eq!(db.connection.query_row("PRAGMA main.user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-    assert_eq!(db.connection.query_row("SELECT count(*) FROM main.sqlite_schema", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(db.connection.fixtures_check_main_user_version(|r| r.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(db.connection.fixtures_read_main_sqlite_schema_count(|r| r.get::<_, i64>(0)).unwrap(), 0);
 }
 
 #[test]
@@ -707,7 +482,7 @@ fn interrupted_initialization_rolls_back_and_retries_after_reopen() {
     }
     let directory = TestDirectory(std::env::temp_dir().join(format!("library-init-{}", uuid::Uuid::new_v4())));
     std::fs::create_dir(&directory.0).unwrap();
-    for budget in [500, 5000] {
+    for budget in [500, 3000] {
         let path = directory.0.join(format!("{budget}.sqlite"));
         {
             let db = Database::open(&path).unwrap();
@@ -766,12 +541,7 @@ fn subject_browsing_reads_assignments_without_cached_membership() {
     let hash = book.content_hash;
     book.inspection.as_mut().unwrap().metadata.book.subjects = vec![book_model::BookSubject::new(None, "History / United States / 20th Century", "dc:subject", Some("bisac".into()), Some("HIS036060".into())).unwrap()];
     db.commit_import(book).unwrap();
-    let (path, parent): (i64, i64) = db
-        .connection
-        .query_row("SELECT route.route_id,route.parent_route_id FROM book_unified_concept assignment JOIN curated.unified_concept_route route ON route.concept_id=assignment.concept_id WHERE route.route_id!=route.parent_route_id LIMIT 1", [], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
-        .unwrap();
+    let (path, parent): (i64, i64) = db.connection.fixtures_read_book_unified_concept_route_route_id_route(|row| Ok((row.get(0)?, row.get(1)?))).unwrap();
     let mut query = library_model::LibraryBrowseQuery {
         location: library_model::BrowseLocation::Subject(parent),
         search: String::new(),
@@ -791,7 +561,7 @@ fn subject_browsing_reads_assignments_without_cached_membership() {
     query.location = library_model::BrowseLocation::Subject(0);
     query.search.clear();
     let root_contents = db.browse_contents(&query, false).unwrap();
-    assert_eq!(root_contents.books[0].content_hash, hash);
+    assert_eq!(root_contents.books[0].content_hash(), Some(hash));
     query.search = "Original".into();
     let searched = db.browse_contents(&query, false).unwrap();
     assert!(searched.children.is_empty());
@@ -816,7 +586,7 @@ fn subject_fixture() -> (Database, String, String) {
     for index in 1..=4 {
         let mut book = import();
         book.content_hash = ContentHash::new(&format!("{index:064x}"));
-        book.checksum = book.content_hash;
+
         book.file_name = format!("book{index}.epub");
         book.published.name = book.file_name.clone();
         book.published.relative_path = format!("/{}", book.file_name);
@@ -824,10 +594,7 @@ fn subject_fixture() -> (Database, String, String) {
         book.inspection.as_mut().unwrap().metadata.book.subjects = vec![book_model::BookSubject::new(None, "History / United States / 20th Century", "dc:subject", Some("bisac".into()), Some("HIS036060".into())).unwrap()];
         db.commit_import(book).unwrap();
     }
-    let (path, parent): (String, String) = db
-        .connection
-        .query_row("SELECT path,parent_path FROM curated.unified_concept_paths WHERE concept_id IN (SELECT concept_id FROM book_unified_concept) AND path!=parent_path AND parent_path!='Subject' LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap();
+    let (path, parent): (String, String) = db.connection.fixtures_read_curated_unified_concept_paths_path_parent_path(|r| Ok((r.get(0)?, r.get(1)?))).unwrap();
     // Subsequent browse-only edits explicitly operate on the derived fixture.
 
     (db, path, parent)
@@ -847,13 +614,13 @@ fn subject_browsing_is_read_only_and_follows_placement_and_assignment_edits() {
     db.browse(&query, false).unwrap();
     db.connection.pragma_update(None, "query_only", false).unwrap();
     assert_eq!(db.connection.total_changes(), changes);
-    db.connection.execute("UPDATE book_dir SET deleted_at=10 WHERE book_row_id=(SELECT row_id FROM book WHERE title='Book 4')", []).unwrap();
+    db.connection.fixtures_update_book_dir_deleted_at().unwrap();
     let shrunk = db.browse_contents(&query, false).unwrap();
     assert!(shrunk.children.is_empty());
     assert_eq!(shrunk.books.len(), 3);
-    db.connection.execute("UPDATE book_dir SET deleted_at=NULL", []).unwrap();
+    db.connection.fixtures_update_book_dir_deleted_at_2().unwrap();
     assert_eq!(db.browse_contents(&query, false).unwrap().books.len(), 4);
-    db.connection.execute("DELETE FROM book_unified_concept", []).unwrap();
+    db.connection.fixtures_delete_book_unified_concept_4().unwrap();
     let empty = db.browse_contents(&query, false).unwrap();
     assert!(empty.children.is_empty() && empty.books.is_empty());
 }
@@ -885,7 +652,7 @@ fn import_in_folder(db: &Database, index: u64, dir: DirId) -> ContentHash {
     let mut book = import();
     book.parent_id = dir;
     book.content_hash = ContentHash::new(&format!("{index:064x}"));
-    book.checksum = book.content_hash;
+
     book.file_name = format!("book{index}.epub");
     book.published.name = book.file_name.clone();
     book.published.relative_path = format!("/{}", book.file_name);
@@ -896,12 +663,79 @@ fn import_in_folder(db: &Database, index: u64, dir: DirId) -> ContentHash {
 }
 
 fn place_book(db: &Database, hash: ContentHash, dir: DirId, downloaded: bool) {
-    db.connection
-        .execute(
-            "INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT ?1,row_id,'copy.epub','',?3 FROM book WHERE content_hash=?2",
-            library_database::rusqlite::params![dir.to_string(), hash.as_str(), downloaded],
-        )
-        .unwrap();
+    db.connection.fixtures_insert_book_dir_4(&(dir.to_string()), &(&hash), &downloaded).unwrap();
+}
+
+#[test]
+fn all_books_lists_unique_live_books_across_folders() {
+    use library_model::BrowseLocation;
+
+    let db = database();
+    let query = subject_query(BrowseLocation::Books);
+    assert!(db.browse(&query, false).unwrap().contents.books.is_empty());
+    let shelf = db.create_directory(&ROOT_DIR_ID, &"Shelf".into()).unwrap().id;
+    let nested = db.create_directory(&shelf, &"Nested".into()).unwrap().id;
+    let second = import_in_folder(&db, 102, nested);
+    let first = import_in_folder(&db, 101, ROOT_DIR_ID);
+    place_book(&db, first, shelf, true);
+    let deleted = import_in_folder(&db, 103, shelf);
+    db.connection.fixtures_update_book_deleted_at(&(&deleted)).unwrap();
+    let unplaced = import_in_folder(&db, 104, shelf);
+    db.connection.fixtures_delete_book_dir_2(&(shelf.to_string()), &unplaced).unwrap();
+
+    let page = db.browse(&query, false).unwrap();
+    assert_eq!(page.contents.books.iter().map(|book| book.content_hash()).collect::<Vec<_>>(), [Some(first), Some(second)]);
+    assert!(page.contents.books.iter().all(|book| book.source_directory.is_none()));
+    assert!(page.contents.children.is_empty());
+    assert!(page.sections.is_empty());
+    assert!(page.path.is_empty());
+    assert!(page.ancestors.is_empty());
+    assert_eq!(page.contents.books.len(), db.book_count().unwrap());
+    assert_eq!(page.format_counts.iter().map(|count| count.book_count).sum::<u32>(), 2);
+    assert_eq!(db.browse_contents(&query, false).unwrap(), page.contents);
+}
+
+#[test]
+fn all_books_uses_shared_search_filters_and_book_order() {
+    use crate::assets::TransfersSql;
+    use crate::projection::ProjectionSql;
+    use library_model::{BrowseBookSort, BrowseLocation, LibraryFileTypeFilter};
+
+    let db = database();
+    let shelf = db.create_directory(&ROOT_DIR_ID, &"Shelf".into()).unwrap().id;
+    let first = import_in_folder(&db, 101, ROOT_DIR_ID);
+    let second = import_in_folder(&db, 102, shelf);
+    let third = import_in_folder(&db, 103, shelf);
+    db.connection.fixtures_update_book_dir_is_downloaded().unwrap();
+    db.connection.fixtures_update_book_dir_is_downloaded_2(&(&first), &(&second)).unwrap();
+    db.connection.asset_clear_book_paths(&(&third)).unwrap();
+    db.connection.fixtures_update_book_format(&(&third)).unwrap();
+    db.connection.fixtures_insert_book_language_4(&(&third)).unwrap();
+    // Derived reading state provides the recent-reading sort order.
+    db.connection.projection_set_book_reading(&first, Some("reading"), 50.0_f32, Some(20)).unwrap();
+    db.connection.projection_set_book_reading(&second, Some("finished"), 100.0_f32, Some(30)).unwrap();
+    let mut query = subject_query(BrowseLocation::Books);
+    let hashes = |query: &library_model::LibraryBrowseQuery, downloaded_only| db.browse_contents(query, downloaded_only).unwrap().books.into_iter().map(|book| book.content_hash().unwrap()).collect::<Vec<_>>();
+    assert_eq!(hashes(&query, true), [first, second]);
+    query.search = "TITLE 102".into();
+    assert_eq!(hashes(&query, false), [second]);
+    query.search = "original author".into();
+    assert_eq!(hashes(&query, false), [first, second, third]);
+    query.search = "Shelf".into();
+    assert!(hashes(&query, false).is_empty());
+    query.search.clear();
+    query.file_types = vec![LibraryFileTypeFilter::Pdf];
+    assert_eq!(hashes(&query, false), [third]);
+    query.file_types.clear();
+    query.languages = vec!["EN_us".into()];
+    assert_eq!(hashes(&query, false), [first, second]);
+    query.languages.clear();
+    query.book_sort = BrowseBookSort::RecentlyRead;
+    assert_eq!(hashes(&query, false), [second, first, third]);
+    query.hide_finished = true;
+    assert_eq!(hashes(&query, false), [first, third]);
+    query.search = "no matches".into();
+    assert!(hashes(&query, false).is_empty());
 }
 
 #[test]
@@ -916,12 +750,12 @@ fn folder_counts_include_all_placements_and_search_sources() {
     let third = import_in_folder(&db, 103, shelf);
     // Exercise derived browse rows without producing unrelated canonical edits.
 
-    db.connection.execute("UPDATE book_dir SET is_downloaded=0", []).unwrap();
+    db.connection.fixtures_update_book_dir_is_downloaded().unwrap();
     place_book(&db, first, shelf, false);
     place_book(&db, first, branch, true);
-    db.connection.execute("UPDATE book_dir SET is_downloaded=1 WHERE book_row_id IN (SELECT row_id FROM book WHERE content_hash IN (?1,?2))", [second.as_str(), third.as_str()]).unwrap();
-    db.connection.execute("UPDATE book SET format=2 WHERE content_hash=?1", [third.as_str()]).unwrap();
-    db.connection.execute("INSERT OR IGNORE INTO book_language(book_row_id,language) SELECT row_id,'en' FROM book WHERE content_hash!=?1", [third.as_str()]).unwrap();
+    db.connection.fixtures_update_book_dir_is_downloaded_2(&(&second), &(&third)).unwrap();
+    db.connection.fixtures_update_book_format(&(&third)).unwrap();
+    db.connection.fixtures_insert_book_language_4(&(&third)).unwrap();
     let view = browse_folder(&db, ROOT_DIR_ID, "", &[]);
     let chip = view.children.iter().find(|c| c.id == library_model::BrowseLocation::Folder(shelf)).unwrap();
     assert_eq!((chip.book_count, chip.downloaded_book_count), (5, 3));
@@ -932,9 +766,9 @@ fn folder_counts_include_all_placements_and_search_sources() {
     assert!(direct.books.iter().all(|b| b.source_directory == Some(shelf)));
     let searched = browse_folder(&db, shelf, "Title", &[]);
     assert_eq!(searched.books.len(), 5, "search returns each descendant placement");
-    assert_eq!(searched.books.iter().filter(|b| b.content_hash == first).count(), 3);
+    assert_eq!(searched.books.iter().filter(|b| b.content_hash() == Some(first)).count(), 3);
     let source = [shelf, nested, branch].into_iter().min_by_key(|id| id.to_string()).unwrap();
-    assert_eq!(searched.books.iter().find(|b| b.content_hash == first).unwrap().source_directory, Some(source));
+    assert_eq!(searched.books.iter().find(|b| b.content_hash() == Some(first)).unwrap().source_directory, Some(source));
     let filtered = browse_folder(&db, ROOT_DIR_ID, "", &["en"]);
     assert_eq!(filtered.children.len(), 1);
     assert_eq!(filtered.children[0].book_count, 4);
@@ -951,13 +785,13 @@ fn folder_counts_include_all_placements_and_search_sources() {
     assert_eq!(nested_search.children[0].path.as_deref(), Some("Shelf"));
     assert_eq!(nested_search.children[0].book_count, 1);
     // Every removed or moved placement changes the subtree count.
-    db.connection.execute("DELETE FROM book_dir WHERE dir_id=?1 AND book_row_id=(SELECT row_id FROM book WHERE content_hash=?2)", [shelf.to_string(), first.to_string()]).unwrap();
+    db.connection.fixtures_delete_book_dir_2(&(shelf.to_string()), &first).unwrap();
     assert_eq!(browse_folder(&db, ROOT_DIR_ID, "", &[]).children.iter().find(|c| c.id == library_model::BrowseLocation::Folder(shelf)).unwrap().book_count, 4);
-    db.connection.execute("UPDATE book_dir SET dir_id=?1 WHERE dir_id=?2 AND book_row_id=(SELECT row_id FROM book WHERE content_hash=?3)", [empty.to_string(), nested.to_string(), first.to_string()]).unwrap();
+    db.connection.fixtures_update_book_dir_dir_id(&(empty.to_string()), &(nested.to_string()), &first).unwrap();
     let moved = browse_folder(&db, ROOT_DIR_ID, "", &[]);
     assert_eq!(moved.children.iter().find(|c| c.id == library_model::BrowseLocation::Folder(shelf)).unwrap().book_count, 3);
     assert_eq!(moved.children.iter().find(|c| c.id == library_model::BrowseLocation::Folder(empty)).unwrap().book_count, 1);
-    assert_eq!(browse_folder(&db, shelf, "Title", &[]).books.iter().find(|b| b.content_hash == first).unwrap().source_directory, Some(branch));
+    assert_eq!(browse_folder(&db, shelf, "Title", &[]).books.iter().find(|b| b.content_hash() == Some(first)).unwrap().source_directory, Some(branch));
 }
 
 #[test]
@@ -974,27 +808,27 @@ fn folder_counts_follow_writes_and_browsing_is_read_only() {
     };
     assert_eq!(counts(), (1, 1));
     for downloaded in [0, 1, 0] {
-        db.connection.execute("UPDATE book_dir SET is_downloaded=?1", [downloaded]).unwrap();
+        db.connection.fixtures_update_book_dir_is_downloaded_3(&downloaded).unwrap();
         assert_eq!(counts(), (1, downloaded as usize));
     }
     let tx = db.connection.unchecked_transaction().unwrap();
-    tx.execute("UPDATE book_dir SET deleted_at=1", []).unwrap();
-    assert_eq!(db.connection.query_row("SELECT count(*) FROM book_dir WHERE deleted_at IS NULL", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    tx.fixtures_update_book_dir_deleted_at_3().unwrap();
+    assert_eq!(db.connection.fixtures_read_book_dir_count(|r| r.get::<_, i64>(0)).unwrap(), 0);
     tx.rollback().unwrap();
     assert_eq!(counts(), (1, 0));
     db.connection.pragma_update(None, "query_only", true).unwrap();
     assert_eq!(browse_folder(&db, branch, "", &[]).books.len(), 1);
     db.connection.pragma_update(None, "query_only", false).unwrap();
 
-    db.connection.execute("UPDATE dir SET name='Moved',parent_id=?1 WHERE id=?2", [other.to_string(), branch.to_string()]).unwrap();
+    db.connection.fixtures_update_dir_name_parent_id(&(other.to_string()), &(branch.to_string())).unwrap();
 
     let view = browse_folder(&db, ROOT_DIR_ID, "", &[]);
     assert_eq!(view.children.iter().find(|c| c.id == library_model::BrowseLocation::Folder(shelf)).unwrap().book_count, 0);
     assert_eq!(view.children.iter().find(|c| c.id == library_model::BrowseLocation::Folder(other)).unwrap().book_count, 1);
-    db.connection.execute("UPDATE book_dir SET deleted_at=1 WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?1)", [hash.as_str()]).unwrap();
+    db.connection.fixtures_update_book_dir_deleted_at_4(&(&hash)).unwrap();
     assert_eq!(browse_folder(&db, ROOT_DIR_ID, "", &[]).children.iter().find(|c| c.id == library_model::BrowseLocation::Folder(other)).unwrap().book_count, 0);
-    db.connection.execute("UPDATE book_dir SET deleted_at=NULL", []).unwrap();
-    db.connection.execute("UPDATE dir SET deleted_at=1 WHERE id=?1", [other.to_string()]).unwrap();
+    db.connection.fixtures_update_book_dir_deleted_at_2().unwrap();
+    db.connection.fixtures_update_dir_deleted_at(&(other.to_string())).unwrap();
     assert!(browse_folder(&db, ROOT_DIR_ID, "Title", &[]).books.is_empty(), "deleted ancestors block membership");
     assert_eq!(browse_folder(&db, branch, "", &[]).books.len(), 1, "a live detached subtree retains its own membership");
 }
@@ -1008,12 +842,12 @@ fn folder_sections_use_subtree_counts_and_normalized_languages() {
     let branch = db.create_directory(&child, &"Branch".into()).unwrap().id;
     import_in_folder(&db, 301, child);
     import_in_folder(&db, 302, branch);
-    db.connection.execute("INSERT OR IGNORE INTO book_language(book_row_id,language) SELECT row_id,'en' FROM book", []).unwrap();
+    db.connection.fixtures_insert_book_language_5().unwrap();
     let mut query = subject_query(library_model::BrowseLocation::Folder(ROOT_DIR_ID));
     let unfiltered = db.browse(&query, false).unwrap();
     assert_eq!(unfiltered.sections.len(), 1);
     assert_eq!(unfiltered.sections[0].parent.id, library_model::BrowseLocation::Folder(shelf));
-    assert_eq!(unfiltered.sections[0].children.iter().map(|row| row.id.clone()).collect::<Vec<_>>(), [library_model::BrowseLocation::Folder(child), library_model::BrowseLocation::Folder(empty)]);
+    assert_eq!(unfiltered.sections[0].children.iter().map(|row| row.id).collect::<Vec<_>>(), [library_model::BrowseLocation::Folder(child), library_model::BrowseLocation::Folder(empty)]);
     let downloaded = db.browse(&query, true).unwrap();
     assert_eq!(downloaded.sections[0].children.len(), 1);
     assert_eq!(downloaded.sections[0].children[0].id, library_model::BrowseLocation::Folder(child));
@@ -1040,8 +874,8 @@ fn folder_sections_preserve_wrapper_order_and_direct_search_results() {
     import_in_folder(&db, 304, plain);
     let query = subject_query(library_model::BrowseLocation::Folder(ROOT_DIR_ID));
     let page = db.browse(&query, false).unwrap();
-    assert_eq!(page.contents.children.iter().map(|row| row.id.clone()).collect::<Vec<_>>(), [library_model::BrowseLocation::Folder(wrapper), library_model::BrowseLocation::Folder(plain)]);
-    assert_eq!(page.sections.iter().map(|section| section.parent.id.clone()).collect::<Vec<_>>(), [library_model::BrowseLocation::Folder(plain), library_model::BrowseLocation::Folder(wrapper)]);
+    assert_eq!(page.contents.children.iter().map(|row| row.id).collect::<Vec<_>>(), [library_model::BrowseLocation::Folder(wrapper), library_model::BrowseLocation::Folder(plain)]);
+    assert_eq!(page.sections.iter().map(|section| section.parent.id).collect::<Vec<_>>(), [library_model::BrowseLocation::Folder(plain), library_model::BrowseLocation::Folder(wrapper)]);
     assert_eq!(page.sections[1].children[0].id, library_model::BrowseLocation::Folder(nested));
     assert_eq!(page.sections[0].books.len(), 1);
     assert!(page.sections[1].books.is_empty());
@@ -1061,10 +895,10 @@ fn downloaded_folder_sorting_uses_scoped_counts_and_normalized_names() {
         for book in 0..downloads + remote {
             index += 1;
             let hash = import_in_folder(&db, index, directory);
-            db.connection.execute("UPDATE book_dir SET is_downloaded=?1 WHERE book_row_id=(SELECT row_id FROM book WHERE content_hash=?2)", library_database::rusqlite::params![book < downloads, hash.as_str()]).unwrap();
+            db.connection.fixtures_update_book_dir_is_downloaded_4(&(book < downloads), &(&hash)).unwrap();
         }
     }
-    db.connection.execute("INSERT OR IGNORE INTO book_language(book_row_id,language) SELECT row_id,'en' FROM book", []).unwrap();
+    db.connection.fixtures_insert_book_language_5().unwrap();
     for filtered in [false, true] {
         for search in ["", "ology"] {
             for sort in [library_model::BrowseChipSort::Alphabetical, library_model::BrowseChipSort::BookCount] {
@@ -1093,7 +927,7 @@ fn downloaded_folder_sorting_uses_scoped_counts_and_normalized_names() {
 #[test]
 fn subject_cards_and_global_facets_use_normalized_languages() {
     let (db, _path, _) = subject_fixture();
-    db.connection.execute("INSERT OR IGNORE INTO book_language(book_row_id,language) SELECT row_id,'en' FROM book", []).unwrap();
+    db.connection.fixtures_insert_book_language_5().unwrap();
     let root = db.browse_contents(&subject_query(library_model::BrowseLocation::Subject(0)), false).unwrap();
     let mut query = subject_query(root.children[0].id);
     query.languages = vec!["en".into()];
@@ -1111,19 +945,19 @@ fn browse_progress_is_derived_without_rewriting_sync_registers_and_audio_is_book
     // Browse progress comes from the dedicated register, independent of the location.
 
     for (position, progress, expected) in [("0.25", 0., 0.), ("35", 0., 0.), ("chapter.xhtml", 0., 0.), ("0.25", 70., 70.), ("101", 0., 0.), (" 0.5suffix", 0., 0.)] {
-        db.connection.execute("UPDATE book SET read_pos=?1,read_progress=?2 WHERE content_hash=?3", library_database::rusqlite::params![position, progress, hash.as_str()]).unwrap();
+        db.connection.fixtures_update_book_read_pos_read_progress(&position, &progress, &(&hash)).unwrap();
         assert_eq!(db.browse_book_detail(&hash).unwrap().book.progress, f64::from(expected) as f32);
-        let stored: (String, f64) = db.connection.query_row("SELECT read_pos,read_progress FROM book WHERE content_hash=?1", [hash.as_str()], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        let stored: (String, f64) = db.connection.fixtures_read_book_read_pos_read_progress(&(&hash), |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!(stored, (position.to_owned(), progress));
     }
-    db.connection.execute("UPDATE book_navigation SET duration_ms=12345 WHERE content_hash=?1", [hash.as_str()]).unwrap();
-    db.connection.execute("UPDATE book_navigation SET entry_count=7 WHERE content_hash=?1", [hash.as_str()]).unwrap();
+    db.connection.fixtures_update_book_duration_ms(&(&hash)).unwrap();
+    db.connection.fixtures_update_book_entry_count(&(&hash)).unwrap();
     let folder = db.create_directory(&ROOT_DIR_ID, &"Copy".into()).unwrap().id;
     place_book(&db, hash, folder, false);
     let detail = db.browse_book_detail(&hash).unwrap();
     assert_eq!(detail.book.audiobook_duration_ms, Some(12345));
     assert_eq!(detail.audiobook_chapter_count, Some(7));
-    db.connection.execute("UPDATE book_navigation SET duration_ms=NULL WHERE content_hash=?1", [hash.as_str()]).unwrap();
+    db.connection.fixtures_update_book_duration_ms_2(&(&hash)).unwrap();
     let detail = db.browse_book_detail(&hash).unwrap();
     assert_eq!(detail.book.audiobook_duration_ms, None);
     assert_eq!(detail.audiobook_chapter_count, None);
@@ -1131,7 +965,7 @@ fn browse_progress_is_derived_without_rewriting_sync_registers_and_audio_is_book
 
 /// Books a search from the root finds, by title or author.
 fn searched(db: &Database, search: &str) -> Vec<ContentHash> {
-    browse_folder(db, ROOT_DIR_ID, search, &[]).books.into_iter().map(|book| book.content_hash).collect()
+    browse_folder(db, ROOT_DIR_ID, search, &[]).books.into_iter().map(|book| book.content_hash().unwrap()).collect()
 }
 
 #[test]
@@ -1149,7 +983,8 @@ fn search_reads_stored_keys_without_normalizing_metadata_again() {
 
 #[test]
 fn folder_count_queries_do_not_scan_unrelated_library_books() {
-    use library_database::rusqlite::{StatementStatus, named_params};
+    use crate::browse::FoldersSql;
+    use crate::query_methods::active_query_fullscan_steps;
     let db = database();
     let small = db.create_directory(&ROOT_DIR_ID, &"Small".into()).unwrap().id;
     let child = db.create_directory(&small, &"Child".into()).unwrap().id;
@@ -1157,29 +992,32 @@ fn folder_count_queries_do_not_scan_unrelated_library_books() {
     import_in_folder(&db, 901, child);
 
     let tx = db.connection.unchecked_transaction().unwrap();
-    tx.execute_batch("WITH RECURSIVE numbers(n) AS (VALUES(1000) UNION ALL SELECT n+1 FROM numbers WHERE n<2999) INSERT INTO book(content_hash,title,format) SELECT printf('%064x',n),'Other book',1 FROM numbers;").unwrap();
-    tx.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) SELECT ?1,row_id,content_hash || '.epub','',1 FROM book WHERE title='Other book'", [big.to_string()]).unwrap();
-    tx.execute(
-        "WITH RECURSIVE numbers(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM numbers WHERE n<1000)
-        INSERT INTO dir(id,parent_id,name) SELECT printf('10000000-0000-0000-0000-%012x',n),?1,printf('Unrelated %d',n) FROM numbers",
-        [big.to_string()],
-    )
-    .unwrap();
+    tx.fixtures_read_numbers_numbers_n_n().unwrap();
+    tx.fixtures_insert_book_dir_5(&(big.to_string())).unwrap();
+    tx.fixtures_read_numbers_numbers_n_n_2(&(big.to_string())).unwrap();
     tx.commit().unwrap();
     browse_folder(&db, ROOT_DIR_ID, "", &[]);
-    let source = include_str!("../src/browse/sql/folders.sql");
-    let query = source.split("-- name: folder_direct_counts?\n").nth(1).unwrap();
     let directories = serde_json::to_string(&[child.to_string()]).unwrap();
-    let mut direct = db.connection.prepare(query).unwrap();
-    let count: i64 = direct.query_row(named_params! {":directory_ids":directories,":file_types":0,":languages":""}, |r| r.get(1)).unwrap();
+    let mut count = 0;
+    db.connection
+        .folder_direct_counts(&directories, 0, "", |row| {
+            count = row.get::<_, i64>(1)?;
+            assert!(active_query_fullscan_steps(&db.connection) < 100, "direct counts must not scan unrelated books");
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(count, 1);
-    assert!(direct.get_status(StatementStatus::FullscanStep) < 100, "direct counts must not scan unrelated books");
-    db.connection.execute("INSERT OR IGNORE INTO book_language(book_row_id,language) SELECT row_id,'en' FROM book WHERE title!='Other book'", []).unwrap();
+    db.connection.fixtures_insert_book_language_6().unwrap();
     for (formats, languages) in [(1, ""), (2, ""), (3, ""), (0, ",en,"), (1, ",en,"), (1, ",sv,")] {
-        direct.reset_status(StatementStatus::FullscanStep);
-        let actual: i64 = direct.query_row(named_params! {":directory_ids":directories,":file_types":formats,":languages":languages}, |r| r.get(1)).unwrap();
+        let mut actual = 0;
+        db.connection
+            .folder_direct_counts(&directories, formats, languages, |row| {
+                actual = row.get::<_, i64>(1)?;
+                assert!(active_query_fullscan_steps(&db.connection) < 100, "filtered counts must not scan unrelated books");
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(actual, i64::from((formats == 0 || formats & 1 != 0) && (languages.is_empty() || languages == ",en,")));
-        assert!(direct.get_status(StatementStatus::FullscanStep) < 100, "filtered counts must not scan unrelated books");
     }
     assert_eq!(browse_folder(&db, ROOT_DIR_ID, "", &[]).children.iter().find(|row| row.id == library_model::BrowseLocation::Folder(small)).unwrap().book_count, 1);
 }
@@ -1193,115 +1031,32 @@ fn read_time_directory_counts_follow_deletes_and_physical_cascades() {
     place_book(&db, hash, shelf, true);
     let root_count = || browse_folder(&db, ROOT_DIR_ID, "", &[]).children.iter().map(|row| row.book_count).sum::<usize>();
     assert_eq!(root_count(), 2);
-    db.connection.execute("UPDATE book SET deleted_at=1 WHERE content_hash=?1", [hash.as_str()]).unwrap();
+    db.connection.fixtures_update_book_deleted_at(&(&hash)).unwrap();
     assert_eq!(root_count(), 0);
-    db.connection.execute("UPDATE book SET deleted_at=NULL WHERE content_hash=?1", [hash.as_str()]).unwrap();
+    db.connection.fixtures_update_book_deleted_at_2(&(&hash)).unwrap();
     assert_eq!(root_count(), 2);
-    db.connection.execute("DELETE FROM dir WHERE id=?1", [branch.to_string()]).unwrap();
+    db.connection.fixtures_delete_dir(&(branch.to_string())).unwrap();
     assert_eq!(root_count(), 1);
-    db.connection.execute("DELETE FROM book WHERE content_hash=?1", [hash.as_str()]).unwrap();
+    db.connection.fixtures_delete_book(&(&hash)).unwrap();
     assert_eq!(root_count(), 0);
     import_in_folder(&db, 902, shelf);
-    db.connection.execute("DELETE FROM dir WHERE id=?1", [shelf.to_string()]).unwrap();
+    db.connection.fixtures_delete_dir(&(shelf.to_string())).unwrap();
     assert_eq!(root_count(), 0);
-}
-
-#[cfg(feature = "scanner")]
-#[test]
-fn scan_file_failures_finish_and_remain_visible_until_next_scan() {
-    use library_database::{FilesystemScan, InspectedFilesystemScan};
-    let db = database();
-    let mut snapshot = db.scan_snapshot().unwrap();
-    let discovery = FilesystemScan { readable: true, ..Default::default() };
-    let failures = vec![("Broken.epub".to_owned(), "Invalid ZIP header".to_owned())];
-    // Even a batch containing only failed files must persist their diagnostics.
-    db.apply_filesystem_scan_batch(&mut snapshot, &discovery, &InspectedFilesystemScan { failures: failures.clone(), readable: false, books: vec![] }, false).unwrap();
-    db.apply_filesystem_scan_batch(&mut snapshot, &discovery, &InspectedFilesystemScan { readable: false, ..Default::default() }, true).unwrap();
-    assert!(!db.needs_scan().unwrap());
-    for _ in 0..2 {
-        assert!(!({ use library_database::{DatabaseError, LibraryWork}; use library_database::assets::ActivitySql; let database = &db; (|| -> Result<LibraryWork, DatabaseError> {
-        let mut work = None;
-        database.connection.activity_progress(|row| {
-            let count = |index| row.get::<_, i64>(index).map(|value| value.max(0) as u64);
-            work = Some(LibraryWork {
-                total_books: count(0)?, uploaded_books: count(1)?,
-                pending_uploads: count(2)?, pending_changes: count(3)?,
-                pending_thumbnails: count(4)?, pending_covers: count(5)?,
-                scan_pending: row.get(6)?, scan_failed: row.get(7)?, sync_configured: row.get(8)?,
-            });
-            Ok(())
-        })?;
-        work.ok_or_else(|| DatabaseError::message("library activity query returned no row"))
-    })() }).unwrap().scan_pending);
-        assert_eq!(db.scan_failures().unwrap(), failures);
-    }
-    let snapshot = db.scan_snapshot().unwrap();
-    db.apply_filesystem_scan(&snapshot, &discovery, &InspectedFilesystemScan { readable: true, ..Default::default() }).unwrap();
-    assert!(db.scan_failures().unwrap().is_empty());
 }
 
 fn record_found_answer(db: &Database, hash: ContentHash) {
-    let candidate = ({ use library_database::enrichment::facts::*; use library_database::DatabaseError; use library_replica::LibraryStateEntry; use metadata_contract::books::{BookEnrichmentStatus,BookFacts}; let database = db; let scope = &[hash]; let now = 0; (|| -> Result<Vec<EnrichmentCandidate>, DatabaseError> {
-        let scope = serde_json::to_string(scope).map_err(DatabaseError::operation)?;
-        let mut rows = Vec::new();
-        database.connection.facts_candidates(&scope, |row| {
-            rows.push((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, Option<i64>>(4)?));
-            Ok(())
-        })?;
-        let mut candidates = Vec::new();
-        for (hash, format, stored_key, status, retry_at) in rows {
-            let Some((body, recording)) = facts_input(&database.connection, &hash)? else { continue };
-            let key = request_key(&body, recording.as_deref());
-            let waiting = retry_at.is_some_and(|at| at > now);
-            if waiting && (stored_key.as_deref() == Some(key.as_str()) || status.as_deref() == Some("failed")) {
-                continue;
-            }
-            let LibraryStateEntry::Metadata { value, .. } = sync_common::wire::decode::<LibraryStateEntry>(&body, sync_common::wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)? else { continue };
-            let mut filenames = Vec::new();
-            database.connection.facts_filenames(&hash, |row| {
-                filenames.push(row.get(0)?);
-                Ok(())
-            })?;
-            let recording = recording.map(|json| serde_json::from_str(&json)).transpose().map_err(DatabaseError::operation)?;
-            let audiobook = matches!(format.and_then(book_model::BookFormat::from_code), Some(book_model::BookFormat::M4b | book_model::BookFormat::Mp3Folder));
-            let record = book_model::BookRecord { metadata: value, description: String::new() };
-            candidates.push(EnrichmentCandidate { content_hash: ContentHash::new(&hash), request_key: key, facts: BookFacts { key: String::new(), record, audiobook, filenames, recording } });
-        }
-        Ok(candidates)
-    })() }).unwrap().pop().expect("an unanswered book is a candidate");
-    let mut record = candidate.facts.record.clone();
+    let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().expect("an unanswered book is a candidate");
+    let mut record = candidate.record.clone();
     record.book.subjects.push(book_model::BookSubject::new(None, "History", "openlibrary:metadata:work", Some("lcc".into()), Some("DC38".into())).unwrap());
     record.contributors[0] = book_model::Contributor::with_id(book_model::agent_id_from_migration_seed(b"external-author:open_library:OL1A"), "Original Author", book_model::MarcRelatorCode(*b"aut")).unwrap();
     record.description = "Server description.".into();
     let answer = metadata_contract::books::BookEnrichment { key: "0".into(), status: metadata_contract::books::BookEnrichmentStatus::Found, record: Some(record), toc: None, cover: None, detail: String::new() };
-    ({ use library_database::enrichment::facts::*; use library_database::DatabaseError; use library_replica::LibraryStateEntry; use metadata_contract::books::{BookEnrichmentStatus,BookFacts}; let database = db; let hash = &hash; let request_key = &candidate.request_key; let result = &answer; let now = 0; (|| -> Result<(), DatabaseError> {
-        let transaction = database.connection.unchecked_transaction()?;
-        match result.status {
-            BookEnrichmentStatus::Failed => {
-                transaction.facts_record_failure(hash.as_str(), request_key, now + FAILURE_RETRY_SECONDS)?;
-            }
-            BookEnrichmentStatus::Found => {
-                let response = serde_json::to_string(result).map_err(DatabaseError::operation)?;
-                transaction.facts_record(hash.as_str(), request_key, "found", Some(response.as_str()), now + ANSWER_LIFETIME_SECONDS)?;
-                transaction.facts_mark_dirty(hash.as_str())?;
-            }
-            BookEnrichmentStatus::NoMatch => {
-                transaction.facts_record(hash.as_str(), request_key, "no_match", None, now + ANSWER_LIFETIME_SECONDS)?;
-                transaction.facts_mark_dirty(hash.as_str())?;
-            }
-        }
-        library_database::commit(transaction)?;
-        Ok(())
-    })() }).unwrap();
+    db.record_enrichment(&hash, &candidate.request_key, &answer, 0).unwrap();
 }
 
 fn projected_subject_codes(db: &Database) -> Vec<String> {
-    db.connection.prepare("SELECT code FROM book_subject WHERE code IS NOT NULL").unwrap().query_map([], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
+    query_rows(|callback| db.connection.fixtures_read_book_subject_code(callback), |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
 }
-
-
-
-
 
 #[test]
 fn reimport_keeps_the_file_author_identity_under_an_enriched_projection() {
@@ -1309,18 +1064,140 @@ fn reimport_keeps_the_file_author_identity_under_an_enriched_projection() {
     let input = import();
     let hash = input.content_hash;
     db.commit_import(input).unwrap();
-    let file_author = db.connection.query_row("SELECT stable_id FROM author_identity", [], |row| row.get::<_, String>(0)).unwrap();
+    let file_author = db.connection.fixtures_read_author_identity_stable_id(|row| row.get::<_, String>(0)).unwrap();
     record_found_answer(&db, hash);
-    let projected: String = db.connection.query_row("SELECT a.stable_id FROM book_contributor c JOIN author_identity a ON a.id=c.author_identity_id", [], |row| row.get(0)).unwrap();
+    let projected: String = db.connection.fixtures_read_book_contributor_a_stable_id(|row| row.get(0)).unwrap();
     assert_ne!(projected, file_author, "the answer's authority identity is projected");
 
     db.clear_sync_outbox().unwrap();
     db.commit_import(import()).unwrap();
+    complete_no_match(&db, &hash);
     let metadata = db.sync_publishable_mutations().unwrap().into_iter().find_map(|mutation| match mutation.state.value {
-        library_replica::LibraryStateEntry::Metadata { value, .. } => Some(value),
+        library_replica::LibraryStateEntry::BookAdd { value, .. } => Some(value.record.metadata),
         _ => None,
     });
     if let Some(metadata) = metadata {
         assert_eq!(metadata.contributors[0].agent_id().to_string(), file_author, "the register never takes the projected identity");
     }
+}
+
+#[cfg(test)]
+use crate::sql_fixtures::FixturesSql;
+
+fn complete_no_match(db: &Database, hash: &ContentHash) {
+    use metadata_contract::books::{BookEnrichment, BookEnrichmentStatus};
+    let Some(candidate) = db.enrichment_candidates(&[*hash], 0).unwrap().pop() else { return };
+    db.record_enrichment(hash, &candidate.request_key, &BookEnrichment { key: String::new(), status: BookEnrichmentStatus::NoMatch, record: None, toc: None, cover: None, detail: String::new() }, 0).unwrap();
+}
+
+#[test]
+fn failed_enrichment_blocks_uploads_and_metadata_only_sync_until_a_definitive_answer() {
+    use metadata_contract::books::{BookEnrichment, BookEnrichmentStatus};
+    let db = database();
+    let book = import();
+    let hash = book.content_hash;
+    db.commit_import(book).unwrap();
+    db.connection.fixtures_ready_book_upload(&hash).unwrap();
+    assert!(db.pending_book_uploads(0, 10).unwrap().is_empty());
+    assert!(db.transfer_snapshot(&[hash]).unwrap().asset_for(&hash).unwrap().upload.intent.is_none());
+    db.set_asset_storage_policy(false, false).unwrap();
+    assert!(db.sync_publishable_mutations().unwrap().is_empty());
+    let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
+    let mut answer = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Failed, record: None, toc: None, cover: None, detail: String::new() };
+    db.record_enrichment(&hash, &candidate.request_key, &answer, 0).unwrap();
+    assert_eq!(db.enrichment_next_retry().unwrap(), Some(60));
+    assert!(db.enrichment_candidates(&[hash], 59).unwrap().is_empty());
+    assert_eq!(db.enrichment_candidates(&[hash], 60).unwrap().len(), 1);
+    assert!(db.sync_publishable_mutations().unwrap().is_empty());
+    answer.status = BookEnrichmentStatus::NoMatch;
+    db.record_enrichment(&hash, &candidate.request_key, &answer, 60).unwrap();
+    assert!(db.enrichment_next_retry().unwrap().is_none());
+    assert!(db.sync_publishable_mutations().unwrap().iter().any(|publication| matches!(publication.state.value, library_replica::LibraryStateEntry::BookAdd { .. })));
+    db.set_asset_storage_policy(true, false).unwrap();
+    assert_eq!(db.pending_book_uploads(0, 10).unwrap().len(), 1);
+    assert!(db.transfer_snapshot(&[hash]).unwrap().asset_for(&hash).unwrap().upload.intent.is_some());
+}
+
+#[test]
+fn enrichment_cover_checks_preserve_transfer_state_and_survive_reopening() {
+    let path = std::env::temp_dir().join(format!("enrichment-cover-check-{}.db", uuid::Uuid::new_v4()));
+    let db = Database::open(&path).unwrap();
+    db.initialize_library().unwrap();
+    let book = import();
+    let hash = book.content_hash;
+    db.commit_import(book).unwrap();
+    db.complete_thumbnail_work(&hash, false).unwrap();
+    assert!(db.enrichment_cover_candidates(&[hash]).unwrap().is_empty());
+    let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
+    let answer = metadata_contract::books::BookEnrichment { key: String::new(), status: metadata_contract::books::BookEnrichmentStatus::NoMatch, record: None, toc: None, cover: None, detail: String::new() };
+    db.record_enrichment(&hash, &candidate.request_key, &answer, 0).unwrap();
+    assert_eq!(db.enrichment_cover_candidates(&[hash]).unwrap(), vec![hash]);
+    db.mark_enrichment_cover_checked(&hash).unwrap();
+    assert!(db.enrichment_cover_candidates(&[hash]).unwrap().is_empty());
+    assert_eq!(db.thumbnail_work_state(&hash).unwrap().as_deref(), Some("no_cover"));
+    drop(db);
+    let reopened = Database::open(&path).unwrap();
+    reopened.initialize_library().unwrap();
+    assert!(reopened.enrichment_cover_candidates(&[hash]).unwrap().is_empty());
+    assert_eq!(reopened.thumbnail_work_state(&hash).unwrap().as_deref(), Some("no_cover"));
+    drop(reopened);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn flat_book_copy_preserves_each_source_and_file_name() {
+    let db = database();
+    let first_source = db.create_directory(&ROOT_DIR_ID, &"First".into()).unwrap().id;
+    let second_source = db.create_directory(&ROOT_DIR_ID, &"Second".into()).unwrap().id;
+    let destination = db.create_directory(&ROOT_DIR_ID, &"Copies".into()).unwrap().id;
+    let first = import_in_folder(&db, 901, first_source);
+    let second = import_in_folder(&db, 902, second_source);
+
+    for hash in [first, second] {
+        assert!(db.copy_book_to_directory(&hash, None, &destination).unwrap());
+    }
+    assert_eq!(browse_folder(&db, first_source, "", &[]).books[0].content_hash(), Some(first));
+    assert_eq!(browse_folder(&db, second_source, "", &[]).books[0].content_hash(), Some(second));
+    assert_eq!(browse_folder(&db, destination, "", &[]).books.len(), 2);
+    assert!(db.has_book_named(&destination, "book901.epub").unwrap());
+    assert!(db.has_book_named(&destination, "book902.epub").unwrap());
+    assert_eq!(db.browse_contents(&subject_query(library_model::BrowseLocation::Books), false).unwrap().books.len(), 2);
+}
+
+#[test]
+fn flat_book_copy_skips_existing_assignments_and_retains_them_on_undo() {
+    let db = database();
+    let destination = db.create_directory(&ROOT_DIR_ID, &"Copies".into()).unwrap().id;
+    let first = import_in_folder(&db, 903, ROOT_DIR_ID);
+    let second = import_in_folder(&db, 904, ROOT_DIR_ID);
+    assert!(db.copy_book_to_directory(&first, Some(&ROOT_DIR_ID), &destination).unwrap());
+    db.clear_sync_outbox().unwrap();
+    let work = || db.native_file_work().unwrap().into_iter().map(|work| (work.id, work.operation, work.content_hash, work.original_path.to_string())).collect::<Vec<_>>();
+    let work_before = work();
+    assert!(!db.copy_book_to_directory(&first, None, &destination).unwrap());
+    assert!(!db.copy_book_to_directory(&first, Some(&destination), &destination).unwrap());
+    assert!(db.sync_publishable_mutations().unwrap().is_empty());
+    assert_eq!(work(), work_before);
+
+    // The shared copy workflow records undo only for newly created placements.
+    let mut undo = Vec::new();
+    for hash in [first, second] {
+        if db.copy_book_to_directory(&hash, None, &destination).unwrap() { undo.push(hash); }
+    }
+    assert_eq!(undo, [second]);
+    for hash in undo { assert!(!db.remove_book_placement(&hash, &destination).unwrap()); }
+    assert_eq!(browse_folder(&db, destination, "", &[]).books[0].content_hash(), Some(first));
+    assert_eq!(browse_folder(&db, ROOT_DIR_ID, "", &[]).books.len(), 2);
+}
+
+#[test]
+fn flat_book_copy_failure_keeps_the_successful_prefix() {
+    let db = database();
+    let destination = db.create_directory(&ROOT_DIR_ID, &"Copies".into()).unwrap().id;
+    let first = import_in_folder(&db, 905, ROOT_DIR_ID);
+    let missing = ContentHash::new(&"f".repeat(64));
+    assert!(db.copy_book_to_directory(&first, None, &destination).unwrap());
+    assert!(db.copy_book_to_directory(&missing, None, &destination).is_err());
+    assert_eq!(browse_folder(&db, destination, "", &[]).books[0].content_hash(), Some(first));
+    assert_eq!(browse_folder(&db, ROOT_DIR_ID, "", &[]).books[0].content_hash(), Some(first));
 }

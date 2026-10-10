@@ -3,18 +3,35 @@ pub(crate) use super::*;
 
 impl Database {
     pub(super) fn load_subject_tree(&self) -> Result<BTreeMap<i64, SubjectNode>, DatabaseError> {
-        let mut nodes = BTreeMap::from([(0, SubjectNode { label: "Subject".into(), ..Default::default() })]);
         let mut assignments = Vec::new();
         self.connection.subject_assignments(|row| {
             assignments.push((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?));
             Ok(())
         })?;
-        let mut lookup = self.connection.prepare_cached(include_str!("../sql/subjects/parent.sql"))?;
+        self.subject_tree(assignments)
+    }
+
+    /// The catalog's books, by position, at the routes of their concepts.
+    pub(super) fn catalog_subject_tree(&self) -> Result<BTreeMap<i64, SubjectNode>, DatabaseError> {
+        let books = crate::catalog::books();
+        let concepts = books.iter().flat_map(|book| book.concepts.iter().copied()).collect::<BTreeSet<_>>();
+        let mut routes = BTreeMap::<i64, Vec<i64>>::new();
+        self.connection.concept_routes(&serde_json::to_string(&concepts).map_err(DatabaseError::operation)?, |row| {
+            routes.entry(row.get(0)?).or_default().push(row.get(1)?);
+            Ok(())
+        })?;
+        let assignments = books.iter().enumerate().flat_map(|(index, book)| book.concepts.iter().flat_map(|concept| routes.get(concept).into_iter().flatten()).map(move |route| (index as i64, *route))).collect();
+        self.subject_tree(assignments)
+    }
+
+    /// The displayed tree for `(book, assigned route)` pairs.
+    fn subject_tree(&self, assignments: Vec<(i64, i64)>) -> Result<BTreeMap<i64, SubjectNode>, DatabaseError> {
+        let mut nodes = BTreeMap::from([(0, SubjectNode { label: "Subject".into(), ..Default::default() })]);
         for (book, assigned_route) in assignments {
             let mut current = assigned_route;
             while current != 0 {
                 if !nodes.contains_key(&current) {
-                    let (parent, label) = lookup.query_row([current], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                    let (parent, label) = self.connection.taxonomy_route_parent(&current, |row| Ok((row.get(0)?, row.get(1)?)))?;
                     nodes.insert(current, SubjectNode { parent, label, ..Default::default() });
                 }
                 let node = nodes.get_mut(&current).expect("loaded route");
@@ -80,10 +97,10 @@ pub(crate) fn subtree_routes(nodes: &BTreeMap<i64, SubjectNode>, root: i64) -> B
     let mut routes = BTreeSet::new();
     let mut pending = vec![root];
     while let Some(route) = pending.pop() {
-        if let Some(node) = nodes.get(&route) {
-            if routes.insert(route) {
-                pending.extend(&node.children);
-            }
+        if let Some(node) = nodes.get(&route)
+            && routes.insert(route)
+        {
+            pending.extend(&node.children);
         }
     }
     routes
@@ -100,29 +117,20 @@ mod tests {
         db.initialize_library().unwrap();
         // This fixture owns derived rows directly; do not enqueue canonical edits.
 
-        db.connection
-            .execute_batch(
-                "DETACH curated; ATTACH ':memory:' AS curated;
-            CREATE TABLE curated.taxonomy_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-            CREATE TABLE curated.concept(concept_id INTEGER PRIMARY KEY,preferred_label TEXT NOT NULL);
-            INSERT INTO curated.concept VALUES(1,'Transportation'),(2,'Land Transport'),(3,'Automotive'),(4,'Railroads'),(5,'Marine Transport');
-            CREATE TABLE curated.unified_concept_route(route_id INTEGER PRIMARY KEY,concept_id INTEGER NOT NULL,parent_route_id INTEGER NOT NULL);
-            INSERT INTO curated.unified_concept_route VALUES(1,1,0),(2,2,1),(3,3,2),(4,4,2),(5,5,1);
-        ",
-            )
+        db.connection.fixtures_detach_curated_taxonomy_meta()
             .unwrap();
         let insert = |first: i64, last: i64| {
             db.with_write_transaction(|tx| {
                 for id in first..=last {
-                    tx.execute("INSERT INTO book(content_hash,title,format) VALUES(printf('%064x',?1),printf('Book %d',?1),1)", [id])?;
-                    tx.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) VALUES(?1,?2,?3,'',1)", rusqlite::params![sync_common::ROOT_DIR_ID.to_string(), id, format!("book{id}.epub")])?;
+                    tx.fixtures_insert_book_8(&id)?;
+                    tx.fixtures_insert_book_dir(&(sync_common::ROOT_DIR_ID.to_string()), &id, &(format!("book{id}.epub")))?;
                     let concept = match id {
                         1 | 4 | 5 => 3,
                         2 => 4,
                         3 => 5,
                         _ => unreachable!(),
                     };
-                    tx.execute("INSERT INTO book_unified_concept(book_row_id,concept_id,mapper_version) VALUES(?1,?2,1)", [id, concept])?;
+                    tx.fixtures_insert_book_unified_concept_3(&id, &concept)?;
                 }
                 Ok(WriteOutcome::Commit(()))
             })
@@ -157,20 +165,20 @@ mod tests {
         assert_eq!(visible(), vec![1, 2, 3]);
         assert_eq!(owners(), vec![(1, 3), (2, 2), (3, 1), (3, 4), (3, 5)]);
         db.with_write_transaction(|tx| {
-            tx.execute("DELETE FROM book_unified_concept WHERE book_row_id IN (4,5)", [])?;
+            tx.fixtures_delete_book_unified_concept()?;
             Ok(WriteOutcome::Commit(()))
         })
         .unwrap();
         assert_eq!(visible(), vec![1]);
         assert_eq!(owners(), vec![(1, 1), (1, 2), (1, 3)]);
         db.with_write_transaction(|tx| {
-            tx.execute("DELETE FROM book_unified_concept WHERE book_row_id=3", [])?;
+            tx.fixtures_delete_book_unified_concept_2()?;
             Ok(WriteOutcome::Commit(()))
         })
         .unwrap();
         assert_eq!(visible(), Vec::<i64>::new());
         assert_eq!(owners(), vec![(0, 1), (0, 2)]);
-        assert_eq!(db.connection.query_row("SELECT concept_id FROM book_unified_concept WHERE book_row_id=1", [], |row| row.get::<_, i64>(0)).unwrap(), 3);
+        assert_eq!(db.connection.fixtures_read_book_unified_concept_concept_id(|row| row.get::<_, i64>(0)).unwrap(), 3);
     }
 
     #[test]
@@ -179,22 +187,13 @@ mod tests {
         db.initialize_library().unwrap();
         // This fixture owns derived rows directly; do not enqueue canonical edits.
 
-        db.connection
-            .execute_batch(
-                "DETACH curated; ATTACH ':memory:' AS curated;
-            CREATE TABLE curated.taxonomy_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-            CREATE TABLE curated.concept(concept_id INTEGER PRIMARY KEY,preferred_label TEXT NOT NULL);
-            INSERT INTO curated.concept VALUES(1,'Science'),(2,'Physics'),(3,'Quantum'),(4,'Optics');
-            CREATE TABLE curated.unified_concept_route(route_id INTEGER PRIMARY KEY,concept_id INTEGER NOT NULL,parent_route_id INTEGER NOT NULL);
-            INSERT INTO curated.unified_concept_route VALUES(1,1,0),(2,2,1),(3,3,2),(4,4,2);
-        ",
-            )
+        db.connection.fixtures_detach_curated_taxonomy_meta_2()
             .unwrap();
         let insert = |range: std::ops::RangeInclusive<i64>| {
             db.with_write_transaction(|tx| {
                 for id in range {
-                    tx.execute("INSERT INTO book(content_hash,title,format) VALUES(printf('%064x',?1),printf('Book %d',?1),1)", [id])?;
-                    tx.execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) VALUES(?1,?2,?3,'',1)", rusqlite::params![sync_common::ROOT_DIR_ID.to_string(), id, format!("book{id}.epub")])?;
+                    tx.fixtures_insert_book_8(&id)?;
+                    tx.fixtures_insert_book_dir(&(sync_common::ROOT_DIR_ID.to_string()), &id, &(format!("book{id}.epub")))?;
                     let concept = if id <= 3 {
                         3
                     } else if id <= 6 {
@@ -202,7 +201,7 @@ mod tests {
                     } else {
                         1
                     };
-                    tx.execute("INSERT INTO book_unified_concept(book_row_id,concept_id,mapper_version) VALUES(?1,?2,1)", [id, concept])?;
+                    tx.fixtures_insert_book_unified_concept_3(&id, &concept)?;
                 }
                 Ok(WriteOutcome::Commit(()))
             })
@@ -227,37 +226,28 @@ mod tests {
         insert(7..=7);
         assert_eq!(visible(), vec![(1, 0), (2, 1), (3, 2), (4, 2)]);
         db.with_write_transaction(|tx| {
-            tx.execute("DELETE FROM book_unified_concept WHERE book_row_id=7", [])?;
+            tx.fixtures_delete_book_unified_concept_3()?;
             Ok(WriteOutcome::Commit(()))
         })
         .unwrap();
         assert_eq!(visible(), vec![(1, 0), (3, 1), (4, 1)]);
-        assert_eq!(db.connection.query_row("SELECT concept_id FROM book_unified_concept WHERE book_row_id=1", [], |row| row.get::<_, i64>(0)).unwrap(), 3);
+        assert_eq!(db.connection.fixtures_read_book_unified_concept_concept_id(|row| row.get::<_, i64>(0)).unwrap(), 3);
     }
 
     #[test]
     fn multiple_routes_filters_search_scope_and_taxonomy_edits_are_read_live() {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
-        db.connection
-            .execute_batch(
-                "
-            DETACH curated; ATTACH ':memory:' AS curated;
-            CREATE TABLE curated.concept(concept_id INTEGER PRIMARY KEY,preferred_label TEXT NOT NULL);
-            INSERT INTO curated.concept VALUES(1,'Science'),(2,'Physics'),(3,'Other'),(4,'Quantum');
-            CREATE TABLE curated.unified_concept_route(route_id INTEGER PRIMARY KEY,concept_id INTEGER NOT NULL,parent_route_id INTEGER NOT NULL);
-            INSERT INTO curated.unified_concept_route VALUES(1,1,0),(2,2,1),(3,3,0),(4,4,2),(5,4,3);",
-            )
+        db.connection.fixtures_detach_curated_concept_2()
             .unwrap();
         for id in 1..=3 {
-            db.connection.execute("INSERT INTO book(row_id,content_hash,title,search_title,format) VALUES(?1,printf('%064x',?1),printf('Book %d',?1),printf('book %d',?1),1)", [id]).unwrap();
-            db.connection
-                .execute("INSERT INTO book_dir(dir_id,book_row_id,file_name,local_hash,is_downloaded) VALUES(?1,?2,?3,'',?4)", rusqlite::params![sync_common::ROOT_DIR_ID.to_string(), id, format!("book{id}.epub"), i64::from(id == 1)])
+            db.connection.fixtures_insert_book_6(&id).unwrap();
+            db.connection.fixtures_insert_book_dir_2(&(sync_common::ROOT_DIR_ID.to_string()), &id, &(format!("book{id}.epub")), &(i64::from(id == 1)))
                 .unwrap();
-            db.connection.execute("INSERT INTO book_unified_concept VALUES(?1,4,1)", [id]).unwrap();
-            db.connection.execute("INSERT INTO book_language VALUES(?1,?2)", rusqlite::params![id, if id == 1 { "en" } else { "sv" }]).unwrap();
+            db.connection.fixtures_insert_book_unified_concept_4(&id).unwrap();
+            db.connection.fixtures_insert_book_language_2(&id, &(if id == 1 { "en" } else { "sv" })).unwrap();
         }
-        db.connection.execute("INSERT INTO book_unified_concept VALUES(1,3,1)", []).unwrap();
+        db.connection.fixtures_insert_book_unified_concept_5().unwrap();
         let mut query = library_model::LibraryBrowseQuery {
             location: library_model::BrowseLocation::Subject(0),
             search: String::new(),
@@ -287,12 +277,16 @@ mod tests {
         let downloaded = db.browse_contents(&query, true).unwrap();
         assert!(downloaded.children.iter().all(|row| row.book_count == 1 && row.downloaded_book_count == 1));
         db.connection.pragma_update(None, "query_only", false).unwrap();
-        db.connection.execute("UPDATE curated.concept SET preferred_label='Renamed science' WHERE concept_id=1", []).unwrap();
+        db.connection.fixtures_update_curated_concept_preferred_label_science().unwrap();
         assert!(db.browse_contents(&query, false).unwrap().children.iter().any(|row| row.name == "Renamed science"));
-        db.connection.execute("DELETE FROM book_dir WHERE book_row_id=3", []).unwrap();
+        db.connection.fixtures_delete_book_dir().unwrap();
         let collapsed = db.browse_contents(&query, false).unwrap();
         assert!(collapsed.children.is_empty());
         assert_eq!(collapsed.books.len(), 2);
-        assert_eq!(db.connection.query_row("SELECT count(*) FROM book_unified_concept", [], |row| row.get::<_, i64>(0)).unwrap(), 4, "compaction never rewrites assignments");
+        assert_eq!(db.connection.fixtures_read_book_unified_concept_count(|row| row.get::<_, i64>(0)).unwrap(), 4, "compaction never rewrites assignments");
     }
 }
+
+#[cfg(test)]
+use crate::sql_fixtures::FixturesSql;
+

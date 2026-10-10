@@ -1,6 +1,6 @@
+pub(crate) use super::*;
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
-pub(crate) use super::*;
 pub(crate) use sync_common::DirId;
 // Native asset-store projections. The shared model owns paths;
 // these snapshots remember which physical paths this device has materialized.
@@ -96,7 +96,7 @@ impl PreparedDirectory {
         let missing_external = old.as_deref() == Some(relative.as_str()) && !exists && chosen.is_none();
         let source = if !exists && !missing_external {
             if let Some(old) = old.as_ref().filter(|old| *old != &relative || chosen.is_some()) {
-                let source = library_path(handle, &old);
+                let source = library_path(handle, old);
                 let source_exists = record(&source)?;
                 if source_exists && source.is_dir() {
                     let marker = source.join(".biblos_uuid");

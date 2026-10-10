@@ -1,10 +1,12 @@
 //! Window-level browser shell.
 
 use std::rc::Rc;
+use app_preferences::{ApplicationTheme, BrowsingPreferencePatch, ResolvedAppearance};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render, Subscription, Window, px};
 use gpui_component::{Root, WindowExt, dialog::DialogButtonProps};
 use library_model::BookLocator;
+use ui_components::theme::{PaletteSelectionHandler, PaletteSelectionService};
 
 use crate::navigation::{BrowserShell, GlobalRoute};
 use crate::services::AppServices;
@@ -21,10 +23,22 @@ pub struct OpenBookRequested {
 /// to show it can collapse back down.
 pub struct BookDetailDismissed;
 
+struct PalettePreferences {
+    preferences: Entity<Preferences>,
+}
+
+impl PaletteSelectionService for PalettePreferences {
+    fn select_palette(&self, theme: ApplicationTheme, appearance: ResolvedAppearance, cx: &mut App) {
+        self.preferences.update(cx, |preferences, cx| {
+            if let Err(error) = preferences.update_browsing(BrowsingPreferencePatch::Palette(theme, appearance), cx) {
+                log::error!("failed to select application palette: {error}");
+            }
+        });
+    }
+}
+
 /// Owns window policy and composes the browser shell.
 pub struct BrowserRoot {
-    #[cfg(target_arch = "wasm32")]
-    _import_notifications: gpui::Task<()>,
     preferences: Entity<Preferences>,
     shell: Entity<BrowserShell>,
     focus: FocusHandle,
@@ -46,9 +60,6 @@ impl BrowserRoot {
         self.shell.update(cx, |shell, cx| shell.open_book_detail(library_id, content_hash, window, cx));
     }
 
-    pub fn clear_cached_book_details(&mut self, cx: &mut Context<Self>) {
-        self.shell.update(cx, |shell, cx| shell.clear_cached_book_details(cx));
-    }
     pub fn open_folder(&mut self, library_id: sync_common::LibraryId, directory_id: sync_common::DirId, title: String, window: &mut Window, cx: &mut Context<Self>) {
         self.shell.update(cx, |shell, cx| shell.open_folder(library_id, directory_id, title, window, cx));
     }
@@ -60,17 +71,8 @@ impl BrowserRoot {
     /// Builds the window root and its browser shell.
     pub fn new(services: AppServices, sync_state: Entity<crate::SyncState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.set_system_bars_visible(true);
-        #[cfg(target_arch = "wasm32")]
-        let import_notifications = crate::services::import_progress::watch_browser_imports(services.backend.clone(), services.sync_events.clone().expect("web sync event inbox"), window, cx);
         let preferences = cx.new(|cx| Preferences::new(services.clone(), cx));
-        let theme_preferences = preferences.clone();
-        cx.set_global(ui_components::theme::PaletteSelectionHandler(Rc::new(move |theme, appearance, cx| {
-            theme_preferences.update(cx, |preferences, cx| {
-                if let Err(error) = preferences.update_browsing(app_preferences::BrowsingPreferencePatch::Palette(theme, appearance), cx) {
-                    log::error!("failed to select application palette: {error}");
-                }
-            });
-        })));
+        cx.set_global(PaletteSelectionHandler(Rc::new(PalettePreferences { preferences: preferences.clone() })));
         let appearance_preferences = preferences.clone();
         window
             .observe_window_appearance(move |_, cx| {
@@ -102,8 +104,6 @@ impl BrowserRoot {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         Self {
-            #[cfg(target_arch = "wasm32")]
-            _import_notifications: import_notifications,
             preferences,
             shell,
             focus,

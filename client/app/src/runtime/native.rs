@@ -1,9 +1,12 @@
-use std::future::Future;
 use crate::BackendError;
+use crate::app::AppBackend;
+use library_backend::library::LibraryDirectory;
+use std::future::Future;
+use tokio::sync::watch;
 #[derive(Clone)]
 pub(crate) struct Transport {
     jobs: async_channel::Sender<BackendJob>,
-    pub(crate) libraries: std::sync::Arc<crate::library::LibraryDirectory>,
+    pub(crate) libraries: std::sync::Arc<LibraryDirectory>,
 }
 
 use super::*;
@@ -170,6 +173,11 @@ impl Transport {
         let (WorkerSubscription::Unit(events), ()) = self.subscribe::<()>(command).await? else { return Err("unexpected subscription type".into()) };
         Ok(events)
     }
+
+    pub(crate) async fn library_list_changes_transport(&self) -> Result<watch::Receiver<()>, BackendError> {
+        let (WorkerSubscription::LibraryList(events), ()) = self.subscribe::<()>(AppCommand::SubscribeLibraryList).await? else { return Err("unexpected subscription type".into()) };
+        Ok(events)
+    }
 }
 
 impl AppClient {
@@ -177,21 +185,32 @@ impl AppClient {
     pub fn start_native(launch: crate::api::BackendLaunch) -> Result<(Self, AppStartupState), BackendError> {
         let backend_context = launch.into_context()?;
         let backend = AppBackend::new(backend_context).map_err(BackendError::operation)?;
-        let startup = app_startup_state(&backend)?;
+        let startup = backend.startup_state()?;
         let (client, worker) = crate::runtime::native::channel(&backend);
         std::thread::Builder::new().name("bokheim-app-worker".to_owned()).spawn(move || backend.run_native_worker(worker)).map_err(|error| format!("failed to start application backend worker: {error}"))?;
         Ok((client, startup))
     }
 }
 
-/// Native transport has no browser-worker capability commands.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub enum NoHostCommand {}
-impl NoHostCommand {
-    pub(crate) fn is_book_subscription(&self) -> bool {
-        match *self {}
-    }
-    pub(crate) async fn dispatch_app(self, _: AppBackend) -> Result<WorkerDispatchResult<client_runtime::reply::Reply>, BackendError> {
-        match self {}
+#[cfg(test)]
+mod ordering_tests {
+    use super::*;
+    use app_preferences::{ReaderPreferencePatch, ReaderPreferences};
+
+    #[tokio::test]
+    async fn settings_patches_are_ordered_by_the_worker() {
+        let root = tempfile::tempdir().unwrap();
+        let context = crate::app::BackendContext::initialize(crate::app::AppDataLocation::native_path(root.path())).unwrap();
+        let (client, _) = AppClient::start_native(crate::BackendLaunch::initialize(crate::AppDataLocation::native_path(root.path())).unwrap()).unwrap();
+
+        let first = client.update_reader_preferences(vec![ReaderPreferencePatch::LineHeight(1.8)]);
+        let second = client.update_reader_preferences(vec![ReaderPreferencePatch::LineHeight(2.0), ReaderPreferencePatch::Zoom(1.7)]);
+        let (first, second) = futures_util::future::join(first, second).await;
+        first.unwrap();
+        second.unwrap();
+
+        let preferences = serde_json::from_slice::<ReaderPreferences>(&context.registry.read_value("reader_preferences.json").unwrap().unwrap()).unwrap();
+        assert_eq!(preferences.line_height(), 2.0);
+        assert_eq!(preferences.zoom(), 1.7);
     }
 }

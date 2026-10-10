@@ -5,10 +5,6 @@ fn main() {
     if desktop_gpui::update_entry::candidate_entry() {
         return;
     }
-    if app::host::cpu::run_pdf_cover_process() {
-        return;
-    }
-    app::host::cpu::configure_pdf_cover_process(std::env::current_exe().expect("could not locate desktop executable"));
     let backend_context = BackendLaunch::initialize(AppDataLocation::SharedDesktop).expect("failed to initialize backend app-data directory");
     app::init_logging();
 

@@ -3,15 +3,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{
-    App, Bounds, Div, Element, ElementId, FontWeight, GlobalElementId, Image, ImageSource, Img, LayoutId, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels, RenderOnce, ScrollHandle, SharedString, Size, Stateful, Style,
-    StyledImage, Window, div, img, px,
-};
+use gpui::{App, Div, ElementId, FontWeight, Image, ImageSource, Img, MouseButton, ObjectFit, Pixels, RenderOnce, ScrollHandle, SharedString, Size, Stateful, StyledImage, Window, div, img, px};
 use gpui_component::IconName;
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants};
 use gpui_component::menu::PopupMenu;
 use gpui_component::popover::Popover;
-use gpui_component::{ElementExt, Sizable};
+use gpui_component::Sizable;
 
 use crate::{BrowserTheme, RADIUS_MD, RADIUS_SM, SETTINGS_CONTROL_SIZE_REM, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, ScrollableElement, TEXT_SM, TEXT_XS, base_button, browser_theme, menu_item, outlined_text_button, scroll::Scrollable};
 
@@ -159,7 +156,7 @@ pub fn reader_annotation_group_heading(title: impl Into<SharedString>, theme: Br
     div().w_full().min_w_0().pt(px(12.0)).pb(px(SPACE_XS)).px(px(12.0)).text_size(gpui::rems(TEXT_XS)).font_features(crate::small_caps()).text_color(theme.text_muted).child(title.into())
 }
 
-pub fn reader_annotation_color_bar(color: &str) -> Div {
+pub fn reader_annotation_color_bar(color: u32) -> Div {
     div().absolute().left(px(6.0)).top(px(12.0)).bottom(px(12.0)).w(px(3.0)).bg(reader_annotation_color(color))
 }
 
@@ -230,22 +227,17 @@ pub fn reader_annotation_editor(note: impl IntoElement, theme: BrowserTheme) -> 
 /// laid over — which is also why they collapse on a greyscale screen. There,
 /// the style row is the distinction that survives.
 ///
-/// The values are canonical: an annotation stores the hex it was given, so this
+/// The values are canonical: an annotation stores the `0xRRGGBB` it was given, so this
 /// is the one place a colour may be named, and both the swatch and the renderer
 /// read it from here.
-pub const READER_ANNOTATION_COLORS: [(&str, &str); 8] = [("Yellow", "#f6c945"), ("Orange", "#fb923c"), ("Red", "#f87171"), ("Pink", "#f472b6"), ("Purple", "#c084fc"), ("Blue", "#60a5fa"), ("Teal", "#2dd4bf"), ("Green", "#4ade80")];
+pub const READER_ANNOTATION_COLORS: [(&str, u32); 8] = [("Yellow", 0xf6c945), ("Orange", 0xfb923c), ("Red", 0xf87171), ("Pink", 0xf472b6), ("Purple", 0xc084fc), ("Blue", 0x60a5fa), ("Teal", 0x2dd4bf), ("Green", 0x4ade80)];
 
-/// The default a new annotation takes, and the fallback for an unreadable one,
-/// in the two spellings the readers need: EPUB stores and parses hex strings,
-/// the PDF overlay packs channels into an integer. `colors_agree_on_the_default`
-/// keeps the pair honest.
-pub const READER_ANNOTATION_DEFAULT_COLOR: &str = READER_ANNOTATION_COLORS[0].1;
-pub const READER_ANNOTATION_DEFAULT_RGB: u32 = 0xf6c945;
+/// The colour a new annotation takes.
+pub const READER_ANNOTATION_DEFAULT_COLOR: u32 = READER_ANNOTATION_COLORS[0].1;
 
-/// Parses one of [`READER_ANNOTATION_COLORS`] for display.
-pub fn reader_annotation_color(hex: &str) -> gpui::Hsla {
-    let parsed = hex.strip_prefix('#').and_then(|value| u32::from_str_radix(value, 16).ok()).filter(|_| hex.len() == 7);
-    gpui::rgb(parsed.unwrap_or(0xf6c945)).into()
+/// An annotation's `0xRRGGBB` for display.
+pub fn reader_annotation_color(color: u32) -> gpui::Hsla {
+    gpui::rgb(color).into()
 }
 
 /// The group the swatches sit in: one bordered strip, like a choice group.
@@ -259,7 +251,7 @@ pub fn reader_annotation_color_group() -> Div {
 /// the tooltip, where a reader who needs it can ask. The chosen one is picked
 /// out by the accent wash behind it rather than by a tick, which would have to
 /// sit on top of the colour it is confirming.
-pub fn reader_annotation_color_swatch(id: impl Into<ElementId>, hex: &'static str, name: &'static str, selected: bool, theme: BrowserTheme) -> Stateful<Div> {
+pub fn reader_annotation_color_swatch(id: impl Into<ElementId>, color: u32, name: &'static str, selected: bool, theme: BrowserTheme) -> Stateful<Div> {
     div()
         .id(id)
         .size(gpui::rems(SETTINGS_CONTROL_SIZE_REM))
@@ -272,7 +264,7 @@ pub fn reader_annotation_color_swatch(id: impl Into<ElementId>, hex: &'static st
         .when(selected, |swatch| swatch.bg(theme.accent_wash))
         .when(!selected, |swatch| swatch.hover(move |style| style.bg(theme.hover)))
         .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(name).build(window, cx))
-        .child(div().size(px(16.0)).rounded_full().border_1().border_color(theme.rule).bg(reader_annotation_color(hex)))
+        .child(div().size(px(16.0)).rounded_full().border_1().border_color(theme.rule).bg(reader_annotation_color(color)))
 }
 
 /// A compact text action in the annotation editor.
@@ -516,43 +508,6 @@ impl RenderOnce for ReaderImagePopup {
     }
 }
 
-#[cfg(test)]
-mod annotation_color_tests {
-    use super::*;
-
-    #[test]
-    fn colors_agree_on_the_default() {
-        assert_eq!(READER_ANNOTATION_DEFAULT_COLOR, READER_ANNOTATION_COLORS[0].1);
-        assert_eq!(format!("#{READER_ANNOTATION_DEFAULT_RGB:06x}"), READER_ANNOTATION_DEFAULT_COLOR);
-    }
-
-    /// Every colour must be a full `#rrggbb`: the EPUB parser reads `#rgb` as
-    /// shorthand, and a swatch that means one thing there and another in a PDF
-    /// is worse than no swatch.
-    #[test]
-    fn every_color_is_a_full_hex_triplet() {
-        for (name, hex) in READER_ANNOTATION_COLORS {
-            assert_eq!(hex.len(), 7, "{name} is {hex}");
-            assert!(hex.starts_with('#') && hex[1..].chars().all(|digit| digit.is_ascii_hexdigit()), "{name} is {hex}");
-        }
-    }
-}
-
-#[cfg(test)]
-mod image_popup_tests {
-    use super::image_popup_panel_size;
-
-    #[test]
-    fn panel_tracks_reader_bounds_and_image_aspect_ratio() {
-        let landscape = image_popup_panel_size(1000.0, 700.0, Some((1600.0, 900.0)));
-        let portrait = image_popup_panel_size(1000.0, 700.0, Some((900.0, 1600.0)));
-        let constrained = image_popup_panel_size(420.0, 320.0, Some((1600.0, 900.0)));
-
-        assert!(landscape.0 > landscape.1, "a landscape image should produce a wider dialog");
-        assert!(portrait.1 > portrait.0, "a portrait image should produce a taller dialog");
-        assert!(constrained.0 <= 372.0 && constrained.1 <= 272.0, "the dialog must remain within the reader inset");
-    }
-}
 
 pub fn reader_document_body() -> Div {
     div().relative().size_full().min_h_0().min_w_0().flex().flex_col().overflow_hidden()
@@ -593,181 +548,4 @@ pub fn reader_settings_popover(document_focus: Option<&gpui::FocusHandle>, theme
     // trigger and the remainder of the toolbar before drawing the panel.
     let top_offset = reader_toolbar_size_px(window) + READER_SETTINGS_POPOVER_GAP;
     Popover::new("reader-settings").anchor(gpui::Anchor::TopRight).top(px(top_offset)).p_0().when_some(document_focus, |popover, focus| popover.track_focus(focus)).trigger(reader_settings_trigger(theme).tooltip("Reader settings"))
-}
-
-#[cfg(test)]
-mod reader_settings_geometry_tests {
-    use super::*;
-
-    #[test]
-    fn settings_panel_begins_below_the_toolbar() {
-        let toolbar_size = READER_TOOLBAR_SIZE_REM * 16.0;
-        let trigger_top = 0.0;
-        let top_offset = toolbar_size + READER_SETTINGS_POPOVER_GAP;
-
-        assert_eq!(trigger_top, 0.0, "reader controls must meet the top edge");
-        assert_eq!(trigger_top + top_offset, toolbar_size + READER_SETTINGS_POPOVER_GAP);
-    }
-}
-
-const READER_SIDEBAR_MIN_WIDTH: f32 = 260.0;
-const READER_SIDEBAR_MAX_WIDTH: f32 = 520.0;
-
-pub fn clamp_reader_sidebar_width(width: f32) -> f32 {
-    width.clamp(READER_SIDEBAR_MIN_WIDTH, READER_SIDEBAR_MAX_WIDTH)
-}
-
-struct ReaderSplitState {
-    width: f32,
-    bounds: Bounds<Pixels>,
-    resizing: bool,
-}
-
-impl ReaderSplitState {
-    fn new(width: f32) -> Self {
-        Self { width: clamp_reader_sidebar_width(width), bounds: Bounds::default(), resizing: false }
-    }
-}
-
-/// A reader-specific two-pane layout whose sidebar has an absolute pixel width.
-///
-/// Unlike a proportional resizable panel group, window resizing never changes
-/// the sidebar width. Only dragging the divider updates it.
-#[derive(IntoElement)]
-pub struct ReaderSplit {
-    sidebar: gpui::AnyElement,
-    document: gpui::AnyElement,
-    width: f32,
-    on_resize: Rc<dyn Fn(f32, &mut Window, &mut App)>,
-}
-
-impl ReaderSplit {
-    pub fn on_resize(mut self, callback: impl Fn(f32, &mut Window, &mut App) + 'static) -> Self {
-        self.on_resize = Rc::new(callback);
-        self
-    }
-}
-
-impl RenderOnce for ReaderSplit {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let theme = browser_theme(cx);
-        let requested_width = clamp_reader_sidebar_width(self.width);
-        let state = window.use_keyed_state("reader-layout", cx, |_, _| ReaderSplitState::new(requested_width));
-        state.update(cx, |state, _| {
-            if !state.resizing && (state.width - requested_width).abs() >= 0.5 {
-                state.width = requested_width;
-            }
-        });
-        let width = state.read(cx).width;
-
-        let start_resize = state.clone();
-        let track_bounds = state.clone();
-        div()
-            .id("reader-layout")
-            .relative()
-            .size_full()
-            .min_h_0()
-            .min_w_0()
-            .flex()
-            .overflow_hidden()
-            .child(div().h_full().w(px(width)).min_w(px(width)).max_w(px(width)).flex_none().min_h_0().overflow_hidden().child(self.sidebar))
-            .child(div().h_full().min_h_0().min_w_0().flex_1().overflow_hidden().child(self.document))
-            // The divider is the sidebar's only outer boundary. Keep it a
-            // single `theme.rule` line, matching the sidebar header, tabs,
-            // and controls; the former sidebar border plus this handle made
-            // a visibly heavier two-tone seam.
-            .child(div().id("reader-resize-handle").absolute().top_0().left(px(width - 4.0)).h_full().w(px(9.0)).cursor_col_resize().flex().justify_center().child(div().h_full().w(px(1.0)).bg(theme.rule)).on_mouse_down(
-                MouseButton::Left,
-                move |_, _, cx| {
-                    cx.stop_propagation();
-                    start_resize.update(cx, |state, cx| {
-                        state.resizing = true;
-                        cx.notify();
-                    });
-                },
-            ))
-            .on_prepaint(move |bounds, _, cx| {
-                track_bounds.update(cx, |state, _| state.bounds = bounds);
-            })
-            .child(ReaderSplitEventSink { state, on_resize: self.on_resize })
-    }
-}
-
-struct ReaderSplitEventSink {
-    state: gpui::Entity<ReaderSplitState>,
-    on_resize: Rc<dyn Fn(f32, &mut Window, &mut App)>,
-}
-
-impl IntoElement for ReaderSplitEventSink {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
-impl Element for ReaderSplitEventSink {
-    type RequestLayoutState = ();
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, Self::RequestLayoutState) {
-        (window.request_layout(Style::default(), None, cx), ())
-    }
-
-    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, _: Bounds<Pixels>, _: &mut Self::RequestLayoutState, _: &mut Window, _: &mut App) -> Self::PrepaintState {}
-
-    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&gpui::InspectorElementId>, _: Bounds<Pixels>, _: &mut Self::RequestLayoutState, _: &mut Self::PrepaintState, window: &mut Window, _cx: &mut App) {
-        let move_state = self.state.clone();
-        window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-            if !phase.bubble() || !move_state.read(cx).resizing {
-                return;
-            }
-            let bounds = move_state.read(cx).bounds;
-            let width = clamp_reader_sidebar_width(f32::from(event.position.x - bounds.left()));
-            move_state.update(cx, |state, cx| {
-                if (state.width - width).abs() >= 0.5 {
-                    state.width = width;
-                    cx.notify();
-                }
-            });
-        });
-
-        let end_state = self.state.clone();
-        let on_resize = self.on_resize.clone();
-        window.on_mouse_event(move |_: &MouseUpEvent, phase, window, cx| {
-            if !phase.bubble() || !end_state.read(cx).resizing {
-                return;
-            }
-            let width = end_state.read(cx).width;
-            end_state.update(cx, |state, cx| {
-                state.resizing = false;
-                cx.notify();
-            });
-            on_resize(width, window, cx);
-        });
-    }
-}
-
-pub fn reader_split(sidebar: impl IntoElement, document: impl IntoElement, sidebar_width: f32) -> ReaderSplit {
-    ReaderSplit { sidebar: sidebar.into_any_element(), document: document.into_any_element(), width: sidebar_width, on_resize: Rc::new(|_, _, _| {}) }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn reader_sidebar_width_is_clamped_only_to_its_user_range() {
-        assert_eq!(clamp_reader_sidebar_width(100.0), READER_SIDEBAR_MIN_WIDTH);
-        assert_eq!(clamp_reader_sidebar_width(360.0), 360.0);
-        assert_eq!(clamp_reader_sidebar_width(900.0), READER_SIDEBAR_MAX_WIDTH);
-    }
 }

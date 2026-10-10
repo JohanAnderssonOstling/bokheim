@@ -3,7 +3,6 @@
 //! The session supplies an immutable database snapshot. Inspection retries
 //! unstable files locally; the session owns scan scheduling and commits.
 
-use std::ffi::OsString;
 use std::sync::Arc;
 use crate::ingestion::ingest_file;
 use futures_util::StreamExt;
@@ -89,7 +88,7 @@ fn excluded_audiobook_member(folder: &Path, excluded_paths: &[String]) -> bool {
     })
 }
 
-fn folder_fingerprint(folder: &Path, tracks: &[audiobook_folder::Track]) -> std::io::Result<u64> {
+fn folder_fingerprint(folder: &Path, tracks: &[audiobook_archive::Track]) -> std::io::Result<u64> {
     library_files::filesystem::audiobook_fingerprint(folder, tracks)
 }
 
@@ -274,24 +273,23 @@ pub async fn inspect(root: impl Into<PathBuf>, scan: &FilesystemScan, snapshot: 
             for attempt in 0..3 {
                 match (async |host: &dyn cpu_host::CpuHost, path: PathBuf, root: &Path, excluded_paths: &[String], file: &ScanFileObservation| -> std::io::Result<ScannedBook> {
                     if path.is_dir() {
-                        let (content_hash, fingerprint, checksum, size_bytes, reader) = client_platform_runtime::executor::run_blocking({
+                        let (content_hash, fingerprint, size_bytes, reader) = client_platform_runtime::executor::run_blocking({
                             let path = path.clone();
                             let root = root.to_owned();
                             let excluded_paths = excluded_paths.to_vec();
                             move || {
-                                (|path: &Path, root: &Path, excluded_paths: &[String]| -> std::io::Result<(ContentHash, u64, ContentHash, u64, std::fs::File)> {
+                                (|path: &Path, root: &Path, excluded_paths: &[String]| -> std::io::Result<(ContentHash, u64, u64, std::fs::File)> {
                                     use std::io::{Read as _, Seek as _};
                                     let tracks = audiobook_folder::discover(path)?;
                                     if excluded_audiobook_member(path.strip_prefix(root).unwrap_or(path), excluded_paths) {
                                         return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "audiobook contains a temporarily excluded file"));
                                     }
                                     let fingerprint = folder_fingerprint(path, &tracks)?;
-                                    let identity = ContentHash::new(audiobook_folder::identity(&tracks)?.to_hex().as_str());
                                     require_folder_unchanged(path, fingerprint)?;
                                     let nfo = audiobook_folder::discover_nfo(path)?;
                                     let cue = audiobook_folder::discover_cue(path)?;
                                     let cover = audiobook_folder::discover_cover(path)?;
-                                    let mut archive = audiobook_folder::write_archive_with_sidecars(tempfile::tempfile()?, &tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref())?;
+                                    let mut archive = audiobook_archive::write_archive_with_sidecars(tempfile::tempfile()?, &tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref())?;
                                     require_folder_unchanged(path, fingerprint)?;
                                     archive.rewind()?;
                                     let mut hasher = blake3::Hasher::new();
@@ -306,14 +304,14 @@ pub async fn inspect(root: impl Into<PathBuf>, scan: &FilesystemScan, snapshot: 
                                         size = size.saturating_add(read as u64);
                                     }
                                     archive.rewind()?;
-                                    Ok((identity, fingerprint, ContentHash::new(hasher.finalize().to_hex().as_str()), size, archive))
+                                    Ok((ContentHash::from(hasher.finalize()), fingerprint, size, archive))
                                 })(&path, &root, &excluded_paths)
                             }
                         })
                         .await
                         .map_err(|error| std::io::Error::other(error.to_string()))??;
                         let format = BookFormat::Mp3Folder;
-                        let inspection = cpu_host::submit_book(host, cpu_host::Inspect { source_name: file.name.clone(), format, checksum: Some(checksum) }, cpu_host::as_cpu_reader(reader)).await;
+                        let inspection = cpu_host::submit_book(host, cpu_host::Inspect { source_name: file.name.clone(), format, content_hash: Some(content_hash) }, cpu_host::as_cpu_reader(reader)).await;
                         require_folder_unchanged(&path, fingerprint)?;
                         return Ok(ScannedBook {
                             directory: file.directory,
@@ -321,15 +319,14 @@ pub async fn inspect(root: impl Into<PathBuf>, scan: &FilesystemScan, snapshot: 
                             path: file.path.clone(),
                             fingerprint,
                             content_hash,
-                            checksum,
                             size_bytes,
                             extension: format.canonical_extension().to_owned(),
                             inspection: inspection.map_err(std::io::Error::other)?,
                             inspection_version: book_inspection::inspection_version(format),
                         });
                     }
-                    let ingested = ingest_file(path, file.name.clone(), host, None).await?;
-                    let crate::ingestion::IngestedFile { content_hash, checksum, size_bytes, fingerprint, format, inspection } = ingested;
+                    let ingested = ingest_file(path, file.name.clone(), host).await?;
+                    let crate::ingestion::IngestedFile { content_hash, size_bytes, fingerprint, format, inspection } = ingested;
                     let extension = format.canonical_extension().to_owned();
                     Ok(ScannedBook {
                         directory: file.directory,
@@ -337,7 +334,6 @@ pub async fn inspect(root: impl Into<PathBuf>, scan: &FilesystemScan, snapshot: 
                         path: file.path.clone(),
                         fingerprint,
                         content_hash,
-                        checksum,
                         size_bytes,
                         extension,
                         inspection,
@@ -361,9 +357,9 @@ pub async fn inspect(root: impl Into<PathBuf>, scan: &FilesystemScan, snapshot: 
     while let Some(inspection) = inspections.next().await {
         match inspection {
             Ok(book) => result.books.push(book),
-            Err(failure) => {
+            Err((path, error)) => {
+                log::warn!("could not inspect {path}: {error}");
                 result.readable = false;
-                result.failures.push(failure);
             }
         }
     }
@@ -393,14 +389,24 @@ mod tests {
     }
 
     #[test]
-    fn scan_retries_only_transient_errors() {
-        use std::io::{Error, ErrorKind::*};
-        for kind in [Interrupted, WouldBlock, TimedOut] {
-            assert!(retryable(&Error::from(kind)));
-        }
-        for kind in [InvalidData, PermissionDenied, NotFound, Other] {
-            assert!(!retryable(&Error::from(kind)));
-        }
+    fn staged_copies_are_invisible_until_published() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = root.path().join(".bokheim-copy-abandoned");
+        std::fs::create_dir_all(staging.join("contents/Nested")).unwrap();
+        std::fs::write(staging.join("contents/Nested/book.epub"), b"partial copy").unwrap();
+        let snapshot = ScanSnapshot { placements: vec![], work_revision: 0, scan_id: 1, excluded_paths: vec![], directories: vec![], tombstoned_files: vec![], books: vec![] };
+        let found = discover(root.path(), &snapshot);
+        assert!(found.readable);
+        assert!(found.files.is_empty());
+        assert!(found.directories.is_empty());
+        assert!(!staging.join("contents/.biblos_uuid").exists());
+
+        std::fs::write(staging.join("contents/Nested/book.epub"), b"complete copy").unwrap();
+        std::fs::rename(staging.join("contents"), root.path().join("Books")).unwrap();
+        let found = discover(root.path(), &snapshot);
+        assert!(found.readable);
+        assert_eq!(found.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>(), ["Books/Nested/book.epub"]);
+        assert!(found.directories.iter().all(|directory| !directory.path.starts_with('.')));
     }
 
     #[test]
@@ -477,6 +483,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn unrelated_non_utf8_child_does_not_hide_mp3_folder() {
+        use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
 
         let root = tempfile::tempdir().unwrap();
@@ -567,8 +574,18 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("book.epub");
         std::fs::write(&path, b"not an epub").unwrap();
-        let error = ingest_file(path, "book.epub".into(), &*host(), None).await.err().unwrap();
+        let error = ingest_file(path, "book.epub".into(), &*host()).await.err().unwrap();
         assert!(!retryable(&error));
+
+        {
+            use std::io::{Error, ErrorKind::*};
+            for kind in [Interrupted, WouldBlock, TimedOut] {
+                assert!(retryable(&Error::from(kind)));
+            }
+            for kind in [InvalidData, PermissionDenied, NotFound, Other] {
+                assert!(!retryable(&Error::from(kind)));
+            }
+        }
     }
 
     #[tokio::test]

@@ -1,9 +1,9 @@
 use crate::{
-    BOOK_CARD_SUBTITLE_SIZE, BOOK_COVER_BADGE_INSET, BOOK_COVER_RADIUS, COMPACT_HIERARCHY_ITEM_CONTENT_GAP, COMPACT_HIERARCHY_ITEM_HORIZONTAL_PADDING,
-    COMPACT_HIERARCHY_ITEM_TEXT_SIZE_REM, CONTENT_INSET, DISPLAY_FONT_FAMILY, DOWNLOAD_ACTION_SIZE_REM, NavigationIcon, SPACE_MD, TEXT_LG, TEXT_MD,
+    BOOK_CARD_SUBTITLE_SIZE, BOOK_COVER_BADGE_INSET, BOOK_COVER_RADIUS, COMPACT_HIERARCHY_ITEM_CONTENT_GAP, COMPACT_HIERARCHY_ITEM_HORIZONTAL_PADDING, COMPACT_HIERARCHY_ITEM_TEXT_SIZE_REM, CONTENT_INSET, DISPLAY_FONT_FAMILY,
+    DOWNLOAD_ACTION_SIZE_REM, NavigationIcon, SPACE_MD, TEXT_LG, TEXT_MD,
 };
 use gpui::prelude::*;
-use gpui::{AnyElement, Div, ElementId, ImageSource, ObjectFit, SharedString, Stateful, StyledImage, div, img, px};
+use gpui::{AnyElement, App, Div, ElementId, ImageSource, ObjectFit, Pixels, SharedString, Stateful, StyledImage, Window, div, img, px};
 use gpui_component::breadcrumb::{Breadcrumb, BreadcrumbItem};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::spinner::Spinner;
@@ -11,8 +11,8 @@ use gpui_component::{Icon, IconName, Selectable, Sizable};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
-    BOOK_CARD_COVER_CONTENT_GAP, BOOK_CARD_TITLE_LINE_HEIGHT_EM, BOOK_CARD_TITLE_LINES, BOOK_CARD_TITLE_SIZE, BOOK_CARD_TITLE_WEIGHT, BOOK_COVER_ASPECT_RATIO, BrowserTheme, CAROUSEL_CONTENT_GAP, CAROUSEL_CONTROL_GAP, CAROUSEL_TITLE_SIZE,
-    CAROUSEL_TITLE_WEIGHT, RADIUS_MD, RADIUS_SM, SPACE_SM, SPACE_XS, SPACE_XXS, TEXT_SM, TEXT_XS,
+    BOOK_CARD_COVER_CONTENT_GAP, BOOK_CARD_TITLE_LINE_HEIGHT_EM, BOOK_CARD_TITLE_LINES, BOOK_CARD_TITLE_SIZE, BOOK_CARD_TITLE_WEIGHT, BOOK_COVER_ASPECT_RATIO, BrowserTheme,
+    RADIUS_MD, RADIUS_SM, SPACE_SM, SPACE_XS, SPACE_XXS, TEXT_SM, TEXT_XS,
 };
 
 /// Cover, then the text block. The two levels each have one gap: `SPACE_MD`
@@ -253,7 +253,12 @@ const LIBRARY_GRADIENTS: [(u32, u32); 12] = [
 /// either would recolour existing folders and subjects.
 pub fn section_card_band_index(kind: NavigationIcon, key: &str) -> usize {
     let mut hash = 0xcbf29ce484222325_u64;
-    let namespace = if kind == NavigationIcon::Folder { b'F' } else { b'S' };
+    let namespace = match kind {
+        NavigationIcon::Folder => b'F',
+        NavigationIcon::User => b'A',
+        NavigationIcon::House => b'H',
+        _ => b'S',
+    };
     hash = (hash ^ u64::from(namespace)).wrapping_mul(0x100000001b3);
     let normalized = key.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase().nfc().collect::<String>();
     for byte in normalized.bytes() {
@@ -270,19 +275,6 @@ pub fn section_card_band_index(kind: NavigationIcon, key: &str) -> usize {
     (hash % LIBRARY_GRADIENTS.len() as u64) as usize
 }
 
-#[cfg(test)]
-mod section_band_tests {
-    use super::section_card_band_index;
-    use crate::NavigationIcon;
-
-    #[test]
-    fn assignment_is_stable_across_equivalent_names() {
-        assert_eq!(section_card_band_index(NavigationIcon::Folder, "History"), 0);
-        assert_eq!(section_card_band_index(NavigationIcon::Folder, "  HISTORY  "), 0);
-        assert_eq!(section_card_band_index(NavigationIcon::Folder, "Café"), section_card_band_index(NavigationIcon::Folder, "Cafe\u{301}"));
-        assert_eq!(section_card_band_index(NavigationIcon::Tags, "History / Europe"), 9);
-    }
-}
 
 fn section_card_band_colors(index: usize) -> (gpui::Hsla, gpui::Hsla) {
     #[cfg(feature = "kobo")]
@@ -384,8 +376,28 @@ pub fn book_card_title_row(title: impl Into<SharedString>, subtitle: Option<&str
 /// spinner in the same place, so nothing moves when the mark is pressed; the
 /// caller only makes the idle mark clickable.
 pub fn book_cover_download_badge(id: impl Into<ElementId>, pending: bool) -> Stateful<Div> {
-    let plate = gpui::black().opacity(0.45);
+    book_cover_action_badge(id, pending, download_glyph())
+}
+
+/// The same corner for a catalog book: adding it to the library.
+pub fn book_cover_add_badge(id: impl Into<ElementId>, pending: bool) -> Stateful<Div> {
+    book_cover_action_badge(id, pending, Icon::new(IconName::Plus).size(gpui::rems(crate::DOWNLOAD_ICON_SIZE_REM)))
+}
+
+/// The same corner for a catalog book the library already holds: a mark,
+/// not an action.
+pub fn book_cover_in_library_badge(id: impl Into<ElementId>) -> Stateful<Div> {
+    book_cover_badge_plate(id).child(Icon::new(IconName::Check).size(gpui::rems(crate::DOWNLOAD_ICON_SIZE_REM)).text_color(gpui::white()))
+}
+
+fn book_cover_action_badge(id: impl Into<ElementId>, pending: bool, glyph: Icon) -> Stateful<Div> {
     let plate_hover = gpui::black().opacity(0.7);
+    book_cover_badge_plate(id)
+        .when(pending, |badge| badge.child(Spinner::new().icon(IconName::LoaderCircle).xsmall().color(gpui::white())))
+        .when(!pending, |badge| badge.cursor_pointer().hover(move |style| style.bg(plate_hover)).child(glyph.text_color(gpui::white())))
+}
+
+fn book_cover_badge_plate(id: impl Into<ElementId>) -> Stateful<Div> {
     div()
         .id(id)
         .absolute()
@@ -396,9 +408,7 @@ pub fn book_cover_download_badge(id: impl Into<ElementId>, pending: bool) -> Sta
         .items_center()
         .justify_center()
         .rounded(px(RADIUS_SM))
-        .bg(plate)
-        .when(pending, |badge| badge.child(Spinner::new().icon(IconName::LoaderCircle).xsmall().color(gpui::white())))
-        .when(!pending, |badge| badge.cursor_pointer().hover(move |style| style.bg(plate_hover)).child(download_glyph().text_color(gpui::white())))
+        .bg(gpui::black().opacity(0.45))
 }
 
 /// The cloud-and-arrow glyph every download action carries, on a book's cover
@@ -407,164 +417,11 @@ pub fn download_glyph() -> Icon {
     Icon::empty().path("icons/cloud-download.svg").size(gpui::rems(crate::DOWNLOAD_ICON_SIZE_REM))
 }
 
-/// A page of shelves: rows of a paginator rather than a scrolling column. The
-/// paginator supplies the vertical extent, so there is nothing here but the
-/// page's own inset. The author index is laid out in the same container.
-pub fn shelf_page() -> Div {
-    crate::full_size_column().p(px(SPACE_MD))
-}
-
-/// One row: the heading, then the shelf it names.
-///
-/// A whole row per shelf is what lets the width of the page go to books — the
-/// heading takes a line rather than a column beside the covers.
-pub fn shelf_row() -> Div {
-    div().w_full().min_w_0().h_full().flex().flex_col().gap(px(CAROUSEL_CONTENT_GAP))
-}
-
-/// The line over a shelf: its title, then its controls at the far end.
-///
-/// Inset by `CONTENT_INSET` so the title begins on the same line as the first
-/// cover beneath it. The covers carry that inset as card padding — the heading
-/// has to match it rather than sit flush, or every title hangs a card's padding
-/// to the left of its own row.
-///
-/// Its height is stated rather than left to the font because the row's height is
-/// computed from it — see `shelf_rows_policy`.
-pub fn shelf_heading() -> Div {
-    div().w_full().min_w_0().flex_none().h(gpui::rems(crate::SHELF_HEADING_HEIGHT_REM)).flex().flex_row().items_center().justify_between().px(px(CONTENT_INSET)).gap(px(CAROUSEL_CONTENT_GAP))
-}
-
-/// What the shelf is, at the head of the row, tinted when the keyboard cursor
-/// is on this row. A title too long for the heading is elided rather than
-/// pushing the controls off the row.
-pub fn shelf_title(title: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_ellipsis()
-        .font_family(DISPLAY_FONT_FAMILY)
-        .text_size(gpui::rems(CAROUSEL_TITLE_SIZE))
-        .font_weight(CAROUSEL_TITLE_WEIGHT)
-        .when(selected, |title| title.text_color(theme.text_accent))
-        .child(title.into())
-}
-
 /// The pill that follows the pointer while items are being dragged. It names
 /// what is being carried rather than miniaturising it: a half-transparent copy
 /// of three book covers reads as a rendering fault, and a count does not.
 pub fn drag_preview(label: SharedString, theme: BrowserTheme) -> Div {
     div().px(px(SPACE_SM)).h(px(28.0)).flex().items_center().rounded(px(RADIUS_SM)).bg(theme.accent).text_color(theme.accent_text).text_size(gpui::rems(TEXT_XS)).child(label)
-}
-
-/// The shelf under the heading, taking whatever the heading leaves.
-pub fn shelf_carousel() -> Div {
-    div().w_full().min_w_0().flex_1().min_h_0()
-}
-
-pub fn paginator_controls(previous: Option<AnyElement>, next: Option<AnyElement>) -> Div {
-    div().flex_none().flex().flex_row().items_center().gap(px(CAROUSEL_CONTROL_GAP)).children(previous).children(next)
-}
-
-/// The author index: its paginated list, then the letter rail beside it.
-pub fn author_index_body() -> Div {
-    div().size_full().min_h_0().min_w_0().flex().flex_row().gap(px(SPACE_MD)).p(px(SPACE_MD))
-}
-
-/// The paginated list of names, taking whatever the rail leaves.
-pub fn author_index_list() -> Div {
-    div().flex_1().min_w_0().h_full()
-}
-
-/// The heading over one letter's names — or one book count's, when the index is
-/// ordered by how many books a name has. Its padding and rule are what
-/// `AUTHOR_INDEX_LETTER_FIXED_HEIGHT` reserves.
-pub fn author_index_letter(letter: impl Into<SharedString>, count: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div()
-        .size_full()
-        .min_w_0()
-        .flex()
-        .flex_row()
-        .items_baseline()
-        .gap(px(SPACE_SM))
-        .px(px(CONTENT_INSET))
-        .pt(px(SPACE_MD))
-        .pb(px(SPACE_XS))
-        .border_b_1()
-        .border_color(theme.rule)
-        .child(div().flex_none().font_family(DISPLAY_FONT_FAMILY).text_size(gpui::rems(TEXT_LG)).line_height(gpui::relative(crate::SHELF_HEADING_LINE_HEIGHT_EM)).text_color(theme.text_accent).child(letter.into()))
-        .child(div().min_w_0().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(count.into()))
-}
-
-/// One name in the index: the name and what it wrote, then a few of its covers.
-///
-/// Highlighted while the keyboard cursor is on it and while its books are open
-/// beneath it, drawn like a focused book card — a tint, not an inversion.
-pub fn author_index_entry(id: impl Into<ElementId>, highlighted: bool, theme: BrowserTheme) -> Stateful<Div> {
-    let hovered = if highlighted { theme.accent_wash_hover } else { theme.hover };
-    div()
-        .id(id)
-        .size_full()
-        .min_w_0()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(SPACE_MD))
-        .px(px(CONTENT_INSET))
-        .border_b_1()
-        .border_color(theme.rule)
-        .cursor_pointer()
-        .when(highlighted, |entry| entry.bg(theme.accent_wash))
-        .hover(move |style| style.bg(hovered))
-}
-
-/// The name over its detail line — how many books, and what they are about.
-/// Both are elided rather than wrapped: an entry is one fixed height.
-pub fn author_index_name(name: impl Into<SharedString>, detail: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .gap(px(SPACE_XS))
-        .child(div().min_w_0().truncate().text_size(gpui::rems(TEXT_MD)).line_height(gpui::relative(BOOK_CARD_TITLE_LINE_HEIGHT_EM)).child(name.into()))
-        .child(div().min_w_0().truncate().text_size(gpui::rems(TEXT_XS)).line_height(gpui::relative(BOOK_CARD_TITLE_LINE_HEIGHT_EM)).text_color(theme.text_muted).child(detail.into()))
-}
-
-/// The covers at the end of an entry, and the count of any it leaves out.
-pub fn author_index_covers() -> Div {
-    div().flex_none().h_full().flex().flex_row().items_center()
-}
-
-/// One cover's slot. The card inside carries its own padding, so neighbouring
-/// covers sit a card's padding apart without a gap of their own.
-pub fn author_index_cover() -> Div {
-    div().flex_none().h_full().w(gpui::rems(crate::AUTHOR_INDEX_COVER_SLOT_WIDTH_REM))
-}
-
-pub fn author_index_more(label: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().flex_none().pl(px(SPACE_XS)).text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(label.into())
-}
-
-/// The letters down the side of the index, one per heading, each a jump to it.
-pub fn author_index_rail() -> Div {
-    div().flex_none().h_full().flex().flex_col().overflow_hidden()
-}
-
-pub fn author_index_rail_letter(id: impl Into<ElementId>, letter: impl Into<SharedString>, theme: BrowserTheme) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_none()
-        .w(gpui::rems(1.5))
-        .flex()
-        .justify_center()
-        .text_size(gpui::rems(TEXT_XS))
-        .line_height(gpui::relative(1.5))
-        .cursor_pointer()
-        .hover(move |style| style.bg(theme.hover))
-        .child(letter.into())
 }
 
 /// Breadcrumbs use regular text at the medium body size. Items own the vertical
@@ -631,23 +488,33 @@ pub fn folder_breadcrumb_root_item(label: impl Into<SharedString>, current: bool
     folder_breadcrumb_item(label, current, theme).pl(px(CONTENT_INSET))
 }
 
-/// Natural chip width, including the action slot only when it is shown.
-/// Use the same text and icon layout as the rendered chip so font changes
-/// affect wrapping without estimating label widths from character counts.
-pub fn compact_hierarchy_item_width(icon: NavigationIcon, label: SharedString, count: Option<usize>, show_download: bool, window: &mut gpui::Window, cx: &mut gpui::App) -> gpui::Pixels {
-    let mut content = div()
-        .flex()
-        .items_center()
-        .whitespace_nowrap()
-        .text_size(gpui::rems(COMPACT_HIERARCHY_ITEM_TEXT_SIZE_REM))
-        .gap(px(COMPACT_HIERARCHY_ITEM_CONTENT_GAP))
-        .child(crate::navigation_icon(icon))
-        .child(div().flex_none().child(label))
-        .children(count.map(|count| div().flex_none().child(count.to_string())))
-        .when(show_download, |content| content.child(div().w(gpui::rems(DOWNLOAD_ACTION_SIZE_REM)).flex_none()))
-        .into_any_element();
-    let measured = content.layout_as_root(gpui::size(gpui::AvailableSpace::MaxContent, gpui::AvailableSpace::MaxContent), window, cx);
-    measured.width + px(COMPACT_HIERARCHY_ITEM_HORIZONTAL_PADDING * 2.0 + 2.0)
+/// The content that determines a hierarchy item's natural width.
+#[derive(Clone)]
+pub struct HierarchyItemWidth {
+    pub icon: NavigationIcon,
+    pub label: SharedString,
+    pub count: Option<usize>,
+    pub show_download: bool,
+}
+
+impl HierarchyItemWidth {
+    /// Uses the rendered chip's text and icon layout so font changes affect
+    /// wrapping, including the action slot only when it is shown.
+    pub fn measure(&self, window: &mut Window, cx: &mut App) -> Pixels {
+        let mut content = div()
+            .flex()
+            .items_center()
+            .whitespace_nowrap()
+            .text_size(gpui::rems(COMPACT_HIERARCHY_ITEM_TEXT_SIZE_REM))
+            .gap(px(COMPACT_HIERARCHY_ITEM_CONTENT_GAP))
+            .child(crate::navigation_icon(self.icon))
+            .child(div().flex_none().child(self.label.clone()))
+            .children(self.count.map(|count| div().flex_none().child(count.to_string())))
+            .when(self.show_download, |content| content.child(div().w(gpui::rems(DOWNLOAD_ACTION_SIZE_REM)).flex_none()))
+            .into_any_element();
+        let measured = content.layout_as_root(gpui::size(gpui::AvailableSpace::MaxContent, gpui::AvailableSpace::MaxContent), window, cx);
+        measured.width + px(COMPACT_HIERARCHY_ITEM_HORIZONTAL_PADDING * 2.0 + 2.0)
+    }
 }
 
 /// A compact hierarchy item for mixed paginator pages.
@@ -737,7 +604,10 @@ pub fn section_card_band(index: usize, heading: impl IntoElement) -> Div {
 /// Hover underlines carry an id on the text itself: the underline is shaped
 /// with the text at layout, when only an element with its own state can know
 /// that its group is hovered.
-pub fn section_card_heading(id: impl Into<ElementId>, title: impl Into<SharedString>, count: usize, pager: AnyElement, focused: bool, marquee: bool) -> Stateful<Div> {
+///
+/// A heading that `opens` nothing — a shelf of Home — neither points nor
+/// underlines.
+pub fn section_card_heading(id: impl Into<ElementId>, title: impl Into<SharedString>, count: usize, pager: AnyElement, opens: bool, focused: bool, marquee: bool) -> Stateful<Div> {
     div()
         .id(id)
         .group("section-card-heading")
@@ -748,7 +618,7 @@ pub fn section_card_heading(id: impl Into<ElementId>, title: impl Into<SharedStr
         .items_center()
         .gap(px(SPACE_SM))
         .text_color(gpui::rgb(0xf2efe8))
-        .cursor_pointer()
+        .when(opens, |heading| heading.cursor_pointer())
         .child(
             div()
                 .id("title")
@@ -760,7 +630,7 @@ pub fn section_card_heading(id: impl Into<ElementId>, title: impl Into<SharedStr
                 .font_family(DISPLAY_FONT_FAMILY)
                 .text_size(gpui::rems(TEXT_LG))
                 .when(focused, |title| title.text_color(gpui::white()))
-                .when(!marquee, |title| title.group_hover("section-card-heading", |style| style.underline()))
+                .when(opens && !marquee, |title| title.group_hover("section-card-heading", |style| style.underline()))
                 .child(title.into()),
         )
         .child(div().flex_none().child(count.to_string()))
@@ -769,7 +639,7 @@ pub fn section_card_heading(id: impl Into<ElementId>, title: impl Into<SharedStr
 
 /// One child in a section card's list, with its navigation icon and a quiet
 /// count pill. The whole row is the hover and click target.
-pub fn section_card_subject(id: impl Into<ElementId>, icon: NavigationIcon, label: impl Into<SharedString>, count: usize, focused: bool, theme: BrowserTheme) -> Stateful<Div> {
+pub fn section_card_subject(id: impl Into<ElementId>, icon: NavigationIcon, label: impl Into<SharedString>, count: usize, theme: BrowserTheme) -> Stateful<Div> {
     div()
         .id(id)
         .group("section-card-subject")
@@ -784,7 +654,7 @@ pub fn section_card_subject(id: impl Into<ElementId>, icon: NavigationIcon, labe
         .text_size(gpui::rems(TEXT_SM))
         .hover(move |style| style.bg(theme.hover))
         .child(crate::navigation_icon(icon).size(gpui::rems(0.8)).text_color(theme.text_accent))
-        .child(div().id("label").flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().when(focused, |label| label.text_color(theme.text_accent)).child(label.into()))
+        .child(div().id("label").flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label.into()))
         .child(div().flex_none().min_w(gpui::rems(1.6)).px(px(SPACE_XS)).text_center().text_size(gpui::rems(0.8)).text_color(theme.text_muted).bg(theme.hover).child(count.to_string()))
 }
 

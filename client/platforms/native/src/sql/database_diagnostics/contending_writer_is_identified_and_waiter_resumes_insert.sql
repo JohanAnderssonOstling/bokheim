@@ -1,1 +1,0 @@
-INSERT INTO test VALUES(2)

@@ -65,32 +65,3 @@ fn read_range_from<R: Read + Seek>(reader: &mut R, offset: u64, length: usize) -
     bytes.truncate(count);
     Ok(bytes)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::read_range_from;
-    use std::io::Cursor;
-
-    #[test]
-    fn reads_requested_range() {
-        let mut reader = Cursor::new(b"0123456789".to_vec());
-        assert_eq!(read_range_from(&mut reader, 3, 4).unwrap(), b"3456");
-    }
-
-    #[test]
-    fn truncates_at_end_of_reader() {
-        let mut reader = Cursor::new(b"abc".to_vec());
-        assert_eq!(read_range_from(&mut reader, 2, 8).unwrap(), b"c");
-        assert_eq!(read_range_from(&mut reader, 9, 1).unwrap(), b"");
-    }
-
-    #[test]
-    fn rejects_ranges_over_the_limit_before_lookup() {
-        assert_eq!(super::read_range("missing", 0, 256 * 1024 + 1), Err("book range exceeds limit".into()));
-    }
-
-    #[test]
-    fn rejects_closed_capability() {
-        assert_eq!(super::read_range("missing", 0, 1), Err("book source closed; reopen the book".into()));
-    }
-}

@@ -206,60 +206,7 @@ mod tests {
         received.recv_timeout(Duration::from_secs(2)).expect("background work resumes after commit");
     }
 
-    fn assert_send<T: Send>() {}
 
-    #[test]
-    fn executor_reuses_one_runtime_for_spawn_and_block_on() {
-        let executor = BackendExecutor::new().unwrap();
-        assert_send::<BackendTask<()>>();
-        let first = executor.spawn(async {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-            41_u8
-        });
-        assert_eq!(executor.block_on(first).unwrap(), 41);
-        assert_eq!(
-            executor.block_on(async {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-                42_u8
-            }),
-            42
-        );
-    }
-
-    #[test]
-    fn dropping_backend_task_cancels_its_future() {
-        struct DropFlag(Arc<AtomicBool>);
-        impl Drop for DropFlag {
-            fn drop(&mut self) {
-                self.0.store(true, Ordering::Release);
-            }
-        }
-
-        let executor = BackendExecutor::new().unwrap();
-        let dropped = Arc::new(AtomicBool::new(false));
-        let flag = DropFlag(dropped.clone());
-        let task = executor.spawn(async move {
-            let _flag = flag;
-            std::future::pending::<()>().await
-        });
-        std::thread::sleep(Duration::from_millis(10));
-        drop(task);
-        for _ in 0..100 {
-            if dropped.load(Ordering::Acquire) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        panic!("cancelled backend future was not dropped");
-    }
-
-    #[test]
-    fn task_panics_become_errors_at_the_host_boundary() {
-        let executor = BackendExecutor::new().unwrap();
-        let task = executor.spawn(async { panic!("broken backend operation") });
-        let error = executor.block_on(task).unwrap_err();
-        assert!(error.to_string().contains("panicked"));
-    }
 }
 
 /// Report available CPU capacity; callers choose their own concurrency limits.

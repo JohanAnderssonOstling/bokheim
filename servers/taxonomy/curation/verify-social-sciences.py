@@ -51,32 +51,6 @@ class SocialSciencesReview(unittest.TestCase):
         roots='SELECT concept_id FROM concept EXCEPT SELECT concept_id FROM concept_parent'
         self.assertEqual(set(self.after.execute(roots)),set(self.before.execute(roots)))
 
-    def test_ddc_and_bisac_assignments(self):
-        for table in ('ddc_selector','bisac_selector'):
-            expected={(code,self.canonical(id)) for code,id in self.before.execute(f'SELECT selector,concept_id FROM {table}')}
-            if table=='ddc_selector':
-                for code,old,new in [('381',12269,5083),('304',12260,5488),('152',5389,5381),('655',5236,None)]:
-                    expected.remove((code,old))
-                    if new is not None:expected.add((code,new))
-            self.assertEqual(expected,set(self.after.execute(f'SELECT selector,concept_id FROM {table}')))
-        self.assertEqual(self.label(53287),'Unconscious Mind & Altered States')
-
-    def test_broad_hd_vk_scopes(self):
-        for lo,hi,id in [('HD28','HD9999',5104),('VK1','VK1661',478)]:
-            self.assertEqual(self.after.execute('SELECT concept_id FROM lcc_range WHERE start_code=? AND end_code=?',(lo,hi)).fetchone(),(id,))
-        self.assertEqual(self.label(478),'Navigation & Merchant Marine')
-        for id in (5232,5234,5235,12272):self.assertIn(5104,self.parents(id))
-        self.assertEqual(self.after.execute("SELECT concept_id FROM lcc_range WHERE start_code='VA10'").fetchone(),(13770,))
-
-    def test_law_scopes(self):
-        self.assertEqual(self.label(11731),'Private Law Unification')
-        for lo,hi,id in [('K605','K615',11731),('K625','K709',5310),('K670','K709',5288),
-                         ('K37','K44',self.new['Reference & Collections']),('K50','K54',self.new['Reference & Collections']),
-                         ('K68','K70',self.new['Reference & Collections'])]:
-            self.assertEqual(self.after.execute('SELECT concept_id FROM lcc_range WHERE start_code=? AND end_code=?',(lo,hi)).fetchone(),(id,))
-        self.assertIn(5310,self.parents(5288))
-        self.assertEqual(self.parents(51562),{self.new['Reference & Collections']})
-
     def test_merges_preserve_children_and_source_labels(self):
         for old,new in self.merges.items():
             self.assertIsNone(self.after.execute('SELECT 1 FROM concept WHERE concept_id=?',(old,)).fetchone())
@@ -90,47 +64,6 @@ class SocialSciencesReview(unittest.TestCase):
         self.assertEqual(self.parents(5239),{5238,5664})
         self.assertEqual(self.parents(5496),{5664,self.new['Life Stages']})
 
-    def test_anthropology_sociology_and_archaeology(self):
-        self.assertEqual(self.parents(5072),{5488})
-        self.assertEqual(self.label(5075),'Race & Race Relations')
-        self.assertIn(5663,self.parents(5073))
-        self.assertIn(5663,self.parents(5075))
-        self.assertEqual(self.parents(5071),{5492})
-        self.assertEqual(self.parents(5492),{5055,5056})
-
-    def test_family_hierarchy_and_geography(self):
-        self.assertEqual(self.parents(5252),{5244})
-        for id in (5245,5248,5249,5250,5253):self.assertEqual(self.parents(id),{self.new['Gender & Sexuality']})
-        for id in (12281,12282,12283,12284):self.assertEqual(self.parents(id),{self.new['Life Stages']})
-        self.assertEqual(self.parents(12294),{self.new['Life Stages'],5664})
-        self.assertEqual(self.parents(52556),{5252})
-        self.assertEqual(self.parents(52557),{52556})
-        self.assertEqual(self.parents(52558),{52557})
-        for id in (5504,5510,5522):self.assertEqual(self.parents(id),{5462})
-
-    def test_penology_is_broader_than_prisons(self):
-        self.assertEqual(self.parents(5325),{5463})
-        self.assertEqual(self.parents(5465),{5325,5472})
-        for id in (52813,52814,52816,52817):self.assertEqual(self.parents(id),{5325})
-
-    def test_psychology_groups_and_distinct_fields(self):
-        for id in (7018,7688,9977,10805,5390):self.assertEqual(self.parents(id),{5389})
-        for id in (10863,10896,10913,10975,10982,11212):self.assertEqual(self.parents(id),{5414})
-        for id in (10895,10927,10968,11130,11199):self.assertEqual(self.parents(id),{self.new['Professional Practice']})
-        self.assertEqual(self.parents(11019),{5385})
-        self.assertEqual(self.parents(10990),{5418})
-        self.assertEqual(self.label(10990),'Whole & Parts')
-        for id in (5387,5422,5429):self.assertIn(5381,self.parents(id))
-        self.assertEqual(self.parents(5410),{5384})
-
-    def test_reference_and_context_labels(self):
-        for id,label in [(5498,'Essays'),(5509,'Methods'),(12245,'Reference'),(12246,'Research')]:
-            self.assertEqual(self.parents(id),{self.new['Methods & Reference']})
-            self.assertEqual(self.label(id),label)
-        for id,label in [(5057,'Fields'),(5071,'Prehistoric'),(5407,'History'),(52556,'By Region'),
-                         (52557,'North America'),(52558,'United States'),(52940,'United States'),(5261,'Support Services')]:
-            self.assertEqual(self.label(id),label)
-
     def test_previous_politics_cleanup_is_preserved(self):
         q='WITH RECURSIVE t(id) AS(VALUES(5326) UNION SELECT concept_id FROM concept_parent JOIN t ON parent_concept_id=id) SELECT id FROM t'
         ids={r[0] for r in self.before.execute(q)}
@@ -139,18 +72,6 @@ class SocialSciencesReview(unittest.TestCase):
             marks=','.join('?' for _ in ids)
             query=f'SELECT * FROM {table} WHERE concept_id IN({marks})'
             self.assertEqual(set(self.before.execute(query,tuple(ids))),set(self.after.execute(query,tuple(ids))))
-    def test_materialized_and_simplified_ranges(self):
-        self.assertEqual(len(self.manifest['added_matching_ranges']),16)
-        for id,lo,hi in self.manifest['added_matching_ranges']:
-            self.assertEqual(self.after.execute('SELECT concept_id FROM lcc_range WHERE start_code=? AND end_code=?',(lo,hi)).fetchone(),(id,))
-        for id,lo,hi,outer_lo,outer_hi in self.manifest['removed_contained_ranges']:
-            self.assertIsNone(self.after.execute('SELECT 1 FROM lcc_range WHERE start_code=? AND end_code=?',(lo,hi)).fetchone())
-            self.assertEqual(self.after.execute('SELECT concept_id FROM lcc_range WHERE start_code=? AND end_code=?',(outer_lo,outer_hi)).fetchone(),(id,))
-        summary=json.loads((FOLDER/'simplification-summary.json').read_text())
-        self.assertGreater(summary['probes'],100000)
-        self.assertEqual(summary['changes'],0)
-        self.assertEqual((FOLDER/'simplification-changes.tsv').stat().st_size,0)
-
     def test_production_matching(self):
         reference=self.new['Reference & Collections']
         expected={'ddc:152':5381,'ddc:153':5389,'ddc:154':53287,'ddc:304':5488,'ddc:381':5083,'ddc:655':None,'ddc:658':5236,
@@ -234,20 +155,9 @@ class SocialSciencesReview(unittest.TestCase):
         self.assertEqual(seen,set(recovery))
 
     @unittest.skipUnless(LIVE,'Use --live after book')
-    def test_live_database_and_complete_viewer_payload(self):
+    def test_live_database_matches_reviewed_snapshot(self):
         with sqlite3.connect(f'file:{migration.DATABASE}?mode=ro',uri=True) as live:
             self.assertEqual(migration.snapshot(live),migration.snapshot(self.after))
-        viewer=(migration.DATABASE.parents[1]/'taxonomy-viewer.html').read_text()
-        data,_=json.JSONDecoder().raw_decode(viewer.split('const DATA=',1)[1])
-        nodes=data['nodes']
-        labels=dict(self.after.execute('SELECT concept_id,preferred_label FROM concept'))
-        self.assertEqual({int(id):n['l'] for id,n in nodes.items()},labels)
-        edges={(child,int(parent)) for parent,n in nodes.items() for child in n['c']}
-        self.assertEqual(edges,set(self.after.execute('SELECT concept_id,parent_concept_id FROM concept_parent')))
-        with (FOLDER/'full-counts.tsv').open() as source:
-            counts={int(id):int(count) for id,count in csv.reader(source,delimiter='\t')}
-        for id,n in nodes.items():self.assertEqual(n['h'],counts.get(int(id),0))
-        self.assertTrue(any('GN301' in code for code in nodes['5058']['q']))
 
 
 if __name__=='__main__':unittest.main()

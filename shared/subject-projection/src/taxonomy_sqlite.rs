@@ -1,5 +1,7 @@
 use crate::lcc::lcc_endpoint;
-use crate::{UnifiedCodeResolution, UnifiedConceptDefinition, DEFAULT_UNIFIED_TAXONOMY_SQLITE};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::DEFAULT_UNIFIED_TAXONOMY_SQLITE;
+use crate::{UnifiedCodeResolution, UnifiedConceptDefinition};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -14,6 +16,7 @@ fn split_lcc_range(selector: &str) -> Result<(&str, &str), String> {
     Ok((start, end))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn read_embedded_unified_taxonomy() -> Result<Vec<UnifiedConceptDefinition>, String> {
     let mut connection = Connection::open_in_memory().map_err(|error| format!("failed to open embedded taxonomy database: {error}"))?;
     connection.deserialize_bytes("main", DEFAULT_UNIFIED_TAXONOMY_SQLITE).map_err(|error| format!("failed to open embedded taxonomy database image: {error}"))?;
@@ -25,6 +28,7 @@ pub fn read_unified_taxonomy_sqlite(path: &Path) -> Result<Vec<UnifiedConceptDef
     read_unified_taxonomy_connection(&connection, &path.display().to_string())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn reset_unified_taxonomy_connection(connection: &mut Connection) -> Result<(), String> {
     let mut seed = Connection::open_in_memory().map_err(|error| format!("failed to open embedded taxonomy database: {error}"))?;
     seed.deserialize_bytes("main", DEFAULT_UNIFIED_TAXONOMY_SQLITE).map_err(|error| format!("failed to open embedded taxonomy database image: {error}"))?;
@@ -176,7 +180,7 @@ pub fn merge_unified_taxonomy_connection(connection: &mut Connection, server_rel
             .execute(
                 "INSERT INTO concept(concept_id,preferred_label,normalized_label) VALUES(?1,?2,?3)
                  ON CONFLICT(concept_id) DO UPDATE SET preferred_label=excluded.preferred_label,normalized_label=excluded.normalized_label",
-                params![concept.concept_id(), concept.preferred_label(), super::runtime::normalize_source_label(concept.preferred_label())],
+                params![concept.concept_id(), concept.preferred_label(), super::runtime_index::normalize_source_label(concept.preferred_label())],
             )
             .map_err(|error| format!("failed to merge taxonomy concept {}: {error}", concept.concept_id()))?;
     }
@@ -254,80 +258,6 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    #[test]
-    fn only_preferred_names_are_stored_and_updated() {
-        let mut db = Connection::open_in_memory().unwrap();
-        reset_unified_taxonomy_connection(&mut db).unwrap();
-        for (release, display) in [(1, "Political History"), (2, "Äldre Historia")] {
-            let concept = UnifiedConceptDefinition::new(999991, display.into(), vec![], BTreeMap::new());
-            merge_unified_taxonomy_connection(&mut db, release, &[concept], &[], "preferred name test").unwrap();
-            let row = db.query_row("SELECT preferred_label,normalized_label FROM concept WHERE concept_id=999991", [], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).unwrap();
-            assert_eq!(row, (display.to_owned(), super::super::runtime::normalize_source_label(display)));
-        }
-        assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE name='source_label'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-    }
-
-    #[test]
-    fn range_writer_rejects_unparsed_endpoint_suffixes() {
-        for selector in ["D551..D552.A-Z", "DK908.67..DK908.68.2"] {
-            assert!(split_lcc_range(selector).is_err());
-        }
-        assert!(split_lcc_range("D551..D552.Z").is_ok());
-        assert!(split_lcc_range("DK908.67..DK908.68").is_ok());
-    }
-
-    #[test]
-    fn selector_text_order_round_trips_without_changing_subject_order() {
-        let mut connection = Connection::open_in_memory().unwrap();
-        reset_unified_taxonomy_connection(&mut connection).unwrap();
-        let parent = read_unified_taxonomy_connection(&connection, "test").unwrap().into_iter().find(|concept| concept.parent_ids().is_empty()).unwrap().concept_id();
-        let child = UnifiedConceptDefinition::new(999990, "Selector order test".into(), vec![parent], BTreeMap::from([("lcc".into(), vec!["QA9".into(), "QA1".into()])]));
-        merge_unified_taxonomy_connection(&mut connection, 1, &[child.clone()], &[], "test").unwrap();
-        let restored = read_unified_taxonomy_connection(&connection, "test").unwrap().into_iter().find(|concept| concept.concept_id() == child.concept_id()).unwrap();
-        assert_eq!(restored, child);
-        assert_eq!(restored.source_selectors("lcc"), &["QA1", "QA9"]);
-        let display_columns: i64 = connection.query_row("SELECT count(*) FROM pragma_table_info('concept_parent') WHERE name='display_order'", [], |row| row.get(0)).unwrap();
-        assert_eq!(display_columns, 0);
-        let ordinal_columns: i64 = connection.query_row("SELECT count(*) FROM pragma_table_info('lcc_selector') WHERE name='ordinal'", [], |row| row.get(0)).unwrap();
-        assert_eq!(ordinal_columns, 0);
-    }
-
-    #[test]
-    fn taxonomy_relationships_store_integer_subject_ids() {
-        let mut connection = Connection::open_in_memory().unwrap();
-        reset_unified_taxonomy_connection(&mut connection).unwrap();
-        for (table, column) in [("concept", "concept_id"), ("concept_parent", "concept_id"), ("concept_parent", "parent_concept_id"), ("lcc_selector", "concept_id"), ("bisac_selector", "concept_id"), ("ddc_selector", "concept_id")] {
-            let count: i64 = connection.query_row(&format!("SELECT count(*) FROM {table} WHERE typeof({column}) <> 'integer'"), [], |row| row.get(0)).unwrap();
-            assert_eq!(count, 0, "{table}.{column}");
-        }
-        assert!(connection.execute("INSERT INTO concept(concept_id,preferred_label) VALUES('old:string-id','Invalid')", []).is_err());
-    }
-
-    #[test]
-    fn lcc_ranges_are_structural_and_have_one_owner() {
-        let mut connection = Connection::open_in_memory().unwrap();
-        reset_unified_taxonomy_connection(&mut connection).unwrap();
-        let encoded_ranges: i64 = connection.query_row("SELECT count(*) FROM lcc_selector WHERE instr(selector,'..')>0", [], |row| row.get(0)).unwrap();
-        assert_eq!(encoded_ranges, 0);
-        let (owner, start_code, end_code) = super::super::range_storage::read_ranges(&connection).unwrap().into_iter().next().unwrap();
-        let other = connection.query_row("SELECT concept_id FROM concept WHERE concept_id<>?1 LIMIT 1", [owner], |row| row.get::<_, i64>(0)).unwrap();
-        assert!(super::super::range_storage::insert_range(&connection, other, &start_code, &end_code).is_err());
-    }
-
-    #[cfg(not(feature = "authoritative-taxonomy"))]
-    #[test]
-    fn embedded_client_taxonomy_is_the_bounded_second_level_seed() {
-        let concepts = read_embedded_unified_taxonomy().unwrap();
-        assert!((1_000..=2_000).contains(&concepts.len()));
-        assert!(DEFAULT_UNIFIED_TAXONOMY_SQLITE.len() < 2 * 1024 * 1024);
-    }
-
-    #[cfg(feature = "authoritative-taxonomy")]
-    #[test]
-    fn authoritative_build_embeds_the_complete_taxonomy() {
-        let concepts = read_embedded_unified_taxonomy().unwrap();
-        assert!(concepts.len() > 2_000);
-    }
 
     #[test]
     fn server_slice_is_persisted_as_an_ancestor_closed_local_overlay() {

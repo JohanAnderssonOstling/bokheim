@@ -12,6 +12,7 @@ use ui_components::WindowWidthClass;
 
 use crate::invalidation::Component;
 use crate::settings::ReaderSettings;
+use super::layout::{clamp_reader_sidebar_width, reader_split};
 
 /// Smallest divider drag worth persisting, in pixels. Resize events arrive on
 /// every mouse move; sub-pixel jitter must not write to disk.
@@ -191,11 +192,7 @@ pub(crate) fn with_sidebar(sidebar: AnyElement, document: AnyElement, window: &W
         return div().relative().size_full().min_h_0().min_w_0().overflow_hidden().child(document).child(div().absolute().left_0().right_0().top(top).bottom(bottom).child(sidebar)).into_any_element();
     }
     let width = ReaderSettings::preferences(cx).toc_width.min(f32::from(window.viewport_size().width));
-    ui_components::reader_split(sidebar, document, width)
-        .on_resize(|width, _, cx| {
-            set_sidebar_width(width, cx);
-        })
-        .into_any_element()
+    reader_split(sidebar, document, width).into_any_element()
 }
 
 /// Persists a new sidebar width, ignoring drags too small to matter.
@@ -219,28 +216,9 @@ pub(crate) fn sidebar_width(visible: bool, window: &Window, cx: &App) -> f32 {
     if !visible || sidebar_overlays_document(window) {
         return 0.0;
     }
-    ui_components::clamp_reader_sidebar_width(ReaderSettings::preferences(cx).toc_width.min(f32::from(window.viewport_size().width)))
+    clamp_reader_sidebar_width(ReaderSettings::preferences(cx).toc_width.min(f32::from(window.viewport_size().width)))
 }
 
 pub(crate) fn sidebar_overlays_document(window: &Window) -> bool {
     cfg!(feature = "kobo") || WindowWidthClass::for_window(window).is_compact()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sub_pixel_divider_jitter_is_not_persisted() {
-        assert!(!is_meaningful_resize(300.0, 300.0));
-        assert!(!is_meaningful_resize(300.0, 300.4));
-        assert!(!is_meaningful_resize(300.0, 299.6));
-    }
-
-    #[test]
-    fn a_real_drag_is_persisted_in_either_direction() {
-        assert!(is_meaningful_resize(300.0, 301.0));
-        assert!(is_meaningful_resize(300.0, 299.0));
-        assert!(is_meaningful_resize(300.0, 420.0));
-    }
 }

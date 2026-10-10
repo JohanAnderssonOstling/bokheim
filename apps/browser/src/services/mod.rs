@@ -1,13 +1,15 @@
 //! Explicit service boundaries for browser UI code.
 
 mod app;
+mod book_confirmation;
+pub(crate) use book_confirmation::BookConfirmation;
 mod update_prompt;
 pub(crate) mod updates;
 pub use updates::{UpdateAction, UpdateActionHandler, UpdateControls, UpdateView};
 mod format;
 pub(crate) use format::format_storage_bytes;
 pub(crate) mod library_removal;
-pub use library_removal::{LibraryRemovalHook, LibraryRemovalPreparation, library_is_being_removed};
+pub use library_removal::{LibraryRemovalHook, LibraryRemovalPreparation, LibraryRemovalService, library_is_being_removed};
 pub(crate) type UiFuture<T> = std::pin::Pin<Box<dyn Future<Output = Result<T, String>> + 'static>>;
 mod import_presentation;
 pub(crate) mod import_progress;
@@ -20,5 +22,3 @@ pub(crate) use notifications::{notify_error, notify_info, notify_undoable, notif
 #[cfg(feature = "kobo")]
 pub use app::SaveKoboAutoRotate;
 pub use app::{AppServices, AppStartup};
-
-pub(crate) mod library_add_trace;

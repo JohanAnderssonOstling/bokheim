@@ -103,14 +103,6 @@ impl PaginatorElement {
         self
     }
 
-    /// Mouse activation is declared by the child, not inferred from its bounds:
-    /// a book card is a cover plus two lines of text, and only the cover should
-    /// open the book. `activate` remains the keyboard's route in, so Enter and a
-    /// click still run the same callback.
-    fn activation_hitbox(&self, _child_index: usize, _item_bounds: Bounds<Pixels>, _clip_bounds: Bounds<Pixels>, _window: &mut Window) -> Option<ActivationHitbox> {
-        None
-    }
-
     /// Handles a secondary click left unanswered by a child. Registered before
     /// child paint, since GPUI bubbles mouse listeners in reverse order.
     fn paint_secondary_input(&self, rects: Vec<(usize, Bounds<Pixels>)>, hitbox: Hitbox, window: &mut Window) {
@@ -239,7 +231,7 @@ impl PaginatorElement {
             items.push(MeasuredItem { child_index: item.child_index, x: item.x, width: item.width, element });
         }
 
-        MeasuredRow { assignment, items, height, gap_before: Pixels::ZERO, header_height: Pixels::ZERO }
+        MeasuredRow { assignment, items, height, gap_before: Pixels::ZERO }
     }
 
     fn measure_page(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) -> MeasuredPage {
@@ -252,10 +244,6 @@ impl PaginatorElement {
     }
 
     fn minimum_next_page_peek(&self, available_extent: Pixels) -> Pixels {
-        // A small peek cannot show a header and a row together.
-        if self.reported_visible_page.and_then(|page| self.data.group_index_for_child(page.last_child.saturating_add(1))).is_some_and(|group| self.data.groups[group].header_sizing.is_some()) {
-            return Pixels::ZERO;
-        }
         if (self.flow_axis == PaginatorAxis::Vertical && self.maximum_rows.is_some()) || self.reported_visible_page.is_none_or(|page| page.last_child.saturating_add(1) >= self.data.children.len()) {
             return Pixels::ZERO;
         }
@@ -273,9 +261,6 @@ impl PaginatorElement {
     fn measure_next_preview(&self, page: VisiblePage, geometries: &[GroupGeometry], available_height: Pixels, window: &mut Window, cx: &mut App) -> Option<MeasuredRow> {
         let mut next_child = page.last_child.saturating_add(1);
         let assignment = geometry::next_forward_row(&self.data, geometries, &mut next_child)?;
-        if self.data.groups[assignment.group_index].header_sizing.is_some() {
-            return None;
-        }
         Some(self.measure_row(assignment, available_height, window, cx))
     }
 
@@ -303,21 +288,8 @@ impl PaginatorElement {
 
     fn measure_assignments(&self, assignments: Vec<AssignedRow>, maximum_height: Pixels, window: &mut Window, cx: &mut App) -> MeasuredPage {
         let mut rows = Vec::new();
-        let mut used = Pixels::ZERO;
         for assignment in assignments {
-            let previous = rows.last().map(|row: &MeasuredRow| &row.assignment);
-            let header_height = geometry::row_header_height(&self.data, previous, &assignment, self.rem_size);
-            let gap = previous.map_or(Pixels::ZERO, |previous| geometry::gap_between(&self.data, previous, &assignment));
-            let nominal_height = self.data.groups[assignment.group_index].policy.sizing.height(assignment.child_width, self.rem_size);
-            // A forced outgoing range can outlive a viewport resize. Even then,
-            // never paint a new heading unless its first row fits with it.
-            if header_height > Pixels::ZERO && used + gap + header_height + nominal_height > maximum_height {
-                break;
-            }
-            let mut row = self.measure_row(assignment, maximum_height - header_height, window, cx);
-            row.header_height = header_height;
-            used += gap + header_height + row.height;
-            rows.push(row);
+            rows.push(self.measure_row(assignment, maximum_height, window, cx));
         }
         set_vertical_gaps(&self.data, &mut rows);
         MeasuredPage { rows }
@@ -352,7 +324,7 @@ impl Element for PaginatorElement {
     fn request_layout(&mut self, _id: Option<&GlobalElementId>, _inspector_id: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, Self::RequestLayoutState) {
         for child in &self.data.children {
             if let Some(measure) = &child.intrinsic_width {
-                child.measured_width.set(measure(window, cx));
+                child.measured_width.set(measure.measure(window, cx));
             }
         }
         let mut style = Style::default();
@@ -403,7 +375,7 @@ impl Element for PaginatorElement {
                 }
             }
 
-            let content_height: Pixels = page.rows.iter().map(|row| row.height + row.gap_before + row.header_height).fold(Pixels::ZERO, |total, height| total + height);
+            let content_height: Pixels = page.rows.iter().map(|row| row.height + row.gap_before).fold(Pixels::ZERO, |total, height| total + height);
             if self.reported_content_height != Some(content_height) {
                 let paginator = self.paginator.clone();
                 let children_revision = self.children_revision;
@@ -426,49 +398,27 @@ impl Element for PaginatorElement {
         let row_left = bounds.left() + bounds.size.width * self.horizontal_offset;
         let mut row_top = bounds.top() + bounds.size.height * self.vertical_offset + self.vertical_pixels;
         let mut elements = Vec::new();
-        let mut activations = Vec::new();
         // Only the page the reader is on: the peek row below it belongs to the
         // next page, and a band drawn over this one must not reach it.
         let mut child_rects = Vec::new();
-        // A headed group reads as raised off the page: the panel is the
-        // header's top to the last row's bottom, at the header's own inset —
-        // tracked here because the paginator draws rows one at a time and this
-        // is the one place that knows where a group starts and ends.
-        let mut group_panels = Vec::new();
         let mut grid_rows = Vec::new();
-        let mut open_panel: Option<(Pixels, Pixels, Pixels)> = None;
         let row_count = page.rows.len();
         for row_index in 0..row_count {
             let next_grid_contiguous = page.rows.get(row_index + 1).is_some_and(|next| {
                 let policy = self.data.groups[next.assignment.group_index].policy;
-                policy.grid_rules && next.gap_before == Pixels::ZERO && next.header_height == Pixels::ZERO
+                policy.grid_rules && next.gap_before == Pixels::ZERO
             });
             let row = &mut page.rows[row_index];
             row_top += row.gap_before;
             let group_index = row.assignment.group_index;
-            if row.header_height > Pixels::ZERO {
-                if let Some(header) = &self.data.headers[group_index] {
-                    let inset = self.data.groups[group_index].policy.edge_inset;
-                    let width = (self.current_page_width(bounds.size.width) - inset * 2.0).max(px(1.0));
-                    let mut element = div().w(width).h(row.header_height).overflow_hidden().child((header.render)(window, cx)).into_any_element();
-                    element.layout_as_root(size(AvailableSpace::Definite(width), AvailableSpace::Definite(row.header_height)), window, cx);
-                    element.prepaint_at(point(row_left + inset, row_top), window, cx);
-                    elements.push(element);
-                    open_panel = Some((row_top, row_left + inset, width));
-                }
-                row_top += row.header_height;
-            }
-            if self.data.groups[group_index].policy.grid_rules {
-                if let Some(grid_row) = GridRow::from_row(row, row_left, row_top, !next_grid_contiguous) {
-                    grid_rows.push(grid_row);
-                }
+            if self.data.groups[group_index].policy.grid_rules
+                && let Some(grid_row) = GridRow::from_row(row, row_left, row_top, !next_grid_contiguous)
+            {
+                grid_rows.push(grid_row);
             }
             for item in row.items.drain(..) {
                 let origin = point(row_left + item.x, row_top);
                 let item_bounds = Bounds { origin, size: size(item.width, row.height) };
-                if let Some(activation) = self.activation_hitbox(item.child_index, item_bounds, bounds, window) {
-                    activations.push(activation);
-                }
                 if self.selectable && self.active && item_bounds.intersects(&bounds) {
                     child_rects.push((item.child_index, item_bounds));
                 }
@@ -477,10 +427,6 @@ impl Element for PaginatorElement {
                 elements.push(element);
             }
             row_top += row.height;
-            let group_changes = page.rows.get(row_index + 1).is_none_or(|next| next.assignment.group_index != group_index);
-            if group_changes && let Some((top, left, width)) = open_panel.take() {
-                group_panels.push(Bounds { origin: point(left, top), size: size(width, row_top - top) });
-            }
         }
 
         if let Some(visible_page) = visible_page
@@ -493,16 +439,13 @@ impl Element for PaginatorElement {
                     let reserved_left = bounds.left() + self.current_page_width(bounds.size.width) + bounds.size.width * self.horizontal_offset;
                     let preview_left = natural_left.min(reserved_left);
                     let preview_top = bounds.top() + bounds.size.height * self.vertical_offset;
-                    if self.data.groups[preview.assignment.group_index].policy.grid_rules {
-                        if let Some(grid_row) = GridRow::from_row(&preview, preview_left, preview_top, true) {
-                            grid_rows.push(grid_row);
-                        }
+                    if self.data.groups[preview.assignment.group_index].policy.grid_rules
+                        && let Some(grid_row) = GridRow::from_row(&preview, preview_left, preview_top, true)
+                    {
+                        grid_rows.push(grid_row);
                     }
                     for item in preview.items.drain(..) {
                         let origin = point(preview_left + item.x, preview_top);
-                        if let Some(activation) = self.activation_hitbox(item.child_index, Bounds { origin, size: size(item.width, preview.height) }, bounds, window) {
-                            activations.push(activation);
-                        }
                         let mut element = item.element;
                         element.prepaint_at(origin, window, cx);
                         elements.push(element);
@@ -513,16 +456,13 @@ impl Element for PaginatorElement {
                     let natural_top = row_top + gap_before;
                     let reserved_top = bounds.top() + self.current_page_height(bounds.size.height) + bounds.size.height * self.vertical_offset;
                     let preview_top = natural_top.min(reserved_top);
-                    if self.data.groups[preview.assignment.group_index].policy.grid_rules {
-                        if let Some(grid_row) = GridRow::from_row(&preview, row_left, preview_top, true) {
-                            grid_rows.push(grid_row);
-                        }
+                    if self.data.groups[preview.assignment.group_index].policy.grid_rules
+                        && let Some(grid_row) = GridRow::from_row(&preview, row_left, preview_top, true)
+                    {
+                        grid_rows.push(grid_row);
                     }
                     for item in preview.items.drain(..) {
                         let origin = point(row_left + item.x, preview_top);
-                        if let Some(activation) = self.activation_hitbox(item.child_index, Bounds { origin, size: size(item.width, preview.height) }, bounds, window) {
-                            activations.push(activation);
-                        }
                         let mut element = item.element;
                         element.prepaint_at(origin, window, cx);
                         elements.push(element);
@@ -540,7 +480,7 @@ impl Element for PaginatorElement {
             });
             window.insert_hitbox(bounds, HitboxBehavior::Normal)
         });
-        PaginatorPrepaint { elements, activations, container, child_rects, group_panels, grid_rows }
+        PaginatorPrepaint { elements, container, child_rects, grid_rows }
     }
 
     fn paint(&mut self, _id: Option<&GlobalElementId>, _inspector_id: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _layout: &mut Self::RequestLayoutState, prepaint: &mut Self::PrepaintState, window: &mut Window, cx: &mut App) {
@@ -550,12 +490,6 @@ impl Element for PaginatorElement {
             self.paint_secondary_input(prepaint.child_rects.clone(), container, window);
         }
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            if !prepaint.group_panels.is_empty() {
-                let theme = components::browser_theme(cx);
-                for panel in &prepaint.group_panels {
-                    window.paint_quad(quad(*panel, px(0.0), theme.raised_bg, px(1.0), theme.rule, BorderStyle::Solid));
-                }
-            }
             for element in &mut prepaint.elements {
                 element.paint(window, cx);
             }
@@ -579,33 +513,16 @@ impl Element for PaginatorElement {
         if let Some(container) = prepaint.container.clone() {
             self.paint_selection_input(container, prepaint.child_rects.clone(), window);
         }
-
-        for activation in &prepaint.activations {
-            let hitbox = activation.hitbox.clone();
-            let activate = activation.activate.clone();
-            window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
-                if phase == DispatchPhase::Bubble && event.button == MouseButton::Left && hitbox.is_hovered(window) {
-                    activate(window, cx);
-                }
-            });
-        }
     }
-}
-
-struct ActivationHitbox {
-    hitbox: gpui::Hitbox,
-    activate: Rc<super::ActivateChild>,
 }
 
 #[derive(Default)]
 pub(super) struct PaginatorPrepaint {
     elements: Vec<AnyElement>,
-    activations: Vec<ActivationHitbox>,
     /// Present only while the paginator is selectable, and the only thing that
     /// distinguishes a press on empty space from one on a child.
     container: Option<Hitbox>,
     child_rects: Vec<(usize, Bounds<Pixels>)>,
-    group_panels: Vec<Bounds<Pixels>>,
     grid_rows: Vec<GridRow>,
 }
 
@@ -656,7 +573,6 @@ struct MeasuredRow {
     items: Vec<MeasuredItem>,
     height: Pixels,
     gap_before: Pixels,
-    header_height: Pixels,
 }
 
 struct MeasuredPage {

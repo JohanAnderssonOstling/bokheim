@@ -1,6 +1,6 @@
 //! Group-aware paginator with declared child sizes.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 mod element;
 mod geometry;
 mod identity;
@@ -13,16 +13,14 @@ use std::time::Duration;
 #[cfg(feature = "mobile")]
 use gpui::TouchPhase;
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Bounds, Context, ElementId, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Window, div, ease_in_out};
+use gpui::{AnyElement, App, Bounds, Context, ElementId, Font, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Window, div, ease_in_out};
+use ui_components::HierarchyItemWidth;
 use web_time::Instant;
 
 use element::PaginatorElement;
 use identity::ItemPosition;
 pub(crate) use identity::PaginatorPosition;
-pub(crate) use policy::{
-    PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy, author_index_entry_policy, author_index_letter_sizing, book_card_policy, browse_section_card_policy, browse_section_item_policy, graph_cover_policy, shelf_card_policy,
-    shelf_rows_policy,
-};
+pub(crate) use policy::{PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy, book_card_policy, browse_section_card_policy, browse_section_item_policy, browse_shelf_card_policy, graph_cover_policy};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PaginatorAxis {
@@ -37,6 +35,18 @@ pub(crate) enum CursorMove {
     Right,
     Up,
     Down,
+}
+
+impl CursorMove {
+    pub(crate) fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            "up" => Some(Self::Up),
+            "down" => Some(Self::Down),
+            _ => None,
+        }
+    }
 }
 
 type RenderChild = dyn Fn(&PaginatorState, &mut Window, &mut App) -> AnyElement;
@@ -133,13 +143,40 @@ impl PaginatorState {
     }
 }
 
+struct CachedItemWidth {
+    rem_size: Pixels,
+    font: Font,
+    width: Pixels,
+}
+
+struct IntrinsicWidth {
+    content: HierarchyItemWidth,
+    cache: RefCell<Option<CachedItemWidth>>,
+}
+
+impl IntrinsicWidth {
+    fn measure(&self, window: &mut Window, cx: &mut App) -> Pixels {
+        let rem_size = window.rem_size();
+        let font = window.text_style().font();
+        if let Some(cached) = self.cache.borrow().as_ref()
+            && cached.rem_size == rem_size
+            && cached.font == font
+        {
+            return cached.width;
+        }
+        let width = self.content.measure(window, cx);
+        *self.cache.borrow_mut() = Some(CachedItemWidth { rem_size, font, width });
+        width
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct PaginatorChild {
     id: Option<SharedString>,
     pub(super) activate: Option<Rc<ActivateChild>>,
     pub(super) prepare: Option<Rc<PrepareChild>>,
     pub(super) render: Rc<RenderChild>,
-    intrinsic_width: Option<Rc<dyn Fn(&mut Window, &mut App) -> Pixels>>,
+    intrinsic_width: Option<Rc<IntrinsicWidth>>,
     measured_width: Rc<Cell<Pixels>>,
 }
 
@@ -155,19 +192,8 @@ impl PaginatorChild {
     }
 
     /// Measures content without constructing off-page interactive children.
-    pub(crate) fn with_intrinsic_width(mut self, measure: impl Fn(&mut Window, &mut App) -> Pixels + 'static) -> Self {
-        let cache = std::cell::RefCell::new(None);
-        self.intrinsic_width = Some(Rc::new(move |window, cx| {
-            let key = (window.rem_size(), window.text_style().font());
-            if let Some((previous, width)) = cache.borrow().as_ref() {
-                if previous == &key {
-                    return *width;
-                }
-            }
-            let width = measure(window, cx);
-            *cache.borrow_mut() = Some((key, width));
-            width
-        }));
+    pub(crate) fn with_intrinsic_width(mut self, content: HierarchyItemWidth) -> Self {
+        self.intrinsic_width = Some(Rc::new(IntrinsicWidth { content, cache: RefCell::new(None) }));
         self
     }
 
@@ -184,30 +210,19 @@ impl PaginatorChild {
     }
 }
 
-/// Decorations belong to the group, never to the selectable child sequence.
-struct PaginatorHeader {
-    render: Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>,
-}
-
 pub(crate) struct PaginatorGroup {
     policy: PaginatorGroupPolicy,
     children: Vec<PaginatorChild>,
-    header: Option<(PaginatorSizing, Rc<PaginatorHeader>)>,
 }
 
 impl PaginatorGroup {
     pub(crate) fn new(policy: PaginatorGroupPolicy, children: impl IntoIterator<Item = PaginatorChild>) -> Self {
-        Self { policy, children: children.into_iter().collect(), header: None }
-    }
-    pub(crate) fn with_header(mut self, sizing: PaginatorSizing, render: impl Fn(&mut Window, &mut App) -> AnyElement + 'static) -> Self {
-        self.header = Some((sizing, Rc::new(PaginatorHeader { render: Rc::new(render) })));
-        self
+        Self { policy, children: children.into_iter().collect() }
     }
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct GroupSpan {
-    pub(super) header_sizing: Option<PaginatorSizing>,
     pub(super) policy: PaginatorGroupPolicy,
     pub(super) start: usize,
     pub(super) end: usize,
@@ -222,7 +237,6 @@ impl GroupSpan {
 #[derive(Default)]
 pub(super) struct PaginatorData {
     indices: HashMap<SharedString, usize>,
-    headers: Vec<Option<Rc<PaginatorHeader>>>,
     pub(super) groups: Vec<GroupSpan>,
     pub(super) children: Vec<PaginatorChild>,
 }
@@ -244,7 +258,6 @@ impl PaginatorData {
 
     fn new(groups: impl IntoIterator<Item = PaginatorGroup>) -> Self {
         let mut spans = Vec::new();
-        let mut headers = Vec::new();
         let mut children = Vec::new();
         for group in groups {
             if group.children.is_empty() {
@@ -252,15 +265,10 @@ impl PaginatorData {
             }
             let start = children.len();
             children.extend(group.children);
-            let (header_sizing, header) = match group.header {
-                Some((sizing, header)) => (Some(sizing), Some(header)),
-                None => (None, None),
-            };
-            headers.push(header);
-            spans.push(GroupSpan { policy: group.policy, header_sizing, start, end: children.len() });
+            spans.push(GroupSpan { policy: group.policy, start, end: children.len() });
         }
         let indices = children.iter().enumerate().filter_map(|(index, child)| child.id.clone().map(|id| (id, index))).collect();
-        Self { indices, groups: spans, children, headers }
+        Self { indices, groups: spans, children }
     }
 
     pub(super) fn group_index_for_child(&self, child_index: usize) -> Option<usize> {
@@ -370,7 +378,7 @@ impl Paginator {
         }
     }
 
-    /// Enables rubber-band selection over the children.
+    /// Enables rubber-band and keyboard selection over the children.
     pub(crate) fn selectable(mut self) -> Self {
         self.selectable = true;
         self
@@ -441,49 +449,6 @@ impl Paginator {
         self.content_height = content_height;
     }
 
-    /// Remove one item without replacing the paginator or its surviving children.
-    pub(crate) fn remove_child(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index >= self.data.children.len() {
-            return;
-        }
-        let offset = self.child_offset.saturating_sub(usize::from(index < self.child_offset));
-        let cursor = self.cursor.map(|cursor| cursor.saturating_sub(usize::from(index < cursor)));
-        let mut groups = self.cloned_groups();
-        if let Some(group_index) = self.data.group_index_for_child(index) {
-            groups[group_index].children.remove(index - self.data.groups[group_index].start);
-        }
-        self.refresh_groups(groups, cx);
-        let last = self.data.children.len().saturating_sub(1);
-        self.child_offset = offset.min(last);
-        self.cursor = cursor.map(|cursor| cursor.min(last));
-    }
-
-    pub(crate) fn cloned_groups(&self) -> Vec<PaginatorGroup> {
-        self.data
-            .groups
-            .iter()
-            .enumerate()
-            .map(|(index, group)| PaginatorGroup { policy: group.policy, children: self.data.children[group.start..group.end].to_vec(), header: group.header_sizing.zip(self.data.headers[index].clone()) })
-            .collect()
-    }
-
-    /// Append a newly created review item while retaining the current page.
-    pub(crate) fn append_groups(&mut self, other: Vec<PaginatorGroup>, cx: &mut Context<Self>) {
-        let mut groups = self.cloned_groups();
-        for group in other {
-            if let Some(last) = groups.last_mut()
-                && last.policy == group.policy
-                && last.header.is_none()
-                && group.header.is_none()
-            {
-                last.children.extend(group.children);
-            } else {
-                groups.push(group);
-            }
-        }
-        self.refresh_groups(groups, cx);
-    }
-
     pub(crate) fn set_groups(&mut self, groups: impl IntoIterator<Item = PaginatorGroup>, cx: &mut Context<Self>) {
         self.data = Rc::new(PaginatorData::new(groups));
         self.child_offset = 0;
@@ -506,56 +471,24 @@ impl Paginator {
         cx.notify();
     }
 
-    pub(crate) fn previous(&mut self, cx: &mut Context<Self>) -> bool {
-        self.previous_with_axis(PaginatorAxis::Horizontal, cx)
-    }
-
     pub(crate) fn previous_with_axis(&mut self, axis: PaginatorAxis, cx: &mut Context<Self>) -> bool {
-        if !self.allows_axis(axis) {
-            return false;
-        }
-        if self.transition.is_some() {
-            return false;
-        }
-        let Some(page) = self.visible_page else {
-            return false;
-        };
-        if page.first_child == 0 {
-            return false;
-        }
-        // The band selected what was on the page it was drawn over.
-        self.clear_selection(cx);
-        self.capture_page_transition(AssignmentDirection::Backward, page);
-        self.child_offset = page.first_child - 1;
-        self.direction = AssignmentDirection::Backward;
-        self.visible_page = None;
-        self.prefetched = None;
-        cx.notify();
-        true
-    }
-
-    pub(crate) fn next(&mut self, cx: &mut Context<Self>) -> bool {
-        self.next_with_axis(PaginatorAxis::Horizontal, cx)
+        self.turn_page(AssignmentDirection::Backward, axis, cx)
     }
 
     pub(crate) fn next_with_axis(&mut self, axis: PaginatorAxis, cx: &mut Context<Self>) -> bool {
-        if !self.allows_axis(axis) {
+        self.turn_page(AssignmentDirection::Forward, axis, cx)
+    }
+
+    fn turn_page(&mut self, direction: AssignmentDirection, axis: PaginatorAxis, cx: &mut Context<Self>) -> bool {
+        if !self.allows_axis(axis) || self.transition.is_some() {
             return false;
         }
-        if self.transition.is_some() {
-            return false;
-        }
-        let Some(page) = self.visible_page else {
-            return false;
-        };
-        let next_offset = page.last_child.saturating_add(1);
-        if next_offset >= self.data.children.len() {
-            return false;
-        }
+        let Some(page) = self.visible_page else { return false };
+        let Some(offset) = page.adjacent_offset(direction, self.data.children.len()) else { return false };
         self.clear_selection(cx);
-        self.capture_page_transition(AssignmentDirection::Forward, page);
-        self.child_offset = next_offset;
-        self.direction = AssignmentDirection::Forward;
+        self.capture_page_transition(direction, page);
+        self.child_offset = offset;
+        self.direction = direction;
         self.visible_page = None;
         self.prefetched = None;
         cx.notify();
@@ -566,17 +499,13 @@ impl Paginator {
         self.cursor
     }
 
-    /// Keep keyboard focus with a page turned by its controls without
-    /// replacing the page or cancelling its transition.
-    pub(crate) fn focus_child_on_current_page(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.data.children.len() {
-            self.cursor = Some(index);
-            cx.notify();
-        }
-    }
-
     pub(crate) fn selection(&self) -> &BTreeSet<usize> {
         &self.selection
+    }
+
+    /// A keyboard menu acts on the selection before the previous cursor.
+    pub(crate) fn context_menu_index(&self) -> Option<usize> {
+        self.selection.iter().next().copied().or_else(|| self.cursor())
     }
 
     /// Where the last painted frame put a child, for anchoring a menu opened
@@ -641,15 +570,8 @@ impl Paginator {
         self.marquee.is_some_and(|marquee| marquee.active)
     }
 
-    pub(crate) fn child_anchor(&self) -> usize {
+    fn child_anchor(&self) -> usize {
         self.visible_page.map_or(self.child_offset, |page| page.first_child)
-    }
-
-    /// Position in a one-row, single-group horizontal strip.
-    pub(crate) fn horizontal_page_position(&self) -> (usize, usize) {
-        let columns = self.columns_for_group(0).max(1);
-        let total = self.data.children.len().div_ceil(columns).max(1);
-        (self.child_anchor() / columns + 1, total)
     }
 
     /// Columns a group is laid out at, for the width the element last used.
@@ -682,6 +604,36 @@ impl Paginator {
             return false;
         };
         self.place_cursor(target, cx)
+    }
+
+    /// Moves the cursor and toggles only the destination, keeping other picks.
+    pub(crate) fn move_and_toggle_selection(&mut self, movement: CursorMove, cx: &mut Context<Self>) -> bool {
+        let Some(target) = self.toggle_cursor_selection(movement) else {
+            return false;
+        };
+        // Cursor-driven page turns normally clear selection. Keep it while
+        // revealing the destination so keyboard picks can span pages.
+        let selection = std::mem::take(&mut self.selection);
+        self.reveal_cursor(target, cx);
+        self.selection = selection;
+        cx.notify();
+        true
+    }
+
+    fn toggle_cursor_selection(&mut self, movement: CursorMove) -> Option<usize> {
+        if !self.selectable || self.data.children.is_empty() || self.transition.is_some() {
+            return None;
+        }
+        let target = match self.cursor {
+            Some(current) => self.cursor_target(current, movement)?,
+            None => self.visible_page.map_or(0, |page| page.first_child),
+        };
+        self.cursor = Some(target);
+        self.marquee = None;
+        if !self.selection.remove(&target) {
+            self.selection.insert(target);
+        }
+        Some(target)
     }
 
     fn cursor_target(&self, current: usize, movement: CursorMove) -> Option<usize> {
@@ -784,6 +736,12 @@ impl Paginator {
             return false;
         }
         self.cursor = Some(index);
+        self.reveal_cursor(index, cx);
+        cx.notify();
+        true
+    }
+
+    fn reveal_cursor(&mut self, index: usize, cx: &mut Context<Self>) {
         // Walking off the page is what turns it: one step past the last row
         // lands on the first row of the next page, so paging is a consequence
         // of moving rather than a second gesture.
@@ -794,57 +752,10 @@ impl Paginator {
                 self.next_with_axis(self.flow_axis, cx);
             }
         }
-        cx.notify();
-        true
-    }
-
-    /// Restores selection and page position independently: selecting the third
-    /// child must not move a page that previously started at the first child.
-    pub(crate) fn restore_cursor(&mut self, index: usize, child_anchor: usize, cx: &mut Context<Self>) {
-        if index >= self.data.children.len() {
-            return;
-        }
-        self.cursor = Some(index);
-        self.child_offset = child_anchor.min(self.data.children.len() - 1);
-        self.direction = AssignmentDirection::Forward;
-        self.visible_page = None;
-        self.prefetched = None;
-        self.cancel_page_transition();
-        cx.notify();
-    }
-
-    /// Places the keyboard cursor on the final child and lays out the page that
-    /// contains it. Used when spatial navigation enters a nested carousel from
-    /// its right or lower edge.
-    pub(crate) fn focus_last_child(&mut self, cx: &mut Context<Self>) {
-        let Some(last_child) = self.data.children.len().checked_sub(1) else { return };
-        self.child_offset = last_child;
-        self.direction = AssignmentDirection::Backward;
-        self.cursor = Some(last_child);
-        self.visible_page = None;
-        self.prefetched = None;
-        self.cancel_page_transition();
-        cx.notify();
-    }
-
-    /// Positions a newly installed bounded result window at its final page.
-    /// This is used when crossing a remote window boundary backwards.
-    pub(crate) fn show_end(&mut self, cx: &mut Context<Self>) {
-        let Some(last_child) = self.data.children.len().checked_sub(1) else { return };
-        self.child_offset = last_child;
-        self.direction = AssignmentDirection::Backward;
-        self.visible_page = None;
-        self.prefetched = None;
-        self.cancel_page_transition();
-        cx.notify();
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         self.data.children.is_empty()
-    }
-
-    pub(crate) fn is_idle(&self) -> bool {
-        self.transition.is_none() && self.visible_page.is_some()
     }
 
     /// Whether a measured page exists before the page currently on screen.
@@ -859,12 +770,9 @@ impl Paginator {
         self.visible_page.or_else(|| self.transition.as_ref().map(|transition| transition.outgoing_page)).is_some_and(|page| page.last_child.saturating_add(1) < self.data.children.len())
     }
 
-    pub(crate) fn can_previous(&self) -> bool {
-        self.transition.is_none() && self.has_previous()
-    }
-
-    pub(crate) fn can_next(&self) -> bool {
-        self.transition.is_none() && self.has_next()
+    /// Whether the page on screen is measured and holds the last child.
+    pub(crate) fn on_last_page(&self) -> bool {
+        self.visible_page.is_some_and(|page| page.last_child.saturating_add(1) >= self.data.children.len())
     }
 
     fn set_visible_page(&mut self, children_revision: usize, visible_page: Option<VisiblePage>, cx: &mut Context<Self>) {
@@ -965,10 +873,10 @@ impl Paginator {
         // than dragged along invisibly; walking the cursor off the edge turns
         // the page to follow it, so that cursor lands inside the new page and
         // is kept.
-        if let (Some(cursor), Some(page)) = (self.cursor, visible_page) {
-            if cursor < page.first_child || cursor > page.last_child {
-                self.cursor = None;
-            }
+        if let (Some(cursor), Some(page)) = (self.cursor, visible_page)
+            && (cursor < page.first_child || cursor > page.last_child)
+        {
+            self.cursor = None;
         }
         true
     }
@@ -1199,6 +1107,18 @@ pub(super) struct VisiblePage {
     pub(super) last_child: usize,
 }
 
+impl VisiblePage {
+    fn adjacent_offset(self, direction: AssignmentDirection, child_count: usize) -> Option<usize> {
+        match direction {
+            AssignmentDirection::Backward => self.first_child.checked_sub(1),
+            AssignmentDirection::Forward => {
+                let offset = self.last_child.checked_add(1)?;
+                (offset < child_count).then_some(offset)
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct PrefetchKey {
     pub(super) children_revision: usize,
@@ -1209,54 +1129,125 @@ pub(super) struct PrefetchKey {
 }
 
 #[cfg(test)]
-mod refresh_tests {
-    use super::*;
-    use gpui::{AppContext, TestAppContext, px};
+mod tests {
+    use super::{AssignmentDirection, CursorMove, Paginator, PaginatorChild, PaginatorData, PaginatorGroup, PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy, PrefetchKey, VisiblePage};
+    use gpui::px;
+    use std::collections::BTreeSet;
+    use std::rc::Rc;
 
-    fn groups(ids: &[&str]) -> Vec<PaginatorGroup> {
-        let children = ids.iter().map(|id| PaginatorChild::new(|_, _, _| div().into_any_element()).with_id((*id).to_owned()));
-        vec![PaginatorGroup::new(PaginatorGroupPolicy::new(PaginatorWidthPolicy::pixels(px(100.0)), PaginatorSizing::pixels(px(100.0)), px(0.0)), children)]
+    fn selection_grid(count: usize) -> Paginator {
+        let policy = PaginatorGroupPolicy::new(PaginatorWidthPolicy::pixels(px(100.0)), PaginatorSizing::pixels(px(150.0)), px(0.0)).with_minimum_columns(4);
+        let children = (0..count).map(|index| PaginatorChild::new(|_, _, _| unreachable!()).with_id(index.to_string()));
+        let mut paginator = Paginator::new("selection-test", [PaginatorGroup::new(policy, children)]).selectable();
+        let page = VisiblePage { first_child: 0, last_child: count.saturating_sub(1) };
+        paginator.visible_page = Some(page);
+        paginator.prefetched = Some(PrefetchKey { children_revision: 0, page, width: px(400.0), height: px(600.0), rem_size: px(16.0) });
+        paginator
     }
 
-    #[gpui::test]
-    fn marquee_selects_items_and_keeps_selection_after_release(cx: &mut TestAppContext) {
-        let paginator = cx.new(|_| Paginator::new("test", groups(&["book:a", "book:b"])));
-        paginator.update(cx, |paginator, cx| {
-            paginator.set_child_bounds(vec![(0, Bounds::new(gpui::point(px(0.0), px(0.0)), gpui::size(px(100.0), px(100.0)))), (1, Bounds::new(gpui::point(px(150.0), px(0.0)), gpui::size(px(100.0), px(100.0))))]);
-            paginator.begin_marquee(gpui::point(px(1.0), px(1.0)), cx);
-            paginator.drag_marquee(gpui::point(px(2.0), px(2.0)), cx);
-            assert!(!paginator.marquee_active());
-            assert!(paginator.selection.is_empty());
-            paginator.drag_marquee(gpui::point(px(90.0), px(90.0)), cx);
-            assert!(paginator.marquee_active());
-            assert_eq!(paginator.selection, BTreeSet::from([0]));
-            paginator.drag_marquee(gpui::point(px(200.0), px(90.0)), cx);
-            assert_eq!(paginator.selection, BTreeSet::from([0, 1]));
-            paginator.end_marquee(cx);
-            assert!(!paginator.marquee_active());
-            assert_eq!(paginator.selection, BTreeSet::from([0, 1]));
-            assert!(paginator.clear_selection(cx));
-            assert!(paginator.selection.is_empty());
-        });
+    #[test]
+    fn keyboard_selection_vertical_moves_toggle_only_destination() {
+        let mut paginator = selection_grid(12);
+        paginator.cursor = Some(1);
+        paginator.selection = BTreeSet::from([1, 10]);
+        assert_eq!(paginator.toggle_cursor_selection(CursorMove::Down), Some(5));
+        assert_eq!(paginator.cursor(), Some(5));
+        assert_eq!(paginator.selection(), &BTreeSet::from([1, 5, 10]));
+        assert_eq!(paginator.toggle_cursor_selection(CursorMove::Up), Some(1));
+        assert_eq!(paginator.selection(), &BTreeSet::from([5, 10]));
+        assert_eq!(paginator.toggle_cursor_selection(CursorMove::Down), Some(5));
+        assert_eq!(paginator.selection(), &BTreeSet::from([10]));
     }
 
-    #[gpui::test]
-    fn refresh_retains_selected_items_and_cursor_but_navigation_clears_them(cx: &mut TestAppContext) {
-        let paginator = cx.new(|_| Paginator::new("test", groups(&["folder:a", "book:b", "book:c"])));
-        paginator.update(cx, |paginator, cx| {
-            paginator.cursor = Some(1);
-            paginator.child_offset = 1;
-            paginator.selection = BTreeSet::from([0, 1]);
-            paginator.refresh_groups(groups(&["book:c", "folder:new", "folder:a", "book:b"]), cx);
-            assert_eq!(paginator.cursor, Some(3));
-            assert_eq!(paginator.child_offset, 3);
-            assert_eq!(paginator.selection, BTreeSet::from([2, 3]));
-            paginator.refresh_groups(groups(&["folder:a", "book:c"]), cx);
-            assert_eq!(paginator.cursor, None);
-            assert_eq!(paginator.selection, BTreeSet::from([0]));
-            paginator.set_groups(groups(&["folder:a", "book:c"]), cx);
-            assert_eq!(paginator.cursor, None);
-            assert!(paginator.selection.is_empty());
+    #[test]
+    fn keyboard_selection_horizontal_moves_toggle_existing_picks() {
+        let mut paginator = selection_grid(12);
+        paginator.cursor = Some(1);
+        paginator.selection = BTreeSet::from([10]);
+        assert_eq!(paginator.toggle_cursor_selection(CursorMove::Right), Some(2));
+        assert_eq!(paginator.selection(), &BTreeSet::from([2, 10]));
+        assert_eq!(paginator.toggle_cursor_selection(CursorMove::Left), Some(1));
+        assert_eq!(paginator.selection(), &BTreeSet::from([1, 2, 10]));
+        assert_eq!(paginator.toggle_cursor_selection(CursorMove::Right), Some(2));
+        assert_eq!(paginator.selection(), &BTreeSet::from([1, 10]));
+    }
+
+    #[test]
+    fn keyboard_selection_boundaries_leave_selection_unchanged() {
+        let mut paginator = selection_grid(12);
+        paginator.cursor = Some(0);
+        paginator.selection = BTreeSet::from([0, 8]);
+        assert_eq!(paginator.toggle_cursor_selection(CursorMove::Left), None);
+        assert_eq!(paginator.toggle_cursor_selection(CursorMove::Up), None);
+        assert_eq!(paginator.cursor(), Some(0));
+        assert_eq!(paginator.selection(), &BTreeSet::from([0, 8]));
+        paginator.cursor = Some(11);
+        assert_eq!(paginator.toggle_cursor_selection(CursorMove::Right), None);
+        assert_eq!(paginator.toggle_cursor_selection(CursorMove::Down), None);
+        assert_eq!(paginator.selection(), &BTreeSet::from([0, 8]));
+    }
+
+    #[test]
+    fn keyboard_selection_starts_on_visible_page_and_handles_short_rows() {
+        let mut paginator = selection_grid(10);
+        paginator.visible_page = Some(VisiblePage { first_child: 4, last_child: 9 });
+        assert_eq!(paginator.toggle_cursor_selection(CursorMove::Right), Some(4));
+        assert_eq!(paginator.selection(), &BTreeSet::from([4]));
+        paginator.cursor = Some(7);
+        assert_eq!(paginator.toggle_cursor_selection(CursorMove::Down), Some(9));
+        assert_eq!(paginator.selection(), &BTreeSet::from([4, 9]));
+    }
+
+    #[test]
+    fn keyboard_selection_requires_selectable_nonempty_grid() {
+        let mut paginator = selection_grid(0);
+        assert_eq!(paginator.toggle_cursor_selection(CursorMove::Right), None);
+        let mut paginator = selection_grid(4);
+        paginator.selectable = false;
+        assert_eq!(paginator.toggle_cursor_selection(CursorMove::Right), None);
+        assert_eq!(paginator.cursor(), None);
+        assert!(paginator.selection().is_empty());
+    }
+
+    #[test]
+    fn keyboard_menu_targets_selection_instead_of_previous_cursor() {
+        let mut paginator = Paginator::new("menu-test", []);
+        let ids = ["a", "b", "c"].map(gpui::SharedString::from);
+        paginator.data = Rc::new(PaginatorData {
+            indices: ids.iter().cloned().enumerate().map(|(index, id)| (id, index)).collect(),
+            children: ids.iter().cloned().map(|id| PaginatorChild::new(|_, _, _| unreachable!()).with_id(id)).collect(),
+            groups: Vec::new(),
         });
+        paginator.cursor = Some(2);
+        paginator.selection = BTreeSet::from([0, 1]);
+        let index = paginator.context_menu_index().unwrap();
+        assert_eq!(paginator.target_ids(paginator.child_id(index).unwrap()), ids[..2]);
+        paginator.selection.clear();
+        assert_eq!(paginator.context_menu_index(), Some(2));
+        paginator.cursor = None;
+        assert_eq!(paginator.context_menu_index(), None);
+    }
+
+    #[test]
+    fn adjacent_pages_stop_at_first_and_last_children() {
+        let first = VisiblePage { first_child: 0, last_child: 2 };
+        assert_eq!(first.adjacent_offset(AssignmentDirection::Backward, 8), None);
+        assert_eq!(first.adjacent_offset(AssignmentDirection::Forward, 8), Some(3));
+        let last = VisiblePage { first_child: 6, last_child: 7 };
+        assert_eq!(last.adjacent_offset(AssignmentDirection::Backward, 8), Some(5));
+        assert_eq!(last.adjacent_offset(AssignmentDirection::Forward, 8), None);
+    }
+
+    #[test]
+    fn adjacent_page_offsets_follow_measured_page_boundaries() {
+        let page = VisiblePage { first_child: 3, last_child: 5 };
+        assert_eq!(page.adjacent_offset(AssignmentDirection::Backward, 8), Some(2));
+        assert_eq!(page.adjacent_offset(AssignmentDirection::Forward, 8), Some(6));
+    }
+
+    #[test]
+    fn overflowing_page_boundary_has_no_next_page() {
+        let page = VisiblePage { first_child: 0, last_child: usize::MAX };
+        assert_eq!(page.adjacent_offset(AssignmentDirection::Forward, usize::MAX), None);
     }
 }

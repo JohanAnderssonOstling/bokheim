@@ -30,12 +30,8 @@ create table if not exists book_dir(
     is_downloaded   INTEGER not null default 0 CHECK(is_downloaded IN (0,1)),
     deleted_at      INTEGER,
     trash_origin_dir_id TEXT,
-    -- Content checksum and size of the bytes this device last recorded at
-    -- this placement. `checksum_seq` grows with every recording, so the most
-    -- recently recorded version of a book is the one to upload.
-    checksum        TEXT,
-    size_bytes      INTEGER CHECK(size_bytes > 0),
-    checksum_seq    INTEGER,
+    -- Size of the locally verified bytes at this placement.
+    size_bytes INTEGER CHECK(size_bytes > 0),
     -- A row is a file *placement*: one book in one directory.
     -- Same-path collisions remain local filesystem invariants enforced by
     -- idx_book_dir_live_path.

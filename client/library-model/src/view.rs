@@ -1,6 +1,5 @@
 use crate::BookTocEntry;
 use book_model::AuthorId;
-use book_model::{AuthorName, AuthorNameError};
 use content_address::ContentHash;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -116,18 +115,73 @@ impl BrowseBookSort {
     }
 }
 
-/// A browsable node: a folder, or a route in the subject hierarchy.
+/// A browsable node: all books, a folder, a route in the subject hierarchy, an author,
+/// a shelf of Home, a route in the public-domain catalog's subject hierarchy, or
+/// a page of one of the user's OPDS feeds. `Author(None)` is the author index, every credited
+/// name; `Home(None)` is Home itself, its shelves. An author or a shelf holds
+/// books and nothing below them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum BrowseLocation {
     Folder(DirId),
     Subject(i64),
+    Author(Option<AuthorId>),
+    Home(Option<HomeShelf>),
+    Books,
+    Catalog(i64),
+    /// `page` is `None` for the feed's root, otherwise a page this session
+    /// has visited, by its index in the session's page table.
+    Opds { source: OpdsSourceId, page: Option<u32> },
+}
+
+impl BrowseLocation {
+    /// The directory this location is, when it is a folder.
+    pub fn folder(self) -> Option<DirId> {
+        match self {
+            Self::Folder(id) => Some(id),
+            _ => None,
+        }
+    }
+}
+
+/// Home's shelves, in the order Home shows them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum HomeShelf {
+    RecentlyRead,
+    Finished,
+    RecentlyAdded,
+}
+
+impl HomeShelf {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::RecentlyRead => "Recently read",
+            Self::Finished => "Finished",
+            Self::RecentlyAdded => "Recently added",
+        }
+    }
+
+    fn slug(self) -> &'static str {
+        match self {
+            Self::RecentlyRead => "recently-read",
+            Self::Finished => "finished",
+            Self::RecentlyAdded => "recently-added",
+        }
+    }
 }
 
 impl std::fmt::Display for BrowseLocation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Books => write!(formatter, "books:"),
             Self::Folder(id) => write!(formatter, "folder:{id}"),
             Self::Subject(route) => write!(formatter, "subject:{route}"),
+            Self::Author(None) => write!(formatter, "author:"),
+            Self::Author(Some(id)) => write!(formatter, "author:{id}"),
+            Self::Home(None) => write!(formatter, "home:"),
+            Self::Home(Some(shelf)) => write!(formatter, "home:{}", shelf.slug()),
+            Self::Catalog(route) => write!(formatter, "catalog:{route}"),
+            Self::Opds { source, page: None } => write!(formatter, "opds:{source}"),
+            Self::Opds { source, page: Some(page) } => write!(formatter, "opds:{source}:{page}"),
         }
     }
 }
@@ -216,25 +270,76 @@ pub struct Dir {
     pub downloaded_book_count: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct AuthorSummary {
-    pub id: AuthorId,
-    pub name: AuthorName,
-    /// Every book credited to this identity, which is what the row states.
-    /// `books` is capped by the query, so the two disagree for a prolific
-    /// author and the count is the one to render.
-    pub book_count: usize,
-    /// The author's shelf, most recently read first: whole cards, because the
-    /// shelf is the same carousel Home draws and its children are book cards.
-    /// Capped by the query, so this is a prefix of the author's books rather
-    /// than all of them.
-    pub books: Vec<BookCardRow>,
+/// Where a card's book is, which decides what it offers: a library book is
+/// opened, read and downloaded; a catalog or feed book is added to the library.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BookSource {
+    Library { content_hash: ContentHash },
+    Catalog { content_hash: ContentHash, in_library: bool },
+    /// A publication in one of the user's OPDS feeds. It has no file, and so
+    /// no content hash, until it is downloaded into the library, where it
+    /// is listed as a library book.
+    /// `downloadable` when the feed offers it openly, as an EPUB or PDF.
+    Opds { source: OpdsSourceId, entry: CardKey, downloadable: bool },
+}
+
+/// A user's OPDS feed, by the id of its synced entry.
+pub type OpdsSourceId = uuid::Uuid;
+
+/// One of the library's OPDS feeds: where it is and what it is called.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpdsSource {
+    pub id: OpdsSourceId,
+    pub name: String,
+    pub url: String,
+}
+
+/// What a feed asks for, sent as HTTP basic auth. Kept on the device that
+/// entered it; the feed itself syncs, these do not.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpdsCredentials {
+    pub username: String,
+    pub password: String,
+}
+
+/// Commands carrying credentials are logged; the password must not be.
+impl std::fmt::Debug for OpdsCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("OpdsCredentials").field("username", &self.username).finish_non_exhaustive()
+    }
+}
+
+/// What a feed page adds to its listing: the page that continues it, and the
+/// feed's own sort and filter choices.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedPage {
+    pub next: Option<BrowseLocation>,
+    pub facets: Vec<FeedFacetGroup>,
+    /// The feed refused this device: it has no credentials for it, or the
+    /// ones it has were refused. The page lists nothing until they are given.
+    pub sign_in: bool,
+}
+
+/// One of a feed's sort or filter choices ("Sort by", "Language"); each
+/// choice is a page of the feed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedFacetGroup {
+    pub title: String,
+    pub choices: Vec<FeedFacet>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedFacet {
+    pub title: String,
+    pub location: BrowseLocation,
+    pub active: bool,
 }
 
 /// Everything a browsing card renders for one book.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BookCardRow {
-    pub content_hash: ContentHash,
+    /// Which book this is, and so what the card offers.
+    pub source: BookSource,
     pub title: String,
     #[serde(default)]
     pub subtitle: Option<String>,
@@ -254,10 +359,44 @@ pub struct BookCardRow {
     pub source_directory: Option<DirId>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct LibraryHomeView {
-    pub recently_read: Vec<BookCardRow>,
-    pub recently_added: Vec<BookCardRow>,
+/// What identifies a card in a listing. A book with a file is keyed by its
+/// content hash; a book known only by its entry in a feed is keyed by an id
+/// derived from that entry. Never a file's identity: code that reaches the
+/// book's file uses `content_hash()`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CardKey(pub [u8; 32]);
+
+impl std::fmt::Display for CardKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.iter().try_for_each(|byte| write!(formatter, "{byte:02x}"))
+    }
+}
+
+impl BookCardRow {
+    pub fn key(&self) -> CardKey {
+        match self.source {
+            BookSource::Library { content_hash } | BookSource::Catalog { content_hash, .. } => CardKey(*content_hash.as_bytes()),
+            BookSource::Opds { entry, .. } => entry,
+        }
+    }
+
+    /// The file of a book in the library; none for catalog and feed books,
+    /// which are added rather than read or downloaded.
+    pub fn library_file(&self) -> Option<ContentHash> {
+        match self.source {
+            BookSource::Library { content_hash } => Some(content_hash),
+            BookSource::Catalog { .. } | BookSource::Opds { .. } => None,
+        }
+    }
+
+    /// The book's file, when it has one: a feed book has none until it is
+    /// downloaded.
+    pub fn content_hash(&self) -> Option<ContentHash> {
+        match self.source {
+            BookSource::Library { content_hash } | BookSource::Catalog { content_hash, .. } => Some(content_hash),
+            BookSource::Opds { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,13 +430,6 @@ pub struct LibraryFolderDestination {
     pub path: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AudiobookChapter {
-    pub title: String,
-    pub start_ms: u64,
-    pub end_ms: u64,
-}
-
 /// One credited author on a book. Only `aut` contributor roles are projected
 /// here; editors, translators and narrators remain contributor metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -306,18 +438,12 @@ pub struct BookDetailAuthor {
     pub name: String,
 }
 
-/// A credit the detail page states beside the authors.
-///
-/// Only the roles a reader chooses a book by: a narrator is why one audiobook
-/// is picked over another, and a translator is why one edition is. The rest —
-/// typographer, book producer, proofreader — describe how the file was made,
-/// and a survey of a real library found `bkp` on half its books naming the
-/// conversion tool. They stay in contributor metadata.
+/// A narrator credit the detail page states beside the authors.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookDetailCredit {
     pub id: AuthorId,
     pub name: String,
-    /// The MARC relator code, as stored: "nrt", "trl".
+    /// The MARC relator code, as stored: "nrt".
     pub role: String,
 }
 
@@ -341,7 +467,7 @@ pub struct BookDetail {
     /// link. The book itself is the trail's last crumb and is not repeated here.
     pub path: Vec<BrowsePathSegment>,
     pub authors: Vec<BookDetailAuthor>,
-    /// Narrators and translators, in the order the book credits them.
+    /// Narrators, in the order the book credits them.
     pub credits: Vec<BookDetailCredit>,
     /// Where the reader is, named: "Against the Tide?" rather than a percentage
     /// nobody can picture. Absent for a book nobody has opened, and for one
@@ -356,16 +482,6 @@ pub struct BookDetail {
     /// list that could never mark anything.
     pub current_target: Option<String>,
     pub toc: Vec<BookTocEntry>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthorSort {
-    /// Case-insensitive ascending name, with the original spelling as a stable tie-breaker.
-    #[default]
-    Name,
-    /// Descending book count, then ascending name.
-    BookCount,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -405,91 +521,9 @@ impl FolderSort {
     }
 }
 
-impl AuthorSummary {
-    /// Authors file under their display name.
-    pub fn try_new(id: AuthorId, name: String, book_count: usize, books: Vec<BookCardRow>) -> Result<Self, AuthorNameError> {
-        let name = AuthorName::parse(&name)?;
-        Ok(Self { id, name, book_count, books })
-    }
-    pub fn id(&self) -> AuthorId {
-        self.id
-    }
-    pub fn name(&self) -> &AuthorName {
-        &self.name
-    }
-    pub fn book_count(&self) -> usize {
-        self.book_count
-    }
-    pub fn books(&self) -> &[BookCardRow] {
-        &self.books
-    }
-}
-
-impl AuthorSort {
-    pub fn sort(self, authors: &mut [AuthorSummary]) {
-        match self {
-            Self::Name => authors.sort_by_cached_key(|author| (author.name.as_str().to_lowercase(), author.name.as_str().to_owned(), author.id.to_string())),
-            Self::BookCount => authors.sort_by_cached_key(|author| (Reverse(author.book_count), author.name.as_str().to_lowercase(), author.name.as_str().to_owned(), author.id.to_string())),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use book_model::agent_id_from_migration_seed;
-
-    #[test]
-    fn author_summary_keeps_display_name_and_distinct_identity() {
-        let id = agent_id_from_migration_seed(b"Kerstin Ekman");
-        let author = AuthorSummary::try_new(id, "Kerstin Ekman".to_owned(), 9, Vec::new()).unwrap();
-
-        assert_eq!(author.name().as_str(), "Kerstin Ekman", "the display name is what the reader sees");
-
-        let first_id = agent_id_from_migration_seed(b"first Alex Smith");
-        let second_id = agent_id_from_migration_seed(b"second Alex Smith");
-        let first = AuthorSummary::try_new(first_id, "Alex Smith".to_owned(), 1, Vec::new()).unwrap();
-        let second = AuthorSummary::try_new(second_id, "Alex Smith".to_owned(), 2, Vec::new()).unwrap();
-
-        assert_eq!(first.name(), second.name());
-        assert_ne!(first.id(), second.id());
-        assert_eq!(serde_json::to_value(first).unwrap()["id"], first_id.to_string());
-        assert_eq!(serde_json::to_value(second).unwrap()["id"], second_id.to_string());
-    }
-
-    #[test]
-    fn sorting_by_name_orders_by_the_display_name() {
-        let author = |display: &str| AuthorSummary::try_new(agent_id_from_migration_seed(display.as_bytes()), display.to_owned(), 1, Vec::new()).unwrap();
-        let mut authors = vec![author("Kerstin Ekman"), author("Susanna Clarke"), author("Peter Englund")];
-
-        AuthorSort::Name.sort(&mut authors);
-
-        assert_eq!(authors.iter().map(|author| author.name().as_str()).collect::<Vec<_>>(), vec!["Kerstin Ekman", "Peter Englund", "Susanna Clarke"]);
-    }
-
-    #[test]
-    fn author_name_sort_is_case_insensitive_and_deterministic() {
-        let mut authors = vec![
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"zelda"), "zelda".to_string(), 3, Vec::new()).unwrap(),
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"Alice"), "Alice".to_string(), 1, Vec::new()).unwrap(),
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"alice"), "alice".to_string(), 2, Vec::new()).unwrap(),
-        ];
-
-        AuthorSort::Name.sort(&mut authors);
-        assert_eq!(authors.iter().map(|author| author.name().as_str()).collect::<Vec<_>>(), vec!["Alice", "alice", "zelda"]);
-    }
-
-    #[test]
-    fn author_book_count_sort_uses_name_as_a_deterministic_tie_breaker() {
-        let mut authors = vec![
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"Zelda"), "Zelda".to_string(), 2, Vec::new()).unwrap(),
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"Alice"), "Alice".to_string(), 7, Vec::new()).unwrap(),
-            AuthorSummary::try_new(agent_id_from_migration_seed(b"Bob"), "Bob".to_string(), 2, Vec::new()).unwrap(),
-        ];
-
-        AuthorSort::BookCount.sort(&mut authors);
-        assert_eq!(authors.iter().map(|author| (author.name().as_str(), author.book_count())).collect::<Vec<_>>(), vec![("Alice", 7), ("Bob", 2), ("Zelda", 2)]);
-    }
 
     #[test]
     fn folder_book_count_sort_uses_name_as_a_deterministic_tie_breaker() {

@@ -3,11 +3,23 @@ use std::{cell::RefCell, rc::Rc};
 use gpui::{
     Anchor, AnyElement, App, Context, DismissEvent, Element, ElementId, Entity, Focusable,
     GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, StyleRefinement, Styled,
-    Subscription, Window, anchored, deferred, div, prelude::FluentBuilder, px,
+    KeyBinding, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, StyleRefinement, Styled,
+    Subscription, Window, actions, anchored, deferred, div, prelude::FluentBuilder, px,
 };
 
 use crate::menu::PopupMenu;
+
+actions!(context_menu, [OpenContextMenu]);
+
+pub(crate) fn init(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("ctrl-enter", OpenContextMenu, Some("!PopupMenu && (!Dialog || Input)")),
+        KeyBinding::new("shift-f10", OpenContextMenu, Some("!PopupMenu && (!Dialog || Input)")),
+        KeyBinding::new("menu", OpenContextMenu, Some("!PopupMenu && (!Dialog || Input)")),
+    ]);
+}
+
+type MenuBuilder = dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu;
 
 /// A extension trait for adding a context menu to an element.
 pub trait ContextMenuExt: InteractiveElement + ParentElement + Styled {
@@ -38,11 +50,12 @@ pub trait ContextMenuExt: InteractiveElement + ParentElement + Styled {
 
 impl<E: InteractiveElement + ParentElement + Styled> ContextMenuExt for E {}
 
-/// A context menu that can be shown on right-click.
+/// A context menu opened by right-click or the context-menu keyboard shortcuts.
 pub struct ContextMenu<E: ParentElement + Styled + Sized> {
     id: ElementId,
     element: Option<E>,
-    menu: Option<Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>>,
+    menu: Option<Rc<MenuBuilder>>,
+    keyboard_menu: Option<Rc<MenuBuilder>>,
     // This is not in use, just for style refinement forwarding.
     _ignore_style: StyleRefinement,
     anchor: Anchor,
@@ -55,6 +68,7 @@ impl<E: ParentElement + Styled> ContextMenu<E> {
             id: id.into(),
             element: Some(element),
             menu: None,
+            keyboard_menu: None,
             anchor: Anchor::TopLeft,
             _ignore_style: StyleRefinement::default(),
         }
@@ -67,6 +81,13 @@ impl<E: ParentElement + Styled> ContextMenu<E> {
         F: Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
     {
         self.menu = Some(Rc::new(builder));
+        self
+    }
+
+    /// Use selection or keyboard focus to resolve menu contents instead of the pointer.
+    #[must_use]
+    pub fn keyboard_menu(mut self, builder: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static) -> Self {
+        self.keyboard_menu = Some(Rc::new(builder));
         self
     }
 
@@ -106,7 +127,7 @@ impl<E: ParentElement + Styled> Styled for ContextMenu<E> {
     }
 }
 
-impl<E: ParentElement + Styled + IntoElement + 'static> IntoElement for ContextMenu<E> {
+impl<E: InteractiveElement + ParentElement + Styled + IntoElement + 'static> IntoElement for ContextMenu<E> {
     type Element = Self;
 
     fn into_element(self) -> Self::Element {
@@ -119,6 +140,47 @@ struct ContextMenuSharedState {
     open: bool,
     position: Point<Pixels>,
     _subscription: Option<Subscription>,
+}
+
+impl ContextMenuSharedState {
+    fn open(state: Rc<RefCell<Self>>, builder: Option<Rc<MenuBuilder>>, position: Point<Pixels>, window: &mut Window, cx: &mut App) {
+        // Keep the original focus when replacing an already open menu.
+        let previous_focus_handle = window.focused(cx).and_then(|focused| {
+            let state = state.borrow();
+            match state.menu_view.as_ref() {
+                Some(menu) if menu.read(cx).focus_handle == focused => menu.read(cx).previous_focus_handle.clone(),
+                _ => Some(focused),
+            }
+        });
+        {
+            let mut state = state.borrow_mut();
+            state.menu_view = None;
+            state._subscription = None;
+            state.position = position;
+            state.open = true;
+        }
+        // Build after event dispatch, just as for a mouse-triggered menu.
+        window.defer(cx, move |window, cx| {
+            let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
+                match &builder {
+                    Some(build) => build(menu, window, cx),
+                    None => menu,
+                }
+            });
+            menu.update(cx, |menu, cx| menu.set_previous_focus(previous_focus_handle, cx));
+            let subscription = window.subscribe(&menu, cx, {
+                let state = state.clone();
+                move |_, _: &DismissEvent, window, _cx| {
+                    state.borrow_mut().open = false;
+                    window.refresh();
+                }
+            });
+            let mut state = state.borrow_mut();
+            state.menu_view = Some(menu);
+            state._subscription = Some(subscription);
+            window.refresh();
+        });
+    }
 }
 
 pub struct ContextMenuState {
@@ -140,7 +202,7 @@ impl Default for ContextMenuState {
     }
 }
 
-impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<E> {
+impl<E: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<E> {
     type RequestLayoutState = ContextMenuState;
     type PrepaintState = Hitbox;
 
@@ -213,10 +275,15 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
                     }
                 }
 
+                let keyboard_state = state.shared_state.clone();
+                let keyboard_builder = this.keyboard_menu.clone().or_else(|| this.menu.clone());
                 let mut element = this
                     .element
                     .take()
                     .expect("Element should exists.")
+                    .on_action(move |_: &OpenContextMenu, window, cx| {
+                        ContextMenuSharedState::open(keyboard_state.clone(), keyboard_builder.clone(), window.mouse_position(), window, cx);
+                    })
                     .children(menu_element)
                     .into_any_element();
 
@@ -279,61 +346,7 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
                         && event.button == MouseButton::Right
                         && hitbox.is_hovered(window)
                     {
-                        // Capture the focused element to restore focus to on dismiss.
-                        // If focus is still on the previous menu, keep its captured focus.
-                        let previous_focus_handle = window.focused(cx).and_then(|focused| {
-                            let shared_state = shared_state.borrow();
-                            match shared_state.menu_view.as_ref() {
-                                Some(menu) if menu.read(cx).focus_handle == focused => {
-                                    menu.read(cx).previous_focus_handle.clone()
-                                }
-                                _ => Some(focused),
-                            }
-                        });
-
-                        {
-                            let mut shared_state = shared_state.borrow_mut();
-                            // Clear any existing menu view to allow immediate replacement
-                            // Set the new position and open the menu
-                            shared_state.menu_view = None;
-                            shared_state._subscription = None;
-                            shared_state.position = event.position;
-                            shared_state.open = true;
-                        }
-
-                        // Use defer to build the menu in the next frame, avoiding race conditions
-                        window.defer(cx, {
-                            let shared_state = shared_state.clone();
-                            let builder = builder.clone();
-                            move |window, cx| {
-                                let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
-                                    let Some(build) = &builder else {
-                                        return menu;
-                                    };
-                                    build(menu, window, cx)
-                                });
-                                menu.update(cx, |menu, cx| {
-                                    menu.set_previous_focus(previous_focus_handle, cx);
-                                });
-
-                                // Set up the subscription for dismiss handling
-                                let _subscription = window.subscribe(&menu, cx, {
-                                    let shared_state = shared_state.clone();
-                                    move |_, _: &DismissEvent, window, _cx| {
-                                        shared_state.borrow_mut().open = false;
-                                        window.refresh();
-                                    }
-                                });
-
-                                // Update the shared state with the built menu and subscription
-                                {
-                                    let mut state = shared_state.borrow_mut();
-                                    state.menu_view = Some(menu.clone());
-                                    state._subscription = Some(_subscription);
-                                    window.refresh();
-                                }
-                            }
-                        });
+                        ContextMenuSharedState::open(shared_state.clone(), builder.clone(), event.position, window, cx);
                     }
                 });
             },
@@ -384,6 +397,59 @@ mod tests {
                                 .context_menu(|menu, _, _| menu.menu("Close", Box::new(RemoveTab))),
                         ),
                 )
+        }
+    }
+
+    struct KeyboardRoot {
+        focus: FocusHandle,
+        received: Rc<Cell<bool>>,
+    }
+
+    impl Render for KeyboardRoot {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let received = self.received.clone();
+            div()
+                .id("keyboard-menu-trigger")
+                .key_context("Root")
+                .size_full()
+                .track_focus(&self.focus)
+                .on_action(move |_: &RemoveTab, _, _| received.set(true))
+                .context_menu(|menu, _, _| menu.label("Pointer-only actions"))
+                .keyboard_menu(|menu, _, _| menu.menu("Close", Box::new(RemoveTab)))
+        }
+    }
+
+    #[gpui::test]
+    fn keyboard_context_menu_shortcuts_open_menu_and_restore_focus(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(Theme::default());
+            super::init(cx);
+            super::super::popup_menu::init(cx);
+        });
+        let received = Rc::new(Cell::new(false));
+        let (root, cx) = cx.add_window_view({
+            let received = received.clone();
+            move |window, cx| {
+                let focus = cx.focus_handle();
+                focus.focus(window, cx);
+                KeyboardRoot { focus, received }
+            }
+        });
+        let focus = root.read_with(cx, |root, _| root.focus.clone());
+        let cx: &mut VisualTestContext = cx;
+        for shortcut in ["ctrl-enter", "shift-f10", "menu"] {
+            received.set(false);
+            cx.run_until_parked();
+            cx.update(|window, cx| { _ = window.draw(cx); });
+            cx.simulate_keystrokes(shortcut);
+            cx.run_until_parked();
+            cx.update(|window, cx| { _ = window.draw(cx); });
+            cx.simulate_keystrokes("down enter");
+            cx.run_until_parked();
+            assert!(received.get(), "{shortcut} should open the same actionable menu");
+            cx.update(|window, cx| {
+                assert_eq!(window.focused(cx).as_ref(), Some(&focus));
+            });
         }
     }
 

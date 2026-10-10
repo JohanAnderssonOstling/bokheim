@@ -50,7 +50,8 @@ pub enum PopupMenuItem {
         disabled: bool,
         checked: bool,
         action: Option<Box<dyn Action>>,
-        render: Box<dyn Fn(&mut Window, &mut App) -> AnyElement + 'static>,
+        render: Box<dyn Fn(bool, &mut Window, &mut App) -> AnyElement + 'static>,
+        select_side: Option<Rc<dyn Fn(bool, &mut Window, &mut App)>>,
         handler: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
     },
     /// A submenu item that opens another popup menu.
@@ -92,9 +93,31 @@ impl PopupMenuItem {
             disabled: false,
             checked: false,
             action: None,
-            render: Box::new(move |window, cx| builder(window, cx).into_any_element()),
+            render: Box::new(move |_, window, cx| builder(window, cx).into_any_element()),
+            select_side: None,
             handler: None,
         }
+    }
+
+    /// A custom row that can show which part keyboard navigation selected.
+    pub fn element_with_selection<F, E>(builder: F) -> Self
+    where
+        F: Fn(bool, &mut Window, &mut App) -> E + 'static,
+        E: IntoElement,
+    {
+        let mut item = Self::element(|_, _| div());
+        if let Self::ElementItem { render, .. } = &mut item {
+            *render = Box::new(move |selected, window, cx| builder(selected, window, cx).into_any_element());
+        }
+        item
+    }
+
+    /// Handle Left/Right within a custom row before submenu navigation.
+    pub fn on_select_side(mut self, handler: impl Fn(bool, &mut Window, &mut App) + 'static) -> Self {
+        if let Self::ElementItem { select_side, .. } = &mut self {
+            *select_side = Some(Rc::new(handler));
+        }
+        self
     }
 
     /// Create a new submenu item that opens another popup menu.
@@ -912,8 +935,9 @@ impl PopupMenu {
 
     fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
+        let first_ix = self.clickable_menu_items().next().map(|(ix, _)| ix).unwrap_or(0);
         let Some(ix) = self.selected_index else {
-            self.set_selected_index(0, cx);
+            self.set_selected_index(first_ix, cx);
             return;
         };
 
@@ -927,10 +951,20 @@ impl PopupMenu {
             return;
         }
 
-        self.set_selected_index(0, cx);
+        self.set_selected_index(first_ix, cx);
+    }
+
+    fn select_item_side(&mut self, right: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if let Some(PopupMenuItem::ElementItem { select_side: Some(handler), .. }) = self.selected_index.and_then(|ix| self.menu_items.get(ix)) {
+            handler(right, window, cx);
+            cx.notify();
+            return true;
+        }
+        false
     }
 
     fn select_left(&mut self, _: &SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
+        if self.select_item_side(false, window, cx) { return; }
         let handled = if matches!(self.submenu_anchor.0, Anchor::TopLeft | Anchor::BottomLeft) {
             self._unselect_submenu(window, cx)
         } else {
@@ -952,6 +986,7 @@ impl PopupMenu {
     }
 
     fn select_right(&mut self, _: &SelectRight, window: &mut Window, cx: &mut Context<Self>) {
+        if self.select_item_side(true, window, cx) { return; }
         let handled = if matches!(self.submenu_anchor.0, Anchor::TopLeft | Anchor::BottomLeft) {
             self._select_submenu(window, cx)
         } else {
@@ -1226,6 +1261,7 @@ impl PopupMenu {
                 render,
                 icon,
                 disabled,
+                select_side,
                 ..
             } => this
                 .when(!disabled, |this| {
@@ -1233,7 +1269,7 @@ impl PopupMenu {
                         cx.listener(move |this, _, window, cx| this.on_click(ix, window, cx)),
                     )
                 })
-                .disabled(*disabled)
+                .disabled(*disabled || select_side.is_some())
                 .child(
                     h_flex()
                         .flex_1()
@@ -1247,7 +1283,7 @@ impl PopupMenu {
                             window,
                             cx,
                         ))
-                        .child((render)(window, cx))
+                        .child((render)(selected, window, cx))
                         .children(right_check_icon.map(|icon| icon.ml_3())),
                 ),
             PopupMenuItem::Item {
@@ -1471,6 +1507,47 @@ impl Render for PopupMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn context_menu_split_row_chooses_side_and_confirms(cx: &mut gpui::TestAppContext) {
+        use std::cell::Cell;
+        cx.update(|cx| {
+            cx.set_global(crate::theme::Theme::default());
+            super::init(cx);
+        });
+        for (keys, expected) in [("down right enter", true), ("down right left enter", false)] {
+            let side = Rc::new(Cell::new(false));
+            let confirmed = Rc::new(Cell::new(None));
+            let rendered_selection = Rc::new(Cell::new(false));
+            let (_, cx) = cx.add_window_view({
+                let side = side.clone();
+                let confirmed = confirmed.clone();
+                let rendered_selection = rendered_selection.clone();
+                move |window, cx| {
+                    let select = side.clone();
+                    let menu = PopupMenu::new(cx)
+                        .item(PopupMenuItem::new("Disabled").disabled(true))
+                        .item(PopupMenuItem::element_with_selection(move |selected, _, _| {
+                            rendered_selection.set(selected);
+                            div().child("Left / Right")
+                        })
+                        .on_select_side(move |right, _, _| select.set(right))
+                        .on_click(move |_, _, _| confirmed.set(Some(side.get()))));
+                    menu.focus_handle.focus(window, cx);
+                    menu
+                }
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| { _ = window.draw(cx); });
+            // Draw after selecting to check that the row receives a visible focus state.
+            cx.simulate_keystrokes("down");
+            cx.update(|window, cx| { _ = window.draw(cx); });
+            assert!(rendered_selection.get());
+            cx.simulate_keystrokes(keys.strip_prefix("down ").unwrap());
+            cx.run_until_parked();
+            assert_eq!(confirmed.get(), Some(expected));
+        }
+    }
 
     #[gpui::test]
     fn popup_menu_item_a11y_label_uses_visible_label(cx: &mut gpui::TestAppContext) {

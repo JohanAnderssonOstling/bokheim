@@ -1,5 +1,4 @@
 pub(crate) use super::TransfersSql;
-pub(crate) use crate::shared_sql::SharedSql;
 pub(crate) use crate::*;
 pub(crate) use library_model::BlobKind;
 pub(crate) use library_model::BookUploadIntent;
@@ -8,8 +7,8 @@ pub(crate) use sync_common::ContentHash;
 impl Database {
     pub(crate) fn upload_intent_of(connection: &rusqlite::Connection, hash: &ContentHash) -> Result<Option<BookUploadIntent>, DatabaseError> {
         let mut intent = None;
-        connection.transfer_upload_intent(hash.as_str(), |row| {
-            intent = Some(BookUploadIntent { id: row.get(0)?, content_hash: hash.clone(), checksum: ContentHash::new(&row.get::<_, String>(1)?), size_bytes: row.get::<_, i64>(2)? as u64 });
+        connection.transfer_upload_intent(hash, |row| {
+            intent = Some(BookUploadIntent { id: row.get(0)?, content_hash: *hash, size_bytes: row.get::<_, i64>(1)? as u64 });
             Ok(())
         })?;
         Ok(intent)
@@ -18,7 +17,7 @@ impl Database {
     pub(crate) fn complete_book_upload_in_transaction(connection: &rusqlite::Connection, hash: &ContentHash, expected_versions: &[(String, String, String)], intent: Option<&BookUploadIntent>) -> Result<bool, DatabaseError> {
         let current = {
             let mut versions: Vec<(String, String, String)> = Vec::new();
-            let requested = serde_json::to_string(&[hash.as_str()]).map_err(DatabaseError::operation)?;
+            let requested = serde_json::to_string(&[&hash]).map_err(DatabaseError::operation)?;
             connection.transfer_snapshot_versions(&requested, |row| {
                 versions.push((row.get(1)?, row.get(2)?, row.get(3)?));
                 Ok(())
@@ -26,28 +25,34 @@ impl Database {
             versions
         } == expected_versions;
         if current {
-            connection.record_remote_asset(BlobKind::Book.storage(), hash.as_str())?;
+            connection.record_remote_asset(BlobKind::Book.storage(), hash)?;
             if let Some(intent) = intent {
-                connection.transfer_complete_upload(intent.id, intent.content_hash.as_str(), intent.checksum.as_str())?;
+                connection.transfer_complete_upload(intent.id, &intent.content_hash)?;
             }
         } else {
-            connection.forget_remote_asset(BlobKind::Book.storage(), hash.as_str())?;
+            connection.forget_remote_asset(BlobKind::Book.storage(), hash)?;
         }
         Ok(current)
     }
 
-    pub fn book_upload_rejection_reason(&self, hash: &ContentHash) -> Result<Option<String>, DatabaseError> {
-        let mut reason = None;
-        self.connection.transfer_book_upload_rejection_reason(hash.as_str(), super::rejection_cutoff()?, |row| {
-            reason = row.get(0)?;
+    /// One page of prepared uploads by intent id.
+    pub fn pending_book_uploads(&self, after: i64, limit: i64) -> Result<Vec<BookUploadIntent>, DatabaseError> {
+        let mut intents = Vec::new();
+        self.connection.transfer_pending_book_uploads(after, limit, |row| {
+            intents.push(BookUploadIntent { id: row.get(0)?, content_hash: row.get::<_, ContentHash>(1)?, size_bytes: row.get::<_, i64>(2)? as u64 });
             Ok(())
         })?;
-        Ok(reason)
+        Ok(intents)
     }
 
-    pub fn book_upload_intent(&self, hash: &ContentHash) -> Result<Option<BookUploadIntent>, DatabaseError> {
-        {
-            Database::upload_intent_of(&self.connection, hash)
-        }
+    /// One page of eligible covers by content hash.
+    pub fn pending_cover_uploads(&self, after: Option<&ContentHash>, limit: i64) -> Result<Vec<ContentHash>, DatabaseError> {
+        let mut hashes = Vec::new();
+        self.connection.transfer_pending_cover_uploads(after, limit, |row| {
+            hashes.push(row.get::<_, ContentHash>(0)?);
+            Ok(())
+        })?;
+        Ok(hashes)
     }
+
 }

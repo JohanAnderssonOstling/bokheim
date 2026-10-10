@@ -18,11 +18,10 @@ keeps task ownership and queue policy consistent without introducing dependencie
 between platform implementations.
 
 Backend target dependencies select Android and web services. Its `kobo` feature
-forwards to `client-platform-kobo/device`; mounted-device transfer is available
+forwards to `client-platform-kobo/device`; mounted-device discovery is available
 on native hosts through `app::host::kobo` without enabling hardware access.
-The app owns registry and manifest validation, transfer exclusions, and publishing
-the manifest after copying content. Desktop location resolution
-uses the portable `dirs` API, preserving the existing `SharedDesktop` behavior.
+Desktop location resolution uses the portable `dirs` API, preserving the existing
+`SharedDesktop` behavior.
 
 Shared application policy has explicit homes:
 
@@ -30,7 +29,7 @@ Shared application policy has explicit homes:
 
 - `client/library` owns database mutations and durable library state.
 - `client/library-backend/crates/library-files` owns scanning and asset reconciliation policy.
-- `client/library-backend/crates/book-access` owns book-cache policy.
+- `client/library-backend/crates/book-access` owns revision-pinned range reads and bounded in-memory book caches.
 - `client/app/src/storage` coordinates connections, write notifications,
   and adapters for those shared services.
 - `client/app/src/library/events.rs` and `discovery.rs` connect domain events

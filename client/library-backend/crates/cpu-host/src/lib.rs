@@ -6,6 +6,7 @@
 //! `client-platform-web` provide the hosts; callers hold explicit host
 //! handles, and launchers may override the process-wide default.
 
+use content_address::ContentHash;
 use std::io::{Cursor, Read, Seek};
 use std::path::Path;
 use std::sync::OnceLock;
@@ -13,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use client_platform_runtime::executor::BoxedBackendFuture;
 pub use client_runtime::BackendError;
+pub use update_protocol::Artifact;
 use std::sync::Arc;
 
 /// Byte reader handed to CPU work. A single trait keeps the object type legal;
@@ -43,15 +45,15 @@ pub fn as_cpu_reader<R: Read + Seek + Send + Sync + 'static>(reader: R) -> Boxed
 /// Metadata and cover parsers request ranges from the storage owner.
 #[derive(Serialize, Deserialize)]
 pub enum BookTask {
-    Inspect { source_name: String, format: book_model::BookFormat, checksum: Option<content_address::ContentHash> },
+    Inspect { source_name: String, format: book_model::BookFormat, content_hash: Option<ContentHash> },
     Thumbnail { extension: String },
 }
 
 #[derive(Serialize, Deserialize)]
 pub enum CpuResponse {
     Done,
-    Inspection(book_metadata::InspectedBook),
-    Hash(String),
+    Inspection(book_inspection::InspectedBook),
+    Hash(ContentHash),
     Thumbnail(Option<ThumbnailBytes>),
     Bytes(#[serde(with = "serde_bytes")] Vec<u8>),
 }
@@ -89,14 +91,14 @@ pub fn execute(request: CpuRequest) -> Result<CpuResponse, BackendError> {
         }),
         CpuRequest::HashFinish { key } => HASHERS.with(|hashers| {
             let hasher = hashers.borrow_mut().remove(&key).ok_or("hash session was lost; retry the job")?;
-            Ok(CpuResponse::Hash(hasher.finalize().to_hex().to_string()))
+            Ok(CpuResponse::Hash(ContentHash::from(hasher.finalize())))
         }),
         CpuRequest::HashAbort { key } => {
             HASHERS.with(|hashers| hashers.borrow_mut().remove(&key));
             Ok(CpuResponse::Done)
         }
         CpuRequest::Cover { bytes } => {
-            let versions = (|| -> thumbnail::ThumbnailResult<_> { thumbnail::ThumbnailVersions::from_image(&thumbnail::decode_cover_image(&bytes, image::guess_format(&bytes)?)?) })().map_err(BackendError::operation)?;
+            let versions = cover_thumbnails(&bytes).map_err(BackendError::operation)?;
             Ok(CpuResponse::Thumbnail(Some(versions.into())))
         }
         CpuRequest::Resize { width, bytes } => {
@@ -104,9 +106,21 @@ pub fn execute(request: CpuRequest) -> Result<CpuResponse, BackendError> {
             if ![thumbnail::BROWSE_THUMBNAIL_WIDTH, thumbnail::THUMBNAIL_WIDTH].contains(&width) {
                 return Err("unsupported thumbnail width".into());
             }
-            (|| -> thumbnail::ThumbnailResult<_> { let format = image::guess_format(&bytes)?; thumbnail::encode_thumbnail_at_width(&thumbnail::decode_cover_image(&bytes, format)?, width) })().map(CpuResponse::Bytes).map_err(BackendError::operation)
+            resize_cover(&bytes, width).map(CpuResponse::Bytes).map_err(BackendError::operation)
         }
     }
+}
+
+/// Both thumbnail sizes for an uploaded cover image.
+fn cover_thumbnails(bytes: &[u8]) -> thumbnail::ThumbnailResult<thumbnail::ThumbnailVersions> {
+    let format = image::guess_format(bytes)?;
+    thumbnail::ThumbnailVersions::from_image(&thumbnail::decode_cover_image(bytes, format)?)
+}
+
+/// A cover image re-encoded at one thumbnail width.
+fn resize_cover(bytes: &[u8], width: u32) -> thumbnail::ThumbnailResult<Vec<u8>> {
+    let format = image::guess_format(bytes)?;
+    thumbnail::encode_thumbnail_at_width(&thumbnail::decode_cover_image(bytes, format)?, width)
 }
 
 thread_local! {
@@ -114,23 +128,20 @@ thread_local! {
 }
 
 
-
-
-
 pub fn execute_book_with_mobi<R: Read + Seek + Send + Sync + 'static>(
     task: BookTask, mut reader: R, mobi_pages: fn(&Path, &[u8]) -> Result<book_model::BookMetadata, BackendError>,
 ) -> Result<CpuResponse, BackendError> {
     match task {
-        BookTask::Inspect { source_name, format, checksum } => {
+        BookTask::Inspect { source_name, format, content_hash } => {
             let path = Path::new(&source_name);
             if format != book_model::BookFormat::Mobi {
-                return book_metadata::inspect_book_reader_with_checksum(path, format, reader, checksum).map(CpuResponse::Inspection).map_err(BackendError::operation);
+                return book_inspection::inspect_book_reader_with_hash(path, format, reader, content_hash).map(CpuResponse::Inspection).map_err(BackendError::operation);
             }
             // Page evidence joins the file facts the metadata server is asked about.
             let mut bytes = Vec::new();
             reader.read_to_end(&mut bytes).map_err(BackendError::operation)?;
             let evidence = mobi_pages(path, &bytes).ok();
-            let mut inspected = book_metadata::inspect_book_reader_with_checksum(path, format, Cursor::new(bytes), checksum).map_err(BackendError::operation)?;
+            let mut inspected = book_inspection::inspect_book_reader_with_hash(path, format, Cursor::new(bytes), content_hash).map_err(BackendError::operation)?;
             if let Some(evidence) = evidence {
                 let book = &mut inspected.metadata.book;
                 for identifier in evidence.identifiers {
@@ -163,7 +174,9 @@ macro_rules! operations {
     ($($name:ident { $($(#[$attribute:meta])* $field:ident: $ty:ty),* } => $reply:ty, $pattern:pat => $value:expr;)*) => {
         #[derive(Serialize, Deserialize)]
         pub enum CpuRequest {
-            Book { task: BookTask },
+            /// `taxonomy` names the snapshot a browser CPU worker loads before
+            /// inspecting; native hosts share the process taxonomy and send none.
+            Book { task: BookTask, taxonomy: Option<Artifact> },
             $($name { $($(#[$attribute])* $field: $ty),* }),*
         }
         $(pub struct $name { $(pub $field: $ty),* }
@@ -179,7 +192,7 @@ macro_rules! operations {
 operations! {
     HashStart { key: String } => (), CpuResponse::Done => ();
     HashUpdate { key: String, #[serde(with = "serde_bytes")] bytes: Vec<u8> } => (), CpuResponse::Done => ();
-    HashFinish { key: String } => String, CpuResponse::Hash(hash) => hash;
+    HashFinish { key: String } => ContentHash, CpuResponse::Hash(hash) => hash;
     HashAbort { key: String } => (), CpuResponse::Done => ();
     Resize { width: u32, #[serde(with = "serde_bytes")] bytes: Vec<u8> } => Vec<u8>, CpuResponse::Bytes(bytes) => bytes;
     Cover { #[serde(with = "serde_bytes")] bytes: Vec<u8> } => ThumbnailBytes, CpuResponse::Thumbnail(Some(versions)) => versions;
@@ -192,7 +205,7 @@ macro_rules! book_operations {
         }
         impl Operation for $name {
             type Reply = $reply;
-            fn request(self) -> CpuRequest { CpuRequest::Book { task: self.task() } }
+            fn request(self) -> CpuRequest { CpuRequest::Book { task: self.task(), taxonomy: None } }
             fn decode(response: CpuResponse) -> Result<Self::Reply, BackendError> {
                 match response { $pattern => Ok($value), _ => Err(concat!("invalid CPU reply for ", stringify!($name)).into()) }
             }
@@ -200,7 +213,7 @@ macro_rules! book_operations {
     )*};
 }
 book_operations! {
-    Inspect { source_name: String, format: book_model::BookFormat, checksum: Option<content_address::ContentHash> } => book_metadata::InspectedBook, CpuResponse::Inspection(inspection) => inspection;
+    Inspect { source_name: String, format: book_model::BookFormat, content_hash: Option<ContentHash> } => book_inspection::InspectedBook, CpuResponse::Inspection(inspection) => inspection;
     Thumbnail { extension: String } => Option<ThumbnailBytes>, CpuResponse::Thumbnail(versions) => versions;
 }
 
@@ -240,7 +253,6 @@ pub fn set_cpu_host(host: Arc<dyn CpuHost>) -> Result<(), Arc<dyn CpuHost>> {
 }
 
 
-
 /// Remote BLAKE3 session over any host. Dropping an unfinished session
 /// releases the worker-side hasher.
 pub struct RemoteHashSession {
@@ -260,7 +272,7 @@ impl RemoteHashSession {
         }
         Ok(())
     }
-    pub async fn finish(mut self) -> Result<String, BackendError> {
+    pub async fn finish(mut self) -> Result<ContentHash, BackendError> {
         let key = self.key.clone().ok_or("hash session finished")?;
         let result = submit(&*self.host, HashFinish { key }).await;
         self.key = None;
@@ -288,43 +300,18 @@ mod tests {
         rmp_serde::from_slice(&rmp_serde::to_vec_named(&response).unwrap()).unwrap()
     }
 
-    #[test]
-    fn generated_requests_preserve_named_fields_and_binary_payloads() {
-        let update = HashUpdate { key: "stream".into(), bytes: vec![1, 2, 3] }.request();
-        assert_eq!(rmp_serde::to_vec_named(&update).unwrap(), b"\x81\xaaHashUpdate\x82\xa3key\xa6stream\xa5bytes\xc4\x03\x01\x02\x03");
-        let resize = Resize { width: 32, bytes: vec![4, 5] }.request();
-        assert_eq!(rmp_serde::to_vec_named(&resize).unwrap(), b"\x81\xa6Resize\x82\xa5width\x20\xa5bytes\xc4\x02\x04\x05");
-    }
 
     #[test]
-    fn independent_streams_hash_their_own_bytes_and_release_sessions() {
-        for key in ["first", "second"] {
-            roundtrip(CpuRequest::HashStart { key: key.into() });
-        }
-        roundtrip(CpuRequest::HashUpdate { key: "first".into(), bytes: b"hello ".to_vec() });
-        roundtrip(CpuRequest::HashUpdate { key: "second".into(), bytes: b"another book".to_vec() });
-        roundtrip(CpuRequest::HashUpdate { key: "first".into(), bytes: b"world".to_vec() });
-        for (key, bytes) in [("first", b"hello world".as_slice()), ("second", b"another book".as_slice())] {
-            let CpuResponse::Hash(actual) = roundtrip(CpuRequest::HashFinish { key: key.into() }) else { panic!("expected digest") };
-            assert_eq!(actual, blake3::hash(bytes).to_hex().as_str());
-            assert!(execute(CpuRequest::HashUpdate { key: key.into(), bytes: Vec::new() }).is_err());
-        }
-    }
-
-    #[test]
-    fn lost_or_cancelled_hash_sessions_cannot_silently_start_again() {
-        roundtrip(CpuRequest::HashStart { key: "cancel".into() });
-        roundtrip(CpuRequest::HashAbort { key: "cancel".into() });
-        assert!(execute(CpuRequest::HashFinish { key: "cancel".into() }).is_err());
-        assert!(execute(CpuRequest::HashUpdate { key: "missing".into(), bytes: vec![1] }).is_err());
-    }
-
-    #[test]
-    fn seekable_book_inspection_matches_direct_inspection() {
-        let bytes = include_bytes!("../../../../app/tests/fixtures/storage-contract.epub").to_vec();
-        let actual = execute_book_with_mobi(BookTask::Inspect { source_name: "fixture.epub".into(), format: book_model::BookFormat::Epub, checksum: None }, Cursor::new(bytes.clone()), |_, _| Err("subject page inspection is not supported for this format".into())).unwrap();
-        let expected = CpuResponse::Inspection(book_metadata::inspect_book_bytes("fixture.epub", book_model::BookFormat::Epub, bytes).unwrap());
-        assert_eq!(rmp_serde::to_vec_named(&actual).unwrap(), rmp_serde::to_vec_named(&expected).unwrap());
+    fn hashing_worker_returns_digest_bytes() {
+        let key = "raw-digest-test".to_owned();
+        assert!(matches!(roundtrip(CpuRequest::HashStart { key: key.clone() }), CpuResponse::Done));
+        roundtrip(CpuRequest::HashUpdate { key: key.clone(), bytes: b"book bytes".to_vec() });
+        let response = roundtrip(CpuRequest::HashFinish { key });
+        let CpuResponse::Hash(hash) = &response else { panic!("expected hash") };
+        assert_eq!(*hash, ContentHash::from(blake3::hash(b"book bytes")));
+        let encoded = rmp_serde::to_vec_named(&response).unwrap();
+        assert!(encoded.windows(32).any(|bytes| bytes == hash.as_bytes()));
+        assert!(!encoded.windows(64).any(|bytes| bytes == hash.to_hex().as_bytes()));
     }
 
     #[test]

@@ -11,7 +11,4 @@ workspace = true
 axum = "0.7"
 wire = { package = "protobuf-wire", path = "../../../../shared/protobuf-wire" }
 serde = "1"
-tracing = "0.1"
 
-[dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt"] }

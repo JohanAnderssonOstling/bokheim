@@ -81,19 +81,19 @@ INSERT INTO local_directory_projection(dir_id, relative_path) VALUES (:dir_id, :
 ON CONFLICT(dir_id) DO UPDATE SET relative_path = excluded.relative_path;
 
 -- name: requested_purge_books?
--- param: after: &str
+-- param: after: Option<&ContentHash>
 SELECT content_hash
 FROM local_purge_work
-WHERE content_hash > :after
+WHERE content_hash > COALESCE(:after,X'')
 ORDER BY content_hash
 LIMIT 32;
 
 -- name: purge_book_is_retired ->
--- param: content_hash: &str
+-- param: content_hash: &ContentHash
 SELECT NOT EXISTS(SELECT 1 FROM book WHERE content_hash = :content_hash);
 
 -- name: acknowledge_purge_book!
--- param: content_hash: &str
+-- param: content_hash: &ContentHash
 -- param: work_id: i64
 DELETE FROM local_purge_work
 WHERE content_hash = :content_hash AND id = :work_id;
@@ -102,7 +102,7 @@ WHERE content_hash = :content_hash AND id = :work_id;
 
 -- name: native_rename_book!
 -- param: dir_id: &str
--- param: content_hash: &str
+-- param: content_hash: &ContentHash
 -- param: name: &str
 UPDATE book_dir SET file_name=:name WHERE dir_id=:dir_id AND book_row_id=(SELECT row_id FROM book WHERE content_hash=:content_hash);
 
@@ -113,45 +113,38 @@ SELECT id,operation,content_hash,relative_path FROM local_file_work ORDER BY id;
 -- each one's path. The queued path is only a hint; a directory
 -- move after queueing must not strand the job.
 -- name: native_live_placement_paths?
--- param: content_hash: &str
+-- param: content_hash: &ContentHash
 SELECT bd.dir_id, bd.file_name FROM book_dir bd JOIN book ON book.row_id=bd.book_row_id WHERE book.content_hash=:content_hash AND bd.deleted_at IS NULL AND book.deleted_at IS NULL;
 
 -- Last materialized locations for a hash; trash work for a retired book
 -- resolves here instead of the stale queued path.
 -- name: native_file_projection_paths?
--- param: content_hash: &str
+-- param: content_hash: &ContentHash
 SELECT dir_id, relative_path FROM local_file_projection WHERE content_hash=:content_hash ORDER BY relative_path;
 
 -- name: native_file_is_current ->
 -- param: id: i64
 -- param: operation: &str
--- param: content_hash: &str
+-- param: content_hash: &ContentHash
 -- param: relative_path: &str
 SELECT EXISTS(SELECT 1 FROM local_file_work WHERE id=:id AND operation=:operation AND content_hash=:content_hash AND relative_path=:relative_path);
 
--- name: native_current_checksum?
--- param: content_hash: &str
--- param: dir_id: &str
--- param: file_name: &str
-SELECT max(bd.checksum) FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id
-WHERE b.content_hash=:content_hash AND b.deleted_at IS NULL AND bd.deleted_at IS NULL AND bd.dir_id=:dir_id AND bd.file_name=:file_name;
-
 -- name: native_request_thumbnail!
--- param: content_hash: &str
+-- param: content_hash: &ContentHash
 INSERT INTO book_transfer(content_hash,cover_state) SELECT content_hash,'pending' FROM book WHERE content_hash=:content_hash AND deleted_at IS NULL
-ON CONFLICT(content_hash) DO UPDATE SET cover_state='pending',cover_retry_after=0 WHERE cover_state IS NULL OR cover_state='ready';
+ON CONFLICT(content_hash) DO UPDATE SET cover_state='pending' WHERE cover_state IS NULL OR cover_state='ready';
 
 -- name: native_delete_file_work!
 -- param: id: i64
 DELETE FROM local_file_work WHERE id=:id;
 
 -- name: native_record_remote_book!
--- param: content_hash: &str
+-- param: content_hash: &ContentHash
 INSERT INTO book_transfer(content_hash,server_has_book) SELECT content_hash,1 FROM book WHERE content_hash=:content_hash
 ON CONFLICT(content_hash) DO UPDATE SET server_has_book=1;
 
 -- name: native_queue_book_work!
--- param: content_hash: &str
+-- param: content_hash: &ContentHash
 INSERT INTO local_book_work(content_hash) VALUES(:content_hash) ON CONFLICT(content_hash) DO UPDATE SET id=excluded.id;
 
 -- name: native_has_pending_purge_work?

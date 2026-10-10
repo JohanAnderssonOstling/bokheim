@@ -44,7 +44,7 @@ impl RemoteAudio {
         let events = Arc::new(Mutex::new(Vec::new()));
         let errors = Arc::new(Mutex::new(Vec::new()));
         let route = format!("/api/libraries/{}/blobs/{hash}", fixture.record.locator.library_id());
-        let checksum = format!("\"{hash}\"");
+        let etag = format!("\"{hash}\"");
         let server = {
             let (stop, failures, events, errors) = (stop.clone(), failures.clone(), events.clone(), errors.clone());
             let offline = offline.clone();
@@ -55,7 +55,7 @@ impl RemoteAudio {
                         Err(error) if error.kind() == io::ErrorKind::WouldBlock => { thread::sleep(Duration::from_millis(5)); continue; },
                         Err(error) => { errors.lock().unwrap().push(error.to_string()); break; },
                     };
-                    if let Err(error) = serve(socket, &route, &checksum, &media, &failures, &offline, &events) {
+                    if let Err(error) = serve(socket, &route, &etag, &media, &failures, &offline, &events) {
                         errors.lock().unwrap().push(error.to_string());
                     }
                 }
@@ -97,7 +97,7 @@ impl Drop for RemoteAudio {
     }
 }
 
-fn serve(socket: TcpStream, route: &str, checksum: &str, media: &[u8], failures: &AtomicUsize, offline: &AtomicBool, events: &Mutex<Vec<RangeEvent>>) -> io::Result<()> {
+fn serve(socket: TcpStream, route: &str, etag: &str, media: &[u8], failures: &AtomicUsize, offline: &AtomicBool, events: &Mutex<Vec<RangeEvent>>) -> io::Result<()> {
     socket.set_read_timeout(Some(Duration::from_secs(2)))?;
     socket.set_write_timeout(Some(Duration::from_secs(2)))?;
     let mut reader = BufReader::new(socket);
@@ -121,11 +121,11 @@ fn serve(socket: TcpStream, route: &str, checksum: &str, media: &[u8], failures:
     let start: usize = range.0.parse().map_err(io::Error::other)?;
     let end: usize = range.1.parse::<usize>().map_err(io::Error::other)?.min(media.len() - 1);
     if start > end { return Err(io::Error::other("invalid requested range")); }
-    let pinned = headers.get("if-range").is_some_and(|value| value == checksum);
+    let pinned = headers.get("if-range").is_some_and(|value| value == etag);
     if headers.contains_key("if-range") && !pinned { return Err(io::Error::other("wrong source revision")); }
     let failed = offline.load(Ordering::Acquire) || failures.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| count.checked_sub(1)).is_ok();
     events.lock().unwrap().push(RangeEvent { start, end, failed, pinned });
     if failed { return socket.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"); }
-    write!(socket, "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{end}/{}\r\nETag: {checksum}\r\nConnection: close\r\n\r\n", end - start + 1, media.len())?;
+    write!(socket, "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{end}/{}\r\nETag: {etag}\r\nConnection: close\r\n\r\n", end - start + 1, media.len())?;
     socket.write_all(&media[start..=end])
 }

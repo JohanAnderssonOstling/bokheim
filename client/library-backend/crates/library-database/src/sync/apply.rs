@@ -1,11 +1,13 @@
 //! Pull-page commit: wire decoding plus one atomic apply transaction.
 
-use std::collections::BTreeMap;
-pub(crate) use crate::shared_sql::SharedSql;
-pub(crate) use crate::sync::{PullCursorKey, SyncApplySql, invalid_integer_column, invalid_text_column, nonnegative_u64, parse_revision, parse_uuid_column, read_cursor_revision, storage_i64, write_cursor_revision};
+use crate::query_methods::query_rows;
+#[cfg(test)]
+pub use crate::transactions::commit;
+pub(crate) use crate::sync::{PullCursorKey, SyncApplySql, invalid_integer_column, nonnegative_u64, parse_revision, parse_uuid_column, read_cursor_revision, storage_i64, write_cursor_revision};
 pub(crate) use crate::{Database, DatabaseError};
 pub(crate) use library_replica::{LibraryStateEntry, VersionKey};
-pub(crate) use sync_common::{ReplicaSeq, PullStateResponse};
+use sync_common::StateKey;
+pub(crate) use sync_common::{PullStateResponse, ReplicaSeq};
 
 #[derive(Clone, Debug)]
 pub(crate) struct StoredVersion(pub(crate) VersionKey);
@@ -23,7 +25,7 @@ impl StoredVersion {
     }
 }
 
-pub(crate) fn read_version(conn: &rusqlite::Connection, kind: &str, key: &str, subkey: &str) -> Result<Option<VersionKey>, DatabaseError> {
+pub(crate) fn read_version(conn: &rusqlite::Connection, kind: &str, key: &StateKey, subkey: &str) -> Result<Option<VersionKey>, DatabaseError> {
     let mut stored = None;
     conn.read_sync_state_version_select(kind, key, subkey, |row| {
         stored = StoredVersion::decode(row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, [0, 1, 2, 3])?.map(|version| version.0);
@@ -32,13 +34,22 @@ pub(crate) fn read_version(conn: &rusqlite::Connection, kind: &str, key: &str, s
     Ok(stored)
 }
 
+/// Mutable registers carry an ordered version; immutable records retain an
+/// opaque transport token solely for acknowledgements and exact republication.
+pub(crate) fn publication_version(conn: &rusqlite::Connection, kind: &str, key: &StateKey, subkey: &str) -> Result<Option<VersionKey>, DatabaseError> {
+    if records::is_record(kind) {
+        return Ok(records::snapshot(conn, kind, key, subkey)?.map(|(_, token)| token));
+    }
+    read_version(conn, kind, key, subkey)
+}
+
 /// Decoded wire values and state identities only. Never snapshots database
 /// state: winning versions and lifecycle checks still run under the writer.
 pub(crate) struct PreparedRemoteChanges {
     pub(crate) changes: Vec<sync_common::Versioned<LibraryStateEntry>>,
 }
 
-pub(crate) fn sync_state_identity(body: &LibraryStateEntry) -> (&'static str, String, String) {
+pub(crate) fn sync_state_identity(body: &LibraryStateEntry) -> (&'static str, StateKey, String) {
     let address = body.address();
     (body.kind(), address.entity_key, address.entity_subkey)
 }
@@ -51,163 +62,127 @@ pub(crate) struct PreparedBook {
     pub(crate) metadata: book_model::BookMetadata,
     pub(crate) subject_codes: Vec<subject_projection::ProjectedSubjectCode>,
     pub(crate) concepts: Vec<(usize, i64)>,
-    pub(crate) classification_rows: Vec<ClassificationRows>,
 }
 
 pub(crate) fn project_book(metadata: &book_model::BookMetadata) -> Result<PreparedBook, DatabaseError> {
-    let mut timing = crate::timing::PhaseTimer::new("project_book");
     let invalid = |error: String| DatabaseError::message(format!("book projection failed: {error}"));
     let mut metadata = metadata.clone();
     metadata.infer_embedded_subject_isbns().map_err(|e| invalid(e.to_string()))?;
-    timing.mark("clone_and_infer_isbns");
     let subject_codes = subject_projection::project_subject_codes(&metadata.subjects);
-    timing.mark("subject_codes");
     let mut concepts = Vec::new();
     for (index, code) in subject_codes.iter().enumerate() {
         for path in subject_projection::unified_subject_paths(code.system_id(), code.code()) {
             concepts.push((index, subject_projection::unified_concept_id(&path).expect("projected subject exists in the taxonomy")));
         }
     }
-    timing.mark("unified_concepts");
-    let mut prepared = PreparedBook { metadata, subject_codes, concepts, classification_rows: Vec::new() };
-    prepared.classification_rows = prepare_classification_rows(&prepared);
-    timing.mark("classification_rows");
-    Ok(prepared)
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Cell {
-    Null,
-    Integer(i64),
-    Text(String),
-}
-
-impl From<i64> for Cell {
-    fn from(v: i64) -> Self {
-        Self::Integer(v)
-    }
-}
-
-impl From<&str> for Cell {
-    fn from(v: &str) -> Self {
-        Self::Text(v.into())
-    }
-}
-
-impl From<Option<&str>> for Cell {
-    fn from(v: Option<&str>) -> Self {
-        v.map_or(Self::Null, Self::from)
-    }
-}
-
-impl rusqlite::types::ToSql for Cell {
-    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
-        use rusqlite::types::{ToSqlOutput, Value, ValueRef};
-        Ok(match self {
-            Self::Null => ToSqlOutput::Owned(Value::Null),
-            Self::Integer(v) => ToSqlOutput::Owned(Value::Integer(*v)),
-            Self::Text(v) => ToSqlOutput::Borrowed(ValueRef::Text(v.as_bytes())),
-        })
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct ClassificationRows {
-    pub(crate) table: &'static str,
-    pub(crate) keys: usize,
-    pub(crate) width: usize,
-    pub(crate) desired: BTreeMap<Vec<Cell>, Vec<Cell>>,
-}
-
-pub(crate) fn prepare_classification_rows(prepared: &PreparedBook) -> Vec<ClassificationRows> {
-    let subjects = prepared.metadata.subjects.iter().enumerate().map(|(i, s)| vec![(i as i64).into(), s.name().into(), s.source().into(), s.authority().into(), s.code().into()]).collect();
-    let mut concepts = Vec::new();
-    let mut unified_evidence = Vec::new();
-    for (index, concept) in &prepared.concepts {
-        concepts.push(vec![(*concept).into(), subject_projection::UNIFIED_MATCHER_VERSION.into()]);
-        let code = &prepared.subject_codes[*index];
-        for pos in code.evidence_positions() {
-            unified_evidence.push(vec![(*concept).into(), (*pos as i64).into(), code.system_id().into(), code.code().into()]);
-        }
-    }
-    fn rows(table: &'static str, keys: usize, width: usize, rows: Vec<Vec<Cell>>) -> ClassificationRows {
-        ClassificationRows { table, keys, width, desired: rows.into_iter().map(|v| (v[..keys].to_vec(), v)).collect() }
-    }
-    vec![rows("book_subject", 1, 5, subjects), rows("book_unified_concept", 1, 2, concepts), rows("book_unified_concept_evidence", 4, 4, unified_evidence)]
+    Ok(PreparedBook { metadata, subject_codes, concepts })
 }
 
 pub(crate) mod pull;
 
+pub(crate) mod records;
 pub(crate) mod registers;
 
-pub use crate::transactions::commit;
 
-/// Reconcile derived subject rows without changing canonical metadata or other projections.
+/// Replace a book's complete local subject projection inside the caller's transaction.
 pub(crate) fn write_subject_projection(tx: &rusqlite::Transaction<'_>, book_id: i64, projected: &PreparedBook) -> Result<(), DatabaseError> {
-    // Manual subject paths are legacy canonical evidence. Retain their stable
-    // concept IDs across renames/reparenting without rewriting synchronized metadata.
-    let mut adjusted;
-    let projected = if projected.subject_codes.iter().any(|c| c.system_id() == subject_projection::UNIFIED_SYSTEM_ID) {
-        adjusted = projected.clone();
-        for (index, code) in adjusted.subject_codes.iter().enumerate() {
-            if code.system_id() != subject_projection::UNIFIED_SYSTEM_ID {
-                continue;
-            }
-            let mut retained = Vec::new();
-            for position in code.evidence_positions() {
-                let mut query = tx.prepare(include_str!("sql/manual_unified_concept_evidence.sql"))?;
-                retained.extend(query.query_map(rusqlite::params![book_id, *position as i64, code.code()], |r| Ok((index, r.get::<_, i64>(0)?)))?.collect::<Result<Vec<_>, _>>()?);
-            }
-            if !retained.is_empty() {
-                adjusted.concepts.retain(|(i, _)| *i != index);
-                adjusted.concepts.extend(retained);
-            }
+    let mut concepts = projected.concepts.clone();
+    // Read retained manual identities before deleting their old evidence.
+    // Their source paths may have changed after a taxonomy rename/reparenting.
+    for (index, code) in projected.subject_codes.iter().enumerate() {
+        if code.system_id() != subject_projection::UNIFIED_SYSTEM_ID {
+            continue;
         }
-        adjusted.classification_rows = prepare_classification_rows(&adjusted);
-        &adjusted
-    } else {
-        projected
-    };
+        let mut retained = Vec::new();
+        for position in code.evidence_positions() {
+            retained.extend(query_rows(|callback| tx.subject_projection_retained_manual_concepts(book_id, *position as i64, code.code(), callback), |row| row.get::<_, i64>(0))?.collect::<Result<Vec<_>, _>>()?);
+        }
+        if !retained.is_empty() {
+            concepts.retain(|(i, _)| *i != index);
+            concepts.extend(retained.into_iter().map(|concept| (index, concept)));
+        }
+    }
 
-    {
-        for rows in &projected.classification_rows {
-            let (select_sql, delete_sql, insert_sql): (&str, &str, &str) = match rows.table {
-                "book_subject" => (include_str!("sql/reconcile/book_subject_select.sql"), include_str!("sql/reconcile/book_subject_delete.sql"), include_str!("sql/reconcile/book_subject_insert.sql")),
-                "book_unified_concept" => (include_str!("sql/reconcile/book_unified_concept_select.sql"), include_str!("sql/reconcile/book_unified_concept_delete.sql"), include_str!("sql/reconcile/book_unified_concept_insert.sql")),
-                "book_unified_concept_evidence" => {
-                    (include_str!("sql/reconcile/book_unified_concept_evidence_select.sql"), include_str!("sql/reconcile/book_unified_concept_evidence_delete.sql"), include_str!("sql/reconcile/book_unified_concept_evidence_insert.sql"))
-                }
-                _ => return Err(DatabaseError::message("unknown classification table")),
-            };
-            let existing: BTreeMap<Vec<Cell>, Vec<Cell>> = tx
-                .prepare_cached(select_sql)
-                .map_err(DatabaseError::operation)?
-                .query_map([book_id], |r| {
-                    (0..rows.width)
-                        .map(|i| match r.get_ref(i)? {
-                            rusqlite::types::ValueRef::Null => Ok(Cell::Null),
-                            rusqlite::types::ValueRef::Integer(v) => Ok(Cell::Integer(v)),
-                            rusqlite::types::ValueRef::Text(v) => Ok(Cell::Text(std::str::from_utf8(v).map_err(|error| invalid_text_column(i, error.to_string()))?.into())),
-                            _ => Err(invalid_text_column(i, "unexpected classification value")),
-                        })
-                        .collect::<rusqlite::Result<Vec<_>>>()
-                })
-                .map_err(DatabaseError::operation)?
-                .collect::<Result<Vec<_>, rusqlite::Error>>()
-                .map_err(DatabaseError::operation)?
-                .into_iter()
-                .map(|v| (v[..rows.keys].to_vec(), v))
-                .collect();
-            for key in existing.keys().filter(|key| !rows.desired.contains_key(*key)) {
-                tx.prepare_cached(delete_sql).map_err(DatabaseError::operation)?.execute(rusqlite::params_from_iter(std::iter::once(Cell::Integer(book_id)).chain(key.iter().cloned()))).map_err(DatabaseError::operation)?;
-            }
-            for (key, values) in &rows.desired {
-                if existing.get(key) == Some(values) {
-                    continue;
-                }
-                tx.prepare_cached(insert_sql).map_err(DatabaseError::operation)?.execute(rusqlite::params_from_iter(std::iter::once(Cell::Integer(book_id)).chain(values.iter().cloned()))).map_err(DatabaseError::operation)?;
-            }
+    tx.subject_projection_clear_subjects(book_id)?;
+    // Deleting assignments also deletes their evidence through the foreign key.
+    tx.subject_projection_clear_concepts(book_id)?;
+    for (position, subject) in projected.metadata.subjects.iter().enumerate() {
+        tx.subject_projection_insert_subject(book_id, position as i64, subject.name(), subject.source(), subject.authority(), subject.code())?;
+    }
+    for (index, concept) in concepts {
+        tx.subject_projection_insert_concept(book_id, concept, subject_projection::UNIFIED_MATCHER_VERSION)?;
+        let code = &projected.subject_codes[index];
+        for position in code.evidence_positions() {
+            tx.subject_projection_insert_evidence(book_id, concept, *position as i64, code.system_id(), code.code())?;
         }
     }
     Ok(())
+}
+
+include_sqlite_sql::include_sql!("src/sql/subject_projection.sql");
+
+#[cfg(test)]
+mod subject_projection_tests {
+    use super::*;
+    use crate::sql_fixtures::FixturesSql;
+    use book_model::{BookMetadata, BookSubject};
+    use subject_projection::ProjectedSubjectCode;
+
+    fn database() -> (Database, i64, i64) {
+        let db = Database::open(":memory:").unwrap();
+        db.initialize_library().unwrap();
+        let hash = sync_common::ContentHash::new(&"d".repeat(64));
+        db.connection.fixtures_insert_book(&hash).unwrap();
+        let book = db.connection.fixtures_read_book_row_id(&hash, |row| row.get(0)).unwrap();
+        let concept = db.connection.fixtures_first_curated_concept(|row| row.get(0)).unwrap();
+        (db, book, concept)
+    }
+
+    fn prepared(concept: i64, system: &str) -> PreparedBook {
+        PreparedBook {
+            metadata: BookMetadata { subjects: vec![BookSubject::new(None, "Subject", "test", None, None).unwrap()], ..BookMetadata::default() },
+            subject_codes: vec![ProjectedSubjectCode { system_id: system.into(), code: "Original path".into(), evidence_positions: vec![0] }],
+            // Different matches may lead to the same assignment and evidence.
+            concepts: vec![(0, concept), (0, concept)],
+        }
+    }
+
+    fn counts(db: &Database, book: i64) -> (i64, i64, i64) {
+        db.connection.fixtures_subject_projection_counts(book, |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()
+    }
+
+    #[test]
+    fn replacement_deduplicates_clears_stale_rows_and_rolls_back_failed_inserts() {
+        let (db, book, concept) = database();
+        let projected = prepared(concept, "bisac");
+        db.write(|tx| write_subject_projection(tx, book, &projected)).unwrap();
+        db.write(|tx| write_subject_projection(tx, book, &projected)).unwrap();
+        assert_eq!(counts(&db, book), (1, 1, 1));
+
+        // This fails after deleting the old projection and inserting subjects.
+        let invalid = prepared(0, "bisac");
+        assert!(db.write(|tx| write_subject_projection(tx, book, &invalid)).is_err());
+        assert_eq!(counts(&db, book), (1, 1, 1));
+        assert_eq!(db.connection.fixtures_subject_projection_concept(book, |row| row.get::<_, i64>(0)).unwrap(), concept);
+
+        let mut unmatched = projected;
+        unmatched.concepts.clear();
+        db.write(|tx| write_subject_projection(tx, book, &unmatched)).unwrap();
+        assert_eq!(counts(&db, book), (1, 0, 0));
+        let empty = project_book(&BookMetadata::default()).unwrap();
+        db.write(|tx| write_subject_projection(tx, book, &empty)).unwrap();
+        assert_eq!(counts(&db, book), (0, 0, 0));
+    }
+
+    #[test]
+    fn replacement_retains_manual_identity_before_clearing_evidence() {
+        let (db, book, concept) = database();
+        let original = prepared(concept, subject_projection::UNIFIED_SYSTEM_ID);
+        db.write(|tx| write_subject_projection(tx, book, &original)).unwrap();
+        // The same source path now resolves differently after a taxonomy edit.
+        let changed = prepared(concept + 1, subject_projection::UNIFIED_SYSTEM_ID);
+        db.write(|tx| write_subject_projection(tx, book, &changed)).unwrap();
+        assert_eq!(counts(&db, book), (1, 1, 1));
+        assert_eq!(db.connection.fixtures_subject_projection_concept(book, |row| row.get::<_, i64>(0)).unwrap(), concept);
+    }
 }

@@ -85,6 +85,8 @@ impl PdfReaderView {
             positions,
             close_reader,
             focus,
+            sidebar_focus: cx.focus_handle().tab_index(0).tab_stop(true),
+            settings_navigation: Default::default(),
             _subscriptions: vec![pdf_subscription, search_subscription],
         };
         reader.load_reader_state(cx);
@@ -121,7 +123,7 @@ impl PdfReaderView {
                 self.select_annotation(id.clone(), window, cx);
             }
             PdfViewEvent::LoadFailed(error) => {
-                log::error!("failed to load PDF reader for book {}: {error}", self.locator.content_hash());
+                log::error!("failed to load PDF reader for book {}: {error}", self.title);
             }
         }
     }

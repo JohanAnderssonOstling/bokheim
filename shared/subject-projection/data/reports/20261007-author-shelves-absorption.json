@@ -1,0 +1,784 @@
+{
+  "scope": "User-approved absorption of 50 American and 99 English author leaves into their current era parents. Goethe and the three Shakespeare subjects retained.",
+  "before_concepts": 15900,
+  "after_concepts": 15751,
+  "merges": {
+    "52111": {
+      "into": 12719,
+      "old_label": "Roberts, Nora",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52112": {
+      "into": 4153,
+      "old_label": "Clemens, Samuel Langhorne \"Mark Twain\"",
+      "surviving_label": "19th Century"
+    },
+    "52113": {
+      "into": 4153,
+      "old_label": "James, Henry",
+      "surviving_label": "19th Century"
+    },
+    "52114": {
+      "into": 12718,
+      "old_label": "Faulkner, William, 1897-1962",
+      "surviving_label": "American, 1900–1960"
+    },
+    "52115": {
+      "into": 12718,
+      "old_label": "Hemingway, Ernest, 1899-1961",
+      "surviving_label": "American, 1900–1960"
+    },
+    "52116": {
+      "into": 4153,
+      "old_label": "Melville, Herman",
+      "surviving_label": "19th Century"
+    },
+    "52117": {
+      "into": 4153,
+      "old_label": "Poe, Edgar Allan",
+      "surviving_label": "19th Century"
+    },
+    "52118": {
+      "into": 12718,
+      "old_label": "Eliot, T. S.",
+      "surviving_label": "American, 1900–1960"
+    },
+    "52119": {
+      "into": 12719,
+      "old_label": "King, Stephen, 1947-",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52120": {
+      "into": 12718,
+      "old_label": "Fitzgerald, F. Scott",
+      "surviving_label": "American, 1900–1960"
+    },
+    "52121": {
+      "into": 4153,
+      "old_label": "Hawthorne, Nathaniel",
+      "surviving_label": "19th Century"
+    },
+    "52122": {
+      "into": 4153,
+      "old_label": "Whitman, Walt",
+      "surviving_label": "19th Century"
+    },
+    "52123": {
+      "into": 12719,
+      "old_label": "Patterson, James",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52124": {
+      "into": 12719,
+      "old_label": "Steel, Danielle",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52125": {
+      "into": 4153,
+      "old_label": "Thoreau, Henry David",
+      "surviving_label": "19th Century"
+    },
+    "52126": {
+      "into": 4153,
+      "old_label": "Emerson, Ralph Waldo",
+      "surviving_label": "19th Century"
+    },
+    "52127": {
+      "into": 4153,
+      "old_label": "Dickinson, Emily",
+      "surviving_label": "19th Century"
+    },
+    "52128": {
+      "into": 12718,
+      "old_label": "Pound, Ezra, 1885-1972",
+      "surviving_label": "American, 1900–1960"
+    },
+    "52129": {
+      "into": 12718,
+      "old_label": "Faust, Frederick, 1892-1944",
+      "surviving_label": "American, 1900–1960"
+    },
+    "52130": {
+      "into": 12718,
+      "old_label": "Wharton, Edith, 1862-1937",
+      "surviving_label": "American, 1900–1960"
+    },
+    "52131": {
+      "into": 12718,
+      "old_label": "Steinbeck, John, 1902-1968",
+      "surviving_label": "American, 1900–1960"
+    },
+    "52132": {
+      "into": 12719,
+      "old_label": "Updike, John",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52133": {
+      "into": 12718,
+      "old_label": "Cather, Willa Sibert",
+      "surviving_label": "American, 1900–1960"
+    },
+    "52134": {
+      "into": 12719,
+      "old_label": "Morrison, Toni",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52135": {
+      "into": 12718,
+      "old_label": "London, Jack",
+      "surviving_label": "American, 1900–1960"
+    },
+    "52136": {
+      "into": 12719,
+      "old_label": "Oates, Joyce Carol, 1938-",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52137": {
+      "into": 12719,
+      "old_label": "Krentz, Jayne Ann",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52138": {
+      "into": 12718,
+      "old_label": "L'Amour, Louis, 1908-",
+      "surviving_label": "American, 1900–1960"
+    },
+    "52139": {
+      "into": 12718,
+      "old_label": "Miller, Arthur, 1915-2005",
+      "surviving_label": "American, 1900–1960"
+    },
+    "52140": {
+      "into": 12719,
+      "old_label": "Michaels, Fern",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52141": {
+      "into": 12719,
+      "old_label": "Plath, Sylvia",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52142": {
+      "into": 12719,
+      "old_label": "Macomber, Debbie",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52143": {
+      "into": 12718,
+      "old_label": "Williams, Tennessee, 1911-1983",
+      "surviving_label": "American, 1900–1960"
+    },
+    "52144": {
+      "into": 12719,
+      "old_label": "Cussler, Clive",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52145": {
+      "into": 12719,
+      "old_label": "Koontz, Dean",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52146": {
+      "into": 12719,
+      "old_label": "Morris, Gilbert",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52147": {
+      "into": 12719,
+      "old_label": "Dick, Philip K.",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52148": {
+      "into": 12718,
+      "old_label": "Stein, Gertrude",
+      "surviving_label": "American, 1900–1960"
+    },
+    "52149": {
+      "into": 12718,
+      "old_label": "Kerouac, Jack, 1922-1969",
+      "surviving_label": "American, 1900–1960"
+    },
+    "52150": {
+      "into": 12719,
+      "old_label": "Johnstone, William W.",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52151": {
+      "into": 12719,
+      "old_label": "Roth, Philip",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52152": {
+      "into": 12719,
+      "old_label": "Paine, Lauran",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52153": {
+      "into": 12719,
+      "old_label": "Clark, Mary Higgins",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52154": {
+      "into": 12719,
+      "old_label": "Brown, Sandra",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52155": {
+      "into": 4153,
+      "old_label": "Alcott, Louisa May",
+      "surviving_label": "19th Century"
+    },
+    "52156": {
+      "into": 12719,
+      "old_label": "Grisham, John",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52157": {
+      "into": 12718,
+      "old_label": "Grey, Zane, 1872-1939",
+      "surviving_label": "American, 1900–1960"
+    },
+    "52158": {
+      "into": 12719,
+      "old_label": "Andrews, V. C.",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52159": {
+      "into": 12718,
+      "old_label": "Nabokov, Vladimir Vladimirovich, 1899-1977",
+      "surviving_label": "American, 1900–1960"
+    },
+    "52160": {
+      "into": 12719,
+      "old_label": "Parker, Robert B.",
+      "surviving_label": "American, 1961–2000"
+    },
+    "52190": {
+      "into": 4179,
+      "old_label": "Rowling, J. K.",
+      "surviving_label": "20th Century"
+    },
+    "52191": {
+      "into": 4179,
+      "old_label": "Chesney, Marion M. C. Beaton",
+      "surviving_label": "20th Century"
+    },
+    "52192": {
+      "into": 4179,
+      "old_label": "Rendell, Ruth, 1930-",
+      "surviving_label": "20th Century"
+    },
+    "52193": {
+      "into": 4179,
+      "old_label": "McCall Smith, Alexander",
+      "surviving_label": "20th Century"
+    },
+    "52194": {
+      "into": 4179,
+      "old_label": "Perry, Anne",
+      "surviving_label": "20th Century"
+    },
+    "52195": {
+      "into": 4179,
+      "old_label": "Cornwell, Bernard",
+      "surviving_label": "20th Century"
+    },
+    "52196": {
+      "into": 4179,
+      "old_label": "Rushdie, Salman",
+      "surviving_label": "20th Century"
+    },
+    "52197": {
+      "into": 4179,
+      "old_label": "Pinter, Harold",
+      "surviving_label": "20th Century"
+    },
+    "52198": {
+      "into": 4179,
+      "old_label": "Pratchett, Terry",
+      "surviving_label": "20th Century"
+    },
+    "52199": {
+      "into": 4179,
+      "old_label": "Le Carré, John, 1931-",
+      "surviving_label": "20th Century"
+    },
+    "52200": {
+      "into": 4179,
+      "old_label": "Higgins, Jack, 1929-",
+      "surviving_label": "20th Century"
+    },
+    "52201": {
+      "into": 4179,
+      "old_label": "Murdoch, Iris",
+      "surviving_label": "20th Century"
+    },
+    "52202": {
+      "into": 4179,
+      "old_label": "Heaney, Seamus",
+      "surviving_label": "20th Century"
+    },
+    "52203": {
+      "into": 4179,
+      "old_label": "Moorcock, Michael",
+      "surviving_label": "20th Century"
+    },
+    "52204": {
+      "into": 4179,
+      "old_label": "Francis, Dick",
+      "surviving_label": "20th Century"
+    },
+    "52205": {
+      "into": 4179,
+      "old_label": "Stoppard, Tom",
+      "surviving_label": "20th Century"
+    },
+    "52206": {
+      "into": 4179,
+      "old_label": "Rankin, Ian",
+      "surviving_label": "20th Century"
+    },
+    "52207": {
+      "into": 4179,
+      "old_label": "Fleming, Ian",
+      "surviving_label": "20th Century"
+    },
+    "52208": {
+      "into": 4179,
+      "old_label": "Hughes, Ted, 1930-1998",
+      "surviving_label": "20th Century"
+    },
+    "52209": {
+      "into": 4179,
+      "old_label": "Doherty, P. C.",
+      "surviving_label": "20th Century"
+    },
+    "52210": {
+      "into": 4179,
+      "old_label": "Cookson, Catherine",
+      "surviving_label": "20th Century"
+    },
+    "52211": {
+      "into": 4179,
+      "old_label": "Weldon, Fay",
+      "surviving_label": "20th Century"
+    },
+    "52212": {
+      "into": 4179,
+      "old_label": "Archer, Jeffrey",
+      "surviving_label": "20th Century"
+    },
+    "52213": {
+      "into": 4179,
+      "old_label": "Lovesey, Peter",
+      "surviving_label": "20th Century"
+    },
+    "52214": {
+      "into": 4179,
+      "old_label": "Burgess, Anthony, 1917-",
+      "surviving_label": "20th Century"
+    },
+    "52215": {
+      "into": 4179,
+      "old_label": "Dahl, Roald",
+      "surviving_label": "20th Century"
+    },
+    "52216": {
+      "into": 4179,
+      "old_label": "Deighton, Len",
+      "surviving_label": "20th Century"
+    },
+    "52217": {
+      "into": 4179,
+      "old_label": "Hill, Reginald",
+      "surviving_label": "20th Century"
+    },
+    "52218": {
+      "into": 4179,
+      "old_label": "Miles, Keith",
+      "surviving_label": "20th Century"
+    },
+    "52219": {
+      "into": 4179,
+      "old_label": "McEwan, Ian",
+      "surviving_label": "20th Century"
+    },
+    "52220": {
+      "into": 4179,
+      "old_label": "Barnard, Robert",
+      "surviving_label": "20th Century"
+    },
+    "52221": {
+      "into": 4179,
+      "old_label": "Binchy, Maeve",
+      "surviving_label": "20th Century"
+    },
+    "52222": {
+      "into": 4179,
+      "old_label": "Aldiss, Brian Wilson",
+      "surviving_label": "20th Century"
+    },
+    "52223": {
+      "into": 4179,
+      "old_label": "Ballard, J. G.",
+      "surviving_label": "20th Century"
+    },
+    "52224": {
+      "into": 4179,
+      "old_label": "Follett, Ken",
+      "surviving_label": "20th Century"
+    },
+    "52225": {
+      "into": 4179,
+      "old_label": "Robinson, Peter",
+      "surviving_label": "20th Century"
+    },
+    "52226": {
+      "into": 4179,
+      "old_label": "Gregory, Philippa",
+      "surviving_label": "20th Century"
+    },
+    "52227": {
+      "into": 4179,
+      "old_label": "Trevor, William",
+      "surviving_label": "20th Century"
+    },
+    "52228": {
+      "into": 4179,
+      "old_label": "James, P. D.",
+      "surviving_label": "20th Century"
+    },
+    "52229": {
+      "into": 4179,
+      "old_label": "McCutchan, Philip, 1920-",
+      "surviving_label": "20th Century"
+    },
+    "52230": {
+      "into": 4179,
+      "old_label": "Banville, John",
+      "surviving_label": "20th Century"
+    },
+    "52231": {
+      "into": 4179,
+      "old_label": "Carter, Angela",
+      "surviving_label": "20th Century"
+    },
+    "52232": {
+      "into": 4179,
+      "old_label": "Saint, Dora Jessie, 1913-",
+      "surviving_label": "20th Century"
+    },
+    "52233": {
+      "into": 4179,
+      "old_label": "McDermid, Val",
+      "surviving_label": "20th Century"
+    },
+    "52234": {
+      "into": 4179,
+      "old_label": "Jeffries, Roderic, 1926-",
+      "surviving_label": "20th Century"
+    },
+    "52235": {
+      "into": 4179,
+      "old_label": "Balogh, Mary",
+      "surviving_label": "20th Century"
+    },
+    "52236": {
+      "into": 4179,
+      "old_label": "Amis, Martin",
+      "surviving_label": "20th Century"
+    },
+    "52237": {
+      "into": 4179,
+      "old_label": "Brett, Simon",
+      "surviving_label": "20th Century"
+    },
+    "52238": {
+      "into": 4179,
+      "old_label": "Bowen, Rhys",
+      "surviving_label": "20th Century"
+    },
+    "52239": {
+      "into": 4179,
+      "old_label": "Pym, Barbara",
+      "surviving_label": "20th Century"
+    },
+    "52240": {
+      "into": 4179,
+      "old_label": "Keating, H. R. F.",
+      "surviving_label": "20th Century"
+    },
+    "52241": {
+      "into": 4179,
+      "old_label": "Barnes, Julian",
+      "surviving_label": "20th Century"
+    },
+    "52242": {
+      "into": 4179,
+      "old_label": "Hill, Susan",
+      "surviving_label": "20th Century"
+    },
+    "52243": {
+      "into": 4179,
+      "old_label": "Davis, Lindsey",
+      "surviving_label": "20th Century"
+    },
+    "52244": {
+      "into": 4179,
+      "old_label": "Harrod-Eagles, Cynthia",
+      "surviving_label": "20th Century"
+    },
+    "52245": {
+      "into": 4179,
+      "old_label": "Kent, Alexander",
+      "surviving_label": "20th Century"
+    },
+    "52246": {
+      "into": 4179,
+      "old_label": "Baxter, Stephen",
+      "surviving_label": "20th Century"
+    },
+    "52247": {
+      "into": 4179,
+      "old_label": "Ayckbourn, Alan",
+      "surviving_label": "20th Century"
+    },
+    "52248": {
+      "into": 4179,
+      "old_label": "Bennett, Alan",
+      "surviving_label": "20th Century"
+    },
+    "52249": {
+      "into": 4179,
+      "old_label": "Gardner, John E.",
+      "surviving_label": "20th Century"
+    },
+    "52250": {
+      "into": 4179,
+      "old_label": "Jordan, Penny",
+      "surviving_label": "20th Century"
+    },
+    "52251": {
+      "into": 4179,
+      "old_label": "Drabble, Margaret, 1939-",
+      "surviving_label": "20th Century"
+    },
+    "52252": {
+      "into": 4179,
+      "old_label": "Masterton, Graham",
+      "surviving_label": "20th Century"
+    },
+    "52253": {
+      "into": 4179,
+      "old_label": "Trollope, Joanna",
+      "surviving_label": "20th Century"
+    },
+    "52254": {
+      "into": 4179,
+      "old_label": "Kinsella, Sophie",
+      "surviving_label": "20th Century"
+    },
+    "52255": {
+      "into": 4179,
+      "old_label": "Connolly, John",
+      "surviving_label": "20th Century"
+    },
+    "52256": {
+      "into": 4179,
+      "old_label": "Brookner, Anita",
+      "surviving_label": "20th Century"
+    },
+    "52257": {
+      "into": 4179,
+      "old_label": "Friel, Brian",
+      "surviving_label": "20th Century"
+    },
+    "52258": {
+      "into": 4179,
+      "old_label": "Forsyth, Frederick",
+      "surviving_label": "20th Century"
+    },
+    "52259": {
+      "into": 4179,
+      "old_label": "Fowles, John",
+      "surviving_label": "20th Century"
+    },
+    "52260": {
+      "into": 4179,
+      "old_label": "Adams, Douglas",
+      "surviving_label": "20th Century"
+    },
+    "52261": {
+      "into": 4179,
+      "old_label": "Frayn, Michael",
+      "surviving_label": "20th Century"
+    },
+    "52262": {
+      "into": 4179,
+      "old_label": "Seymour, Gerald",
+      "surviving_label": "20th Century"
+    },
+    "52263": {
+      "into": 4179,
+      "old_label": "Bond, Edward",
+      "surviving_label": "20th Century"
+    },
+    "52264": {
+      "into": 4179,
+      "old_label": "Dunn, Carola",
+      "surviving_label": "20th Century"
+    },
+    "52265": {
+      "into": 4179,
+      "old_label": "Boyd, William",
+      "surviving_label": "20th Century"
+    },
+    "52266": {
+      "into": 4179,
+      "old_label": "Collins, Jackie",
+      "surviving_label": "20th Century"
+    },
+    "52267": {
+      "into": 4179,
+      "old_label": "French, Nicci",
+      "surviving_label": "20th Century"
+    },
+    "52268": {
+      "into": 4179,
+      "old_label": "Gaiman, Neil",
+      "surviving_label": "20th Century"
+    },
+    "52269": {
+      "into": 4179,
+      "old_label": "Keyes, Marian",
+      "surviving_label": "20th Century"
+    },
+    "52270": {
+      "into": 4179,
+      "old_label": "Wainwright, John William, 1921-",
+      "surviving_label": "20th Century"
+    },
+    "52271": {
+      "into": 4179,
+      "old_label": "O'Brien, Edna",
+      "surviving_label": "20th Century"
+    },
+    "52272": {
+      "into": 4179,
+      "old_label": "Ishiguro, Kazuo",
+      "surviving_label": "20th Century"
+    },
+    "52273": {
+      "into": 4179,
+      "old_label": "Lively, Penelope",
+      "surviving_label": "20th Century"
+    },
+    "52274": {
+      "into": 4179,
+      "old_label": "Hannah, Sophie",
+      "surviving_label": "20th Century"
+    },
+    "52275": {
+      "into": 4179,
+      "old_label": "MacLean, Alistair, 1922 or 3-",
+      "surviving_label": "20th Century"
+    },
+    "52276": {
+      "into": 4179,
+      "old_label": "Lewis, Susan",
+      "surviving_label": "20th Century"
+    },
+    "52277": {
+      "into": 4179,
+      "old_label": "Byatt, A. S.",
+      "surviving_label": "20th Century"
+    },
+    "52278": {
+      "into": 4179,
+      "old_label": "La Plante, Lynda",
+      "surviving_label": "20th Century"
+    },
+    "52279": {
+      "into": 4179,
+      "old_label": "James, Peter",
+      "surviving_label": "20th Century"
+    },
+    "52280": {
+      "into": 4179,
+      "old_label": "Churchill, Caryl",
+      "surviving_label": "20th Century"
+    },
+    "52281": {
+      "into": 4179,
+      "old_label": "Freeling, Nicolas",
+      "surviving_label": "20th Century"
+    },
+    "52282": {
+      "into": 4179,
+      "old_label": "Self, Will",
+      "surviving_label": "20th Century"
+    },
+    "52283": {
+      "into": 4179,
+      "old_label": "Lodge, David",
+      "surviving_label": "20th Century"
+    },
+    "52284": {
+      "into": 4179,
+      "old_label": "James, Bill",
+      "surviving_label": "20th Century"
+    },
+    "52285": {
+      "into": 4179,
+      "old_label": "Graham, Lynne",
+      "surviving_label": "20th Century"
+    },
+    "52286": {
+      "into": 4179,
+      "old_label": "Harris, John, 1916-",
+      "surviving_label": "20th Century"
+    },
+    "52287": {
+      "into": 4179,
+      "old_label": "Doyle, Roddy",
+      "surviving_label": "20th Century"
+    },
+    "52288": {
+      "into": 4179,
+      "old_label": "Swift, Graham",
+      "surviving_label": "20th Century"
+    }
+  },
+  "validation": {
+    "integrity_check": "ok",
+    "foreign_key_violations": 0,
+    "exact_row_remapping": true,
+    "range_multiplicity_preserved": true,
+    "surviving_ids_and_autoincrement_preserved": true,
+    "only_childless_subjects_removed": true,
+    "production_matcher": {
+      "probes": 172771,
+      "changed_destinations": 945,
+      "unexpected_changes": 0,
+      "coverage_losses": 0,
+      "coverage_gains": 0,
+      "scope": "Stored selectors, all structured range endpoints and full spans, adjacent numeric boundaries, author work/year/volume probes and malformed notation probes. Full observed-code cache unavailable."
+    },
+    "full_usage_refresh": "Local OpenLibrary code-usage cache unavailable; viewer regenerated without usage counts and historical usage TSV retained.",
+    "replay_guard": "Already absorbed author IDs are rejected without changing the database.",
+    "rust_tests": {
+      "command": "cargo test --offline -p subject-projection --lib",
+      "passed": 34,
+      "failed": 0
+    },
+    "viewer": {
+      "subjects": 15751,
+      "usage_counts_visible": false,
+      "all_149_author_shelves_absent": true,
+      "Goethe_and_three_Shakespeare_subjects_retained": true
+    }
+  },
+  "before_sha256": "972fee6b2b6968c63195a3f4a49e72ee911c394dad99bfc554418a06f40205b4",
+  "after_sha256": "a0d33ae5d184ee607d96be714d6d4899ce14ea6618923c00210356bf358708e7",
+  "recoverable_before_snapshot": "/tmp/taxonomy-authors-20261007/before.sqlite3"
+}

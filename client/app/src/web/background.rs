@@ -7,7 +7,7 @@ use wasm_bindgen::prelude::*;
 use web_sys::{MessageEvent, MessagePort};
 
 use super::{object, Port};
-use crate::sync::SyncRequest;
+use library_runtime::scheduler::SyncRequest;
 use client_platform_web::transport::control::BackgroundEvent;
 
 type Reply = oneshot::Sender<bool>;
@@ -68,16 +68,13 @@ impl State {
 }
 
 /// Shared browser timers request whole cycles from the database worker.
-#[cfg_attr(feature = "web-runtime-tests", wasm_bindgen)]
 pub struct BackgroundService(Rc<State>);
 impl Drop for BackgroundService {
     fn drop(&mut self) {
         self.0.stop();
     }
 }
-#[cfg_attr(feature = "web-runtime-tests", wasm_bindgen)]
 impl BackgroundService {
-    #[cfg_attr(feature = "web-runtime-tests", wasm_bindgen(constructor))]
     pub fn new(port: MessagePort, retry: u32, debounce: u32) -> Self {
         let (signals, requests) = async_channel::unbounded();
         let state = Rc::new_cyclic(|weak: &std::rc::Weak<State>| {
@@ -101,7 +98,7 @@ impl BackgroundService {
         let run = state.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let cycles = run.clone();
-            crate::sync::run_timed(
+            library_runtime::scheduler::run_timed(
                 move |input| {
                     let state = cycles.clone();
                     async move { state.request(input.remote).await }
@@ -115,11 +112,6 @@ impl BackgroundService {
         });
         Self(state)
     }
-    #[cfg(feature = "web-runtime-tests")]
-    pub fn stop(&self) {
-        self.0.stop();
-    }
-    #[cfg_attr(feature = "web-runtime-tests", wasm_bindgen(getter))]
     pub fn stopped(&self) -> bool {
         self.0.port.borrow().is_none()
     }

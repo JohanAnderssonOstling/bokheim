@@ -4,11 +4,9 @@ use std::rc::Rc;
 
 use js_sys::Array;
 use wasm_bindgen::prelude::*;
-#[cfg(feature = "web-runtime-tests")]
-use web_sys::Worker;
 use web_sys::{MessageEvent, MessagePort};
 
-use super::{BackgroundService, ClientRelay, CpuService, SyncService, TransferService, byte_reply, error_message, failure, field, object};
+use super::{BackgroundService, ClientRelay, CpuService, SyncService, byte_reply, error_message, failure, field, object};
 use app::host::coordinator_lifecycle::{Action, CoordinatorLifecycle};
 use client_platform_web::transport::endpoint::WorkerEndpoint;
 
@@ -16,12 +14,10 @@ type WorkerFactory = Rc<dyn Fn(&str, &str) -> Result<WorkerEndpoint, JsValue>>;
 
 struct State {
     failure_handler: RefCell<Option<Rc<dyn Fn(String, bool)>>>,
-    ready_handler: RefCell<Option<Rc<dyn Fn()>>>,
     lifecycle: RefCell<CoordinatorLifecycle>,
     backend: WorkerEndpoint,
     close: Box<dyn Fn()>,
     sync: SyncService,
-    transfers: TransferService,
     cpu: CpuService,
     clients: ClientRelay,
     background: RefCell<Vec<BackgroundService>>,
@@ -51,7 +47,6 @@ impl State {
                     super::network_client::fail_all(js_sys::Error::new(&error).into());
                 }
                 Action::FailSync { error } => self.sync.fail(js_sys::Error::new(&error).into()),
-                Action::FailTransfers { error } => self.transfers.fail(js_sys::Error::new(&error).into()),
                 Action::FailCpu { error } => self.cpu.fail(js_sys::Error::new(&error).into()),
                 Action::NotifySyncFailure { error } => {
                     let _ = self.backend.post_message(&object(&[("transport", "sync_failed".into()), ("error", error.into())]));
@@ -120,13 +115,12 @@ impl State {
                 }
             }
             Some("network_request") => self.route_network(message),
-            Some("transfer_request" | "sync_request" | "cpu_request") => {
+            Some("sync_request" | "cpu_request") => {
                 use client_platform_web::transport::protocol::WorkerRequest;
                 let Ok(port) = field(&message, "port").dyn_into::<MessagePort>() else {
                     return;
                 };
                 match WorkerRequest::decode(&message) {
-                    Ok(WorkerRequest::Transfer { key }) => self.transfers.request(key, port),
                     Ok(WorkerRequest::Sync { key, bytes }) => self.sync.request_bytes(key, bytes, port),
                     Ok(WorkerRequest::Cpu { bytes, source }) => {
                         let response = self.cpu.request_source(bytes, source);
@@ -141,9 +135,6 @@ impl State {
             }
             Some("backend_ready") => {
                 self.clients.resume();
-                if let Some(handler) = self.ready_handler.borrow().clone() {
-                    handler();
-                }
                 let actions = self.lifecycle.borrow_mut().ready();
                 self.execute(actions);
             }
@@ -164,14 +155,12 @@ impl Drop for State {
 }
 
 /// Owns the browser worker topology and executes lifecycle decisions in Rust.
-#[cfg_attr(feature = "web-runtime-tests", wasm_bindgen)]
 pub struct Coordinator(Rc<State>);
 impl Drop for Coordinator {
     fn drop(&mut self) {
         self.0.fail("Coordinator closed".into());
     }
 }
-#[cfg_attr(feature = "web-runtime-tests", wasm_bindgen)]
 impl Coordinator {
     pub fn connect(&self, port: MessagePort) {
         let id = self.0.next.get() + 1;
@@ -183,18 +172,8 @@ impl Coordinator {
 }
 
 impl Coordinator {
-    pub(crate) fn set_host_handlers(&self, failed: impl Fn(String, bool) + 'static, ready: impl Fn() + 'static) {
+    pub(crate) fn set_failure_handler(&self, failed: impl Fn(String, bool) + 'static) {
         *self.0.failure_handler.borrow_mut() = Some(Rc::new(failed));
-        *self.0.ready_handler.borrow_mut() = Some(Rc::new(ready));
-    }
-    #[cfg(feature = "web-runtime-tests")]
-    pub fn with_factory(create_worker: impl Fn(&str, &str) -> Result<Worker, JsValue> + 'static, close: impl Fn() + 'static) -> Result<Self, JsValue> {
-        Self::create(move |url, name| create_worker(url, name).map(Into::into), close)
-    }
-    #[cfg(feature = "web-runtime-tests")]
-    pub(crate) fn create(create_worker: impl Fn(&str, &str) -> Result<WorkerEndpoint, JsValue> + 'static, close: impl Fn() + 'static) -> Result<Self, JsValue> {
-        let clients = ClientRelay::new(|_| Err(js_sys::Error::new("Backend is starting").into()));
-        Self::with_clients(create_worker, close, clients, Default::default())
     }
 
     pub(crate) fn suspend(&self) {
@@ -213,12 +192,10 @@ impl Coordinator {
         clients.set_connector(connect_storage);
         let state = Rc::new(State {
             failure_handler: RefCell::new(None),
-            ready_handler: RefCell::new(None),
             lifecycle: RefCell::new(CoordinatorLifecycle::new()),
             backend,
             close: Box::new(close),
             sync: SyncService::with_options(options.sync),
-            transfers: TransferService::new(256),
             cpu: CpuService::with_options(create_cpu, options.cpu),
             clients,
             background: RefCell::new(Vec::new()),

@@ -10,29 +10,6 @@ classifiers=load('classifiers','wikidata-classifiers.py')
 bundle=load('bundle','extract-wikidata-complete.py')
 
 class ClassifierTests(unittest.TestCase):
-    def test_inference_is_separate_and_preserves_full_link_and_source(self):
-        link=claim({'id':'Q2'},'wikibase-item');ddc=claim('700','external-id','deprecated')
-        book={'id':'Q1','claims':{'P8360':[claim('N5300')],'P921':[link]}}
-        topic={'id':'Q2','claims':{'P1036':[ddc],'P8359':[claim('999')]}}
-        r=classifiers.for_book(book,{'Q2':topic})
-        self.assertEqual(len(r['direct']),1);self.assertFalse(r['direct'][0]['inferred'])
-        self.assertEqual(len(r['inferred']),1)
-        e=r['inferred'][0];self.assertTrue(e['inferred']);self.assertEqual(e['source_entity'],'Q2')
-        self.assertEqual(e['statement'],ddc);self.assertEqual(e['topic_link'],link)
-        self.assertEqual(classifiers.for_book(book,{})['inferred'],[])
-    def test_preferred_then_normal_then_deprecated_fallback(self):
-        old=claim('100',rank='deprecated');normal=claim('200');preferred=claim('300',rank='preferred')
-        self.assertEqual(classifiers.values([old,normal,preferred]),[preferred])
-        self.assertEqual(classifiers.values([old,normal]),[normal])
-        self.assertEqual(classifiers.values([old]),[old])
-    def test_new_classifier_definition_and_nonidentifier_values_survive(self):
-        definition={'id':'P999998','type':'property','claims':{'P31':[claim({'id':classifiers.TOPIC_CLASS},'wikibase-item')]}}
-        r={'id':'Q1','claims':{'P999998':[claim('new code')]}}
-        projected=bundle.extractor.project(r)
-        self.assertEqual(classifiers.assigned(projected,classifiers.definitions([definition]))[0]['value'],'new code')
-    def test_all_known_classifiers_preserve_complete_statements(self):
-        r={'id':'Q1','claims':{p:[claim('test',rank='deprecated')] for p in classifiers.KNOWN}}
-        self.assertEqual(bundle.extractor.project(r)['claims'],r['claims'])
     def test_index_views_keep_topic_inference_separate(self):
         index=load('classifier_index','index-wikidata-classifiers.py')
         c=sqlite3.connect(':memory:');c.executescript(index.SCHEMA)

@@ -1,7 +1,7 @@
 //! EPUB appearance preferences and matching renderer commands.
 
 use crate::invalidation::notify;
-use app_preferences::{COLUMN_COUNT_MAX, COLUMN_COUNT_MIN, FONT_SIZE_MAX, FONT_SIZE_MIN, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, LINE_WIDTH_MAX, LINE_WIDTH_MIN, READER_SPACING_MAX, READER_SPACING_MIN, ReaderFontFamily, ReaderTextAlignment};
+use app_preferences::{FONT_SIZE_MAX, FONT_SIZE_MIN, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, LINE_WIDTH_MAX, LINE_WIDTH_MIN, READER_SPACING_MAX, READER_SPACING_MIN, ReaderFontFamily, ReaderTextAlignment};
 use gpui::{Context, Window};
 use html_view_core::RendererCommand;
 
@@ -75,17 +75,6 @@ impl ReaderView {
         fitted_columns_and_width(available_width / scale, f64::from(preferences.min_column_gap_px) / scale, self.desired_column_count, minimum, maximum).0
     }
 
-    /// Mobile owns the viewport width, so its user-facing layout preference
-    /// is a column count. Recalculate the underlying width whenever that
-    /// viewport changes; do not persist a meaningless phone pixel width.
-    pub(in crate::epub) fn sync_mobile_column_width(&self, available_width: f64, cx: &mut Context<Self>) {
-        if !cfg!(target_os = "android") {
-            return;
-        }
-        let width = self.fitted_column_width(available_width, cx);
-        self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::SetColumnWidth(width), cx));
-    }
-
     /// Persists a preference, applies its renderer command, and refreshes the
     /// reader only when the value actually changed.
     fn apply_appearance(&self, cx: &mut Context<Self>, update: impl FnOnce(&mut ReaderPreferences), command: impl FnOnce(&ReaderPreferences) -> RendererCommand) {
@@ -121,31 +110,6 @@ impl ReaderView {
     pub(in crate::epub) fn adjust_line_height(&self, delta: f32, cx: &mut Context<Self>) {
         let line_height = (ReaderSettings::preferences(cx).line_height + delta).clamp(LINE_HEIGHT_MIN, LINE_HEIGHT_MAX);
         self.apply_style_override(cx, |preferences| preferences.line_height = line_height);
-    }
-
-    pub(in crate::epub) fn adjust_desired_column_count(&mut self, delta: i8, window: &mut Window, cx: &mut Context<Self>) {
-        if cfg!(feature = "kobo") {
-            return;
-        }
-        let count = (i16::from(self.desired_column_count) + i16::from(delta)).clamp(i16::from(COLUMN_COUNT_MIN), i16::from(COLUMN_COUNT_MAX)) as u8;
-        // Clicking at a count limit also refits the current count after a
-        // window or sidebar resize.
-        self.desired_column_count = count;
-        let sidebar_visible = (self.chrome.is_visible() || self.search.query.is_some()) && self.active_sidebar_tab(window).is_some();
-        let (_, _, available_width) = Self::horizontal_layout(window, cx, sidebar_visible);
-        if cfg!(target_os = "android") {
-            ReaderSettings::update(cx, |preferences| preferences.max_column_count = count);
-            self.sync_mobile_column_width(f64::from(available_width), cx);
-            notify(cx, Component::ReaderShell, "mobile_column_count_changed");
-            return;
-        }
-        let width = self.fitted_column_width(f64::from(available_width), cx);
-        ReaderSettings::update(cx, |preferences| {
-            preferences.max_column_count = count;
-            preferences.column_width = width;
-        });
-        self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::SetColumnWidth(width), cx));
-        notify(cx, Component::ReaderShell, "column_count_changed");
     }
 
     pub(in crate::epub) fn adjust_column_width(&self, delta: f64, window: &Window, cx: &mut Context<Self>) {
@@ -212,34 +176,5 @@ impl ReaderView {
         if ReaderSettings::update(cx, |preferences| preferences.min_column_gap_px = value) {
             notify(cx, Component::ReaderShell, "column_gap_changed");
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{column_count_for_gap, fitted_columns_and_width};
-
-    #[test]
-    fn minimum_gap_reduces_columns_when_the_viewport_cannot_fit_them() {
-        assert_eq!(column_count_for_gap(1200.0, 600.0, 0.0, 2), 2);
-        assert_eq!(column_count_for_gap(1200.0, 600.0, 20.0, 2), 1);
-        assert_eq!(column_count_for_gap(1240.0, 600.0, 0.0, 2), 2);
-        assert_eq!(column_count_for_gap(1240.0, 600.0, 20.0, 2), 2);
-        assert_eq!(column_count_for_gap(1500.0, 600.0, 100.0, 4), 2);
-    }
-
-    #[test]
-    fn fit_width_survives_renderer_rounding_and_a_fractionally_smaller_document() {
-        let (count, fitted) = fitted_columns_and_width(1940.0, 0.0, 2, 450.0, 650.0);
-        assert_eq!((count, fitted), (2, 650.0));
-
-        let (count, fitted) = fitted_columns_and_width(1940.0, 80.0, 2, 450.0, 650.0);
-        assert_eq!((count, fitted), (2, 650.0));
-    }
-
-    #[test]
-    fn narrow_viewport_fits_even_when_below_preferred_line_width() {
-        let (count, fitted) = fitted_columns_and_width(390.0, 0.0, 2, 450.0, 650.0);
-        assert_eq!((count, fitted), (1, 389.0));
     }
 }

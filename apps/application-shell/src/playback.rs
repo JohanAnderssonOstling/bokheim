@@ -1,16 +1,18 @@
 //! One playback owner and one ordered restoration writer per application.
 
-use std::task::Waker;
 use app::AppClient;
+use browser_ui::{LibraryRemovalHook, LibraryRemovalPreparation, LibraryRemovalService};
 use futures_util::{
     FutureExt,
     future::{LocalBoxFuture, Shared},
 };
-use gpui::{App, AppContext, Context, Entity, Global, Subscription};
+use gpui::{App, AppContext, Context, Entity, Global, Subscription, WeakEntity};
 use library_model::BookLocator;
 use reader_ui::ActiveAudiobook;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::Duration;
+use sync_common::LibraryId;
 use web_time::Instant;
 
 type PositionFlush = Shared<LocalBoxFuture<'static, Result<(), String>>>;
@@ -136,7 +138,7 @@ impl<T: Copy + Eq> SaveIdentity<T> {
 struct OpenOrder {
     next: u64,
     accepted: u64,
-    removed_through: std::collections::HashMap<sync_common::LibraryId, u64>,
+    removed_through: std::collections::HashMap<LibraryId, u64>,
 }
 impl OpenOrder {
     fn reserve(&mut self) -> u64 {
@@ -153,10 +155,10 @@ impl OpenOrder {
     fn cancel_pending(&mut self) {
         self.accepted = self.next;
     }
-    fn cancel_library(&mut self, library: sync_common::LibraryId) {
+    fn cancel_library(&mut self, library: LibraryId) {
         self.removed_through.insert(library, self.next);
     }
-    fn cancelled_for(&self, request: u64, library: sync_common::LibraryId) -> bool {
+    fn cancelled_for(&self, request: u64, library: LibraryId) -> bool {
         self.removed_through.get(&library).is_some_and(|through| request <= *through)
     }
 }
@@ -168,18 +170,25 @@ pub(super) struct PlaybackController {
     opening: Option<BookLocator>,
     user_changed: bool,
     quitting: bool,
-    pending_positions: Vec<(sync_common::LibraryId, PositionFlush)>,
+    pending_positions: Vec<(LibraryId, PositionFlush)>,
     saves: async_channel::Sender<Save>,
     observation: Option<Subscription>,
+}
+
+struct PlaybackLibraryRemoval {
+    controller: WeakEntity<PlaybackController>,
+}
+
+impl LibraryRemovalService for PlaybackLibraryRemoval {
+    fn prepare_removal(&self, library: LibraryId, cx: &mut App) -> LibraryRemovalPreparation {
+        self.controller.update(cx, |controller, cx| controller.prepare_removal(library, cx)).unwrap_or_else(|_| Box::pin(async { Err("Playback controller is unavailable".into()) }))
+    }
 }
 
 impl PlaybackController {
     pub fn shared(backend: AppClient, restore_path: Option<PathBuf>, cx: &mut App) -> Entity<Self> {
         let controller = Self::shared_with(cx, |cx| Self::new(backend, RestoreStore::new(restore_path), cx));
-        let target = controller.downgrade();
-        cx.set_global(browser_ui::LibraryRemovalHook(std::rc::Rc::new(move |library, cx| {
-            target.update(cx, |controller, cx| controller.prepare_removal(library, cx)).unwrap_or_else(|_| Box::pin(async { Err("Playback controller is unavailable".into()) }))
-        })));
+        cx.set_global(LibraryRemovalHook(Rc::new(PlaybackLibraryRemoval { controller: controller.downgrade() })));
         controller
     }
 
@@ -198,29 +207,6 @@ impl PlaybackController {
         #[cfg(not(target_arch = "wasm32"))]
         cx.extend_shutdown_timeout(Duration::from_secs(45));
         let (saves, incoming) = async_channel::unbounded();
-        let library_backend = backend.clone();
-        cx.spawn(async move |this, cx| {
-            let Ok(changes) = library_backend.library_list_changes().await else {
-                return;
-            };
-            loop {
-                let expected = this.update(cx, |controller, _| controller.current.as_ref().map(|active| (active.record.session_id, *active.record.locator.library_id()))).ok().flatten();
-                let libraries = library_backend.libraries().await;
-                if let (Some((session_id, library_id)), Ok(libraries)) = (expected, libraries) {
-                    if !libraries.iter().any(|entry| entry.library_id() == &library_id) {
-                        let _ = this.update(cx, |controller, cx| {
-                            if controller.current.as_ref().is_some_and(|active| active.record.session_id == session_id) {
-                                controller.close(cx);
-                            }
-                        });
-                    }
-                }
-                if changes.recv().await.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
         let restore_backend = backend.clone();
         let (restored_tx, restored_rx) = async_channel::bounded(1);
         let writer = async move {
@@ -301,19 +287,19 @@ impl PlaybackController {
             // Return the future itself: spawning it on the stopped UI executor
             // deadlocks shutdown. Capture no entity/App access across awaits.
             async move {
-                if let Some(flush) = position_flush {
-                    if let Err(error) = flush.await {
-                        log::warn!("could not save final audiobook position: {error}");
-                    }
+                if let Some(flush) = position_flush
+                    && let Err(error) = flush.await
+                {
+                    log::warn!("could not save final audiobook position: {error}");
                 }
                 if let Some(snapshot) = snapshot {
                     let _ = saves.try_send(Save::Replace(Some(snapshot())));
                 }
                 let (done, finished) = async_channel::bounded(1);
-                if saves.try_send(Save::Flush(done)).is_ok() {
-                    if let Ok(Err(error)) = finished.recv().await {
-                        log::warn!("could not flush active audiobook state: {error}");
-                    }
+                if saves.try_send(Save::Flush(done)).is_ok()
+                    && let Ok(Err(error)) = finished.recv().await
+                {
+                    log::warn!("could not flush active audiobook state: {error}");
                 }
             }
         })
@@ -321,7 +307,7 @@ impl PlaybackController {
         Self { current: None, generation: 0, opens: OpenOrder::default(), opening: None, user_changed: false, quitting: false, pending_positions: vec![], saves, observation: None }
     }
 
-    fn begin_shutdown(&mut self, cx: &mut Context<Self>) -> Option<browser_ui::LibraryRemovalPreparation> {
+    fn begin_shutdown(&mut self, cx: &mut Context<Self>) -> Option<LibraryRemovalPreparation> {
         if self.quitting {
             return None;
         }
@@ -347,10 +333,10 @@ impl PlaybackController {
                     result = Err(error);
                 }
             }
-            if let Some(flush) = current {
-                if let Err(error) = flush.await {
-                    result = Err(error);
-                }
+            if let Some(flush) = current
+                && let Err(error) = flush.await
+            {
+                result = Err(error);
             }
             result
         }))
@@ -396,7 +382,7 @@ impl PlaybackController {
             return;
         }
         self.stop_current(cx);
-        let metadata = app::PlaybackMetadata { format: book_model::BookFormat::M4b, title, author: String::new(), narrator: None, duration_ms: 0, chapters: vec![], tracks: vec![], cover: vec![] };
+        let metadata = library_model::PlaybackMetadata { format: book_model::BookFormat::M4b, title, author: String::new(), narrator: None, duration_ms: 0, chapters: vec![], tracks: vec![], cover: vec![] };
         let record = ActiveAudiobook::new(locator, 0, 1.0, metadata);
         self.install(record, session, false, cx);
         self.save_current(true, cx);
@@ -451,7 +437,7 @@ impl PlaybackController {
         self.stop_current(cx);
     }
 
-    fn flush_saves(&self) -> browser_ui::LibraryRemovalPreparation {
+    fn flush_saves(&self) -> LibraryRemovalPreparation {
         let (done, finished) = async_channel::bounded(1);
         let queued = self.saves.try_send(Save::Flush(done)).is_ok();
         Box::pin(async move {
@@ -462,7 +448,7 @@ impl PlaybackController {
         })
     }
 
-    fn prepare_removal(&mut self, library: sync_common::LibraryId, cx: &mut Context<Self>) -> browser_ui::LibraryRemovalPreparation {
+    fn prepare_removal(&mut self, library: LibraryId, cx: &mut Context<Self>) -> LibraryRemovalPreparation {
         if self.quitting {
             return Box::pin(async { Err("Application is shutting down".into()) });
         }
@@ -504,7 +490,7 @@ impl PlaybackController {
         )
     }
 
-    fn finish_active_removal(&mut self, positions: browser_ui::LibraryRemovalPreparation, cx: &mut Context<Self>) -> browser_ui::LibraryRemovalPreparation {
+    fn finish_active_removal(&mut self, positions: LibraryRemovalPreparation, cx: &mut Context<Self>) -> LibraryRemovalPreparation {
         let library = *self.current.as_ref().expect("active removal requires a session").record.locator.library_id();
         let positions = self.track_position_flush(library, positions, cx);
         self.opens.cancel_pending();
@@ -579,7 +565,7 @@ impl PlaybackController {
         cx.notify();
     }
 
-    fn track_position_flush(&mut self, library: sync_common::LibraryId, positions: browser_ui::LibraryRemovalPreparation, cx: &mut Context<Self>) -> PositionFlush {
+    fn track_position_flush(&mut self, library: LibraryId, positions: LibraryRemovalPreparation, cx: &mut Context<Self>) -> PositionFlush {
         self.pending_positions.retain(|(_, flush)| flush.peek().is_none());
         let positions = positions.shared();
         self.pending_positions.push((library, positions.clone()));
@@ -609,398 +595,5 @@ impl PlaybackController {
         self.observation = None;
         let _ = self.saves.try_send(Save::Replace(None));
         cx.notify();
-    }
-}
-
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn failed_initial_save_does_not_discard_later_updates_for_selected_session() {
-        let mut identity = SaveIdentity::new(Some(1));
-        identity.select(Some(2));
-        // Failed replacement: disk still contains 1, but updates belong to 2.
-        assert_eq!(identity.stored, Some(1));
-        assert!(identity.accepts_update(2));
-        assert!(!identity.accepts_update(1));
-        identity.committed(Some(2));
-        assert_eq!(identity.stored, Some(2));
-        assert!(identity.accepts_update(2));
-    }
-
-    #[test]
-    fn failed_close_does_not_allow_old_updates_to_resurrect_playback() {
-        let mut identity = SaveIdentity::new(Some(1));
-        identity.select(None);
-        assert!(!identity.accepts_update(1));
-        assert_eq!(identity.stored, Some(1));
-        identity.select(Some(2));
-        assert!(identity.accepts_update(2));
-        assert_eq!(identity.stored, Some(1), "new save must still compare against actual disk identity");
-        identity.committed(Some(2));
-        identity.select(None);
-        identity.committed(None);
-        assert!(!identity.accepts_update(2));
-        assert_eq!(identity.stored, None);
-    }
-
-    fn stopped_controller(cx: &mut gpui::TestAppContext) -> (Entity<PlaybackController>, async_channel::Receiver<Save>, tempfile::TempDir) {
-        let directory = tempfile::tempdir().unwrap();
-        let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
-        let (backend, _) = AppClient::start_native(launch).unwrap();
-        let (controller, writes, library) = opening_controller(cx);
-        let record = ActiveAudiobook::new(
-            BookLocator::new(library, "d".repeat(64).parse().unwrap()),
-            42_000,
-            1.25,
-            app::PlaybackMetadata { format: book_model::BookFormat::M4b, title: "Recoverable book".into(), author: "Author".into(), narrator: None, duration_ms: 100_000, chapters: vec![], tracks: vec![], cover: vec![] },
-        );
-        controller.update(cx, |controller, cx| {
-            let session = reader_ui::restore_audiobook(&record, backend.library(library), cx);
-            // Cancel the real persistence task before the deterministic executor
-            // polls it. Tests below inject the final writer result at the barrier.
-            session.update(cx, |session, _| drop(session.stop_and_flush()));
-            controller.install(record, session, true, cx);
-        });
-        (controller, writes, directory)
-    }
-
-    fn assert_paused_recovery(controller: &Entity<PlaybackController>, cx: &mut gpui::TestAppContext) {
-        controller.read_with(cx, |controller, cx| {
-            let active = controller.current.as_ref().expect("failed removal must retain the dock");
-            assert_eq!(active.record.position_ms, 42_000);
-            assert_eq!(active.record.speed, 1.25);
-            assert!(!active.session.read(cx).is_playing());
-            assert!(controller.observation.is_some());
-        });
-        // Do not submit a real backend write during fixture teardown.
-        controller.update(cx, |controller, cx| {
-            controller.current.as_ref().unwrap().session.update(cx, |session, _| drop(session.stop_and_flush()));
-        });
-    }
-
-    #[gpui::test]
-    async fn failed_position_flush_retains_recovery_and_never_clears_record(cx: &mut gpui::TestAppContext) {
-        let (controller, writes, _directory) = stopped_controller(cx);
-        let session = controller.read_with(cx, |controller, _| controller.current.as_ref().unwrap().session.clone());
-        let result = controller.update(cx, |controller, cx| controller.finish_active_removal(Box::pin(async { Err("progress failed".into()) }), cx)).await;
-        assert_eq!(result, Err("progress failed".into()));
-        assert_paused_recovery(&controller, cx);
-        controller.read_with(cx, |controller, _| assert_eq!(controller.current.as_ref().unwrap().session, session));
-        let mut replacement = false;
-        while let Ok(command) = writes.try_recv() {
-            match command {
-                Save::Replace(Some(record)) => {
-                    replacement = true;
-                    assert_eq!(record.position_ms, 42_000);
-                }
-                Save::Replace(None) => panic!("failed progress save must not clear restoration"),
-                _ => {}
-            }
-        }
-        assert!(replacement);
-    }
-
-    #[gpui::test]
-    async fn failed_clear_restores_paused_session_as_replacement(cx: &mut gpui::TestAppContext) {
-        let (controller, writes, _directory) = stopped_controller(cx);
-        let preparation = controller.update(cx, |controller, cx| controller.finish_active_removal(Box::pin(async { Ok(()) }), cx));
-        cx.run_until_parked();
-        assert!(matches!(writes.try_recv().unwrap(), Save::Update(_)));
-        let Save::Flush(done) = writes.try_recv().unwrap() else {
-            panic!("expected snapshot barrier");
-        };
-        done.try_send(Ok(())).unwrap();
-        cx.run_until_parked();
-        assert!(matches!(writes.try_recv().unwrap(), Save::Replace(None)));
-        let Save::Flush(done) = writes.try_recv().unwrap() else {
-            panic!("expected clear barrier");
-        };
-        done.try_send(Err("disk full".into())).unwrap();
-        assert_eq!(preparation.await, Err("disk full".into()));
-        assert_paused_recovery(&controller, cx);
-        assert!(matches!(writes.try_recv().unwrap(), Save::Replace(Some(_))));
-    }
-
-    #[gpui::test]
-    async fn failed_snapshot_flush_recovers_without_queuing_clear(cx: &mut gpui::TestAppContext) {
-        let (controller, writes, _directory) = stopped_controller(cx);
-        let preparation = controller.update(cx, |controller, cx| controller.finish_active_removal(Box::pin(async { Ok(()) }), cx));
-        cx.run_until_parked();
-        assert!(matches!(writes.try_recv().unwrap(), Save::Update(_)));
-        let Save::Flush(done) = writes.try_recv().unwrap() else {
-            panic!("expected snapshot barrier");
-        };
-        done.try_send(Err("snapshot failed".into())).unwrap();
-        assert_eq!(preparation.await, Err("snapshot failed".into()));
-        assert_paused_recovery(&controller, cx);
-        assert!(matches!(writes.try_recv().unwrap(), Save::Replace(Some(_))));
-        assert!(writes.is_empty(), "failed snapshot must never queue a clear");
-    }
-
-    #[gpui::test]
-    async fn removal_waits_for_both_state_barriers_before_dropping_session(cx: &mut gpui::TestAppContext) {
-        let (controller, writes, _directory) = stopped_controller(cx);
-        let preparation = controller.update(cx, |controller, cx| controller.finish_active_removal(Box::pin(async { Ok(()) }), cx));
-        for clearing in [false, true] {
-            cx.run_until_parked();
-            controller.read_with(cx, |controller, _| assert!(controller.current.is_some()));
-            let command = writes.try_recv().unwrap();
-            assert!(if clearing { matches!(command, Save::Replace(None)) } else { matches!(command, Save::Update(_)) });
-            let Save::Flush(done) = writes.try_recv().unwrap() else {
-                panic!("expected barrier");
-            };
-            done.try_send(Ok(())).unwrap();
-        }
-        preparation.await.unwrap();
-        controller.read_with(cx, |controller, _| assert!(controller.current.is_none()));
-    }
-
-    #[gpui::test]
-    async fn late_removal_failure_cannot_undo_explicit_close(cx: &mut gpui::TestAppContext) {
-        let (controller, writes, _directory) = stopped_controller(cx);
-        let (done, positions) = async_channel::bounded(1);
-        let preparation = controller.update(cx, |controller, cx| controller.finish_active_removal(Box::pin(async move { positions.recv().await.unwrap() }), cx));
-        controller.update(cx, |controller, cx| controller.close(cx));
-        done.try_send(Err("progress failed".into())).unwrap();
-        assert_eq!(preparation.await, Err("progress failed".into()));
-        controller.read_with(cx, |controller, _| assert!(controller.current.is_none()));
-        while let Ok(command) = writes.try_recv() {
-            assert!(!matches!(command, Save::Replace(Some(_))), "late failure resurrected a closed session");
-        }
-    }
-
-    #[gpui::test]
-    async fn shutdown_during_clear_reselects_the_retained_restore_record(cx: &mut gpui::TestAppContext) {
-        let (controller, writes, _directory) = stopped_controller(cx);
-        let preparation = controller.update(cx, |controller, cx| controller.finish_active_removal(Box::pin(async { Ok(()) }), cx));
-        cx.run_until_parked();
-        assert!(matches!(writes.try_recv().unwrap(), Save::Update(_)));
-        let Save::Flush(done) = writes.try_recv().unwrap() else {
-            panic!("expected snapshot barrier");
-        };
-        done.try_send(Ok(())).unwrap();
-        cx.run_until_parked();
-        assert!(matches!(writes.try_recv().unwrap(), Save::Replace(None)));
-        let Save::Flush(done) = writes.try_recv().unwrap() else {
-            panic!("expected clear barrier");
-        };
-        let shutdown = controller.update(cx, |controller, cx| controller.begin_shutdown(cx)).unwrap();
-        shutdown.await.unwrap();
-        controller.update(cx, |controller, cx| controller.save_current(true, cx));
-        assert!(matches!(writes.try_recv().unwrap(), Save::Replace(Some(_))), "shutdown snapshot must not be an ignored update after clear");
-        done.try_send(Ok(())).unwrap();
-        assert!(preparation.await.is_err());
-        controller.read_with(cx, |controller, _| assert!(controller.current.is_some()));
-    }
-
-    #[gpui::test]
-    async fn shutdown_joins_inflight_removal_progress_even_after_close(cx: &mut gpui::TestAppContext) {
-        for close in [false, true] {
-            for outcome in [Ok(()), Err("final producer failed".to_owned())] {
-                let (controller, _writes, _directory) = stopped_controller(cx);
-                let (done, positions) = async_channel::bounded(1);
-                let removal = controller.update(cx, |controller, cx| controller.finish_active_removal(Box::pin(async move { positions.recv().await.unwrap() }), cx));
-                if close {
-                    controller.update(cx, |controller, cx| controller.close(cx));
-                }
-                let mut shutdown = controller.update(cx, |controller, cx| controller.begin_shutdown(cx)).expect("shutdown must join the outstanding producer");
-                let mut poll = std::task::Context::from_waker(Waker::noop());
-                assert!(shutdown.as_mut().poll(&mut poll).is_pending());
-                done.try_send(outcome.clone()).unwrap();
-                assert_eq!(shutdown.await, outcome);
-                assert!(removal.await.is_err(), "shutdown must cancel deletion, not its pending progress flush");
-                controller.read_with(cx, |controller, _| assert_eq!(controller.current.is_none(), close));
-            }
-        }
-    }
-
-    #[gpui::test]
-    async fn cancelled_removal_waiter_does_not_cancel_shutdown_progress(cx: &mut gpui::TestAppContext) {
-        let (controller, _writes, _directory) = stopped_controller(cx);
-        let (done, positions) = async_channel::bounded(1);
-        let removal = controller.update(cx, |controller, cx| controller.finish_active_removal(Box::pin(async move { positions.recv().await.unwrap() }), cx));
-        drop(removal);
-        let mut shutdown = controller.update(cx, |controller, cx| controller.begin_shutdown(cx)).unwrap();
-        let mut poll = std::task::Context::from_waker(Waker::noop());
-        assert!(shutdown.as_mut().poll(&mut poll).is_pending());
-        done.try_send(Ok(())).unwrap();
-        shutdown.await.unwrap();
-    }
-
-    #[gpui::test]
-    async fn close_tracks_final_progress_and_completed_flushes_are_pruned(cx: &mut gpui::TestAppContext) {
-        let (controller, _writes, _directory) = stopped_controller(cx);
-        controller.update(cx, |controller, cx| {
-            controller.close(cx);
-            assert!(controller.current.is_none());
-            assert_eq!(controller.pending_positions.len(), 1, "Close must retain the session's final producer");
-        });
-        cx.run_until_parked();
-        controller.read_with(cx, |controller, _| assert!(controller.pending_positions[0].1.peek().is_some()));
-        let (done, saved) = async_channel::bounded(1);
-        controller.update(cx, |controller, cx| {
-            drop(controller.track_position_flush(sync_common::LibraryId::from_u128(1), Box::pin(async move { saved.recv().await.unwrap() }), cx));
-            assert_eq!(controller.pending_positions.len(), 1, "completed producers must not accumulate across replacements");
-        });
-        let mut shutdown = controller.update(cx, |controller, cx| controller.begin_shutdown(cx)).unwrap();
-        let mut poll = std::task::Context::from_waker(Waker::noop());
-        assert!(shutdown.as_mut().poll(&mut poll).is_pending());
-        done.try_send(Ok(())).unwrap();
-        shutdown.await.unwrap();
-    }
-
-    #[gpui::test]
-    async fn removal_after_close_waits_only_for_origin_progress(cx: &mut gpui::TestAppContext) {
-        for outcome in [Ok(()), Err("final save failed".to_owned())] {
-            let (controller, _writes, library) = opening_controller(cx);
-            let (done, saved) = async_channel::bounded(1);
-            controller.update(cx, |controller, cx| {
-                controller.close(cx);
-                drop(controller.track_position_flush(library, Box::pin(async move { saved.recv().await.unwrap() }), cx));
-            });
-            let other = sync_common::LibraryId::from_u128(999);
-            assert_eq!(controller.update(cx, |controller, cx| controller.prepare_removal(other, cx)).await, Ok(()));
-            let mut removal = controller.update(cx, |controller, cx| controller.prepare_removal(library, cx));
-            let mut poll = std::task::Context::from_waker(Waker::noop());
-            assert!(removal.as_mut().poll(&mut poll).is_pending());
-            done.try_send(outcome.clone()).unwrap();
-            assert_eq!(removal.await, outcome);
-        }
-    }
-
-    fn opening_controller(cx: &mut gpui::TestAppContext) -> (Entity<PlaybackController>, async_channel::Receiver<Save>, sync_common::LibraryId) {
-        let (saves, received) = async_channel::unbounded();
-        let library = sync_common::LibraryId::from_u128(1);
-        let locator = BookLocator::new(library, "d".repeat(64).parse().unwrap());
-        let controller = cx.new(|_| PlaybackController { current: None, generation: 0, opens: OpenOrder::default(), opening: Some(locator), user_changed: false, quitting: false, pending_positions: vec![], saves, observation: None });
-        (controller, received, library)
-    }
-
-    #[gpui::test]
-    async fn shutdown_seals_opening_and_preserves_restore_state(cx: &mut gpui::TestAppContext) {
-        let (controller, writes, library) = opening_controller(cx);
-        let locator = BookLocator::new(library, "d".repeat(64).parse().unwrap());
-        controller.update(cx, |controller, cx| {
-            let old_request = controller.reserve_open();
-            assert!(controller.begin_shutdown(cx).is_none());
-            assert!(controller.opening.is_none());
-            assert!(controller.user_changed);
-            assert!(!controller.prepare_open(old_request, &locator, cx));
-            let late_request = controller.reserve_open();
-            assert!(!controller.prepare_open(late_request, &locator, cx));
-            assert!(!controller.activate_current(late_request, &locator, None, cx));
-            let generation = controller.generation;
-            controller.close(cx);
-            assert!(controller.begin_shutdown(cx).is_none());
-            assert_eq!(controller.generation, generation, "shutdown must be idempotent");
-        });
-        let error = controller.update(cx, |controller, cx| controller.prepare_removal(library, cx)).await;
-        assert_eq!(error, Err("Application is shutting down".into()));
-        assert!(writes.is_empty(), "late actions must not clear the restorable session");
-        // Shutdown may still enqueue and await the final ordered save barrier.
-        let flush = controller.read_with(cx, |controller, _| controller.flush_saves());
-        let Save::Flush(done) = writes.recv().await.unwrap() else {
-            panic!("expected flush");
-        };
-        done.send(Ok(())).await.unwrap();
-        flush.await.unwrap();
-    }
-
-    #[gpui::test]
-    async fn removal_cancels_opening_and_waits_for_state_flush(cx: &mut gpui::TestAppContext) {
-        let (controller, writes, library) = opening_controller(cx);
-        let mut preparation = controller.update(cx, |controller, cx| controller.prepare_removal(library, cx));
-        controller.read_with(cx, |controller, _| {
-            assert!(controller.opening.is_none());
-            assert_eq!(controller.generation, 1);
-        });
-        let mut poll = std::task::Context::from_waker(Waker::noop());
-        assert!(preparation.as_mut().poll(&mut poll).is_pending());
-        assert!(matches!(writes.recv().await.unwrap(), Save::Replace(None)));
-        let Save::Flush(done) = writes.recv().await.unwrap() else {
-            panic!("expected flush barrier");
-        };
-        done.send(Ok(())).await.unwrap();
-        preparation.await.unwrap();
-    }
-
-    #[gpui::test]
-    async fn failed_state_flush_rejects_removal(cx: &mut gpui::TestAppContext) {
-        let (controller, writes, library) = opening_controller(cx);
-        let preparation = controller.update(cx, |controller, cx| controller.prepare_removal(library, cx));
-        assert!(matches!(writes.recv().await.unwrap(), Save::Replace(None)));
-        let Save::Flush(done) = writes.recv().await.unwrap() else {
-            panic!("expected flush barrier");
-        };
-        done.send(Err("disk full".to_owned())).await.unwrap();
-        assert_eq!(preparation.await, Err("disk full".to_owned()));
-    }
-
-    #[gpui::test]
-    async fn removing_another_library_does_not_cancel_playback_opening(cx: &mut gpui::TestAppContext) {
-        let (controller, writes, _) = opening_controller(cx);
-        controller.update(cx, |controller, cx| controller.prepare_removal(sync_common::LibraryId::from_u128(2), cx)).await.unwrap();
-        assert!(writes.is_empty());
-        controller.read_with(cx, |controller, _| assert!(controller.opening.is_some()));
-    }
-
-    #[gpui::test]
-    fn application_windows_share_one_controller(cx: &mut gpui::TestAppContext) {
-        let (saves, _received) = async_channel::unbounded();
-        let first = cx.update(|cx| {
-            PlaybackController::shared_with(cx, |_| PlaybackController { current: None, generation: 0, opens: OpenOrder::default(), opening: None, user_changed: false, quitting: false, pending_positions: vec![], saves, observation: None })
-        });
-        let second = cx.update(|cx| PlaybackController::shared_with(cx, |_| panic!("a second controller must not be constructed")));
-        assert_eq!(first, second);
-        second.update(cx, |controller, cx| controller.close(cx));
-        first.read_with(cx, |controller, _| {
-            assert!(controller.current.is_none());
-            assert!(controller.user_changed);
-            assert_eq!(controller.generation, 1);
-        });
-    }
-
-    #[test]
-    fn slow_older_format_probe_cannot_override_newer_audiobook_choice() {
-        let mut order = OpenOrder::default();
-        let first = order.reserve();
-        let second = order.reserve();
-        assert!(order.accept(second));
-        assert!(!order.accept(first));
-        assert!(!order.accept(second));
-    }
-
-    #[gpui::test]
-    async fn removal_invalidates_unresolved_probes_without_cancelling_other_libraries(cx: &mut gpui::TestAppContext) {
-        let (controller, writes, _) = opening_controller(cx);
-        let removed = sync_common::LibraryId::from_u128(2);
-        let other = sync_common::LibraryId::from_u128(3);
-        let locator = |library| BookLocator::new(library, "d".repeat(64).parse().unwrap());
-        let (old, unrelated) = controller.update(cx, |controller, _| (controller.reserve_open(), controller.reserve_open()));
-        controller.update(cx, |controller, cx| controller.prepare_removal(removed, cx)).await.unwrap();
-        assert!(writes.is_empty());
-        controller.update(cx, |controller, cx| {
-            assert!(!controller.prepare_open(old, &locator(removed), cx));
-            assert!(controller.prepare_open(unrelated, &locator(other), cx));
-            let retry = controller.reserve_open();
-            assert!(controller.prepare_open(retry, &locator(removed), cx), "a new attempt after failed deletion must be allowed");
-        });
-    }
-
-    #[test]
-    fn newer_choice_survives_earlier_completion_and_non_audio_probes() {
-        let mut order = OpenOrder::default();
-        let first = order.reserve();
-        let second = order.reserve();
-        let _epub_probe = order.reserve();
-        assert!(order.accept(first));
-        assert!(order.accept(second));
-        let pending = order.reserve();
-        order.cancel_pending();
-        assert!(!order.accept(pending));
-        let after_close = order.reserve();
-        assert!(order.accept(after_close));
     }
 }

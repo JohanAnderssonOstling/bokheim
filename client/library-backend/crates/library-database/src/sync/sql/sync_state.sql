@@ -5,9 +5,13 @@
 
 -- name: sync_state_inventory_page?
 -- param: kind: &str
--- param: key: &str
+-- param: key: &StateKey
 -- param: subkey: &str
-SELECT state_kind,state_key,state_subkey FROM sync_state_version WHERE (state_kind,state_key,state_subkey)>(:kind,:key,:subkey) ORDER BY state_kind,state_key,state_subkey LIMIT 256;
+SELECT state_kind,state_key,state_subkey FROM (
+    SELECT state_kind,state_key,state_subkey FROM sync_state_version
+    UNION ALL SELECT state_kind,content_hash,'' FROM sync_book_record
+) WHERE (state_kind,state_key,state_subkey)>(:kind,:key,:subkey)
+ORDER BY state_kind,state_key,state_subkey LIMIT 256;
 
 -- name: sync_cursor_recovery_pending ->
 SELECT cursor_recovery_pending FROM sync_metadata WHERE singleton = 1;

@@ -71,14 +71,13 @@ for diagnostics and tests. Runtime extraction into temporary directories is gone
 ## Updating and validation
 
 Update the target entry's URL, revision, and verified checksum together. Prepare
-again, then run the release PDF core tests and the browser worker tests. Native
+again, then run the release PDF core tests. Native
 and WASM runtime initialization is confined to the PDF core's `runtime/` modules;
 reader, search, selection, and thumbnail consumers share the existing API.
 
 ```sh
 python3 -m unittest discover -s shared/pdfium -p 'test_*.py'
 cargo test --release -p pdf-reader-core --lib
-bash apps/web-gpui/scripts/test-pdf-worker.sh
 ```
 
 For Android, build `assembleRelease`, inspect APK native libraries and ELF

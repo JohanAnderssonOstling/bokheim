@@ -1,6 +1,6 @@
 //! Library-owned opening configuration.
 
-use account_client::ServerUrl;
+use account_client::Url;
 use sync_common::LibraryId;
 
 /// Application policy captured at library-open time.
@@ -14,7 +14,7 @@ pub struct LibraryOpenConfig {
     pub display_name: String,
     pub root: String,
     pub database_locator: String,
-    pub default_sync_server_url: ServerUrl,
+    pub default_sync_server_url: Url,
     pub metadata_server_url: String,
     pub asset_storage_enabled: bool,
     pub reset_cloud_presence: bool,

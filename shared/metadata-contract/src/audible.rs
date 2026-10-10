@@ -1,5 +1,6 @@
 //! Recording evidence shared by scanning, Audible lookup and chapter alignment.
 //! Recording release dates remain separate from original book dates.
+use book_model::AudiobookChapter;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,13 +27,6 @@ pub struct RecordingEvidence {
     pub recording_release_year: Option<i32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Chapter {
-    pub title: String,
-    pub start_ms: u64,
-    pub end_ms: u64,
-}
-
 /// The backend sends bibliographic evidence, never local paths or content hashes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LookupRequest {
@@ -40,7 +34,7 @@ pub struct LookupRequest {
     pub authors: Vec<String>,
     pub duration_ms: u64,
     pub recording: RecordingEvidence,
-    pub chapters: Vec<Chapter>,
+    pub chapters: Vec<AudiobookChapter>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -60,7 +54,7 @@ pub struct Candidate {
     pub provider_duration_ms: Option<u64>,
     /// Measured from the provider chapter tree, not rounded provider minutes.
     pub duration_ms: Option<u64>,
-    pub chapters: Vec<Chapter>,
+    pub chapters: Vec<AudiobookChapter>,
     pub source: DiscoverySource,
     /// Provider provenance is independent of how the ASIN was discovered.
     #[serde(default = "default_metadata_provider")]
@@ -104,7 +98,7 @@ pub enum LookupStatus {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChapterPlan {
     pub method: AlignmentMethod,
-    pub chapters: Vec<Chapter>,
+    pub chapters: Vec<AudiobookChapter>,
     pub renamed: usize,
     pub detail: String,
 }

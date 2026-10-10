@@ -4,28 +4,28 @@
 
 use std::time::Duration;
 
-use gpui::{App, Context, EventEmitter, Subscription, Task, Window};
-
-use super::controls::SearchField;
+use gpui::{App, AppContext as _, Context, Entity, EventEmitter, Focusable as _, Subscription, Task, Window};
+use gpui_component::input::{InputEvent, InputState};
+use ui_components as components;
 
 /// The query to search for, reported once typing has settled.
 pub(super) struct SearchChanged(pub(super) String);
 
 pub(super) struct BrowseSearch {
     /// Created the first time the box opens, since an input needs a window.
-    field: Option<SearchField>,
+    input: Option<Entity<InputState>>,
     open: bool,
     /// What was last reported, so an edit that changes nothing reports nothing.
     query: String,
     debounce: Option<Task<()>>,
-    _field_changes: Option<Subscription>,
+    _input_changes: Option<Subscription>,
 }
 
 impl EventEmitter<SearchChanged> for BrowseSearch {}
 
 impl BrowseSearch {
     pub(super) fn new() -> Self {
-        Self { field: None, open: false, query: String::new(), debounce: None, _field_changes: None }
+        Self { input: None, open: false, query: String::new(), debounce: None, _input_changes: None }
     }
 
     pub(super) fn is_open(&self) -> bool {
@@ -33,19 +33,25 @@ impl BrowseSearch {
     }
 
     pub(super) fn is_focused(&self, window: &Window, cx: &App) -> bool {
-        self.field.as_ref().is_some_and(|field| field.is_focused(window, cx))
+        self.input.as_ref().is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
     }
 
     pub(super) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.field.is_none() {
-            let (field, changes) = SearchField::new(Some("Search books or authors"), |search: &mut Self, cx| search.field_changed(cx), window, cx);
-            self.field = Some(field);
-            self._field_changes = Some(changes);
-        }
+        let input = match &self.input {
+            Some(input) => input.clone(),
+            None => {
+                let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search books or authors"));
+                self._input_changes = Some(cx.subscribe(&input, |search, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        search.input_changed(cx);
+                    }
+                }));
+                self.input = Some(input.clone());
+                input
+            }
+        };
         self.open = true;
-        if let Some(field) = &self.field {
-            field.focus(window, cx);
-        }
+        input.read(cx).focus_handle(cx).focus(window, cx);
         cx.notify();
     }
 
@@ -56,23 +62,24 @@ impl BrowseSearch {
     }
 
     /// Empties the box without reporting it, for a page that has already
-    /// dropped the query itself.
+    /// dropped the query itself. The change the input reports matches the
+    /// emptied query, so nothing is searched.
     pub(super) fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.query.clear();
         self.debounce = None;
-        if let Some(field) = &self.field {
-            field.clear(window, cx);
+        if let Some(input) = &self.input {
+            input.update(cx, |input, cx| input.set_value("", window, cx));
         }
     }
 
     pub(super) fn render(&self) -> Option<gpui::Div> {
-        self.open.then(|| self.field.as_ref().map(SearchField::render)).flatten()
+        self.open.then(|| self.input.as_ref().map(components::browser_search_control)).flatten()
     }
 
     /// Reports the typed query once typing pauses.
-    fn field_changed(&mut self, cx: &mut Context<Self>) {
-        let Some(field) = &self.field else { return };
-        let query = field.query(cx);
+    fn input_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = &self.input else { return };
+        let query = input.read(cx).value().to_string();
         if query == self.query {
             return;
         }

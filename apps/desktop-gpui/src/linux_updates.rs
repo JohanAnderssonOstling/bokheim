@@ -1,14 +1,17 @@
-//! GPUI binding for the Linux startup/update host. Never activates from a UI tick.
+//! GPUI binding for the Linux startup/update host. Activation belongs to startup.
 use browser_ui::{UpdateAction, UpdateControls, UpdateView};
 use gpui::{App, AppContext, Entity};
 use linux_update_host::Host;
 pub use linux_update_host::Startup;
 use std::{
+    cell::RefCell,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
-static HOST: OnceLock<Arc<Mutex<Host>>> = OnceLock::new();
+thread_local! {
+    // Startup owns the host until healthy() commits; the worker then takes it.
+    static HOST: RefCell<Option<Host>> = const { RefCell::new(None) };
+}
 
 pub use crate::update_entry::candidate_entry;
 
@@ -34,20 +37,23 @@ pub fn initialize(data: &Path) -> Result<Startup, String> {
     let trial = args.windows(2).find(|a| a[0] == "--bokheim-update-trial").map(|a| a[1].as_str());
     let startup = host.startup(trial)?;
     if matches!(startup, Startup::Run) {
-        HOST.set(Arc::new(Mutex::new(host))).map_err(|_| "Linux update host already initialized")?;
+        HOST.with_borrow_mut(|slot| {
+            if slot.is_some() {
+                return Err("Linux update host already initialized");
+            }
+            *slot = Some(host);
+            Ok(())
+        })?;
     }
     Ok(startup)
 }
 
 pub fn trial_pending() -> bool {
-    HOST.get().is_some_and(|h| h.lock().map(|h| h.is_trial()).unwrap_or(false))
+    HOST.with_borrow(|host| host.as_ref().is_some_and(Host::is_trial))
 }
 
 pub fn healthy() -> Result<(), String> {
-    if let Some(host) = HOST.get() {
-        host.lock().map_err(|_| "update host lock poisoned")?.healthy()?;
-    }
-    Ok(())
+    HOST.with_borrow_mut(|host| host.as_mut().map_or(Ok(()), Host::healthy))
 }
 
 /// Parent waits only during a new launch, while no previous user session exists.
@@ -76,11 +82,7 @@ pub fn launch(data: &Path, executable: &Path, trial: Option<&str>) -> Result<boo
 }
 
 pub fn bind(cx: &mut App) -> Option<Entity<UpdateControls>> {
-    let host = HOST.get()?.clone();
-    let restart = {
-        let h = host.lock().ok()?;
-        h.executable.clone()
-    };
+    let restart = HOST.with_borrow(|host| host.as_ref().map(|host| host.executable.clone()))?;
     // APPIMAGE points to the persistent package, current_exe to its temporary mount.
     let restart = std::env::var_os("APPIMAGE").map(PathBuf::from).unwrap_or(restart);
     let (actions, requests) = std::sync::mpsc::channel();
@@ -100,42 +102,40 @@ pub fn bind(cx: &mut App) -> Option<Entity<UpdateControls>> {
     });
     let weak = controls.downgrade();
     let worker = crate::blocking_worker::BlockingWorker::new(cx.background_executor(), 1);
-    // Scheduling this after the startup callback lets healthy() commit before polling.
+    // The startup callback commits healthy() before this task transfers ownership.
     cx.spawn(async move |_| {
+        let Some(mut host) = HOST.with_borrow_mut(Option::take) else { return };
         let _ = worker
             .dispatch(move || {
-                let mut retry_delay = Duration::from_secs(1);
+                let mut action = None;
                 loop {
-                    let action = match requests.recv_timeout(retry_delay) {
-                        Ok(action) => Some(action),
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
-                        Err(_) => break,
-                    };
                     let result = (|| {
-                        let mut host = host.lock().map_err(|_| "update host lock poisoned".to_owned())?;
-                        if action == Some(UpdateAction::Update) {
+                        if action.is_none() {
+                            host.check_for_updates()?;
+                        } else if action == Some(UpdateAction::Update) {
                             host.approve()?;
-                            // Publish the committed approval before tick downloads.
-                            views.try_send(Ok(host.view())).map_err(|_| "update UI closed".to_owned())?;
                         }
-                        host.tick()
+                        // Publish availability or committed approval before downloading.
+                        views.try_send(Ok(host.view())).map_err(|_| "update UI closed".to_owned())?;
+                        host.prepare()
                     })();
                     match result {
                         Ok(view) => {
-                            retry_delay = Duration::from_secs(1);
-                            if views.send_blocking(Ok(view)).is_err() {
+                            if views.try_send(Ok(view)).is_err() {
                                 break;
                             }
                         }
                         Err(error) => {
-                            log::warn!("update work will retry: {error}");
-                            if views.try_send(Err(())).is_err() {
+                            log::warn!("update work failed: {error}");
+                            if views.try_send(Ok(host.view())).is_err() || views.try_send(Err(())).is_err() {
                                 break;
                             }
-                            // A new button press can wake the worker during backoff.
-                            retry_delay = Duration::from_secs(30);
                         }
                     }
+                    action = match requests.recv() {
+                        Ok(action) => Some(action),
+                        Err(_) => break,
+                    };
                 }
             })
             .recv()

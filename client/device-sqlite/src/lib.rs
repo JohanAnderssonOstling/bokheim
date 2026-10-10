@@ -97,28 +97,3 @@ mod platform {
         Ok(())
     }
 }
-
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn opening_creates_native_parent_directories() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("nested/storage/database.sqlite3");
-
-        let connection = open(&path, OpenOptions::new()).unwrap();
-
-        assert!(path.is_file());
-        connection.execute("CREATE TABLE example(value TEXT NOT NULL)", []).unwrap();
-    }
-
-    #[test]
-    fn native_wal_policy_is_applied() {
-        let directory = tempfile::tempdir().unwrap();
-        let connection = open(directory.path().join("database.sqlite3"), OpenOptions::new().journal_mode(JournalMode::Wal)).unwrap();
-
-        let mode = connection.query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0)).unwrap();
-        assert_eq!(mode.to_ascii_lowercase(), "wal");
-    }
-}

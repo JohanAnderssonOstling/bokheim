@@ -65,11 +65,11 @@ Descriptions, author identity, ambiguity, provenance and per-book merge behavior
 stay deterministic for the same file facts and answer file. Audible data remains
 live. Cover artwork is resolved on the server: ISBN candidates are tried against
 Open Library with a shared one-request-per-second limit, and selected Audible
-artwork uses the existing proxy. Confirmed bytes persist in `demand.sqlite` and
+artwork is fetched from Audible. Confirmed bytes persist in `demand.sqlite` and
 `/v3/books` returns one reference fetched from `/v3/covers/{id}`. The policy is `books_v3`, prompting clients to refresh saved enrichment.
 Clients otherwise re-ask after their 30-day answer lifetime.
 
-Routes: `/v3/books`, `/v3/covers/{id}`, `/v2/audiobooks/audible` (cover bytes), `/health`,
+Routes: `/v3/books`, `/v3/covers/{id}`, `/health`,
 `/health/descriptions`, and `/internal/operations`. Operations reports the books
 endpoint counters and processing totals; it has no duplicate service counters.
 
@@ -115,7 +115,7 @@ state into a new provider database; the runtime has no cache-upgrade code.
 ## Verification
 
 ```sh
-cargo test -p metadata-server -p metadata-contract -p book-enrichment
+cargo test -p metadata-server -p metadata-contract
 # Python extraction tests also require indexed_bzip2 and the system zstd command.
 python3 -m unittest discover -s servers/metadata -p 'test_*.py'
 ```

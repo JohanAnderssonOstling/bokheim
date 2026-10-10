@@ -2,7 +2,7 @@
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PdfReaderMetadata {
     pub version: u32,
-    pub checksum: String,
+    pub content_hash: String,
     pub pages: Vec<PdfStoredPage>,
     /// Zero-based pages containing no content or only a blank-page notice.
     /// None denotes metadata written before page classification was available.
@@ -23,11 +23,11 @@ pub struct PdfStoredPage {
 }
 
 impl PdfReaderMetadata {
-    pub fn valid_for(&self, checksum: &str) -> bool {
+    pub fn valid_for(&self, content_hash: &str) -> bool {
         self.version == 1
-            && self.checksum == checksum
-            && checksum.len() == 64
-            && checksum.bytes().all(|c| c.is_ascii_hexdigit())
+            && self.content_hash == content_hash
+            && content_hash.len() == 64
+            && content_hash.bytes().all(|c| c.is_ascii_hexdigit())
             && !self.pages.is_empty()
             && self.pages.len() <= 32767
             && self.pages.iter().all(|p| p.width.is_finite() && p.height.is_finite() && p.width > 0.0 && p.height > 0.0 && matches!(p.rotation, 0 | 90 | 180 | 270))
@@ -128,18 +128,18 @@ mod tests {
     use super::*;
     #[test]
     fn old_snapshots_default_optional_fields_and_large_notes_stay_syncable() {
-        let checksum = "a".repeat(64);
+        let content_hash = "a".repeat(64);
         let mut metadata: PdfReaderMetadata = serde_json::from_value(serde_json::json!({
-            "version":1,"checksum":checksum,"pages":[{"width":600,"height":800,"rotation":0}],"outline":[]
+            "version":1,"content_hash":content_hash,"pages":[{"width":600,"height":800,"rotation":0}],"outline":[]
         }))
         .unwrap();
-        assert!(metadata.valid_for(&checksum));
+        assert!(metadata.valid_for(&content_hash));
         let note = PdfStoredAnnotation { page_index: 0, index: 0, kind: PdfStoredAnnotationKind::Note, rects: vec![[0.1, 0.1, 0.2, 0.1]], color: "#abcdef".into(), text: String::new(), note: "\n".repeat(16384) };
         metadata.annotations = vec![note; 200];
-        assert!(!metadata.valid_for(&checksum));
+        assert!(!metadata.valid_for(&content_hash));
         metadata.bound_optional_data();
         assert!(!metadata.annotations.is_empty());
-        assert!(metadata.valid_for(&checksum));
+        assert!(metadata.valid_for(&content_hash));
         assert!(serde_json::to_vec(&metadata).unwrap().len() < 4 * 1024 * 1024);
     }
 }

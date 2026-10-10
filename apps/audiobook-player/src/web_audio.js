@@ -195,7 +195,7 @@ export class BrowserAudio {
                 try { next = await this.renew(); }
                 catch { continue; }
                 if (this.disposed || recovery.signal.aborted || !this.wantsPlay) { this.revokeDirect(next.url); return; }
-                if (next.checksum !== this.direct.checksum) { this.revokeDirect(next.url); throw Error('Audiobook revision changed; reopen it.'); }
+                if (next.content_hash !== this.direct.content_hash) { this.revokeDirect(next.url); throw Error('Audiobook revision changed; reopen it.'); }
                 const previous = this.url;
                 this.url = next.url;
                 this.direct = next;

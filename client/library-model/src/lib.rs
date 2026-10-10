@@ -14,14 +14,14 @@ mod placement;
 pub use placement::{BookPlacement, BookUploadIntent, PublishedStagedBook, RelativeBookPath, RelativeBookPathError, RelativeDirPath, RelativeDirPathError};
 
 mod transfer;
-pub use transfer::{BlobKey, BlobKind, LibraryActivitySnapshot, ScanProgress, TransferJobKind, TransferOrigin, TransferState, TransferStatus};
+pub use transfer::{BlobKey, BlobKind, TransferJobKind, TransferOrigin};
 
 mod download;
-mod import;
-pub use import::{DirectoryImportProgress, ImportFileProgress, ImportFileStage};
+mod playback;
 mod view;
 
 pub use download::{BookDownloadStatus, DownloadProgress, DownloadProgressError, DownloadState};
+pub use playback::PlaybackMetadata;
 pub use view::*;
 
 pub use book_model::BookTocEntry;

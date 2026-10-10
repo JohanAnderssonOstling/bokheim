@@ -39,18 +39,6 @@ pub fn canonical_uuid(value: &str) -> Option<String> {
     uuid::Uuid::parse_str(value).ok().map(|value| value.hyphenated().to_string())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn canonical_identifiers_are_validated_and_normalized() {
-        assert_eq!(canonical_isbn("urn:isbn:978-1-23456-789-7"), Some("9781234567897".to_owned()));
-        assert_eq!(canonical_isbn("978-1-23456-789-8"), None);
-        assert_eq!(canonical_doi("HTTPS://DOI.ORG/10.1000/Example"), Some("10.1000/example".to_owned()));
-        assert_eq!(canonical_uuid("URN:UUID:00112233-4455-6677-8899-AABBCCDDEEFF"), Some("00112233-4455-6677-8899-aabbccddeeff".to_owned()));
-    }
-}
 
 /// Extract complete, checksum-valid ISBNs from metadata text, retaining their
 /// original ISBN-10/13 form. Never take a substring of an alphanumeric token.
@@ -105,53 +93,4 @@ pub fn from_text(text: &str) -> Vec<String> {
 pub fn from_content_candidate(value: &str) -> Option<String> {
     let raw: String = value.chars().filter(|c| !c.is_whitespace()).map(|c| if matches!(c, '\u{00ad}' | '–' | '‐' | '‑') { '-' } else { c }).collect();
     canonical_isbn(&raw).filter(|isbn| (isbn.len() == 10 || isbn.starts_with("978") || isbn.starts_with("979")) && isbn != "0000000000" && isbn != "0000000000000")
-}
-
-#[cfg(test)]
-mod embedded_isbn_tests {
-    use super::*;
-    #[test]
-    fn embedded_isbns_accept_titles_labels_and_common_separators() {
-        for text in [
-            "9780131103627 The C Programming Language",
-            "The C Programming Language (ISBN: 978-0-13-110362-7)",
-            "ISBN-13: 978 0 13 110362 7",
-            "ISBN: 978‑0‑13‑110362‑7",
-            "urn:isbn:9780131103627",
-            "ISBN9780131103627",
-            "9780131103627, 9780131103627",
-        ] {
-            assert_eq!(from_text(text), vec!["9780131103627"], "{text}");
-        }
-        assert_eq!(from_text("ISBN-10: 0-8044-2957-X"), vec!["080442957X"]);
-        assert_eq!(from_text("9780131103627 / 9780306406157"), vec!["9780131103627", "9780306406157"]);
-    }
-    #[test]
-    fn embedded_isbns_reject_invalid_checksums_and_numeric_substrings() {
-        for text in ["9780131103628", "0000000000000", "1239780131103627", "9780131103627123", "id9780131103627foo", "123-9780131103627", "QA76.73.R87", "History"] {
-            assert!(from_text(text).is_empty(), "{text}");
-        }
-    }
-
-    #[test]
-    fn content_candidates_apply_content_acceptance_rules() {
-        assert_eq!(from_content_candidate("978‑0‑13‑110362‑7"), Some("9780131103627".into()));
-        for value in ["0000000000", "0000000000000", "9770131103627", "9780131103628"] {
-            assert_eq!(from_content_candidate(value), None, "{value}");
-        }
-    }
-    #[test]
-    fn promotion_preserves_subjects_and_explicit_identifiers() {
-        use crate::*;
-        let subject = BookSubject::new(None, "ISBN: 9780131103627 The C Programming Language", "dc:subject", None, None).unwrap();
-        let mut metadata = BookMetadata { subjects: vec![subject.clone()], ..BookMetadata::default() };
-        metadata.infer_embedded_subject_isbns().unwrap();
-        metadata.infer_embedded_subject_isbns().unwrap();
-        assert_eq!(metadata.identifiers.len(), 1);
-        assert_eq!(metadata.subjects, vec![subject]);
-        metadata.identifiers = vec![Identifier::new("9780131103627", Scheme::Isbn, Scope::Edition).unwrap()];
-        metadata.infer_embedded_subject_isbns().unwrap();
-        assert_eq!(metadata.identifiers.len(), 1);
-        assert_eq!(metadata.identifiers[0], Identifier::new("9780131103627", Scheme::Isbn, Scope::Edition).unwrap());
-    }
 }

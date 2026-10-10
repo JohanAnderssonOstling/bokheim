@@ -9,7 +9,7 @@ use crate::shell::input::CommandTarget;
 use crate::shell::search::SearchBarTarget;
 use crate::shell::state_panel::{self, SidebarTab};
 use crate::shell::toolbar::SidebarTarget;
-use crate::{CloseSearch, DecreaseScale, FocusReaderSearch, IncreaseScale, NextLine, NextPage, PreviousLine, PreviousPage, ReturnToLibrary, ToggleSearch, ToggleToc};
+use crate::{NextSidebarTab, PreviousSidebarTab, CloseSearch, DecreaseScale, FocusReaderSearch, IncreaseScale, NextLine, NextPage, PreviousLine, PreviousPage, ReturnToLibrary, ToggleSearch, ToggleSidebar, ToggleToc};
 
 use super::{PdfReaderView, ZOOM_STEP};
 
@@ -50,6 +50,40 @@ impl CommandTarget<NextLine> for PdfReaderView {
             self.chrome.hide(cx);
         }
         self.pdf.update(cx, |pdf, cx| pdf.next_item(cx));
+    }
+}
+
+impl CommandTarget<NextSidebarTab> for PdfReaderView {
+    fn execute(&mut self, _: &NextSidebarTab, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = state_panel::adjacent_sidebar_tab(self.sidebar_tab(), self.contents_available(), 1);
+        self.chrome.show(cx);
+        self.select_sidebar_tab(tab, window, cx);
+    }
+}
+
+impl CommandTarget<PreviousSidebarTab> for PdfReaderView {
+    fn execute(&mut self, _: &PreviousSidebarTab, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = state_panel::adjacent_sidebar_tab(self.sidebar_tab(), self.contents_available(), -1);
+        self.chrome.show(cx);
+        self.select_sidebar_tab(tab, window, cx);
+    }
+}
+
+impl CommandTarget<ToggleSidebar> for PdfReaderView {
+    fn execute(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
+        let chrome_visible = self.chrome.is_visible() || (!components::uses_mobile_navigation(window) && self.search_match.is_some());
+        let visible = chrome_visible && (!crate::shell::chrome::sidebar_overlays_document(window) || self.sidebar.is_visible());
+        if visible {
+            self.search_close(window, cx);
+            self.sidebar.close();
+            self.chrome.hide(cx);
+            self.focus_document(window, cx);
+        } else {
+            self.sidebar.reopen();
+            self.chrome.show(cx);
+            self.sidebar_focus.focus(window, cx);
+        }
+        notify(cx, Component::PdfShell, "sidebar_toggled");
     }
 }
 

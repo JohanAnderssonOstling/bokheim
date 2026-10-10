@@ -4,12 +4,12 @@ mod api;
 mod assets;
 mod state;
 
-pub use api::{SyncCredentials, TransportError};
+pub use api::SyncCredentials;
 pub use assets::{
-    blob_endpoint, classify_asset_status, download_thumbnail_batch, negotiate_blobs, thumbnail_batch_endpoint, thumbnail_endpoint, thumbnail_presence, thumbnail_presence_endpoint, upload_book_revision_stream, upload_thumbnail_batch,
+    blob_endpoint, classify_asset_status, download_thumbnail_batch, negotiate_blobs, thumbnail_batch_endpoint, thumbnail_endpoint, thumbnail_presence, thumbnail_presence_endpoint, upload_book_stream, upload_thumbnail_batch,
     validate_streaming_asset_response, AssetResponseError, AssetStatus,
 };
-pub use binary_http::{ServerUrl, ServerUrlError};
+pub use url::Url;
 pub use state::{exchange_changes, SyncRequestError};
 pub use sync_common::{validate_pull_batch, validate_push_response, PullBatchError, PushResponseError, ValidatedPushResponse};
 

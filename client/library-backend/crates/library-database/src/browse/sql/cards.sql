@@ -7,9 +7,8 @@ SELECT book.content_hash,book.title,book.subtitle,book.author,
        book.read_progress AS progress,book.format,book.added_at,
        COALESCE((SELECT downloaded FROM library_book_presence WHERE book_row_id=book.row_id),0) AS downloaded,
        COALESCE(transfer.book_download IS NOT NULL, 0) AS download_requested,
-       audio.duration_ms AS audiobook_duration_ms
+       book.duration_ms AS audiobook_duration_ms
 FROM json_each(:book_ids) selected
 JOIN book ON book.row_id=selected.value
 LEFT JOIN book_transfer transfer ON transfer.content_hash=book.content_hash
-LEFT JOIN book_navigation audio ON audio.content_hash=book.content_hash
 ORDER BY selected.key;

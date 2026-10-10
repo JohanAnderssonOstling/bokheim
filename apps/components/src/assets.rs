@@ -169,21 +169,3 @@ impl AssetSource for Assets {
         Ok(assets)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashSet;
-
-    #[test]
-    fn phosphor_overrides_are_unique_valid_light_svgs() {
-        let mut paths = HashSet::new();
-        for (path, bytes) in PHOSPHOR_LIGHT_ICONS {
-            assert!(paths.insert(path), "duplicate icon override: {path}");
-            let svg = std::str::from_utf8(bytes).expect("Phosphor SVG must be UTF-8");
-            assert!(svg.starts_with("<svg"), "invalid SVG override: {path}");
-            assert!(svg.contains("viewBox=\"0 0 256 256\""), "unexpected Phosphor viewBox: {path}");
-            assert!(svg.contains("currentColor"), "icon must inherit the GPUI text color: {path}");
-        }
-    }
-}

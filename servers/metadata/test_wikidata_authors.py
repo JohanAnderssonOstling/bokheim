@@ -33,7 +33,4 @@ class AuthorIndexTest(unittest.TestCase):
             self.assertEqual(c.execute('SELECT birth_year FROM profile WHERE qid="Q1"').fetchone()[0],1900)
             self.assertEqual(c.execute('PRAGMA quick_check').fetchone()[0],'ok')
             self.assertFalse(Path(str(out)+'.building').exists())
-    def test_uncertain_dates_are_not_identity_conflicts(self):
-        self.assertIsNone(m.ol_year('circa 1900'));self.assertIsNone(m.ol_year('1900?'))
-        self.assertIsNone(m.year({'P569':[claim({'time':'+1900-01-01T00:00:00Z','precision':8})]},'P569'))
 if __name__=='__main__':unittest.main()

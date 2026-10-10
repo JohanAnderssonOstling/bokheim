@@ -1,4 +1,3 @@
-use std::time::Instant;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -69,6 +68,7 @@ impl Drop for PrimaryInstance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn lock_failures_do_not_signal_a_nonexistent_primary() {

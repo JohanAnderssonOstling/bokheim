@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use book_content::{Book, BookFormat};
 use std::{
     cell::{Cell, RefCell},
     io::{Read, Seek, SeekFrom},
@@ -19,13 +19,13 @@ pub async fn open_file(url: String) -> Result<(), JsValue> {
     close_file();
     let generation = GENERATION.with(Cell::get);
     let url = reqwest::Url::parse(&url).map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let (source, initial_bytes) = remote_file::describe(url.clone(), TOKEN.with(|value| value.borrow().clone()), ContentHash::new("7777777777777777777777777777777777777777777777777777777777777777")).await.map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let reader = remote_file::browser_reader(source.length, Some(initial_bytes), move |offset, length| {
+    let (source, initial_bytes) = remote_file::describe(&reqwest::Client::new(), url.clone(), &TOKEN.with(|value| value.borrow().clone()), ContentHash::new("7777777777777777777777777777777777777777777777777777777777777777")).await.map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let reader = remote_file::browser_reader(source.length, initial_bytes, move |offset, length| {
         let url = url.clone();
         let source = source.clone();
         let token = TOKEN.with(|value| value.borrow().clone());
         Box::pin(async move { remote_file::fetch_range(&reqwest::Client::new(), url, &source, &token, offset, length).await.map_err(|e| e.to_string()) })
-    })?;
+    }).map_err(|error| JsValue::from_str(&error.to_string()))?;
     if GENERATION.with(Cell::get) != generation { return Err("file closed while opening".into()); }
     FILE.with(|file| *file.borrow_mut() = Some(reader));
     Ok(())
@@ -61,7 +61,7 @@ pub fn close_file() {
 }
 
 thread_local! {
-    static EPUB: RefCell<Option<Arc<epub_provider::EpubProvider>>> = const { RefCell::new(None) };
+    static EPUB: RefCell<Option<Book>> = const { RefCell::new(None) };
 }
 #[wasm_bindgen]
 pub async fn open_epub(url: String) -> Result<(), JsValue> {
@@ -69,13 +69,20 @@ pub async fn open_epub(url: String) -> Result<(), JsValue> {
     open_file(url).await?;
     let generation = GENERATION.with(Cell::get);
     let file = FILE.with(|slot| slot.borrow_mut().take()).ok_or("file not open")?;
-    let provider = wasm_thread::spawn(move || epub_provider::EpubProvider::try_from_reader(file).map_err(|e| e.to_string())).join_async().await.map_err(|_| "EPUB parser worker panicked")??;
+    let provider = wasm_thread::spawn(move || Book::open_reader(BookFormat::Epub, file).map_err(|e| e.to_string())).join_async().await.map_err(|_| "EPUB parser worker panicked")??;
     if GENERATION.with(Cell::get) != generation { return Err("file closed while opening EPUB".into()); }
-    EPUB.with(|slot| *slot.borrow_mut() = Some(Arc::new(provider)));
+    EPUB.with(|slot| *slot.borrow_mut() = Some(provider));
     Ok(())
 }
 #[wasm_bindgen]
 pub async fn read_epub_entry(name: String) -> Result<usize, JsValue> {
-    let provider = EPUB.with(|slot| slot.borrow().clone()).ok_or("EPUB not open")?;
-    Ok(wasm_thread::spawn(move || provider.read_string(&name).map(|text| text.len()).map_err(|e| e.to_string())).join_async().await.map_err(|_| "EPUB parser worker panicked")??)
+    let generation = GENERATION.with(Cell::get);
+    let mut provider = EPUB.with(|slot| slot.borrow_mut().take()).ok_or("EPUB not open")?;
+    let (provider, result) = wasm_thread::spawn(move || {
+        let result = provider.read_resource_sync(&name, 4 * 1024 * 1024).map(|bytes| String::from_utf8_lossy(&bytes).len()).map_err(|e| e.to_string());
+        (provider, result)
+    }).join_async().await.map_err(|_| "EPUB parser worker panicked")?;
+    if GENERATION.with(Cell::get) != generation { return Err("file closed while reading EPUB".into()); }
+    EPUB.with(|slot| *slot.borrow_mut() = Some(provider));
+    Ok(result?)
 }

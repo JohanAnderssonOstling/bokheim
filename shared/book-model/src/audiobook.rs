@@ -1,10 +1,21 @@
 use std::time::Duration;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A chapter is an interval of the book-wide playback clock, in milliseconds.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AudiobookChapter {
     pub title: String,
-    pub start: Duration,
-    pub end: Duration,
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+impl AudiobookChapter {
+    pub fn start(&self) -> Duration {
+        Duration::from_millis(self.start_ms)
+    }
+
+    pub fn end(&self) -> Duration {
+        Duration::from_millis(self.end_ms)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

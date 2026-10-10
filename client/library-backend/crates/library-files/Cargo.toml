@@ -6,24 +6,21 @@ publish = false
 
 [dependencies]
 client-runtime = { path = "../../../client-runtime" }
-web-time = "1"
 library-model = { path = "../../../library-model" }
 library-replica = { path = "../library-replica" }
 book-access = { path = "../book-access" }
-book-identity = { path = "../../../../shared/book-identity" }
-pdf-view-common = { path = "../../../../shared/pdf-view-common" }
+content-address = { path = "../../../../shared/content-address" }
 client-platform-runtime = { path = "../../../platforms/runtime" }
 thumbnail = { path = "../thumbnail" }
-metadata-contract = { path = "../../../../shared/metadata-contract" }
 sync-common = { path = "../../../../shared/sync-common" }
 blake3 = "1"
 futures-util = { version = "0.3", features = ["io"] }
 log = "0.4"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-audiobook-folder = { path = "../../../../shared/audiobook-folder" }
+audiobook-archive = { path = "../../../../shared/audiobook-archive" }
+audiobook-folder = { path = "../audiobook-folder" }
 client-platform-native = { path = "../../../platforms/native" }
-book-identity = { path = "../../../../shared/book-identity", features = ["native-write"] }
 reqwest = { workspace = true, default-features = false, features = ["stream", "rustls-tls"] }
 tempfile = "3"
 fs2 = "0.4"
@@ -33,7 +30,9 @@ uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 client-platform-web = { path = "../../../platforms/web" }
-web-sys = { version = "0.3", features = ["Blob"] }
+web-sys = { version = "0.3", features = ["Blob", "File"] }
+js-sys = "0.3"
+wasm-bindgen-futures = "0.4"
 reqwest = { workspace = true, default-features = false, features = ["stream"] }
 
 [dev-dependencies]

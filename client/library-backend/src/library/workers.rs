@@ -1,130 +1,193 @@
-//! Lifetime ownership for this library's background tasks.
+//! The library's workers. Each is a `run_timed` loop that asks the database
+//! for its work; events published through `LibraryEventRouter` wake them.
+//! They all run inside the actor's root future and end with it.
 
 use std::future::Future;
 use std::time::Duration;
-use client_platform_runtime::executor::BackendTask;
 
-/// Dropping this value cancels/joins every task held by the platform task
-/// wrapper. A session therefore owns all of its workers as one unit.
-#[derive(Default)]
-pub struct LibraryWorkers {
-    pub(super) account_observer: Option<BackendTask<()>>,
-    pub(super) remote: Option<BackendTask<()>>,
-    pub(super) sync: Option<BackendTask<()>>,
-    pub(super) assets: Option<BackendTask<()>>,
+use super::LibrarySession;
+use super::events::{LibraryEvent, LibraryEventRouter};
+use crate::BackendError;
+use futures_util::FutureExt;
+use library_database::Database;
+use library_runtime::scheduler::{CycleInput, SyncRequest};
+use library_sync::LibrarySync;
+use std::panic::AssertUnwindSafe;
+use std::rc::Rc;
+
+/// Wake receivers, one per worker; the router holds the senders.
+pub(crate) struct WorkerRequests {
+    pub(crate) sync: async_channel::Receiver<SyncRequest>,
+    pub(crate) assets: async_channel::Receiver<SyncRequest>,
+    pub(crate) files: async_channel::Receiver<SyncRequest>,
+    pub(crate) enrichment: async_channel::Receiver<SyncRequest>,
 }
 
-use super::events::{LibraryEvent, LibraryEventSender};
-use super::handle::{LibraryActorCommand, LibraryControl};
-use super::worker_state::WorkerState;
-use crate::{sync::LibrarySync, BackendError};
-use library_runtime::scheduler::{SyncRequest, SyncScheduler};
-use std::sync::Arc;
-
-/// Subscribe before spawning so startup cannot miss an account change.
-pub(super) fn observe_account_changes(account: crate::integration::LibraryAccount, commands: async_channel::Sender<LibraryActorCommand>, sync_wake: SyncScheduler, events: LibraryEventSender) -> impl Future<Output = ()> {
-    let mut changed = account.subscribe();
-    changed.borrow_and_update();
+/// Subscribes immediately, so an account change between opening
+/// and the first poll is not missed.
+pub(super) fn observe_account(account: crate::integration::LibraryAccount, events: LibraryEventRouter) -> impl Future<Output = ()> {
+    let mut account_changed = account.subscribe();
+    account_changed.borrow_and_update();
     async move {
-        while changed.changed().await.is_ok() {
-            let _ = events.try_send(LibraryEvent::ContentsChanged);
-            sync_wake.request_remote_refresh();
-            let _ = commands.try_send(LibraryActorCommand::Control(LibraryControl::WakeAssets(Vec::new())));
+        while account_changed.changed().await.is_ok() {
+            events.emit(LibraryEvent::ContentsChanged);
+            events.sync.request_remote_refresh();
+            events.assets.request_remote_refresh();
         }
     }
 }
 
-pub(super) fn observe_remote_changes(remote_changes: crate::notification_interest::RemoteChanges, sync_wake: SyncScheduler) -> impl Future<Output = ()> {
-    let mut changed = remote_changes.subscribe();
-    changed.borrow_and_update();
-    async move {
-        while changed.changed().await.is_ok() {
-            sync_wake.request_remote_refresh();
-        }
-    }
+/// Runs every worker until dropped; none of them ends on its own.
+pub(super) async fn run_workers(session: Rc<LibrarySession>, requests: WorkerRequests, observers: impl Future<Output = ()>) {
+    let session = &*session;
+    let sync = run_timed(move |input| sync_pass(session, input), requests.sync);
+    let assets = run_timed(move |_| asset_pass(session), requests.assets);
+    let files = run_timed(move |_| replay_and_admit(session), requests.files);
+    let enrichment = run_timed(move |_| session.enrichment.run(), requests.enrichment);
+    #[cfg(not(target_arch = "wasm32"))]
+    let scan = run_scan_worker(session);
+    #[cfg(target_arch = "wasm32")]
+    let scan = async {};
+    futures_util::join!(observers, sync, assets, files, enrichment, scan);
+}
+
+/// Every worker retries a failed pass after 30 s; wakes within 100 ms coalesce.
+async fn run_timed<F: Future<Output = Result<(), ()>>>(pass: impl FnMut(CycleInput) -> F, requests: async_channel::Receiver<SyncRequest>) {
+    library_runtime::scheduler::run_timed(pass, requests, Duration::from_secs(30), Duration::from_millis(100)).await;
 }
 
 /// Create the remote library once for the current server and user.
-async fn ensure_remote_library(sync: &LibrarySync, state: &WorkerState) -> Result<(), BackendError> {
+async fn ensure_remote_library(sync: &LibrarySync, database: &Database) -> Result<(), BackendError> {
     let account = sync.account().ok_or_else(|| BackendError::message("library has no account capability"))?;
     let session = account.require().map_err(crate::BackendError::operation)?;
     let identity = format!("{}|{}", session.server_url(), session.user_id());
-    if let Some(name) = state.registration(identity.clone()).await? {
-        account.create_library(sync.library_id, name).await.map_err(crate::BackendError::operation)?;
-        state.registered(identity).await?;
+    if database.sync_metadata("server_library_created")?.as_deref() == Some(identity.as_str()) {
+        return Ok(());
     }
+    let name = database.sync_metadata("remote_library_name")?.ok_or_else(|| BackendError::message("library has no remote name"))?;
+    account.create_library(sync.library_id, name).await.map_err(crate::BackendError::operation)?;
+    database.set_sync_metadata("server_library_created", &identity)?;
     Ok(())
 }
 
-pub(super) async fn run_sync_scheduler(sync: Arc<LibrarySync>, requests: async_channel::Receiver<SyncRequest>, #[cfg(not(target_arch = "wasm32"))] assets: crate::asset_store::AssetStore, state: WorkerState) {
-    library_runtime::scheduler::run_timed(
-        move |input| {
-            let sync = sync.clone();
-            let state = state.clone();
-            #[cfg(not(target_arch = "wasm32"))]
-            let assets = assets.clone();
-            async move {
-                let result = async {
-                    if !sync.bind_current_account().map_err(crate::BackendError::operation)? {
-                        // Account discovery can lag behind library startup.
-                        // This is a deferred pass, not a successful sync:
-                        // returning an error preserves the scheduler retry
-                        // until the account observer wakes us on sign-in.
-                        return Err(BackendError::message("waiting for account session"));
-                    }
-                    ensure_remote_library(&sync, &state).await?;
-                    if input.remote {
-                        sync.synchronize_state_mode(false).await.map(|_| ()).map_err(crate::BackendError::operation)
-                    } else {
-                        sync.drain_outbox().await.map(|_| ()).map_err(crate::BackendError::operation)
-                    }
-                }
-                .await;
-                // Sync can't replay this itself (SyncStore futures must
-                // stay Send); the orchestrator owns local state instead.
-                #[cfg(not(target_arch = "wasm32"))]
-                if result.is_ok() {
-                    if let Err(error) = state.replay_directories(&assets).await {
-                        log::warn!("directory rename will retry from the durable queue: {error}");
-                    }
-                }
-                result.map_err(|error| log::warn!("library synchronization will resume: {error}"))
-            }
-        },
-        requests,
-        Duration::from_secs(30),
-        Duration::from_millis(100),
-    )
+async fn sync_pass(session: &LibrarySession, input: CycleInput) -> Result<(), ()> {
+    let sync = &session.sync;
+    let result = async {
+        if !sync.bind_current_account().map_err(crate::BackendError::operation)? {
+            // Account discovery can lag behind library startup.
+            // This is a deferred pass, not a successful sync:
+            // returning an error preserves the scheduler retry
+            // until the account observer wakes us on sign-in.
+            return Err(BackendError::message("waiting for account session"));
+        }
+        ensure_remote_library(sync, &session.db).await?;
+        if input.remote {
+            sync.synchronize_state_mode(false).await.map(|_| ()).map_err(crate::BackendError::operation)
+        } else {
+            sync.drain_outbox().await.map(|_| ()).map_err(crate::BackendError::operation)
+        }
+    }
     .await;
+    #[cfg(not(target_arch = "wasm32"))]
+    if result.is_ok() {
+        if let Err(error) = library_placement::replay_directories(&session.db, &session.assets) {
+            log::warn!("directory rename will retry from the durable queue: {error}");
+        }
+    }
+    result.map_err(|error| log::warn!("library synchronization will resume: {error}"))
 }
 
-pub(super) async fn run_asset_scheduler(sync: Arc<LibrarySync>, requests: async_channel::Receiver<SyncRequest>, state: WorkerState) {
-    library_runtime::scheduler::run_timed(
-        move |input| {
-            let sync = sync.clone();
-            let state = state.clone();
-            async move {
-                if !sync.bind_current_account().map_err(|error| log::warn!("could not bind account before asset reconciliation: {error}"))? {
-                    // Do not consume a durable asset wake while account
-                    // discovery is still in progress. The scheduler will
-                    // retry, and the account observer wakes it immediately
-                    // when a usable session arrives.
-                    return Err(());
-                }
-                sync.reconcile_assets(input.hashes).await.map_err(|error: crate::sync::error::SyncError| log::warn!("asset reconciliation will resume: {error}"))?;
-                // A scheduler wake is only a hint; the database owns the
-                // actual queue. `sync_assets` drains eligible paged work
-                // directly; remaining work here is blocked and should
-                // retain the normal retry policy.
-                if state.pending_assets().await.map_err(|error| log::warn!("could not check remaining asset work: {error}"))? {
-                    return Err(());
-                }
-                Ok(())
-            }
-        },
-        requests,
-        Duration::from_secs(30),
-        Duration::from_millis(100),
-    )
-    .await;
+async fn asset_pass(session: &LibrarySession) -> Result<(), ()> {
+    if !session.sync.bind_current_account().map_err(|error| log::warn!("could not bind asset account: {error}"))? {
+        return Ok(());
+    }
+    match session.sync.run_asset_pass().await {
+        Ok(()) | Err(asset_transfer::TransferError::AuthenticationRequired) => Ok(()),
+        Err(error) => {
+            log::warn!("asset pass will retry: {error}");
+            Err(())
+        }
+    }
+}
+
+/// File replay, then upload admission. A scan or folder import owns the
+/// files meanwhile; their completion events wake this worker again.
+async fn replay_and_admit(session: &LibrarySession) -> Result<(), ()> {
+    if session.scanner_running() {
+        return Ok(());
+    }
+    let mut failed = false;
+    if session.assets.local_access_enabled() {
+        let result = AssertUnwindSafe(async {
+            let Some(_files) = session.runtime.begin_local_work() else {
+                return Err(BackendError::message("local file preparation is already running"));
+            };
+            session.run_file_jobs().await
+        })
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| Err(BackendError::message("library file replay panicked")));
+        if let Err(error) = &result {
+            log::warn!("library file replay will resume: {error}");
+        }
+        // A lease can leave durable work queued even after a successful pass.
+        failed = result.is_err() || session.db.has_pending_file_work().unwrap_or(true) || session.db.has_pending_purge_work().unwrap_or(true);
+    }
+    // Admission never waits for a failed replay of other books.
+    if let Err(error) = session.admit_uploads() {
+        log::warn!("upload admission will resume: {error}");
+        return Err(());
+    }
+    session.emit(LibraryEvent::FilesPrepared);
+    if failed {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(all(feature = "watcher", not(target_arch = "wasm32")))]
+type FolderWatcher = notify::RecommendedWatcher;
+#[cfg(all(not(feature = "watcher"), not(target_arch = "wasm32")))]
+type FolderWatcher = ();
+
+/// Scans on open, on folder changes, and after failures.
+#[cfg(not(target_arch = "wasm32"))]
+async fn run_scan_worker(session: &LibrarySession) {
+    let (wake, requests) = library_runtime::scheduler::SyncScheduler::new();
+    let watcher = std::cell::RefCell::new(None);
+    #[cfg(feature = "watcher")]
+    if session.assets.local_access_enabled() {
+        *watcher.borrow_mut() = super::handle::start_filesystem_watcher(session._scanner.root(), wake.clone()).map_err(|error| log::warn!("could not watch library folder {}: {error}", session._scanner.root())).ok();
+    }
+    wake.wake();
+    let (wake, watcher) = (&wake, &watcher);
+    // The debounce is the quiet period while a file manager is still copying.
+    library_runtime::scheduler::run_timed(move |_| scan_and_watch(session, wake, watcher), requests, Duration::from_secs(30), Duration::from_millis(500)).await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn scan_and_watch(session: &LibrarySession, wake: &library_runtime::scheduler::SyncScheduler, watcher: &std::cell::RefCell<Option<FolderWatcher>>) -> Result<(), ()> {
+    // Explicit imports own their in-progress files, including external moves.
+    if session.directory_imports_active() {
+        return Ok(());
+    }
+    if let Err(error) = session.scan_folder().await {
+        log::warn!("filesystem scan failed; retrying in 30 seconds: {error}");
+        #[cfg(feature = "watcher")]
+        if !std::path::Path::new(session._scanner.root()).is_dir() {
+            *watcher.borrow_mut() = None;
+        }
+        return Err(());
+    }
+    #[cfg(feature = "watcher")]
+    if watcher.borrow().is_none() && session.assets.local_access_enabled() {
+        let started = super::handle::start_filesystem_watcher(session._scanner.root(), wake.clone()).map_err(|error| log::warn!("could not watch library folder {}: {error}", session._scanner.root())).ok();
+        // Recheck files that may have arrived before registration.
+        wake.wake_after(if started.is_some() { Duration::from_millis(250) } else { Duration::from_secs(30) });
+        *watcher.borrow_mut() = started;
+    }
+    #[cfg(not(feature = "watcher"))]
+    let _ = (wake, watcher);
+    Ok(())
 }

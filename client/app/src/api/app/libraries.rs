@@ -1,18 +1,18 @@
-use crate::LibraryEntry;
 use super::AppClient;
+use crate::LibraryEntry;
 use crate::runtime::AppCommand;
-use crate::LibraryId;
+use sync_common::LibraryId;
+use tokio::sync::watch;
 
 impl AppClient {
-    pub async fn library_list_changes(&self) -> Result<async_channel::Receiver<()>, String> {
+    /// Subscribe before reading the initial list. Unread changes coalesce;
+    /// await `changed()` and fetch `libraries()` for the current entries.
+    pub async fn library_list_changes(&self) -> Result<watch::Receiver<()>, String> {
         self.transport.library_list_changes_transport().await.map_err(|error| error.to_string())
     }
 
     pub async fn libraries(&self) -> Result<Vec<LibraryEntry>, String> {
         self.request(AppCommand::Libraries).await
-    }
-    pub async fn reconcile_libraries(&self) -> Result<crate::app::LibraryListState, String> {
-        self.request(AppCommand::ReconcileLibraries).await
     }
 
     /// Resolve a destination only when the user imports or downloads a book.
@@ -46,14 +46,6 @@ impl AppClient {
 
     pub async fn create_libraries_with_asset_storage(&self, locators: Vec<String>, asset_storage_enabled: bool) -> Result<(Vec<LibraryId>, Vec<String>), String> {
         self.request(AppCommand::CreateLibrariesWithAssetStorage { locators, asset_storage_enabled }).await
-    }
-
-    pub async fn create_library(&self, name: String) -> Result<LibraryEntry, String> {
-        self.request(AppCommand::CreateLibrary { name }).await
-    }
-
-    pub async fn create_libraries_from_paths(&self, locators: Vec<String>) -> Result<(Vec<LibraryId>, Vec<String>), String> {
-        self.request(AppCommand::CreateLibrariesFromPaths { locators }).await
     }
 
     pub async fn rename_library(&self, library_id: LibraryId, name: String) -> Result<(), String> {

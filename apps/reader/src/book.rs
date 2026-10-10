@@ -1,3 +1,3 @@
-// The UI owns presentation and interaction. Source parsing belongs to the
-// renderer-neutral book layer.
-pub(crate) use html_book::BookSource as NativeBook;
+#[path = "../crates/html/src/book.rs"]
+mod adapter;
+pub(crate) use adapter::BookSource as NativeBook;

@@ -50,6 +50,21 @@ pub(super) async fn exchange_events(State(state): State<AppState>, user: AuthUse
     server_wire_http::response(&headers, response)
 }
 
+pub(super) async fn list_opds_feeds(State(state): State<AppState>, user: AuthUser, headers: HeaderMap) -> Result<Response, axum::http::StatusCode> {
+    server_wire_http::response(&headers, state.sync.list_opds_feeds(&user.user_id).await.map_err(sync_error)?)
+}
+
+pub(super) async fn put_opds_feed(State(state): State<AppState>, user: AuthUser, headers: HeaderMap, body: Bytes) -> Result<Response, axum::http::StatusCode> {
+    let feed: sync_common::api::opds_feeds::OpdsFeed = server_wire_http::decode_request(&headers, &body, wire::MAX_DECODED_REQUEST_BYTES)?;
+    server_wire_http::response(&headers, state.sync.put_opds_feed(&user.user_id, &feed).await.map_err(sync_error)?)
+}
+
+pub(super) async fn delete_opds_feed(State(state): State<AppState>, user: AuthUser, headers: HeaderMap, Path(id): Path<String>) -> Result<Response, axum::http::StatusCode> {
+    let id = uuid::Uuid::parse_str(&id).map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
+    state.sync.delete_opds_feed(&user.user_id, &id).await.map_err(sync_error)?;
+    server_wire_http::response(&headers, ())
+}
+
 pub(super) async fn cloud_storage(State(state): State<AppState>, user: AuthUser, headers: HeaderMap) -> Result<Response, axum::http::StatusCode> {
     server_wire_http::response(&headers, state.sync.cloud_storage(&user.user_id).await.map_err(sync_error)?)
 }

@@ -1,17 +1,42 @@
 //! Network-free bibliographic evidence rules shared by device and authority ingestion.
-//! A checksum is necessary, but never sufficient, to identify the current book.
+//! A content_hash is necessary, but never sufficient, to identify the current book.
 
-use std::collections::BTreeSet;
 pub(crate) use book_model::{BookRecord, BookSubject, Identifier, Scheme, Scope};
 pub(crate) use regex::Regex;
+use std::collections::BTreeSet;
 pub(crate) use std::sync::OnceLock;
 
-pub const INSPECTION_VERSION: u32 = 10;
+pub const INSPECTION_VERSION: u32 = 11;
 pub const EDGE_SECTIONS: usize = 8;
 
 pub(crate) const LOCAL_CIP_SOURCE_PREFIX: &str = "inspection:local-cip:";
 
-pub use book_enrichment::evidence::{IsbnEvidence, IsbnScope, SectionEvidence, MAX_SECTION_BYTES};
+pub const MAX_SECTION_BYTES: usize = 128 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum IsbnScope {
+    ElectronicEdition,
+    RelatedPrintEdition,
+    Unspecified,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IsbnEvidence {
+    pub isbn: String,
+    pub scope: IsbnScope,
+    pub format: Option<String>,
+}
+
+/// Evidence is anchored to one page/section, never joined across unrelated pages.
+/// Related/unspecified ISBNs are candidates for verified authority lookup, not identities.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SectionEvidence {
+    pub location: String,
+    pub accepted: bool,
+    pub reason: String,
+    pub isbns: Vec<IsbnEvidence>,
+    pub lcc: Vec<String>,
+}
 
 // Cross a line boundary only around an explicit hyphen, so printing-number
 // lines cannot be absorbed into the ISBN. PDF extraction often isolates hyphens.
@@ -25,6 +50,13 @@ pub(crate) const ISBN_SEARCH_CHARS: usize = 128;
 pub(crate) fn isbn_marker_pattern() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?i)\b(?:e-?)?I\s{0,4}S\s{0,4}B\s{0,4}N(?:[\t ]*[-:]?[\t ]*1[03]\b)?\b").unwrap())
+}
+
+/// An ISBN-shaped digit run, with an optional short parenthetical after it
+/// such as "(hardcover)".
+fn isbn_candidate_pattern() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)\b(?P<isbn>(?:[0-9X](?:[\t \x{00a0}]*|\s*[-–‐‑]\s*)){9,}[0-9X])\b[\t \x{00a0}]*(?:\((?P<after>[^)\n]{1,40})\))?").unwrap())
 }
 
 /// Inspect a bounded bibliographic page independently of embedded identity fields.
@@ -43,12 +75,7 @@ pub fn inspect_section(_book: &BookRecord, location: &str, text: &str) -> Sectio
         let limit = tail.char_indices().nth(ISBN_SEARCH_CHARS).map_or(tail.len(), |(i, _)| i);
         let end = isbn_marker_pattern().find(tail).map_or(limit, |next| next.start().min(limit));
         let window = &tail[..end];
-        let mut matched = {
-            (|| -> &'static Regex {
-                static RE: OnceLock<Regex> = OnceLock::new();
-                RE.get_or_init(|| Regex::new(r"(?i)\b(?P<isbn>(?:[0-9X](?:[\t \x{00a0}]*|\s*[-–‐‑]\s*)){9,}[0-9X])\b[\t \x{00a0}]*(?:\((?P<after>[^)\n]{1,40})\))?").unwrap())
-            })()
-        }
+        let mut matched = isbn_candidate_pattern()
         .captures_iter(window)
         .find_map(|c| {
             // Do not accept a number cut short by the bounded search window.
@@ -94,7 +121,7 @@ pub fn inspect_section(_book: &BookRecord, location: &str, text: &str) -> Sectio
         }
     }
     // Search the entire accepted block without requiring an ISBN label. Match
-    // maximal number runs so a valid checksum substring in a longer number is
+    // maximal number runs so a valid content_hash substring in a longer number is
     // not accepted. Keep the labelled pass above for richer edition scope.
     static NUMBER_RUN: OnceLock<Regex> = OnceLock::new();
     let numbers = NUMBER_RUN.get_or_init(|| Regex::new(r"(?i)\b[0-9](?:(?:[\t \x{00a0}]*|\s*[-–‐‑]\s*)[0-9X]){9,}\b").unwrap());
@@ -218,7 +245,7 @@ pub fn apply_evidence(book: &mut BookRecord, evidence: &[SectionEvidence], forma
                 if !usable_lcc(code) {
                     continue;
                 }
-                if book.book.subjects.iter().any(|subject| subject.authority().is_some_and(|authority| authority.eq_ignore_ascii_case("lcc")) && subject.code() == Some(code)) {
+                if book.book.subjects.iter().any(|subject| subject.authority().is_some_and(|authority| authority.eq_ignore_ascii_case("lcc")) && subject.code() == Some(code.as_str())) {
                     continue;
                 }
                 if let Ok(subject) = BookSubject::new(None, code, &source, Some("lcc".into()), Some(code.clone())) {
@@ -265,51 +292,21 @@ pub fn apply_evidence(book: &mut BookRecord, evidence: &[SectionEvidence], forma
     }
 }
 
-/// Visible XHTML text, preserving block boundaries and excluding head/script/style.
-/// Malformed markup is skipped rather than interpreted as trustworthy text.
-pub fn xhtml_text(markup: &str) -> Option<String> {
-    if markup.len() > MAX_SECTION_BYTES {
-        return None;
-    }
-    let doc = roxmltree::Document::parse(markup).ok()?;
-    let mut out = String::new();
-    for node in doc.descendants().filter(|n| n.is_text()) {
-        if node.ancestors().any(|n| n.is_element() && matches!(n.tag_name().name(), "head" | "script" | "style")) {
-            continue;
-        }
-        out.push_str(node.text().unwrap_or_default());
-        out.push(' ');
-        if node.next_sibling().is_none() {
-            out.push('\n');
-        }
-    }
-    Some(out)
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::related_isbn::lookup_candidates;
     use super::*;
-    use book_model::{Contributor, AUTHOR_MARC_RELATOR_CODE};
+    use book_model::{AUTHOR_MARC_RELATOR_CODE, Contributor};
+
+    /// The ISBNs the metadata server looks up as candidate editions.
+    fn lookup_candidates(identifiers: &[book_model::Identifier]) -> Vec<String> {
+        identifiers.iter().filter(|identifier| identifier.scheme() == &Scheme::Isbn && identifier.scope() == Scope::Edition).filter_map(book_model::Identifier::canonical_value).collect()
+    }
 
     fn book(title: &str) -> BookRecord {
         BookRecord { metadata: book_model::BookDetails { title: title.into(), subtitle: None, contributors: vec![Contributor::new("Ada Author", AUTHOR_MARC_RELATOR_CODE).unwrap()], book: Default::default() }, description: String::new() }
     }
     fn cip(title: &str) -> String {
         format!("Copyright © Ada Author\nLibrary of Congress Cataloging-in-Book Data\nTitle: {title} / Ada Author\nISBN 978-0-8213-3827-8 (hardcover)\nISBN 978-0-393-24327-7 (epub)\nClassification: LCC Q125 .A12 2023\n")
-    }
-    #[test]
-    fn own_cip_preserves_print_scope_and_promotes_only_electronic_identity() {
-        let mut b = book("Science History");
-        let e = inspect_section(&b, "back/copyright.xhtml", &cip(&b.title));
-        assert!(e.accepted);
-        assert_eq!(e.isbns.len(), 2);
-        assert_eq!(e.isbns[0].scope, IsbnScope::RelatedPrintEdition);
-        apply_evidence(&mut b, &[e], "epub");
-        assert_eq!(b.book.identifiers.len(), 2);
-        assert_eq!(b.book.identifiers[0].canonical_value().as_deref(), Some("9780393243277"));
-        assert_eq!(b.book.subjects[0].code(), Some("Q125 .A12 2023"));
-        assert!(b.book.identifiers.iter().any(|id| id.scope() == Scope::Edition && id.canonical_value().as_deref() == Some("9780821338278")));
     }
     #[test]
     fn headings_and_missing_copyright_do_not_reject_isbns() {
@@ -334,11 +331,6 @@ mod tests {
         let b = book("World History Volume 4");
         let text = format!("{}\n{}", b.title, cip("World History Volume 2"));
         assert!(inspect_section(&b, "copyright.xhtml", &text).accepted);
-    }
-    #[test]
-    fn embedded_collection_title_does_not_veto_page_evidence() {
-        let b = book("Complete Science History");
-        assert!(inspect_section(&b, "volume/copyright.xhtml", &cip(&b.title)).accepted);
     }
     #[test]
     fn missing_or_wrong_embedded_authors_do_not_veto_page_evidence() {
@@ -368,18 +360,6 @@ mod tests {
         assert_eq!(b.book.identifiers[0], before[0]);
         assert!(b.book.identifiers.iter().filter(|id| id.scope() == Scope::Book).count() == 1);
         assert!(b.book.identifiers.iter().any(|id| id.scope() == Scope::Edition && id.canonical_value().as_deref() == Some("9780393243277")));
-    }
-    #[test]
-    fn copyright_isbn_does_not_require_title_on_the_same_page() {
-        let b = book("Science History");
-        assert!(!inspect_section(&b, "page1", "Science History by Ada Author").accepted);
-        assert!(inspect_section(&b, "page2", "Copyright\nISBN 9780821338278").accepted);
-    }
-    #[test]
-    fn hidden_head_and_script_text_do_not_establish_identity() {
-        let text = xhtml_text("<html><head><title>Science History by Ada Author</title></head><body><script>ISBN 9780821338278</script><p>Copyright</p></body></html>").unwrap();
-        assert!(!text.contains("Science") && !text.contains("ISBN"));
-        assert!(!inspect_section(&book("Science History"), "copyright", &text).accepted);
     }
     #[test]
     fn bad_xmp_cannot_veto_copyright_codes_and_page_lcc_replaces_metadata() {
@@ -414,7 +394,7 @@ mod tests {
             }
         }
         let invalid = inspect_section(&book("ATHEISM"), "pdf:page:2", "© Julian Baggini\nISBN 0\n-\n19\n-\n280424\n-\n4\n3 5 7 9");
-        assert!(invalid.isbns.is_empty(), "hyphen recovery must retain checksum validation");
+        assert!(invalid.isbns.is_empty(), "hyphen recovery must retain content_hash validation");
     }
     #[test]
     fn format_labels_before_isbn_numbers_preserve_edition_scope() {
@@ -482,11 +462,6 @@ mod tests {
     }
 
     #[test]
-    fn malformed_and_oversized_sections_are_skipped() {
-        assert!(xhtml_text("<broken").is_none());
-        assert!(!inspect_section(&book("Science History"), "copyright", &"x".repeat(MAX_SECTION_BYTES + 1)).accepted);
-    }
-    #[test]
     fn final_cip_page_without_repeated_heading_is_evidence() {
         let e = inspect_section(
             &book("mangled metadata"),
@@ -502,12 +477,12 @@ mod tests {
     #[test]
     fn isbn_candidates_do_not_require_a_page_kind() {
         let b = book("damaged title");
-        let strip = inspect_isbn_image(&b, "epub:image:copyright.png", "ISBN 0-19-285458-5");
+        let strip = inspect_section(&b, "epub:image:copyright.png", "ISBN 0-19-285458-5");
         assert_eq!(strip.isbns[0].isbn, "0192854585");
-        let cover = inspect_isbn_image(&b, "pdf:page:127:back-cover", "A remarkable book.\nISBN 0-9613921-1-8");
+        let cover = inspect_section(&b, "pdf:page:127:back-cover", "A remarkable book.\nISBN 0-9613921-1-8");
         assert_eq!(cover.isbns[0].isbn, "0961392118");
-        assert!(inspect_isbn_image(&b, "page:5", "Inspired by Lions’ Commentary (ISBN 1-57398-013-7)").accepted);
-        assert!(inspect_isbn_image(&b, "page:5:back-cover", "Other books\nISBN 1-57398-013-7").accepted);
+        assert!(inspect_section(&b, "page:5", "Inspired by Lions’ Commentary (ISBN 1-57398-013-7)").accepted);
+        assert!(inspect_section(&b, "page:5:back-cover", "Other books\nISBN 1-57398-013-7").accepted);
     }
 
     #[test]

@@ -24,21 +24,24 @@ impl Database {
             }
             Ok(())
         })?;
-        {
-            let (language_counts, format_counts, languages, file_types): (&mut Vec<LibraryLanguageCount>, &mut Vec<LibraryFormatCount>, &str, i32) = (&mut language_counts, &mut format_counts, &options.languages, options.file_types);
-            for language in languages.trim_matches(',').split(',').filter(|language| !language.is_empty()) {
-                if !language_counts.iter().any(|count| count.language == language) {
-                    language_counts.push(LibraryLanguageCount { language: language.to_owned(), book_count: 0 });
-                }
-            }
-            for format in [LibraryFileTypeFilter::Book, LibraryFileTypeFilter::Pdf, LibraryFileTypeFilter::Audiobook] {
-                if file_types & file_type_query_value(format) != 0 && !format_counts.iter().any(|count| count.format == format) {
-                    format_counts.push(LibraryFormatCount { format, book_count: 0 });
-                }
-            }
-            language_counts.sort_by(|left, right| left.language.cmp(&right.language));
-            format_counts.sort_by_key(|count| LibraryFileTypeFilter::ALL.iter().position(|format| *format == count.format));
-        };
+        include_selected_facets(&mut language_counts, &mut format_counts, &options.languages, options.file_types);
         Ok((language_counts, format_counts))
     }
+}
+
+/// Selected filters stay listed even when no book matches them. Languages
+/// sort by code and formats by their filter order.
+pub(super) fn include_selected_facets(language_counts: &mut Vec<LibraryLanguageCount>, format_counts: &mut Vec<LibraryFormatCount>, languages: &str, file_types: i32) {
+    for language in languages.trim_matches(',').split(',').filter(|language| !language.is_empty()) {
+        if !language_counts.iter().any(|count| count.language == language) {
+            language_counts.push(LibraryLanguageCount { language: language.to_owned(), book_count: 0 });
+        }
+    }
+    for format in [LibraryFileTypeFilter::Book, LibraryFileTypeFilter::Pdf, LibraryFileTypeFilter::Audiobook] {
+        if file_types & file_type_query_value(format) != 0 && !format_counts.iter().any(|count| count.format == format) {
+            format_counts.push(LibraryFormatCount { format, book_count: 0 });
+        }
+    }
+    language_counts.sort_by(|left, right| left.language.cmp(&right.language));
+    format_counts.sort_by_key(|count| LibraryFileTypeFilter::ALL.iter().position(|format| *format == count.format));
 }

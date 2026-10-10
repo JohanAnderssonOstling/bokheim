@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{Context, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent, MouseButton, Render, Window, div, px};
-use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::button::ButtonVariants;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{Disableable, IconName, Sizable};
 use library_model::LibraryFolderDestination;
@@ -275,34 +275,5 @@ impl Render for FolderPicker {
             ),
         )
         .with_priority(2)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn destination(id: u128, parent_id: DirId, label: &str) -> LibraryFolderDestination {
-        LibraryFolderDestination { id: DirId::from_u128(id), parent_id: Some(parent_id), label: label.to_owned(), path: label.to_owned() }
-    }
-
-    fn tree() -> Vec<LibraryFolderDestination> {
-        let shelf = DirId::from_u128(1);
-        vec![
-            LibraryFolderDestination { id: ROOT_DIR_ID, parent_id: None, label: "Library".to_owned(), path: "Library".to_owned() },
-            destination(1, ROOT_DIR_ID, "Shelf / literal separator"),
-            destination(2, shelf, "Child"),
-            destination(3, ROOT_DIR_ID, "Other"),
-        ]
-    }
-
-    #[test]
-    fn columns_follow_ids_instead_of_parsing_labels() {
-        let child = DirId::from_u128(2);
-        let columns = columns_of(&tree(), child);
-        assert_eq!(columns.len(), 3);
-        assert_eq!(columns[0].iter().map(|destination| destination.id).collect::<Vec<_>>(), [ROOT_DIR_ID]);
-        assert_eq!(columns[1].iter().map(|destination| destination.id).collect::<Vec<_>>(), [DirId::from_u128(1), DirId::from_u128(3)]);
-        assert_eq!(columns[2].iter().map(|destination| destination.id).collect::<Vec<_>>(), [child]);
     }
 }

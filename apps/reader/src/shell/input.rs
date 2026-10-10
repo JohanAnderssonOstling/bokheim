@@ -2,7 +2,7 @@
 
 use gpui::{App, Context, KeyBinding, Window};
 
-use crate::{CloseSearch, DecreaseScale, FocusReaderSearch, IncreaseScale, NextLine, NextPage, PreviousLine, PreviousPage, ReturnToLibrary, ToggleSearch, ToggleToc};
+use crate::{NextSidebarTab, PreviousSidebarTab, CloseSearch, DecreaseScale, FocusReaderSearch, IncreaseScale, NextLine, NextPage, PreviousLine, PreviousPage, ReturnToLibrary, ToggleSearch, ToggleSidebar, ToggleToc};
 
 /// A reader implements this only for commands it supports.
 pub(crate) trait CommandTarget<C>: Sized + 'static {
@@ -15,6 +15,9 @@ pub(crate) trait CommonReaderCommands:
     + CommandTarget<NextPage>
     + CommandTarget<PreviousLine>
     + CommandTarget<NextLine>
+    + CommandTarget<NextSidebarTab>
+    + CommandTarget<PreviousSidebarTab>
+    + CommandTarget<ToggleSidebar>
     + CommandTarget<ToggleToc>
     + CommandTarget<FocusReaderSearch>
     + CommandTarget<ToggleSearch>
@@ -30,6 +33,9 @@ impl<T> CommonReaderCommands for T where
         + CommandTarget<NextPage>
         + CommandTarget<PreviousLine>
         + CommandTarget<NextLine>
+        + CommandTarget<NextSidebarTab>
+        + CommandTarget<PreviousSidebarTab>
+        + CommandTarget<ToggleSidebar>
         + CommandTarget<ToggleToc>
         + CommandTarget<FocusReaderSearch>
         + CommandTarget<ToggleSearch>
@@ -52,6 +58,11 @@ where
 /// Binds commands handled by the reader shell rather than the document.
 pub(crate) fn bind_reader_keys(cx: &mut App) {
     cx.bind_keys([
+        KeyBinding::new("tab", NextSidebarTab, Some("Reader")),
+        KeyBinding::new("shift-tab", PreviousSidebarTab, Some("Reader")),
+        KeyBinding::new("ctrl-tab", NextSidebarTab, Some("Reader")),
+        KeyBinding::new("ctrl-shift-tab", PreviousSidebarTab, Some("Reader")),
+        KeyBinding::new("ctrl-s", ToggleSidebar, Some("Reader")),
         KeyBinding::new("ctrl-f", ToggleSearch, Some("Reader")),
         KeyBinding::new("escape", CloseSearch, Some("Reader")),
         // Backspace leaves the book the same way the toolbar's library button

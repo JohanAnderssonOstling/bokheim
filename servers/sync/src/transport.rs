@@ -194,49 +194,6 @@ mod tests {
         ServerConfig::from_values(|name| values.get(name).cloned())
     }
 
-    #[test]
-    fn defaults_to_loopback_http_and_direct_peer_addresses() {
-        let config = config(&[]).unwrap();
-        assert_eq!(config, ServerConfig { transport: Transport::Tcp("127.0.0.1:8080".parse().unwrap()) });
-        assert_eq!(config.client_address_source(), ClientAddressSource::DirectPeer);
-    }
-
-    #[test]
-    fn refuses_public_plain_http_by_default() {
-        let error = config(&[("SYNC_SERVER_ADDR", "0.0.0.0:8080")]).unwrap_err();
-        assert!(error.to_string().contains("plain TCP HTTP may only bind to loopback"));
-    }
-
-    #[test]
-    fn public_plain_http_requires_an_explicit_escape_hatch() {
-        assert!(config(&[("SYNC_SERVER_ADDR", "0.0.0.0:8080"), ("SYNC_ALLOW_INSECURE_HTTP", "true")]).is_ok());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn unix_socket_uses_the_trusted_proxy_address_source() {
-        let config = config(&[("SYNC_SERVER_SOCKET", "/run/bokheim/sync.sock")]).unwrap();
-        assert_eq!(config.client_address_source(), ClientAddressSource::TrustedForwardedFor);
-    }
-
-    #[test]
-    fn socket_and_tcp_address_are_mutually_exclusive() {
-        let error = config(&[("SYNC_SERVER_SOCKET", "/run/bokheim/sync.sock"), ("SYNC_SERVER_ADDR", "127.0.0.1:8080")]).unwrap_err();
-        assert!(error.to_string().contains("mutually exclusive"));
-    }
-
-    #[test]
-    fn socket_path_must_be_absolute() {
-        let error = config(&[("SYNC_SERVER_SOCKET", "sync.sock")]).unwrap_err();
-        assert!(error.to_string().contains("absolute path"));
-    }
-
-    #[test]
-    fn removed_embedded_tls_settings_fail_loudly() {
-        let error = config(&[("SYNC_TLS_MODE", "acme")]).unwrap_err();
-        assert!(error.to_string().contains("terminate public HTTPS in Caddy"));
-    }
-
     #[cfg(unix)]
     #[test]
     fn unix_socket_is_group_accessible_but_not_world_accessible() {
@@ -266,9 +223,29 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn unix_transport_serves_http_without_a_tcp_listener() {
+        {
+            let error = config(&[("SYNC_SERVER_ADDR", "0.0.0.0:8080")]).unwrap_err();
+            assert!(error.to_string().contains("plain TCP HTTP may only bind to loopback"));
+        }
+        {
+            assert!(config(&[("SYNC_SERVER_ADDR", "0.0.0.0:8080"), ("SYNC_ALLOW_INSECURE_HTTP", "true")]).is_ok());
+        }
+        {
+            let error = config(&[("SYNC_SERVER_SOCKET", "/run/bokheim/sync.sock"), ("SYNC_SERVER_ADDR", "127.0.0.1:8080")]).unwrap_err();
+            assert!(error.to_string().contains("mutually exclusive"));
+        }
+        {
+            let error = config(&[("SYNC_SERVER_SOCKET", "sync.sock")]).unwrap_err();
+            assert!(error.to_string().contains("absolute path"));
+        }
+        {
+            let error = config(&[("SYNC_TLS_MODE", "acme")]).unwrap_err();
+            assert!(error.to_string().contains("terminate public HTTPS in Caddy"));
+        }
+
         let directory = tempfile::tempdir().unwrap();
         let socket = directory.path().join("sync.sock");
-        let config = ServerConfig { transport: Transport::Unix(socket.clone()) };
+        let config = config(&[("SYNC_SERVER_SOCKET", socket.to_str().unwrap())]).unwrap();
         let app = Router::new().route("/api/health", get(|| async { "ok" }));
         let server = tokio::spawn(async move { serve(config, app).await.map_err(|error| error.to_string()) });
 

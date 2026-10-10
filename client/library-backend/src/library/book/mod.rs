@@ -1,5 +1,5 @@
 //! Shared book-opening policy. Hosts provide local readers and supported
-//! streaming mechanisms; metadata selection and download fallback are common.
+//! streaming mechanisms; metadata selection and remote access are common.
 
 use crate::BackendError;
 use crate::BoxedBookReader;
@@ -45,11 +45,32 @@ pub struct DocumentBook {
     pub pdf_metadata: Option<pdf_view_common::PdfReaderMetadata>,
     pub path: String,
     pub format: BookFormat,
-    pub reader: BoxedBookReader,
+    pub source: DocumentSource,
 }
 impl DocumentBook {
     pub fn new(path: String, format: BookFormat, reader: BoxedBookReader) -> Self {
-        Self { pdf_page_source: None, pdf_metadata: None, path, format, reader }
+        Self { pdf_page_source: None, pdf_metadata: None, path, format, source: DocumentSource::Reader(reader) }
+    }
+}
+
+/// EPUB and MOBI share asynchronous sources; PDF retains its seekable input.
+pub enum DocumentSource {
+    Reader(BoxedBookReader),
+    Async(book_access::AsyncBookSource),
+}
+
+impl DocumentSource {
+    pub fn into_reader(self) -> Result<BoxedBookReader, String> {
+        match self {
+            Self::Reader(reader) => Ok(reader),
+            Self::Async(_) => Err("expected a synchronous document reader".into()),
+        }
+    }
+}
+
+impl DocumentBook {
+    pub fn from_async_source(path: String, format: BookFormat, source: book_access::AsyncBookSource) -> Self {
+        Self { pdf_page_source: None, pdf_metadata: None, path, format, source: DocumentSource::Async(source) }
     }
 }
 
@@ -67,12 +88,12 @@ struct RemoteDocument {
     prefix: Vec<u8>,
     pdf_metadata: Option<pdf_view_common::PdfReaderMetadata>,
 }
-async fn pdf_metadata(library: &LibrarySession, hash: ContentHash, checksum: ContentHash) -> Result<Option<pdf_view_common::PdfReaderMetadata>, BackendError> {
-    library.db.pdf_metadata(&hash, &checksum).map_err(Into::into)
+async fn pdf_metadata(library: &LibrarySession, hash: ContentHash) -> Result<Option<pdf_view_common::PdfReaderMetadata>, BackendError> {
+    library.db.pdf_metadata(&hash).map_err(Into::into)
 }
 async fn remote_document(library: &LibrarySession, hash: ContentHash) -> Result<RemoteDocument, BackendError> {
     let (source, prefix) = library.describe_remote_file(hash).await.map_err(BackendError::operation)?;
-    let pdf_metadata = pdf_metadata(library, hash, source.checksum).await?;
+    let pdf_metadata = pdf_metadata(library, hash).await?;
     Ok(RemoteDocument { source, prefix, pdf_metadata })
 }
 

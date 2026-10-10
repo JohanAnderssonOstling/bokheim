@@ -11,11 +11,11 @@ GitHub is optional build/artifact storage.
    tests and platform package signing. Schema migrations ship in the application.
 2. If publishing taxonomy, prepare and validate the snapshot with its final
    release ID. Include the compatible application/schema/format requirements.
-3. Prepare a manifest using the types in `shared/update-client/src/lib.rs`.
+3. Prepare a manifest using the types in `shared/update-protocol/src/lib.rs`.
    Set each artifact's exact bytes and SHA-256, immutable HTTPS URL, and a new,
    monotonically increasing publication sequence. Use a bounded expiry.
 4. Review and sign that exact manifest using the existing
-   `shared/update-client/examples/sign_manifest.rs` release utility. Keep its
+   `shared/update-protocol/examples/sign_manifest.rs` release utility. Keep its
    Ed25519 private key in the release signer, never on the hosting server or in
    artifacts. OS package signing is additional to this manifest signature.
 5. Upload the signed bundle and run the publisher. It verifies trust, validity,
@@ -53,6 +53,16 @@ promoting the feed, including on retries. It follows HTTPS redirects so release
 storage CDNs work. External packages are not copied to the website. Unconfigured
 external directories are rejected; the client protocol remains provider independent.
 
+The manifest's optional `catalog` entry names the public-domain catalog
+snapshot on `https://catalog.bokheim.se` (directory `catalog`). Clients fetch it
+quietly, without the approval and restart an application or taxonomy update
+takes. `catalog DIR publish OUT_DIR N` (servers/catalog) writes the tree that
+origin serves, `releases/N/catalog.sqlite3`, `books/` and `covers/`, and prints
+the entry to put in the manifest. Copy OUT_DIR to
+`/srv/bokheim-updates/public/catalog/`; the publisher then verifies the
+snapshot's existing bytes like any previously published artifact. Books and
+covers are not manifest artifacts: the snapshot names them by hash.
+
 GitHub releases live in `JohanAnderssonOstling/bokheim`, which is private.
 Preparation downloads them using the operator's authenticated GitHub CLI, checks
 them against successful build artifacts, and puts the verified bytes into the
@@ -65,7 +75,7 @@ after publication. Changing storage providers only requires different manifest
 URLs and the publisher's directory allowlist, with no client code change.
 
 ```bash
-cargo run --release -p update-client --example sign_manifest -- \
+cargo run --release -p update-protocol --example sign_manifest -- \
   manifest.json /secure/release-key.pk8 release-1 bundle/manifest.signed.json
 cargo run --release -p update-publisher -- \
   config.json bundle /tmp/bokheim-update-host

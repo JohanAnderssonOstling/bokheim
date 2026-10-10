@@ -3,12 +3,27 @@
 use crate::invalidation::notify;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, IntoElement, Window};
-use library_backend::ReaderAnnotation;
+use library_backend::Annotation;
 use ui_components as components;
 
 use crate::epub::ReaderView;
 use crate::invalidation::Component;
-use crate::shell::state_panel::{self, SidebarTab};
+use crate::shell::state_panel::{self, AnnotationSidebarTarget, SidebarTab};
+
+impl AnnotationSidebarTarget for ReaderView {
+    fn select_sidebar_annotation(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.annotation_popup_anchor = None;
+        self.select_annotation(id, window, cx);
+    }
+
+    fn go_to_annotation(&mut self, annotation: &Annotation, cx: &mut Context<Self>) {
+        self.navigate_to_cfi(annotation.anchor.epub_cfi_value().unwrap_or_default().to_owned(), cx);
+    }
+
+    fn delete_sidebar_annotation(&mut self, id: String, cx: &mut Context<Self>) {
+        self.delete_annotation(id, cx);
+    }
+}
 
 impl ReaderView {
     fn render_sidebar_tabs(&self, active: SidebarTab, theme: components::BrowserTheme, cx: &mut Context<Self>) -> AnyElement {
@@ -34,31 +49,19 @@ impl ReaderView {
 
     fn render_annotations_body(&self, theme: components::BrowserTheme, cx: &mut Context<Self>) -> AnyElement {
         components::reader_state_panel(theme)
-            .children(state_panel::reader_state_rows(
-                &cx.entity(),
-                &self.marks,
-                "Select text, then use Highlight to create an annotation.",
-                theme,
-                |annotation: &ReaderAnnotation| {
-                    annotation
-                        .toc_ordinal
-                        .and_then(|ordinal| usize::try_from(ordinal).ok())
-                        .and_then(|ordinal| self.toc.title_at_ordinal(ordinal).map(|title| (format!("chapter:{ordinal}"), title.to_owned())))
-                        .unwrap_or_else(|| ("other".to_owned(), "Other annotations".to_owned()))
-                },
-                |id, window, this: &mut Self, cx| {
-                    this.annotation_popup_anchor = None;
-                    this.select_annotation(id, window, cx);
-                },
-                |annotation: &ReaderAnnotation, this: &mut Self, cx| this.navigate_to_cfi(annotation.anchor.epub_cfi_value().unwrap_or_default().to_owned(), cx),
-                |id, this: &mut Self, cx| this.delete_annotation(id, cx),
-            ))
+            .children(state_panel::reader_state_rows(&cx.entity(), &self.marks, "Select text, then use Highlight to create an annotation.", theme, |annotation: &Annotation| {
+                annotation
+                    .toc_ordinal
+                    .and_then(|ordinal| usize::try_from(ordinal).ok())
+                    .and_then(|ordinal| self.toc.title_at_ordinal(ordinal).map(|title| (format!("chapter:{ordinal}"), title.to_owned())))
+                    .unwrap_or_else(|| ("other".to_owned(), "Other annotations".to_owned()))
+            }))
             .into_any_element()
     }
 
     /// The tab strip and the active tab's body — the two pieces
     /// `shell::toolbar::reader_sidebar` places under its own header.
-    pub(super) fn render_sidebar(&self, active: SidebarTab, entity: Entity<Self>, theme: components::BrowserTheme, window: &Window, cx: &mut Context<Self>) -> (AnyElement, AnyElement) {
+    pub(super) fn render_sidebar(&self, active: SidebarTab, entity: Entity<Self>, theme: components::BrowserTheme, _window: &Window, cx: &mut Context<Self>) -> (AnyElement, AnyElement) {
         let tabs = self.render_sidebar_tabs(active, theme, cx);
         let body = match active {
             SidebarTab::Contents => self.render_toc_body(entity, theme, cx),

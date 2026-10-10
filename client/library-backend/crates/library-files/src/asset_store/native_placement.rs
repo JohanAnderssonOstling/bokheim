@@ -1,8 +1,8 @@
 //! Concrete native placement operations; inputs are selected by the caller.
 
-use std::fs::File;
-use super::{imp, AssetStore, AssetStoreError};
+use super::{AssetStore, AssetStoreError, imp};
 use library_model::RelativeBookPath;
+use std::fs::File;
 use std::path::Path;
 use sync_common::{ContentHash, DirId};
 
@@ -48,34 +48,15 @@ impl AssetStore {
         imp::prepare_removal(&self.0, hash, relative).map(PreparedPlacement)
     }
 
-    pub fn prepare_placement(
-        &self, hash: &ContentHash, relative: &RelativeBookPath, expected: Option<&str>, source_paths: &[RelativeBookPath], movable_sources: &[RelativeBookPath],
-    ) -> Result<Option<PreparedPlacement>, AssetStoreError> {
-        use super::native::{content_matches, placement_path, VerifiedPath};
+    pub fn prepare_placement(&self, hash: &ContentHash, relative: &RelativeBookPath, source_paths: &[RelativeBookPath], movable_sources: &[RelativeBookPath]) -> Result<Option<PreparedPlacement>, AssetStoreError> {
+        use super::native::{VerifiedPath, content_matches, placement_path};
         let handle = &self.0;
         use std::io::Write as _;
         let destination = placement_path(handle, relative);
         if destination.exists() {
             return Ok(Some(PreparedPlacement(imp::PreparedPlacement::Existing(VerifiedPath::new(destination, hash)?))));
         }
-        let matches_version = |path: &Path| -> Result<bool, AssetStoreError> {
-            if !content_matches(path, hash)? {
-                return Ok(false);
-            }
-            // The ZIP is a transport representation. The ordered source bytes
-            // already established the folder's identity above.
-            if path.is_dir() {
-                return Ok(true);
-            }
-            let Some(expected) = expected else { return Ok(true) };
-            let mut hasher = blake3::Hasher::new();
-            hasher.update_reader(File::open(path)?)?;
-            Ok(hasher.finalize().to_hex().as_str() == expected)
-        };
-        let found = source_paths
-            .iter()
-            .map(|relative| (relative, placement_path(handle, relative)))
-            .find(|(_, path)| (path.is_file() || path.is_dir()) && matches_version(path).unwrap_or(false));
+        let found = source_paths.iter().map(|relative| (relative, placement_path(handle, relative))).find(|(_, path)| (path.is_file() || path.is_dir()) && content_matches(path, hash).unwrap_or(false));
         // Only a source with a queued removal job for this path is safe to move.
         if let Some((source_relative, source)) = &found {
             if movable_sources.iter().any(|movable| movable == *source_relative) {
@@ -105,7 +86,7 @@ impl AssetStore {
             if let Some(cover) = audiobook_folder::discover_cover(&source)? {
                 std::fs::copy(cover.path, output.path().join(cover.name))?;
             }
-            if !matches_version(output.path())? {
+            if !content_matches(output.path(), hash)? {
                 return Err(AssetStoreError::operation("audiobook changed during copy"));
             }
             return Ok(Some(PreparedPlacement(imp::PreparedPlacement::CopiedFolder { output, destination })));
@@ -117,15 +98,13 @@ impl AssetStore {
         output.as_file().sync_all()?;
         // Verify the staged bytes too: an external editor can change the source
         // between source discovery and copying it.
-        if !matches_version(output.path())? {
+        if !content_matches(output.path(), hash)? {
             return Err(AssetStoreError::operation("book changed during copy"));
         }
         Ok(Some(PreparedPlacement(imp::PreparedPlacement::Copied { output, destination })))
     }
 
-    pub fn inspect_directory(
-        &self, id: DirId, relative: &str, projected: Option<&str>, name: &str, siblings: &[String],
-    ) -> Result<PreparedDirectory, AssetStoreError> {
+    pub fn inspect_directory(&self, id: DirId, relative: &str, projected: Option<&str>, name: &str, siblings: &[String]) -> Result<PreparedDirectory, AssetStoreError> {
         imp::projection::PreparedDirectory::inspect(&self.0, id, relative, projected, name, siblings).map(PreparedDirectory)
     }
 

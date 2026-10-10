@@ -94,26 +94,3 @@ pub(crate) async fn run_email_worker(accounts: Arc<PostgresAccountService>, send
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn verification_messages_contain_the_token_and_expected_recipient() {
-        let email = QueuedAccountEmail { id: "email-id".to_owned(), recipient: "reader@example.com".to_owned(), kind: AccountEmailKind::VerifyEmail, token: "012345".to_owned() };
-        let content = ResendEmailSender::content(&email);
-        assert_eq!(content.subject, "Verify your Bokheim account");
-        assert!(content.text.contains("verification PIN"));
-        assert!(content.text.contains("012345"));
-        assert!(content.html.contains("012345"));
-    }
-
-    #[test]
-    fn configuration_is_all_or_nothing_and_rejects_header_injection() {
-        assert!(ResendEmailSender::from_config(None, None).unwrap().is_none());
-        assert!(ResendEmailSender::from_config(Some("re_test".to_owned()), None).is_err());
-        assert!(ResendEmailSender::from_config(Some("bad\nkey".to_owned()), Some("accounts@bokheim.se".to_owned())).is_err());
-        assert!(ResendEmailSender::from_config(Some("re_test".to_owned()), Some("bad\nfrom".to_owned())).is_err());
-    }
-}

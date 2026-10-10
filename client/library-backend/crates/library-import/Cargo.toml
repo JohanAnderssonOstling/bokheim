@@ -1,0 +1,34 @@
+[package]
+name = "library-import"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+book-inspection = { path = "../book-inspection" }
+book-model = { path = "../../../../shared/book-model" }
+metadata-contract = { path = "../../../../shared/metadata-contract" }
+client-platform-runtime = { path = "../../../platforms/runtime" }
+client-runtime = { path = "../../../client-runtime" }
+library-catalog = { path = "../library-catalog" }
+cpu-host = { path = "../cpu-host" }
+library-database = { path = "../library-database" }
+library-files = { path = "../library-files" }
+library-model = { path = "../../../library-model" }
+library-placement = { path = "../library-placement" }
+library-replica = { path = "../library-replica" }
+library-runtime = { path = "../library-runtime" }
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+sync-common = { path = "../../../../shared/sync-common" }
+web-time = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+client-platform-native = { path = "../../../platforms/native" }
+filesystem-scanner = { path = "../filesystem-scanner" }
+tempfile = "3"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+client-platform-web = { path = "../../../platforms/web" }
+getrandom = { version = "0.3", features = ["wasm_js"] }
+

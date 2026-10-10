@@ -8,9 +8,8 @@ publish = false
 workspace = true
 
 [dependencies]
-audiobook-folder = { path = "../../../../shared/audiobook-folder" }
+audiobook-archive = { path = "../../../../shared/audiobook-archive" }
 tracing = "0.1"
-book-identity = { path = "../../../../shared/book-identity" }
 blake3 = "1"
 sync-common = { path = "../../../../shared/sync-common" }
 thiserror = "1"

@@ -1,0 +1,23 @@
+[package]
+name = "catalog"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+book-inspection = { path = "../../client/library-backend/crates/book-inspection" }
+book-model = { path = "../../shared/book-model" }
+content-address = { path = "../../shared/content-address" }
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+metadata-contract = { path = "../../shared/metadata-contract" }
+ring = "0.17"
+reqwest = { workspace = true, default-features = false, features = ["blocking", "rustls-tls"] }
+roxmltree = "0.20"
+rusqlite = { version = "0.40.0", features = ["bundled"] }
+serde_json = "1"
+subject-projection = { path = "../../shared/subject-projection" }
+update-protocol = { path = "../../shared/update-protocol" }
+thumbnail = { path = "../../client/library-backend/crates/thumbnail" }

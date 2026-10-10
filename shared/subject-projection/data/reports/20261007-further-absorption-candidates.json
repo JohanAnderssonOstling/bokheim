@@ -1,0 +1,868 @@
+{
+  "scope": "Proposals only; taxonomy unchanged. All selected categories are childless and transfer their classification codes to existing parents. Early-work chronology and collection-format distinctions would be absorbed.",
+  "before_concepts": 15713,
+  "proposed_reduction": 40,
+  "groups": [
+    {
+      "name": "Art and object exhibition records",
+      "sources": [
+        {
+          "id": 6416,
+          "label": "Exhibitions by place held",
+          "target": 1039,
+          "target_label": "Watercolor Painting",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                6416,
+                "ND",
+                1731.0,
+                "[]",
+                "ND",
+                1735.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 6608,
+          "label": "Museums",
+          "target": 653,
+          "target_label": "Furniture",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                6608,
+                "NK",
+                2215.0,
+                "[]",
+                "NK",
+                2216.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 6754,
+          "label": "Exhibitions by place held",
+          "target": 653,
+          "target_label": "Furniture",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                6754,
+                "NK",
+                2210.0,
+                "[]",
+                "NK",
+                2211.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 6805,
+          "label": "Exhibitions by place held",
+          "target": 1048,
+          "target_label": "Printmaking & engraving",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                6805,
+                "NE",
+                40.0,
+                "[]",
+                "NE",
+                45.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 7445,
+          "label": "Exhibitions by Place",
+          "target": 659,
+          "target_label": "Tapestries",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                7445,
+                "NK",
+                2980.0,
+                "[]",
+                "NK",
+                2981.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 7741,
+          "label": "Museums. Collections",
+          "target": 1048,
+          "target_label": "Printmaking & engraving",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                7741,
+                "NE",
+                53.0,
+                "[]",
+                "NE",
+                59.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 8299,
+          "label": "Museums & collections",
+          "target": 671,
+          "target_label": "Posters",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                8299,
+                "NC",
+                1820.0,
+                "[]",
+                "NC",
+                1833.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 8626,
+          "label": "Museums",
+          "target": 659,
+          "target_label": "Tapestries",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                8626,
+                "NK",
+                2985.0,
+                "[]",
+                "NK",
+                2986.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 8824,
+          "label": "Exhibitions by place held",
+          "target": 670,
+          "target_label": "Visual Humor & Caricature",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                8824,
+                "NC",
+                1310.0,
+                "[]",
+                "NC",
+                1312.0,
+                "[]"
+              ]
+            ]
+          }
+        }
+      ],
+      "tradeoff": "Absorb museum and exhibition filing leaves into their existing medium/object subjects; named geographic children are not removed."
+    },
+    {
+      "name": "Periodicals, handbooks and reference detail",
+      "sources": [
+        {
+          "id": 13526,
+          "label": "Journals by Language",
+          "target": 55018,
+          "target_label": "Scientific Reference & Publishing",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                13526,
+                "Q",
+                1.0,
+                "[]",
+                "Q",
+                4.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 13553,
+          "label": "Terminology",
+          "target": 55018,
+          "target_label": "Scientific Reference & Publishing",
+          "codes": {
+            "lcc_selector": [
+              [
+                13553,
+                "Q179"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 10893,
+          "label": "Terminology",
+          "target": 5532,
+          "target_label": "Reference",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                10893,
+                "B",
+                49.0,
+                "[]",
+                "B",
+                50.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 52839,
+          "label": "Banking Periodicals",
+          "target": 5229,
+          "target_label": "Banking",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                52839,
+                "HG",
+                1501.0,
+                "[]",
+                "HG",
+                1505.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 52854,
+          "label": "Periodicals",
+          "target": 11761,
+          "target_label": "Socialism & Communism",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                52854,
+                "HX",
+                1.0,
+                "[]",
+                "HX",
+                9.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 52878,
+          "label": "Investment Periodicals",
+          "target": 5183,
+          "target_label": "Investments & Securities",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                52878,
+                "HG",
+                4501.0,
+                "[]",
+                "HG",
+                4503.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 53462,
+          "label": "Handbooks",
+          "target": 55043,
+          "target_label": "Business Learning & Reference",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                53462,
+                "HF",
+                5356.0,
+                "[]",
+                "HF",
+                5363.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 6113,
+          "label": "Handbooks",
+          "target": 6106,
+          "target_label": "Foundations & Professional Study",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                6113,
+                "Z",
+                670.0,
+                "[[\"A\",\"2\"]]",
+                "Z",
+                670.0,
+                "[[\"A\",\"3\"]]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 6199,
+          "label": "U.S. Education History Miscellany",
+          "target": 2208,
+          "target_label": "U.S. Education History",
+          "codes": {
+            "lcc_selector": [
+              [
+                6199,
+                "LA230"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 53350,
+          "label": "Geomagnetism Reference & Study",
+          "target": 5036,
+          "target_label": "Geophysics",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                53350,
+                "QC",
+                811.0,
+                "[]",
+                "QC",
+                817.0,
+                "[[\"Z\",\"\"]]"
+              ],
+              [
+                53350,
+                "QC",
+                819.0,
+                "[]",
+                "QC",
+                824.0,
+                "[[\"Z\",\"\"]]"
+              ]
+            ]
+          }
+        }
+      ],
+      "tradeoff": "Absorb publication/reference leaves into their existing topical parents."
+    },
+    {
+      "name": "Technical and commercial information resources",
+      "sources": [
+        {
+          "id": 6836,
+          "label": "Information services",
+          "target": 301,
+          "target_label": "Environmental protection",
+          "codes": {
+            "lcc_selector": [
+              [
+                6836,
+                "TD169.5"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 6996,
+          "label": "Terminology & Symbols",
+          "target": 405,
+          "target_label": "Aeronautical Engineering",
+          "codes": {
+            "lcc_selector": [
+              [
+                6996,
+                "TL509"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 52715,
+          "label": "Commerce Information Services",
+          "target": 5083,
+          "target_label": "Commerce",
+          "codes": {
+            "lcc_selector": [
+              [
+                52715,
+                "HF54.5-54.56"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                52715,
+                "HF",
+                54.5,
+                "[]",
+                "HF",
+                54.56,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 8081,
+          "label": "Printing Recipes & Handbooks",
+          "target": 4686,
+          "target_label": "Practical printing",
+          "codes": {
+            "lcc_selector": [
+              [
+                8081,
+                "Z244.3"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        }
+      ],
+      "tradeoff": "Absorb specialized information services, terminology and printing-handbook leaves into their parent topics."
+    },
+    {
+      "name": "Early scientific works",
+      "sources": [
+        {
+          "id": 6092,
+          "label": "Early Works",
+          "target": 6073,
+          "target_label": "Electricity",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                6092,
+                "QC",
+                516.0,
+                "[]",
+                "QC",
+                517.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 6644,
+          "label": "Early works through 1860",
+          "target": 4793,
+          "target_label": "Evolution",
+          "codes": {
+            "lcc_selector": [
+              [
+                6644,
+                "QH363"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 7262,
+          "label": "Early works through 1800",
+          "target": 5033,
+          "target_label": "Experimental & Descriptive Mechanics",
+          "codes": {
+            "lcc_selector": [
+              [
+                7262,
+                "QC123"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 8294,
+          "label": "Early works through 1800",
+          "target": 5040,
+          "target_label": "Optics",
+          "codes": {
+            "lcc_selector": [
+              [
+                8294,
+                "QC353"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 8940,
+          "label": "Early works through 1800",
+          "target": 4787,
+          "target_label": "Practical & Spherical Astronomy",
+          "codes": {
+            "lcc_selector": [
+              [
+                8940,
+                "QB144"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 9121,
+          "label": "Early works through 1800",
+          "target": 4923,
+          "target_label": "Analytic mechanics",
+          "codes": {
+            "lcc_selector": [
+              [
+                9121,
+                "QA804"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 9415,
+          "label": "Early works",
+          "target": 4908,
+          "target_label": "Paleontology",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                9415,
+                "QE",
+                709.0,
+                "[]",
+                "QE",
+                710.0,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 13542,
+          "label": "Early works through 1800",
+          "target": 55018,
+          "target_label": "Scientific Reference & Publishing",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                13542,
+                "Q",
+                151.0,
+                "[]",
+                "Q",
+                157.0,
+                "[]"
+              ]
+            ]
+          }
+        }
+      ],
+      "tradeoff": "Absorb publication-date distinctions into their scientific parent topics, retaining exact classification boundaries."
+    },
+    {
+      "name": "Art and photographic collection formats",
+      "sources": [
+        {
+          "id": 916,
+          "label": "Annuals",
+          "target": 920,
+          "target_label": "Collections, Catalogs, Exhibitions",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [
+              [
+                916,
+                "PHO025000"
+              ]
+            ],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 921,
+          "label": "Group Shows",
+          "target": 920,
+          "target_label": "Collections, Catalogs, Exhibitions",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [
+              [
+                921,
+                "PHO004010"
+              ]
+            ],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 922,
+          "label": "Permanent Collections",
+          "target": 920,
+          "target_label": "Collections, Catalogs, Exhibitions",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [
+              [
+                922,
+                "PHO004020"
+              ]
+            ],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 975,
+          "label": "Annuals",
+          "target": 998,
+          "target_label": "Collections, Catalogs, Exhibitions",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [
+              [
+                975,
+                "ART054000"
+              ]
+            ],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 999,
+          "label": "Group Shows",
+          "target": 998,
+          "target_label": "Collections, Catalogs, Exhibitions",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [
+              [
+                999,
+                "ART006010"
+              ]
+            ],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 1000,
+          "label": "Permanent Collections",
+          "target": 998,
+          "target_label": "Collections, Catalogs, Exhibitions",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [
+              [
+                1000,
+                "ART006020"
+              ]
+            ],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        }
+      ],
+      "tradeoff": "Combine annual, group-show and permanent-collection forms within the existing collection parents."
+    },
+    {
+      "name": "Medical-office administration",
+      "sources": [
+        {
+          "id": 6355,
+          "label": "Medical Office Staff",
+          "target": 2739,
+          "target_label": "Medical Practice",
+          "codes": {
+            "lcc_selector": [
+              [
+                6355,
+                "R728.8"
+              ]
+            ],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": []
+          }
+        },
+        {
+          "id": 8729,
+          "label": "Corporate Medical Practice",
+          "target": 2739,
+          "target_label": "Medical Practice",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                8729,
+                "R",
+                728.2,
+                "[]",
+                "R",
+                728.25,
+                "[]"
+              ]
+            ]
+          }
+        },
+        {
+          "id": 9120,
+          "label": "Physician Fees & Income",
+          "target": 2739,
+          "target_label": "Medical Practice",
+          "codes": {
+            "lcc_selector": [],
+            "bisac_selector": [],
+            "ddc_selector": [],
+            "lcc_range": [
+              [
+                9120,
+                "R",
+                728.5,
+                "[]",
+                "R",
+                728.6,
+                "[]"
+              ]
+            ]
+          }
+        }
+      ],
+      "tradeoff": "Combine office staffing, corporate medical practice and fees/income into Medical Practice; physicians’ trade unions remain."
+    }
+  ],
+  "matcher_validation": {
+    "probes": 172771,
+    "changed_destinations": 272,
+    "unexpected_changes": [],
+    "coverage_losses": 0,
+    "coverage_gains": 0,
+    "limit": "Selector and range boundary probes; complete observed-code cache unavailable."
+  },
+  "proposed_after_concepts": 15673,
+  "recommendation": "Prioritize the first three groups (23 categories). The remaining 17 categories involve broader choices about historical-publication dates, collection formats and medical-office detail.",
+  "validation": {
+    "exact_row_remapping": true,
+    "integrity_check": "ok",
+    "foreign_key_violations": 0,
+    "range_multiplicity_preserved": true
+  }
+}

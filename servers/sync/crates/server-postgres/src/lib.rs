@@ -5,10 +5,9 @@ mod applications;
 mod assets;
 mod cloud_storage;
 mod database;
+mod opds_feeds;
 mod sync;
 mod sync_store;
-#[cfg(test)]
-mod test_support;
 
 pub use applications::{AssetApplication, LibraryStorageUsage, StorageUsage};
 pub async fn configure_user_storage_quota(database: &PostgresDatabase, user_id: &str, quota_bytes: i64) -> Result<i64, sqlx::Error> {

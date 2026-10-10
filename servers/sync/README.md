@@ -152,7 +152,7 @@ membership in a directory, and ordinary field edits do not change quota referenc
 
 Every typed account, library, preference, asset-manifest, and
 synchronization body negotiates the versioned
-`application/vnd.bokheim+protobuf; version=23` representation. The wire body
+`application/vnd.bokheim+protobuf; version=26` representation. The wire body
 is a versioned protobuf envelope whose value preserves the Serde data model
 and numeric enum variants. Bodies use identity encoding and retain the 8 MiB
 request limit. JSON is neither accepted nor returned by this protocol;
@@ -171,9 +171,9 @@ revision for pagination. Forwarding never changes the original winning version.
 Typed publications and versioned state define their wire serialization directly;
 callers do not construct parallel transport envelopes. Book records contain the
 canonical `BookDetails` plus their separately updated description. Reader
-annotations contain canonical `AnnotationState`, which composes `AnnotationDetail`
-with its book identity, modification time, and deletion flag. Stored detail blobs
-serialize that same detail type. Existing flat JSON and positional binary layouts
+annotations are one flat `Annotation` carrying its id, book identity, content,
+modification time, and deletion flag; the client's stored annotation blob
+serializes that same type. Existing flat JSON and positional binary layouts
 remain readable and writable without converting between mirrored value types.
 
 Protocol 23 requires clients and servers to upgrade together. Clients retain a
@@ -185,7 +185,10 @@ only rejected sequences, and clients acknowledge exactly the submitted sequences
 that were accepted or permanently rejected. Transient rejections remain queued.
 Server schema 4 merges reading state into `sync_state` and removes unused channel
 revision columns. The explicit upgrade command applies schema 1's owner migration,
-schema 3's UUID removal, and schema 4's row-preserving table merge as needed.
+schema 3's UUID removal, schema 4's row-preserving table merge, and schema 5's
+content hash consolidation as needed. Schema 5 removes the book-to-blob revision
+mapping and redundant claim hash; it rejects differing legacy mappings until
+those identities have been migrated or the books reimported.
 Unfrozen queue entries obtain their payload and version from canonical state.
 Push and exchange pages are bounded to 1,000 mutations and clients also stop at
 the 4 MiB encoded-mutation target, whichever limit is reached first.
@@ -199,7 +202,8 @@ Book and thumbnail routes retain their original bytes, content hashes, content l
 and byte-range semantics and never pass through the sync codec.
 
 Books upload through individual `PUT /api/libraries/{library_id}/blobs/{hash}`
-requests with an exact `Content-Length` and `x-bokheim-content-checksum`.
+requests with an exact `Content-Length`. The URL hash identifies and verifies
+the complete bytes; downloads use the same content hash as their ETag.
 Upload negotiation remains batched, but file bytes have no batch framing or
 book-batch endpoint. Native clients run at most four independent PUTs at a time;
 each file commits and retries separately, regardless of its size. Browser
@@ -333,26 +337,9 @@ address. Embedded certificate management is deliberately not part of the
 application. See [`deploy/README.md`](deploy/README.md) for the complete public
 Internet deployment.
 
-## Local server stress test
+Schema 6 stores content hashes as 32-byte bytea values. The explicit schema
+upgrade converts hexadecimal columns; transport version 26 and storage
+version 15 require coordinated client/server updates. JSON remains hexadecimal.
 
-`tests/run_server_stress.sh` provisions a throwaway PostgreSQL cluster, starts
-the real HTTP server on loopback, and exercises concurrent synchronization
-through authentication, HTTP, PostgreSQL, and response decoding. It compares
-independent-library writes with intentionally serialized same-library writes,
-coalesced reading-position register updates, complete single-request position
-exchanges, concurrent full pulls, and concurrent validated EPUB transfers.
-It verifies that every acknowledged event is observable and every downloaded
-blob exactly matches its upload:
-
-```sh
-servers/sync/tests/run_server_stress.sh
-```
-
-The harness reports throughput and p50/p95/p99/max request latency. Workload
-size can be changed with `BOKHEIM_STRESS_WORKERS`,
-`BOKHEIM_STRESS_REQUESTS_PER_WORKER`, and
-`BOKHEIM_STRESS_EVENTS_PER_REQUEST`. Validated EPUB payload size is controlled
-by `BOKHEIM_STRESS_BLOB_BYTES`. All values are bounded, and the workload binary
-refuses non-loopback URLs so it cannot accidentally load-test the public service.
-
-`BOKHEIM_STRESS_MODE=ingest` uses the production protobuf sync transport.
+Schema 7 also stores book register keys as raw digests and other register keys
+as UTF-8 bytea values. JSON register addresses retain their existing strings.

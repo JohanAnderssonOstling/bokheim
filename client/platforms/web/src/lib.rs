@@ -17,4 +17,5 @@ pub mod signal;
 
 #[cfg(target_arch = "wasm32")]
 pub use web_storage::reserve_database_capacity;
+#[cfg(target_arch = "wasm32")]
 pub mod audiobook;

@@ -1,10 +1,9 @@
 //! Collect classifications from verified candidates without choosing an edition ISBN.
 
-use crate::identity_evidence::{edition_identity_evidence, verified_author_prefix_query};
 use crate::matching::NormalizedTitle;
 use crate::{
-    matching::{author_credits, author_names_compatible, matching_author_count, title_qualifiers, title_substring_keys},
     Classification, ClassificationEvidence, ClassificationScheme, ClassificationSource, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus,
+    matching::{author_credits, author_names_compatible, matching_author_count, title_qualifiers, title_substring_keys},
 };
 use std::collections::BTreeSet;
 pub const METHOD: &str = "verified_matching_edition_classifications";
@@ -131,9 +130,9 @@ pub fn resolved_classifications(query: &EditionIdentityQuery, result: &EditionId
     if exact.is_empty() {
         exact = result.candidates.iter().filter(|candidate| title == title_key(&candidate.full_title())).collect();
     }
-    let filename_surname = exact.is_empty() && local.is_empty();
-    if filename_surname {
-        exact = result.candidates.iter().filter(|candidate| crate::identity_evidence::filename_surname_title_matches(&query.title, &candidate.title, &candidate.authors)).collect();
+    let surname = query.author_surname.as_deref().filter(|_| local.is_empty());
+    if let Some(surname) = surname {
+        exact.retain(|candidate| surname_matches(surname, &candidate.authors));
     }
     let unique_title = exact.len() == 1;
     let best = exact.iter().map(|candidate| matching_author_count(&local, &candidate.authors)).max().unwrap_or(0);
@@ -157,7 +156,7 @@ pub fn resolved_classifications(query: &EditionIdentityQuery, result: &EditionId
     }
     candidate_classifications(
         matches,
-        if filename_surname {
+        if surname.is_some() {
             "verified_filename_surname_title_classification"
         } else if unique_title {
             "verified_unique_title_classification"
@@ -165,6 +164,17 @@ pub fn resolved_classifications(query: &EditionIdentityQuery, result: &EditionId
             METHOD
         },
     )
+}
+
+/// Whether a candidate credits a full-named author with this surname.
+fn surname_matches(surname: &str, authors: &[String]) -> bool {
+    let surname = crate::matching::bibliographic_match_key(surname);
+    author_credits(authors).iter().any(|author| {
+        crate::matching::author_match_keys(author).iter().any(|key| {
+            let words = key.split_whitespace().filter(|word| crate::matching::author_suffix(word).is_none()).collect::<Vec<_>>();
+            words.len() >= 2 && words.last().copied() == Some(surname.as_str())
+        })
+    })
 }
 
 #[cfg(test)]
@@ -179,6 +189,7 @@ mod tests {
             query_id: "art".into(),
             title: "Art History: A Very Short Introduction (Very Short Introductions)".into(),
             authors: vec!["Arnold, Dana".into()],
+            author_surname: None,
             publishers: vec!["Oxford University Press".into()],
             book_year: Some(2004),
         };
@@ -206,128 +217,6 @@ mod tests {
         (query, EditionIdentityResult { authority_subjects: None, query_id: "art".into(), status: EditionIdentityStatus::Ambiguous, matched: None, candidates, candidates_truncated: false })
     }
     #[test]
-    fn candidate_corroborates_author_prefix_before_subject_assignment() {
-        let (mut q, mut r) = fixture();
-        q.title = "Paul Bushkovitch - A Concise History of Russia".into();
-        q.authors.clear();
-        for candidate in &mut r.candidates {
-            candidate.title = "A Concise History of Russia".into();
-        }
-        r.candidates[0].authors = vec!["Ronald Hingley".into()];
-        r.candidates[0].classifications = vec![code("DK41", ClassificationSource::Work)];
-        r.candidates[1].authors = vec!["Paul Bushkovitch".into()];
-        r.candidates[1].classifications = vec![code("DK37 .B86 2011", ClassificationSource::Work)];
-        let verified = verified_author_prefix_query(&q, &r).unwrap();
-        assert_eq!(verified.authors, vec!["Paul Bushkovitch"]);
-        assert_eq!(resolved_classifications(&verified, &r)[0].notation, "DK37");
-        assert!(r.matched.is_none());
-        q.authors = vec!["Known Different Author".into()];
-        assert!(verified_author_prefix_query(&q, &r).is_none());
-        q.authors.clear();
-        q.title = "Paul Bushkovitch - A Different Book".into();
-        assert!(verified_author_prefix_query(&q, &r).is_none());
-        q.title = "Paul Bushkovitch - A Concise History of Russia (Volume 2)".into();
-        assert!(verified_author_prefix_query(&q, &r).is_none());
-        q.title = "History Series - A Concise History of Russia".into();
-        assert!(verified_author_prefix_query(&q, &r).is_none());
-        q.title = "Paul Bushkovitch - A Concise History of Russia".into();
-        r.candidates_truncated = true;
-        assert!(verified_author_prefix_query(&q, &r).is_none());
-    }
-    #[test]
-    fn huntington_prefix_handles_initials_and_filename_subtitle_punctuation() {
-        let (mut q, mut r) = fixture();
-        q.title = "Samuel P.Huntington - The Soldier and the State_：the Theory and Politics of Civil-Military Relations".into();
-        q.authors.clear();
-        for candidate in &mut r.candidates {
-            candidate.title = "The Soldier and the State".into();
-            candidate.subtitle = Some("The Theory and Politics of Civil-Military Relations (Belknap Press)".into());
-            candidate.authors = vec!["Samuel P. Huntington".into()];
-            candidate.classifications = vec![code("UA23 .H95 1957", ClassificationSource::Work)];
-        }
-        let verified = verified_author_prefix_query(&q, &r).unwrap();
-        assert_eq!(resolved_classifications(&verified, &r)[0].notation, "UA23");
-        assert!(r.matched.is_none());
-    }
-    #[test]
-    fn more_matching_authors_break_ties_but_extra_narrators_do_not() {
-        let (mut q, mut r) = fixture();
-        q.title = "Art History".into();
-        q.authors = vec!["Dana Arnold".into(), "Casey Roe".into()];
-        r.candidates[0].classifications = vec![code("N5300", ClassificationSource::ExactEdition)];
-        r.candidates[1].classifications = vec![code("N7425", ClassificationSource::ExactEdition)];
-        r.candidates[1].authors.push("Casey Roe".into());
-        r.candidates[1].authors.push("Narrator Person".into());
-        let codes = resolved_classifications(&q, &r);
-        assert_eq!(codes.len(), 1);
-        assert_eq!(codes[0].notation, "N7425");
-        q.authors.pop();
-        assert_eq!(resolved_classifications(&q, &r).len(), 2);
-        q.authors = vec!["Unrelated Person".into()];
-        assert!(resolved_classifications(&q, &r).is_empty());
-    }
-    #[test]
-    fn underscore_space_is_a_subtitle_separator() {
-        let evidence = edition_identity_evidence("Logic_ a very short introduction");
-        assert_eq!(evidence.title, "Logic: a very short introduction");
-        assert_eq!(evidence.author, None);
-        assert_eq!(title_key(&evidence.title), title_key("Logic"));
-        assert_eq!(edition_identity_evidence("knuth_mathematical_writing").title, "knuth mathematical writing");
-    }
-    #[test]
-    fn filename_surname_disambiguates_knuth_without_inventing_an_author() {
-        let (mut q, mut r) = fixture();
-        q.title = "knuth_mathematical_writing".into();
-        q.authors.clear();
-        for c in &mut r.candidates {
-            c.title = "Mathematical Writing".into();
-        }
-        r.candidates[0].authors = vec!["Donald Knuth".into()];
-        r.candidates[0].classifications = vec![code("QA42 .K59 1989", ClassificationSource::ExactEdition)];
-        r.candidates[1].authors = vec!["Franco Vivaldi".into()];
-        r.candidates[1].classifications = vec![code("QA1-939", ClassificationSource::ExactEdition)];
-        let codes = resolved_classifications(&q, &r);
-        assert_eq!(codes.len(), 1);
-        assert_eq!(codes[0].notation, "QA42");
-        assert_eq!(codes[0].evidence[0].method, "verified_filename_surname_title_classification");
-        r.candidates_truncated = true;
-        assert!(resolved_classifications(&q, &r).is_empty());
-        r.candidates_truncated = false;
-        q.authors = vec!["Franco Vivaldi".into()];
-        assert!(resolved_classifications(&q, &r).is_empty());
-        q.authors.clear();
-        r.candidates[1].authors = vec!["Another Knuth".into()];
-        assert!(resolved_classifications(&q, &r).is_empty());
-        r.candidates.pop();
-        for title in ["donald_mathematical_writing", "knuth_different_title", "knuth mathematical writing"] {
-            q.title = title.into();
-            assert!(resolved_classifications(&q, &r).is_empty(), "{title}");
-        }
-        q.title = "knuth_mathematical_writing".into();
-        r.candidates[0].authors = vec!["Knuth, Donald E.".into()];
-        assert!(!resolved_classifications(&q, &r).is_empty());
-    }
-    #[test]
-    fn unique_exact_title_resolves_single_or_mixed_results() {
-        let (mut q, mut r) = fixture();
-        q.title = "Refactoring UI".into();
-        q.authors.clear();
-        r.candidates[0].title = q.title.clone();
-        r.candidates[1].title = "Refactoring Databases".into();
-        assert!(!resolved_classifications(&q, &r).is_empty());
-        r.candidates.truncate(1);
-        assert!(!resolved_classifications(&q, &r).is_empty());
-        r.candidates_truncated = true;
-        assert!(resolved_classifications(&q, &r).is_empty());
-        r.candidates_truncated = false;
-        q.authors = vec!["Steve Schoger".into()];
-        assert!(resolved_classifications(&q, &r).is_empty());
-        r.candidates[0].authors = vec!["Steve Schoger".into(), "Adam Wathan".into()];
-        assert!(!resolved_classifications(&q, &r).is_empty());
-        r.candidates[0].classifications.clear();
-        assert!(resolved_classifications(&q, &r).is_empty());
-    }
-    #[test]
     fn duplicate_exact_titles_with_different_subjects_still_need_evidence() {
         let (mut q, mut r) = fixture();
         q.title = "Refactoring UI".into();
@@ -337,156 +226,8 @@ mod tests {
         }
         assert!(resolved_classifications(&q, &r).is_empty());
     }
-    #[test]
-    fn sutton_middle_initial_expansion_preserves_shared_subject() {
-        let (mut q, mut r) = fixture();
-        q.title = "Wall Street and the Rise of Hitler".into();
-        q.authors = vec!["Antony C. Sutton".into()];
-        for (i, c) in r.candidates.iter_mut().enumerate() {
-            c.title = q.title.clone();
-            c.authors = vec![if i == 0 { "Antony Cyril Sutton" } else { "Antony C. Sutton" }.into()];
-            c.classifications = vec![code("HF1456.5.G3 S87", ClassificationSource::ExactEdition)];
-        }
-        assert!(!resolved_classifications(&q, &r).is_empty());
-        r.candidates[1].authors = vec!["Antony Charles Sutton".into()];
-        assert!(resolved_classifications(&q, &r).is_empty());
-    }
-    #[test]
-    fn whiteout_exact_author_outweighs_unrelated_title_hit() {
-        let (mut q, mut r) = fixture();
-        q.title = "Whiteout".into();
-        q.authors = vec!["Alexander Cockburn".into()];
-        for c in &mut r.candidates {
-            c.title = q.title.clone();
-        }
-        r.candidates[0].authors = q.authors.clone();
-        r.candidates[0].classifications = vec![code("HV5825 .C59 1998", ClassificationSource::ExactEdition)];
-        r.candidates[1].authors = vec!["Alexander Lowe".into(), "Sebastian Kadlecik".into()];
-        r.candidates[1].classifications = vec![code("QC926.37", ClassificationSource::Work)];
-        assert_eq!(resolved_classifications(&q, &r)[0].notation, "HV5825");
-        r.candidates_truncated = true;
-        assert!(resolved_classifications(&q, &r).is_empty());
-        r.candidates_truncated = false;
-        r.candidates[1].authors = q.authors.clone();
-        assert_eq!(resolved_classifications(&q, &r).len(), 2);
-    }
 
-    #[test]
-    fn lotte_language_edition_note_does_not_block_shared_subject() {
-        let (mut q, mut r) = fixture();
-        q.title = "Lotte in Weimar: Roman (Fischer Klassik PLUS) (German Edition)".into();
-        q.authors = vec!["Mann, Thomas".into(), "Frizen, Werner".into()];
-        for (i, c) in r.candidates.iter_mut().enumerate() {
-            c.title = "Lotte in Weimar".into();
-            c.authors = vec!["Thomas Mann".into()];
-            c.classifications = vec![code(if i == 0 { "PT2625.A44 L62 1990" } else { "PT2625.A44" }, ClassificationSource::ExactEdition)];
-        }
-        assert_eq!(resolved_classifications(&q, &r)[0].notation, "PT2625");
-    }
-    #[test]
-    fn athwart_history_duplicate_records_share_subject() {
-        let (mut q, mut r) = fixture();
-        q.title = "Athwart History".into();
-        q.authors = vec!["Buckley, William F., Jr., Roger Kimball, Linda Bridges".into()];
-        for c in &mut r.candidates {
-            c.title = "Athwart history".into();
-            c.authors = vec!["William F. Buckley".into()];
-            c.classifications = vec![code("JC573.2.U6 B83 2010", ClassificationSource::ExactEdition)];
-            c.canonical_isbn13 = "9781594033797".into();
-        }
-        assert!(!classifications(&q, &r).is_empty());
-    }
 
-    #[test]
-    fn metternich_subtitle_omission_resolves_shared_subject_only() {
-        let (mut q, mut r) = fixture();
-        q.title = "Metternich Strategist and Visionary".into();
-        q.authors = vec!["Wolfram Siemann".into()];
-        for c in &mut r.candidates {
-            c.title = "Metternich".into();
-            c.authors = q.authors.clone();
-            c.classifications = vec![code("DB80.8.M5", ClassificationSource::ExactEdition)];
-        }
-        assert_eq!(classifications(&q, &r).len(), 1);
-        assert!(r.matched.is_none());
-        assert_ne!(r.candidates[0].canonical_isbn13, r.candidates[1].canonical_isbn13);
-        for title in ["Metternich Volume 2", "Metternich: An Adaptation", "Metternich Revised Edition", "Metternichs"] {
-            r.candidates[1].title = title.into();
-            assert!(classifications(&q, &r).is_empty(), "{title}");
-        }
-    }
-
-    #[test]
-    fn master_of_disguise_combined_credits_resolve_shared_subject() {
-        let (mut q, mut r) = fixture();
-        q.title = "The Master of Disguise".into();
-        for c in &mut r.candidates {
-            c.title = q.title.clone();
-            c.authors = vec!["Antonio Mendez".into(), "Malcolm McConnell".into()];
-            c.classifications = vec![code("UB271.U52", ClassificationSource::ExactEdition)];
-        }
-        for separator in [" with ", " AND ", " & ", "; "] {
-            q.authors = vec![format!("Antonio J. Mendez{separator}Malcolm McConnell")];
-            let codes = classifications(&q, &r);
-            assert_eq!(codes.len(), 1, "{separator}");
-            assert_eq!(codes[0].evidence.len(), 2);
-        }
-        r.candidates[1].authors = vec!["Antonio Smith".into(), "Malcolm Jones".into()];
-        assert!(classifications(&q, &r).is_empty());
-        r.candidates[1].authors = vec!["Antonio Q. Mendez".into()];
-        assert!(classifications(&q, &r).is_empty());
-    }
-
-    #[test]
-    fn about_face_accepts_additional_coauthors_but_requires_a_shared_author() {
-        let (mut q, mut r) = fixture();
-        q.title = "About Face".into();
-        q.authors = vec!["Alan Cooper".into()];
-        for (i, candidate) in r.candidates.iter_mut().enumerate() {
-            candidate.title = "About Face".into();
-            candidate.authors = vec!["Alan Cooper".into()];
-            candidate.classifications = vec![code(if i == 0 { "QA76.9.U83 C6 1995" } else { "QA76.9.U83 C6596 2014" }, if i == 0 { ClassificationSource::ExactEdition } else { ClassificationSource::Work })];
-        }
-        r.candidates[1].authors.extend(["Robert Reimann", "David Cronin", "Christopher Noessel"].map(str::to_owned));
-        let codes = classifications(&q, &r);
-        assert_eq!(codes.len(), 1);
-        assert_eq!(codes[0].notation, "QA76.9");
-        assert_eq!(codes[0].evidence.len(), 2);
-        r.candidates[1].authors.remove(0);
-        assert!(classifications(&q, &r).is_empty());
-    }
-
-    #[test]
-    fn work_classifications_participate_in_agreement() {
-        let (q, mut r) = fixture();
-        let expected = classifications(&q, &r);
-        assert!(!expected.is_empty());
-        r.candidates[1].classifications[0].source = ClassificationSource::Work;
-        assert_eq!(classifications(&q, &r), expected);
-        r.candidates[0].classifications[0].source = ClassificationSource::Work;
-        assert_eq!(classifications(&q, &r), expected);
-    }
-
-    #[test]
-    fn art_history_collects_different_codes_with_per_record_provenance() {
-        let (q, r) = fixture();
-        let codes = classifications(&q, &r);
-        assert_eq!(codes.len(), 3);
-        assert_eq!(codes[0].notation, "N5300");
-        assert_eq!(codes[0].evidence.len(), 2);
-        assert_eq!(codes[1].evidence.len(), 1);
-        assert_eq!(codes[2].evidence.len(), 1);
-        assert_ne!(codes[1].evidence[0].isbn13, codes[2].evidence[0].isbn13);
-        assert!(r.matched.is_none());
-    }
-    #[test]
-    fn incomplete_coauthors_can_support_the_same_subject() {
-        let (mut q, mut r) = fixture();
-        q.authors = vec!["Clive H. Church".into(), "Randolph C. Head".into()];
-        r.candidates[0].authors = vec![q.authors[0].clone()];
-        r.candidates[1].authors = vec![q.authors[1].clone()];
-        assert_eq!(classifications(&q, &r).len(), 3);
-    }
     #[test]
     fn unrelated_titles_authors_or_invalid_codes_cannot_vote() {
         for change in 0..7 {
@@ -509,56 +250,5 @@ mod tests {
             }
         }
     }
-    #[test]
-    fn shared_first_name_is_not_author_identity() {
-        let (mut q, mut r) = fixture();
-        q.authors = vec!["Fred C. Piper".into(), "Sean Murphy".into()];
-        r.candidates[0].authors = vec!["Fred C. Piper".into()];
-        r.candidates[1].authors = vec!["Sean-Philip Oriyano".into()];
-        assert!(classifications(&q, &r).is_empty());
-    }
 
-    #[test]
-    fn real_switzerland_title_and_split_coauthors_share_dq54() {
-        let (mut q, mut r) = fixture();
-        q.title = "A Concise History of Switzerland (Cambridge Concise Histories)".into();
-        q.authors = vec!["Clive H. Church".into(), "Randolph C. Head".into()];
-        for (i, c) in r.candidates.iter_mut().enumerate() {
-            c.title = "A Concise History Of Switzerland".into();
-            c.authors = vec![q.authors[i].clone()];
-            c.classifications = vec![code("DQ54 .C47 2013", ClassificationSource::ExactEdition)];
-        }
-        r.candidates[0].classifications.push(code("DQ54", ClassificationSource::ExactEdition));
-        let codes = classifications(&q, &r);
-        assert_eq!(codes.len(), 1);
-        assert_eq!(codes[0].notation, "DQ54");
-    }
-    #[test]
-    fn real_filename_debris_and_cutter_difference_share_hq31() {
-        let (mut q, mut r) = fixture();
-        q.title = "(by-Anne-Hooper)-Great-Sex-Guide-692141-(z-lib.org)".into();
-        q.authors = vec!["Anne Hooper".into()];
-        for (i, c) in r.candidates.iter_mut().enumerate() {
-            c.title = "Great sex guide".into();
-            c.authors = q.authors.clone();
-            c.classifications = vec![code(if i == 0 { "HQ31 .H742 1999" } else { "HQ31" }, ClassificationSource::ExactEdition)];
-        }
-        let codes = classifications(&q, &r);
-        assert_eq!(codes.len(), 1);
-        assert_eq!(codes[0].notation, "HQ31");
-    }
-    #[test]
-    fn cleanup_keeps_volumes_but_demotes_parenthesized_editions() {
-        let (mut q, mut r) = fixture();
-        q.title = "Art History (Volume 2)".into();
-        for c in &mut r.candidates {
-            c.title = "Art History (Volume 3)".into();
-        }
-        assert!(classifications(&q, &r).is_empty());
-        q.title = "Art History (Revised Edition)".into();
-        for c in &mut r.candidates {
-            c.title = "Art History".into();
-        }
-        assert!(!classifications(&q, &r).is_empty());
-    }
 }

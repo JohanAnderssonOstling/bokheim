@@ -1,9 +1,26 @@
-use crate::{AccountSnapshot, LibraryCommand};
+//! Account state, discovery, queued writes, and the shared notification connection.
+
+mod notifications;
+
+use std::sync::{Arc, Weak};
+use std::time::Duration;
+
+use super::core::*;
+use crate::executor::{sleep, timeout, BackendExecutor, BackendFuture, BackendTask};
+use crate::notification_interest::NotificationInterest;
+use crate::AccountSnapshot;
 use futures_util::{stream, StreamExt, TryStreamExt};
-use library_backend::{PendingCommand, ReadyCommand, SessionCommand};
+use library_backend::library::handle::{LibraryActorCommand, LibraryControl};
+use library_backend::library::LibraryDirectory;
+use library_backend::{LibraryCommand, PendingCommand, ReadyCommand};
 use serde::{Deserialize, Serialize};
 
-use crate::LibraryId;
+use sync_common::api::libraries::{CloudStorageChange, LibraryCloudStorage};
+use sync_common::LibraryId;
+use tokio::sync::watch;
+
+const MAINTENANCE_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+const MAINTENANCE_DEBOUNCE: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct AccountStatus {
@@ -34,25 +51,6 @@ impl AccountStatus {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct AccountStorageUsage {
-    pub used_bytes: u64,
-    pub reserved_bytes: u64,
-    pub quota_bytes: u64,
-}
-
-impl AccountStorageUsage {
-    pub const fn available_bytes(self) -> u64 {
-        self.quota_bytes.saturating_sub(self.used_bytes.saturating_add(self.reserved_bytes))
-    }
-}
-
-impl From<account_contract::StorageUsageResponse> for AccountStorageUsage {
-    fn from(value: account_contract::StorageUsageResponse) -> Self {
-        Self { used_bytes: value.used_bytes, reserved_bytes: value.reserved_bytes, quota_bytes: value.quota_bytes }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ServerLibraryStorageUsage {
     pub library_id: LibraryId,
@@ -69,23 +67,54 @@ pub struct LocalLibraryStorageUsage {
 
 struct RemoteAccountDetails {
     state: LibraryListState,
-    storage_usage: AccountStorageUsage,
+    storage_usage: account_contract::StorageUsageResponse,
     server_storage_usage: Vec<ServerLibraryStorageUsage>,
 }
 
-use super::core::*;
+/// Owns the shared account connection and maintenance together. Both loops
+/// are dropped when the returned task is dropped; maintenance holds weak state.
+pub(super) fn start(
+    executor: &BackendExecutor, state: &Weak<AppState>, account: DeviceAccountSession, wake: watch::Sender<()>, requests: watch::Receiver<()>, interest: NotificationInterest, libraries: Arc<LibraryDirectory>,
+) -> BackendTask<()> {
+    let account_state = state.clone();
+    // Subscribe before spawning so login or token refresh cannot be missed.
+    let mut changes = account.subscribe();
+    changes.borrow_and_update();
+    executor.spawn(async move {
+        tokio::join!(notifications::run(account, wake, interest, libraries), run_maintenance(account_state, requests, changes));
+    })
+}
 
-#[path = "account_tasks.rs"]
-pub(super) mod tasks;
+async fn run_maintenance(state: Weak<AppState>, mut requests: watch::Receiver<()>, mut changes: watch::Receiver<u64>) {
+    let mut retry = false;
+    while wait_for_maintenance(&mut requests, &mut changes, retry).await {
+        let Some(state) = state.upgrade() else { return };
+        retry = AppBackend { state }.run_account_maintenance().await.is_err();
+    }
+}
+
+/// New events bypass a failed pass's retry wait. Changes during a running pass
+/// remain unseen so the next wait schedules another pass.
+async fn wait_for_maintenance(requests: &mut watch::Receiver<()>, changes: &mut watch::Receiver<u64>, retry: bool) -> bool {
+    let changed = tokio::select! {
+        changed = requests.changed() => changed,
+        changed = changes.changed() => changed,
+        _ = sleep(MAINTENANCE_RETRY_INTERVAL), if retry => return true,
+    };
+    if changed.is_err() {
+        return false;
+    }
+    sleep(MAINTENANCE_DEBOUNCE).await;
+    requests.borrow_and_update();
+    changes.borrow_and_update();
+    true
+}
 
 impl AppBackend {
     pub(crate) fn account_status(&self) -> Result<AccountStatus, BackendError> {
         let mut account = self.current_account()?;
         if account.is_none() {
             account = self.state.account.restore_if_empty().map_err(BackendError::operation)?;
-            if account.is_some() {
-                self.state.account_scheduler.request_remote_refresh();
-            }
         }
         Ok(account.as_ref().map(|session| AccountStatus::authenticated(session.server_url().as_str(), session.email())).unwrap_or_else(AccountStatus::signed_out))
     }
@@ -97,7 +126,6 @@ impl AppBackend {
 
     pub(crate) fn adopt_session(&self, session: account_client::Session) -> Result<(), BackendError> {
         self.state.account.set(session.clone()).map_err(BackendError::operation)?;
-        self.state.account_scheduler.request_remote_refresh();
         Ok(())
     }
 
@@ -108,7 +136,7 @@ impl AppBackend {
 
     pub(crate) fn logout(&self) -> Result<(), BackendError> {
         self.logout_with_notification(|session| async move {
-            match crate::executor::timeout(std::time::Duration::from_secs(8), account_client::logout(&session)).await {
+            match timeout(Duration::from_secs(8), account_client::logout(&session)).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => log::warn!("Failed to notify server about logout: {error}"),
                 Err(_) => log::warn!("Server logout notification timed out"),
@@ -116,28 +144,14 @@ impl AppBackend {
         })
     }
 
-    pub(super) fn logout_with_notification<F: crate::executor::BackendFuture<()>>(&self, notify: impl FnOnce(account_client::Session) -> F) -> Result<(), BackendError> {
+    pub(super) fn logout_with_notification<F: BackendFuture<()>>(&self, notify: impl FnOnce(account_client::Session) -> F) -> Result<(), BackendError> {
         let session = self.state.account.take().map_err(BackendError::operation)?;
-        self.state.account_scheduler.wake();
         if let Some(session) = session {
             // Revoke only the captured session. A subsequent login must not
             // wait for or be affected by this best-effort notification.
             self.state.executor.spawn_detached(notify(session));
         }
         Ok(())
-    }
-
-    pub(crate) async fn reconcile_libraries(&self) -> Result<LibraryListState, BackendError> {
-        let Some(_) = self.current_account()? else {
-            return self.library_list_state(None, None).await;
-        };
-        // Failed deletions stay durable; the worker discovers them on its next check.
-        self.flush_pending_library_deletions().await?;
-        self.refresh_remote_account().await
-    }
-
-    pub(crate) async fn refresh_remote_account(&self) -> Result<LibraryListState, BackendError> {
-        Ok(self.refresh_remote_account_details().await?.state)
     }
 
     /// Fetches account facts only for an explicit caller. Nothing from this
@@ -174,7 +188,7 @@ impl AppBackend {
                 Ok(ServerLibraryStorageUsage { library_id, library_name, used_bytes: entry.used_bytes })
             })
             .collect::<Result<Vec<_>, BackendError>>()?;
-        let storage_usage = snapshot.storage.into();
+        let storage_usage = snapshot.storage;
         // Publish remote knowledge before discovery emits library-list events.
         let remote_ids = self.attach_remote_libraries(&libraries)?;
         let account = self.account_identity()?;
@@ -183,7 +197,7 @@ impl AppBackend {
         Ok(RemoteAccountDetails { state: self.library_list_state(Some(&session), Some(&remote_ids)).await?, storage_usage, server_storage_usage: library_storage_usage })
     }
 
-    pub(super) async fn flush_pending_library_deletions(&self) -> Result<bool, BackendError> {
+    async fn flush_pending_library_deletions(&self) -> Result<bool, BackendError> {
         let mut all_flushed = true;
         for library_id in self.state.registry.pending_server_deletions().map_err(BackendError::operation)? {
             match self.state.account.request(|session| Box::pin(async move { account_client::delete_library(session, &library_id).await })).await {
@@ -203,7 +217,7 @@ impl AppBackend {
     }
 
     async fn apply_remote_library_deletions(&self, deleted: &[LibraryId]) -> Result<(), BackendError> {
-        let local_ids = self.state.registry.entries().map_err(BackendError::operation)?.into_iter().map(|entry| *entry.library_id()).collect::<std::collections::HashSet<_>>();
+        let local_ids = self.state.registry.entries().map_err(BackendError::operation)?.into_iter().map(|entry| *entry.library_id()).collect::<HashSet<_>>();
         for library_id in deleted.iter().filter(|library_id| local_ids.contains(library_id)) {
             self.remove_library_from_device(library_id).await?;
             self.state.registry.complete_server_deletion(library_id).map_err(BackendError::operation)?;
@@ -211,41 +225,43 @@ impl AppBackend {
         Ok(())
     }
 
-    pub(super) fn attach_remote_libraries(&self, remote: &[sync_common::api::libraries::LibrarySummary]) -> Result<std::collections::HashSet<LibraryId>, BackendError> {
-        let mut remote_ids = std::collections::HashSet::with_capacity(remote.len());
-        let mut needing_open = Vec::new();
-        let mut changed = false;
-        for library in remote {
-            let _guard = self.state.library_directory.lock_lifecycle()?;
-            let existing = self.state.registry.entry(&library.library_id).map_err(BackendError::operation)?;
-            remote_ids.insert(library.library_id.clone());
-            if self.state.registry.is_detached(&library.library_id).map_err(BackendError::operation)? {
-                continue;
-            }
-            // A stale server snapshot must not undo an offline rename.
-            if self.state.registry.read_value(&format!("pending-library-rename/{}", library.library_id)).map_err(BackendError::operation)?.is_some() {
-                continue;
-            }
-            let renamed = existing.as_ref().map(|entry| entry.library_name()) != Some(library.library_name.as_str());
-            if renamed {
-                changed = true;
-            }
-            // Library-list reconciliation updates registry metadata only. A live
-            // Library owns expensive shared resources (pool, scanner, sync manager,
-            // event forwarding) and must survive metadata refreshes unchanged.
-            self.state.registry.attach_remote(&library.library_id, &library.library_name).map_err(BackendError::operation)?;
-            if renamed {
-                if let Ok(handle) = self.state.library_directory.get(&library.library_id) {
-                    let _ = handle.commands.try_send(library_backend::library::handle::LibraryActorCommand::Control(library_backend::library::handle::LibraryControl::Rename { name: library.library_name.clone(), refresh_remote: false }));
+    pub(super) fn attach_remote_libraries(&self, remote: &[sync_common::api::libraries::LibrarySummary]) -> Result<HashSet<LibraryId>, BackendError> {
+        let remote = remote.to_vec();
+        let (remote_ids, needing_open, changed) = self.with_storage(move |this| {
+            let mut remote_ids = HashSet::with_capacity(remote.len());
+            let mut needing_open = Vec::new();
+            let mut changed = false;
+            for library in &remote {
+                let existing = this.state.registry.entry(&library.library_id).map_err(BackendError::operation)?;
+                remote_ids.insert(library.library_id);
+                if this.state.registry.is_detached(&library.library_id).map_err(BackendError::operation)? {
+                    continue;
+                }
+                // A stale server snapshot must not undo an offline rename.
+                if this.state.registry.read_value(&format!("pending-library-rename/{}", library.library_id)).map_err(BackendError::operation)?.is_some() {
+                    continue;
+                }
+                let renamed = existing.as_ref().map(|entry| entry.library_name()) != Some(library.library_name.as_str());
+                if renamed {
+                    changed = true;
+                }
+                // Library-list reconciliation updates registry metadata only. A live
+                // Library owns expensive shared resources (pool, scanner, sync manager,
+                // event forwarding) and must survive metadata refreshes unchanged.
+                this.state.registry.attach_remote(&library.library_id, &library.library_name).map_err(BackendError::operation)?;
+                if renamed {
+                    if let Ok(handle) = this.state.library_directory.get(&library.library_id) {
+                        let _ = handle.commands.try_send(LibraryActorCommand::Control(LibraryControl::Rename { name: library.library_name.clone(), refresh_remote: false }));
+                    }
+                }
+                if this.state.library_directory.try_get(&library.library_id)?.is_none() {
+                    needing_open.push(library.library_id);
                 }
             }
-            if self.state.library_directory.try_get(&library.library_id)?.is_none() {
-                needing_open.push(library.library_id);
-            }
-        }
-        // Discovery retries registered libraries that failed to open during
-        // startup, after browser database capacity has been reserved. A
-        // persistently inaccessible library remains listed but unavailable.
+            Ok((remote_ids, needing_open, changed))
+        })?;
+        // Each open rechecks registry policy in its own storage command. A
+        // failed open leaves the library listed but unavailable.
         for library_id in needing_open {
             if let Err(error) = self.open_registered_library(&library_id) {
                 log::warn!("Could not open registered library {library_id} during discovery: {error}");
@@ -257,7 +273,7 @@ impl AppBackend {
         Ok(remote_ids)
     }
 
-    pub(super) async fn library_list_state(&self, session: Option<&account_client::Session>, remote: Option<&std::collections::HashSet<LibraryId>>) -> Result<LibraryListState, BackendError> {
+    pub(super) async fn library_list_state(&self, session: Option<&account_client::Session>, remote: Option<&HashSet<LibraryId>>) -> Result<LibraryListState, BackendError> {
         let libraries = self.libraries()?;
         let started = web_time::Instant::now();
         let sync_statuses = stream::iter(libraries.iter().cloned().map(|library| async move { self.library_sync_status(&library, session, remote).await })).buffered(4).try_collect().await?;
@@ -268,7 +284,7 @@ impl AppBackend {
     pub(super) async fn library_sync_status(&self, library: &LibraryEntry, session: Option<&account_client::Session>, remote: Option<&HashSet<LibraryId>>) -> Result<LibrarySyncStatus, BackendError> {
         if let Some(handle) = self.state.library_directory.try_get(library.library_id())? {
             match handle
-                .dispatch(LibraryCommand::Session(SessionCommand::Ready(ReadyCommand::SyncStatus { signed_in: session.is_some(), remote_present: remote.map(|remote| remote.contains(library.library_id())) })))
+                .dispatch(LibraryCommand::Ready(ReadyCommand::SyncStatus { signed_in: session.is_some(), remote_present: remote.map(|remote| remote.contains(library.library_id())) }))
                 .await
                 .and_then(client_runtime::reply::Reply::take::<LibrarySyncStatus>)
             {
@@ -303,7 +319,7 @@ impl AppBackend {
             let Ok(library) = self.state.library_directory.get(entry.library_id()) else {
                 return Ok::<_, BackendError>(None);
             };
-            Ok(library.dispatch(LibraryCommand::Session(SessionCommand::Pending(PendingCommand::LocalStorageUsage))).await?.take::<Option<u64>>()?.map(|used_bytes| LocalLibraryStorageUsage {
+            Ok(library.dispatch(LibraryCommand::Pending(PendingCommand::LocalStorageUsage)).await?.take::<Option<u64>>()?.map(|used_bytes| LocalLibraryStorageUsage {
                 library_id: *entry.library_id(),
                 library_name: entry.library_name().to_owned(),
                 used_bytes,
@@ -324,6 +340,234 @@ impl AppBackend {
 
     pub(super) fn current_account(&self) -> Result<Option<account_client::Session>, BackendError> {
         self.state.account.current().map_err(BackendError::operation)
+    }
+
+    async fn publish_pending_library_names(&self) -> Result<(), BackendError> {
+        if self.current_account()?.is_none() {
+            return Ok(());
+        }
+        let mut failure = None;
+        for entry in self.libraries()? {
+            let id = *entry.library_id();
+            let result = async {
+                let key = format!("pending-library-rename/{id}");
+                let Some(pending) = self.state.registry.read_value(&key).map_err(BackendError::operation)? else {
+                    return Ok::<(), BackendError>(());
+                };
+                let name = String::from_utf8(pending.clone()).map_err(BackendError::operation)?;
+                self.state.account.request(|session| Box::pin(account_client::rename_library(session, id, name.clone()))).await.map_err(BackendError::operation)?;
+                self.with_storage(move |this| {
+                    // A second rename during the request must remain queued.
+                    if this.state.registry.read_value(&key).map_err(BackendError::operation)?.as_ref() == Some(&pending) {
+                        this.state.registry.remove_value(&key).map_err(BackendError::operation)?;
+                    }
+                    Ok(())
+                })
+            }
+            .await;
+            if let Err(error) = result {
+                log::warn!("rename for library {id} remains queued: {error}");
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
+    async fn run_account_maintenance(&self) -> Result<(), ()> {
+        let result = async {
+            let account = self.account_identity()?;
+            if account.is_none() {
+                return Ok(());
+            }
+            let (writes, refresh) = tokio::join!(self.flush_account_writes_cycle(), self.refresh_remote_account_details());
+            writes?;
+            refresh?;
+            self.check_account_identity(&account)
+        }
+        .await;
+        result.map_err(|error| log::warn!("account discovery will retry: {error}"))
+    }
+
+    async fn flush_account_writes_cycle(&self) -> Result<(), BackendError> {
+        let mut changed = self.state.account.subscribe();
+        changed.borrow_and_update();
+        let work = async {
+            if self.current_account()?.is_none() {
+                return Ok(());
+            }
+            // Every queue gets an attempt even if another fails.
+            let (names, deletions, cloud) = tokio::join!(self.publish_pending_library_names(), self.flush_pending_library_deletions(), self.publish_pending_cloud_storage());
+            // Feed changes made offline; the catalog page also syncs them.
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Err(error) = self.sync_opds_feeds().await {
+                log::warn!("OPDS feed changes remain queued: {error}");
+            }
+            cloud?;
+            names?;
+            if deletions? {
+                Ok(())
+            } else {
+                Err(BackendError::message("library deletions remain pending"))
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = changed.changed() => Ok(()),
+            result = work => result,
+        }
+    }
+
+    fn account_identity(&self) -> Result<Option<String>, BackendError> {
+        Ok(self.current_account()?.map(|session| format!("{}|{}", session.server_url(), session.user_id())))
+    }
+
+    fn check_account_identity(&self, account: &Option<String>) -> Result<(), BackendError> {
+        if self.account_identity()? != *account {
+            return Err(BackendError::message("account changed during background synchronization"));
+        }
+        Ok(())
+    }
+
+    async fn publish_cloud_storage(&self, id: LibraryId) -> Result<(), BackendError> {
+        let key = format!("pending-cloud-storage:{id}");
+        let Some(pending) = self.state.registry.read_value(&key).map_err(BackendError::operation)? else { return Ok(()) };
+        let text = std::str::from_utf8(&pending).map_err(BackendError::operation)?;
+        let (change_id, value) = text.split_once(':').ok_or_else(|| BackendError::message("Invalid pending cloud storage change"))?;
+        let change = CloudStorageChange { change_id: change_id.parse().map_err(BackendError::operation)?, enabled: value == "1" };
+        let account = self.account_identity()?;
+        let result = self.state.account.request(|session| Box::pin(account_client::set_cloud_storage(session, id, change.clone()))).await.map_err(BackendError::operation)?;
+        self.with_storage(move |this| {
+            this.check_account_identity(&account)?;
+            if this.state.registry.read_value(&key).map_err(BackendError::operation)?.as_ref() == Some(&pending) {
+                this.state.registry.cache_cloud_storage_with_reset(&id, result.enabled).map_err(BackendError::operation)?;
+                this.apply_open_cloud_storage(id, result.enabled)?;
+                this.state.registry.remove_value(&key).map_err(BackendError::operation)?;
+            }
+            this.state.account_wake.send_replace(());
+            Ok(())
+        })
+    }
+
+    fn apply_cloud_storage(&self, states: &[LibraryCloudStorage]) -> Result<(), BackendError> {
+        let states = states.to_vec();
+        self.with_storage(move |this| {
+            for state in &states {
+                let id = state.library_id;
+                if this.state.registry.entry(&id).map_err(BackendError::operation)?.is_none() || this.state.registry.read_value(&format!("pending-cloud-storage:{id}")).map_err(BackendError::operation)?.is_some() {
+                    continue;
+                }
+                if this.library_asset_storage_enabled(&id)? != state.enabled {
+                    this.state.registry.cache_cloud_storage_with_reset(&id, state.enabled).map_err(BackendError::operation)?;
+                    this.apply_open_cloud_storage(id, state.enabled)?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn apply_open_cloud_storage(&self, id: LibraryId, enabled: bool) -> Result<(), BackendError> {
+        if let Ok(library) = self.state.library_directory.get(&id) {
+            let _ = library.commands.try_send(LibraryActorCommand::Control(LibraryControl::SetAssetStorage { enabled, reset_cloud_presence: true }));
+        }
+        Ok(())
+    }
+
+    async fn publish_pending_cloud_storage(&self) -> Result<(), BackendError> {
+        let mut failure = None;
+        for entry in self.libraries()? {
+            let id = *entry.library_id();
+            if self.state.registry.read_value(&format!("pending-cloud-storage:{id}")).map_err(BackendError::operation)?.is_none() {
+                continue;
+            }
+            if let Err(error) = self.publish_cloud_storage(id).await {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod maintenance_tests {
+    use super::*;
+    use futures_util::poll;
+    use tokio::time::advance;
+
+    #[tokio::test(start_paused = true)]
+    async fn failure_retries_after_thirty_seconds_without_an_event() {
+        let (_sender, mut requests) = watch::channel(());
+        let (_account_sender, mut changes) = watch::channel(0);
+        let mut waiting = Box::pin(wait_for_maintenance(&mut requests, &mut changes, true));
+        assert!(poll!(&mut waiting).is_pending());
+        advance(Duration::from_secs(29)).await;
+        assert!(poll!(&mut waiting).is_pending());
+        advance(Duration::from_secs(1)).await;
+        assert!(waiting.await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn new_events_bypass_retry_wait_and_coalesce_during_debounce() {
+        let (sender, mut requests) = watch::channel(());
+        let (_account_sender, mut changes) = watch::channel(0);
+        let mut waiting = Box::pin(wait_for_maintenance(&mut requests, &mut changes, true));
+        assert!(poll!(&mut waiting).is_pending());
+        sender.send_replace(());
+        assert!(poll!(&mut waiting).is_pending());
+        sender.send_replace(());
+        advance(Duration::from_millis(99)).await;
+        assert!(poll!(&mut waiting).is_pending());
+        advance(Duration::from_millis(1)).await;
+        assert!(waiting.await);
+        assert!(!requests.has_changed().unwrap());
+
+        // An event raised by a running pass must still schedule the next pass.
+        sender.send_replace(());
+        let mut waiting = Box::pin(wait_for_maintenance(&mut requests, &mut changes, false));
+        assert!(poll!(&mut waiting).is_pending());
+        advance(MAINTENANCE_DEBOUNCE).await;
+        assert!(waiting.await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn session_changes_wake_maintenance_without_a_notification_connection() {
+        for retry in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let context = BackendContext::initialize(AppDataLocation::native_path(root.path())).unwrap();
+            let server = "https://example.com".parse().unwrap();
+            let account = DeviceAccountSession::load(context, server).unwrap();
+            let mut changes = account.subscribe();
+            let (_sender, mut requests) = watch::channel(());
+            let mut waiting = Box::pin(wait_for_maintenance(&mut requests, &mut changes, retry));
+            assert!(poll!(&mut waiting).is_pending());
+
+            let session = account_client::Session::try_new("https://example.com".parse().unwrap(), "user".into(), "reader@example.com".into(), "a".repeat(43)).unwrap();
+            account.set(session.clone()).unwrap();
+            assert!(poll!(&mut waiting).is_pending());
+            account.set(session).unwrap();
+            advance(MAINTENANCE_DEBOUNCE).await;
+            assert!(waiting.await);
+            assert!(!changes.has_changed().unwrap(), "session changes during debounce coalesce");
+            assert!(!requests.has_changed().unwrap(), "maintenance does not need a forwarded wake");
+
+            // A logout during a maintenance pass must schedule the next pass.
+            account.take().unwrap();
+            let mut waiting = Box::pin(wait_for_maintenance(&mut requests, &mut changes, false));
+            assert!(poll!(&mut waiting).is_pending());
+            advance(MAINTENANCE_DEBOUNCE).await;
+            assert!(waiting.await);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closing_wake_channel_stops_idle_and_retry_waits() {
+        for retry in [false, true] {
+            let (sender, mut requests) = watch::channel(());
+            let (_account_sender, mut changes) = watch::channel(0);
+            let mut waiting = Box::pin(wait_for_maintenance(&mut requests, &mut changes, retry));
+            assert!(poll!(&mut waiting).is_pending());
+            drop(sender);
+            assert!(!waiting.await);
+        }
     }
 }
 
@@ -350,7 +594,7 @@ mod unavailable_library_tests {
     async fn discovery_reopens_an_existing_registered_library() {
         let root = tempfile::tempdir().unwrap();
         let backend = AppBackend::new(BackendContext::initialize(AppDataLocation::native_path(root.path())).unwrap()).unwrap();
-        let library = backend.create_library("Existing".to_owned(), None).unwrap();
+        let library = backend.create_library_with_asset_storage("Existing".to_owned(), true).unwrap();
         let id = *library.library_id();
         backend.state.library_directory.retire(&id).unwrap();
 

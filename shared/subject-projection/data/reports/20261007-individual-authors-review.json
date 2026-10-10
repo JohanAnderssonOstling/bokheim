@@ -1,0 +1,4708 @@
+{
+  "scope": "Read-only review of individual-author categories in fiction and literature; no author categories merged or removed.",
+  "taxonomy_concepts_before_compaction": 15931,
+  "named_author_subjects_identified": 153,
+  "approved_author_batches": {
+    "american_subjects": 50,
+    "english_subjects": 99
+  },
+  "additional_author_topics": {
+    "Goethe": 1,
+    "Shakespeare_by_drama_criticism_and_poetry": 3
+  },
+  "limits": [
+    "Historical usage TSV predates subsequent hierarchy changes and is not a fresh usage audit. Counts are classification uses, not unique books.",
+    "Named-author inventory is based on installation manifests and inspected literature labels; generic groupings, author demographics, works and bibliography topics are excluded."
+  ],
+  "findings": [
+    {
+      "topic": "Compact named-author shelves",
+      "recommendation": "For fewer visible categories, absorb all 149 installed American and English author leaves into their current era parents, transferring every selector. Keep author discovery in the creator index. This is a proposal; retain these previously approved exceptions until an explicit removal decision.",
+      "reduction": 149
+    },
+    {
+      "topic": "Current English parent",
+      "recommendation": "All 99 English author shelves now sit under 20th Century after previous period compaction. Do not restore the historical source subject 3914; a future compaction must target the current parent."
+    },
+    {
+      "topic": "Goethe",
+      "recommendation": "Retain as an established author topic unless choosing a consistent removal policy for author topics. Optional absorption into German literature saves one category; transfer the three disjoint LCC ranges exactly.",
+      "optional_reduction": 1
+    },
+    {
+      "topic": "Shakespeare",
+      "recommendation": "Review consolidating the three Shakespeare subjects into one shared concept with drama, poetry and criticism parents. This saves two IDs while retaining all three browsing routes. BISAC fiction/poetry and criticism scopes differ, so this reduces distinctions between works and studies and is a product choice.",
+      "optional_reduction": 2
+    },
+    {
+      "topic": "Ancient Greek author-specific fragments",
+      "recommendation": "Review the 12 immediate children of Ancient Greek Authors separately. Editions, particular orations, fragments and Plutarch-specific works expose author filing detail without most author names. Broad absorption would remove 12 children; Translations owns a further child that must be retained or explicitly reviewed.",
+      "immediate_children": 12
+    },
+    {
+      "topic": "Creator attribution",
+      "recommendation": "Preserve classification coverage on broader literature subjects. Transferring author-shelf selectors does not populate creator records; these shelves cover both works by and material about their authors."
+    }
+  ],
+  "authors": [
+    {
+      "id": 3897,
+      "label": "Shakespeare",
+      "batch": "existing-topic",
+      "current_parents": [
+        {
+          "id": 3876,
+          "label": "Drama"
+        }
+      ],
+      "paths": [
+        "Literature / Genres / Literary Forms / Drama / Shakespeare"
+      ],
+      "historical_direct_hits": 0,
+      "selectors": {
+        "lcc_selector": [],
+        "bisac_selector": [
+          [
+            3897,
+            "DRA010000"
+          ]
+        ],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 4248,
+      "label": "Goethe",
+      "batch": "existing-topic",
+      "current_parents": [
+        {
+          "id": 4244,
+          "label": "German"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / Germanic / German / Goethe"
+      ],
+      "historical_direct_hits": 3579,
+      "selectors": {
+        "lcc_selector": [],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": [
+          [
+            4248,
+            "PT",
+            1891.0,
+            "[]",
+            "PT",
+            2017.0,
+            "[]"
+          ],
+          [
+            4248,
+            "PT",
+            2026.0,
+            "[]",
+            "PT",
+            2039.0,
+            "[]"
+          ],
+          [
+            4248,
+            "PT",
+            2044.0,
+            "[]",
+            "PT",
+            2239.0,
+            "[]"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 4360,
+      "label": "Shakespeare",
+      "batch": "existing-topic",
+      "current_parents": [
+        {
+          "id": 5811,
+          "label": "Genres & Forms"
+        }
+      ],
+      "paths": [
+        "Literature / Criticism / Genres & Forms / Shakespeare"
+      ],
+      "historical_direct_hits": 0,
+      "selectors": {
+        "lcc_selector": [],
+        "bisac_selector": [
+          [
+            4360,
+            "LIT015000"
+          ]
+        ],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 4443,
+      "label": "Shakespeare",
+      "batch": "existing-topic",
+      "current_parents": [
+        {
+          "id": 4416,
+          "label": "Poetry"
+        }
+      ],
+      "paths": [
+        "Literature / Genres / Literary Forms / Poetry / Shakespeare"
+      ],
+      "historical_direct_hits": 0,
+      "selectors": {
+        "lcc_selector": [],
+        "bisac_selector": [
+          [
+            4443,
+            "POE026000"
+          ]
+        ],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52111,
+      "label": "Roberts, Nora",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Roberts, Nora"
+      ],
+      "historical_direct_hits": 2278,
+      "historical_code_examples": [
+        "PS3568.O243"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52111,
+            "PS3568.O243"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52112,
+      "label": "Clemens, Samuel Langhorne \"Mark Twain\"",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 4153,
+          "label": "19th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / 19th Century / Clemens, Samuel Langhorne \"Mark Twain\""
+      ],
+      "historical_direct_hits": 2131,
+      "historical_code_examples": [
+        "PS1300..PS1348"
+      ],
+      "selectors": {
+        "lcc_selector": [],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": [
+          [
+            52112,
+            "PS",
+            1300.0,
+            "[]",
+            "PS",
+            1348.0,
+            "[]"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 52113,
+      "label": "James, Henry",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 4153,
+          "label": "19th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / 19th Century / James, Henry"
+      ],
+      "historical_direct_hits": 1847,
+      "historical_code_examples": [
+        "PS2110..PS2128"
+      ],
+      "selectors": {
+        "lcc_selector": [],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": [
+          [
+            52113,
+            "PS",
+            2110.0,
+            "[]",
+            "PS",
+            2128.0,
+            "[]"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 52114,
+      "label": "Faulkner, William, 1897-1962",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12718,
+          "label": "American, 1900–1960"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1900–1960 / Faulkner, William, 1897-1962"
+      ],
+      "historical_direct_hits": 1566,
+      "historical_code_examples": [
+        "PS3511.A86"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52114,
+            "PS3511.A86"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52115,
+      "label": "Hemingway, Ernest, 1899-1961",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12718,
+          "label": "American, 1900–1960"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1900–1960 / Hemingway, Ernest, 1899-1961"
+      ],
+      "historical_direct_hits": 1313,
+      "historical_code_examples": [
+        "PS3515.E37"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52115,
+            "PS3515.E37"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52116,
+      "label": "Melville, Herman",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 4153,
+          "label": "19th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / 19th Century / Melville, Herman"
+      ],
+      "historical_direct_hits": 1268,
+      "historical_code_examples": [
+        "PS2380..PS2388"
+      ],
+      "selectors": {
+        "lcc_selector": [],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": [
+          [
+            52116,
+            "PS",
+            2380.0,
+            "[]",
+            "PS",
+            2388.0,
+            "[]"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 52117,
+      "label": "Poe, Edgar Allan",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 4153,
+          "label": "19th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / 19th Century / Poe, Edgar Allan"
+      ],
+      "historical_direct_hits": 1195,
+      "historical_code_examples": [
+        "PS2600..PS2648"
+      ],
+      "selectors": {
+        "lcc_selector": [],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": [
+          [
+            52117,
+            "PS",
+            2600.0,
+            "[]",
+            "PS",
+            2648.0,
+            "[]"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 52118,
+      "label": "Eliot, T. S.",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12718,
+          "label": "American, 1900–1960"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1900–1960 / Eliot, T. S."
+      ],
+      "historical_direct_hits": 1142,
+      "historical_code_examples": [
+        "PS3509.L43"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52118,
+            "PS3509.L43"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52119,
+      "label": "King, Stephen, 1947-",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / King, Stephen, 1947-"
+      ],
+      "historical_direct_hits": 1061,
+      "historical_code_examples": [
+        "PS3561.I483"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52119,
+            "PS3561.I483"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52120,
+      "label": "Fitzgerald, F. Scott",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12718,
+          "label": "American, 1900–1960"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1900–1960 / Fitzgerald, F. Scott"
+      ],
+      "historical_direct_hits": 991,
+      "historical_code_examples": [
+        "PS3511.I9"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52120,
+            "PS3511.I9"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52121,
+      "label": "Hawthorne, Nathaniel",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 4153,
+          "label": "19th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / 19th Century / Hawthorne, Nathaniel"
+      ],
+      "historical_direct_hits": 986,
+      "historical_code_examples": [
+        "PS1850..PS1898"
+      ],
+      "selectors": {
+        "lcc_selector": [],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": [
+          [
+            52121,
+            "PS",
+            1850.0,
+            "[]",
+            "PS",
+            1898.0,
+            "[]"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 52122,
+      "label": "Whitman, Walt",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 4153,
+          "label": "19th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / 19th Century / Whitman, Walt"
+      ],
+      "historical_direct_hits": 947,
+      "historical_code_examples": [
+        "PS3200..PS3248"
+      ],
+      "selectors": {
+        "lcc_selector": [],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": [
+          [
+            52122,
+            "PS",
+            3200.0,
+            "[]",
+            "PS",
+            3248.0,
+            "[]"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 52123,
+      "label": "Patterson, James",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Patterson, James"
+      ],
+      "historical_direct_hits": 916,
+      "historical_code_examples": [
+        "PS3566.A822"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52123,
+            "PS3566.A822"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52124,
+      "label": "Steel, Danielle",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Steel, Danielle"
+      ],
+      "historical_direct_hits": 842,
+      "historical_code_examples": [
+        "PS3569.T33828"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52124,
+            "PS3569.T33828"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52125,
+      "label": "Thoreau, Henry David",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 4153,
+          "label": "19th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / 19th Century / Thoreau, Henry David"
+      ],
+      "historical_direct_hits": 814,
+      "historical_code_examples": [
+        "PS3040..PS3058"
+      ],
+      "selectors": {
+        "lcc_selector": [],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": [
+          [
+            52125,
+            "PS",
+            3040.0,
+            "[]",
+            "PS",
+            3058.0,
+            "[]"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 52126,
+      "label": "Emerson, Ralph Waldo",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 4153,
+          "label": "19th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / 19th Century / Emerson, Ralph Waldo"
+      ],
+      "historical_direct_hits": 809,
+      "historical_code_examples": [
+        "PS1600..PS1648"
+      ],
+      "selectors": {
+        "lcc_selector": [],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": [
+          [
+            52126,
+            "PS",
+            1600.0,
+            "[]",
+            "PS",
+            1648.0,
+            "[]"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 52127,
+      "label": "Dickinson, Emily",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 4153,
+          "label": "19th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / 19th Century / Dickinson, Emily"
+      ],
+      "historical_direct_hits": 798,
+      "historical_code_examples": [
+        "PS1541"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52127,
+            "PS1541"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52128,
+      "label": "Pound, Ezra, 1885-1972",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12718,
+          "label": "American, 1900–1960"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1900–1960 / Pound, Ezra, 1885-1972"
+      ],
+      "historical_direct_hits": 760,
+      "historical_code_examples": [
+        "PS3531.O82"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52128,
+            "PS3531.O82"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52129,
+      "label": "Faust, Frederick, 1892-1944",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12718,
+          "label": "American, 1900–1960"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1900–1960 / Faust, Frederick, 1892-1944"
+      ],
+      "historical_direct_hits": 758,
+      "historical_code_examples": [
+        "PS3511.A87"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52129,
+            "PS3511.A87"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52130,
+      "label": "Wharton, Edith, 1862-1937",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12718,
+          "label": "American, 1900–1960"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1900–1960 / Wharton, Edith, 1862-1937"
+      ],
+      "historical_direct_hits": 744,
+      "historical_code_examples": [
+        "PS3545.H16"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52130,
+            "PS3545.H16"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52131,
+      "label": "Steinbeck, John, 1902-1968",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12718,
+          "label": "American, 1900–1960"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1900–1960 / Steinbeck, John, 1902-1968"
+      ],
+      "historical_direct_hits": 698,
+      "historical_code_examples": [
+        "PS3537.T3234"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52131,
+            "PS3537.T3234"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52132,
+      "label": "Updike, John",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Updike, John"
+      ],
+      "historical_direct_hits": 702,
+      "historical_code_examples": [
+        "PS3571.P4"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52132,
+            "PS3571.P4"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52133,
+      "label": "Cather, Willa Sibert",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12718,
+          "label": "American, 1900–1960"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1900–1960 / Cather, Willa Sibert"
+      ],
+      "historical_direct_hits": 677,
+      "historical_code_examples": [
+        "PS3505.A87"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52133,
+            "PS3505.A87"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52134,
+      "label": "Morrison, Toni",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Morrison, Toni"
+      ],
+      "historical_direct_hits": 629,
+      "historical_code_examples": [
+        "PS3563.O8749"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52134,
+            "PS3563.O8749"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52135,
+      "label": "London, Jack",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12718,
+          "label": "American, 1900–1960"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1900–1960 / London, Jack"
+      ],
+      "historical_direct_hits": 611,
+      "historical_code_examples": [
+        "PS3523.O46"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52135,
+            "PS3523.O46"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52136,
+      "label": "Oates, Joyce Carol, 1938-",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Oates, Joyce Carol, 1938-"
+      ],
+      "historical_direct_hits": 590,
+      "historical_code_examples": [
+        "PS3565.A8"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52136,
+            "PS3565.A8"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52137,
+      "label": "Krentz, Jayne Ann",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Krentz, Jayne Ann"
+      ],
+      "historical_direct_hits": 551,
+      "historical_code_examples": [
+        "PS3561.R44"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52137,
+            "PS3561.R44"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52138,
+      "label": "L'Amour, Louis, 1908-",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12718,
+          "label": "American, 1900–1960"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1900–1960 / L'Amour, Louis, 1908-"
+      ],
+      "historical_direct_hits": 535,
+      "historical_code_examples": [
+        "PS3523.A446"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52138,
+            "PS3523.A446"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52139,
+      "label": "Miller, Arthur, 1915-2005",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12718,
+          "label": "American, 1900–1960"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1900–1960 / Miller, Arthur, 1915-2005"
+      ],
+      "historical_direct_hits": 541,
+      "historical_code_examples": [
+        "PS3525.I5156"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52139,
+            "PS3525.I5156"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52140,
+      "label": "Michaels, Fern",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Michaels, Fern"
+      ],
+      "historical_direct_hits": 521,
+      "historical_code_examples": [
+        "PS3563.I27"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52140,
+            "PS3563.I27"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52141,
+      "label": "Plath, Sylvia",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Plath, Sylvia"
+      ],
+      "historical_direct_hits": 523,
+      "historical_code_examples": [
+        "PS3566.L27"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52141,
+            "PS3566.L27"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52142,
+      "label": "Macomber, Debbie",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Macomber, Debbie"
+      ],
+      "historical_direct_hits": 511,
+      "historical_code_examples": [
+        "PS3563.A2364"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52142,
+            "PS3563.A2364"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52143,
+      "label": "Williams, Tennessee, 1911-1983",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12718,
+          "label": "American, 1900–1960"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1900–1960 / Williams, Tennessee, 1911-1983"
+      ],
+      "historical_direct_hits": 508,
+      "historical_code_examples": [
+        "PS3545.I5365"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52143,
+            "PS3545.I5365"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52144,
+      "label": "Cussler, Clive",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Cussler, Clive"
+      ],
+      "historical_direct_hits": 496,
+      "historical_code_examples": [
+        "PS3553.U75"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52144,
+            "PS3553.U75"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52145,
+      "label": "Koontz, Dean",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Koontz, Dean"
+      ],
+      "historical_direct_hits": 478,
+      "historical_code_examples": [
+        "PS3561.O55"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52145,
+            "PS3561.O55"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52146,
+      "label": "Morris, Gilbert",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Morris, Gilbert"
+      ],
+      "historical_direct_hits": 476,
+      "historical_code_examples": [
+        "PS3563.O8742"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52146,
+            "PS3563.O8742"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52147,
+      "label": "Dick, Philip K.",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Dick, Philip K."
+      ],
+      "historical_direct_hits": 476,
+      "historical_code_examples": [
+        "PS3554.I3"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52147,
+            "PS3554.I3"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52148,
+      "label": "Stein, Gertrude",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12718,
+          "label": "American, 1900–1960"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1900–1960 / Stein, Gertrude"
+      ],
+      "historical_direct_hits": 466,
+      "historical_code_examples": [
+        "PS3537.T323"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52148,
+            "PS3537.T323"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52149,
+      "label": "Kerouac, Jack, 1922-1969",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12718,
+          "label": "American, 1900–1960"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1900–1960 / Kerouac, Jack, 1922-1969"
+      ],
+      "historical_direct_hits": 460,
+      "historical_code_examples": [
+        "PS3521.E735"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52149,
+            "PS3521.E735"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52150,
+      "label": "Johnstone, William W.",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Johnstone, William W."
+      ],
+      "historical_direct_hits": 444,
+      "historical_code_examples": [
+        "PS3560.O415"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52150,
+            "PS3560.O415"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52151,
+      "label": "Roth, Philip",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Roth, Philip"
+      ],
+      "historical_direct_hits": 449,
+      "historical_code_examples": [
+        "PS3568.O855"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52151,
+            "PS3568.O855"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52152,
+      "label": "Paine, Lauran",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Paine, Lauran"
+      ],
+      "historical_direct_hits": 427,
+      "historical_code_examples": [
+        "PS3566.A34"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52152,
+            "PS3566.A34"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52153,
+      "label": "Clark, Mary Higgins",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Clark, Mary Higgins"
+      ],
+      "historical_direct_hits": 431,
+      "historical_code_examples": [
+        "PS3553.L287"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52153,
+            "PS3553.L287"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52154,
+      "label": "Brown, Sandra",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Brown, Sandra"
+      ],
+      "historical_direct_hits": 420,
+      "historical_code_examples": [
+        "PS3552.R718"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52154,
+            "PS3552.R718"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52155,
+      "label": "Alcott, Louisa May",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 4153,
+          "label": "19th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / 19th Century / Alcott, Louisa May"
+      ],
+      "historical_direct_hits": 421,
+      "historical_code_examples": [
+        "PS1015..PS1018"
+      ],
+      "selectors": {
+        "lcc_selector": [],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": [
+          [
+            52155,
+            "PS",
+            1015.0,
+            "[]",
+            "PS",
+            1018.0,
+            "[]"
+          ]
+        ]
+      }
+    },
+    {
+      "id": 52156,
+      "label": "Grisham, John",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Grisham, John"
+      ],
+      "historical_direct_hits": 411,
+      "historical_code_examples": [
+        "PS3557.R5355"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52156,
+            "PS3557.R5355"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52157,
+      "label": "Grey, Zane, 1872-1939",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12718,
+          "label": "American, 1900–1960"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1900–1960 / Grey, Zane, 1872-1939"
+      ],
+      "historical_direct_hits": 401,
+      "historical_code_examples": [
+        "PS3513.R6545"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52157,
+            "PS3513.R6545"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52158,
+      "label": "Andrews, V. C.",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Andrews, V. C."
+      ],
+      "historical_direct_hits": 394,
+      "historical_code_examples": [
+        "PS3551.N454"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52158,
+            "PS3551.N454"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52159,
+      "label": "Nabokov, Vladimir Vladimirovich, 1899-1977",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12718,
+          "label": "American, 1900–1960"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1900–1960 / Nabokov, Vladimir Vladimirovich, 1899-1977"
+      ],
+      "historical_direct_hits": 403,
+      "historical_code_examples": [
+        "PS3527.A15"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52159,
+            "PS3527.A15"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52160,
+      "label": "Parker, Robert B.",
+      "batch": "american-top50",
+      "current_parents": [
+        {
+          "id": 12719,
+          "label": "American, 1961–2000"
+        }
+      ],
+      "paths": [
+        "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000 / Parker, Robert B."
+      ],
+      "historical_direct_hits": 395,
+      "historical_code_examples": [
+        "PS3566.A686"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52160,
+            "PS3566.A686"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52190,
+      "label": "Rowling, J. K.",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Rowling, J. K."
+      ],
+      "historical_direct_hits": 534,
+      "historical_code_examples": [
+        "PR6068.O93"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52190,
+            "PR6068.O93"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52191,
+      "label": "Chesney, Marion M. C. Beaton",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Chesney, Marion M. C. Beaton"
+      ],
+      "historical_direct_hits": 697,
+      "historical_code_examples": [
+        "PR6053.H4535",
+        "PR6052.E196"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52191,
+            "PR6052.E196"
+          ],
+          [
+            52191,
+            "PR6053.H4535"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52192,
+      "label": "Rendell, Ruth, 1930-",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Rendell, Ruth, 1930-"
+      ],
+      "historical_direct_hits": 523,
+      "historical_code_examples": [
+        "PR6068.E63"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52192,
+            "PR6068.E63"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52193,
+      "label": "McCall Smith, Alexander",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / McCall Smith, Alexander"
+      ],
+      "historical_direct_hits": 483,
+      "historical_code_examples": [
+        "PR6063.C326"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52193,
+            "PR6063.C326"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52194,
+      "label": "Perry, Anne",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Perry, Anne"
+      ],
+      "historical_direct_hits": 480,
+      "historical_code_examples": [
+        "PR6066.E693"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52194,
+            "PR6066.E693"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52195,
+      "label": "Cornwell, Bernard",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Cornwell, Bernard"
+      ],
+      "historical_direct_hits": 451,
+      "historical_code_examples": [
+        "PR6053.O75"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52195,
+            "PR6053.O75"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52196,
+      "label": "Rushdie, Salman",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Rushdie, Salman"
+      ],
+      "historical_direct_hits": 416,
+      "historical_code_examples": [
+        "PR6068.U757"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52196,
+            "PR6068.U757"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52197,
+      "label": "Pinter, Harold",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Pinter, Harold"
+      ],
+      "historical_direct_hits": 412,
+      "historical_code_examples": [
+        "PR6066.I53"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52197,
+            "PR6066.I53"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52198,
+      "label": "Pratchett, Terry",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Pratchett, Terry"
+      ],
+      "historical_direct_hits": 387,
+      "historical_code_examples": [
+        "PR6066.R34"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52198,
+            "PR6066.R34"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52199,
+      "label": "Le Carré, John, 1931-",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Le Carré, John, 1931-"
+      ],
+      "historical_direct_hits": 390,
+      "historical_code_examples": [
+        "PR6062.E33"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52199,
+            "PR6062.E33"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52200,
+      "label": "Higgins, Jack, 1929-",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Higgins, Jack, 1929-"
+      ],
+      "historical_direct_hits": 380,
+      "historical_code_examples": [
+        "PR6058.I343"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52200,
+            "PR6058.I343"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52201,
+      "label": "Murdoch, Iris",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Murdoch, Iris"
+      ],
+      "historical_direct_hits": 371,
+      "historical_code_examples": [
+        "PR6063.U7"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52201,
+            "PR6063.U7"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52202,
+      "label": "Heaney, Seamus",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Heaney, Seamus"
+      ],
+      "historical_direct_hits": 349,
+      "historical_code_examples": [
+        "PR6058.E2"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52202,
+            "PR6058.E2"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52203,
+      "label": "Moorcock, Michael",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Moorcock, Michael"
+      ],
+      "historical_direct_hits": 349,
+      "historical_code_examples": [
+        "PR6063.O59"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52203,
+            "PR6063.O59"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52204,
+      "label": "Francis, Dick",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Francis, Dick"
+      ],
+      "historical_direct_hits": 334,
+      "historical_code_examples": [
+        "PR6056.R27"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52204,
+            "PR6056.R27"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52205,
+      "label": "Stoppard, Tom",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Stoppard, Tom"
+      ],
+      "historical_direct_hits": 334,
+      "historical_code_examples": [
+        "PR6069.T6"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52205,
+            "PR6069.T6"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52206,
+      "label": "Rankin, Ian",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Rankin, Ian"
+      ],
+      "historical_direct_hits": 316,
+      "historical_code_examples": [
+        "PR6068.A57"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52206,
+            "PR6068.A57"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52207,
+      "label": "Fleming, Ian",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Fleming, Ian"
+      ],
+      "historical_direct_hits": 311,
+      "historical_code_examples": [
+        "PR6056.L4"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52207,
+            "PR6056.L4"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52208,
+      "label": "Hughes, Ted, 1930-1998",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Hughes, Ted, 1930-1998"
+      ],
+      "historical_direct_hits": 294,
+      "historical_code_examples": [
+        "PR6058.U37"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52208,
+            "PR6058.U37"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52209,
+      "label": "Doherty, P. C.",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Doherty, P. C."
+      ],
+      "historical_direct_hits": 289,
+      "historical_code_examples": [
+        "PR6054.O37"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52209,
+            "PR6054.O37"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52210,
+      "label": "Cookson, Catherine",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Cookson, Catherine"
+      ],
+      "historical_direct_hits": 287,
+      "historical_code_examples": [
+        "PR6053.O525"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52210,
+            "PR6053.O525"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52211,
+      "label": "Weldon, Fay",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Weldon, Fay"
+      ],
+      "historical_direct_hits": 287,
+      "historical_code_examples": [
+        "PR6073.E374"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52211,
+            "PR6073.E374"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52212,
+      "label": "Archer, Jeffrey",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Archer, Jeffrey"
+      ],
+      "historical_direct_hits": 276,
+      "historical_code_examples": [
+        "PR6051.R285"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52212,
+            "PR6051.R285"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52213,
+      "label": "Lovesey, Peter",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Lovesey, Peter"
+      ],
+      "historical_direct_hits": 277,
+      "historical_code_examples": [
+        "PR6062.O86"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52213,
+            "PR6062.O86"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52214,
+      "label": "Burgess, Anthony, 1917-",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Burgess, Anthony, 1917-"
+      ],
+      "historical_direct_hits": 275,
+      "historical_code_examples": [
+        "PR6052.U638"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52214,
+            "PR6052.U638"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52215,
+      "label": "Dahl, Roald",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Dahl, Roald"
+      ],
+      "historical_direct_hits": 272,
+      "historical_code_examples": [
+        "PR6054.A35"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52215,
+            "PR6054.A35"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52216,
+      "label": "Deighton, Len",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Deighton, Len"
+      ],
+      "historical_direct_hits": 259,
+      "historical_code_examples": [
+        "PR6054.E37"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52216,
+            "PR6054.E37"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52217,
+      "label": "Hill, Reginald",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Hill, Reginald"
+      ],
+      "historical_direct_hits": 252,
+      "historical_code_examples": [
+        "PR6058.I448"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52217,
+            "PR6058.I448"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52218,
+      "label": "Miles, Keith",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Miles, Keith"
+      ],
+      "historical_direct_hits": 250,
+      "historical_code_examples": [
+        "PR6063.I3175"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52218,
+            "PR6063.I3175"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52219,
+      "label": "McEwan, Ian",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / McEwan, Ian"
+      ],
+      "historical_direct_hits": 252,
+      "historical_code_examples": [
+        "PR6063.C4"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52219,
+            "PR6063.C4"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52220,
+      "label": "Barnard, Robert",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Barnard, Robert"
+      ],
+      "historical_direct_hits": 242,
+      "historical_code_examples": [
+        "PR6052.A665"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52220,
+            "PR6052.A665"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52221,
+      "label": "Binchy, Maeve",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Binchy, Maeve"
+      ],
+      "historical_direct_hits": 242,
+      "historical_code_examples": [
+        "PR6052.I7728"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52221,
+            "PR6052.I7728"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52222,
+      "label": "Aldiss, Brian Wilson",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Aldiss, Brian Wilson"
+      ],
+      "historical_direct_hits": 239,
+      "historical_code_examples": [
+        "PR6051.L3"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52222,
+            "PR6051.L3"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52223,
+      "label": "Ballard, J. G.",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Ballard, J. G."
+      ],
+      "historical_direct_hits": 242,
+      "historical_code_examples": [
+        "PR6052.A46"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52223,
+            "PR6052.A46"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52224,
+      "label": "Follett, Ken",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Follett, Ken"
+      ],
+      "historical_direct_hits": 236,
+      "historical_code_examples": [
+        "PR6056.O45"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52224,
+            "PR6056.O45"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52225,
+      "label": "Robinson, Peter",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Robinson, Peter"
+      ],
+      "historical_direct_hits": 233,
+      "historical_code_examples": [
+        "PR6068.O1964"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52225,
+            "PR6068.O1964"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52226,
+      "label": "Gregory, Philippa",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Gregory, Philippa"
+      ],
+      "historical_direct_hits": 224,
+      "historical_code_examples": [
+        "PR6057.R386"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52226,
+            "PR6057.R386"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52227,
+      "label": "Trevor, William",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Trevor, William"
+      ],
+      "historical_direct_hits": 229,
+      "historical_code_examples": [
+        "PR6070.R4"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52227,
+            "PR6070.R4"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52228,
+      "label": "James, P. D.",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / James, P. D."
+      ],
+      "historical_direct_hits": 225,
+      "historical_code_examples": [
+        "PR6060.A467"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52228,
+            "PR6060.A467"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52229,
+      "label": "McCutchan, Philip, 1920-",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / McCutchan, Philip, 1920-"
+      ],
+      "historical_direct_hits": 224,
+      "historical_code_examples": [
+        "PR6063.A167"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52229,
+            "PR6063.A167"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52230,
+      "label": "Banville, John",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Banville, John"
+      ],
+      "historical_direct_hits": 221,
+      "historical_code_examples": [
+        "PR6052.A57"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52230,
+            "PR6052.A57"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52231,
+      "label": "Carter, Angela",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Carter, Angela"
+      ],
+      "historical_direct_hits": 221,
+      "historical_code_examples": [
+        "PR6053.A73"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52231,
+            "PR6053.A73"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52232,
+      "label": "Saint, Dora Jessie, 1913-",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Saint, Dora Jessie, 1913-"
+      ],
+      "historical_direct_hits": 220,
+      "historical_code_examples": [
+        "PR6069.A42"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52232,
+            "PR6069.A42"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52233,
+      "label": "McDermid, Val",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / McDermid, Val"
+      ],
+      "historical_direct_hits": 218,
+      "historical_code_examples": [
+        "PR6063.C37"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52233,
+            "PR6063.C37"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52234,
+      "label": "Jeffries, Roderic, 1926-",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Jeffries, Roderic, 1926-"
+      ],
+      "historical_direct_hits": 211,
+      "historical_code_examples": [
+        "PR6060.E43"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52234,
+            "PR6060.E43"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52235,
+      "label": "Balogh, Mary",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Balogh, Mary"
+      ],
+      "historical_direct_hits": 208,
+      "historical_code_examples": [
+        "PR6052.A465"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52235,
+            "PR6052.A465"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52236,
+      "label": "Amis, Martin",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Amis, Martin"
+      ],
+      "historical_direct_hits": 198,
+      "historical_code_examples": [
+        "PR6051.M5"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52236,
+            "PR6051.M5"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52237,
+      "label": "Brett, Simon",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Brett, Simon"
+      ],
+      "historical_direct_hits": 195,
+      "historical_code_examples": [
+        "PR6052.R4296"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52237,
+            "PR6052.R4296"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52238,
+      "label": "Bowen, Rhys",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Bowen, Rhys"
+      ],
+      "historical_direct_hits": 193,
+      "historical_code_examples": [
+        "PR6052.O848"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52238,
+            "PR6052.O848"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52239,
+      "label": "Pym, Barbara",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Pym, Barbara"
+      ],
+      "historical_direct_hits": 196,
+      "historical_code_examples": [
+        "PR6066.Y58"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52239,
+            "PR6066.Y58"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52240,
+      "label": "Keating, H. R. F.",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Keating, H. R. F."
+      ],
+      "historical_direct_hits": 190,
+      "historical_code_examples": [
+        "PR6061.E26"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52240,
+            "PR6061.E26"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52241,
+      "label": "Barnes, Julian",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Barnes, Julian"
+      ],
+      "historical_direct_hits": 193,
+      "historical_code_examples": [
+        "PR6052.A6657"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52241,
+            "PR6052.A6657"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52242,
+      "label": "Hill, Susan",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Hill, Susan"
+      ],
+      "historical_direct_hits": 188,
+      "historical_code_examples": [
+        "PR6058.I45"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52242,
+            "PR6058.I45"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52243,
+      "label": "Davis, Lindsey",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Davis, Lindsey"
+      ],
+      "historical_direct_hits": 185,
+      "historical_code_examples": [
+        "PR6054.A8925"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52243,
+            "PR6054.A8925"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52244,
+      "label": "Harrod-Eagles, Cynthia",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Harrod-Eagles, Cynthia"
+      ],
+      "historical_direct_hits": 182,
+      "historical_code_examples": [
+        "PR6058.A6945"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52244,
+            "PR6058.A6945"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52245,
+      "label": "Kent, Alexander",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Kent, Alexander"
+      ],
+      "historical_direct_hits": 180,
+      "historical_code_examples": [
+        "PR6061.E63"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52245,
+            "PR6061.E63"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52246,
+      "label": "Baxter, Stephen",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Baxter, Stephen"
+      ],
+      "historical_direct_hits": 180,
+      "historical_code_examples": [
+        "PR6052.A849"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52246,
+            "PR6052.A849"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52247,
+      "label": "Ayckbourn, Alan",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Ayckbourn, Alan"
+      ],
+      "historical_direct_hits": 176,
+      "historical_code_examples": [
+        "PR6051.Y35"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52247,
+            "PR6051.Y35"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52248,
+      "label": "Bennett, Alan",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Bennett, Alan"
+      ],
+      "historical_direct_hits": 179,
+      "historical_code_examples": [
+        "PR6052.E5"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52248,
+            "PR6052.E5"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52249,
+      "label": "Gardner, John E.",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Gardner, John E."
+      ],
+      "historical_direct_hits": 176,
+      "historical_code_examples": [
+        "PR6057.A63"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52249,
+            "PR6057.A63"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52250,
+      "label": "Jordan, Penny",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Jordan, Penny"
+      ],
+      "historical_direct_hits": 172,
+      "historical_code_examples": [
+        "PR6060.O6257"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52250,
+            "PR6060.O6257"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52251,
+      "label": "Drabble, Margaret, 1939-",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Drabble, Margaret, 1939-"
+      ],
+      "historical_direct_hits": 171,
+      "historical_code_examples": [
+        "PR6054.R25"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52251,
+            "PR6054.R25"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52252,
+      "label": "Masterton, Graham",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Masterton, Graham"
+      ],
+      "historical_direct_hits": 171,
+      "historical_code_examples": [
+        "PR6063.A834"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52252,
+            "PR6063.A834"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52253,
+      "label": "Trollope, Joanna",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Trollope, Joanna"
+      ],
+      "historical_direct_hits": 168,
+      "historical_code_examples": [
+        "PR6070.R57"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52253,
+            "PR6070.R57"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52254,
+      "label": "Kinsella, Sophie",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Kinsella, Sophie"
+      ],
+      "historical_direct_hits": 168,
+      "historical_code_examples": [
+        "PR6073.I246"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52254,
+            "PR6073.I246"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52255,
+      "label": "Connolly, John",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Connolly, John"
+      ],
+      "historical_direct_hits": 168,
+      "historical_code_examples": [
+        "PR6053.O48645"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52255,
+            "PR6053.O48645"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52256,
+      "label": "Brookner, Anita",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Brookner, Anita"
+      ],
+      "historical_direct_hits": 170,
+      "historical_code_examples": [
+        "PR6052.R5816"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52256,
+            "PR6052.R5816"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52257,
+      "label": "Friel, Brian",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Friel, Brian"
+      ],
+      "historical_direct_hits": 168,
+      "historical_code_examples": [
+        "PR6056.R5"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52257,
+            "PR6056.R5"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52258,
+      "label": "Forsyth, Frederick",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Forsyth, Frederick"
+      ],
+      "historical_direct_hits": 165,
+      "historical_code_examples": [
+        "PR6056.O699"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52258,
+            "PR6056.O699"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52259,
+      "label": "Fowles, John",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Fowles, John"
+      ],
+      "historical_direct_hits": 170,
+      "historical_code_examples": [
+        "PR6056.O85"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52259,
+            "PR6056.O85"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52260,
+      "label": "Adams, Douglas",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Adams, Douglas"
+      ],
+      "historical_direct_hits": 165,
+      "historical_code_examples": [
+        "PR6051.D3352"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52260,
+            "PR6051.D3352"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52261,
+      "label": "Frayn, Michael",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Frayn, Michael"
+      ],
+      "historical_direct_hits": 165,
+      "historical_code_examples": [
+        "PR6056.R3"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52261,
+            "PR6056.R3"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52262,
+      "label": "Seymour, Gerald",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Seymour, Gerald"
+      ],
+      "historical_direct_hits": 161,
+      "historical_code_examples": [
+        "PR6069.E734"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52262,
+            "PR6069.E734"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52263,
+      "label": "Bond, Edward",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Bond, Edward"
+      ],
+      "historical_direct_hits": 164,
+      "historical_code_examples": [
+        "PR6052.O5"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52263,
+            "PR6052.O5"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52264,
+      "label": "Dunn, Carola",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Dunn, Carola"
+      ],
+      "historical_direct_hits": 161,
+      "historical_code_examples": [
+        "PR6054.U537"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52264,
+            "PR6054.U537"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52265,
+      "label": "Boyd, William",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Boyd, William"
+      ],
+      "historical_direct_hits": 163,
+      "historical_code_examples": [
+        "PR6052.O9192"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52265,
+            "PR6052.O9192"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52266,
+      "label": "Collins, Jackie",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Collins, Jackie"
+      ],
+      "historical_direct_hits": 161,
+      "historical_code_examples": [
+        "PR6053.O425"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52266,
+            "PR6053.O425"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52267,
+      "label": "French, Nicci",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / French, Nicci"
+      ],
+      "historical_direct_hits": 157,
+      "historical_code_examples": [
+        "PR6056.R456"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52267,
+            "PR6056.R456"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52268,
+      "label": "Gaiman, Neil",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Gaiman, Neil"
+      ],
+      "historical_direct_hits": 157,
+      "historical_code_examples": [
+        "PR6057.A319"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52268,
+            "PR6057.A319"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52269,
+      "label": "Keyes, Marian",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Keyes, Marian"
+      ],
+      "historical_direct_hits": 157,
+      "historical_code_examples": [
+        "PR6061.E88"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52269,
+            "PR6061.E88"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52270,
+      "label": "Wainwright, John William, 1921-",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Wainwright, John William, 1921-"
+      ],
+      "historical_direct_hits": 157,
+      "historical_code_examples": [
+        "PR6073.A354"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52270,
+            "PR6073.A354"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52271,
+      "label": "O'Brien, Edna",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / O'Brien, Edna"
+      ],
+      "historical_direct_hits": 159,
+      "historical_code_examples": [
+        "PR6065.B7"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52271,
+            "PR6065.B7"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52272,
+      "label": "Ishiguro, Kazuo",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Ishiguro, Kazuo"
+      ],
+      "historical_direct_hits": 156,
+      "historical_code_examples": [
+        "PR6059.S5"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52272,
+            "PR6059.S5"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52273,
+      "label": "Lively, Penelope",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Lively, Penelope"
+      ],
+      "historical_direct_hits": 156,
+      "historical_code_examples": [
+        "PR6062.I89"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52273,
+            "PR6062.I89"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52274,
+      "label": "Hannah, Sophie",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Hannah, Sophie"
+      ],
+      "historical_direct_hits": 151,
+      "historical_code_examples": [
+        "PR6058.A5928"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52274,
+            "PR6058.A5928"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52275,
+      "label": "MacLean, Alistair, 1922 or 3-",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / MacLean, Alistair, 1922 or 3-"
+      ],
+      "historical_direct_hits": 155,
+      "historical_code_examples": [
+        "PR6063.A248"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52275,
+            "PR6063.A248"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52276,
+      "label": "Lewis, Susan",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Lewis, Susan"
+      ],
+      "historical_direct_hits": 151,
+      "historical_code_examples": [
+        "PR6062.E9546"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52276,
+            "PR6062.E9546"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52277,
+      "label": "Byatt, A. S.",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Byatt, A. S."
+      ],
+      "historical_direct_hits": 150,
+      "historical_code_examples": [
+        "PR6052.Y2"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52277,
+            "PR6052.Y2"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52278,
+      "label": "La Plante, Lynda",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / La Plante, Lynda"
+      ],
+      "historical_direct_hits": 150,
+      "historical_code_examples": [
+        "PR6062.A65"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52278,
+            "PR6062.A65"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52279,
+      "label": "James, Peter",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / James, Peter"
+      ],
+      "historical_direct_hits": 146,
+      "historical_code_examples": [
+        "PR6060.A472"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52279,
+            "PR6060.A472"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52280,
+      "label": "Churchill, Caryl",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Churchill, Caryl"
+      ],
+      "historical_direct_hits": 145,
+      "historical_code_examples": [
+        "PR6053.H786"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52280,
+            "PR6053.H786"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52281,
+      "label": "Freeling, Nicolas",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Freeling, Nicolas"
+      ],
+      "historical_direct_hits": 146,
+      "historical_code_examples": [
+        "PR6056.R4"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52281,
+            "PR6056.R4"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52282,
+      "label": "Self, Will",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Self, Will"
+      ],
+      "historical_direct_hits": 144,
+      "historical_code_examples": [
+        "PR6069.E3654"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52282,
+            "PR6069.E3654"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52283,
+      "label": "Lodge, David",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Lodge, David"
+      ],
+      "historical_direct_hits": 147,
+      "historical_code_examples": [
+        "PR6062.O36"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52283,
+            "PR6062.O36"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52284,
+      "label": "James, Bill",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / James, Bill"
+      ],
+      "historical_direct_hits": 141,
+      "historical_code_examples": [
+        "PR6070.U23"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52284,
+            "PR6070.U23"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52285,
+      "label": "Graham, Lynne",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Graham, Lynne"
+      ],
+      "historical_direct_hits": 140,
+      "historical_code_examples": [
+        "PR6057.R2374"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52285,
+            "PR6057.R2374"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52286,
+      "label": "Harris, John, 1916-",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Harris, John, 1916-"
+      ],
+      "historical_direct_hits": 142,
+      "historical_code_examples": [
+        "PR6058.A6886"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52286,
+            "PR6058.A6886"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52287,
+      "label": "Doyle, Roddy",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Doyle, Roddy"
+      ],
+      "historical_direct_hits": 141,
+      "historical_code_examples": [
+        "PR6054.O95"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52287,
+            "PR6054.O95"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    },
+    {
+      "id": 52288,
+      "label": "Swift, Graham",
+      "batch": "english-top100",
+      "current_parents": [
+        {
+          "id": 4179,
+          "label": "20th Century"
+        }
+      ],
+      "paths": [
+        "Literature / By Language / English / English Periods / By Period / 20th Century / Swift, Graham"
+      ],
+      "historical_direct_hits": 140,
+      "historical_code_examples": [
+        "PR6069.W47"
+      ],
+      "selectors": {
+        "lcc_selector": [
+          [
+            52288,
+            "PR6069.W47"
+          ]
+        ],
+        "bisac_selector": [],
+        "ddc_selector": [],
+        "lcc_range": []
+      }
+    }
+  ],
+  "simulation": {
+    "scope": "Hypothetical absorption of 149 installed author leaves; not applied. Uses current parents.",
+    "probes": 172066,
+    "changed_destinations": 240,
+    "unexpected_changes": [],
+    "coverage_losses": 0,
+    "coverage_gains": 0,
+    "proposed_merges": {
+      "52111": 12719,
+      "52112": 4153,
+      "52113": 4153,
+      "52114": 12718,
+      "52115": 12718,
+      "52116": 4153,
+      "52117": 4153,
+      "52118": 12718,
+      "52119": 12719,
+      "52120": 12718,
+      "52121": 4153,
+      "52122": 4153,
+      "52123": 12719,
+      "52124": 12719,
+      "52125": 4153,
+      "52126": 4153,
+      "52127": 4153,
+      "52128": 12718,
+      "52129": 12718,
+      "52130": 12718,
+      "52131": 12718,
+      "52132": 12719,
+      "52133": 12718,
+      "52134": 12719,
+      "52135": 12718,
+      "52136": 12719,
+      "52137": 12719,
+      "52138": 12718,
+      "52139": 12718,
+      "52140": 12719,
+      "52141": 12719,
+      "52142": 12719,
+      "52143": 12718,
+      "52144": 12719,
+      "52145": 12719,
+      "52146": 12719,
+      "52147": 12719,
+      "52148": 12718,
+      "52149": 12718,
+      "52150": 12719,
+      "52151": 12719,
+      "52152": 12719,
+      "52153": 12719,
+      "52154": 12719,
+      "52155": 4153,
+      "52156": 12719,
+      "52157": 12718,
+      "52158": 12719,
+      "52159": 12718,
+      "52160": 12719,
+      "52190": 4179,
+      "52191": 4179,
+      "52192": 4179,
+      "52193": 4179,
+      "52194": 4179,
+      "52195": 4179,
+      "52196": 4179,
+      "52197": 4179,
+      "52198": 4179,
+      "52199": 4179,
+      "52200": 4179,
+      "52201": 4179,
+      "52202": 4179,
+      "52203": 4179,
+      "52204": 4179,
+      "52205": 4179,
+      "52206": 4179,
+      "52207": 4179,
+      "52208": 4179,
+      "52209": 4179,
+      "52210": 4179,
+      "52211": 4179,
+      "52212": 4179,
+      "52213": 4179,
+      "52214": 4179,
+      "52215": 4179,
+      "52216": 4179,
+      "52217": 4179,
+      "52218": 4179,
+      "52219": 4179,
+      "52220": 4179,
+      "52221": 4179,
+      "52222": 4179,
+      "52223": 4179,
+      "52224": 4179,
+      "52225": 4179,
+      "52226": 4179,
+      "52227": 4179,
+      "52228": 4179,
+      "52229": 4179,
+      "52230": 4179,
+      "52231": 4179,
+      "52232": 4179,
+      "52233": 4179,
+      "52234": 4179,
+      "52235": 4179,
+      "52236": 4179,
+      "52237": 4179,
+      "52238": 4179,
+      "52239": 4179,
+      "52240": 4179,
+      "52241": 4179,
+      "52242": 4179,
+      "52243": 4179,
+      "52244": 4179,
+      "52245": 4179,
+      "52246": 4179,
+      "52247": 4179,
+      "52248": 4179,
+      "52249": 4179,
+      "52250": 4179,
+      "52251": 4179,
+      "52252": 4179,
+      "52253": 4179,
+      "52254": 4179,
+      "52255": 4179,
+      "52256": 4179,
+      "52257": 4179,
+      "52258": 4179,
+      "52259": 4179,
+      "52260": 4179,
+      "52261": 4179,
+      "52262": 4179,
+      "52263": 4179,
+      "52264": 4179,
+      "52265": 4179,
+      "52266": 4179,
+      "52267": 4179,
+      "52268": 4179,
+      "52269": 4179,
+      "52270": 4179,
+      "52271": 4179,
+      "52272": 4179,
+      "52273": 4179,
+      "52274": 4179,
+      "52275": 4179,
+      "52276": 4179,
+      "52277": 4179,
+      "52278": 4179,
+      "52279": 4179,
+      "52280": 4179,
+      "52281": 4179,
+      "52282": 4179,
+      "52283": 4179,
+      "52284": 4179,
+      "52285": 4179,
+      "52286": 4179,
+      "52287": 4179,
+      "52288": 4179
+    }
+  },
+  "taxonomy_concepts_after_compaction": 15900,
+  "proposed_count_if_149_shelves_absorbed": 15751
+}

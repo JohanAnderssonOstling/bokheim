@@ -7,10 +7,7 @@ workspace root. Generated wasm-bindgen modules are build output.
 
 Production starts `startSharedCoordinator`. The WASM module also retains
 `startNetworkWorker` for standalone transport adapters; production HTTP runs in
-the shared coordinator. Generated browser-stream bindings remain in the module. Test constructors and adapters live in
-`app/examples/support/coordinator_test_api.rs` and require the
-`web-runtime-tests` feature, which the test runner enables. Service inspection
-methods and public service reexports are also limited to that feature.
+the shared coordinator. Generated browser-stream bindings remain in the module.
 Background phases and replies are typed Rust values executed beside storage
 on both native and browser. The coordinator owns browser timers and sends one
 cycle request with a refresh flag; the database worker returns a success flag.
@@ -53,44 +50,12 @@ Database startup, request handling and browser error events live in
 before opening storage. Coordinator and network-worker WASM downloads use native
 fetch before the coordinator installs its own bridge.
 
-From the client directory, build and run the WASM adapter tests:
-
-```sh
-REAL_DATABASE=1 node app/scripts/test-coordinator-policies.mjs
-```
-
-Then run the browser checks (requires Playwright and an installed browser;
-set `BROWSER=chromium` and `BROWSER_EXECUTABLE` for Chromium):
-
-```sh
-node app/scripts/test-coordinator-browser.mjs
-REAL_DATABASE=1 node app/scripts/test-coordinator-browser.mjs
-```
-
-The first uses a disposable storage fixture to exercise a real CPU worker and coordinator-owned HTTP.
-The second opens production storage in a fresh browser origin/profile and checks
-startup, binary requests, metadata timers, database recovery after an unhandled
-rejection, and explicit failure delivery after a fatal coordinator error.
-Neither uses the user's application database. Set `PLAYWRIGHT_MODULE` and
-`PLAYWRIGHT_BROWSERS_PATH` when Playwright is installed outside the default paths;
-`COORDINATOR_TEST_TARGET` selects a reusable Cargo target directory.
-`COORDINATOR_TEST_OUTPUT` selects an isolated bindings directory for both the
-builder and tests.
-
-The storage and sync browser contracts accept `WORKER_TEST_PROFILE` to reuse an
-optimized Cargo profile (for example `web-release`). The sync contract also
-accepts `WORKER_TEST_DIST` for an isolated directory containing production worker
-bundles, so verification need not replace the installed web app. The full worker
-contract (`test-web-workers.mjs`) accepts the same override. All worker scripts
-share Cargo invocation, immediate binding generation and browser launch through
-`app/scripts/worker-test-support.mjs`. Bindings are generated immediately
-after each build to avoid confusing production and test feature artifacts.
-
 ## Ownership boundaries
 
 ### Imported files at startup
 
-Books and thumbnails use ordinary OPFS files. The SQLite asset index stores
+Imported books and thumbnails use ordinary OPFS files. Remote books are read
+through range requests or audio streams and are never downloaded into OPFS. The SQLite asset index stores
 logical names and physical paths, never thumbnail bytes. New files are flushed
 before their index entry is published. Reads prepare an access handle
 asynchronously and release it when their last reader closes; thumbnail reads
@@ -114,12 +79,8 @@ Browser storage accounting sums immutable lengths recorded in the asset index at
 
 Folder-import format selection, destination matching, structured failures, progress
 deltas, sequential batch execution, progress cadence, and finalization are shared
-by native readers and staged imports through `import_workflow`. `staged_import` owns the copy barrier, checkpoint recovery, and
-metadata ordering over typed storage and library interfaces; it compiles on native
-and WASM targets. `import_journal` owns durable outcomes. `browser_import` adapts
-browser files, OPFS, progress callbacks, and typed worker requests to these interfaces.
-`web::import_worker` owns the serial browser job queue and request transport.
-JavaScript supplies file capabilities and invokes the workflow entry point.
+by native and browser imports through `import_workflow`, driven by
+`import_selected_directory` in the library.
 
 Settings snapshots only read cached state. One background task refreshes after
 relevant events; successful work returns to waiting for events. Only failures
@@ -206,12 +167,10 @@ stays pinned until the request completes; dropping an upload aborts fetch.
 
 ## Folder import memory
 
-Folder selection retains file handles and a directory manifest. Native clients
-create the directory tree and import one reader at a time. Browser clients transfer
-`File` capabilities to the import worker, which copies and hashes bounded 1 MiB
-chunks into OPFS before requesting metadata insertion. Single-file browser imports
-use that same workflow; they do not send file chunks through the database worker.
-See Folder imports below for checkpointing and recovery.
+Folder selection retains file handles and a directory manifest. Both clients
+create the directory tree and import one book at a time. Browser clients send the
+selected `File` objects beside the import request to the database worker, which
+copies and hashes each one into OPFS in bounded 1 MiB chunks before inspecting it.
 
 CPU metadata and cover jobs use a seekable range source. One 256 KiB shared
 buffer and a direct MessagePort connect the CPU parser to the storage owner.
@@ -286,7 +245,7 @@ including cache hits, and preserve short-read and end-of-file behavior.
 `COORDINATOR_TEST_OUTPUT=<release bindings directory> node
 app/scripts/test-book-source.mjs` exercises the actual Rust reader,
 including eviction, short reads and source closure. The bindings must contain
-`cpu_worker` built with `web-runtime-tests`.
+the production CPU worker.
 
 The old `benchmark-book-cache.mjs` targets the removed JavaScript cache
 and needs updating before it can compare the Rust implementation. Its historical
@@ -294,43 +253,23 @@ measurements do not describe the current implementation.
 
 ## Folder imports
 
-The selecting tab transfers browser `File` capabilities to the shared coordinator.
-`web::import_queue` retains the selection and broadcasts progress to connected tabs.
-The elected tab hosts a separate import worker, which copies bounded 1 MiB chunks
-straight to `__import_objects/<job UUID>/<file index>` in OPFS and computes BLAKE3
-in its own WASM instance. File bytes never pass through the database worker.
+The selecting tab sends the folder's structure as one import command and the
+selected `File` objects beside it on the same port
+(`SessionSender::send_with_files`). The database worker holds the files under the
+request's token (`import_io::hold_selected_files`) and runs the same
+`import_selected_directory` as native: folders are created or reused by name, books
+already present under their file name are skipped, and each remaining file is copied
+into OPFS while hashing (`AssetStore::stage_browser_file`), inspected and committed.
+Progress is the library's import activity, shown by the same notification as native.
 
-The manifest records source paths, empty directories, sizes and modification times.
-A flushed journal checkpoints each completed file and each metadata outcome. No
-library-directory or book insertion starts until **every selected book has been
-copied**. The database then adopts immutable file references without another copy,
-inspects books through the CPU worker, and commits metadata. Folder IDs are
-deterministic per job/path; book placement upserts make an unacknowledged commit
-safe to retry. Failed copies pause before database insertion; malformed books are
-reported individually in the second phase. Unreferenced copies are cleaned up
-only after their outcomes have been checkpointed.
-
-Host replacement retains the selection in the coordinator, restarts the import
-worker, skips completed copies and resumes metadata work. Fully staged unfinished
-jobs can also be discovered after all tabs were closed. Original `File`
-capabilities are not durable across browser shutdown: an incomplete copy then
-requires selecting the source folder again. Progress distinguishes copying
-(bytes and files) from adding to the library (processed files and failures).
-
-```sh
-node --test app/web/import_worker.test.mjs app/web/import_queue.test.mjs
-node app/scripts/test-folder-import-handover.mjs
-node app/scripts/test-folder-import-memory.mjs
-```
-
-The browser checks use disposable storage and accept `WORKER_TEST_DIST` and
-`WORKER_PROBE_DIR`. The handover test closes the host in each phase, checks the
-whole-folder barrier, and reopens an imported book after database restart.
+An import interrupted by closing the tab or a host change stops; the books already
+committed stay. Selecting the same folder again into the same place continues it:
+existing folders are reused and imported books skipped without reading them.
 
 ### Audiobook playback sources
 
 WASM audiobook resolution returns a source descriptor instead of book
-bytes. A downloaded M4B uses a browser Blob URL backed by its immutable OPFS
+bytes. An imported M4B uses a browser Blob URL backed by its immutable OPFS
 file. The backend subscription pins that generation and revokes the URL when
 playback closes or the tab disconnects. Cancelling source preparation also
 releases its lease.

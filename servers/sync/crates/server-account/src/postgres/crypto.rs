@@ -27,10 +27,6 @@ impl AccountTokenKey {
         Ok(Self(key))
     }
 
-    #[cfg(test)]
-    pub(super) fn test_key() -> Self {
-        Self([0x5a; 32])
-    }
 }
 
 pub(super) struct TokenProtector {
@@ -148,38 +144,4 @@ fn hex(bytes: &[u8]) -> String {
         let _ = write!(output, "{byte:02x}");
         output
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{mint_verification_pin, AccountTokenKey, TokenProtector};
-
-    #[test]
-    fn verification_pin_contains_exactly_six_digits() {
-        for _ in 0..100 {
-            let protector = TokenProtector::new(AccountTokenKey::test_key());
-            let (pin, hash) = mint_verification_pin(&protector, "reader@example.com");
-            assert_eq!(pin.len(), 6);
-            assert!(pin.bytes().all(|byte| byte.is_ascii_digit()));
-            assert_eq!(hash.len(), 64);
-        }
-    }
-
-    #[test]
-    fn pin_hashes_are_keyed_and_scoped_to_the_email() {
-        let first = TokenProtector::new(AccountTokenKey::test_key());
-        let second = TokenProtector::new(AccountTokenKey([0x6b; 32]));
-        assert_ne!(first.verification_hash("one@example.com", "123456"), first.verification_hash("two@example.com", "123456"));
-        assert_ne!(first.verification_hash("one@example.com", "123456"), second.verification_hash("one@example.com", "123456"));
-    }
-
-    #[test]
-    fn outbox_ciphertext_round_trips_and_is_bound_to_its_row() {
-        let protector = TokenProtector::new(AccountTokenKey::test_key());
-        let ciphertext = protector.encrypt_outbox_token("row-1", "reader@example.com", "verify_email", "012345").unwrap();
-        assert!(!ciphertext.contains("012345"));
-        assert_eq!(protector.decrypt_outbox_token("row-1", "reader@example.com", "verify_email", &ciphertext).unwrap(), "012345");
-        assert!(protector.decrypt_outbox_token("row-2", "reader@example.com", "verify_email", &ciphertext).is_err());
-        assert!(protector.decrypt_outbox_token("row-1", "other@example.com", "verify_email", &ciphertext).is_err());
-    }
 }

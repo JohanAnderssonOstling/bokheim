@@ -8,7 +8,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use html::resources::ResourceProvider;
 use html::style::property_name_is_supported;
-use html_book::{BookSourceFormat, BookSource};
+#[path = "../book.rs"]
+mod book;
+use book::BookSource;
+use book_content::BookFormat as BookSourceFormat;
 use lightningcss::printer::PrinterOptions;
 use lightningcss::properties::Property;
 use lightningcss::rules::CssRule;
