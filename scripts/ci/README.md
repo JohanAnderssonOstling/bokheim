@@ -145,3 +145,10 @@ Dispatch the Windows, macOS, and Kobo workflows with `build_only=true` and
 the resulting workflow artifacts before uploading them to the version release.
 This mode does not attest shared-test success; the normal verified publication
 commands still require their existing test gates.
+
+Completed Windows and macOS packages can be copied directly from workflow
+artifacts to the existing draft with `distribute-release.yml`. Supply the
+platform, successful packaging run ID, full build source SHA, and draft tag.
+This avoids downloading and re-uploading hosted packages through the workstation.
+It checks the build source, package version, and recorded hashes without running
+tests or creating tags; existing assets must already contain identical bytes.
