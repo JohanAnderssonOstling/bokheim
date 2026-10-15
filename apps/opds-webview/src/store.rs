@@ -737,7 +737,9 @@ fn navigation_state(page: &WebView) -> (bool, bool) {
     #[cfg(target_os = "macos")]
     {
         let native = page.webview();
-        (native.canGoBack(), native.canGoForward())
+        // SAFETY: GPUI calls this on the main thread, and Wry keeps the native
+        // WKWebView alive for the lifetime of `page`.
+        unsafe { (native.canGoBack(), native.canGoForward()) }
     }
 }
 
@@ -751,7 +753,9 @@ fn navigate_history(page: &WebView, forward: bool) {
     #[cfg(target_os = "macos")]
     {
         let native = page.webview();
-        if forward { let _ = native.goForward(); } else { let _ = native.goBack(); }
+        // SAFETY: Navigation runs on the main thread while `page` owns the
+        // live WKWebView and its navigation history.
+        unsafe { if forward { let _ = native.goForward(); } else { let _ = native.goBack(); } }
     }
 }
 
