@@ -16,6 +16,10 @@ on:
         description: Full source commit built by that workflow
         type: string
         required: true
+      workflow_commit:
+        description: Optional macOS workflow commit when packaging a pinned application source
+        type: string
+        required: false
       tag:
         description: Existing draft release version, for example v0.1.9
         type: string
@@ -42,6 +46,7 @@ jobs:
           PLATFORM: ${{ inputs.platform }}
           RUN_ID: ${{ inputs.run_id }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
+          WORKFLOW_COMMIT: ${{ inputs.workflow_commit }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           python3 - <<'PY_UPLOAD'
@@ -64,7 +69,10 @@ jobs:
           assert re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag)
           workflow = {'windows': 'desktop-release.yml', 'macos': 'macos-release.yml', 'kobo': 'kobo-release.yml'}[platform]
           run = json.loads(command('gh', 'api', f'repos/{repository}/actions/runs/{run_id}'))
-          assert run['head_sha'] == sha and run['conclusion'] == 'success', 'Build source or result differs'
+          workflow_sha = os.environ.get('WORKFLOW_COMMIT') or sha
+          assert re.fullmatch('[0-9a-f]{40}', workflow_sha)
+          assert workflow_sha == sha or platform == 'macos', 'Only macOS supports a separately pinned application source'
+          assert run['head_sha'] == workflow_sha and run['conclusion'] == 'success', 'Build workflow or result differs'
           assert run['path'] == '.github/workflows/' + workflow, 'Unexpected packaging workflow'
           release = json.loads(command('gh', 'release', 'view', tag, '--repo', repository, '--json', 'isDraft,assets'))
           assert release['isDraft'], 'Packages may only be added to a draft'
