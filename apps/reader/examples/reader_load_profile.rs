@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use book_access::AsyncBookSource;
 use book_content::{Book, BookFormat};
 use gpui::{App, AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div, px, size};
-use html::text::{FontSlant, GlyphShaper, TextRunShapeRequest, TextStyleSpan};
+use html::text::{FontSlant, GlyphShaper, OpenTypeFeature, TextRunShapeRequest, TextStyleSpan};
 use html_gpui::backend::GpuiTextCache;
 use html_view_core::{RendererCommand, RendererInitialConfig, RendererPreparation};
 use html_view_gpui::HtmlView;
@@ -181,23 +181,43 @@ fn profile_whitespace() {
         ui_components::register_fonts(cx).expect("reader fonts");
         cx.open_window(Default::default(), |window, cx| {
             let mut shaper = GpuiTextCache::new(window.text_system().clone());
-            for family in ["serif", "sans-serif", "monospace"] {
-                for text in [" ", "   ", "word ", "word  ", "office ", "a\u{301} ", "אבג ", "سلام ", "word\u{a0}", "word\u{2003}", "word\u{2009}", "word\u{3000}", "word\t", "word\n", "word\u{2028}"] {
-                    let before = shaper.shape_cache_stats();
-                    let style = TextStyleSpan::new(0..text.len(), 19.0, 400, FontSlant::Normal, 0x000000ff, Some(family)).unwrap();
-                    let request = TextRunShapeRequest::new(text, style).unwrap();
-                    let mut glyphs = vec![0; text.chars().count()];
-                    let shaped = shaper.shape_glyph_run(request, &mut glyphs).expect("native whitespace shaping").expect("native run");
-                    let after = shaper.shape_cache_stats();
-                    println!(
-                        "READER_WHITESPACE_PROFILE {}",
-                        serde_json::json!({
-                            "family": family, "text": text, "width": shaped.advances().iter().sum::<f32>(),
-                            "last_advance": shaped.advances().last(),
-                            "probes": after.trailing_whitespace_probes - before.trailing_whitespace_probes,
-                            "probe_ms": (after.trailing_whitespace_probe_time - before.trailing_whitespace_probe_time).as_secs_f64() * 1000.0,
-                        })
-                    );
+            let no_features = [];
+            let disabled_features = [OpenTypeFeature::new(*b"liga", 0), OpenTypeFeature::new(*b"kern", 0)];
+            let overridden_features = [OpenTypeFeature::new(*b"liga", 0), OpenTypeFeature::new(*b"liga", 1)];
+            for (font_size, weight, slant, features) in [
+                (19.0, 400, FontSlant::Normal, no_features.as_slice()),
+                (26.0, 700, FontSlant::Italic, disabled_features.as_slice()),
+                (13.0, 400, FontSlant::Oblique, overridden_features.as_slice()),
+                (0.0, 400, FontSlant::Normal, no_features.as_slice()),
+            ] {
+                for family in ["serif", "sans-serif", "monospace"] {
+                    for text in [" ", "   ", "word ", "word  ", "office ", "a\u{301} ", "אבג ", "سلام ", "word\u{a0}", "word\u{2003}", "word\u{2009}", "word\u{3000}", "word\t", "word\n", "word\u{2028}"] {
+                        let before = shaper.shape_cache_stats();
+                        let style = TextStyleSpan::new(0..text.len(), font_size, weight, slant, 0x000000ff, Some(family)).unwrap().with_font_features(features);
+                        let request = TextRunShapeRequest::new(text, style).unwrap();
+                        let mut glyphs = vec![0; text.chars().count()];
+                        let shaped = shaper.shape_glyph_run(request, &mut glyphs).expect("native whitespace shaping").expect("native run");
+                        let after = shaper.shape_cache_stats();
+                        let metrics = glyphs
+                            .iter()
+                            .map(|glyph| {
+                                let metric = shaper.glyph_resources().get(*glyph).expect("registered metric");
+                                (metric.ch(), metric.advance(), metric.ascent(), metric.descent(), metric.baseline_offset())
+                            })
+                            .collect::<Vec<_>>();
+                        println!(
+                            "READER_WHITESPACE_PROFILE {}",
+                            serde_json::json!({
+                                "family": family, "text": text, "width": shaped.advances().iter().sum::<f32>(),
+                                "font_size": font_size, "weight": weight, "slant": format!("{slant:?}"),
+                                "features": features.iter().map(|feature| (feature.tag(), feature.value())).collect::<Vec<_>>(),
+                                "advances": shaped.advances(), "cluster_boundaries": shaped.cluster_boundaries(), "caret_stops": shaped.caret_stops(), "metrics": metrics,
+                                "last_advance": shaped.advances().last(),
+                                "probes": after.trailing_whitespace_probes - before.trailing_whitespace_probes,
+                                "probe_ms": (after.trailing_whitespace_probe_time - before.trailing_whitespace_probe_time).as_secs_f64() * 1000.0,
+                            })
+                        );
+                    }
                 }
             }
             window.on_next_frame(|_, cx| cx.quit());

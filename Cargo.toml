@@ -44,7 +44,7 @@ members = [
     "servers/updates",
     "servers/taxonomy/curation"
 ]
-exclude = ["servers/sync"]
+exclude = ["servers/sync", "vendor/segment-parser"]
 
 [workspace.lints]
 

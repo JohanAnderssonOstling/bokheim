@@ -8,13 +8,18 @@ on:
         required: true
         type: boolean
         default: false
+      build_only:
+        description: Build packages without running or requiring tests
+        required: true
+        type: boolean
+        default: false
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
 
 permissions:
   contents: read
-  statuses: write
+  statuses: read
 
 concurrency:
   group: kobo-release-${{ github.ref }}
@@ -28,28 +33,20 @@ env:
 
 jobs:
   shared-tests:
-    permissions:
-      contents: read
-      statuses: write
-    uses: ./.github/workflows/sync-e2e.yml
-
-  installer-tests:
-    name: Kobo installer tests
-    needs: shared-tests
-    runs-on: [self-hosted, linux, x64, bokheim-shared]
-    timeout-minutes: 60
-    env:
-      RUSTUP_TOOLCHAIN: '1.95.0'
-      RUSTC_BOOTSTRAP: '1'
-      CARGO_BUILD_JOBS: '1'
+    name: Require local shared tests
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
-      - name: Install Rust
-        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
-      - name: Test Kobo installer
+      - name: Require shared tests for this source commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_ONLY: ${{ inputs.build_only || false }}
         run: |
-          export CARGO_TARGET_DIR="$RUNNER_TOOL_CACHE/bokheim-kobo-installer"
-          cargo test --release --no-fail-fast --manifest-path apps/kobo-installer/Cargo.toml --lib
+          if [[ "$BUILD_ONLY" == true ]]; then
+            echo "Build-only release requested; shared tests are skipped."
+          else
+            python3 scripts/ci/require-shared-tests.py "${{ github.repository }}" "$GITHUB_SHA"
+          fi
 
   version:
     name: Release version
@@ -79,7 +76,7 @@ jobs:
 
   build-windows-installer:
     name: Windows USB installer
-    needs: [version, shared-tests, installer-tests]
+    needs: [version, shared-tests]
     runs-on: windows-2025
     timeout-minutes: 30
 
@@ -123,6 +120,7 @@ jobs:
           key: kobo-installer-windows-v3-${{ runner.os }}-rust-${{ env.RUST_VERSION }}-${{ hashFiles('bokheim/apps/kobo-installer/Cargo.lock') }}
 
       - name: Test installer workflows
+        if: inputs.build_only != true
         working-directory: bokheim
         shell: pwsh
         run: cargo test --release --manifest-path apps/kobo-installer/Cargo.toml --lib
@@ -166,7 +164,7 @@ jobs:
 
   build-linux-installer:
     name: Linux USB installer AppImage
-    needs: [version, shared-tests, installer-tests]
+    needs: [version, shared-tests]
     runs-on: ubuntu-22.04
     timeout-minutes: 30
 
@@ -239,6 +237,7 @@ jobs:
           chmod +x "$RUNNER_TEMP/linuxdeploy-x86_64.AppImage" "$RUNNER_TEMP/appimagetool-x86_64.AppImage"
 
       - name: Test installer workflows
+        if: inputs.build_only != true
         working-directory: bokheim
         run: cargo test --release --manifest-path apps/kobo-installer/Cargo.toml --lib
 

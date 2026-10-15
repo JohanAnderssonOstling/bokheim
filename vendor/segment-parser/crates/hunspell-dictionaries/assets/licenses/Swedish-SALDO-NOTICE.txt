@@ -1,0 +1,19 @@
+SALDO
+Copyright Lars Borin, Markus Forsberg, Lennart Lönngren and Språkbanken,
+University of Gothenburg. https://spraakbanken.gu.se/en/resources/saldo
+
+The bundled Swedish dictionary (sv_SE.aff, sv_SE.dic) contains material derived
+from SALDO's morphological lexicon (saldom.xml), distributed under the Creative
+Commons Attribution 4.0 International licence
+(https://creativecommons.org/licenses/by/4.0/), and from SALDO 2.3
+(saldo20v03.txt), distributed under Creative Commons Attribution 3.0 Unported
+(https://creativecommons.org/licenses/by/3.0/) or LGPL-3.0, at the user's choice.
+
+Changes: inflection paradigms converted to Hunspell suffix rules; lemmas, parts
+of speech and descriptor-confirmed compound part lemmas added as Hunspell
+morphological fields; merged with Den stora svenska ordlistan 2.42 (LGPL-3.0,
+see Swedish-LGPL-3.0.txt).
+
+Reference: Borin, Lars, Markus Forsberg and Lennart Lönngren 2013. SALDO: a
+touch of yin to WordNet's yang. Language Resources and Evaluation 47(4):
+1191-1211.

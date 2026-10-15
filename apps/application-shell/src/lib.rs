@@ -178,7 +178,9 @@ impl ApplicationRoot {
 
     pub fn open_window_target(&mut self, target: browser_ui::NewWindowTarget, window: &mut Window, cx: &mut Context<Self>) {
         match target {
-            browser_ui::NewWindowTarget::Book { locator, title } => self.open_book(locator, title, None, window, cx),
+            browser_ui::NewWindowTarget::Book { locator, .. } => {
+                self.browser.update(cx, |browser, cx| browser.open_book_detail(*locator.library_id(), locator.content_hash(), window, cx));
+            }
             browser_ui::NewWindowTarget::Folder { library_id, directory_id, title } => {
                 self.browser.update(cx, |browser, cx| browser.open_folder(library_id, directory_id, title, window, cx));
             }

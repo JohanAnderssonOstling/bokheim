@@ -1,0 +1,5 @@
+Source: https://github.com/JohanAnderssonOstling/RustTrados
+Snapshot: maintainer working tree, 2026-10-15
+Crates: segment-parser, segment-lexer, segment-rules, structure, hunspell-dictionaries
+Snapshot SHA256 (sorted paths and file digests): 0079617595139a0545d48f61b9d78f37f68b473b25ff0ebae7d152a3fa8363be
+Default parser features remain disabled for reader-speech.

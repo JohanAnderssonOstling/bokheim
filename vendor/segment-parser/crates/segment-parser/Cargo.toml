@@ -1,0 +1,38 @@
+[package]
+name = "segment-parser"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+segment-lexer = { path = "../segment-lexer" }
+segment-rules = { path = "../segment-rules" }
+structure = { path = "../structure" }
+aho-corasick = { workspace = true, optional = true }
+hunspell-rs = { workspace = true, default-features = false, optional = true }
+hunspell-dictionaries = { path = "../hunspell-dictionaries", optional = true }
+icu_casemap.workspace = true
+rust-stemmers = { workspace = true, optional = true }
+unicode-normalization.workspace = true
+
+[features]
+# Preserve the existing full API for current default consumers.
+default = ["analysis", "hunspell"]
+# Compatibility bundle for consumers that need the previous API without Hunspell.
+analysis = ["terminology", "stemming", "dictionary", "text-analysis", "localization"]
+terminology = ["dep:aho-corasick"]
+stemming = ["dep:rust-stemmers"]
+dictionary = []
+text-analysis = []
+localization = []
+hunspell = ["dictionary", "dep:hunspell-rs", "dep:hunspell-dictionaries"]
+
+[dev-dependencies]
+nlprule.workspace = true
+
+[[example]]
+name = "align_probe"
+path = "examples/align_probe.rs"
+required-features = ["text-analysis"]

@@ -17,6 +17,7 @@ def commands():
                 'library-replica', 'library-backend', 'subject-projection']
     return [
         ['python3', '-m', 'unittest', 'discover', '-s', 'scripts/ci/tests'],
+        ['cargo', 'test', '--release', '--no-default-features', '--manifest-path', 'apps/kobo-installer/Cargo.toml', '--lib'],
         ['python3', 'shared/pdfium/prepare.py', '--target', 'x86_64-unknown-linux-gnu'],
         ['cargo', 'test', '--release', '--no-fail-fast', *sum((['-p', p] for p in packages), [])],
         ['cargo', 'test', '--release', '--no-fail-fast', '-p', 'update-protocol', '-p', 'update-client', '--features', 'update-client/native-state'],

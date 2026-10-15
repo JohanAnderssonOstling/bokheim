@@ -13,6 +13,8 @@
 
     <application
         android:label="Bokheim"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true"
         android:networkSecurityConfig="@xml/bokheim_network_security_config"
         tools:replace="android:networkSecurityConfig"

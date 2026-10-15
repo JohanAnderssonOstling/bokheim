@@ -113,7 +113,11 @@ two workflows. Updating their definitions does not restart or cancel old runs.
 
 The manual shared-suite workflow remains available for operator use, but Windows
 release jobs only read its commit status; they never schedule shared tests.
-The separate Kobo workflow is outside this desktop/mobile/web change.
+The Kobo workflow also reuses the local shared-suite status for its exact source
+commit. The shared suite includes the Kobo installer's portable library tests;
+Windows still runs its platform tests and builds the USB installer on a hosted
+Windows runner. The Kobo ARM package is built locally and committed before those
+installer builds; see `apps/kobo-installer/README.md`.
 
 ## Feed publication
 
@@ -130,3 +134,14 @@ machine. Permission to upload releases/report commit statuses is the trust
 boundary for local build attestations.
 
 Before publishing native packages or deploying a verified web bundle, the pipeline probes the live login endpoint with a version-only protobuf envelope and no login fields. A protocol mismatch blocks publication until the matching server is deployed.
+
+## Build packages without tests
+
+For an explicitly requested build-only release, build locally with
+`apps/desktop-gpui/scripts/build.py`, Gradle `assembleRelease`, and
+`apps/web-gpui/scripts/build.sh`. These commands do not run the shared suite.
+Dispatch the Windows, macOS, and Kobo workflows with `build_only=true` and
+`publish=false` to produce hosted packages without tests. Download and review
+the resulting workflow artifacts before uploading them to the version release.
+This mode does not attest shared-test success; the normal verified publication
+commands still require their existing test gates.

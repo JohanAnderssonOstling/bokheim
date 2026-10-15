@@ -9,6 +9,11 @@ on:
         type: boolean
         required: true
         default: false
+      build_only:
+        description: Build packages without running or requiring tests
+        required: true
+        type: boolean
+        default: false
   push:
     branches:
       - ci/macos-trial
@@ -107,6 +112,7 @@ jobs:
       - name: Build optimized desktop app
         run: python3 apps/desktop-gpui/scripts/build.py --target "${{ matrix.target }}"
       - name: Verify relocated PDF runtime
+        if: inputs.build_only != true
         run: |
           PDFIUM_PREPARED_DIR="$PWD/.pdfium/${{ matrix.target }}" \
             cargo test --release -p pdf-reader-core --test packaged_runtime --target "${{ matrix.target }}"

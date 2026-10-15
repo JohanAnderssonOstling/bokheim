@@ -9,6 +9,11 @@ on:
         required: true
         type: boolean
         default: false
+      build_only:
+        description: Build packages without running or requiring tests
+        required: true
+        type: boolean
+        default: false
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
@@ -43,14 +48,22 @@ jobs:
       - name: Require shared tests for this source commit
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/ci/require-shared-tests.py "${{ github.repository }}" "$GITHUB_SHA"
+          BUILD_ONLY: ${{ inputs.build_only || false }}
+        run: |
+          if [[ "$BUILD_ONLY" == true ]]; then
+            echo "Build-only release requested; shared tests are skipped."
+          else
+            python3 scripts/ci/require-shared-tests.py "${{ github.repository }}" "$GITHUB_SHA"
+          fi
 
   windows-checks:
+    if: inputs.build_only != true
     needs: shared-tests
     uses: ./.github/workflows/client-platforms.yml
 
   build-windows:
-    needs: windows-checks
+    if: always() && needs.shared-tests.result == 'success' && needs.windows-checks.result != 'failure' && needs.windows-checks.result != 'cancelled' && (inputs.build_only == true || needs.windows-checks.result == 'success')
+    needs: [shared-tests, windows-checks]
     name: x86-64 Windows installer
     runs-on: windows-2025
     timeout-minutes: 120

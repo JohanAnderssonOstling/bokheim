@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = ["crates/segment-parser", "crates/segment-lexer", "crates/segment-rules", "crates/structure", "crates/hunspell-dictionaries"]
+
+[workspace.lints]
+
+[workspace.dependencies]
+aho-corasick = "1"
+hunspell-rs = { version = "0.4", default-features = false, features = ["bundled"] }
+icu_casemap = "2"
+nlprule = "0.6"
+rust-stemmers = "1"
+serde = "1"
+unicode-normalization = "0.1"
+unicode-properties = "0.1"

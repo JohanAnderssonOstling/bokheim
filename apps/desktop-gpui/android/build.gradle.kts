@@ -37,6 +37,15 @@ val rustReleaseLibrary = workspaceRoot.resolve("target/$rustTarget/release/libde
 val stagedRustDebugLibraries = layout.buildDirectory.dir("rustJniLibs/debug")
 val stagedRustReleaseLibraries = layout.buildDirectory.dir("rustJniLibs/release")
 val speechDirectory = workspaceRoot.resolve("target/android-speech")
+val launcherIconResources = layout.buildDirectory.dir("generated/res/launcherIcon")
+
+val stageLauncherIcon by tasks.registering(Copy::class) {
+    from(workspaceRoot.resolve("apps/ui/design-tokens/assets/icon/bokheim-android-foreground-432.png"))
+    into(launcherIconResources.map { it.dir("drawable-xxxhdpi") })
+    rename { "bokheim_launcher_foreground.png" }
+}
+
+tasks.named("preBuild") { dependsOn(stageLauncherIcon) }
 
 android {
     namespace = "se.bokheim.reader.gpui"
@@ -58,6 +67,7 @@ android {
     testOptions.unitTests.isIncludeAndroidResources = true
 
     sourceSets.getByName("main").manifest.srcFile("AndroidManifest.xml")
+    sourceSets.getByName("main").res.srcDir(launcherIconResources)
     sourceSets.getByName("main").assets.srcDir(speechDirectory.resolve("assets"))
     sourceSets.getByName("debug").assets.srcDir(layout.buildDirectory.dir("taxonomyAssets/debug"))
     sourceSets.getByName("release").assets.srcDir(layout.buildDirectory.dir("taxonomyAssets/release"))

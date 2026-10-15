@@ -1,0 +1,11 @@
+[package]
+name = "structure"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+segment-lexer = { path = "../segment-lexer" }
+serde = { workspace = true, features = ["derive", "rc"] }

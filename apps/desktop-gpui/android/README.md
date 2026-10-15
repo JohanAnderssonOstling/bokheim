@@ -47,6 +47,14 @@ notification. Failed reader restoration clears the saved book so the next launch
 does not repeat the failure. Native Back cancels both the opening overlay and the
 reader's loading screen; the loading screen also keeps an on-screen Back button.
 
+## Launcher icon
+
+Both launcher icon shapes use the Bokheim adaptive icon, with the shared Android
+foreground artwork on the cream brand background. Android 13 and later also use
+the mark for themed icons. Gradle stages
+`apps/ui/design-tokens/assets/icon/bokheim-android-foreground-432.png` automatically;
+regenerate that shared asset with `generate.py` when changing the brand icon.
+
 ## Book downloads in the app
 
 The library's globe button and bookstore links open a GPUI browser surface inside

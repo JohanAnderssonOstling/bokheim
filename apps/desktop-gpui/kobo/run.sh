@@ -53,6 +53,22 @@ firmware_live_pids() {
     done
 }
 
+# These firmware executable names fit in Linux's comm field. Match all of them
+# in one pass, using shell reads rather than a separate pidof lookup per name.
+find_firmware_pids() {
+    firmware_found=''
+    for firmware_comm in /proc/[0-9]*/comm; do
+        IFS= read -r firmware_name 2>/dev/null < "$firmware_comm" || continue
+        case "$firmware_name" in
+            nickel|hindenburg|sickel|fickel|adobehost|foxitpdf|iink)
+                firmware_proc=${firmware_comm%/comm}
+                firmware_found="$firmware_found ${firmware_proc##*/}"
+                ;;
+        esac
+    done
+    firmware_live_pids "$firmware_found"
+}
+
 uninstall_bokheim() {
     # Remove only shipped program files. Books, app data, optional developer
     # SSH setup, and other applications' NickelMenu configurations stay intact.
@@ -129,7 +145,8 @@ Loading...'
         nickel_stop_seconds=${nickel_stop_started%.*}
         nickel_stop_fraction=${nickel_stop_started#*.}
         nickel_stop_deadline=$((nickel_stop_seconds * 100 + 1$nickel_stop_fraction - 100 + 500))
-        nickel_remaining=$(pidof nickel hindenburg sickel fickel adobehost foxitpdf iink 2>/dev/null)
+        find_firmware_pids
+        nickel_remaining=$firmware_alive
         launcher_profile_mark firmware_discover
         for firmware_pid in $nickel_remaining; do
             kill -TERM "$firmware_pid" 2>/dev/null || true
@@ -145,8 +162,7 @@ Loading...'
             if [ -z "$nickel_remaining" ]; then
                 # One final scan catches processes respawned during shutdown.
                 # Keep the original deadline if another generation appeared.
-                nickel_remaining=$(pidof nickel hindenburg sickel fickel adobehost foxitpdf iink 2>/dev/null)
-                firmware_live_pids "$nickel_remaining"
+                find_firmware_pids
                 nickel_remaining=$firmware_alive
                 launcher_profile_mark firmware_verify
                 [ -n "$nickel_remaining" ] || break
