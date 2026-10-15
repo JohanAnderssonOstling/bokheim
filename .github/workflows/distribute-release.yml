@@ -6,7 +6,7 @@ on:
       platform:
         description: Hosted package to copy to the existing draft
         type: choice
-        options: [windows, macos]
+        options: [windows, macos, kobo]
         required: true
       run_id:
         description: Successful packaging workflow run ID
@@ -45,7 +45,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
           python3 - <<'PY_UPLOAD'
-          import json, os, re, subprocess, sys, tempfile
+          import base64, json, os, re, subprocess, sys, tempfile, tomllib
           from pathlib import Path
           sys.path.insert(0, 'scripts/ci')
           import release_artifacts as artifacts
@@ -58,21 +58,25 @@ jobs:
           run_id = os.environ['RUN_ID']
           sha = os.environ['SOURCE_COMMIT']
           tag = os.environ['RELEASE_TAG']
-          assert platform in ('windows', 'macos')
+          assert platform in ('windows', 'macos', 'kobo')
           assert run_id.isdecimal() and int(run_id) > 0
           assert re.fullmatch('[0-9a-f]{40}', sha)
           assert re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag)
-          workflow = 'desktop-release.yml' if platform == 'windows' else 'macos-release.yml'
+          workflow = {'windows': 'desktop-release.yml', 'macos': 'macos-release.yml', 'kobo': 'kobo-release.yml'}[platform]
           run = json.loads(command('gh', 'api', f'repos/{repository}/actions/runs/{run_id}'))
           assert run['head_sha'] == sha and run['conclusion'] == 'success', 'Build source or result differs'
           assert run['path'] == '.github/workflows/' + workflow, 'Unexpected packaging workflow'
           release = json.loads(command('gh', 'release', 'view', tag, '--repo', repository, '--json', 'isDraft,assets'))
           assert release['isDraft'], 'Packages may only be added to a draft'
           existing = {item['name']: item for item in release['assets']}
+          cargo = json.loads(command('gh', 'api', f'repos/{repository}/contents/apps/desktop-gpui/Cargo.toml?ref={sha}'))
+          assert tomllib.loads(base64.b64decode(cargo['content']).decode())['package']['version'] == tag[1:]
           with tempfile.TemporaryDirectory() as scratch:
               directory = Path(scratch)
-              name = 'bokheim-desktop-windows-x86-64' if platform == 'windows' else 'bokheim-macos-universal'
-              command('gh', 'run', 'download', run_id, '--repo', repository, '--name', name, '--dir', scratch)
+              names = {'windows': ['bokheim-desktop-windows-x86-64'], 'macos': ['bokheim-macos-universal'],
+                       'kobo': ['bokheim-kobo-installer-windows-x86-64', 'bokheim-kobo-installer-linux-x86-64']}[platform]
+              for name in names:
+                  command('gh', 'run', 'download', run_id, '--repo', repository, '--name', name, '--dir', scratch)
               if platform == 'windows':
                   receipt = json.loads((directory / artifacts.receipt_name(platform)).read_text())
                   artifacts.validate(receipt, platform, sha, repository, directory)
@@ -80,6 +84,13 @@ jobs:
                   info = json.loads((directory / 'update-info-windows-x86_64-zip.json').read_text())
                   assert info['application'] == tag[1:], 'Package version differs from release tag'
                   names = [*artifacts.FILES[platform], artifacts.receipt_name(platform)]
+              elif platform == 'kobo':
+                  packages = ['Bokheim-Kobo-Installer-Windows-x86_64.exe', 'Bokheim-Kobo-Installer-Linux-x86_64.AppImage']
+                  names = []
+                  for package in packages:
+                      expected = (directory / (package + '.sha256')).read_text().split()
+                      assert expected == [artifacts.fingerprint(directory / package)['sha256'], package], 'Installer checksum differs'
+                      names.extend([package, package + '.sha256'])
               else:
                   metadata = json.loads((directory / 'build-macos.json').read_text())
                   assert metadata['source_commit'] == sha and metadata['application'] == tag[1:]
@@ -87,7 +98,7 @@ jobs:
                   assert metadata['artifact']['name'] == image.name
                   assert artifacts.fingerprint(image) == {key: metadata['artifact'][key] for key in ('bytes', 'sha256')}
                   names = [image.name, image.name + '.sha256', 'build-macos.json']
-              source = directory / 'desktop-source-commit.txt'
+              source = directory / ('kobo-source-commit.txt' if platform == 'kobo' else 'desktop-source-commit.txt')
               source.write_text(sha + '\n')
               names.append(source.name)
               uploads = []
