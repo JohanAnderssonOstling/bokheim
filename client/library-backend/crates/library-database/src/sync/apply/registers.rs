@@ -108,12 +108,7 @@ pub(crate) fn accept_value(conn: &Connection, body: &LibraryStateEntry, time: u6
         Some(current) => time.max(current.changed_at.checked_add(1).ok_or_else(|| DatabaseError::message("register clock exhausted"))?),
         None => time,
     };
-    let version = VersionKey::new(
-        time,
-        body.conflict_rank(),
-        replica_id(conn)?,
-        next_sequence(conn)?,
-    );
+    let version = VersionKey::new(time, body.conflict_rank(), replica_id(conn)?, next_sequence(conn)?);
     if merge_inner(conn, &sync_common::Versioned { value: body, version: version.clone() }, false)? {
         schedule(conn, kind, &key, &subkey, Some(&version))?;
         if matches!(body, LibraryStateEntry::BookLifecycle { value: library_replica::BookLifecycleState::Present | library_replica::BookLifecycleState::Deleted { .. }, .. }) {

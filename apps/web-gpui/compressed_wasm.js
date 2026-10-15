@@ -1,8 +1,7 @@
-// Fetch immutable WASM as gzip and restore the application/wasm response that
-// wasm-bindgen needs for streaming compilation. Older browsers use the normal
-// uncompressed module path.
+// Request the regular WASM URL. The server negotiates Brotli, gzip, or identity
+// through Accept-Encoding; the browser decodes Content-Encoding before handing
+// the streaming application/wasm response to wasm-bindgen.
 export async function compressedWasm(url) {
-    if (typeof DecompressionStream !== 'function') return null;
     let response;
     try {
         response = await fetch(url, {cache: 'force-cache'});
@@ -10,7 +9,5 @@ export async function compressedWasm(url) {
         return null;
     }
     if (!response.ok || !response.body) return null;
-    return new Response(response.body.pipeThrough(new DecompressionStream('gzip')), {
-        headers: {'Content-Type': 'application/wasm'},
-    });
+    return response;
 }

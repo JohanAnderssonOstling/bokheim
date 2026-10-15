@@ -32,22 +32,26 @@ const EPUB_FALLBACK_MAX_ASPECT_RATIO: f64 = 0.90;
 
 pub type ThumbnailResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// The high-density thumbnail and its smaller browse derivative. Both are
-/// produced from the same decoded cover.
+mod card;
+pub use card::{card_thumbnail_geometry, card_thumbnail_suffix, encode_card_thumbnail_at_width, CardThumbnailGeometry, CARD_MAX_HORIZONTAL_CROP, CARD_MAX_VERTICAL_STRETCH, CARD_TARGET_HEIGHT_RATIO, CARD_THUMBNAIL_VERSION};
+
+/// An unmodified high-density master plus adjusted 300px and 600px cards.
+/// Every derivative is produced independently from the decoded original.
 pub struct ThumbnailVersions {
     pub browse: Vec<u8>,
+    pub card_high_density: Vec<u8>,
     pub high_density: Vec<u8>,
 }
 
 impl ThumbnailVersions {
     pub fn from_image(image: &RgbImage) -> ThumbnailResult<Self> {
-        Ok(Self { browse: encode_thumbnail_at_width(image, BROWSE_THUMBNAIL_WIDTH)?, high_density: encode_thumbnail_at_width(image, THUMBNAIL_WIDTH)? })
+        Ok(Self { browse: encode_card_thumbnail_at_width(image, BROWSE_THUMBNAIL_WIDTH)?, card_high_density: encode_card_thumbnail_at_width(image, THUMBNAIL_WIDTH)?, high_density: encode_thumbnail_at_width(image, THUMBNAIL_WIDTH)? })
     }
 }
 
 /// Returns whether an image is large enough and sufficiently cover-shaped to
-/// be preferred over another book-cover source. Providers use
-/// the same geometry contract for upstream thumbnails and EPUB fallbacks.
+/// be preferred over another book-cover source. Providers and undeclared EPUB
+/// fallbacks use this heuristic; declared artwork can have any valid shape.
 pub fn reasonable_cover_dimensions(width: u32, height: u32) -> bool {
     if width < EPUB_FALLBACK_MIN_WIDTH || height < EPUB_FALLBACK_MIN_HEIGHT {
         return false;
@@ -200,7 +204,10 @@ fn book_cover(mut book: Book, format: BookFormat) -> ThumbnailResult<Option<RgbI
     let preferred = book.preferred_cover_resources()?;
     for uri in &preferred {
         match decode_cover_resource(&mut book, uri) {
-            Ok(image) if reasonable_cover_dimensions(image.width(), image.height()) => return Ok(Some(image)),
+            // Explicit artwork can be square, landscape or unusually tall.
+            // Keep shape heuristics for undeclared reading-order fallbacks.
+            // A tiny MOBI thumbnail still yields to its full cover record.
+            Ok(image) if format == BookFormat::Epub || (image.width() >= EPUB_FALLBACK_MIN_WIDTH && image.height() >= EPUB_FALLBACK_MIN_HEIGHT) => return Ok(Some(image)),
             Err(error) if format == BookFormat::Epub || is_read_failure(&*error) => return Err(error),
             _ => {}
         }
@@ -248,6 +255,31 @@ fn decode_svg_cover(bytes: &[u8]) -> ThumbnailResult<RgbImage> {
 mod book_extractor_tests {
     use super::*;
     use std::io::Write;
+    use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+
+    #[test]
+    fn declared_epub_covers_of_every_shape_use_generated_card_geometry() {
+        for (height, browse_height, dense_height) in [(480, 309, 619), (600, 387, 774), (900, 480, 960), (1200, 480, 960)] {
+            let mut png = Cursor::new(Vec::new());
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(600, height, image::Rgb([180, 40, 20]))).write_to(&mut png, ImageFormat::Png).unwrap();
+            let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+            let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            for (name, bytes) in [
+                ("mimetype", b"application/epub+zip".as_slice()),
+                ("META-INF/container.xml", br#"<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="book.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#.as_slice()),
+                ("book.opf", br#"<package version="3.0" xmlns="http://www.idpf.org/2007/opf" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">cover-test</dc:identifier><dc:title>Declared cover</dc:title><dc:language>en</dc:language></metadata><manifest><item id="art" href="art.png" media-type="image/png" properties="cover-image"/><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#.as_slice()),
+                ("chapter.xhtml", br#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter</title></head><body><p>Book content.</p></body></html>"#.as_slice()),
+                ("art.png", png.get_ref().as_slice()),
+            ] {
+                archive.start_file(name, stored).unwrap();
+                archive.write_all(bytes).unwrap();
+            }
+            let versions = generate_thumbnail_versions_with_pdf_renderer("epub", archive.finish().unwrap(), |_| panic!("EPUB should not invoke PDF rendering")).unwrap().expect("declared cover must be retained regardless of shape");
+            for (bytes, expected) in [(&versions.browse, (300, browse_height)), (&versions.card_high_density, (600, dense_height)), (&versions.high_density, (600, height))] {
+                assert_eq!(image::load_from_memory(bytes).unwrap().to_rgb8().dimensions(), expected);
+            }
+        }
+    }
 
     #[test]
     fn decodes_supported_cover_formats_after_image_upgrade() {

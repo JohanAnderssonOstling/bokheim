@@ -95,10 +95,12 @@ impl LibraryImport {
         let request_thumbnail = !self.assets.thumbnail_set_exists(&content_hash).map_err(BackendError::operation)?;
         let restore_paths = self.import_restore_paths(&content_hash)?;
         let ValidatedImport { parent_id, file_name, format } = import;
+        let catalog_record = library_database::catalog::import_record(content_hash, format).map_err(BackendError::operation)?;
         self.database
-            .commit_import_with_contributor_matching(
+            .commit_import_with_catalog_answer(
                 library_database::ImportCommit { parent_id, file_name, format, content_hash, size_bytes, inspection_version: book_inspection::inspection_version(format), inspection, published, request_thumbnail, restore_paths },
                 Some(metadata_contract::matching::same_author),
+                catalog_record,
             )
             .map_err(BackendError::operation)?;
         self.events.notify_contents_changed();

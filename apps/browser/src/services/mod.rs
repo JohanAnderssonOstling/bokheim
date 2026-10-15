@@ -1,8 +1,8 @@
 //! Explicit service boundaries for browser UI code.
 
 mod app;
-mod book_confirmation;
-pub(crate) use book_confirmation::BookConfirmation;
+mod book_command;
+pub(crate) use book_command::BookCommand;
 mod update_prompt;
 pub(crate) mod updates;
 pub use updates::{UpdateAction, UpdateActionHandler, UpdateControls, UpdateView};
@@ -11,7 +11,11 @@ pub(crate) use format::format_storage_bytes;
 pub(crate) mod library_removal;
 pub use library_removal::{LibraryRemovalHook, LibraryRemovalPreparation, LibraryRemovalService, library_is_being_removed};
 pub(crate) type UiFuture<T> = std::pin::Pin<Box<dyn Future<Output = Result<T, String>> + 'static>>;
+mod book_transfer_error;
+mod catalog_progress;
+pub(crate) use catalog_progress::track_catalog_import;
 mod import_presentation;
+pub(crate) use book_transfer_error::book_transfer_error_message;
 pub(crate) mod import_progress;
 mod notifications;
 pub(crate) use import_presentation::import_failure_message;

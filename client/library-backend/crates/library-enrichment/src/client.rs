@@ -4,7 +4,7 @@ use std::time::Duration;
 use url::Url;
 
 #[cfg(target_arch = "wasm32")]
-async fn browser_delay(milliseconds: u32) {
+pub(crate) async fn browser_delay(milliseconds: u32) {
     use wasm_bindgen::prelude::*;
     #[wasm_bindgen]
     extern "C" {
@@ -29,7 +29,7 @@ pub struct MetadataClient {
 pub struct MetadataClientError(String);
 
 impl MetadataClientError {
-    fn new(message: impl fmt::Display) -> Self {
+    pub(crate) fn new(message: impl fmt::Display) -> Self {
         Self(message.to_string())
     }
 }
@@ -57,21 +57,6 @@ impl MetadataClient {
         Ok(url)
     }
 
-    /// Fetch the artwork already resolved and cached by the metadata server.
-    pub async fn resolved_cover(&self, id: &str) -> Result<Option<Vec<u8>>, MetadataClientError> {
-        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
-            return Err(MetadataClientError::new("invalid cover reference"));
-        }
-        Self::with_deadline(35_000, async {
-            let response = self.http.get(self.endpoint(&format!("v3/covers/{id}"))?).send().await.map_err(MetadataClientError::new)?;
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
-                return Ok(None);
-            }
-            Self::response_bytes(response.error_for_status().map_err(MetadataClientError::new)?, 4 * 1024 * 1024).await.map(Some)
-        })
-        .await
-    }
-
     /// Every lookup and merge rule for a batch of books runs on the server.
     pub async fn books(&self, request: &metadata_contract::books::BookEnrichmentRequest) -> Result<metadata_contract::books::BookEnrichmentResponse, MetadataClientError> {
         let body = serde_json::to_vec(request).map_err(MetadataClientError::new)?;
@@ -89,7 +74,7 @@ impl MetadataClient {
         .await
     }
 
-    async fn with_deadline<T>(milliseconds: u32, operation: impl std::future::Future<Output = Result<T, MetadataClientError>>) -> Result<T, MetadataClientError> {
+    pub(crate) async fn with_deadline<T>(milliseconds: u32, operation: impl std::future::Future<Output = Result<T, MetadataClientError>>) -> Result<T, MetadataClientError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             tokio::time::timeout(Duration::from_millis(u64::from(milliseconds)), operation).await.map_err(|_| MetadataClientError::new("metadata request timed out"))?
@@ -104,14 +89,14 @@ impl MetadataClient {
         }
     }
 
-    async fn response_bytes(response: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>, MetadataClientError> {
+    pub(crate) async fn response_bytes(response: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>, MetadataClientError> {
         if response.content_length().is_some_and(|length| length > max_bytes as u64) {
             return Err(MetadataClientError::new("metadata response is too large"));
         }
         let mut stream = response.bytes_stream();
         let mut bytes = Vec::new();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(MetadataClientError::new)?;
+            let chunk = chunk.map_err(|error| MetadataClientError::new(error.without_url()))?;
             if bytes.len().saturating_add(chunk.len()) > max_bytes {
                 return Err(MetadataClientError::new("metadata response is too large"));
             }

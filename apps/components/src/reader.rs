@@ -3,14 +3,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{App, Div, ElementId, FontWeight, Image, ImageSource, Img, MouseButton, ObjectFit, Pixels, RenderOnce, ScrollHandle, SharedString, Size, Stateful, StyledImage, Window, div, img, px};
+use gpui::{AnyElement, App, Div, ElementId, Image, ImageSource, Img, MouseButton, ObjectFit, Pixels, RenderOnce, ScrollHandle, SharedString, Size, Stateful, StyledImage, Window, div, img, px};
 use gpui_component::IconName;
-use gpui_component::button::{Button, ButtonGroup, ButtonVariants};
+use gpui_component::button::Button;
 use gpui_component::menu::PopupMenu;
 use gpui_component::popover::Popover;
-use gpui_component::Sizable;
 
-use crate::{BrowserTheme, RADIUS_MD, RADIUS_SM, SETTINGS_CONTROL_SIZE_REM, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, ScrollableElement, TEXT_SM, TEXT_XS, base_button, browser_theme, menu_item, outlined_text_button, scroll::Scrollable};
+use crate::{BrowserTheme, RADIUS_MD, RADIUS_SM, SETTINGS_CONTROL_SIZE_REM, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, ScrollableElement, TEXT_SM, TEXT_XS, browser_theme, menu_item, outlined_text_button, scroll::Scrollable};
 
 /// The toolbar and its controls grow together with the UI font. The same 2rem
 /// step as `TOPBAR_ACTION_HEIGHT_REM`, kept under its own name because the
@@ -19,10 +18,6 @@ pub const READER_TOOLBAR_SIZE_REM: f32 = crate::TOPBAR_ACTION_HEIGHT_REM;
 pub fn reader_toolbar_size_px(window: &Window) -> f32 {
     f32::from(gpui::rems(READER_TOOLBAR_SIZE_REM).to_pixels(window.rem_size()))
 }
-/// Height of the reader's mobile bottom bar. Shares the library shell's
-/// bottom-nav height rather than inventing a second size for the same kind of
-/// row.
-pub const READER_BOTTOM_BAR_HEIGHT: f32 = crate::BOTTOM_NAV_HEIGHT_REM * 16.0;
 const READER_SETTINGS_POPOVER_GAP: f32 = 4.0;
 const READER_SETTINGS_POPOVER_WINDOW_MARGIN: f32 = 8.0;
 const READER_SETTINGS_MAX_WIDTH: f32 = 400.0;
@@ -30,38 +25,19 @@ const READER_SETTINGS_MAX_HEIGHT: f32 = 620.0;
 const READER_SETTINGS_PADDING: f32 = 16.0;
 const READER_SETTINGS_GAP: f32 = 13.0;
 
-pub fn reader_toolbar(theme: BrowserTheme) -> Div {
-    div().h(gpui::rems(READER_TOOLBAR_SIZE_REM)).flex_none().w_full().min_w_0().px(px(CONTENT_INSET)).flex().items_center().gap(px(SPACE_SM)).bg(theme.page_bg).border_b_1().border_color(theme.rule)
-}
-
-/// `.ghost()`, not `outlined_icon_button`: the header's square icon buttons
-/// (back, close, search) sit borderless against the header's own bottom
-/// border, not individually outlined.
-pub fn reader_control_button_icon(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
-    base_button(id).ghost().icon(icon).size(gpui::rems(READER_TOOLBAR_SIZE_REM)).rounded(px(RADIUS_SM)).px_0().bg(theme.page_bg).tooltip(label)
-}
-
 /// Chapter title beside progress, yielding space to the fixed toolbar controls.
 pub fn reader_toolbar_title(title: impl Into<SharedString>) -> Div {
     div().flex_initial().min_w_0().max_w(px(520.0)).overflow_hidden().whitespace_nowrap().text_ellipsis().text_align(gpui::TextAlign::Left).text_size(gpui::rems(TEXT_SM)).child(title.into())
 }
 
 pub fn reader_choice_button(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
-    // Use the same selected-button path as the reader's active contents row:
-    // solid accent and inverted ink. `ButtonCustomVariant` is superseded by
-    // ButtonGroup's segment styling, which was why this previously rendered
-    // as the pale accent wash instead.
-    // The group below owns the joined outline and segment edges. These are
-    // deliberately plain children, with only the selected child receiving
-    // reader-specific colour refinement.
-    let base = base_button(id).label(label).with_size(gpui_component::Size::Small).h(gpui::rems(SETTINGS_CONTROL_SIZE_REM)).flex_1().rounded(px(RADIUS_SM)).px(px(SPACE_XS));
-    crate::selectable_button(base, selected, theme).when(selected, |button| button.font_weight(FontWeight::SEMIBOLD))
+    crate::settings_choice_button(id, label, selected, theme)
 }
 
-pub fn reader_choice_button_group(id: impl Into<ElementId>, buttons: impl IntoIterator<Item = Button>) -> ButtonGroup {
+pub fn reader_choice_button_group(id: impl Into<ElementId>, buttons: impl IntoIterator<Item = Button>, theme: BrowserTheme) -> Stateful<Div> {
     // Full width so the group's right edge lands on the steppers' right edge
     // in the rows below; the flex_1 buttons stretch to fill it.
-    ButtonGroup::new(id).children(buttons).outline().w_full()
+    crate::settings_choice_button_group(theme).id(id).children(buttons).w_full()
 }
 
 pub fn reader_match_count(text: impl Into<SharedString>, theme: BrowserTheme) -> Div {
@@ -69,28 +45,7 @@ pub fn reader_match_count(text: impl Into<SharedString>, theme: BrowserTheme) ->
 }
 
 fn reader_settings_trigger(theme: BrowserTheme) -> gpui_component::button::Button {
-    reader_control_button_icon("reader-settings-trigger", "Aa", IconName::Settings2, theme)
-}
-
-/// How far through the book, as a single percentage.
-///
-/// Deliberately just the number: the toolbar is permanent chrome over the page,
-/// and location and section counts are detail the tooltip can carry. The fixed
-/// width keeps the title beside it from reflowing on every page turn.
-pub fn reader_progress(label: impl Into<SharedString>, detail: impl Into<SharedString>, theme: BrowserTheme) -> Stateful<Div> {
-    div()
-        .id("reader-progress")
-        .flex_none()
-        .w(gpui::rems(2.75))
-        .px(px(SPACE_XS))
-        .text_align(gpui::TextAlign::Right)
-        .text_size(gpui::rems(TEXT_SM))
-        .text_color(theme.text_muted)
-        .tooltip({
-            let detail = detail.into();
-            move |window, cx| gpui_component::tooltip::Tooltip::new(detail.clone()).build(window, cx)
-        })
-        .child(label.into())
+    crate::outlined_icon_button("reader-settings-trigger", "Aa", IconName::Settings2, theme)
 }
 
 fn reader_document_surface(theme: BrowserTheme) -> Div {
@@ -106,16 +61,18 @@ pub fn reader_pdf_scroll_surface(scroll_handle: &ScrollHandle, theme: BrowserThe
     reader_document_surface(theme).id("pdf-reader-scroll").track_scroll(scroll_handle).flex().items_start().justify_start()
 }
 
-/// The border between sidebar and document is drawn once, by the sidebar's
-/// own outer container (`reader_sidebar` in `shell/toolbar.rs`) — a tab body
-/// sits inside that border, not beside it, so it draws none of its own.
+/// The split divider and tab strip own the surrounding borders; the TOC body
+/// adds none of its own.
 pub fn reader_toc(theme: BrowserTheme) -> Div {
-    div().size_full().min_h_0().min_w_0().flex().flex_col().gap(px(SPACE_XXS)).bg(theme.page_bg).border_t_1().border_color(theme.rule).on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+    div().size_full().min_h_0().min_w_0().flex().flex_col().gap(px(SPACE_XXS)).bg(theme.page_bg).on_scroll_wheel(|_, _, cx| cx.stop_propagation())
 }
+
+/// Space for the scrollbar's 16px track, including its thumb insets.
+pub const READER_SCROLLBAR_GUTTER_PX: f32 = SPACE_MD;
 
 /// Scrollable reader-sidebar panel: full size, themed surface, own scroll.
 fn reader_scroll_panel(theme: BrowserTheme) -> Scrollable<Div> {
-    div().size_full().min_h_0().min_w_0().overflow_y_scrollbar().flex().flex_col().bg(theme.page_bg)
+    div().size_full().min_h_0().min_w_0().pr(px(READER_SCROLLBAR_GUTTER_PX)).overflow_y_scrollbar().flex().flex_col().bg(theme.page_bg)
 }
 
 pub fn reader_state_panel(theme: BrowserTheme) -> Scrollable<Div> {
@@ -127,9 +84,9 @@ pub fn reader_state_panel(theme: BrowserTheme) -> Scrollable<Div> {
 /// shadowed panel — it lives inside the sidebar's border, not floating over
 /// it.
 pub fn reader_settings_tab_body(theme: BrowserTheme) -> Scrollable<Div> {
-    // Groups carry their own content padding, while their borders and fills
-    // reach the sidebar edges like the Contents and Notes rows.
-    reader_scroll_panel(theme)
+    // Groups provide SPACE_MD on both sides. Their right padding also leaves
+    // room for the scrollbar, so this panel needs no additional gutter.
+    reader_scroll_panel(theme).pr_0()
 }
 
 pub fn reader_state_card(id: impl Into<ElementId>, selected: bool, theme: BrowserTheme) -> Stateful<Div> {
@@ -160,8 +117,8 @@ pub fn reader_annotation_color_bar(color: u32) -> Div {
     div().absolute().left(px(6.0)).top(px(12.0)).bottom(px(12.0)).w(px(3.0)).bg(reader_annotation_color(color))
 }
 
-pub fn reader_state_quote(text: impl Into<SharedString>) -> Div {
-    div().text_size(gpui::rems(TEXT_SM)).line_height(gpui::relative(1.35)).italic().child(text.into())
+pub fn reader_state_quote(text: impl Into<SharedString>, theme: BrowserTheme) -> Div {
+    div().w_full().min_w_0().whitespace_normal().line_clamp(2).text_ellipsis().text_size(gpui::rems(TEXT_SM)).line_height(gpui::relative(1.35)).text_color(theme.text_muted).italic().child(text.into())
 }
 
 pub fn reader_state_note(text: impl Into<SharedString>, theme: BrowserTheme) -> Div {
@@ -187,7 +144,7 @@ pub const READER_NOTE_MAX_ROWS: usize = 40;
 /// The note takes its height from its content. Only when the panel reaches the
 /// height its anchor allows does anything scroll, and then it is the panel, so
 /// a note is never a small scrolling box inside a panel with room to spare.
-pub fn reader_annotation_editor(note: impl IntoElement, theme: BrowserTheme) -> Scrollable<Stateful<Div>> {
+pub fn reader_annotation_editor(note: impl IntoElement, theme: BrowserTheme) -> Stateful<Div> {
     // The panel is `modal_surface` plus editor geometry: an absolute `min_0`
     // pair and `relative` come along, neither of which moves an
     // absolutely-placed, content-sized panel.
@@ -199,7 +156,9 @@ pub fn reader_annotation_editor(note: impl IntoElement, theme: BrowserTheme) -> 
         // one is placed against a point in the page: it should be as tall as
         // the note in it, up to the room its anchor leaves.
         .h_auto()
-        .overflow_y_scrollbar()
+        // Keep the content in this surface's own layout. A Scrollable wrapper's
+        // full-height viewport collapses when this floating panel is auto-sized.
+        .overflow_y_scroll()
         .occlude()
         .p(px(SPACE_MD))
         .flex()
@@ -210,72 +169,91 @@ pub fn reader_annotation_editor(note: impl IntoElement, theme: BrowserTheme) -> 
         .border_color(theme.rule)
         .bg(theme.page_bg)
         .shadow(crate::overlay_shadow(theme))
-        .child(div().w_full().flex_none().p(px(SPACE_XS)).rounded(px(RADIUS_SM)).border_1().border_color(theme.rule).bg(theme.page_bg).child(note))
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+        .child(div().w_full().flex_none().debug_selector(|| "reader-annotation-note-row".into()).p(px(SPACE_XS)).rounded(px(RADIUS_SM)).border_1().border_color(theme.rule).bg(theme.page_bg).child(note))
 }
 
 /// Editor controls run at `SETTINGS_CONTROL_SIZE_REM`, the shared settings
 /// geometry, rather than a third name for the same 2rem step.
 
-/// The highlight palette, in hue order.
+/// The annotation palette, in hue order.
 ///
 /// Eight, which is what one row of swatches holds at the editor's width, and
 /// far enough round the wheel that neighbours are still told apart. Hue order
 /// rather than lightness: past four colours a reader looks for "the green one"
 /// by where green falls on a spectrum, not by how light it is.
 ///
-/// All eight sit at a similar lightness so none of them buries the words it is
-/// laid over — which is also why they collapse on a greyscale screen. There,
-/// the style row is the distinction that survives.
+/// Restrained saturation keeps the colours subtle over text. Warm red and
+/// cooler pink, and violet purple and blue, keep adjacent choices distinct.
+/// On a greyscale screen, the style row provides the distinction.
 ///
 /// The values are canonical: an annotation stores the `0xRRGGBB` it was given, so this
 /// is the one place a colour may be named, and both the swatch and the renderer
 /// read it from here.
-pub const READER_ANNOTATION_COLORS: [(&str, u32); 8] = [("Yellow", 0xf6c945), ("Orange", 0xfb923c), ("Red", 0xf87171), ("Pink", 0xf472b6), ("Purple", 0xc084fc), ("Blue", 0x60a5fa), ("Teal", 0x2dd4bf), ("Green", 0x4ade80)];
+pub const READER_ANNOTATION_COLORS: [(&str, u32); 8] = [("Yellow", 0xe0bb4b), ("Orange", 0xe09a57), ("Red", 0xd57868), ("Pink", 0xc880b2), ("Purple", 0x9d80c9), ("Blue", 0x6e9dcb), ("Teal", 0x57aaa1), ("Green", 0x94ad65)];
 
 /// The colour a new annotation takes.
 pub const READER_ANNOTATION_DEFAULT_COLOR: u32 = READER_ANNOTATION_COLORS[0].1;
 
-/// An annotation's `0xRRGGBB` for display.
-pub fn reader_annotation_color(color: u32) -> gpui::Hsla {
-    gpui::rgb(color).into()
+/// What an annotation paints in, from the `0xRRGGBB` it stores.
+///
+/// E-ink lands the palette on three neighbouring greys, so there every
+/// annotation paints black and the editor offers no colours. The stored colour
+/// is untouched and still shows wherever the annotation syncs to.
+pub const fn reader_annotation_paint_color(color: u32) -> u32 {
+    if cfg!(feature = "kobo") { 0x000000 } else { color }
 }
 
-/// The group the swatches sit in: one bordered strip, like a choice group.
+/// How opaque a highlight is over the text it marks. On e-ink, black at this
+/// weight is a light grey, lighter than a search hit.
+pub const READER_ANNOTATION_HIGHLIGHT_ALPHA: u8 = if cfg!(feature = "kobo") { 56 } else { 96 };
+
+/// An annotation's `0xRRGGBB` for display.
+pub fn reader_annotation_color(color: u32) -> gpui::Hsla {
+    gpui::rgb(reader_annotation_paint_color(color)).into()
+}
+
+/// A full-width palette with evenly spaced swatches.
 pub fn reader_annotation_color_group() -> Div {
-    div().flex_none().flex().flex_row().items_center().gap(px(SPACE_XXS)).p(px(SPACE_XXS)).rounded(px(RADIUS_SM)).border_1().border_color(gpui::transparent_black())
+    div().w_full().min_w_0().flex_none().flex().flex_row().items_center().justify_between()
 }
 
 /// One highlight colour, shown rather than named.
 ///
-/// The circle is the colour itself, so nothing here is a word: the name goes to
-/// the tooltip, where a reader who needs it can ask. The chosen one is picked
-/// out by the accent wash behind it rather than by a tick, which would have to
-/// sit on top of the colour it is confirming.
+/// The selected colour is indicated by the swatch's background tint.
 pub fn reader_annotation_color_swatch(id: impl Into<ElementId>, color: u32, name: &'static str, selected: bool, theme: BrowserTheme) -> Stateful<Div> {
     div()
         .id(id)
-        .size(gpui::rems(SETTINGS_CONTROL_SIZE_REM))
-        .flex_none()
+        .debug_selector(move || format!("reader-annotation-color-{name}"))
+        .w(gpui::rems(SETTINGS_CONTROL_SIZE_REM))
+        .h(gpui::rems(SETTINGS_CONTROL_SIZE_REM))
+        .min_w(px(20.0))
+        .flex_shrink_1()
         .flex()
         .items_center()
         .justify_center()
         .rounded(px(RADIUS_SM))
         .cursor_pointer()
         .when(selected, |swatch| swatch.bg(theme.accent_wash))
-        .when(!selected, |swatch| swatch.hover(move |style| style.bg(theme.hover)))
-        .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(name).build(window, cx))
-        .child(div().size(px(16.0)).rounded_full().border_1().border_color(theme.rule).bg(reader_annotation_color(color)))
+        .hover(move |style| style.bg(theme.hover))
+        .focus_visible(move |style| style.bg(theme.accent_wash))
+        .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(if selected { format!("{name} (selected)") } else { name.to_owned() }).build(window, cx))
+        .child(
+            div()
+                .size(px(16.0))
+                .max_w_full()
+                .flex_none()
+                .rounded_full()
+                .border_1()
+                .border_color(gpui::black().opacity(0.25))
+                .bg(reader_annotation_color(color))
+                .when(selected, |circle| circle.debug_selector(move || format!("reader-annotation-color-selected-{name}"))),
+        )
 }
 
 /// A compact text action in the annotation editor.
 pub fn reader_annotation_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
     crate::selectable_button(outlined_text_button(id, label).h(gpui::rems(SETTINGS_CONTROL_SIZE_REM)).rounded(px(RADIUS_SM)).border_color(theme.rule).bg(theme.page_bg), selected, theme)
-}
-
-/// Discarding an annotation, kept apart from the actions that keep it: an icon
-/// where the others are words, and the only thing in the panel wearing `danger`.
-pub fn reader_annotation_delete_button(id: impl Into<ElementId>, theme: BrowserTheme) -> Button {
-    crate::outlined_icon_button(id, "Delete annotation", IconName::Delete, theme).text_color(theme.danger)
 }
 
 /// Width of the disclosure column. Doubles as the row's left inset and as the
@@ -315,11 +293,11 @@ pub fn reader_settings_group(theme: BrowserTheme) -> Div {
     // hugging its border. Horizontal padding lives here rather than on the
     // tab body, so the border-bottom below it spans full width, edge to edge
     // with the sidebar's own borders.
-    div().w_full().flex().flex_col().gap(px(SPACE_XS)).px(px(CONTENT_INSET)).pt(px(SPACE_MD)).pb(px(SPACE_MD)).border_b_1().border_color(theme.rule)
+    div().w_full().min_w_0().flex().flex_col().gap(px(SPACE_XS)).p(px(SPACE_MD)).border_b_1().border_color(theme.rule)
 }
 
 pub fn reader_setting_row(label: impl Into<SharedString>) -> Div {
-    div().w_full().min_h(gpui::rems(2.375)).flex().items_center().gap(px(SPACE_SM)).child(div().w(gpui::rems(7.0)).max_w(px(112.0)).flex_none().text_size(gpui::rems(TEXT_SM)).child(label.into())).child(div().flex_1())
+    div().w_full().min_h(gpui::rems(2.375)).flex().items_center().gap(px(SPACE_SM)).child(div().w(gpui::rems(7.0)).max_w(px(112.0)).flex_none().whitespace_nowrap().text_size(gpui::rems(TEXT_SM)).child(label.into())).child(div().flex_1())
 }
 
 /// A button-group row: a small-caps label above a full-width choice group,
@@ -328,18 +306,270 @@ pub fn reader_setting_row_smallcaps(label: impl Into<SharedString>, theme: Brows
     div().w_full().flex().flex_col().gap(px(SPACE_XXS)).child(div().text_size(gpui::rems(TEXT_XS)).font_features(crate::small_caps()).text_color(theme.text_muted).child(label.into()))
 }
 
-/// The query field. Grows with the bar instead of sitting at a fixed 260px:
-/// the search bar spans the window, and a stranded box with dead space beside
-/// it looks like a control that failed to lay out.
+/// The places the reader's chrome leads to. Each has one icon, used by the
+/// desktop rail and the phone's bars alike.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ReaderDestination {
+    Library,
+    Contents,
+    Notes,
+    Search,
+    Settings,
+    Tts,
+}
+
+impl ReaderDestination {
+    pub fn icon(self) -> gpui_component::Icon {
+        gpui_component::Icon::empty().path(match self {
+            Self::Library => "icons/arrow-left.svg",
+            Self::Contents => "icons/menu.svg",
+            Self::Notes => "icons/replace.svg",
+            Self::Search => "icons/search.svg",
+            Self::Settings => "icons/text-aa.svg",
+            Self::Tts => "icons/headphones.svg",
+        })
+    }
+
+    /// Settings uses live text so its Aa follows the interface typeface.
+    fn glyph(self, size_rem: f32, theme: BrowserTheme) -> AnyElement {
+        if self == Self::Settings {
+            div().size(gpui::rems(size_rem)).flex().items_center().justify_center().font_family(theme.ui_font_family.family_name()).text_size(gpui::rems(size_rem)).line_height(gpui::relative(1.0)).child("Aa").into_any_element()
+        } else {
+            self.icon().size(gpui::rems(size_rem)).into_any_element()
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Library => "Library",
+            Self::Contents => "Contents",
+            Self::Notes => "Notes",
+            Self::Search => "Search",
+            Self::Settings => "Settings",
+            Self::Tts => "TTS",
+        }
+    }
+}
+
+/// A sidebar panel's own header: its name and a close button.
+pub fn reader_panel_header(title: impl Into<SharedString>, theme: BrowserTheme) -> Div {
+    div()
+        .flex_none()
+        .w_full()
+        .min_w_0()
+        .h(gpui::rems(2.75))
+        .flex()
+        .items_center()
+        .gap(px(SPACE_SM))
+        .pl(px(SPACE_MD))
+        .pr(px(SPACE_XS))
+        .border_b_1()
+        .border_color(theme.rule)
+        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_features(crate::small_caps()).child(title.into()))
+}
+
+/// The handle at the top of a phone sheet, which a downward swipe closes.
+pub fn reader_sheet_grab(theme: BrowserTheme) -> Div {
+    div().flex_none().w_full().pt(px(SPACE_SM)).pb(px(SPACE_XS)).flex().justify_center().child(div().w(px(36.0)).h(px(4.0)).rounded_full().bg(theme.rule))
+}
+
+pub fn reader_top_bar_title(title: impl Into<SharedString>, chapter: impl Into<SharedString>, theme: BrowserTheme) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .items_center()
+        .child(div().max_w_full().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(TEXT_SM)).child(title.into()))
+        .child(div().max_w_full().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(0.75)).text_color(theme.text_muted).child(chapter.into()))
+}
+
+/// On a phone the only place reading progress is shown.
+pub fn reader_top_bar_progress(label: impl Into<SharedString>, theme: BrowserTheme) -> Div {
+    div().flex_none().pl(px(SPACE_XS)).text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(label.into())
+}
+
+/// A phone bar action below the page: the library's bottom bar item over the
+/// destination's glyph. Reading aloud marks its glyph with the rail's activity
+/// dot, and tints it while it plays.
+pub fn reader_bottom_bar_item(id: impl Into<ElementId>, destination: ReaderDestination, mark: ReaderRailMark, theme: BrowserTheme) -> gpui_component::button::Button {
+    let glyph = div()
+        .relative()
+        .when(mark == ReaderRailMark::Active, |glyph| glyph.text_color(theme.accent))
+        .child(destination.glyph(crate::NAV_RAIL_ICON_SIZE_REM, theme))
+        .children(reader_activity_dot(mark, theme).map(|dot| dot.top(px(-2.0)).right(px(-6.0))));
+    crate::browser::bottom_navigation_tile(id, glyph, destination.label(), mark == ReaderRailMark::Selected, theme)
+}
+
+/// Width of the reader sidebar's icon rail. The rail belongs to the sidebar:
+/// it is shown and hidden with the panel, and the panel's resizable width is
+/// measured beside it.
+pub const READER_RAIL_WIDTH: f32 = 52.0;
+const READER_RAIL_ITEM_SIZE: f32 = 40.0;
+const READER_PROGRESS_RING_SIZE: f32 = 28.0;
+const READER_PROGRESS_RING_STROKE: f32 = 3.0;
+
+/// The sidebar's column of destinations: navigation at the top, tools at the
+/// foot, ruled off from the panel beside it.
+pub fn reader_rail(theme: BrowserTheme) -> Div {
+    div().w(px(READER_RAIL_WIDTH)).flex_none().h_full().min_h_0().flex().flex_col().items_center().gap(px(SPACE_XS)).py(px(SPACE_SM)).border_r_1().border_color(theme.rule).bg(theme.page_bg)
+}
+
+/// Pushes the rail's tools to its foot.
+pub fn reader_rail_spacer() -> Div {
+    div().flex_1().min_h_0()
+}
+
+/// What a rail item shows besides its icon.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ReaderRailMark {
+    None,
+    /// The panel on show: accent wash and a bar on the rail's inner edge.
+    Selected,
+    /// Something running: an accent icon with a filled dot.
+    Active,
+    /// Something paused: a hollow dot.
+    Paused,
+}
+
+/// One rail destination: an icon, named by its tooltip.
+pub fn reader_rail_item(id: impl Into<ElementId>, destination: ReaderDestination, label: impl Into<SharedString>, mark: ReaderRailMark, theme: BrowserTheme) -> Stateful<Div> {
+    let label = label.into();
+    let ink = match mark {
+        ReaderRailMark::Selected => theme.text,
+        ReaderRailMark::Active => theme.accent,
+        ReaderRailMark::None | ReaderRailMark::Paused => theme.text_muted,
+    };
+    div()
+        .id(id)
+        .relative()
+        .flex_none()
+        .size(px(READER_RAIL_ITEM_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(RADIUS_SM))
+        .cursor_pointer()
+        .text_color(ink)
+        .when(mark == ReaderRailMark::Selected, |item| item.bg(theme.accent_wash))
+        .hover(move |style| style.bg(if mark == ReaderRailMark::Selected { theme.accent_wash_hover } else { theme.hover }).text_color(theme.text))
+        .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx))
+        .child(destination.glyph(1.25, theme))
+        .when(mark == ReaderRailMark::Selected, |item| item.child(div().absolute().left(px(-(READER_RAIL_WIDTH - READER_RAIL_ITEM_SIZE) / 2.0)).top(px(SPACE_SM)).bottom(px(SPACE_SM)).w(px(3.0)).bg(theme.accent)))
+        .children(reader_activity_dot(mark, theme).map(|dot| dot.top(px(7.0)).right(px(7.0))))
+}
+
+/// The dot that says something is running (filled) or paused (hollow), for
+/// the caller to place over the item it marks.
+fn reader_activity_dot(mark: ReaderRailMark, theme: BrowserTheme) -> Option<Div> {
+    let dot = div().absolute().size(px(7.0)).rounded_full();
+    match mark {
+        ReaderRailMark::Active => Some(dot.bg(theme.accent)),
+        ReaderRailMark::Paused => Some(dot.border_1().border_color(theme.text_muted)),
+        ReaderRailMark::None | ReaderRailMark::Selected => None,
+    }
+}
+
+/// How far through the book, as a ring with the percentage inside. On
+/// desktop this is the one place reading progress is shown.
+pub fn reader_progress_ring(fraction: f32, label: impl Into<SharedString>, detail: impl Into<SharedString>, theme: BrowserTheme) -> Stateful<Div> {
+    let fraction = fraction.clamp(0.0, 1.0);
+    let detail = detail.into();
+    let ring = gpui::canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let center = bounds.center();
+            let radius = (READER_PROGRESS_RING_SIZE - READER_PROGRESS_RING_STROKE) / 2.0;
+            // A circle drawn as a polyline: fine enough at this size, and the
+            // same stroke builder the graph view uses.
+            let arc = |from: f32, to: f32, color: gpui::Hsla, window: &mut Window| {
+                let steps = ((to - from) * 64.0).ceil().max(1.0) as usize;
+                let point_at = |turn: f32| {
+                    let angle = (turn - 0.25) * std::f32::consts::TAU;
+                    center + gpui::point(px(radius * angle.cos()), px(radius * angle.sin()))
+                };
+                let mut builder = gpui::PathBuilder::stroke(px(READER_PROGRESS_RING_STROKE));
+                builder.move_to(point_at(from));
+                for step in 1..=steps {
+                    builder.line_to(point_at(from + (to - from) * step as f32 / steps as f32));
+                }
+                if let Ok(path) = builder.build() {
+                    window.paint_path(path, color);
+                }
+            };
+            arc(0.0, 1.0, theme.rule, window);
+            if fraction > 0.0 {
+                arc(0.0, fraction, theme.accent, window);
+            }
+        },
+    )
+    .absolute()
+    .size_full();
+    div()
+        .id("reader-progress-ring")
+        .relative()
+        .flex_none()
+        .size(px(READER_PROGRESS_RING_SIZE))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(9.0))
+        .text_color(theme.text_muted)
+        .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(detail.clone()).build(window, cx))
+        .child(ring)
+        .child(label.into())
+}
+
+/// One setting's choices as equal-width picture tiles in a row.
+pub fn reader_tile_group(id: impl Into<ElementId>) -> Stateful<Div> {
+    div().id(id).w_full().min_w_0().flex().flex_row().gap(px(SPACE_SM))
+}
+
+/// A choice drawn as a picture of its effect above its name. The selected tile
+/// takes the accent outline and wash, the same marks a selected choice button
+/// carries.
+pub fn reader_picture_tile(id: impl Into<ElementId>, picture: impl IntoElement, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Stateful<Div> {
+    let hovered = if selected { theme.accent_wash_hover } else { theme.hover };
+    div()
+        .id(id)
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(SPACE_XXS))
+        .pt(px(SPACE_XS))
+        .pb(px(SPACE_XS))
+        .rounded(px(RADIUS_SM))
+        .border_1()
+        .border_color(if selected { theme.accent } else { theme.rule })
+        .bg(if selected { theme.accent_wash } else { theme.page_bg })
+        .text_color(if selected { theme.text } else { theme.text_muted })
+        .cursor_pointer()
+        .hover(move |style| style.bg(hovered))
+        .child(picture)
+        .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().text_size(gpui::rems(TEXT_XS)).child(label.into()))
+}
+
+/// The drawing on a settings tile, from the `icons/reader-settings/` set.
+pub fn reader_tile_picture(path: &'static str) -> gpui_component::Icon {
+    gpui_component::Icon::empty().path(path).size(gpui::rems(2.25))
+}
+
+/// A typeface tile's sample: "Ag" set in the face it selects. `None` is the
+/// book's own face, which the panel can only suggest with the interface serif.
+pub fn reader_typeface_sample(family: Option<&'static str>) -> Div {
+    div().h(gpui::rems(2.25)).flex().items_center().text_size(gpui::rems(1.5)).when_some(family, |sample, family| sample.font_family(family)).child("Ag")
+}
+
+/// The query field fills the space beside the search controls.
 pub fn reader_search_box(theme: BrowserTheme) -> Div {
     div().flex_1().min_w_0().h(gpui::rems(READER_TOOLBAR_SIZE_REM)).overflow_hidden().rounded(px(RADIUS_SM)).border_1().border_color(theme.border).bg(theme.page_bg)
 }
 
-/// The search row: the toolbar's own shape, carrying the query field instead
-/// of document controls. (The toolbar's `min_w_0` comes along; inside a
-/// full-width row it can only help.)
+/// Search shares the sidebar's inset, with space above and below its controls.
 pub fn reader_search_bar(theme: BrowserTheme) -> Div {
-    reader_toolbar(theme)
+    div().flex_none().w_full().min_w_0().px(px(CONTENT_INSET)).py(px(SPACE_SM)).flex().items_center().gap(px(SPACE_SM)).bg(theme.page_bg).border_b_1().border_color(theme.rule)
 }
 
 pub fn reader_footnote_panel(theme: BrowserTheme) -> Scrollable<Div> {
@@ -377,10 +607,13 @@ impl ReaderModal {
 }
 
 impl RenderOnce for ReaderModal {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = browser_theme(cx);
         let dismiss = self.on_dismiss;
-        crate::modal_overlay().child(crate::modal_scrim("reader-modal-scrim", theme).on_click(move |_, window, cx| dismiss(window, cx))).child(reader_modal_panel(self.size.width, self.size.height, theme).child(self.content))
+        crate::anchor_to_window(
+            crate::modal_overlay().child(crate::modal_scrim("reader-modal-scrim", theme).on_click(move |_, window, cx| dismiss(window, cx))).child(reader_modal_panel(self.size.width, self.size.height, theme).child(self.content)),
+            window,
+        )
     }
 }
 
@@ -405,18 +638,10 @@ impl ReaderContextMenu {
         self
     }
 
-    pub fn selection(mut self, on_highlight: impl Fn(&mut Window, &mut App) + 'static, on_cite: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+    /// A PDF selection can become an annotation or be copied.
+    pub fn pdf_selection(mut self, on_annotate: impl Fn(&mut Window, &mut App) + 'static, on_copy: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self = self.begin_section();
-        self.menu = self.menu.item(menu_item("Highlight", move |_, window, cx| on_highlight(window, cx))).item(menu_item("Cite", move |_, window, cx| on_cite(window, cx)));
-        self
-    }
-
-    /// The PDF reader has no citation format, but it shares the annotation
-    /// workflow with EPUB: a selection becomes a highlight whose editor holds
-    /// the optional note.
-    pub fn pdf_selection(mut self, on_highlight: impl Fn(&mut Window, &mut App) + 'static, on_copy: impl Fn(&mut Window, &mut App) + 'static) -> Self {
-        self = self.begin_section();
-        self.menu = self.menu.item(menu_item("Highlight", move |_, window, cx| on_highlight(window, cx))).item(menu_item("Copy", move |_, window, cx| on_copy(window, cx)));
+        self.menu = self.menu.item(menu_item("Annotation", move |_, window, cx| on_annotate(window, cx))).item(menu_item("Copy", move |_, window, cx| on_copy(window, cx)));
         self
     }
 
@@ -507,7 +732,6 @@ impl RenderOnce for ReaderImagePopup {
         ReaderModal::new(gpui::size(px(panel_width), px(panel_height)), content).on_dismiss(move |window, cx| dismiss_modal(window, cx))
     }
 }
-
 
 pub fn reader_document_body() -> Div {
     div().relative().size_full().min_h_0().min_w_0().flex().flex_col().overflow_hidden()

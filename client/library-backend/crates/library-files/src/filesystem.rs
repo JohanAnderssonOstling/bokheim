@@ -116,6 +116,12 @@ pub fn audiobook_fingerprint(folder: &Path, tracks: &[audiobook_archive::Track])
 /// Places a file or complete folder before any book inspection begins.
 /// A path already in this directory is a retry and stays in place.
 pub fn place_into_directory(source: &Path, directory: &Path, occupied: &[String], moving: bool) -> io::Result<PathBuf> {
+    place_into_directory_with_intent(source, directory, occupied, moving, |_| Ok(()))
+}
+
+/// Records each candidate destination before publishing it, so an owner can
+/// recover a move interrupted between the rename and its database acknowledgement.
+pub fn place_into_directory_with_intent(source: &Path, directory: &Path, occupied: &[String], moving: bool, mut before_publish: impl FnMut(&Path) -> io::Result<()>) -> io::Result<PathBuf> {
     let metadata = fs::symlink_metadata(source)?;
     if !metadata.is_file() && !metadata.is_dir() {
         return Err(Error::other("only regular files and folders can be added to a library"));
@@ -142,8 +148,9 @@ pub fn place_into_directory(source: &Path, directory: &Path, occupied: &[String]
         if destination.symlink_metadata().is_ok() {
             continue;
         }
+        before_publish(&destination)?;
         if moving && staging.is_none() {
-            match client_platform_native::filesystem::rename_noclobber(&source, &destination) {
+            match rename_entry(&source, &destination) {
                 Ok(()) => return Ok(destination),
                 Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
                 Err(error) if error.kind() == ErrorKind::CrossesDevices => {}
@@ -158,7 +165,7 @@ pub fn place_into_directory(source: &Path, directory: &Path, occupied: &[String]
             staging = Some(temporary);
         }
         let staged = staging.as_ref().unwrap().path().join("contents");
-        match client_platform_native::filesystem::rename_noclobber(&staged, &destination) {
+        match rename_entry(&staged, &destination) {
             Ok(()) => {
                 // Cross-filesystem moves delete the original only after the
                 // completed copy has been renamed into its final location.
@@ -172,6 +179,19 @@ pub fn place_into_directory(source: &Path, directory: &Path, occupied: &[String]
         }
     }
     unreachable!("numeric name suffix space is unbounded")
+}
+
+fn rename_entry(source: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(target_os = "android")]
+    {
+        // Filename candidates and destination checks above handle conflicts.
+        // Shared storage may reject RENAME_NOREPLACE, so use regular rename.
+        fs::rename(source, destination)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        client_platform_native::filesystem::rename_noclobber(source, destination)
+    }
 }
 
 fn copy_entry(source: &Path, destination: &Path) -> io::Result<()> {

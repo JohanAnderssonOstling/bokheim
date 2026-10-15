@@ -134,7 +134,7 @@ CREATE TABLE snapshot(
              CREATE TABLE work_author_stage(work_id INTEGER NOT NULL, position INTEGER NOT NULL, author_id INTEGER NOT NULL);
              CREATE TABLE author_stage(author_id INTEGER NOT NULL, name TEXT);
              CREATE TABLE author_identifier_stage(author_id INTEGER NOT NULL, authority TEXT NOT NULL, external_id TEXT NOT NULL);
-             INSERT INTO metadata_metric(name,value) VALUES('builder_schema_version',9);
+             INSERT INTO metadata_metric(name,value) VALUES('builder_schema_version',10);
 
 -- Optional subtitle indexes preserve compatibility with older query snapshots.
 CREATE TABLE IF NOT EXISTS edition_subtitle(edition_id INTEGER PRIMARY KEY, subtitle TEXT NOT NULL, normalized_title TEXT NOT NULL);

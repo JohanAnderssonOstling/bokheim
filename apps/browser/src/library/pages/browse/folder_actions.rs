@@ -7,7 +7,6 @@
 
 use library_backend::DownloadState;
 use library_backend::LibraryClient;
-use std::future::{Future, ready};
 
 use crate::services::notify_error;
 
@@ -32,25 +31,6 @@ pub(super) fn describe(targets: &FolderTargets) -> String {
         .map(|(count, noun)| if count == 1 { format!("1 {noun}") } else { format!("{count} {noun}s") })
         .collect::<Vec<_>>()
         .join(" and ")
-}
-
-/// What moving `targets` to Trash will do, for its confirmation.
-fn trash_description(targets: &FolderTargets) -> String {
-    let mut description = format!("{} will be moved to Trash.", describe(targets));
-    if !targets.folders.is_empty() {
-        description.push_str(" A folder goes with everything inside it.");
-    }
-    if !targets.books.is_empty() {
-        description.push_str(" A book leaves this folder, and reaches Trash only if this was the last folder holding it.");
-    }
-    description
-}
-
-/// What taking the books in `targets` out of this folder will do, for its
-/// confirmation.
-fn remove_description(targets: &FolderTargets) -> String {
-    let books = FolderTargets { folders: Vec::new(), folder_parents: Default::default(), books: targets.books.clone(), source: targets.source };
-    format!("{} will leave this folder but stay in the library. A book reaches Trash only if this was the last folder holding it.", describe(&books))
 }
 
 /// The folder commands for a menu opened over a selection, worked out when the
@@ -123,9 +103,7 @@ impl TargetOperation {
             .await?;
         for book in targets.books {
             let step = match self {
-                Self::Place(FolderPlacement::Copy, destination) => {
-                    library.copy_book_to_directory(book, source, destination).await?.then_some(UndoStep::RemoveBookFromDirectory { book, directory: destination })
-                }
+                Self::Place(FolderPlacement::Copy, destination) => library.copy_book_to_directory(book, source, destination).await?.then_some(UndoStep::RemoveBookFromDirectory { book, directory: destination }),
                 Self::Place(FolderPlacement::Move, destination) => {
                     let source = source.ok_or("book move requires a source folder")?;
                     library.move_book_to_directory(book, source, destination).await?;
@@ -137,7 +115,9 @@ impl TargetOperation {
                     Some(UndoStep::RestoreBookPlacement { book, directory: source })
                 }
             };
-            if let Some(step) = step { entry.push(step); }
+            if let Some(step) = step {
+                entry.push(step);
+            }
         }
         Ok(())
     }
@@ -326,17 +306,19 @@ impl FolderActions {
         dialog.busy = true;
         dialog.error = None;
         let (mode, target_id, previous_name) = (dialog.mode, dialog.target_id, dialog.previous_name.clone());
-        if mode == FolderNameMode::Rename
-            && let Some(previous) = previous_name
-        {
-            self.ui.undo().push(UndoEntry::new(format!("Renamed “{previous}”")).with(UndoStep::RenameDirectory { directory: target_id, name: previous }));
-        }
+        let session = self.ui.session();
         let library = self.ui.backend().clone();
         cx.spawn(async move |actions, cx| {
             let result = match mode {
                 FolderNameMode::Create => library.create_directory(target_id, name).await,
                 FolderNameMode::Rename => library.rename_directory(target_id, name).await.map(|_| ()),
             };
+            if result.is_ok()
+                && mode == FolderNameMode::Rename
+                && let Some(previous) = previous_name
+            {
+                let _ = session.update(cx, |session, _| session.push_undo(UndoEntry::new(format!("Renamed “{previous}”")).with(UndoStep::RenameDirectory { directory: target_id, name: previous })));
+            }
             let _ = actions.update(cx, |actions, cx| {
                 match result {
                     Ok(()) => actions.dialog = None,
@@ -415,6 +397,57 @@ impl FolderActions {
         self.place_targets(dialog.placement, dialog.targets, destination_id, None, cx);
     }
 
+    /// Transfer resource bytes first; source removal and undo use their owning library.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn transfer_targets(&mut self, source_id: uuid::Uuid, placement: FolderPlacement, targets: FolderTargets, destination: DirId, destination_name: Option<SharedString>, cx: &mut Context<Self>) {
+        if targets.is_empty() {
+            return;
+        }
+        let source = self.ui.app().library(source_id);
+        let library = self.ui.backend().clone();
+        let session = self.ui.session();
+        let label = format!("{} {}", if placement == FolderPlacement::Copy { "Copied" } else { "Moved" }, describe(&targets));
+        let confirmation = destination_name.map(|name| format!("{label} to {name}")).unwrap_or_else(|| label.clone());
+        cx.spawn(async move |actions, cx| {
+            let progress = actions.update_in(cx, |_, window, cx| crate::services::ImportProgressToast::start(window, cx)).ok();
+            let selection = library_backend::client::TransferSelection { folders: targets.folders, books: targets.books, source: targets.source };
+            let outcome = library.transfer_from(&source, selection, destination, placement == FolderPlacement::Move).await;
+            let mut entry = UndoEntry::new(if outcome.error.is_some() { "Copied items between libraries".to_owned() } else { label });
+            for directory in outcome.created_folders {
+                entry.push(UndoStep::TrashDirectory { directory });
+            }
+            for (book, directory) in outcome.created_placements {
+                entry.push(UndoStep::RemoveBookFromDirectory { book, directory });
+            }
+            // Undo restores the source before it removes destination placements.
+            for (directory, parent) in outcome.removed_folders {
+                entry.push_in(&source, UndoStep::RestoreDirectory { directory, parent });
+            }
+            for (book, directory) in outcome.removed_placements {
+                entry.push_in(&source, UndoStep::RestoreBookPlacement { book, directory });
+            }
+            let changed = !entry.is_empty();
+            let _ = session.update(cx, |session, _| session.push_undo(entry));
+            drop(progress);
+            let _ = actions.update_in(cx, |_, window, cx| {
+                if let Some(error) = outcome.error {
+                    if changed {
+                        crate::services::notify_undoable("library-transfer-partial", "Copied items; transfer did not finish", window, cx);
+                    }
+                    notify_error("library-transfer-error", format!("Could not finish the transfer: {error}"), window, cx);
+                } else if changed {
+                    crate::services::notify_undoable("library-transfer", confirmation, window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn library_id(&self) -> &uuid::Uuid {
+        self.ui.backend().id()
+    }
+
     /// Runs a placement whose destination is already known — a drop onto a
     /// folder, where the folder under the pointer is the answer the picker
     /// would otherwise have asked for.
@@ -435,7 +468,6 @@ impl FolderActions {
             targets,
             TargetOperation::Place(placement, destination_id),
             label,
-            ready(true),
             move |result, window, cx| match result {
                 Ok(()) => {
                     cx.emit(FolderActionsEvent::Moved(moved));
@@ -463,63 +495,58 @@ impl FolderActions {
         );
     }
 
-    /// Discards everything in `targets` after one confirmation. Folders go to
-    /// Trash whole; a book leaves the folder it was listed in, which sends it
-    /// to Trash only if that was the last place holding it.
-    pub(crate) fn trash_targets(&mut self, targets: FolderTargets, description: String, window: &mut Window, cx: &mut Context<Self>) {
+    /// Discards everything in `targets` at once. Folders go to Trash whole; a
+    /// book leaves the folder it was listed in, which sends it to Trash only if
+    /// that was the last place holding it.
+    ///
+    /// No confirmation: the removal is on the undo stack, and the toast that
+    /// reports it offers the undo.
+    pub(crate) fn trash_targets(&mut self, targets: FolderTargets, cx: &mut Context<Self>) {
         if targets.is_empty() || targets.folders.contains(&ROOT_DIR_ID) {
             return;
         }
-        let answer = window.prompt(gpui::PromptLevel::Warning, if targets.len() == 1 { "Move this to Trash?" } else { "Move these to Trash?" }, Some(&description), &["Move to Trash", "Cancel"], cx);
         let label = format!("Trashed {}", describe(&targets));
-        self.run_targets(targets, TargetOperation::Remove, label, async move { answer.await.ok() == Some(0) }, |result, window, cx| Self::finish_removal(result, "folder-trash-error", "move everything selected to Trash", window, cx), cx);
+        let report = label.clone();
+        self.run_targets(targets, TargetOperation::Remove, label, move |result, window, cx| Self::finish_removal(result, report, "folder-trash", "move everything selected to Trash", window, cx), cx);
     }
 
     /// Takes the selected books out of the folder they are listed in without
     /// moving anything to Trash directly: a book stays in the library while
     /// another folder holds it, and only reaches Trash when this was its last
     /// folder. Folders in the selection are left alone.
-    pub(crate) fn remove_books_from_folder(&mut self, mut targets: FolderTargets, description: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn remove_books_from_folder(&mut self, mut targets: FolderTargets, cx: &mut Context<Self>) {
         if targets.books.is_empty() {
             return;
         }
-        let answer = window.prompt(gpui::PromptLevel::Warning, "Remove from folder?", Some(&description), &["Remove", "Cancel"], cx);
         targets.folders.clear();
         let label = format!("Removed {}", describe(&targets));
-        self.run_targets(
-            targets,
-            TargetOperation::Remove,
-            label,
-            async move { answer.await.ok() == Some(0) },
-            |result, window, cx| Self::finish_removal(result, "folder-remove-error", "remove everything selected from the folder", window, cx),
-            cx,
-        );
+        let report = label.clone();
+        self.run_targets(targets, TargetOperation::Remove, label, move |result, window, cx| Self::finish_removal(result, report, "folder-remove", "remove everything selected from the folder", window, cx), cx);
     }
 
-    fn finish_removal(result: Result<(), String>, error_id: &'static str, action: &'static str, window: &mut Window, cx: &mut Context<Self>) {
-        if let Err(error) = result {
-            notify_error(error_id, format!("Could not {action}: {error}"), window, cx);
+    fn finish_removal(result: Result<(), String>, label: String, id: &'static str, action: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        match result {
+            Ok(()) => crate::services::notify_undoable(id, label, window, cx),
+            Err(error) => notify_error(id, format!("Could not {action}: {error}"), window, cx),
         }
     }
 
     /// Commit undo before reporting completion, including any successful prefix.
-    fn run_targets(
-        &mut self, targets: FolderTargets, operation: TargetOperation, label: String, confirmed: impl Future<Output = bool> + 'static, finished: impl FnOnce(Result<(), String>, &mut Window, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) {
+    fn run_targets(&mut self, targets: FolderTargets, operation: TargetOperation, label: String, finished: impl FnOnce(Result<(), String>, &mut Window, &mut Context<Self>) + 'static, cx: &mut Context<Self>) {
         let library = self.ui.backend().clone();
-        let undo = self.ui.undo().clone();
+        let session = self.ui.session();
         cx.spawn(async move |actions, cx| {
-            if !confirmed.await {
-                return;
-            }
             let mut entry = UndoEntry::new(label);
             let result = operation.apply(&library, targets, &mut entry).await;
             let unchanged = result.is_ok() && entry.is_empty();
-            undo.push(entry);
+            let _ = session.update(cx, |session, _| session.push_undo(entry));
             let _ = actions.update_in(cx, |_, window, cx| {
                 // A fully skipped copy must not offer undo for an earlier action.
-                if unchanged { cx.notify(); } else { finished(result, window, cx); }
+                if unchanged {
+                    cx.notify();
+                } else {
+                    finished(result, window, cx);
+                }
             });
         })
         .detach();
@@ -558,7 +585,7 @@ impl FolderActions {
         .detach();
     }
 
-    fn render_name_dialog(actions: Entity<Self>, cx: &mut App) -> Option<AnyElement> {
+    fn render_name_dialog(actions: Entity<Self>, window: &Window, cx: &mut App) -> Option<AnyElement> {
         let (mode, input, error, busy) = {
             let actions = actions.read(cx);
             let Some(FolderDialog::Name(dialog)) = &actions.dialog else { return None };
@@ -595,14 +622,15 @@ impl FolderActions {
             .child(div().flex_1())
             .child(div().flex().items_center().justify_end().gap(px(components::SPACE_SM)).child(cancel).child(submit));
         Some(
-            gpui::deferred(
+            gpui::deferred(components::anchor_to_window(
                 components::modal_overlay()
                     .occlude()
                     .child(components::modal_scrim(format!("{id_suffix}-scrim"), theme).on_click(move |_, _, cx| {
                         dismiss_actions.update(cx, |actions, cx| actions.close_name_dialog(cx));
                     }))
                     .child(panel),
-            )
+                window,
+            ))
             .with_priority(2)
             .into_any_element(),
         )
@@ -641,10 +669,8 @@ impl FolderActions {
         // first keeps the books in their other folders, the second moves the
         // whole selection to Trash.
         if !targets.books.is_empty() {
-            let (remove_actions, remove_targets, description) = (actions.clone(), targets.clone(), remove_description(&targets));
-            menu = menu.item(components::menu_item_with_icon("Remove from folder", folder_icon(), move |_, window, cx| {
-                remove_actions.update(cx, |actions, cx| actions.remove_books_from_folder(remove_targets.clone(), description.clone(), window, cx))
-            }));
+            let (remove_actions, remove_targets) = (actions.clone(), targets.clone());
+            menu = menu.item(components::menu_item_with_icon("Remove from folder", folder_icon(), move |_, _, cx| remove_actions.update(cx, |actions, cx| actions.remove_books_from_folder(remove_targets.clone(), cx))));
         }
         menu = menu.separator();
         if can_evict {
@@ -653,10 +679,7 @@ impl FolderActions {
                 evict_actions.update(cx, |actions, cx| actions.evict_downloads(evict_targets.clone(), window, cx))
             }));
         }
-        let description = trash_description(&targets);
-        menu.item(components::menu_item_with_icon("Move to Trash", components::navigation_icon(components::NavigationIcon::Trash2), move |_, window, cx| {
-            actions.update(cx, |actions, cx| actions.trash_targets(targets.clone(), description.clone(), window, cx))
-        }))
+        menu.item(components::menu_item_with_icon("Move to Trash", components::navigation_icon(components::NavigationIcon::Trash2), move |_, _, cx| actions.update(cx, |actions, cx| actions.trash_targets(targets.clone(), cx))))
     }
 
     /// The same move/copy choices for internal items and external files.
@@ -688,10 +711,10 @@ impl FolderActions {
         div().flex().items_center().child(menu).into_any_element()
     }
 
-    pub(crate) fn render_overlay(actions: Entity<Self>, cx: &mut App) -> Option<AnyElement> {
+    pub(crate) fn render_overlay(actions: Entity<Self>, window: &Window, cx: &mut App) -> Option<AnyElement> {
         match &actions.read(cx).dialog {
             Some(FolderDialog::Move(dialog)) => Some(dialog.picker.clone().into_any_element()),
-            _ => Self::render_name_dialog(actions, cx),
+            _ => Self::render_name_dialog(actions, window, cx),
         }
     }
 }

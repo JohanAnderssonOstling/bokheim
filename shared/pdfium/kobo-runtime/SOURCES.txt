@@ -1,0 +1,20 @@
+The Kobo package includes the ARM hard-float glibc runtime from Bootlin's
+armv7-eabihf--glibc--stable-2024.05-1 toolchain. These libraries remain separate
+from the application executable and can be replaced in .adds/bokheim/runtime.
+The package does not replace Kobo firmware libraries.
+
+Toolchain archive:
+https://toolchains.bootlin.com/downloads/releases/toolchains/armv7-eabihf/tarballs/armv7-eabihf--glibc--stable-2024.05-1.tar.xz
+SHA256: 608263bc9dc3eadf0962ddb1165f1c2291001190f9927dee47d464e26374462c
+
+glibc: 2.39-74-g198632a05f6c7b9ab67d3331d8caace9ceabb685
+Source: https://sourceware.org/git/?p=glibc.git;a=tree;h=198632a05f6c7b9ab67d3331d8caace9ceabb685
+License: LICENSE-glibc-LGPL-2.1.txt and LICENSE-glibc.txt
+
+libgcc: GCC 13.3.0
+Source: https://ftp.gnu.org/gnu/gcc/gcc-13.3.0/gcc-13.3.0.tar.xz
+License: LICENSE-libgcc-GPL-3.0.txt and LICENSE-libgcc-exception.txt
+
+Bootlin toolchain build configurations, patches and source archives:
+https://toolchains.bootlin.com/downloads/releases/sources/
+https://github.com/bootlin/toolchains-builder

@@ -1,6 +1,7 @@
 mod performance;
 pub use performance::PerformanceTrace;
 mod api;
+mod body;
 mod assets;
 mod state;
 

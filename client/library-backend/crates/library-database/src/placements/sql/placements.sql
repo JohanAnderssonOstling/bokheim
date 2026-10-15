@@ -82,13 +82,16 @@ SELECT id FROM dir WHERE deleted_at IS NOT NULL AND lifecycle=1
 AND EXISTS(SELECT 1 FROM sync_state_version v WHERE v.state_kind='directory_lifecycle' AND v.state_key=dir.id AND v.state_subkey='' AND v.body IS NOT NULL);
 
 -- name: library_trash_select?
-SELECT content_hash,COALESCE(NULLIF(title,''),'Untitled'),format,deleted_at
+SELECT content_hash,COALESCE(NULLIF(title,''),'Untitled'),author,format,deleted_at
          FROM book WHERE deleted_at IS NOT NULL
          ORDER BY deleted_at DESC,portable_name_key(COALESCE(title,'Untitled')),content_hash;
 
 -- name: library_trash_select_2?
-SELECT id,name,deleted_at FROM dir WHERE deleted_at IS NOT NULL AND lifecycle=1
-AND EXISTS(SELECT 1 FROM sync_state_version v WHERE v.state_kind='directory_lifecycle' AND v.state_key=dir.id AND v.state_subkey='' AND v.body IS NOT NULL) ORDER BY deleted_at DESC,name_key,id;
+-- The parent's name is the folder it was in, or NULL when that was the root.
+SELECT dir.id,dir.name,dir.deleted_at,CASE WHEN dir.parent_id='00000000-0000-0000-0000-000000000000' THEN NULL ELSE parent.name END
+FROM dir LEFT JOIN dir parent ON parent.id=dir.parent_id
+WHERE dir.deleted_at IS NOT NULL AND dir.lifecycle=1
+AND EXISTS(SELECT 1 FROM sync_state_version v WHERE v.state_kind='directory_lifecycle' AND v.state_key=dir.id AND v.state_subkey='' AND v.body IS NOT NULL) ORDER BY dir.deleted_at DESC,dir.name_key,dir.id;
 
 -- name: purge_book_record_select?
 -- param: content_hash: &ContentHash

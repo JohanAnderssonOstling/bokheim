@@ -1,0 +1,1973 @@
+{
+  "description": "Reviewed former literary paths mapped to preserved subject identities. Evidence is recorded in the 20261015 literature coverage fix report and the literature-flatten-speculative-20261015 manifest. Adult Literary Forms and Forms & Literary Traditions compatibility is recorded in the literature-flatten-literary-forms-20261015 manifest. Relationships merge and Erotica promotion are recorded in literature-relationships-leaf-20261015. Humor Form/Topic flattening, including Arts & Media routes, is recorded in humor-flatten-form-topic-20261015. The Nordic rename is recorded in literature-rename-nordic-20261015. English Forms promotion into Great Britain is recorded in literature-english-forms-great-britain-20261015.",
+  "aliases": [
+    {
+      "path": "Arts & Media / Humor / Form",
+      "concept_id": 691
+    },
+    {
+      "path": "Arts & Media / Humor / Form / Anecdotes & Quotations",
+      "concept_id": 693
+    },
+    {
+      "path": "Arts & Media / Humor / Form / Comic Strips & Cartoons",
+      "concept_id": 694
+    },
+    {
+      "path": "Arts & Media / Humor / Form / Humorous Essays",
+      "concept_id": 695
+    },
+    {
+      "path": "Arts & Media / Humor / Form / Jokes & Riddles",
+      "concept_id": 696
+    },
+    {
+      "path": "Arts & Media / Humor / Form / Limericks & Verse",
+      "concept_id": 697
+    },
+    {
+      "path": "Arts & Media / Humor / Form / Parodies",
+      "concept_id": 698
+    },
+    {
+      "path": "Arts & Media / Humor / Form / Pictorial",
+      "concept_id": 699
+    },
+    {
+      "path": "Arts & Media / Humor / Form / Puns & Wordplay",
+      "concept_id": 700
+    },
+    {
+      "path": "Arts & Media / Humor / Form / Trivia",
+      "concept_id": 701
+    },
+    {
+      "path": "Arts & Media / Humor / Topic",
+      "concept_id": 691
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Adult",
+      "concept_id": 703
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Animals",
+      "concept_id": 704
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Business & Professional",
+      "concept_id": 705
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Celebrity & Popular Culture",
+      "concept_id": 706
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Cultural, Ethnic & Regional",
+      "concept_id": 707
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Gender Humor",
+      "concept_id": 713
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Gender Humor / Humor about Men",
+      "concept_id": 53185
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Gender Humor / Humor about Women",
+      "concept_id": 53186
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Historical Humor",
+      "concept_id": 708
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Internet & Social Media",
+      "concept_id": 709
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / LGBTQ+",
+      "concept_id": 710
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Language",
+      "concept_id": 711
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Marriage & Family",
+      "concept_id": 712
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Politics",
+      "concept_id": 714
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Religion",
+      "concept_id": 715
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / School & Education",
+      "concept_id": 716
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Sports",
+      "concept_id": 717
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Travel",
+      "concept_id": 718
+    },
+    {
+      "path": "Literature / By Language / Armenian Literature",
+      "concept_id": 60088
+    },
+    {
+      "path": "Literature / By Language / Classical / Greek",
+      "concept_id": 4253
+    },
+    {
+      "path": "Literature / By Language / Classical / Greek / Ancient Greek Authors / Translations",
+      "concept_id": 9456
+    },
+    {
+      "path": "Literature / By Language / Classical / Greek / Translations / Greek in English",
+      "concept_id": 9646
+    },
+    {
+      "path": "Literature / By Language / Classical / Greek / Translations / Greek in Italian",
+      "concept_id": 6624
+    },
+    {
+      "path": "Literature / By Language / Classical / Latin & Italic / Roman",
+      "concept_id": 4455
+    },
+    {
+      "path": "Literature / By Language / Constructed & Contact-Language Literature / Esperanto Literature",
+      "concept_id": 60137
+    },
+    {
+      "path": "Literature / By Language / English / English Forms / English Literary Collections",
+      "concept_id": 3919
+    },
+    {
+      "path": "Literature / By Language / English / English Forms / English Literary Collections / Drama",
+      "concept_id": 9057
+    },
+    {
+      "path": "Literature / By Language / English / English Forms / English Literary Collections / Prose",
+      "concept_id": 9089
+    },
+    {
+      "path": "Literature / By Language / English / English Periods / Anglo-Norman Period",
+      "concept_id": 3917
+    },
+    {
+      "path": "Literature / By Language / English / English Periods / By Period / 17th & 18th Century",
+      "concept_id": 3912
+    },
+    {
+      "path": "Literature / By Language / English / English Periods / By Period / 19th C., 1770–1890",
+      "concept_id": 3915
+    },
+    {
+      "path": "Literature / By Language / English / English Periods / By Period / 21st Century / Anonymous English Works, 2001–",
+      "concept_id": 7253
+    },
+    {
+      "path": "Literature / By Language / English / English Periods / By Period / English Renaissance, 1500–1640 / The drama",
+      "concept_id": 7324
+    },
+    {
+      "path": "Literature / By Language / English / English Periods / Modern English",
+      "concept_id": 3925
+    },
+    {
+      "path": "Literature / By Language / English / English Periods / Old English Literary History / Old English Authors & Works",
+      "concept_id": 13708
+    },
+    {
+      "path": "Literature / By Language / English / Regional English Literature / Anglophone Australian Lit. / 20th century, A–Z",
+      "concept_id": 11927
+    },
+    {
+      "path": "Literature / By Language / English / Regional English Literature / Anglophone Australian Lit. / Through 1900, A–Z",
+      "concept_id": 11926
+    },
+    {
+      "path": "Literature / By Language / English / Regional English Literature / Anglophone Canadian",
+      "concept_id": 3867
+    },
+    {
+      "path": "Literature / By Language / English / Regional English Literature / Anglophone Canadian / 20th century, A–Z",
+      "concept_id": 11915
+    },
+    {
+      "path": "Literature / By Language / English / Regional English Literature / Anglophone Canadian / 21st century, A–Z",
+      "concept_id": 11916
+    },
+    {
+      "path": "Literature / By Language / English / Regional English Literature / Anglophone Indian / 20th century, A–Z",
+      "concept_id": 11935
+    },
+    {
+      "path": "Literature / By Language / English / Regional English Literature / Anglophone Irish",
+      "concept_id": 8836
+    },
+    {
+      "path": "Literature / By Language / English / Regional English Literature / Australian, New Zealand & Pacific",
+      "concept_id": 11909
+    },
+    {
+      "path": "Literature / By Language / English Forms",
+      "concept_id": 60178
+    },
+    {
+      "path": "Literature / By Language / English Forms / Drama",
+      "concept_id": 3906
+    },
+    {
+      "path": "Literature / By Language / English Forms / Drama / English Drama Forms",
+      "concept_id": 7384
+    },
+    {
+      "path": "Literature / By Language / English Forms / English Fiction Anthologies",
+      "concept_id": 7801
+    },
+    {
+      "path": "Literature / By Language / English Forms / English Literary Collections",
+      "concept_id": 3919
+    },
+    {
+      "path": "Literature / By Language / English Forms / English Literary Collections / Diaries",
+      "concept_id": 6807
+    },
+    {
+      "path": "Literature / By Language / English Forms / English Literary Collections / Drama",
+      "concept_id": 9057
+    },
+    {
+      "path": "Literature / By Language / English Forms / English Literary Collections / English Essay Collections",
+      "concept_id": 6623
+    },
+    {
+      "path": "Literature / By Language / English Forms / English Literary Collections / Letters",
+      "concept_id": 7641
+    },
+    {
+      "path": "Literature / By Language / English Forms / English Literary Collections / Oratory",
+      "concept_id": 7827
+    },
+    {
+      "path": "Literature / By Language / English Forms / English Literary Collections / Poetry",
+      "concept_id": 9208
+    },
+    {
+      "path": "Literature / By Language / English Forms / English Literary Collections / Prose",
+      "concept_id": 9089
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays",
+      "concept_id": 3907
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / Anonymous",
+      "concept_id": 7917
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / Biography, memoirs, letters, etc",
+      "concept_id": 6247
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / Cross-Period Topics",
+      "concept_id": 6473
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / Diaries",
+      "concept_id": 3920
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / English & World",
+      "concept_id": 3928
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / English & World / English & Classical",
+      "concept_id": 9916
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / English & World / English Translation",
+      "concept_id": 7784
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / English & World / Lit. Translation into English",
+      "concept_id": 7321
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / English Children’s",
+      "concept_id": 6296
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / English Essays & Speeches",
+      "concept_id": 6220
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / Humor",
+      "concept_id": 7527
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / Individual English Essays",
+      "concept_id": 7652
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / Letters",
+      "concept_id": 6422
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / Prose",
+      "concept_id": 9029
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters",
+      "concept_id": 3910
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / Anonymous",
+      "concept_id": 7917
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / Biography, memoirs, letters, etc",
+      "concept_id": 6247
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / Cross-Period Topics",
+      "concept_id": 6473
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / Diaries",
+      "concept_id": 3920
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / English & World",
+      "concept_id": 3928
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / English & World / English & Classical",
+      "concept_id": 9916
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / English & World / English Translation",
+      "concept_id": 7784
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / English & World / Lit. Translation into English",
+      "concept_id": 7321
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / English Children’s",
+      "concept_id": 6296
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / English Essays & Speeches",
+      "concept_id": 6220
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / Humor",
+      "concept_id": 7527
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / Individual English Essays",
+      "concept_id": 7652
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / Letters",
+      "concept_id": 6422
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / Prose",
+      "concept_id": 9029
+    },
+    {
+      "path": "Literature / By Language / English Forms / Folk",
+      "concept_id": 3923
+    },
+    {
+      "path": "Literature / By Language / English Forms / Folk / Special forms",
+      "concept_id": 9171
+    },
+    {
+      "path": "Literature / By Language / English Forms / Humor",
+      "concept_id": 3909
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches",
+      "concept_id": 3926
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / Anonymous",
+      "concept_id": 7917
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / Biography, memoirs, letters, etc",
+      "concept_id": 6247
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / Cross-Period Topics",
+      "concept_id": 6473
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / Diaries",
+      "concept_id": 3920
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / English & World",
+      "concept_id": 3928
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / English & World / English & Classical",
+      "concept_id": 9916
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / English & World / English Translation",
+      "concept_id": 7784
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / English & World / Lit. Translation into English",
+      "concept_id": 7321
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / English Children’s",
+      "concept_id": 6296
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / English Essays & Speeches",
+      "concept_id": 6220
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / Humor",
+      "concept_id": 7527
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / Individual English Essays",
+      "concept_id": 7652
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / Letters",
+      "concept_id": 6422
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / Prose",
+      "concept_id": 9029
+    },
+    {
+      "path": "Literature / By Language / English Forms / Poetry",
+      "concept_id": 3930
+    },
+    {
+      "path": "Literature / By Language / English Forms / Prose",
+      "concept_id": 3927
+    },
+    {
+      "path": "Literature / By Language / Germanic",
+      "concept_id": 5587
+    },
+    {
+      "path": "Literature / By Language / Germanic / Denmark",
+      "concept_id": 3869
+    },
+    {
+      "path": "Literature / By Language / Germanic / Denmark / By Period",
+      "concept_id": 54877
+    },
+    {
+      "path": "Literature / By Language / Germanic / Denmark / By Period / 16th-18th centuries",
+      "concept_id": 3870
+    },
+    {
+      "path": "Literature / By Language / Germanic / Denmark / By Period / 19th century",
+      "concept_id": 3871
+    },
+    {
+      "path": "Literature / By Language / Germanic / Denmark / Danish Children’s",
+      "concept_id": 3873
+    },
+    {
+      "path": "Literature / By Language / Germanic / Denmark / Danish Literary Studies",
+      "concept_id": 3874
+    },
+    {
+      "path": "Literature / By Language / Germanic / Denmark / Danish Literary Studies / Danish Literary Criticism",
+      "concept_id": 8043
+    },
+    {
+      "path": "Literature / By Language / Germanic / Denmark / Danish Literary Studies / History of Danish",
+      "concept_id": 7233
+    },
+    {
+      "path": "Literature / By Language / Germanic / Denmark / Folk",
+      "concept_id": 3872
+    },
+    {
+      "path": "Literature / By Language / Germanic / Denmark / Provincial, local, foreign",
+      "concept_id": 3875
+    },
+    {
+      "path": "Literature / By Language / Germanic / Denmark / Provincial, local, foreign / Provincial & Local",
+      "concept_id": 7755
+    },
+    {
+      "path": "Literature / By Language / Germanic / Faroese",
+      "concept_id": 3931
+    },
+    {
+      "path": "Literature / By Language / Germanic / German",
+      "concept_id": 4244
+    },
+    {
+      "path": "Literature / By Language / Germanic / German / By Period / 1700–1860",
+      "concept_id": 4245
+    },
+    {
+      "path": "Literature / By Language / Germanic / German / Collections",
+      "concept_id": 12701
+    },
+    {
+      "path": "Literature / By Language / Germanic / Modern Icelandic",
+      "concept_id": 4389
+    },
+    {
+      "path": "Literature / By Language / Germanic / Modern Icelandic / 21st century",
+      "concept_id": 4390
+    },
+    {
+      "path": "Literature / By Language / Germanic / Modern Icelandic / Folk",
+      "concept_id": 4391
+    },
+    {
+      "path": "Literature / By Language / Germanic / Modern Icelandic / Icelandic Literary Studies",
+      "concept_id": 4392
+    },
+    {
+      "path": "Literature / By Language / Germanic / Modern Icelandic / Icelandic Literary Studies / Icelandic Literary Criticism",
+      "concept_id": 8060
+    },
+    {
+      "path": "Literature / By Language / Germanic / Modern Icelandic / Icelandic Literary Studies / Modern Icelandic Lit. History",
+      "concept_id": 9834
+    },
+    {
+      "path": "Literature / By Language / Germanic / Modern Icelandic / Provincial, local, foreign",
+      "concept_id": 4393
+    },
+    {
+      "path": "Literature / By Language / Germanic / Norway",
+      "concept_id": 4394
+    },
+    {
+      "path": "Literature / By Language / Germanic / Norway / 19th century",
+      "concept_id": 4395
+    },
+    {
+      "path": "Literature / By Language / Germanic / Norway / Folk",
+      "concept_id": 4396
+    },
+    {
+      "path": "Literature / By Language / Germanic / Norway / Landsmaal or New Norwegian",
+      "concept_id": 4398
+    },
+    {
+      "path": "Literature / By Language / Germanic / Norway / Norwegian Kids’",
+      "concept_id": 4397
+    },
+    {
+      "path": "Literature / By Language / Germanic / Norway / Norwegian Literary Studies",
+      "concept_id": 4399
+    },
+    {
+      "path": "Literature / By Language / Germanic / Norway / Norwegian Literary Studies / Norwegian Literary Criticism",
+      "concept_id": 9586
+    },
+    {
+      "path": "Literature / By Language / Germanic / Norway / Norwegian Literary Studies / Norwegian Literary History",
+      "concept_id": 9225
+    },
+    {
+      "path": "Literature / By Language / Germanic / Norway / Provincial, local, foreign",
+      "concept_id": 4400
+    },
+    {
+      "path": "Literature / By Language / Germanic / Norway / Provincial, local, foreign / Norwegian Abroad",
+      "concept_id": 9510
+    },
+    {
+      "path": "Literature / By Language / Germanic / Norway / Provincial, local, foreign / Provincial & Local",
+      "concept_id": 8668
+    },
+    {
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian",
+      "concept_id": 4402
+    },
+    {
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Norse Sagas & Histories",
+      "concept_id": 4403
+    },
+    {
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Norse Sagas & Histories / Icelandic Church & Bishops’ Sagas",
+      "concept_id": 10059
+    },
+    {
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Norse Sagas & Histories / Kings’ Sagas",
+      "concept_id": 9615
+    },
+    {
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Norse Sagas & Histories / Mythical sagas",
+      "concept_id": 8720
+    },
+    {
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Norse Sagas & Histories / Romance Sagas",
+      "concept_id": 7583
+    },
+    {
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Old Norse Literary Studies",
+      "concept_id": 4404
+    },
+    {
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Old Norse Literary Studies / Old Norse Literary Criticism",
+      "concept_id": 7255
+    },
+    {
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Old Norse Literary Studies / Old Norse Literary History",
+      "concept_id": 9972
+    },
+    {
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Prose",
+      "concept_id": 4405
+    },
+    {
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Religious works",
+      "concept_id": 4406
+    },
+    {
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Scientific & learned",
+      "concept_id": 4407
+    },
+    {
+      "path": "Literature / By Language / Germanic / Scandinavian Literary Studies",
+      "concept_id": 60177
+    },
+    {
+      "path": "Literature / By Language / Germanic / Sweden",
+      "concept_id": 4473
+    },
+    {
+      "path": "Literature / By Language / Germanic / Sweden / By Period",
+      "concept_id": 54893
+    },
+    {
+      "path": "Literature / By Language / Germanic / Sweden / By Period / 19th century",
+      "concept_id": 4474
+    },
+    {
+      "path": "Literature / By Language / Germanic / Sweden / By Period / Swedish, 1900–1960",
+      "concept_id": 52013
+    },
+    {
+      "path": "Literature / By Language / Germanic / Sweden / By Period / Swedish, 1961–2000",
+      "concept_id": 52012
+    },
+    {
+      "path": "Literature / By Language / Germanic / Sweden / Provincial, local, foreign",
+      "concept_id": 4478
+    },
+    {
+      "path": "Literature / By Language / Germanic / Sweden / Provincial, local, foreign / Provincial & Local",
+      "concept_id": 9123
+    },
+    {
+      "path": "Literature / By Language / Germanic / Sweden / Provincial, local, foreign / Swedish Abroad",
+      "concept_id": 7112
+    },
+    {
+      "path": "Literature / By Language / Germanic / Sweden / Swedish Children’s",
+      "concept_id": 4476
+    },
+    {
+      "path": "Literature / By Language / Germanic / Sweden / Swedish Literary Studies",
+      "concept_id": 4477
+    },
+    {
+      "path": "Literature / By Language / Germanic / Sweden / Swedish Literary Studies / History of Swedish",
+      "concept_id": 6906
+    },
+    {
+      "path": "Literature / By Language / Germanic / Sweden / Swedish Literary Studies / Swedish Lit. Scholars’ Lives",
+      "concept_id": 7522
+    },
+    {
+      "path": "Literature / By Language / Germanic / Sweden / Swedish Literary Studies / Swedish Literary Criticism",
+      "concept_id": 8951
+    },
+    {
+      "path": "Literature / By Language / Indo-Iranian Literature / Indo-Aryan Literature / Bengali Literature",
+      "concept_id": 60057
+    },
+    {
+      "path": "Literature / By Language / Indo-Iranian Literature / Indo-Aryan Literature / Hindi & Hindustani Literature",
+      "concept_id": 12835
+    },
+    {
+      "path": "Literature / By Language / Indo-Iranian Literature / Iranian Literature / Persian Literature / Persian Authors & Works",
+      "concept_id": 3763
+    },
+    {
+      "path": "Literature / By Language / Romance / French Literature",
+      "concept_id": 4184
+    },
+    {
+      "path": "Literature / By Language / Romance / French Literature / French Literary Studies / History of French",
+      "concept_id": 7795
+    },
+    {
+      "path": "Literature / By Language / Romance / French Literature / French Literary Studies / History of French / French Prose Studies",
+      "concept_id": 52019
+    },
+    {
+      "path": "Literature / By Language / Romance / French Literature / Modern / 18th century",
+      "concept_id": 7338
+    },
+    {
+      "path": "Literature / By Language / Romance / French Literature / Modern / 19th century",
+      "concept_id": 8258
+    },
+    {
+      "path": "Literature / By Language / Romance / French Literature / Modern / French, 1900–1960",
+      "concept_id": 6271
+    },
+    {
+      "path": "Literature / By Language / Romance / French Literature / Modern / French, 1961–2000",
+      "concept_id": 6508
+    },
+    {
+      "path": "Literature / By Language / Romance / French Literature / Regional French / French Abroad / French Canadian",
+      "concept_id": 12697
+    },
+    {
+      "path": "Literature / By Language / Romance / Italian Literature",
+      "concept_id": 4202
+    },
+    {
+      "path": "Literature / By Language / Romance / Italian Literature / By Period / Italian, 1400–1700",
+      "concept_id": 12707
+    },
+    {
+      "path": "Literature / By Language / Romance / Modern Occitan Literature",
+      "concept_id": 60037
+    },
+    {
+      "path": "Literature / By Language / Romance / Spanish-Language Literature / By Period / 1700–1868",
+      "concept_id": 12714
+    },
+    {
+      "path": "Literature / By Language / Romance / Spanish-Language Literature / By Period / Spanish, 1868–1960",
+      "concept_id": 12715
+    },
+    {
+      "path": "Literature / By Language / Romance / Spanish-Language Literature / Regional Spanish / Asian Spanish",
+      "concept_id": 11947
+    },
+    {
+      "path": "Literature / By Language / Romance / Spanish-Language Literature / Regional Spanish / Colombian Spanish / Through 1960, A–Z",
+      "concept_id": 11969
+    },
+    {
+      "path": "Literature / By Language / Slavic & Eurasian / East Slavic / Russia",
+      "concept_id": 4216
+    },
+    {
+      "path": "Literature / By Language / Slavic & Eurasian / East Slavic / Russia / By Period / Russian, 1800–1870",
+      "concept_id": 12492
+    },
+    {
+      "path": "Literature / By Language / Slavic & Eurasian / East Slavic / Russia / By Period / Russian, 1870–1917",
+      "concept_id": 12493
+    },
+    {
+      "path": "Literature / By Language / Slavic & Eurasian / East Slavic / Russia / Russian Literary Studies",
+      "concept_id": 4466
+    },
+    {
+      "path": "Literature / By Language / Slavic & Eurasian / West Slavic / Czech",
+      "concept_id": 6417
+    },
+    {
+      "path": "Literature / By Language / Slavic & Eurasian / West Slavic / Polish",
+      "concept_id": 12525
+    },
+    {
+      "path": "Literature / By Language / Uralic Literature / Finnish Literature",
+      "concept_id": 9258
+    },
+    {
+      "path": "Literature / By Region / American & Caribbean / Canadian",
+      "concept_id": 3867
+    },
+    {
+      "path": "Literature / By Region / American & Caribbean / U.S. / American poetry in English",
+      "concept_id": 3864
+    },
+    {
+      "path": "Literature / By Region / American & Caribbean / U.S. / By Period / 19th Century",
+      "concept_id": 4153
+    },
+    {
+      "path": "Literature / By Region / American & Caribbean / U.S. / By Period / 21st Century",
+      "concept_id": 4155
+    },
+    {
+      "path": "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1900–1960",
+      "concept_id": 12718
+    },
+    {
+      "path": "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000",
+      "concept_id": 12719
+    },
+    {
+      "path": "Literature / By Region / East Asian & Pacific / Indian / By Period / 20th Century",
+      "concept_id": 4196
+    },
+    {
+      "path": "Literature / By Region / Nordic / Denmark / By Period / 19th century",
+      "concept_id": 3871
+    },
+    {
+      "path": "Literature / By Region / Nordic / Norway",
+      "concept_id": 4394
+    },
+    {
+      "path": "Literature / By Region / Nordic / Sweden / By Period / 19th century",
+      "concept_id": 4474
+    },
+    {
+      "path": "Literature / By Region / Nordic / Sweden / Swedish Literary Studies / Swedish Literary Criticism",
+      "concept_id": 8951
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Adaptations & Pastiche",
+      "concept_id": 3935
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Anthologies",
+      "concept_id": 3946
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Classics",
+      "concept_id": 3964
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Epistolary",
+      "concept_id": 3971
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Literary",
+      "concept_id": 4027
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Mashups",
+      "concept_id": 4029
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Media Tie-In",
+      "concept_id": 4030
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Multiple Timelines",
+      "concept_id": 4032
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Sagas",
+      "concept_id": 4106
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Short Stories",
+      "concept_id": 4124
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form",
+      "concept_id": 691
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form / Anecdotes & Quotations",
+      "concept_id": 693
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form / Comic Strips & Cartoons",
+      "concept_id": 694
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form / Humorous Essays",
+      "concept_id": 695
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form / Jokes & Riddles",
+      "concept_id": 696
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form / Limericks & Verse",
+      "concept_id": 697
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form / Parodies",
+      "concept_id": 698
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form / Pictorial",
+      "concept_id": 699
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form / Puns & Wordplay",
+      "concept_id": 700
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form / Trivia",
+      "concept_id": 701
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic",
+      "concept_id": 691
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Adult",
+      "concept_id": 703
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Animals",
+      "concept_id": 704
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Business & Professional",
+      "concept_id": 705
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Celebrity & Popular Culture",
+      "concept_id": 706
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Cultural, Ethnic & Regional",
+      "concept_id": 707
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Gender Humor",
+      "concept_id": 713
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Gender Humor / Humor about Men",
+      "concept_id": 53185
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Gender Humor / Humor about Women",
+      "concept_id": 53186
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Historical Humor",
+      "concept_id": 708
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Internet & Social Media",
+      "concept_id": 709
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / LGBTQ+",
+      "concept_id": 710
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Language",
+      "concept_id": 711
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Marriage & Family",
+      "concept_id": 712
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Politics",
+      "concept_id": 714
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Religion",
+      "concept_id": 715
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / School & Education",
+      "concept_id": 716
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Sports",
+      "concept_id": 717
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Travel",
+      "concept_id": 718
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama",
+      "concept_id": 3876
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / African Drama",
+      "concept_id": 3877
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Ancient Drama",
+      "concept_id": 3879
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Anthologies",
+      "concept_id": 3880
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Australian & Oceanian",
+      "concept_id": 3882
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Caribbean & Latin American",
+      "concept_id": 3884
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / European Drama",
+      "concept_id": 3885
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / European Drama / British & Irish Drama",
+      "concept_id": 3886
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / European Drama / Spanish & Portuguese",
+      "concept_id": 3890
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Indigenous Peoples of the Americas",
+      "concept_id": 3891
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / LGBTQ+",
+      "concept_id": 3892
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Medieval Drama",
+      "concept_id": 3893
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Middle Eastern",
+      "concept_id": 3894
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Religious & Liturgical",
+      "concept_id": 3895
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Russian & Former Soviet Union",
+      "concept_id": 3896
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Shakespeare",
+      "concept_id": 3897
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Women Authors",
+      "concept_id": 3898
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Adaptations & Pastiche",
+      "concept_id": 3935
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Anthologies",
+      "concept_id": 3946
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Classics",
+      "concept_id": 3964
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Epistolary",
+      "concept_id": 3971
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Literary",
+      "concept_id": 4027
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Mashups",
+      "concept_id": 4029
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Media Tie-In",
+      "concept_id": 4030
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Multiple Timelines",
+      "concept_id": 4032
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Sagas",
+      "concept_id": 4106
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Short Stories",
+      "concept_id": 4124
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections",
+      "concept_id": 4280
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / African American & Black",
+      "concept_id": 3878
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / African Literary Collections",
+      "concept_id": 4281
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / American English",
+      "concept_id": 54038
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Anacreontic",
+      "concept_id": 6442
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Ancient Literary Collections",
+      "concept_id": 4282
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Asian Literary Collections",
+      "concept_id": 4283
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Asian Literary Collections / Chinese Literary Collections",
+      "concept_id": 4284
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Asian Literary Collections / Indic",
+      "concept_id": 4285
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Asian Literary Collections / Japanese Literary Collections",
+      "concept_id": 4286
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Australian & Oceanian",
+      "concept_id": 4287
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Canadian Literary Collections",
+      "concept_id": 4288
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Caribbean & Latin American",
+      "concept_id": 4289
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics",
+      "concept_id": 6748
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / British Comics",
+      "concept_id": 12471
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Canadian Comics",
+      "concept_id": 12474
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / French Comics",
+      "concept_id": 12472
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Italian Comics",
+      "concept_id": 12473
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics",
+      "concept_id": 12475
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga",
+      "concept_id": 614
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Action & Adventure",
+      "concept_id": 615
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Crime & Mystery",
+      "concept_id": 616
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Dystopian",
+      "concept_id": 617
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Erotica & Hentai",
+      "concept_id": 618
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Fantasy",
+      "concept_id": 619
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Historical Fiction",
+      "concept_id": 620
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Horror",
+      "concept_id": 621
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Humorous",
+      "concept_id": 622
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Isekai",
+      "concept_id": 623
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / LGBTQ+",
+      "concept_id": 624
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Light Novel",
+      "concept_id": 625
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Magical Girl",
+      "concept_id": 626
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Mecha",
+      "concept_id": 627
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Media Tie-In",
+      "concept_id": 628
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Nonfiction",
+      "concept_id": 629
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Romance",
+      "concept_id": 630
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / School Life",
+      "concept_id": 631
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Science Fiction",
+      "concept_id": 632
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Sports",
+      "concept_id": 633
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Supernatural",
+      "concept_id": 634
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Yaoi",
+      "concept_id": 635
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Yuri",
+      "concept_id": 636
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / South Korean Comics",
+      "concept_id": 51865
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / U.S. Comics by Form & Creator",
+      "concept_id": 12470
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / U.S. Comics by Form & Creator / U.S. Comic Collections",
+      "concept_id": 53206
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / U.S. Comics by Form & Creator / U.S. Comic Titles & Characters",
+      "concept_id": 53208
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / U.S. Comics by Form & Creator / U.S. Comics Creators",
+      "concept_id": 53207
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / U.S. Comics by Form & Creator / U.S. Comics — General & History",
+      "concept_id": 53205
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Diaries & Journals",
+      "concept_id": 4290
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / English",
+      "concept_id": 54039
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / European Literary Collections",
+      "concept_id": 4292
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / European Literary Collections / British & Irish Lit. Collections",
+      "concept_id": 4294
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / European Literary Collections / Eastern",
+      "concept_id": 4293
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / European Literary Collections / French Literary Collections",
+      "concept_id": 4295
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / European Literary Collections / German Literary Collections",
+      "concept_id": 4296
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / European Literary Collections / Italian Literary Collections",
+      "concept_id": 4297
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / European Literary Collections / Scandinavian Lit. Collections",
+      "concept_id": 4298
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / European Literary Collections / Spanish & Portuguese",
+      "concept_id": 4299
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / French, Occitan & Catalan",
+      "concept_id": 54041
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Indigenous Peoples of the Americas",
+      "concept_id": 4300
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Interviews",
+      "concept_id": 4301
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Italian & Romanian",
+      "concept_id": 54042
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / LGBTQ+",
+      "concept_id": 4302
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Letters",
+      "concept_id": 4303
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Literary Collections Miscellany",
+      "concept_id": 9349
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Literary Essays",
+      "concept_id": 4291
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Literary Extracts & Commonplaces",
+      "concept_id": 6957
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Medieval Literary Collections",
+      "concept_id": 4304
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Middle Eastern",
+      "concept_id": 4305
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Other Germanic",
+      "concept_id": 54040
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Other Languages",
+      "concept_id": 54046
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Poetry & Prose About Music",
+      "concept_id": 9419
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Proverbs",
+      "concept_id": 9602
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Russian & Former Soviet Union",
+      "concept_id": 4306
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Scandinavian",
+      "concept_id": 54045
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Selections for daily reading",
+      "concept_id": 8512
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Slavic",
+      "concept_id": 54044
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Spanish & Portuguese",
+      "concept_id": 54043
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Speeches",
+      "concept_id": 4307
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Themed Literary Collections",
+      "concept_id": 52306
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Women Authors",
+      "concept_id": 4308
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry",
+      "concept_id": 4416
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / African Poetry",
+      "concept_id": 4417
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / American Poetry",
+      "concept_id": 4418
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / American Poetry / African American & Black",
+      "concept_id": 4419
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / American Poetry / Asian American & Pacific Islander",
+      "concept_id": 4420
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / American Poetry / Hispanic & Latino",
+      "concept_id": 4421
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / American Poetry / Native American",
+      "concept_id": 4422
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Ancient Poetry",
+      "concept_id": 4423
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Anthologies",
+      "concept_id": 4424
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Asian Poetry",
+      "concept_id": 4425
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Asian Poetry / Chinese Poetry",
+      "concept_id": 4426
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Australian & Oceanian",
+      "concept_id": 4428
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Caribbean & Latin American",
+      "concept_id": 4430
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Epic",
+      "concept_id": 4431
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / European Poetry",
+      "concept_id": 4432
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / European Poetry / British & Irish Poetry",
+      "concept_id": 4433
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / European Poetry / Spanish & Portuguese",
+      "concept_id": 4437
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Haiku",
+      "concept_id": 4438
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Indigenous",
+      "concept_id": 4429
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / LGBTQ+",
+      "concept_id": 4439
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Medieval Poetry",
+      "concept_id": 4440
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Middle Eastern",
+      "concept_id": 4441
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Russian & Former Soviet Union",
+      "concept_id": 4442
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Shakespeare",
+      "concept_id": 4443
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Subjects & Themes",
+      "concept_id": 4444
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Subjects & Themes / Death, Grief, Loss",
+      "concept_id": 4445
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Subjects & Themes / Family",
+      "concept_id": 4446
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Subjects & Themes / Inspirational & Religious",
+      "concept_id": 4447
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Subjects & Themes / Love & Erotica",
+      "concept_id": 4448
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Subjects & Themes / Nature",
+      "concept_id": 4449
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Subjects & Themes / Places",
+      "concept_id": 4450
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Women Authors",
+      "concept_id": 4451
+    },
+    {
+      "path": "Literature / Genres / Relationships / Erotica",
+      "concept_id": 3972
+    },
+    {
+      "path": "Literature / Genres / Relationships / Erotica / BDSM",
+      "concept_id": 3973
+    },
+    {
+      "path": "Literature / Genres / Relationships / Erotica / Collections & Anthologies",
+      "concept_id": 3974
+    },
+    {
+      "path": "Literature / Genres / Relationships / Erotica / Historical Erotica",
+      "concept_id": 3975
+    },
+    {
+      "path": "Literature / Genres / Relationships / Erotica / LGBTQ+",
+      "concept_id": 3976
+    },
+    {
+      "path": "Literature / Genres / Relationships / Erotica / LGBTQ+ / Bisexual",
+      "concept_id": 3977
+    },
+    {
+      "path": "Literature / Genres / Relationships / Erotica / LGBTQ+ / Gay",
+      "concept_id": 3978
+    },
+    {
+      "path": "Literature / Genres / Relationships / Erotica / LGBTQ+ / Lesbian",
+      "concept_id": 3979
+    },
+    {
+      "path": "Literature / Genres / Relationships / Erotica / LGBTQ+ / Transgender",
+      "concept_id": 3980
+    },
+    {
+      "path": "Literature / Genres / Relationships / Erotica / Science Fiction, Fantasy & Horror",
+      "concept_id": 3981
+    },
+    {
+      "path": "Literature / Genres / Relationships / Family Life Fiction",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Family Life Fiction / Marriage & Divorce",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Family Life Fiction / Siblings",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Friendship Fiction",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Action & Adventure Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Billionaire Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Contemporary Life & Lifestyles",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Contemporary Life & Lifestyles / Contemporary Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Contemporary Life & Lifestyles / Later in Life",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Contemporary Life & Lifestyles / New Adult",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Fantasy",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Firefighter Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / 20th Century",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / American Historical Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / Ancient World",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / Gilded Age",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / Medieval Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / Regency",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / Renaissance Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / Scottish",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / Tudor",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / Victorian",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / Viking",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Identity & Relationship Forms",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Identity & Relationship Forms / African American & Black",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Identity & Relationship Forms / LGBTQ+",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Identity & Relationship Forms / LGBTQ+ / Bisexual",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Identity & Relationship Forms / LGBTQ+ / Gay",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Identity & Relationship Forms / LGBTQ+ / Lesbian",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Identity & Relationship Forms / LGBTQ+ / Transgender",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Identity & Relationship Forms / Multicultural & Interracial",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Identity & Relationship Forms / Polyamory",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Law Enforcement Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Medical Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Military Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Paranormal",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Paranormal / Shifters",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Paranormal / Vampires",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Paranormal / Witches",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Rock Star Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Romantic Suspense",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Royal Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Science Fiction",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Sports Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Time Travel",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Tone, Occasion & Collections",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Tone, Occasion & Collections / Clean & Wholesome",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Tone, Occasion & Collections / Collections & Anthologies",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Tone, Occasion & Collections / Erotic",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Tone, Occasion & Collections / Holiday",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Tone, Occasion & Collections / Romantic Comedy",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Western Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Workplace Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy",
+      "concept_id": 3986
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Action & Adventure",
+      "concept_id": 3987
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Arthurian",
+      "concept_id": 3988
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Collections & Anthologies",
+      "concept_id": 3989
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Contemporary Fantasy",
+      "concept_id": 3990
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Dark Fantasy",
+      "concept_id": 3991
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Dragons & Mythical Creatures",
+      "concept_id": 3992
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Epic",
+      "concept_id": 3993
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Folklore-Inspired Fiction",
+      "concept_id": 3982
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Gaslamp",
+      "concept_id": 3994
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Historical Fantasy",
+      "concept_id": 3995
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Humorous",
+      "concept_id": 3996
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Magical Realism",
+      "concept_id": 4028
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Military Fantasy",
+      "concept_id": 3997
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Paranormal",
+      "concept_id": 3998
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Romance",
+      "concept_id": 3999
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Urban",
+      "concept_id": 4000
+    },
+    {
+      "path": "Literature / Genres / Speculative / LitRPG",
+      "concept_id": 4026
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction",
+      "concept_id": 4108
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Action & Adventure",
+      "concept_id": 4109
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Alien Contact",
+      "concept_id": 4110
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Apocalyptic & Post-Apocalyptic",
+      "concept_id": 4111
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Collections & Anthologies",
+      "concept_id": 4112
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Crime & Mystery",
+      "concept_id": 4113
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Cyberpunk",
+      "concept_id": 4114
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Dystopian",
+      "concept_id": 3970
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Genetic Engineering",
+      "concept_id": 4115
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Hard Science Fiction",
+      "concept_id": 4116
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Humorous",
+      "concept_id": 4117
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Military Science Fiction",
+      "concept_id": 4118
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Space Exploration",
+      "concept_id": 4119
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Space Opera",
+      "concept_id": 4120
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Steampunk",
+      "concept_id": 4121
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Time Travel",
+      "concept_id": 4122
+    },
+    {
+      "path": "Literature / Genres / Speculative / Superheroes",
+      "concept_id": 4128
+    },
+    {
+      "path": "Literature / Genres / Speculative / Visionary & Metaphysical",
+      "concept_id": 4144
+    }
+  ]
+}

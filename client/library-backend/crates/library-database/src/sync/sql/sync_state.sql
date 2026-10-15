@@ -17,13 +17,19 @@ ORDER BY state_kind,state_key,state_subkey LIMIT 256;
 SELECT cursor_recovery_pending FROM sync_metadata WHERE singleton = 1;
 
 -- name: sync_begin_cursor_recovery!
-UPDATE sync_metadata SET last_pull_lifecycle_seq = NULL, last_pull_field_seq = NULL, cursor_recovery_pending = 1 WHERE singleton = 1;
+UPDATE sync_metadata SET pull_generation = NULL, last_pull_lifecycle_seq = NULL, last_pull_field_seq = NULL, cursor_recovery_pending = 1 WHERE singleton = 1;
 
 -- name: sync_clear_cursor_recovery!
 UPDATE sync_metadata SET cursor_recovery_pending = NULL WHERE singleton = 1;
 
 -- name: sync_pull_cursor?
-SELECT CAST(last_pull_lifecycle_seq AS TEXT), CAST(last_pull_field_seq AS TEXT) FROM sync_metadata WHERE singleton = 1;
+SELECT pull_generation, CAST(last_pull_lifecycle_seq AS TEXT), CAST(last_pull_field_seq AS TEXT) FROM sync_metadata WHERE singleton = 1;
+
+-- name: sync_write_pull_cursor!
+-- param: generation: Option<&str>
+-- param: lifecycle_revision: Option<i64>
+-- param: field_revision: Option<i64>
+UPDATE sync_metadata SET pull_generation=:generation, last_pull_lifecycle_seq=:lifecycle_revision, last_pull_field_seq=:field_revision WHERE singleton=1;
 
 -- name: cursor_lifecycle_upsert!
 -- param: revision: &str

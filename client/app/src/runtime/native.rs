@@ -1,4 +1,5 @@
 use crate::BackendError;
+use crate::host::startup_profile::StartupProfile;
 use crate::app::AppBackend;
 use library_backend::library::LibraryDirectory;
 use std::future::Future;
@@ -183,11 +184,16 @@ impl Transport {
 impl AppClient {
     /// Starts the native backend on its application-owned thread.
     pub fn start_native(launch: crate::api::BackendLaunch) -> Result<(Self, AppStartupState), BackendError> {
+        let mut profile = StartupProfile::new("native_backend");
         let backend_context = launch.into_context()?;
+        profile.mark("registry_open");
         let backend = AppBackend::new(backend_context).map_err(BackendError::operation)?;
+        profile.mark("backend_construct");
         let startup = backend.startup_state()?;
+        profile.mark("startup_snapshot");
         let (client, worker) = crate::runtime::native::channel(&backend);
         std::thread::Builder::new().name("bokheim-app-worker".to_owned()).spawn(move || backend.run_native_worker(worker)).map_err(|error| format!("failed to start application backend worker: {error}"))?;
+        profile.mark("worker_start");
         Ok((client, startup))
     }
 }

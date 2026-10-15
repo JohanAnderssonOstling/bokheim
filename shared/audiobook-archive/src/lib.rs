@@ -2,9 +2,10 @@
 //! playback order, followed by optional NFO, CUE and cover sidecars. Clients
 //! write it; the server reads its layout to serve each track by byte range.
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{self, Read, Seek, Write};
+use std::io::{self, Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use zip::write::SimpleFileOptions;
@@ -90,6 +91,140 @@ pub fn write_archive_with_sidecars<W: Write + Seek>(writer: W, tracks: &[Track],
         }
     }
     zip.finish().map_err(io::Error::other)
+}
+
+/// Repacks an ordinary ZIP of MP3s, such as a source site's download, into
+/// the transport archive: its MP3s in natural filename order, then `cover`.
+/// A supplied JPEG is saved separately as `cover.jpg`. Every MP3 is copied
+/// byte for byte, preserving audio, tags, embedded artwork and chapters.
+/// Folders are flattened; NFO and CUE sidecars are retained. CUE file paths
+/// follow the flattened tracks. Other files are left out.
+pub fn repack_zip<R: Read + Seek>(reader: R, cover: Option<&[u8]>) -> io::Result<Vec<u8>> {
+    if cover.is_some_and(|bytes| bytes.len() as u64 > MAX_COVER_BYTES || !bytes.starts_with(&[0xff, 0xd8])) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "the replacement cover must be a bounded JPEG"));
+    }
+    let mut source = ZipArchive::new(reader).map_err(io::Error::other)?;
+    let mut tracks = Vec::new();
+    let mut sidecars = Vec::new();
+    let mut sidecar_kinds = HashSet::new();
+    let mut source_cover = None;
+    for index in 0..source.len() {
+        let entry = source.by_index(index).map_err(io::Error::other)?;
+        let name = entry.name().rsplit('/').next().unwrap_or_default().to_owned();
+        if entry.is_file() && !name.starts_with('.') && valid_entry_name(&name) {
+            tracks.push((name, index));
+        } else if entry.is_file() {
+            match sidecar_kind(&name) {
+                Some(kind @ (SidecarKind::Nfo | SidecarKind::Cue)) => {
+                    if !sidecar_kinds.insert(kind) {
+                        return Err(io::Error::new(io::ErrorKind::InvalidData, "the download has multiple sidecars of the same kind"));
+                    }
+                    sidecars.push((name, index));
+                }
+                Some(SidecarKind::Cover) if cover.is_none() && source_cover.is_none() => source_cover = Some((name, index)),
+                _ => {}
+            }
+        }
+    }
+    tracks.sort_by(|left, right| natural_cmp(&left.0, &right.0));
+    if tracks.is_empty() || tracks.len() > MAX_TRACKS {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "the download has no MP3 tracks, or too many"));
+    }
+    let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    let mut names = HashSet::new();
+    for (name, index) in tracks {
+        if !names.insert(name.to_lowercase()) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "the download has duplicate MP3 names"));
+        }
+        zip.start_file(&name, options).map_err(io::Error::other)?;
+        let mut track = source.by_index(index).map_err(io::Error::other)?;
+        io::copy(&mut track, &mut zip)?;
+    }
+    if let Some(source_cover) = source_cover {
+        sidecars.push(source_cover);
+    }
+    for (name, index) in sidecars {
+        if !names.insert(name.to_lowercase()) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "the download has duplicate sidecar names"));
+        }
+        let maximum = sidecar_limit(sidecar_kind(&name).expect("validated source sidecar"));
+        let entry = source.by_index(index).map_err(io::Error::other)?;
+        if entry.size() > maximum {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "oversized audiobook sidecar"));
+        }
+        zip.start_file(&name, options).map_err(io::Error::other)?;
+        if sidecar_kind(&name) == Some(SidecarKind::Cue) {
+            let mut bytes = Vec::new();
+            entry.take(maximum + 1).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > maximum {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "oversized audiobook sidecar"));
+            }
+            zip.write_all(&flatten_cue_paths(&bytes))?;
+        } else if io::copy(&mut entry.take(maximum + 1), &mut zip)? > maximum {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "oversized audiobook sidecar"));
+        }
+    }
+    if let Some(cover) = cover.filter(|cover| cover.len() as u64 <= MAX_COVER_BYTES) {
+        zip.start_file("cover.jpg", options).map_err(io::Error::other)?;
+        zip.write_all(cover)?;
+    }
+    Ok(zip.finish().map_err(io::Error::other)?.into_inner())
+}
+
+/// Change only FILE paths, retaining the original encoding and cue timings.
+fn flatten_cue_paths(bytes: &[u8]) -> Vec<u8> {
+    let mut updated = Vec::with_capacity(bytes.len());
+    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+        let start = line.iter().position(|byte| !byte.is_ascii_whitespace()).unwrap_or(line.len());
+        let instruction = &line[start..];
+        if instruction.len() < 5 || !instruction[..4].eq_ignore_ascii_case(b"FILE") || !instruction[4].is_ascii_whitespace() {
+            updated.extend_from_slice(line);
+            continue;
+        }
+        let path_start = start + 4 + instruction[4..].iter().take_while(|byte| byte.is_ascii_whitespace()).count();
+        let quoted = line.get(path_start) == Some(&b'"');
+        let name_start = path_start + usize::from(quoted);
+        let Some(length) = line[name_start..].iter().position(|byte| if quoted { *byte == b'"' } else { byte.is_ascii_whitespace() }) else {
+            updated.extend_from_slice(line);
+            continue;
+        };
+        let name_end = name_start + length;
+        let basename = line[name_start..name_end].rsplit(|byte| *byte == b'/' || *byte == b'\\').next().unwrap_or_default();
+        updated.extend_from_slice(&line[..name_start]);
+        updated.extend_from_slice(basename);
+        updated.extend_from_slice(&line[name_end..]);
+    }
+    updated
+}
+
+/// Orders names as people number tracks: "2" before "10", ignoring case.
+pub fn natural_cmp(left: &str, right: &str) -> Ordering {
+    let mut a = left.chars().peekable();
+    let mut b = right.chars().peekable();
+    loop {
+        match (a.peek().copied(), b.peek().copied()) {
+            (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
+                let digits_a: String = std::iter::from_fn(|| a.next_if(|character| character.is_ascii_digit())).collect();
+                let digits_b: String = std::iter::from_fn(|| b.next_if(|character| character.is_ascii_digit())).collect();
+                let order = digits_a.trim_start_matches('0').len().cmp(&digits_b.trim_start_matches('0').len()).then_with(|| digits_a.trim_start_matches('0').cmp(digits_b.trim_start_matches('0')));
+                if !order.is_eq() {
+                    return order;
+                }
+            }
+            (Some(x), Some(y)) => {
+                a.next();
+                b.next();
+                let order = x.to_ascii_lowercase().cmp(&y.to_ascii_lowercase());
+                if !order.is_eq() {
+                    return order;
+                }
+            }
+            (None, None) => return left.cmp(right),
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+        }
+    }
 }
 
 pub fn valid_sidecar_name(name: &str) -> bool {
@@ -227,15 +362,84 @@ pub fn extract_archive<R: Read + Seek>(reader: R, destination: &Path) -> io::Res
 mod tests {
     use super::*;
 
+    const JPEG: &[u8] = &[0xff, 0xd8, 0xff, 0xe0, 0xff, 0xd9];
+
+    fn audio() -> &'static [u8] {
+        include_bytes!("../../../client/library-backend/crates/book-inspection/tests/fixtures/silence.mp3")
+    }
+
+    #[test]
+    fn repack_saves_separate_cover_and_preserves_complete_mp3_bytes() {
+        let mut original = ZipWriter::new(Cursor::new(Vec::new()));
+        for name in ["folder/10.mp3", "folder/2.mp3"] {
+            original.start_file(name, SimpleFileOptions::default()).unwrap();
+            original.write_all(audio()).unwrap();
+        }
+        original.start_file("folder/chapters.cue", SimpleFileOptions::default()).unwrap();
+        original.write_all(b"FILE 2.mp3 MP3\nTRACK 01 AUDIO").unwrap();
+        original.start_file("folder/cover.jpg", SimpleFileOptions::default()).unwrap();
+        original.write_all(b"old cover").unwrap();
+        let original = original.finish().unwrap().into_inner();
+        let result = repack_zip(Cursor::new(original.clone()), Some(JPEG)).unwrap();
+        let mut archive = ZipArchive::new(Cursor::new(result)).unwrap();
+        assert_eq!(archive.by_index(0).unwrap().name(), "2.mp3");
+        assert_eq!(archive.by_index(1).unwrap().name(), "10.mp3");
+        for name in ["2.mp3", "10.mp3"] {
+            let mut bytes = Vec::new();
+            archive.by_name(name).unwrap().read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, audio());
+        }
+        let mut cue = String::new();
+        archive.by_name("chapters.cue").unwrap().read_to_string(&mut cue).unwrap();
+        assert_eq!(cue, "FILE 2.mp3 MP3\nTRACK 01 AUDIO");
+        let mut image = Vec::new();
+        archive.by_name("cover.jpg").unwrap().read_to_end(&mut image).unwrap();
+        assert_eq!(image, JPEG);
+        let unchanged = repack_zip(Cursor::new(original), None).unwrap();
+        let mut archive = ZipArchive::new(Cursor::new(unchanged)).unwrap();
+        let mut track = Vec::new();
+        archive.by_name("2.mp3").unwrap().read_to_end(&mut track).unwrap();
+        assert_eq!(track, audio());
+        let mut old_cover = Vec::new();
+        archive.by_name("cover.jpg").unwrap().read_to_end(&mut old_cover).unwrap();
+        assert_eq!(old_cover, b"old cover");
+    }
+
+    #[test]
+    fn repack_never_reads_or_rewrites_track_tags() {
+        let tagged = b"ID3\x04\0\0\x7f\x7f\x7f\x7fsource artwork and chapter metadata";
+        let untagged = b"raw MP3 audio payload";
+        let mut input = ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, bytes) in [("tagged.mp3", tagged.as_slice()), ("untagged.mp3", untagged.as_slice())] {
+            input.start_file(name, SimpleFileOptions::default()).unwrap();
+            input.write_all(bytes).unwrap();
+        }
+        let input = input.finish().unwrap().into_inner();
+        let output = repack_zip(Cursor::new(input), Some(JPEG)).unwrap();
+        let mut archive = ZipArchive::new(Cursor::new(output)).unwrap();
+        for (name, expected) in [("tagged.mp3", tagged.as_slice()), ("untagged.mp3", untagged.as_slice())] {
+            let mut actual = Vec::new();
+            archive.by_name(name).unwrap().read_to_end(&mut actual).unwrap();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn cue_paths_follow_flattened_tracks_without_changing_timings_or_encoding() {
+        let original = b"TITLE \"B\xe5k\"\r\n  FILE \"folder/chapter 1.mp3\" MP3\r\n TRACK 01 AUDIO\r\n INDEX 01 00:12:34\r\nFILE folder\\2.mp3 MP3\n";
+        let expected = b"TITLE \"B\xe5k\"\r\n  FILE \"chapter 1.mp3\" MP3\r\n TRACK 01 AUDIO\r\n INDEX 01 00:12:34\r\nFILE 2.mp3 MP3\n";
+        assert_eq!(flatten_cue_paths(original), expected);
+    }
+
     #[test]
     fn rejects_archive_entries_outside_the_album() {
         assert!(!valid_entry_name("C:/escape.mp3"));
-        let mut zip = ZipWriter::new(io::Cursor::new(Vec::new()));
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
         zip.start_file("../escape.mp3", SimpleFileOptions::default()).unwrap();
         zip.write_all(b"x").unwrap();
         let bytes = zip.finish().unwrap().into_inner();
         let output = tempfile::tempdir().unwrap();
-        assert!(extract_archive(io::Cursor::new(bytes), output.path()).is_err());
+        assert!(extract_archive(Cursor::new(bytes), output.path()).is_err());
         assert!(!output.path().parent().unwrap().join("escape.mp3").exists());
     }
 }

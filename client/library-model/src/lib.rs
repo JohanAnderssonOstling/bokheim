@@ -18,9 +18,11 @@ pub use transfer::{BlobKey, BlobKind, TransferJobKind, TransferOrigin};
 
 mod download;
 mod playback;
+mod torrent;
+pub use torrent::{TorrentInput, TorrentStatus};
 mod view;
 
-pub use download::{BookDownloadStatus, DownloadProgress, DownloadProgressError, DownloadState};
+pub use download::{BookDownloadStatus, BrowserDownloadPhase, BrowserDownloadUpdate, CatalogImportProgress, DownloadProgress, DownloadProgressError, DownloadState};
 pub use playback::PlaybackMetadata;
 pub use view::*;
 

@@ -20,7 +20,7 @@ use gpui::prelude::*;
 use gpui::{Div, ElementId, MouseButton, SharedString, Stateful, div, px};
 use gpui_component::{Icon, IconName};
 
-use crate::{BrowserTheme, CONTENTS_AMOUNT_WIDTH_REM, CONTENTS_DISCLOSURE_SIZE_REM, CONTENTS_ROW_GAP, CONTENTS_ROW_INDENT, SPACE_SM, SPACE_XS, TEXT_SM, TEXT_XS};
+use crate::{BrowserTheme, CONTENTS_AMOUNT_WIDTH_REM, CONTENTS_DIGIT_WIDTH_EM, CONTENTS_DISCLOSURE_SIZE_REM, CONTENTS_ROW_GAP, CONTENTS_ROW_INDENT, SPACE_SM, SPACE_XS, TEXT_SM, TEXT_XS};
 
 /// What one row of a contents list is.
 ///
@@ -43,6 +43,13 @@ pub struct ContentsRow {
     pub read: bool,
     /// The keyboard cursor, which is not the same thing as where the reader is.
     pub focused: bool,
+    /// The entry's place in reading order. Every entry is counted — parents,
+    /// and entries hidden inside closed parents — so a number never changes
+    /// when a part is opened or closed.
+    pub number: Option<usize>,
+    /// Digits in the list's largest number, so every row's number column is
+    /// the same width and every title starts on one line.
+    pub number_digits: usize,
 }
 
 /// An open contents list, beginning with a quiet rule. Rows draw their own
@@ -91,15 +98,34 @@ pub fn contents_disclosure(id: impl Into<ElementId>, row: ContentsRow, theme: Br
 /// One row, laid out and stated. The caller supplies the disclosure and hangs
 /// its own click on the returned row.
 ///
-/// Hover is the neutral overlay, the keyboard cursor is `accent_wash`, and
-/// the current entry is solid accent. Earlier leaf entries use muted ink.
-pub fn contents_row(id: impl Into<ElementId>, row: ContentsRow, disclosure: impl IntoElement, title: impl IntoElement, number: Option<usize>, amount: Option<SharedString>, theme: BrowserTheme) -> Stateful<Div> {
+/// A row reads caret, number, title, amount. The caret column is there only
+/// in a list that has parents — `disclosure` is `None` in a flat one, where it
+/// would be a column of nothing — and the number column only when the row has
+/// a number.
+///
+/// The current entry — where the reader is — is the solid accent, the keyboard
+/// cursor is `accent_wash` and the pointer is the light `hover`, as the ladder
+/// in `tokens.rs` sets out. The cursor on the current entry steps it to
+/// `accent_hover`. Earlier leaf entries use muted ink.
+pub fn contents_row(id: impl Into<ElementId>, row: ContentsRow, disclosure: Option<impl IntoElement>, title: impl IntoElement, amount: Option<SharedString>, theme: BrowserTheme) -> Stateful<Div> {
     let (background, hovered, ink) = match (row.marked, row.focused) {
-        (true, _) => (Some(theme.accent), theme.accent_hover, theme.accent_text),
+        (true, true) => (Some(theme.accent_hover), theme.accent_hover, theme.accent_text),
+        (true, false) => (Some(theme.accent), theme.accent_hover, theme.accent_text),
         (false, true) => (Some(theme.accent_wash), theme.accent_wash_hover, if row.read { theme.text_muted } else { theme.text }),
         (false, false) => (None, theme.hover, if row.read { theme.text_muted } else { theme.text }),
     };
-    let quiet = if row.marked { theme.accent_wash } else { theme.text_muted };
+    let quiet = if row.marked { theme.accent_text } else { theme.text_muted };
+    let depth = row.depth.min(MAXIMUM_DRAWN_DEPTH) as f32;
+    let number_width = contents_number_width(row.number_digits);
+    // A numbered list steps in one level by exactly the number column and its
+    // gap, so a child's number stands under its parent's title. The column is
+    // in rems and the gaps in pixels, so the step is a spacer of the one plus
+    // padding of the other; the spacer brings its own row gap, taken back out.
+    let (indent, spacer) = match row.number {
+        Some(_) if depth > 0.0 => (SPACE_SM + depth * (SPACE_XS + CONTENTS_ROW_GAP) - CONTENTS_ROW_GAP, Some(div().flex_none().w(gpui::rems(depth * number_width)))),
+        Some(_) => (SPACE_SM, None),
+        None => (SPACE_SM + CONTENTS_ROW_INDENT * depth, None),
+    };
     div()
         .id(id)
         .w_full()
@@ -111,7 +137,7 @@ pub fn contents_row(id: impl Into<ElementId>, row: ContentsRow, disclosure: impl
         .min_h(gpui::rems(2.25))
         .py(px(SPACE_XS))
         .px(px(SPACE_SM))
-        .pl(px(SPACE_SM + CONTENTS_ROW_INDENT * row.depth.min(MAXIMUM_DRAWN_DEPTH) as f32))
+        .pl(px(indent))
         .cursor_pointer()
         .text_size(gpui::rems(TEXT_SM))
         .text_color(ink)
@@ -119,10 +145,28 @@ pub fn contents_row(id: impl Into<ElementId>, row: ContentsRow, disclosure: impl
         .border_color(theme.rule.opacity(0.45))
         .when_some(background, |element, colour| element.bg(colour))
         .hover(move |style| style.bg(hovered))
-        .child(disclosure)
-        .children(number.map(|number| div().flex_none().min_w(gpui::rems(1.6)).text_right().text_size(gpui::rems(TEXT_XS)).text_color(quiet).child(number.to_string())))
+        .children(spacer)
+        .children(disclosure)
+        .children(row.number.map(|number| contents_number(number, number_width, quiet)))
         .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(title))
         .children(amount.map(|amount| div().w(gpui::rems(CONTENTS_AMOUNT_WIDTH_REM)).flex_none().text_right().text_size(gpui::rems(TEXT_XS)).text_color(quiet).child(amount)))
+}
+
+/// The number column's width in rems: as many figures as the list's largest
+/// number has, at the number's own size.
+fn contents_number_width(digits: usize) -> f32 {
+    digits.max(1) as f32 * CONTENTS_DIGIT_WIDTH_EM * TEXT_XS
+}
+
+/// An entry's number, left-aligned in its column, which keeps a little air
+/// before the title.
+fn contents_number(number: usize, width: f32, colour: gpui::Hsla) -> Div {
+    div().flex_none().w(gpui::rems(width)).mr(px(SPACE_XS)).text_size(gpui::rems(TEXT_XS)).text_color(colour).child(number.to_string())
+}
+
+/// How many figures a number has, for [`ContentsRow::number_digits`].
+pub fn contents_digits(largest: usize) -> usize {
+    largest.max(1).ilog10() as usize + 1
 }
 
 /// Below this the indent stops growing. A fourth level is still drawn and still

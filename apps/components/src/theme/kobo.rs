@@ -21,6 +21,7 @@ pub(super) const PALETTE: ApplicationPalette = ApplicationPalette {
     danger_bg: 0xdddddd,
     warning_text: 0x333333,
     warning_bg: 0xeeeeee,
+    usage_segments: [0x000000, 0x333333, 0x555555, 0x777777, 0x888888],
 };
 
 pub(super) fn widget_colours(theme: BrowserTheme) -> ThemeColor {

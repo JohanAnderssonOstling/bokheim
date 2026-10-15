@@ -225,28 +225,6 @@ impl SharedWorkerHost {
             clients,
         }))
     }
-    /// Weak callbacks avoid retaining the host through application service closures.
-    pub fn broadcaster(&self) -> impl Fn(JsValue) + 'static {
-        let weak = Rc::downgrade(&self.0);
-        move |message| {
-            if let Some(state) = weak.upgrade() {
-                for tab in state.tabs.borrow().values() {
-                    let _ = tab.control.raw.post_message(&message);
-                }
-            }
-        }
-    }
-    pub fn failure_handler(&self) -> impl Fn(String) + 'static {
-        let weak = Rc::downgrade(&self.0);
-        move |error| {
-            let weak = weak.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                if let Some(state) = weak.upgrade() {
-                    state.fail(&error);
-                }
-            });
-        }
-    }
     pub fn fail(&self, error: &str) {
         self.0.fail(error);
     }

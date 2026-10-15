@@ -191,6 +191,11 @@ mod tests {
         let db = Connection::open(p.join("live.db")).unwrap();
         assert_eq!(db.query_row("SELECT v FROM book", [], |r| r.get::<_, String>(0)).unwrap(), "original");
         assert_eq!(db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 1);
+        for path in ["live.db", "prior.db", "next.db"] {
+            let connection = Connection::open(p.join(path)).unwrap();
+            let mode: String = connection.pragma_query_value(Some("main"), "journal_mode", |row| row.get(0)).unwrap();
+            assert_eq!(mode, "wal", "backup and recovery must preserve WAL for {path}");
+        }
         assert_eq!(fs::read(p.join("app")).unwrap(), b"old binary");
     }
     #[test]

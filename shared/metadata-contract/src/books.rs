@@ -21,6 +21,10 @@ pub struct BookFacts {
     /// so the server only needs to report what it found.
     pub record: book_model::BookRecord,
     pub audiobook: bool,
+    /// Resolve artwork only when the caller still needs a cover. Older clients
+    /// omit this flag and retain the original cover-enrichment behavior.
+    #[serde(default = "needs_cover_by_default")]
+    pub needs_cover: bool,
     /// Other ways to read the book's title and local filenames, parsed on the
     /// device and unconfirmed. The server tries each as an alternative lookup.
     #[serde(default)]
@@ -28,6 +32,8 @@ pub struct BookFacts {
     #[serde(default)]
     pub recording: Option<crate::audible::LookupRequest>,
 }
+
+fn needs_cover_by_default() -> bool { true }
 
 /// One reading of a title or filename. `surname` is set instead of
 /// `authors` when only a surname was written, as in `Smith_Some_Title`.
@@ -59,6 +65,9 @@ pub struct BookEnrichment {
     pub toc: Option<Vec<book_model::BookTocEntry>>,
     #[serde(default)]
     pub cover: Option<CoverSource>,
+    /// Work-level participation evidence, independent of bibliographic metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub popularity: Option<crate::WorkPopularity>,
     #[serde(default)]
     pub detail: String,
 }

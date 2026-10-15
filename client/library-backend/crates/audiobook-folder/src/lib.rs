@@ -2,13 +2,12 @@
 //! orders them for playback, and reads MP3 tags. A device keeps ordinary MP3
 //! files; `audiobook_archive` packs them for transfer and server storage.
 
-use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io;
 use std::path::Path;
 
-use audiobook_archive::{Cover, Cue, MAX_COVER_BYTES, MAX_CUE_BYTES, MAX_NFO_BYTES, MAX_TRACKS, Nfo, Track, audio_file, valid_sidecar_name};
+use audiobook_archive::{Cover, Cue, MAX_COVER_BYTES, MAX_CUE_BYTES, MAX_NFO_BYTES, MAX_TRACKS, Nfo, Track, audio_file, natural_cmp, valid_sidecar_name};
 
 #[derive(Default)]
 pub struct Mp3Facts {
@@ -285,34 +284,6 @@ fn order_from_cue(folder: &Path, tracks: &mut Vec<Track>) -> io::Result<()> {
         *tracks = order.into_iter().map(|index| previous[index].clone()).collect();
     }
     Ok(())
-}
-
-fn natural_cmp(left: &str, right: &str) -> Ordering {
-    let mut a = left.chars().peekable();
-    let mut b = right.chars().peekable();
-    loop {
-        match (a.peek().copied(), b.peek().copied()) {
-            (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
-                let digits_a: String = std::iter::from_fn(|| a.next_if(|character| character.is_ascii_digit())).collect();
-                let digits_b: String = std::iter::from_fn(|| b.next_if(|character| character.is_ascii_digit())).collect();
-                let order = digits_a.trim_start_matches('0').len().cmp(&digits_b.trim_start_matches('0').len()).then_with(|| digits_a.trim_start_matches('0').cmp(digits_b.trim_start_matches('0')));
-                if !order.is_eq() {
-                    return order;
-                }
-            }
-            (Some(x), Some(y)) => {
-                a.next();
-                b.next();
-                let order = x.to_ascii_lowercase().cmp(&y.to_ascii_lowercase());
-                if !order.is_eq() {
-                    return order;
-                }
-            }
-            (None, None) => return left.cmp(right),
-            (None, Some(_)) => return Ordering::Less,
-            (Some(_), None) => return Ordering::Greater,
-        }
-    }
 }
 
 /// Finds the tracks belonging to this book folder. Only numbered disc folders

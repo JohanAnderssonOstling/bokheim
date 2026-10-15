@@ -1,11 +1,10 @@
-use std::cell::RefCell;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use gpui::{App, Bounds, Pixels, point, px, size};
+use browser_ui::NavigationSession;
+use gpui::{App, Bounds, Context, Pixels, Task, point, px, size};
 use reader_ui::ReaderPreferences;
 use serde::{Deserialize, Serialize};
 
@@ -45,13 +44,15 @@ pub struct UiSession {
     #[serde(default = "default_kobo_auto_rotate")]
     pub kobo_auto_rotate: bool,
     pub reader_preferences: ReaderPreferences,
+    #[serde(default)]
+    pub navigation: NavigationSession,
     #[serde(default, alias = "reader_window")]
     pub window: Option<WindowGeometry>,
 }
 
 impl Default for UiSession {
     fn default() -> Self {
-        Self { version: SESSION_VERSION, kobo_auto_rotate: default_kobo_auto_rotate(), reader_preferences: ReaderPreferences::default(), window: None }
+        Self { version: SESSION_VERSION, kobo_auto_rotate: default_kobo_auto_rotate(), reader_preferences: ReaderPreferences::default(), navigation: NavigationSession::default(), window: None }
     }
 }
 
@@ -110,87 +111,195 @@ pub fn session_path(app_data: &Path) -> PathBuf {
     app_data.join("gpui-ui-session.json")
 }
 
-#[derive(Clone)]
-pub struct SessionSaveScheduler {
-    session: Rc<RefCell<UiSession>>,
+/// One UI-thread owner for the saved session and its pending disk writes.
+pub struct SessionPersistence {
+    pub session: UiSession,
     path: PathBuf,
-    state: Rc<RefCell<SaveSchedule>>,
+    deadline: Option<Instant>,
+    worker_running: bool,
+    save_task: Option<Task<()>>,
     blocking_worker: BlockingWorker,
 }
 
-#[derive(Default)]
-struct SaveSchedule {
-    deadline: Option<Instant>,
-    worker_running: bool,
-}
-
-impl SessionSaveScheduler {
-    pub fn new(session: Rc<RefCell<UiSession>>, path: PathBuf, blocking_worker: BlockingWorker) -> Self {
-        Self { session, path, state: Rc::new(RefCell::new(SaveSchedule::default())), blocking_worker }
+impl SessionPersistence {
+    pub fn new(session: UiSession, path: PathBuf, blocking_worker: BlockingWorker) -> Self {
+        Self { session, path, deadline: None, worker_running: false, save_task: None, blocking_worker }
     }
 
-    pub fn schedule(&self, cx: &mut App) {
-        {
-            let mut state = self.state.borrow_mut();
-            state.deadline = Some(Instant::now() + Duration::from_millis(300));
-            if state.worker_running {
-                return;
-            }
-            state.worker_running = true;
+    pub fn schedule(&mut self, cx: &mut Context<Self>) {
+        self.deadline = Some(cx.background_executor().now() + Duration::from_millis(300));
+        if self.worker_running {
+            return;
         }
-
-        let scheduler = self.clone();
+        self.worker_running = true;
         let executor = cx.background_executor().clone();
-        cx.spawn(async move |_| {
+        self.save_task = Some(cx.spawn(async move |owner, cx| {
             loop {
-                let wait = {
-                    let state = scheduler.state.borrow();
-                    let Some(deadline) = state.deadline else {
-                        break;
-                    };
-                    deadline.saturating_duration_since(Instant::now())
+                let Ok(Some(wait)) = owner.update(cx, |owner, _| owner.deadline.map(|deadline| deadline.saturating_duration_since(executor.now()))) else {
+                    break;
                 };
                 executor.timer(wait).await;
-
-                let should_save = {
-                    let mut state = scheduler.state.borrow_mut();
-                    match state.deadline {
-                        Some(deadline) if deadline <= Instant::now() => {
-                            state.deadline = None;
-                            true
-                        }
-                        Some(_) => false,
-                        None => {
-                            state.worker_running = false;
-                            break;
-                        }
+                let Ok(save) = owner.update(cx, |owner, _| {
+                    if owner.deadline.is_some_and(|deadline| deadline <= executor.now()) {
+                        owner.deadline = None;
+                        Some(owner.write_snapshot())
+                    } else {
+                        None
                     }
+                }) else {
+                    break;
                 };
-                if should_save {
-                    let session = scheduler.session.borrow().clone();
-                    let path = scheduler.path.clone();
-                    let save = scheduler.blocking_worker.dispatch(move || session.save(&path));
+                if let Some(save) = save {
                     let _ = save.recv().await;
-                    let mut state = scheduler.state.borrow_mut();
-                    if state.deadline.is_none() {
-                        state.worker_running = false;
-                        break;
-                    }
+                }
+                let finished = owner
+                    .update(cx, |owner, _| {
+                        if owner.deadline.is_none() {
+                            owner.worker_running = false;
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(true);
+                if finished {
+                    break;
                 }
             }
+        }));
+    }
+
+    fn write_snapshot(&self) -> async_channel::Receiver<()> {
+        let session = self.session.clone();
+        let path = self.path.clone();
+        self.blocking_worker.dispatch(move || session.save(&path))
+    }
+
+    /// Navigation changes are queued immediately so recovery does not depend on quitting.
+    pub fn save_now(&self, cx: &mut App) {
+        let save = self.write_snapshot();
+        cx.spawn(async move |_| {
+            let _ = save.recv().await;
         })
         .detach();
     }
 
-    pub fn flush(&self) {
-        {
-            let mut state = self.state.borrow_mut();
-            state.deadline = None;
-            state.worker_running = false;
-        }
-        let session = self.session.borrow().clone();
-        let path = self.path.clone();
-        let save = self.blocking_worker.dispatch(move || session.save(&path));
-        let _ = save.recv_blocking();
+    pub fn flush(&mut self) {
+        self.save_task.take();
+        self.deadline = None;
+        self.worker_running = false;
+        let _ = self.write_snapshot().recv_blocking();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use browser_ui::{GlobalRoute, NavigationSession, Route};
+    use gpui::{AppContext, TestAppContext};
+
+    fn saved_navigation() -> NavigationSession {
+        serde_json::from_value(serde_json::json!({
+            "library_id": "00000000-0000-0000-0000-000000000002",
+            "route": {"Library": "Folders"},
+            "pages": [{"path": [[{"Folder": "00000000-0000-0000-0000-000000000003"}, "Fiction"]], "detail": "07".repeat(32)}],
+            "reader": {"locator": {"library_id": "00000000-0000-0000-0000-000000000002", "content_hash": "07".repeat(32)}, "title": "Book"}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn legacy_sessions_keep_reader_preferences_and_default_navigation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = session_path(directory.path());
+        let mut original = UiSession::default();
+        original.reader_preferences.toc_width = 417.0;
+        original.window = Some(WindowGeometry { x: 10.0, y: 20.0, width: 900.0, height: 700.0 });
+        let mut legacy = serde_json::to_value(&original).unwrap();
+        legacy.as_object_mut().unwrap().remove("navigation");
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let loaded = UiSession::load(&path);
+        assert_eq!(loaded.reader_preferences, original.reader_preferences);
+        assert_eq!(loaded.window, original.window);
+        assert_eq!(loaded.navigation, NavigationSession::default());
+    }
+
+    #[gpui::test]
+    async fn navigation_and_reader_are_saved_without_shutdown_and_closing_reader_stays_closed(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = session_path(directory.path());
+        let scheduler = cx.new(|cx| SessionPersistence::new(UiSession::default(), path.clone(), BlockingWorker::new(cx.background_executor(), 1)));
+        scheduler.update(cx, |owner, cx| {
+            owner.session.navigation = saved_navigation();
+            owner.save_now(cx);
+        });
+        let worker = scheduler.read_with(cx, |owner, _| owner.blocking_worker.clone());
+        // A barrier on the same ordered worker waits for the disk write, without a quit or flush.
+        worker.dispatch(|| ()).recv().await.unwrap();
+        assert_eq!(UiSession::load(&path).navigation, scheduler.read_with(cx, |owner, _| owner.session.navigation.clone()));
+
+        scheduler.update(cx, |owner, cx| {
+            owner.session.navigation.reader = None;
+            owner.session.navigation.route = Route::Global(GlobalRoute::Settings);
+            owner.save_now(cx);
+        });
+        worker.dispatch(|| ()).recv().await.unwrap();
+        let restored = UiSession::load(&path).navigation;
+        assert!(restored.reader.is_none());
+        assert_eq!(restored.route, Route::Global(GlobalRoute::Settings));
+        assert_eq!(restored.library_id, scheduler.read_with(cx, |owner, _| owner.session.navigation.library_id));
+    }
+
+    #[gpui::test]
+    async fn delayed_saves_coalesce_and_include_immediate_navigation_changes(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = session_path(directory.path());
+        let owner = cx.new(|cx| SessionPersistence::new(UiSession::default(), path.clone(), BlockingWorker::new(cx.background_executor(), 1)));
+        let worker = owner.read_with(cx, |owner, _| owner.blocking_worker.clone());
+        owner.update(cx, |owner, cx| {
+            owner.session.reader_preferences.toc_width = 300.0;
+            owner.schedule(cx);
+        });
+        cx.run_until_parked();
+        cx.background_executor.advance_clock(Duration::from_millis(200));
+        owner.update(cx, |owner, cx| {
+            owner.session.reader_preferences.toc_width = 400.0;
+            owner.schedule(cx);
+        });
+        cx.background_executor.advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        worker.dispatch(|| ()).recv().await.unwrap();
+        assert!(!path.exists(), "a later edit extends the quiet period");
+        owner.update(cx, |owner, cx| {
+            owner.session.navigation = saved_navigation();
+            owner.save_now(cx);
+        });
+        worker.dispatch(|| ()).recv().await.unwrap();
+        let immediate = UiSession::load(&path);
+        assert_eq!(immediate.navigation, saved_navigation());
+        assert_eq!(immediate.reader_preferences.toc_width, 400.0);
+        owner.update(cx, |owner, _| owner.session.reader_preferences.toc_width = 500.0);
+        cx.background_executor.advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+        worker.dispatch(|| ()).recv().await.unwrap();
+        let delayed = UiSession::load(&path);
+        assert_eq!(delayed.navigation, immediate.navigation);
+        assert_eq!(delayed.reader_preferences.toc_width, 500.0);
+        cx.run_until_parked();
+        assert!(!owner.read_with(cx, |owner, _| owner.worker_running));
+    }
+
+    #[test]
+    fn failed_atomic_write_preserves_the_previous_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = session_path(directory.path());
+        let original = UiSession { navigation: saved_navigation(), ..Default::default() };
+        original.save(&path);
+        let failed = atomic_session_write(&path, |file| {
+            file.write_all(b"{truncated")?;
+            Err(io::Error::other("simulated interrupted write"))
+        });
+        assert!(failed.is_err());
+        assert_eq!(UiSession::load(&path).navigation, original.navigation);
     }
 }

@@ -1,9 +1,10 @@
 //! Pure subject and author resolution for enrichment results.
 use book_model::BookSubject;
 use metadata_contract::matching::author_match_keys;
-use metadata_contract::{ClassificationScheme, ClassificationSource, EditionIdentityQuery, LookupStatus, RichWorkMetadataMatch};
-use std::collections::{HashMap, HashSet};
-
+use metadata_contract::{ClassificationScheme, ClassificationSource, EditionIdentityQuery, LookupStatus, RichWorkMetadataMatch, SiblingSubjectConsensus, SIBLING_SUBJECT_CONSENSUS_METHOD};
+use crate::MetadataError;
+use subject_projection::{EDITION_SUBTREE_CONSENSUS_SOURCE, UNIFIED_SYSTEM_ID};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub fn merge_rich_matches(matches: &[RichWorkMetadataMatch]) -> RichWorkMetadataMatch {
     metadata_contract::merge_rich_work_matches(matches, classification_similarity_keys)
@@ -25,6 +26,21 @@ pub fn rich_subjects(matched: &RichWorkMetadataMatch) -> Result<Vec<BookSubject>
         subjects.push(BookSubject::new(heading.authority_uri.clone(), name, &heading.source, Some(heading.authority.clone()), None).map_err(|error| error.to_string())?);
     }
     for classification in &matched.classifications {
+        if let Some(ratio) = classification.evidence.iter().find_map(|e| e.method.strip_prefix(SIBLING_SUBJECT_CONSENSUS_METHOD)) {
+            let name = format!("{} (edition consensus: {ratio})", classification.notation);
+            let donors = classification.evidence.iter().filter(|e| e.method.starts_with(SIBLING_SUBJECT_CONSENSUS_METHOD) && !e.open_library_edition_id.is_empty()).map(|e| format!("https://openlibrary.org/books/{}", e.open_library_edition_id)).collect::<BTreeSet<_>>();
+            for donor in donors {
+                subjects.push(BookSubject::new(Some(donor), &name, "metadata:edition-subject-consensus", Some("lcc".into()), Some(classification.notation.clone())).map_err(|error| error.to_string())?);
+            }
+            continue;
+        }
+        if classification.evidence.iter().any(|e| e.method.starts_with("openlibrary_work_title_author:") || e.method == "openlibrary_declared_work_lcc") {
+            let works = classification.evidence.iter().filter(|e| !e.open_library_work_id.is_empty()).map(|e| format!("https://openlibrary.org/works/{}", e.open_library_work_id)).collect::<BTreeSet<_>>();
+            for work in works {
+                subjects.push(BookSubject::new(Some(work), &classification.notation, "openlibrary:metadata:declared-work", Some("lcc".into()), Some(classification.notation.clone())).map_err(|error| error.to_string())?);
+            }
+            continue;
+        }
         if classification.evidence.iter().any(|e| e.method.starts_with("librarything_isbn:")) {
             let authority = match classification.scheme {
                 ClassificationScheme::LibraryOfCongress => "lcc",
@@ -65,6 +81,20 @@ pub fn rich_subjects(matched: &RichWorkMetadataMatch) -> Result<Vec<BookSubject>
     }
     subjects.sort_by(|left, right| (left.authority(), left.name(), left.code()).cmp(&(right.authority(), right.name(), right.code())));
     subjects.dedup();
+    Ok(subjects)
+}
+
+pub(crate) fn sibling_consensus_subjects(consensus: &SiblingSubjectConsensus) -> Result<Vec<BookSubject>, MetadataError> {
+    let mut subjects = Vec::new();
+    for supported in &consensus.subjects {
+        let label = supported.path.rsplit(" / ").next().unwrap_or(&supported.path);
+        let fallback = if consensus.used_highest_support_fallback { "; highest support fallback" } else { "" };
+        let name = format!("{label} (weighted edition support: {:.2}%; {}/{} editions{fallback})", supported.support_fraction * 100.0, supported.supporting_editions, consensus.classified_editions);
+        let donors = supported.evidence.iter().map(|e| format!("https://openlibrary.org/books/{}", e.open_library_edition_id)).collect::<BTreeSet<_>>();
+        for donor in donors {
+            subjects.push(BookSubject::new(Some(donor), &name, EDITION_SUBTREE_CONSENSUS_SOURCE, Some(UNIFIED_SYSTEM_ID.into()), Some(supported.path.clone())).map_err(|error| MetadataError(error.to_string()))?);
+        }
+    }
     Ok(subjects)
 }
 
@@ -153,8 +183,8 @@ pub(crate) fn match_author_resolutions(credits: &[(usize, &str)], remote: &[meta
 }
 
 pub fn classification_only_fallback(query: &EditionIdentityQuery, matched: metadata_contract::EditionIdentityMatch) -> Option<RichWorkMetadataMatch> {
-    use metadata_contract::matching::matching_author_count;
-    if matching_author_count(&query.authors, &matched.authors) == 0 {
+    use metadata_contract::matching::matching_edition_author_count;
+    if matching_edition_author_count(query, &matched) == 0 {
         return None;
     }
     let mut classifications = matched.classifications;
@@ -171,5 +201,5 @@ pub fn classification_only_fallback(query: &EditionIdentityQuery, matched: metad
             open_library_edition_id: matched.open_library_edition_id.clone(),
         });
     }
-    Some(RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: Vec::new(), classifications, authors: Vec::new(), description: None, subjects: Vec::new() })
+    Some(RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: Vec::new(), classifications, authors: Vec::new(), description: None, popularity: None, subjects: Vec::new() })
 }

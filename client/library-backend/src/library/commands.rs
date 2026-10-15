@@ -3,14 +3,16 @@
 //! The runtime defines the wire command, but only the library module is
 //! allowed to interpret it against a resource-bearing LibrarySession.
 
+pub(crate) use crate::ThumbnailResolution;
 use crate::executor::BackendOutput;
 use crate::library::RemoteFile;
-pub(crate) use crate::ThumbnailResolution;
 use crate::{BackendError, ContentHash, DirId};
 pub(crate) use client_runtime::reply::Reply;
+use library_model::{BrowseLocation, BrowsePageRequest, LibraryBrowseQuery};
 
-pub(crate) use super::pending::OperationKind;
 pub(crate) use super::LibrarySession;
+use super::handle::LibraryActor;
+pub(crate) use super::pending::OperationKind;
 pub(crate) use futures_util::future::LocalBoxFuture;
 pub(crate) use std::rc::Rc;
 
@@ -43,6 +45,29 @@ pub enum LibraryCommand {
 /// Commands that produce their reply synchronously in the owning actor.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ReadyCommand {
+    #[cfg(not(target_arch = "wasm32"))]
+    TorrentTransfers,
+    #[cfg(not(target_arch = "wasm32"))]
+    CancelTorrentRequest {
+        request: String,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
+    PrepareTorrentRequest {
+        request: String,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
+    BookTorrents {
+        content_hash: ContentHash,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
+    KeepTorrentSeeding {
+        info_hash: String,
+        keep: bool,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
+    ForgetTorrent {
+        info_hash: String,
+    },
     Scanning,
     DownloadState {
         content_hash: ContentHash,
@@ -52,12 +77,13 @@ pub enum ReadyCommand {
         remote_present: Option<bool>,
     },
     BookCount,
+    LibraryLanguageCounts,
     /// The browser streams books it does not hold; there these are refused.
     DownloadBook {
         content_hash: ContentHash,
     },
     DownloadBrowse {
-        query: library_model::LibraryBrowseQuery,
+        query: LibraryBrowseQuery,
     },
     RemoveLocalBookCopy {
         content_hash: ContentHash,
@@ -81,6 +107,19 @@ pub enum ReadyCommand {
         directory_id: DirId,
     },
     EmptyTrash,
+    #[cfg(not(target_arch = "wasm32"))]
+    TransferPlan {
+        selection: library_database::transfer::TransferSelection,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
+    RemoveTransferredSelection {
+        plan: library_database::transfer::TransferPlan,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
+    CreateDirectoryWithId {
+        parent_id: DirId,
+        name: String,
+    },
     CreateDirectory {
         parent_id: DirId,
         name: String,
@@ -122,10 +161,38 @@ pub enum ReadyCommand {
         directory_id: DirId,
     },
     Browse {
-        query: library_model::LibraryBrowseQuery,
+        query: LibraryBrowseQuery,
+    },
+    BrowseResultPage {
+        query: LibraryBrowseQuery,
+        revision: String,
+        page: BrowsePageRequest,
+    },
+    BrowseResultBooks {
+        query: LibraryBrowseQuery,
+        revision: String,
+        section: BrowseLocation,
+        offset: usize,
+        limit: usize,
+    },
+    BrowsePage {
+        query: LibraryBrowseQuery,
+        page: BrowsePageRequest,
+    },
+    BrowseSections {
+        query: LibraryBrowseQuery,
+        book_limit: usize,
+    },
+    BrowseSectionBooks {
+        query: LibraryBrowseQuery,
+        offset: usize,
+        limit: usize,
     },
     BookDetail {
         content_hash: ContentHash,
+    },
+    ExternalCatalogDetail {
+        entry: library_model::CardKey,
     },
     BookFormat {
         content_hash: ContentHash,
@@ -163,14 +230,43 @@ pub enum ReadyCommand {
 /// Commands that prepare owned asynchronous work for the actor scheduler.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PendingCommand {
+    #[cfg(not(target_arch = "wasm32"))]
+    AddTorrent {
+        input: library_model::TorrentInput,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
+    AddTorrentRequest {
+        input: library_model::TorrentInput,
+        request: String,
+    },
+    #[cfg(not(target_arch = "wasm32"))]
+    CancelTorrent {
+        info_hash: String,
+    },
     LocalStorageUsage,
     /// Downloads a public-domain catalog book and imports it.
-    AddCatalogBook { parent_id: DirId, content_hash: ContentHash },
+    AddCatalogBook {
+        parent_id: DirId,
+        content_hash: ContentHash,
+    },
+    /// Downloads an external catalog audiobook from its source and imports it.
+    AddExternalCatalogAudiobook {
+        parent_id: DirId,
+        entry: library_model::CardKey,
+    },
     /// A file downloaded elsewhere, such as from an OPDS feed, imported as
     /// if it were a local one.
-    ImportDownloadedBook { parent_id: DirId, file_name: String, bytes: serde_bytes::ByteBuf },
+    ImportDownloadedBook {
+        parent_id: DirId,
+        file_name: String,
+        bytes: serde_bytes::ByteBuf,
+    },
     #[cfg(not(target_arch = "wasm32"))]
-    ImportPaths { parent_id: DirId, paths: Vec<std::path::PathBuf>, moving: bool },
+    ImportPaths {
+        parent_id: DirId,
+        paths: Vec<std::path::PathBuf>,
+        moving: bool,
+    },
     // Renewal only authorizes the original remote book. It must not reopen
     // metadata or change source type if the user downloaded a local copy.
     RenewRemoteAudio {
@@ -187,6 +283,10 @@ pub enum PendingCommand {
     },
     Thumbnail {
         content_hash: ContentHash,
+        resolution: ThumbnailResolution,
+    },
+    ExternalCatalogCover {
+        entry: library_model::CardKey,
         resolution: ThumbnailResolution,
     },
     /// A file the caller staged on local disk; the caller deletes it afterwards.
@@ -224,22 +324,44 @@ impl<T: BackendOutput + serde::Serialize + serde::de::DeserializeOwned> LibraryR
 /// The exhaustive match is the ordering audit: adding an async operation must
 /// choose its concurrency/cancellation class explicitly. Native replies stay
 /// typed; encoding still belongs only to the worker boundary.
-pub(crate) fn prepare_library_request(library: Rc<LibrarySession>, command: LibraryCommand) -> Result<PreparedRequest, BackendError> {
+pub(crate) fn prepare_library_request(actor: &mut LibraryActor, command: LibraryCommand) -> Result<PreparedRequest, BackendError> {
     match command {
-        LibraryCommand::Ready(command) => Ok(PreparedRequest::Ready(execute_ready(&library, command)?)),
-        LibraryCommand::Pending(command) => Ok(PreparedRequest::Pending(prepare_pending(library, command))),
+        LibraryCommand::Ready(command) => Ok(PreparedRequest::Ready(execute_ready(actor, command)?)),
+        LibraryCommand::Pending(command) => Ok(PreparedRequest::Pending(prepare_pending(actor.session.clone(), command))),
     }
 }
 
 /// Executes synchronous commands in receive order.
-fn execute_ready(library: &LibrarySession, command: ReadyCommand) -> Result<Reply, BackendError> {
+fn execute_ready(actor: &mut LibraryActor, command: ReadyCommand) -> Result<Reply, BackendError> {
+    let library = &actor.session;
     Ok(match command {
+        #[cfg(not(target_arch = "wasm32"))]
+        ReadyCommand::TorrentTransfers => Reply::new(library.torrents.statuses(&library.db)?),
+        #[cfg(not(target_arch = "wasm32"))]
+        ReadyCommand::CancelTorrentRequest { request } => Reply::new(library.torrents.cancel_request(&request)),
+        #[cfg(not(target_arch = "wasm32"))]
+        ReadyCommand::PrepareTorrentRequest { request } => Reply::new(library.torrents.prepare_request(request)),
+        #[cfg(not(target_arch = "wasm32"))]
+        ReadyCommand::BookTorrents { content_hash } => Reply::new(library.db.book_torrents(&content_hash)?),
+        #[cfg(not(target_arch = "wasm32"))]
+        ReadyCommand::KeepTorrentSeeding { info_hash, keep } => {
+            library.db.keep_torrent_seeding(&info_hash, keep)?;
+            library.torrents.wake();
+            Reply::new(())
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        ReadyCommand::ForgetTorrent { info_hash } => {
+            library.db.forget_torrent(&info_hash)?;
+            library.torrents.wake();
+            Reply::new(())
+        }
         ReadyCommand::Scanning => Reply::new(library.scanner_running()),
-        ReadyCommand::DownloadState { content_hash } => Reply::new(library.download_state(content_hash)?),
+        ReadyCommand::DownloadState { content_hash } => Reply::new(library.download_state(&actor.coordination, content_hash)?),
         ReadyCommand::SyncStatus { signed_in, remote_present } => Reply::new(library.sync_status(signed_in, remote_present)?),
         ReadyCommand::BookCount => Reply::new(library.book_count()?),
+        ReadyCommand::LibraryLanguageCounts => Reply::new(library.db.library_language_counts().map_err(BackendError::operation)?),
         #[cfg(not(target_arch = "wasm32"))]
-        ReadyCommand::DownloadBook { content_hash } => Reply::new(library.queue_download(content_hash)?),
+        ReadyCommand::DownloadBook { content_hash } => Reply::new(library.queue_download(&mut actor.coordination, content_hash)?),
         #[cfg(not(target_arch = "wasm32"))]
         ReadyCommand::DownloadBrowse { query } => Reply::new(library.queue_browse_downloads(query)?),
         #[cfg(target_arch = "wasm32")]
@@ -254,6 +376,16 @@ fn execute_ready(library: &LibrarySession, command: ReadyCommand) -> Result<Repl
         ReadyCommand::PurgeDirectory { directory_id } => Reply::new(library.placement.purge_directory(&directory_id)?),
         ReadyCommand::EmptyTrash => Reply::new(library.placement.empty_trash()?),
         // The new folder identity stays server-side; callers refresh instead.
+        #[cfg(not(target_arch = "wasm32"))]
+        ReadyCommand::TransferPlan { selection } => Reply::new(library.db.transfer_plan(selection)?),
+        #[cfg(not(target_arch = "wasm32"))]
+        ReadyCommand::RemoveTransferredSelection { plan } => {
+            library.db.remove_transferred_selection(&plan)?;
+            library.events.notify_contents_changed();
+            Reply::new(())
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        ReadyCommand::CreateDirectoryWithId { parent_id, name } => Reply::new(library.placement.create_directory(&parent_id, &name)?.id),
         ReadyCommand::CreateDirectory { parent_id, name } => Reply::new(library.placement.create_directory(&parent_id, &name).map(|_| ())?),
         ReadyCommand::RenameDirectory { directory_id, name } => Reply::new(library.placement.queue_directory_move(&directory_id, None, Some(&name))?),
         ReadyCommand::MoveDirectory { directory_id, parent_id } => Reply::new(library.placement.queue_directory_move(&directory_id, Some(&parent_id), None)?),
@@ -265,7 +397,15 @@ fn execute_ready(library: &LibrarySession, command: ReadyCommand) -> Result<Repl
         ReadyCommand::MoveBookToTrash { content_hash } => Reply::new(library.placement.move_book_to_trash(&content_hash)?),
         ReadyCommand::MoveDirectoryToTrash { directory_id } => Reply::new(library.placement.move_directory_to_trash(&directory_id)?),
         ReadyCommand::Browse { query } => Reply::new(library.browse(&query)?),
+        ReadyCommand::BrowseResultPage { query, revision, page } => Reply::new(library.db.browse_result_page(&query, library.downloaded_books_only()?, &revision, page).map_err(BackendError::operation)?),
+        ReadyCommand::BrowseResultBooks { query, revision, section, offset, limit } => {
+            Reply::new(library.db.browse_result_books(&query, library.downloaded_books_only()?, &revision, section, offset, limit).map_err(BackendError::operation)?)
+        }
+        ReadyCommand::BrowsePage { query, page } => Reply::new(library.db.browse_page(&query, library.downloaded_books_only()?, page).map_err(BackendError::operation)?),
+        ReadyCommand::BrowseSections { query, book_limit } => Reply::new(library.db.browse_sections(&query, library.downloaded_books_only()?, book_limit).map_err(BackendError::operation)?),
+        ReadyCommand::BrowseSectionBooks { query, offset, limit } => Reply::new(library.db.browse_section_books(&query, library.downloaded_books_only()?, offset, limit).map_err(BackendError::operation)?),
         ReadyCommand::BookDetail { content_hash } => Reply::new(library.db.browse_book_detail(&content_hash).map_err(BackendError::operation)?),
+        ReadyCommand::ExternalCatalogDetail { entry } => Reply::new(library.db.external_catalog_detail(entry).map_err(BackendError::operation)?),
         ReadyCommand::BookFormat { content_hash } => Reply::new(library.db.book_format(&content_hash).map_err(BackendError::operation)?),
         ReadyCommand::ReadingPosition { content_hash } => Reply::new(library.db.reading_position(&content_hash).map_err(BackendError::operation)?),
         ReadyCommand::PdfReadingPosition { content_hash } => Reply::new(library.db.pdf_reading_position(&content_hash).map_err(BackendError::operation)?),
@@ -273,7 +413,12 @@ fn execute_ready(library: &LibrarySession, command: ReadyCommand) -> Result<Repl
         // travels with the position because that is when it changes, and it is
         // stored locally rather than synchronized: any device can recompute it
         // from the position and the book's own navigation.
-        ReadyCommand::UpdateReadingPosition { content_hash, position, progress, entry } => Reply::new(library.db.update_reading_position(&content_hash, &position, progress, entry.as_deref()).map_err(BackendError::operation)?),
+        ReadyCommand::UpdateReadingPosition { content_hash, position, progress, entry } => {
+            if library.db.update_reading_position(&content_hash, &position, progress, entry.as_deref()).map_err(BackendError::operation)? {
+                actor.coordination.reading_position_changed(content_hash, &library.events);
+            }
+            Reply::new(())
+        }
         ReadyCommand::Annotations { content_hash } => Reply::new(library.db.annotations(content_hash).map_err(BackendError::operation)?),
         ReadyCommand::UpsertAnnotation { annotation } => Reply::new(library.upsert_annotation(&annotation)?),
         ReadyCommand::DeleteAnnotation { annotation_id, modified_at } => Reply::new(library.delete_annotation(&annotation_id, modified_at)?),
@@ -285,15 +430,41 @@ fn execute_ready(library: &LibrarySession, command: ReadyCommand) -> Result<Repl
 /// Prepares owned work with an explicit concurrency/cancellation class.
 fn prepare_pending(library: Rc<LibrarySession>, command: PendingCommand) -> PendingOperation {
     match command {
+        #[cfg(not(target_arch = "wasm32"))]
+        PendingCommand::AddTorrent { input } => PendingOperation::new(OperationKind::Import, Box::pin(async move { Ok(Reply::new(library.add_torrent(input).await?)) })),
+        #[cfg(not(target_arch = "wasm32"))]
+        PendingCommand::AddTorrentRequest { input, request } => {
+            let request = library.torrents.begin_request(&request);
+            PendingOperation::new(OperationKind::Import, Box::pin(async move { Ok(Reply::new(library.add_torrent_request(input, request).await?)) }))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        PendingCommand::CancelTorrent { info_hash } => PendingOperation::new(OperationKind::Read, Box::pin(async move { Ok(Reply::new(library.cancel_torrent(&info_hash).await?)) })),
         PendingCommand::LocalStorageUsage => PendingOperation::new(OperationKind::Read, Box::pin(async move { Ok(Reply::new(library.local_storage_usage().await?)) })),
-        PendingCommand::ImportDownloadedBook { parent_id, file_name, bytes } => PendingOperation::new(OperationKind::Import, Box::pin(async move { Ok(Reply::new(library.import.import_downloaded_book(parent_id, &file_name, bytes.into_vec()).await?)) })),
+        PendingCommand::ImportDownloadedBook { parent_id, file_name, bytes } => {
+            PendingOperation::new(OperationKind::Import, Box::pin(async move { Ok(Reply::new(library.import.import_downloaded_book(parent_id, &file_name, bytes.into_vec()).await?)) }))
+        }
         PendingCommand::AddCatalogBook { parent_id, content_hash } => PendingOperation::new(OperationKind::Import, Box::pin(async move { Ok(Reply::new(library.import.import_catalog_book(parent_id, content_hash).await?)) })),
+        PendingCommand::AddExternalCatalogAudiobook { parent_id, entry } => PendingOperation::new(OperationKind::Import, Box::pin(async move { Ok(Reply::new(library.import.import_external_catalog_audiobook(parent_id, entry).await?)) })),
         // Renewal only authorizes the original remote book. It must not reopen
         // metadata or change source type if the user downloaded a local copy.
         PendingCommand::RenewRemoteAudio { content_hash } => PendingOperation::new(OperationKind::Read, Box::pin(async move { Ok(Reply::new(library.direct_audio_source(content_hash).await?)) })),
-        PendingCommand::ReadFileRange { source, offset, length } => PendingOperation::new(OperationKind::Read, Box::pin(async move { Ok(Reply::new(serde_bytes::ByteBuf::from(library.read_file_range(&source, offset, length).await.map_err(BackendError::operation)?))) })),
-        PendingCommand::ReadFileBundle { source, ranges } => PendingOperation::new(OperationKind::Read, Box::pin(async move { Ok(Reply::new(serde_bytes::ByteBuf::from(library.read_file_bundle(&source, ranges).await.map_err(BackendError::operation)?))) })),
+        PendingCommand::ReadFileRange { source, offset, length } => {
+            PendingOperation::new(OperationKind::Read, Box::pin(async move { Ok(Reply::new(serde_bytes::ByteBuf::from(library.read_file_range(&source, offset, length).await.map_err(BackendError::operation)?))) }))
+        }
+        PendingCommand::ReadFileBundle { source, ranges } => {
+            PendingOperation::new(OperationKind::Read, Box::pin(async move { Ok(Reply::new(serde_bytes::ByteBuf::from(library.read_file_bundle(&source, ranges).await.map_err(BackendError::operation)?))) }))
+        }
         PendingCommand::Thumbnail { content_hash, resolution } => PendingOperation::new(OperationKind::Read, Box::pin(async move { Ok(Reply::new(library.thumbnail(content_hash, resolution).await?.map(serde_bytes::ByteBuf::from))) })),
+        PendingCommand::ExternalCatalogCover { entry, resolution } => PendingOperation::new(
+            OperationKind::Read,
+            Box::pin(async move {
+                let cover = match resolution {
+                    ThumbnailResolution::HighDensity => library_catalog::external_cover(entry, true).await,
+                    ThumbnailResolution::Browse | ThumbnailResolution::CardHighDensity => library_catalog::card_cover(entry, resolution.width(), &*library.cpu).await,
+                };
+                Ok(Reply::new(cover.map(serde_bytes::ByteBuf::from)))
+            }),
+        ),
         #[cfg(not(target_arch = "wasm32"))]
         PendingCommand::ImportPaths { parent_id, paths, moving } => PendingOperation::new(OperationKind::Import, Box::pin(async move { Ok(Reply::new(library.import_paths(parent_id, paths, moving).await?)) })),
         #[cfg(not(target_arch = "wasm32"))]

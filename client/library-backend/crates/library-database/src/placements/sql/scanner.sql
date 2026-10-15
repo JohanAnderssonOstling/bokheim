@@ -45,7 +45,8 @@ WHERE b.deleted_at IS NULL AND bd.deleted_at IS NULL;
 INSERT INTO sync_metadata(singleton,scan_seq) VALUES(1,:value) ON CONFLICT(singleton) DO UPDATE SET scan_seq=excluded.scan_seq;
 
 -- name: scanner_known_books?
-SELECT bd.local_hash,b.content_hash,bd.dir_id,bd.file_name,i.inspection_version
+SELECT bd.local_hash,b.content_hash,bd.dir_id,bd.file_name,i.inspection_version,
+       b.format,b.duration_ms,b.toc_json,b.tracks_json
 FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id
 LEFT JOIN book_local_state i ON i.content_hash=b.content_hash AND i.inspection_format=b.format
 WHERE bd.deleted_at IS NULL AND b.deleted_at IS NULL AND bd.local_hash!='';

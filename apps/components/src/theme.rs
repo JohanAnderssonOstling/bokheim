@@ -24,15 +24,15 @@
 
 use std::rc::Rc;
 
-use app_preferences::{ApplicationTheme, BrowsingPreferences, ResolvedAppearance};
+use app_preferences::{ApplicationTheme, BrowsingPreferences, ResolvedAppearance, UiFontFamily};
 use gpui::{App, Hsla, px};
 use gpui_component::{Theme, ThemeTokens};
 
 /// One theme at one appearance.
 ///
 /// Most surfaces share `surface_bg` and are told apart by their edge.
-/// `raised_bg` is the one deliberate second fill: a browse-page section that
-/// wants to read as raised off the page without floating. `hover_overlay`
+/// `raised_bg` is the one deliberate second fill: bright browse cards against
+/// a slightly darker page. `hover_overlay`
 /// carries alpha (`0xRRGGBBAA`) so one value reads correctly wherever it
 /// lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,7 +65,12 @@ pub struct ApplicationPalette {
     /// hairline is what made the interface read as uniformly emphatic. This is
     /// the quiet tier, and `border` becomes where hover travels to.
     pub rule: u32,
+    /// The light wash under the pointer: the accent at a low alpha, in every
+    /// appearance, so hovering reads as a lighter step of `active_highlight`
+    /// — the keyboard's wash — rather than as a grey of its own.
     pub hover_overlay: u32,
+    /// The keyboard's wash: the cursor and the selection. See the ladder in
+    /// `tokens.rs`.
     pub active_highlight: u32,
     /// `active_highlight` under the pointer. Its own value rather than a step
     /// off it: see the generator's ladder, which owns both the size of the step
@@ -79,6 +84,8 @@ pub struct ApplicationPalette {
     /// `danger_*` so a pending transfer does not read as an error.
     pub warning_text: u32,
     pub warning_bg: u32,
+    /// Categorical colours for library storage, shared by the meter and legend.
+    pub usage_segments: [u32; 5],
 }
 
 #[cfg(feature = "kobo")]
@@ -132,13 +139,13 @@ fn platform_palette(theme: ApplicationTheme, appearance: ResolvedAppearance) -> 
 /// half-applied theme.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BrowserTheme {
+    /// Interface typography, shared by text and prominent display headings.
+    pub ui_font_family: UiFontFamily,
     /// The surface. Every region — the page, a card, a popover, a panel — is
     /// this colour by default, and is told apart by its `rule` edge and, if it
     /// floats, by `overlay_shadow`.
     pub page_bg: Hsla,
-    /// A second fill, lighter than `page_bg` in both appearances, for a region
-    /// that wants to read as raised off the page without floating — see
-    /// `paginator::element`'s group panels.
+    /// A brighter second fill for borderless browse-section cards.
     pub raised_bg: Hsla,
     pub border: Hsla,
     /// The quiet boundary: dividers, card edges, a region's edge against
@@ -154,8 +161,10 @@ pub struct BrowserTheme {
     /// surface inverts to the accent instead of merely bordering with it —
     /// `text` is unreadable there, and `page_bg` only happens to work in light.
     pub accent_text: Hsla,
-    /// A pale accent tint laid over a neutral surface: hover on a list row, a
-    /// tab, a navigation destination.
+    /// The keyboard's tier: the cursor and the selection, which is transient
+    /// however it was made. Also the value chosen in a settings control. What
+    /// it means is set by the ladder in `tokens.rs`; pointer hover is the
+    /// lighter `hover`.
     ///
     /// Distinct from `accent_hover`, which is the accent *itself* under the
     /// pointer. The two are both "hover", but from different starting surfaces
@@ -182,6 +191,7 @@ pub struct BrowserTheme {
     /// it is on the theme because the palette distinguishes it and dropping it
     /// here would mean a control could never acknowledge a press.
     pub accent_active: Hsla,
+    /// The light wash under the pointer — the accent at a low alpha.
     /// Translucent: composited over whichever surface it lands on. Solid hover
     /// colours were the reason hover was invisible on the page background.
     pub hover: Hsla,
@@ -200,13 +210,14 @@ pub struct BrowserTheme {
     /// round trip through `gpui_component::Theme` wrote it and never read it
     /// back, so warning text had no surface of its own to sit on.
     pub warning_surface: Hsla,
+    /// Distinct library colours with contrast against the page in this appearance.
+    pub usage_segments: [Hsla; 5],
 }
 
 impl gpui::Global for BrowserTheme {}
 
 impl BrowserTheme {
-    /// Total in both directions: every palette token is spent, and every field
-    /// here comes from one. The two alpha derivations are the only arithmetic.
+    /// Derives every colour from the palette, with the default interface face.
     pub fn from_palette(palette: ApplicationPalette) -> Self {
         let colour = |value: u32| -> Hsla { gpui::rgb(value).into() };
         let mut shadow = colour(palette.border);
@@ -214,6 +225,7 @@ impl BrowserTheme {
         let mut overlay_scrim = colour(palette.ink_text);
         overlay_scrim.a = 0.5;
         Self {
+            ui_font_family: UiFontFamily::default(),
             page_bg: colour(palette.surface_bg),
             raised_bg: colour(palette.raised_bg),
             border: colour(palette.border),
@@ -234,6 +246,14 @@ impl BrowserTheme {
             danger_surface: colour(palette.danger_bg),
             warning: colour(palette.warning_text),
             warning_surface: colour(palette.warning_bg),
+            usage_segments: palette.usage_segments.map(colour),
+        }
+    }
+
+    pub const fn display_font_family(self) -> &'static str {
+        match self.ui_font_family {
+            UiFontFamily::Serif => crate::DISPLAY_FONT_FAMILY,
+            UiFontFamily::SansSerif => self.ui_font_family.family_name(),
         }
     }
 }
@@ -246,7 +266,7 @@ impl Default for BrowserTheme {
     }
 }
 
-/// The active theme. Cheap: a copy of a struct of colours.
+/// The active colours and typography, copied together.
 pub fn browser_theme(cx: &App) -> BrowserTheme {
     cx.try_global::<BrowserTheme>().copied().unwrap_or_default()
 }
@@ -274,7 +294,8 @@ pub fn resolved_appearance(cx: &App) -> ResolvedAppearance {
 /// `gpui_component::Theme`.
 pub fn apply_appearance(preferences: &BrowsingPreferences, cx: &mut App) {
     let resolved = preferences.appearance_override().unwrap_or_else(|| resolved_appearance(cx));
-    let theme = BrowserTheme::from_palette(platform_palette(preferences.theme(), resolved));
+    let mut theme = BrowserTheme::from_palette(platform_palette(preferences.theme(), resolved));
+    theme.ui_font_family = preferences.ui_font_family();
     cx.set_global(SelectedPalette(preferences.theme(), resolved));
     cx.set_global(theme);
 
@@ -294,7 +315,7 @@ pub fn apply_appearance(preferences: &BrowsingPreferences, cx: &mut App) {
         application_theme.scrollbar_show = gpui_component::scroll::ScrollbarShow::Always;
         application_theme.colors = kobo::widget_colours(theme);
     }
-    application_theme.font_family = app_preferences::INTERFACE_FONT_FAMILY.into();
+    application_theme.font_family = preferences.ui_font_family().family_name().into();
     application_theme.font_size = px(preferences.ui_font_size_px() as f32);
     application_theme.radius = px(0.0);
     application_theme.radius_lg = px(0.0);
@@ -361,11 +382,21 @@ fn apply_widget_colours(theme: BrowserTheme, application: &mut Theme) {
     colors.sidebar_primary_foreground = theme.accent_text;
     colors.title_bar = theme.page_bg;
     colors.title_bar_border = theme.rule;
+    // The scrim behind a dialog, the same one our own modals lay down, so a
+    // confirmation dims the page the way the navigation modal does.
+    colors.overlay = theme.overlay_scrim;
     // gpui-component treats the semantic colour itself as the readable
     // foreground for alerts and derives a soft background from it. The old
     // assignment inverted these roles, rendering the pale tint as alert text.
     colors.danger = theme.danger;
     colors.danger_foreground = theme.danger_surface;
+    // A destructive button, such as a dialog's "Delete library": the danger
+    // text colour as its fill, lettered in the danger surface. Left unset it
+    // kept gpui-component's stock red in every palette.
+    colors.button_danger = theme.danger;
+    colors.button_danger_hover = theme.danger.opacity(0.88);
+    colors.button_danger_active = theme.danger.opacity(0.76);
+    colors.button_danger_foreground = theme.danger_surface;
     colors.warning = theme.warning;
     colors.warning_foreground = theme.warning_surface;
     colors.ring = theme.accent;
@@ -385,6 +416,12 @@ fn apply_widget_colours(theme: BrowserTheme, application: &mut Theme) {
 /// were too, since a highlighter is yellow in every theme. Each pair separates
 /// by weight rather than hue, because a hit and a note rarely land on the same
 /// word while an active one always has to win against its own passive form.
+/// The passage being read aloud is a lighter step of the selection's accent.
+///
+/// On e-ink the amber is a grey, and a search hit at the annotation's weight
+/// reads as one. There hits are the accent at steps darker than any
+/// annotation or narration highlight paints, the active one still light
+/// enough to read black text through.
 ///
 /// Alphas rather than blends: a highlight is laid over text the book
 /// drew, so it has to stay translucent whatever is underneath it.
@@ -395,13 +432,21 @@ pub struct InteractionHighlights {
     pub active_search_match: [u8; 4],
     pub annotation: [u8; 4],
     pub active_annotation: [u8; 4],
+    pub reading: [u8; 4],
 }
 
 const SELECTION_ALPHA: u8 = 96;
+#[cfg(not(feature = "kobo"))]
 const SEARCH_MATCH_ALPHA: u8 = 88;
+#[cfg(not(feature = "kobo"))]
 const ACTIVE_SEARCH_MATCH_ALPHA: u8 = 152;
+#[cfg(feature = "kobo")]
+const SEARCH_MATCH_ALPHA: u8 = 120;
+#[cfg(feature = "kobo")]
+const ACTIVE_SEARCH_MATCH_ALPHA: u8 = 150;
 const ANNOTATION_ALPHA: u8 = 72;
 const ACTIVE_ANNOTATION_ALPHA: u8 = 136;
+const READING_ALPHA: u8 = 56;
 
 /// A theme colour laid over the page at `alpha`.
 fn highlight(colour: Hsla, alpha: u8) -> [u8; 4] {
@@ -412,13 +457,14 @@ fn highlight(colour: Hsla, alpha: u8) -> [u8; 4] {
 
 impl InteractionHighlights {
     pub fn from_theme(theme: BrowserTheme) -> Self {
+        let search = if cfg!(feature = "kobo") { theme.accent } else { theme.warning };
         Self {
             selection: highlight(theme.accent, SELECTION_ALPHA),
-            search_match: highlight(theme.warning, SEARCH_MATCH_ALPHA),
-            active_search_match: highlight(theme.warning, ACTIVE_SEARCH_MATCH_ALPHA),
+            search_match: highlight(search, SEARCH_MATCH_ALPHA),
+            active_search_match: highlight(search, ACTIVE_SEARCH_MATCH_ALPHA),
             annotation: highlight(theme.warning, ANNOTATION_ALPHA),
             active_annotation: highlight(theme.warning, ACTIVE_ANNOTATION_ALPHA),
+            reading: highlight(theme.accent, READING_ALPHA),
         }
     }
-
 }

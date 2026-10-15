@@ -119,6 +119,7 @@ pub fn spawn_helper(data: &Path, installation: &Path) -> Result<(), String> {
     let executable = directory.join("Bokheim.exe");
     let prepared = (|| {
         activation::copy_file(&std::env::current_exe().map_err(error)?, &executable)?;
+        activation::copy_file(&subject_projection::bundled::path()?, &directory.join("taxonomy.sqlite3"))?;
         activation::write_json(&directory.join("job.json"), &Job { installation: canonical(installation)?, parent: std::process::id() })?;
         Command::new(&executable).creation_flags(0x08000000).arg("--bokheim-update-helper").arg(&directory).spawn().map_err(error)
     })();

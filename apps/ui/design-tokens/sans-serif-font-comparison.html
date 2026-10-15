@@ -1,0 +1,659 @@
+<!doctype html>
+<html lang="en" class="all-display" data-theme="warm-light" data-view="specimen">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bokheim · Sans-serif comparison</title>
+  <style>
+    @font-face { font-family: "NV Jost"; src: url("../../desktop-gpui/assets/fonts/NV_Jost-Regular.ttf") format("truetype"); font-weight: 400; font-style: normal; }
+    @font-face { font-family: "NV Jost"; src: url("../../desktop-gpui/assets/fonts/NV_Jost-Italic.ttf") format("truetype"); font-weight: 400; font-style: italic; }
+    @font-face { font-family: "NV Jost"; src: url("../../desktop-gpui/assets/fonts/NV_Jost-Bold.ttf") format("truetype"); font-weight: 700; font-style: normal; }
+    @font-face { font-family: "NV Jost"; src: url("../../desktop-gpui/assets/fonts/NV_Jost-BoldItalic.ttf") format("truetype"); font-weight: 700; font-style: italic; }
+    @font-face { font-family: "Montserrat"; src: url("assets/fonts/sans-comparison/montserrat/Montserrat[wght].ttf") format("truetype"); font-weight: 100 900; font-style: normal; }
+    @font-face { font-family: "Montserrat"; src: url("assets/fonts/sans-comparison/montserrat/Montserrat-Italic[wght].ttf") format("truetype"); font-weight: 100 900; font-style: italic; }
+    @font-face { font-family: "Raleway"; src: url("assets/fonts/sans-comparison/raleway/Raleway[wght].ttf") format("truetype"); font-weight: 100 900; font-style: normal; }
+    @font-face { font-family: "Raleway"; src: url("assets/fonts/sans-comparison/raleway/Raleway-Italic[wght].ttf") format("truetype"); font-weight: 100 900; font-style: italic; }
+    @font-face { font-family: "Source Sans 3"; src: url("assets/fonts/sans-comparison/sourcesans3/SourceSans3[wght].ttf") format("truetype"); font-weight: 200 900; font-style: normal; }
+    @font-face { font-family: "Source Sans 3"; src: url("assets/fonts/sans-comparison/sourcesans3/SourceSans3-Italic[wght].ttf") format("truetype"); font-weight: 200 900; font-style: italic; }
+    @font-face { font-family: "Bodoni Moda"; src: url("../../desktop-gpui/assets/fonts/BodoniModa-Regular.ttf") format("truetype"); font-weight: 400; }
+    :root {
+      color-scheme: light;
+      --canvas: #eae5dc; --paper: #f6f2eb; --raised: #fff; --ink: #22201d;
+      --muted: #6b675f; --rule: #c5bdac; --border: #8c7f64; --accent: #466853;
+      --accent-ink: #fffdfa; --wash: #d9e8de; --hover: #0000000d; --ui-size: 18px; --columns: 4; --compact-columns: 2;
+    }
+    [data-theme="cool-light"] {
+      --canvas: #e4e9f1; --paper: #eff3f9; --raised: #fff; --ink: #262627;
+      --muted: #65686a; --rule: #b9bec4; --border: #798189; --accent: #224a7f;
+      --accent-ink: #fdfdfe; --wash: #dbe4f1; --hover: #0000000d;
+    }
+    [data-theme="warm-dark"] {
+      color-scheme: dark;
+      --canvas: #1c1a16; --paper: #11100d; --raised: #2a2720; --ink: #efe6d0;
+      --muted: #a69c86; --rule: #4e4334; --border: #786644; --accent: #d3b271;
+      --accent-ink: #11100d; --wash: #3c3423; --hover: #d3b27114;
+    }
+    [data-theme="cool-dark"] {
+      color-scheme: dark;
+      --canvas: #191d23; --paper: #0f1216; --raised: #20252c; --ink: #e3e8ef;
+      --muted: #929aa5; --rule: #374456; --border: #53667f; --accent: #8fb0dc;
+      --accent-ink: #0f1216; --wash: #2b3541; --hover: #8fb0dc14;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--canvas); color: var(--ink); font: 14px/1.5 system-ui, sans-serif; }
+    button, input, select { font: inherit; }
+    button, select { cursor: pointer; }
+    button { color: inherit; }
+    button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    main { max-width: 1800px; margin: auto; padding: 40px 32px 28px; }
+    .eyebrow { margin: 0 0 8px; color: var(--muted); font-size: 11px; letter-spacing: .16em; text-transform: uppercase; }
+    h1 { margin: 0; font: 400 clamp(32px, 3vw, 48px)/1.15 "Bodoni Moda", serif; }
+    .intro { margin: 12px 0 24px; color: var(--muted); }
+    .controls { display: flex; align-items: center; flex-wrap: wrap; gap: 16px 28px; padding: 16px 0; border-block: 1px solid var(--rule); }
+    .segmented { display: flex; }
+    .segmented button { border: 1px solid var(--border); background: transparent; padding: 7px 14px; }
+    .segmented button + button { border-left: 0; }
+    .segmented button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+    .control { display: flex; align-items: center; gap: 10px; }
+    .control select { padding: 7px; background: var(--paper); border: 1px solid var(--border); color: var(--ink); }
+    input { accent-color: var(--accent); }
+    input[type="range"] { width: 100px; }
+    output { min-width: 34px; font-variant-numeric: tabular-nums; }
+    .display-control { color: var(--muted); }
+    .comparison { display: grid; grid-template-columns: repeat(var(--columns), minmax(0, 1fr)); gap: 24px; margin-top: 28px; }
+    .version-heading { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+    .number { font-size: 12px; color: var(--muted); }
+    h2 { margin: 0; font-size: 18px; font-weight: 500; }
+    .badge { margin-left: auto; padding: 2px 6px; border: 1px solid var(--rule); color: var(--muted); font-size: 10px; white-space: nowrap; }
+    .mockup { height: 650px; display: flex; flex-direction: column; border: 1px solid var(--border); background: var(--paper); font: 400 var(--ui-size)/1.4 var(--family); font-synthesis: none; }
+    .app-toolbar { display: flex; align-items: center; gap: 10px; height: 64px; flex: none; padding: 0 16px; border-bottom: 1px solid var(--rule); }
+    .app-mark { width: 26px; height: 26px; }
+    .brand { font-size: 1.375em; }
+    .sync { margin-left: auto; color: var(--muted); font-size: .875em; }
+    .sync-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); margin-right: 5px; }
+    .app-body { display: flex; min-height: 0; flex: 1; }
+    .rail { width: 104px; flex: none; border-right: 1px solid var(--rule); padding: 16px 8px; display: flex; flex-direction: column; gap: 8px; }
+    .rail button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; min-height: 72px; padding: 8px 2px; border: 0; background: transparent; font-size: .75em; }
+    .rail button:hover { background: var(--hover); }
+    .rail button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+    .rail svg { width: 25px; height: 25px; stroke: currentColor; fill: none; stroke-width: 1; }
+    .smallcaps { font-feature-settings: "smcp" 1, "c2sc" 1; }
+    .rail .bottom { margin-top: auto; }
+    .screen { min-width: 0; flex: 1; overflow: auto; padding: 24px 16px; }
+    .display { font-family: "Bodoni Moda", serif; font-size: 1.6875em; font-weight: 400; line-height: 1.15; margin: 0 0 6px; }
+    .all-display .mockup .display { font-family: var(--family); }
+    .subheading { margin: 0 0 20px; color: var(--muted); font-size: .875em; }
+    .search { display: flex; align-items: center; gap: 8px; border: 1px solid var(--border); padding: 8px; margin-bottom: 20px; color: var(--muted); font-size: .875em; }
+    .search svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1; flex: none; }
+    .section-label { margin: 0 0 12px; font-size: .875em; color: var(--muted); }
+    .books { display: grid; grid-template-columns: 1fr 1fr; gap: 20px 16px; }
+    .book { min-width: 0; }
+    .cover { position: relative; aspect-ratio: 2 / 3; max-height: 190px; padding: 16px 9px; display: flex; flex-direction: column; align-items: center; justify-content: space-between; overflow: hidden; border: 1px solid #0003; color: #f1e5c7; background: #294438; font: 400 16px/1.12 "Bodoni Moda", serif; text-align: center; }
+    .cover::before { content: ""; position: absolute; inset: 7px; border: 1px solid currentColor; opacity: .5; }
+    .cover > * { position: relative; }
+    .cover small { font: 9px/1.3 system-ui; letter-spacing: .12em; text-transform: uppercase; }
+    .cover .ornament { width: 38px; height: 38px; border: 1px solid currentColor; border-radius: 50%; opacity: .7; }
+    .cover.blue { background: #263e58; color: #f4e9cd; }
+    .cover.red { background: #7c3d37; color: #f4e9cd; }
+    .cover.gold { background: #c4aa73; color: #333025; }
+    .book-title { margin: 9px 0 2px; font-size: 1em; line-height: 1.25; }
+    .author { margin: 0; font-size: .875em; color: var(--muted); }
+    .progress { height: 3px; background: var(--rule); margin-top: 8px; }
+    .progress span { display: block; height: 100%; width: 38%; background: var(--accent); }
+    .app-footer { padding: 8px 16px; border-top: 1px solid var(--rule); font-size: .875em; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
+    .view { display: none; }
+    [data-view="library"] .view-library, [data-view="settings"] .view-settings, [data-view="specimen"] .view-specimen { display: block; }
+    .setting-group { border-bottom: 1px solid var(--rule); padding: 16px 0; }
+    .setting-group:first-of-type { padding-top: 0; }
+    .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 0; font-size: 1em; }
+    .stepper { display: flex; border: 1px solid var(--border); align-items: center; flex: none; }
+    .stepper span { min-width: 40px; text-align: center; padding: 3px; }
+    .stepper .sign { min-width: 24px; }
+    .mock-choice { display: flex; border: 1px solid var(--border); }
+    .mock-choice span { flex: 1; min-width: 0; padding: 6px; text-align: center; font-size: .875em; }
+    .mock-choice span + span { border-left: 1px solid var(--rule); }
+    .mock-choice .selected { background: var(--accent); color: var(--accent-ink); }
+    .note { margin: 10px 0; color: var(--muted); font-size: .875em; }
+    .specimen-text { font-size: 1.125em; line-height: 1.5; margin: 20px 0; }
+    .specimen-row { padding: 14px 0; border-top: 1px solid var(--rule); overflow-wrap: anywhere; }
+    .specimen-row .section-label { margin-bottom: 6px; }
+    .caption { margin: 12px 0 0; font-size: 12px; color: var(--muted); }
+    .font-status { margin: 16px 0 0; font-size: 12px; color: var(--muted); }
+    footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 12px; }
+    @media (max-width: 1650px) { .comparison { grid-template-columns: repeat(var(--compact-columns), minmax(0, 1fr)); } }
+    @media (max-width: 800px) { main { padding: 24px 16px; } .comparison { grid-template-columns: 1fr; overflow: visible; gap: 28px; } .mockup { height: 650px; } .controls { gap: 16px; } .display-control { width: 100%; } }
+    @media print { .controls, .font-status { display: none; } main { padding: 0; } .comparison { overflow: visible; grid-template-columns: repeat(var(--columns), minmax(0, 1fr)); gap: 12px; } .mockup { height: auto; min-height: 650px; } }
+
+    [hidden] { display: none !important; }
+    .secondary-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 16px 28px; margin-top: 16px; }
+    .font-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+    .font-filters button { padding: 5px 10px; background: transparent; border: 1px solid var(--border); font-size: 12px; }
+    .font-filters button[aria-pressed="true"] { background: var(--wash); }
+    .font-filters button:disabled { cursor: default; }
+    .mockup { height: 690px; }
+    .rail { width: 80px; }
+    .screen { padding: 20px 16px; }
+    .specimen-text { font-size: 1em; line-height: 1.55; }
+    .sample-status { float: right; color: var(--muted); font-size: 10px; font-style: normal; font-family: system-ui; }
+    .feature-sample { font-size: 1.125em; line-height: 1.5; overflow-wrap: anywhere; }
+    .specimen-row { font-style: var(--sample-style, normal); }
+    .sample-comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .sample-comparison small { display: block; color: var(--muted); font: 10px/1.5 system-ui; margin-bottom: 4px; }
+    .feature-audit { margin-top: 36px; padding-top: 24px; border-top: 1px solid var(--rule); }
+    .audit-intro { color: var(--muted); font-size: 13px; max-width: 900px; }
+    .table-scroll { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
+    th, td { padding: 10px 14px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+    th { font-weight: 500; }
+    thead { background: var(--paper); }
+    td.yes { color: var(--accent); font-weight: 600; }
+    td.absent { color: var(--muted); }
+    td.partial { color: var(--ink); }
+    details { margin-top: 20px; color: var(--muted); font-size: 12px; }
+    summary { cursor: pointer; }
+    .source-entry { margin: 16px 0; overflow-wrap: anywhere; }
+    a { color: var(--accent); }
+    .source-entry code { font-size: 11px; }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="eyebrow">Bokheim / Interface studies</p>
+    <h1>A sans serif with more to offer.</h1>
+    <p class="intro">NV Jost alongside three alternatives. Compare the letterforms, reading texture, and the typographic features available in each font.</p>
+    <div class="controls" aria-label="Comparison controls">
+      <div class="segmented" role="group" aria-label="Preview view">
+        <button type="button" data-view-button="library" aria-pressed="false">Library</button>
+        <button type="button" data-view-button="settings" aria-pressed="false">Reader settings</button>
+        <button type="button" data-view-button="specimen" aria-pressed="true">Reading &amp; features</button>
+      </div>
+      <label class="control">Theme <select id="theme"><option value="warm-light">Warm · Light</option><option value="warm-dark">Warm · Dark</option><option value="cool-light">Cool · Light</option><option value="cool-dark">Cool · Dark</option></select></label>
+      <label class="control" for="size">UI size <input id="size" type="range" min="12" max="24" step="1" value="18"><output id="size-value" for="size">18px</output></label>
+      <label class="control display-control"><input id="display-font" type="checkbox" checked>Use each font for display headings</label>
+    </div>
+    <div class="secondary-controls">
+      <div class="control"><span>Compare</span><div class="font-filters" role="group" aria-label="Fonts to compare" id="font-filters"></div></div>
+      <label class="control">Style <select id="font-style"><option value="normal">Upright</option><option value="italic">Italic</option></select></label>
+      <label class="control"><input type="checkbox" id="enable-features" checked>Enable sample features</label>
+    </div>
+    <div class="comparison" id="comparison"></div>
+    <section class="feature-audit" aria-labelledby="feature-heading">
+      <h2 id="feature-heading">What is actually in the font?</h2>
+      <p class="audit-intro">Checked against the bundled OpenType tables. Changing the style above updates this table; support can differ between upright and italic.</p>
+      <div class="table-scroll"><table id="feature-table"></table></div>
+      <p class="audit-intro">“Default” means the feature is already present in the normal digits. “No tag” means the font has no dedicated lookup for that feature. The samples request features directly and do not synthesize small caps.</p>
+      <details><summary>Feature tags and sources</summary><div id="source-details"></div></details>
+    </section>
+    <p class="font-status" id="font-status" role="status">Loading bundled fonts…</p>
+    <footer><span>Local font files · Shared app palettes and sizes · SIL Open Font License 1.1.</span><span>Comparison previews of UI and book typography.</span></footer>
+  </main>
+  <template id="panel-template">
+    <section>
+      <div class="version-heading"><span class="number"></span><h2></h2><span class="badge"></span></div>
+      <div class="mockup">
+        <header class="app-toolbar"><img class="app-mark" src="assets/icon/bokheim-small.svg" alt=""><span class="brand">Bokheim</span><span class="sync"><span class="sync-dot"></span>Synced</span></header>
+        <div class="app-body">
+          <nav class="rail" aria-label="Preview navigation">
+            <button type="button" data-view-button="library" aria-pressed="true"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 6h6v21H5zM13 6h6v21h-6zM22 6l5-1 4 21-5 1z"/></svg><span class="smallcaps">Library</span></button>
+            <button type="button" data-view-button="specimen" aria-pressed="false"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 6h10q2 0 2 2v21q-1-3-4-3H4zM28 6H18q-2 0-2 2v21q1-3 4-3h8z"/></svg><span class="smallcaps">Reading</span></button>
+            <button type="button" class="bottom" data-view-button="settings" aria-pressed="false"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 8h24M4 16h24M4 24h24M10 4v8M22 12v8M14 20v8"/></svg><span class="smallcaps">Settings</span></button>
+          </nav>
+          <div class="screen">
+            <div class="view view-library">
+              <h3 class="display">Your library</h3><p class="subheading">A little room for discovery.</p>
+              <div class="search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/></svg><span>Search books and authors</span></div>
+              <p class="section-label smallcaps">Continue reading</p>
+              <div class="books">
+                <article class="book"><div class="cover"><small>Jane Austen</small><span>Pride<br>and Prejudice</span><span class="ornament"></span><small>A novel</small></div><p class="book-title">Pride and Prejudice</p><p class="author">Jane Austen</p><div class="progress"><span></span></div></article>
+                <article class="book"><div class="cover blue"><small>Virginia Woolf</small><span>To the<br>Lighthouse</span><span class="ornament"></span><small>A novel</small></div><p class="book-title">To the Lighthouse</p><p class="author">Virginia Woolf</p><div class="progress"><span style="width:62%"></span></div></article>
+                <article class="book"><div class="cover red"><small>Franz Kafka</small><span>The<br>Metamorphosis</span><span class="ornament"></span><small>1915</small></div><p class="book-title">The Metamorphosis</p><p class="author">Franz Kafka</p></article>
+                <article class="book"><div class="cover gold"><small>Selma Lagerlöf</small><span>Gösta Berlings<br>saga</span><span class="ornament"></span><small>1891</small></div><p class="book-title">Gösta Berlings saga</p><p class="author">Selma Lagerlöf</p></article>
+              </div>
+            </div>
+            <div class="view view-settings">
+              <h3 class="display">Reader settings</h3><p class="subheading">Make yourself comfortable.</p>
+              <div class="setting-group"><p class="section-label smallcaps">Typeface</p><div class="mock-choice"><span>Book</span><span class="selected">Serif</span><span>Sans serif</span></div></div>
+              <div class="setting-group"><div class="setting-row"><span>Font size</span><div class="stepper"><span class="sign">−</span><span>20px</span><span class="sign">+</span></div></div><div class="setting-row"><span>Line height</span><div class="stepper"><span class="sign">−</span><span>1.5</span><span class="sign">+</span></div></div></div>
+              <div class="setting-group"><div class="setting-row"><span>Side margins</span><div class="stepper"><span class="sign">−</span><span>32px</span><span class="sign">+</span></div></div><div class="setting-row"><span>Line width</span><div class="stepper"><span class="sign">−</span><span>65ch</span><span class="sign">+</span></div></div></div>
+              <p class="note">Your reading preferences are saved automatically.</p>
+            </div>
+            <div class="view view-specimen">
+              <h3 class="display">The shape of reading</h3><p class="subheading">The same passage, size, and spacing in every font.</p>
+              <p class="specimen-text">A good library invites you to linger. Between familiar stories and unexpected discoveries, there is always another page to turn. A quiet sentence carries us forward, leaving room for thought.</p><div class="feature-samples"></div>
+              <div class="specimen-row"><p class="section-label">Swedish and punctuation</p><span>Ångström · Österlen · äldre böcker<br>“A reader’s notes” — 14:32</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="app-footer"><span>24 books</span><span>Last opened today</span></div>
+      </div>
+      <p class="caption"></p>
+    </section>
+  </template>
+  <script>
+    const families = [
+  {
+    "name": "NV Jost",
+    "badge": "Previous choice",
+    "caption": "Previous reader choice: the Futura-like geometric reference.",
+    "source": "https://github.com/nicoverbruggen/ebook-fonts",
+    "features": {
+      "normal": [
+        "kern",
+        "ss01",
+        "tnum"
+      ],
+      "italic": [
+        "kern",
+        "ss01",
+        "tnum"
+      ]
+    },
+    "defaultTabular": {
+      "normal": false,
+      "italic": false
+    },
+    "swedishSmallCaps": {
+      "normal": false,
+      "italic": false
+    }
+  },
+  {
+    "name": "Montserrat",
+    "badge": "geometric",
+    "caption": "My first geometric candidate: broader letters and a strong set of book features.",
+    "source": "https://github.com/JulietaUla/Montserrat",
+    "features": {
+      "normal": [
+        "aalt",
+        "c2sc",
+        "case",
+        "ccmp",
+        "dlig",
+        "dnom",
+        "frac",
+        "kern",
+        "liga",
+        "lnum",
+        "locl",
+        "mark",
+        "mkmk",
+        "numr",
+        "onum",
+        "ordn",
+        "pnum",
+        "rvrn",
+        "sinf",
+        "smcp",
+        "ss01",
+        "subs",
+        "sups",
+        "tnum"
+      ],
+      "italic": [
+        "aalt",
+        "c2sc",
+        "case",
+        "ccmp",
+        "dlig",
+        "dnom",
+        "frac",
+        "kern",
+        "liga",
+        "lnum",
+        "locl",
+        "mark",
+        "mkmk",
+        "numr",
+        "onum",
+        "ordn",
+        "pnum",
+        "rvrn",
+        "sinf",
+        "smcp",
+        "ss01",
+        "subs",
+        "sups",
+        "tnum"
+      ]
+    },
+    "defaultTabular": {
+      "normal": false,
+      "italic": false
+    },
+    "swedishSmallCaps": {
+      "normal": true,
+      "italic": true
+    }
+  },
+  {
+    "name": "Raleway",
+    "badge": "Selected",
+    "caption": "A geometric alternative with distinctive W and old-style figures. Small caps omit Å/Ä/Ö.",
+    "source": "https://github.com/theleagueof/raleway",
+    "features": {
+      "normal": [
+        "aalt",
+        "c2sc",
+        "ccmp",
+        "dlig",
+        "dnom",
+        "frac",
+        "kern",
+        "liga",
+        "lnum",
+        "locl",
+        "mark",
+        "mkmk",
+        "numr",
+        "ordn",
+        "salt",
+        "sinf",
+        "smcp",
+        "ss01",
+        "ss02",
+        "ss03",
+        "ss04",
+        "ss05",
+        "ss06",
+        "ss07",
+        "ss08",
+        "ss09",
+        "ss10",
+        "ss11",
+        "subs",
+        "sups"
+      ],
+      "italic": [
+        "aalt",
+        "c2sc",
+        "case",
+        "ccmp",
+        "dlig",
+        "dnom",
+        "frac",
+        "kern",
+        "liga",
+        "locl",
+        "mark",
+        "mkmk",
+        "numr",
+        "ordn",
+        "rvrn",
+        "salt",
+        "sinf",
+        "smcp",
+        "ss01",
+        "ss02",
+        "ss03",
+        "ss04",
+        "ss05",
+        "ss06",
+        "ss07",
+        "ss08",
+        "ss09",
+        "ss10",
+        "ss11",
+        "subs",
+        "sups"
+      ]
+    },
+    "defaultTabular": {
+      "normal": false,
+      "italic": false
+    },
+    "swedishSmallCaps": {
+      "normal": false,
+      "italic": false
+    }
+  },
+  {
+    "name": "Source Sans 3",
+    "badge": "text / UI",
+    "caption": "Less geometric, included as a text and UI reference. Small caps are upright only.",
+    "source": "https://github.com/adobe-fonts/source-sans",
+    "features": {
+      "normal": [
+        "aalt",
+        "c2sc",
+        "case",
+        "ccmp",
+        "cv01",
+        "cv02",
+        "cv03",
+        "cv04",
+        "cv05",
+        "cv06",
+        "cv07",
+        "cv08",
+        "cv09",
+        "cv10",
+        "cv11",
+        "cv12",
+        "cv13",
+        "cv14",
+        "cv15",
+        "cv16",
+        "cv17",
+        "cv18",
+        "cv19",
+        "dlig",
+        "dnom",
+        "frac",
+        "hlig",
+        "kern",
+        "liga",
+        "locl",
+        "mark",
+        "mkmk",
+        "numr",
+        "onum",
+        "ordn",
+        "pnum",
+        "salt",
+        "sinf",
+        "size",
+        "smcp",
+        "ss01",
+        "ss02",
+        "ss03",
+        "ss04",
+        "ss05",
+        "ss06",
+        "ss07",
+        "ss08",
+        "ss09",
+        "ss10",
+        "subs",
+        "sups",
+        "titl",
+        "zero"
+      ],
+      "italic": [
+        "aalt",
+        "case",
+        "ccmp",
+        "cv01",
+        "cv02",
+        "cv03",
+        "cv04",
+        "cv05",
+        "cv06",
+        "cv07",
+        "cv08",
+        "cv09",
+        "cv10",
+        "cv11",
+        "cv12",
+        "cv13",
+        "cv14",
+        "cv15",
+        "cv16",
+        "cv17",
+        "cv18",
+        "cv19",
+        "dlig",
+        "dnom",
+        "frac",
+        "hlig",
+        "kern",
+        "liga",
+        "locl",
+        "mark",
+        "mkmk",
+        "numr",
+        "onum",
+        "ordn",
+        "pnum",
+        "salt",
+        "sinf",
+        "size",
+        "ss01",
+        "ss02",
+        "ss03",
+        "ss04",
+        "ss05",
+        "ss06",
+        "ss07",
+        "ss08",
+        "ss09",
+        "ss10",
+        "subs",
+        "sups",
+        "titl",
+        "zero"
+      ]
+    },
+    "defaultTabular": {
+      "normal": true,
+      "italic": true
+    },
+    "swedishSmallCaps": {
+      "normal": true,
+      "italic": false
+    }
+  }
+];
+    const sampleFeatures = [
+      { label: 'True small caps', text: 'A Quiet Library · ÅÄÖ åäö', tags: ['smcp', 'c2sc'], off: '\"smcp\" 0, \"c2sc\" 0', on: '\"smcp\" 1, \"c2sc\" 1' },
+      { label: 'Standard ligatures', text: 'office · affinity · difficult', tags: ['liga'], off: '\"liga\" 0', on: '\"liga\" 1' },
+      { label: 'Discretionary ligatures', text: 'st · ct · fast · strict', tags: ['dlig'], off: '\"dlig\" 0', on: '\"dlig\" 1' },
+      { label: 'Old-style figures', text: '0123456789 · 1776 · 2026', tags: ['onum'], off: '\"onum\" 0, \"lnum\" 1', on: '\"onum\" 1, \"lnum\" 0' },
+      { label: 'Fractions', text: '1/2 · 3/4 · 5/8', tags: ['frac'], off: '\"frac\" 0', on: '\"frac\" 1' },
+      { label: 'Tabular figures', text: '1111 · 8888 · 2026', tags: ['tnum'], off: '\"tnum\" 0, \"pnum\" 1', on: '\"tnum\" 1, \"pnum\" 0' },
+      { label: 'Superscripts', text: 'x123 · 2026', tags: ['sups'], off: '\"sups\" 0', on: '\"sups\" 1' },
+      { label: 'Subscripts', text: 'H2O · CO2', tags: ['subs'], off: '\"subs\" 0', on: '\"subs\" 1' },
+      { label: 'Kerning', text: 'AVATAR · WA · To · Yo', tags: ['kern'], off: '\"kern\" 0', on: '\"kern\" 1' }
+    ];
+    const auditFeatures = [
+      ['Small caps', ['smcp','c2sc']], ['Swedish small caps (Å/Ä/Ö)', ['swedish-small-caps']], ['Standard ligatures', ['liga']], ['Discretionary ligatures', ['dlig']],
+      ['Historical ligatures', ['hlig']], ['Contextual alternates', ['calt']], ['Old-style figures', ['onum']],
+      ['Lining-figure switch', ['lnum']], ['Tabular figures', ['tnum']], ['Proportional-figure switch', ['pnum']],
+      ['Diagonal fractions', ['frac']], ['Ordinals', ['ordn']], ['Superscripts', ['sups']], ['Subscripts', ['subs']],
+      ['Slashed zero', ['zero']], ['Combining-mark positioning', ['mark']], ['Stacked-mark positioning', ['mkmk']], ['Kerning', ['kern']]
+    ];
+    const comparison = document.getElementById('comparison');
+    const selected = new Set(families.map(family => family.name));
+    function availability(family, tags) {
+      const style = document.getElementById('font-style').value;
+      if (tags[0] === 'swedish-small-caps') return family.swedishSmallCaps[style] ? ['Yes', 'yes'] : ['No', 'absent'];
+      const available = tags.filter(tag => family.features[style].includes(tag));
+      if (available.length === tags.length) return ['Yes', 'yes'];
+      if (tags[0] === 'tnum' && family.defaultTabular[style]) return ['Default', 'yes'];
+      if (tags[0] === 'onum' && family.name === 'Raleway' && style === 'normal') return ['Default', 'yes'];
+      if (available.length) return ['Partial', 'partial'];
+      return ['No tag', 'absent'];
+    }
+    families.forEach((family, index) => {
+      const panel = document.getElementById('panel-template').content.cloneNode(true);
+      const section = panel.querySelector('section');
+      section.dataset.family = family.name;
+      section.style.setProperty('--family', `"${family.name}"`);
+      section.setAttribute('aria-labelledby', `font-${index}`);
+      panel.querySelector('h2').id = `font-${index}`;
+      panel.querySelector('h2').textContent = family.name;
+      panel.querySelector('.number').textContent = String(index + 1).padStart(2, '0');
+      panel.querySelector('.badge').textContent = family.badge;
+      panel.querySelector('.caption').textContent = family.caption;
+      section.querySelector('nav').setAttribute('aria-label', `${family.name} preview navigation`);
+      sampleFeatures.forEach((feature, featureIndex) => {
+        const row = document.createElement('div'); row.className = 'specimen-row'; row.dataset.feature = featureIndex;
+        const label = document.createElement('p'); label.className = 'section-label'; label.textContent = feature.label;
+        const status = document.createElement('span'); status.className = 'sample-status'; label.append(status); row.append(label);
+        const samples = document.createElement('div'); samples.className = 'sample-comparison';
+        ['Before', 'Requested'].forEach((label, sampleIndex) => {
+          const cell = document.createElement('div'); const caption = document.createElement('small'); caption.textContent = label;
+          const sample = document.createElement('span'); sample.className = 'feature-sample'; sample.textContent = feature.text; sample.dataset.enabled = sampleIndex;
+          cell.append(caption, sample); samples.append(cell);
+        });
+        row.append(samples); section.querySelector('.feature-samples').append(row);
+      });
+      comparison.append(panel);
+      const button = document.createElement('button'); button.type = 'button'; button.textContent = family.name; button.dataset.filter = family.name; button.setAttribute('aria-pressed', 'true');
+      button.addEventListener('click', () => { selected.has(family.name) ? selected.delete(family.name) : selected.add(family.name); updateSelection(); });
+      document.getElementById('font-filters').append(button);
+      const source = document.createElement('div'); source.className = 'source-entry';
+      const link = document.createElement('a'); link.href = family.source; link.textContent = family.name; link.target = '_blank'; link.rel = 'noopener'; source.append(link);
+      for (const style of ['normal', 'italic']) { const p = document.createElement('p'); p.textContent = `${style === 'normal' ? 'Upright' : 'Italic'}: ${family.features[style].join(', ')}`; source.append(p); }
+      document.getElementById('source-details').append(source);
+    });
+    function updateSelection() {
+      document.documentElement.style.setProperty('--columns', selected.size);
+      document.documentElement.style.setProperty('--compact-columns', Math.min(selected.size, 2));
+      document.querySelectorAll('[data-family]').forEach(section => section.hidden = !selected.has(section.dataset.family));
+      document.querySelectorAll('[data-filter]').forEach(button => { const active = selected.has(button.dataset.filter); button.setAttribute('aria-pressed', String(active)); button.disabled = active && selected.size === 1; });
+      renderAudit();
+    }
+    function renderAudit() {
+      const table = document.getElementById('feature-table'); table.replaceChildren();
+      const displayed = families.filter(family => selected.has(family.name));
+      const head = document.createElement('thead'); const heading = document.createElement('tr');
+      ['Feature', ...displayed.map(family => family.name)].forEach(text => { const cell = document.createElement('th'); cell.scope = 'col'; cell.textContent = text; heading.append(cell); });
+      head.append(heading); table.append(head);
+      const body = document.createElement('tbody');
+      auditFeatures.forEach(([label, tags]) => {
+        const row = document.createElement('tr'); const name = document.createElement('th'); name.scope = 'row'; name.textContent = label; name.title = tags.join(', '); row.append(name);
+        displayed.forEach(family => { const [text, state] = availability(family, tags); const cell = document.createElement('td'); cell.textContent = text; cell.className = state; row.append(cell); });
+        body.append(row);
+      }); table.append(body);
+    }
+    function updateFeatures() {
+      const style = document.getElementById('font-style').value;
+      const enabled = document.getElementById('enable-features').checked;
+      document.documentElement.style.setProperty('--sample-style', style);
+      document.querySelectorAll('.specimen-text').forEach(p => p.style.fontStyle = style);
+      document.querySelectorAll('[data-family]').forEach(section => {
+        const family = families.find(family => family.name === section.dataset.family);
+        section.querySelectorAll('[data-feature]').forEach(row => {
+          const feature = sampleFeatures[Number(row.dataset.feature)];
+          row.querySelector('.sample-status').textContent = availability(family, feature.tags)[0];
+          row.querySelectorAll('.feature-sample').forEach(sample => sample.style.fontFeatureSettings = enabled && sample.dataset.enabled === '1' ? feature.on : feature.off);
+        });
+      }); renderAudit();
+    }
+    function setView(view) {
+      document.documentElement.dataset.view = view;
+      document.querySelectorAll('[data-view-button]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.viewButton === view)));
+      document.querySelectorAll('.app-footer').forEach(footer => {
+        footer.firstElementChild.textContent = view === 'library' ? '24 books' : view === 'settings' ? 'Preferences' : 'Typography preview';
+        footer.lastElementChild.textContent = view === 'library' ? 'Last opened today' : view === 'settings' ? 'Saved automatically' : 'Scroll for features';
+      });
+    }
+    document.querySelectorAll('[data-view-button]').forEach(button => button.addEventListener('click', () => setView(button.dataset.viewButton)));
+    document.getElementById('theme').addEventListener('change', event => document.documentElement.dataset.theme = event.target.value);
+    document.getElementById('size').addEventListener('input', event => { document.documentElement.style.setProperty('--ui-size', `${event.target.value}px`); document.getElementById('size-value').textContent = `${event.target.value}px`; });
+    document.getElementById('display-font').addEventListener('change', event => document.documentElement.classList.toggle('all-display', event.target.checked));
+    document.getElementById('font-style').addEventListener('change', updateFeatures);
+    document.getElementById('enable-features').addEventListener('change', updateFeatures);
+    setView('specimen'); updateSelection(); updateFeatures();
+    async function checkFonts() {
+      const status = document.getElementById('font-status');
+      try {
+        const loaded = await Promise.all(families.flatMap(family => [document.fonts.load(`18px "${family.name}"`), document.fonts.load(`italic 18px "${family.name}"`)]));
+        if (loaded.some(faces => faces.length === 0)) throw new Error('Missing font');
+        await document.fonts.ready; status.textContent = 'All comparison fonts loaded locally. Feature support verified for upright and italic.'; status.dataset.loaded = 'true';
+      } catch { status.textContent = 'Some fonts could not load. Keep this page in apps/ui/design-tokens with its assets folder.'; status.dataset.loaded = 'false'; }
+    }
+    checkFonts();
+</script>
+</body>
+</html>

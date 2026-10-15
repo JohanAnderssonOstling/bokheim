@@ -2,7 +2,7 @@
 pub(crate) use book_model::BookFormat;
 pub(crate) use library_model::{BrowseBookSort, BrowseChipSort, LibraryBrowseQuery, LibraryFileTypeFilter};
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct BrowseOptions {
     pub search: String,
     pub file_types: i32,
@@ -15,6 +15,9 @@ pub(crate) struct BrowseOptions {
 }
 
 impl BrowseOptions {
+    pub(super) fn needs_popularity(&self) -> bool {
+        self.chip_sort == BrowseChipSort::Popularity || self.book_sort == BrowseBookSort::Popularity
+    }
     pub fn from_query(query: &LibraryBrowseQuery, downloaded_only: bool) -> Self {
         Self {
             search: book_model::normalize_search_text(&query.search),
@@ -23,11 +26,7 @@ impl BrowseOptions {
                 let mut languages = query.languages.iter().map(|language| base_language(language)).filter(|language| !language.is_empty()).collect::<Vec<_>>();
                 languages.sort();
                 languages.dedup();
-                if languages.is_empty() {
-                    String::new()
-                } else {
-                    format!(",{},", languages.join(","))
-                }
+                if languages.is_empty() { String::new() } else { format!(",{},", languages.join(",")) }
             },
             chip_sort: query.chip_sort,
             book_sort: query.book_sort,

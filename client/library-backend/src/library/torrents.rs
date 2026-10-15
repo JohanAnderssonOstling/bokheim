@@ -1,0 +1,425 @@
+//! A library-owned torrent worker. Payloads enter the normal filesystem scan;
+//! SQLite retains metadata and book associations independently of their paths.
+use super::LibrarySession;
+use crate::BackendError;
+use client_platform_runtime::transfers::{self, TransferPolicy};
+use library_database::{torrents::TorrentRecord, Database};
+use library_model::{TorrentInput, TorrentStatus};
+use librqbit::api::TorrentIdOrHash;
+use librqbit::dht::DhtPersistenceConfig;
+use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, DhtSessionConfig, Session, SessionOptions};
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
+use tokio::sync::{watch, Mutex, MutexGuard, Notify};
+
+#[derive(Default)]
+pub(crate) struct TorrentService {
+    engine: Mutex<Option<Arc<Session>>>,
+    requests: Arc<StdMutex<HashMap<String, (watch::Sender<bool>, Option<String>)>>>,
+    wake: Notify,
+    active_adds: AtomicUsize,
+}
+
+struct AddingTorrent<'a>(&'a TorrentService);
+
+impl Drop for AddingTorrent<'_> {
+    fn drop(&mut self) {
+        self.0.active_adds.fetch_sub(1, Ordering::AcqRel);
+        self.0.wake();
+    }
+}
+
+pub(crate) struct TorrentRequest {
+    id: String,
+    cancelled: watch::Receiver<bool>,
+    requests: Arc<StdMutex<HashMap<String, (watch::Sender<bool>, Option<String>)>>>,
+}
+
+impl Drop for TorrentRequest {
+    fn drop(&mut self) {
+        self.requests.lock().expect("torrent requests poisoned").remove(&self.id);
+    }
+}
+
+impl Drop for TorrentService {
+    fn drop(&mut self) {
+        if let Some(engine) = self.engine.get_mut() {
+            engine.cancellation_token().cancel();
+        }
+    }
+}
+
+fn failure(error: impl std::fmt::Display) -> BackendError {
+    BackendError::message(error.to_string())
+}
+
+fn torrent_id(hash: &str) -> Result<TorrentIdOrHash, BackendError> {
+    Ok(TorrentIdOrHash::Hash(hash.parse().map_err(failure)?))
+}
+
+fn folder_name(name: &str) -> String {
+    let name: String = name.chars().map(|c| if c.is_control() || "\\/:*?\"<>|".contains(c) { '_' } else { c }).take(120).collect();
+    let name = name.trim_matches(|c| c == '.' || c == ' ');
+    if name.is_empty() {
+        "Torrent download".into()
+    } else {
+        name.into()
+    }
+}
+
+impl TorrentService {
+    pub(crate) fn wake(&self) {
+        self.wake.notify_one();
+    }
+
+    async fn engine(slot: &mut Option<Arc<Session>>, root: &Path, db: &Database) -> Result<Arc<Session>, BackendError> {
+        if let Some(engine) = slot {
+            return Ok(engine.clone());
+        }
+        let engine = Session::new_with_opts(
+            root.join(".bokheim-torrents"),
+            SessionOptions {
+                listen: Some(Default::default()),
+                dht: Some(DhtSessionConfig { persistence: Some(DhtPersistenceConfig { config_filename: Some(db.path().with_file_name("torrent-dht.json")), ..Default::default() }), ..Default::default() }),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(failure)?;
+        *slot = Some(engine.clone());
+        Ok(engine)
+    }
+
+    pub(crate) async fn add(&self, db: &Database, root: &Path, input: TorrentInput) -> Result<String, BackendError> {
+        transfers::retry(|| self.add_allowed(db, root, input.clone(), None)).await
+    }
+
+    pub(crate) fn begin_request(&self, request: &str) -> TorrentRequest {
+        let receiver = self.requests.lock().expect("torrent requests poisoned").entry(request.to_owned()).or_insert_with(|| (watch::channel(false).0, None)).0.subscribe();
+        TorrentRequest { id: request.to_owned(), cancelled: receiver, requests: self.requests.clone() }
+    }
+
+    pub(crate) fn prepare_request(&self, request: String) {
+        self.requests.lock().expect("torrent requests poisoned").entry(request).or_insert_with(|| (watch::channel(false).0, None));
+    }
+
+    pub(crate) fn cancel_request(&self, request: &str) -> Option<String> {
+        let requests = self.requests.lock().expect("torrent requests poisoned");
+        let (sender, hash) = requests.get(request)?;
+        sender.send_replace(true);
+        hash.clone()
+    }
+
+    async fn add_request(&self, db: &Database, root: &Path, input: TorrentInput, mut request: TorrentRequest) -> Result<String, BackendError> {
+        let id = request.id.clone();
+        tokio::select! {
+            biased;
+            _ = request.cancelled.wait_for(|cancelled| *cancelled) => Err(failure("Download cancelled")),
+            result = transfers::retry(|| self.add_allowed(db, root, input.clone(), Some(&id))) => result,
+        }
+    }
+
+    async fn add_allowed(&self, db: &Database, root: &Path, input: TorrentInput, request: Option<&str>) -> Result<String, BackendError> {
+        // Keep the session alive while a magnet is resolving, before its
+        // durable database record exists. Cancellation also wakes cleanup.
+        self.active_adds.fetch_add(1, Ordering::AcqRel);
+        let _adding = AddingTorrent(self);
+        if !root.is_dir() {
+            return Err(failure("this library's folder is unavailable"));
+        }
+        let (torrent, source) = match input {
+            TorrentInput::Magnet(magnet) => {
+                if !magnet.starts_with("magnet:") {
+                    return Err(failure("expected a magnet link"));
+                }
+                (AddTorrent::from_url(magnet.clone()), Some(magnet))
+            }
+            TorrentInput::File(bytes) => {
+                if bytes.len() > 16 * 1024 * 1024 {
+                    return Err(failure("torrent metadata is too large"));
+                }
+                (AddTorrent::from_bytes(bytes.into_vec()), None)
+            }
+        };
+        let engine = {
+            let mut slot = self.engine.lock().await;
+            Self::engine(&mut slot, root, db).await?
+        };
+        // Resolve metadata before accepting the job. Re-add the metadata bytes
+        // rather than the magnet so its optional file-selection hint cannot
+        // override the application's policy of downloading every file.
+        let response = tokio::time::timeout(Duration::from_secs(120), engine.add_torrent(torrent, Some(AddTorrentOptions { list_only: true, ..Default::default() }))).await.map_err(failure)?.map_err(failure)?;
+        let list = match response {
+            AddTorrentResponse::ListOnly(list) => list,
+            AddTorrentResponse::AlreadyManaged(_, handle) | AddTorrentResponse::Added(_, handle) => return Ok(handle.info_hash().as_string()),
+        };
+        let hash = list.info_hash.as_string();
+        if db.torrents()?.iter().any(|t| t.info_hash == hash) {
+            return Ok(hash);
+        }
+        let name = folder_name(&list.info.name_or_else(|| hash.clone()));
+        let stage = format!(".bokheim-torrents/{hash}/{name}");
+        let files = list.info.iter_file_details().enumerate().filter(|(_, file)| !file.attrs().padding).map(|(index, file)| (index, file.filename.to_pathbuf().to_string_lossy().replace('\\', "/"))).collect::<Vec<_>>();
+        let record = TorrentRecord { info_hash: hash.clone(), metadata: list.torrent_bytes.to_vec(), source, staging_path: stage, output_path: name, imported: false, publishing: false, keep_seeding: true, folder_id: None, error: None };
+        db.save_torrent(&record, &files)?;
+        if let Some(request) = request {
+            if let Some((_, saved_hash)) = self.requests.lock().expect("torrent requests poisoned").get_mut(request) {
+                *saved_hash = Some(hash.clone());
+            }
+        }
+        Self::resume(&engine, db, root, &record, list.seen_peers).await?;
+        Ok(hash)
+    }
+
+    async fn resume(engine: &Arc<Session>, db: &Database, root: &Path, record: &TorrentRecord, initial_peers: Vec<SocketAddr>) -> Result<(), BackendError> {
+        let relative = db.torrent_output_path(record)?.ok_or_else(|| failure("torrent folder is unavailable"))?;
+        let output = root.join(relative.trim_start_matches('/'));
+        if record.imported {
+            // Never recreate an old folder or redownload bytes while a user
+            // move, disconnected drive or deletion has made a payload absent.
+            let list = engine.add_torrent(AddTorrent::from_bytes(record.metadata.clone()), Some(AddTorrentOptions { list_only: true, ..Default::default() })).await.map_err(failure)?;
+            if let AddTorrentResponse::ListOnly(list) = list {
+                for file in list.info.iter_file_details().filter(|file| !file.attrs().padding) {
+                    let path = output.join(file.filename.to_pathbuf());
+                    let metadata = std::fs::symlink_metadata(path).map_err(|_| failure("torrent files are missing; restore their folder before resuming"))?;
+                    if !metadata.is_file() || metadata.len() != file.len {
+                        db.keep_torrent_seeding(&record.info_hash, false)?;
+                        return Err(failure("torrent files changed; seeding stopped"));
+                    }
+                }
+            }
+        }
+        let handle = engine
+            .add_torrent(
+                AddTorrent::from_bytes(record.metadata.clone()),
+                Some(AddTorrentOptions { output_folder: Some(output.to_string_lossy().into_owned()), overwrite: true, paused: record.imported, initial_peers: Some(initial_peers), ..Default::default() }),
+            )
+            .await
+            .map_err(failure)?
+            .into_handle()
+            .ok_or_else(|| failure("torrent did not start"))?;
+        if record.imported {
+            handle.wait_until_initialized().await.map_err(failure)?;
+            if !handle.stats().finished {
+                engine.delete(torrent_id(&record.info_hash)?, false).await.map_err(failure)?;
+                db.keep_torrent_seeding(&record.info_hash, false)?;
+                return Err(failure("torrent files changed; seeding stopped"));
+            }
+            engine.unpause(&handle).await.map_err(failure)?;
+        }
+        db.set_torrent_error(&record.info_hash, None)?;
+        Ok(())
+    }
+
+    pub(crate) async fn cancel(&self, db: &Database, root: &Path, hash: &str) -> Result<(), BackendError> {
+        let slot = self.engine.lock().await;
+        let record = db.torrents()?.into_iter().find(|record| record.info_hash == hash);
+        if record.as_ref().is_some_and(|record| record.imported) {
+            return Ok(());
+        }
+        if let Some(engine) = slot.as_ref() {
+            if engine.get(torrent_id(hash)?).is_some() {
+                engine.delete(torrent_id(hash)?, false).await.map_err(failure)?;
+            }
+        }
+        db.forget_torrent(hash)?;
+        self.wake();
+        if let Some(record) = record {
+            let staged = root.join(record.staging_path);
+            match std::fs::remove_dir_all(staged) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(failure(error)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Hold this guard over physical placement work. Removing session entries
+    /// releases storage handles on Windows too; the next pass reopens them.
+    pub(crate) async fn before_moves(&self) -> Result<MutexGuard<'_, Option<Arc<Session>>>, BackendError> {
+        let guard = self.engine.lock().await;
+        // The worker waits for this guard to be released after physical moves.
+        self.wake();
+        if let Some(engine) = guard.as_ref() {
+            let ids = engine.with_torrents(|torrents| torrents.map(|(id, _)| id).collect::<Vec<_>>());
+            for id in ids {
+                engine.delete(TorrentIdOrHash::Id(id), false).await.map_err(failure)?;
+            }
+        }
+        Ok(guard)
+    }
+
+    pub(crate) fn statuses(&self, db: &Database) -> Result<Vec<TorrentStatus>, BackendError> {
+        let slot = self.engine.try_lock().ok();
+        db.torrents()?
+            .into_iter()
+            .map(|record| {
+                let stats = slot.as_ref().and_then(|s| s.as_ref()).and_then(|engine| engine.get(torrent_id(&record.info_hash).ok()?)).map(|handle| handle.stats());
+                Ok(TorrentStatus {
+                    info_hash: record.info_hash,
+                    name: Path::new(&record.output_path).file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                    progress_bytes: stats.as_ref().map_or(0, |s| s.progress_bytes),
+                    total_bytes: stats.as_ref().map_or(0, |s| s.total_bytes),
+                    uploaded_bytes: stats.as_ref().map_or(0, |s| s.uploaded_bytes),
+                    imported: record.imported,
+                    keep_seeding: record.keep_seeding,
+                    error: stats.and_then(|s| s.error).or(record.error),
+                })
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    async fn pass(&self, library: &LibrarySession) -> Result<(), BackendError> {
+        self.pass_with_policy(library, &transfers::POLICY).await
+    }
+
+    async fn pass_with_policy(&self, library: &LibrarySession, policy: &TransferPolicy) -> Result<(), BackendError> {
+        if !policy.allowed() {
+            if let Some(engine) = self.engine.lock().await.take() {
+                engine.stop().await;
+            }
+            return Ok(());
+        }
+        let records = library.db.torrents()?;
+        if records.is_empty() && self.engine.try_lock().is_ok_and(|slot| slot.is_none()) {
+            return Ok(());
+        }
+        let mut slot = self.engine.lock().await;
+        let records = library.db.torrents()?;
+        if records.iter().all(|record| record.imported && !record.keep_seeding) && self.active_adds.load(Ordering::Acquire) == 0 {
+            if let Some(engine) = slot.take() {
+                engine.stop().await;
+            }
+            return Ok(());
+        }
+        if let Some(engine) = slot.as_ref() {
+            let forgotten = engine.with_torrents(|torrents| torrents.filter(|(_, t)| !records.iter().any(|r| r.info_hash == t.info_hash().as_string())).map(|(id, _)| id).collect::<Vec<_>>());
+            for id in forgotten {
+                engine.delete(TorrentIdOrHash::Id(id), false).await.map_err(failure)?;
+            }
+        }
+        if records.is_empty() {
+            return Ok(());
+        }
+        let root = PathBuf::from(library._scanner.root());
+        if !root.is_dir() {
+            return Ok(());
+        }
+        let engine = Self::engine(&mut slot, &root, &library.db).await?;
+        library.db.bind_torrent_books()?;
+        for record in records {
+            if record.publishing && !root.join(&record.staging_path).exists() {
+                if root.join(&record.output_path).is_dir() {
+                    library.db.torrent_published(&record.info_hash, &record.output_path)?;
+                } else {
+                    library.db.set_torrent_error(&record.info_hash, Some("interrupted torrent move: completed folder is unavailable"))?;
+                }
+                continue;
+            }
+            let id = torrent_id(&record.info_hash)?;
+            if record.imported && !record.keep_seeding {
+                if engine.get(id).is_some() {
+                    engine.delete(torrent_id(&record.info_hash)?, false).await.map_err(failure)?;
+                }
+                continue;
+            }
+            if engine.get(id).is_none() {
+                if let Err(error) = Self::resume(&engine, &library.db, &root, &record, Vec::new()).await {
+                    library.db.set_torrent_error(&record.info_hash, Some(&error.to_string()))?;
+                }
+                continue;
+            }
+            let handle = engine.get(torrent_id(&record.info_hash)?).expect("checked above");
+            let stats = handle.stats();
+            if let Some(error) = &stats.error {
+                library.db.set_torrent_error(&record.info_hash, Some(error))?;
+            }
+            if record.imported || !stats.finished {
+                continue;
+            }
+            engine.delete(torrent_id(&record.info_hash)?, false).await.map_err(failure)?;
+            drop(handle);
+            let staged = root.join(&record.staging_path);
+            // Staging is inside the library filesystem: publication is a
+            // rename. Journal it on the database owner's thread before the
+            // rename, without an await between publication and acknowledgement.
+            let placed = library_files::filesystem::place_into_directory_with_intent(&staged, &root, &[], true, |destination| {
+                let relative = destination.strip_prefix(&root).map_err(std::io::Error::other)?;
+                library.db.torrent_publish_intent(&record.info_hash, &relative.to_string_lossy()).map_err(std::io::Error::other)
+            })
+            .map_err(failure)?;
+            library.db.torrent_published(&record.info_hash, &placed.strip_prefix(&root).map_err(failure)?.to_string_lossy())?;
+            self.wake();
+            library.events.publish_update(library_model::LibraryUpdate::Contents);
+            // The normal watcher/scan owns book inspection and library IDs.
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn run(&self, library: &LibrarySession) {
+        self.run_with_policy(library, &transfers::POLICY).await;
+    }
+
+    async fn run_with_policy(&self, library: &LibrarySession, policy: &TransferPolicy) {
+        let mut changes = policy.subscribe();
+        loop {
+            let next = match self.pass_with_policy(library, policy).await.and_then(|()| self.next_check(library, policy)) {
+                Ok(next) => next,
+                Err(error) => {
+                    log::warn!("torrent transfer will retry: {error}");
+                    Some(Duration::from_secs(30))
+                }
+            };
+            tokio::select! {
+                _ = self.wake.notified() => {},
+                _ = changes.changed() => {},
+                _ = async {
+                    match next {
+                        Some(delay) => crate::executor::sleep(delay).await,
+                        None => std::future::pending().await,
+                    }
+                } => {},
+            }
+        }
+    }
+
+    fn next_check(&self, library: &LibrarySession, policy: &TransferPolicy) -> Result<Option<Duration>, BackendError> {
+        if !policy.allowed() {
+            return Ok(None);
+        }
+        let records = library.db.torrents()?;
+        Ok(if records.iter().any(|record| !record.imported) {
+            Some(Duration::from_secs(2))
+        } else if records.iter().any(|record| record.keep_seeding) {
+            // Peer traffic belongs to librqbit. Reconcile stable seeds less
+            // often; user actions, moves and scans wake us immediately.
+            Some(Duration::from_secs(30))
+        } else {
+            None
+        })
+    }
+}
+
+impl LibrarySession {
+    pub(crate) async fn add_torrent(&self, input: TorrentInput) -> Result<String, BackendError> {
+        self.torrents.add(&self.db, Path::new(self._scanner.root()), input).await
+    }
+
+    pub(crate) async fn add_torrent_request(&self, input: TorrentInput, request: TorrentRequest) -> Result<String, BackendError> {
+        self.torrents.add_request(&self.db, Path::new(self._scanner.root()), input, request).await
+    }
+
+    pub(crate) async fn cancel_torrent(&self, hash: &str) -> Result<(), BackendError> {
+        self.torrents.cancel(&self.db, Path::new(self._scanner.root()), hash).await
+    }
+}
+
+#[cfg(test)]
+#[path = "torrent_tests.rs"]
+mod tests;

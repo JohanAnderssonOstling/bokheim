@@ -63,12 +63,14 @@ pub struct ThumbnailBytes {
     #[serde(with = "serde_bytes")]
     pub browse: Vec<u8>,
     #[serde(with = "serde_bytes")]
+    pub card_high_density: Vec<u8>,
+    #[serde(with = "serde_bytes")]
     pub high_density: Vec<u8>,
 }
 
 impl From<thumbnail::ThumbnailVersions> for ThumbnailBytes {
     fn from(versions: thumbnail::ThumbnailVersions) -> Self {
-        Self { browse: versions.browse, high_density: versions.high_density }
+        Self { browse: versions.browse, card_high_density: versions.card_high_density, high_density: versions.high_density }
     }
 }
 
@@ -117,10 +119,10 @@ fn cover_thumbnails(bytes: &[u8]) -> thumbnail::ThumbnailResult<thumbnail::Thumb
     thumbnail::ThumbnailVersions::from_image(&thumbnail::decode_cover_image(bytes, format)?)
 }
 
-/// A cover image re-encoded at one thumbnail width.
+/// A card derivative cropped and transformed at one thumbnail width.
 fn resize_cover(bytes: &[u8], width: u32) -> thumbnail::ThumbnailResult<Vec<u8>> {
     let format = image::guess_format(bytes)?;
-    thumbnail::encode_thumbnail_at_width(&thumbnail::decode_cover_image(bytes, format)?, width)
+    thumbnail::encode_card_thumbnail_at_width(&thumbnail::decode_cover_image(bytes, format)?, width)
 }
 
 thread_local! {
@@ -315,11 +317,21 @@ mod tests {
     }
 
     #[test]
+    fn cover_worker_transports_both_adjusted_card_densities_and_the_original_master() {
+        let mut png = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(400, 400, image::Rgb([120, 40, 20]))).write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let CpuResponse::Thumbnail(Some(versions)) = roundtrip(CpuRequest::Cover { bytes: png.into_inner() }) else { panic!("expected thumbnail versions") };
+        assert_eq!(image::load_from_memory(&versions.browse).unwrap().to_rgb8().dimensions(), (300, 387));
+        assert_eq!(image::load_from_memory(&versions.card_high_density).unwrap().to_rgb8().dimensions(), (600, 774));
+        assert_eq!(image::load_from_memory(&versions.high_density).unwrap().to_rgb8().dimensions(), (600, 600));
+    }
+
+    #[test]
     fn resize_transports_a_real_jpeg_at_the_requested_display_size() {
         let mut png = Cursor::new(Vec::new());
         image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(400, 600, image::Rgb([120, 40, 20]))).write_to(&mut png, image::ImageFormat::Png).unwrap();
         let CpuResponse::Bytes(bytes) = roundtrip(CpuRequest::Resize { width: 300, bytes: png.into_inner() }) else { panic!("expected thumbnail") };
         assert_eq!(image::guess_format(&bytes).unwrap(), image::ImageFormat::Jpeg);
-        assert_eq!(image::load_from_memory(&bytes).unwrap().to_rgb8().dimensions(), (300, 450));
+        assert_eq!(image::load_from_memory(&bytes).unwrap().to_rgb8().dimensions(), (300, 480));
     }
 }

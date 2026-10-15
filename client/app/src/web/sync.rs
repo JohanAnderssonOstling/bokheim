@@ -10,183 +10,207 @@ impl Default for SyncOptions {
     }
 }
 
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::rc::Rc;
-
-use futures_channel::oneshot;
+use async_channel::{Receiver, Sender, unbounded};
+use futures_util::{StreamExt, future::LocalBoxFuture, stream::FuturesUnordered};
 use js_sys::{Array, Uint8Array};
+use std::cell::OnceCell;
+use std::mem::take;
 use wasm_bindgen::prelude::*;
 use web_sys::MessagePort;
 
-use super::{BytesFuture, BytesOperation, Port, byte_reply, error_message, object};
+use super::{Port, byte_reply, error_message, object};
 use client_platform_runtime::byte_budget::{ByteBudget, Reservation};
 use client_platform_runtime::coordinator::SyncJobs;
-use client_platform_runtime::pending::{OnDrop, take_matching};
+use client_platform_web::storage_job::{self, Event as StorageEvent, ResultBytes};
 use client_platform_web::transport::protocol::SyncEvent;
 
-type Reply = oneshot::Sender<Result<Vec<u8>, String>>;
-type Pending = Rc<RefCell<Option<(u32, Reply)>>>;
 struct Request {
     _bytes: Reservation,
+    _slot: Reservation,
     port: MessagePort,
     bytes: Vec<u8>,
 }
-struct Job {
-    port: Port,
-    pending: Pending,
-    next: Cell<u32>,
-    abort: Rc<RefCell<Option<oneshot::Sender<String>>>>,
-}
-impl Job {
-    fn reject_storage(&self, error: &str) {
-        if let Some((_, reply)) = self.pending.borrow_mut().take() {
-            let _ = reply.send(Err(error.to_owned()));
-        }
-    }
-    fn storage(&self, bytes: Vec<u8>) -> BytesFuture {
-        // SyncEngine and CoordinatorStore await each command before issuing another.
-        if self.pending.borrow().is_some() {
-            return Box::pin(async { Err("Sync storage command already active".into()) });
-        }
-        let Some(id) = self.next.get().checked_add(1) else {
-            return Box::pin(async { Err("Sync request IDs exhausted".into()) });
-        };
-        self.next.set(id);
-        let (reply, response) = oneshot::channel();
-        *self.pending.borrow_mut() = Some((id, reply));
-        let bytes = Uint8Array::from(bytes.as_slice());
-        let transfer = Array::of1(&bytes.buffer());
-        let message = object(&[("kind", "storage".into()), ("id", id.into()), ("bytes", bytes.into())]);
-        if let Err(error) = self.port.raw.post_message_with_transferable(&message, &transfer) {
-            if let Some((_, reply)) = self.pending.borrow_mut().take() {
-                let _ = reply.send(Err(error_message(&error)));
-            }
-        }
-        let pending = self.pending.clone();
-        let cleanup = OnDrop::new(move || {
-            drop(take_matching(&pending, id));
-        });
-        Box::pin(async move {
-            let _cleanup = cleanup;
-            response.await.unwrap_or_else(|_| Err("Sync storage connection closed".into()))
-        })
-    }
-}
-struct State {
-    policy: SyncJobs<Request>,
-    jobs: HashMap<String, Rc<Job>>,
-}
-struct Service {
-    budget: ByteBudget,
-    state: RefCell<State>,
-}
-impl Service {
-    fn reply(request: Request, result: &JsValue) {
-        let _ = request.port.post_message(result);
-        request.port.close();
-    }
-    fn execute(self: &Rc<Self>, key: String) {
-        let (port, bytes) = {
-            let mut state = self.state.borrow_mut();
-            let Some(request) = state.policy.active_mut(&key) else {
-                return;
-            };
-            (request.port.clone(), std::mem::take(&mut request.bytes))
-        };
-        let pending: Pending = Rc::new(RefCell::new(None));
-        let replies = pending.clone();
-        let (abort, aborted) = oneshot::channel();
-        let abort = Rc::new(RefCell::new(Some(abort)));
-        let cancellation = abort.clone();
-        let message = move |data: JsValue| match SyncEvent::decode(&data) {
-            Ok(SyncEvent::Cancel) => {
-                if let Some(abort) = cancellation.borrow_mut().take() {
-                    let _ = abort.send("Sync request cancelled".to_owned());
-                }
-            }
-            Ok(SyncEvent::Reply { id, result }) => {
-                let reply = take_matching(&replies, id);
-                if let Some(reply) = reply {
-                    let _ = reply.send(result);
-                }
-            }
-            Err(error) => {
-                if let Some(abort) = cancellation.borrow_mut().take() {
-                    let _ = abort.send(error.clone());
-                }
-                if let Some((_, reply)) = replies.borrow_mut().take() {
-                    let _ = reply.send(Err(error));
-                }
-            }
-        };
-        let replies = pending.clone();
-        let malformed = move || {
-            if let Some((_, reply)) = replies.borrow_mut().take() {
-                let _ = reply.send(Err("Invalid sync storage response".into()));
-            }
-        };
-        let job = Rc::new(Job { port: Port::listen(port, message, malformed), pending, next: Cell::new(0), abort });
-        self.state.borrow_mut().jobs.insert(key.clone(), job.clone());
-        let storage = job.clone();
-        let storage: BytesOperation = Rc::new(move |bytes| storage.storage(bytes));
-        let service = self.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = tokio::select! {
-                biased;
-                error = aborted => Err(error.unwrap_or_else(|_| "Sync pass ended".into())),
-                result = library_sync::run(&bytes, storage) => result,
-            };
-            let kind = if result.is_ok() { "done" } else { "error" };
-            let (result, _) = byte_reply(&[("kind", kind.into())], result);
-            service.state.borrow_mut().jobs.remove(&key);
-            job.reject_storage("Sync pass ended");
-            let completed = service.state.borrow_mut().policy.complete(&key);
-            for request in completed {
-                Self::reply(request, &result);
-            }
-            service.execute(key);
-        });
+impl Drop for Request {
+    fn drop(&mut self) {
+        self.port.close();
     }
 }
 
-/// Sync passes receive their storage endpoint directly as a Rust operation.
-pub struct SyncService(Rc<Service>);
-impl SyncService {
-    pub fn request_bytes(&self, key: String, bytes: Vec<u8>, port: MessagePort) {
-        let size = bytes.len();
-        let Some(reservation) = self.0.budget.reserve(size) else {
-            let error = if size > self.0.budget.limit() { "Sync request exceeds configured input byte limit" } else { "Sync input queue byte limit exceeded; retry after queued work completes" };
-            let _ = port.post_message(&object(&[("kind", "error".into()), ("error", error.into())]));
-            port.close();
-            return;
-        };
-        let start = self.0.state.borrow_mut().policy.request(key.clone(), Request { _bytes: reservation, port, bytes });
-        match start {
-            Err((error, request)) => Service::reply(request, &object(&[("kind", "error".into()), ("error", error.into())])),
-            Ok(true) => self.0.execute(key),
-            Ok(false) => {}
+struct Outcome {
+    port: Port,
+    result: ResultBytes,
+}
+
+async fn run_job(port: MessagePort, bytes: Vec<u8>) -> Outcome {
+    let (commands, events) = unbounded();
+    let replies = commands.clone();
+    let malformed = commands.clone();
+    let port = Port::listen(
+        port,
+        move |data| {
+            let event = match SyncEvent::decode(&data) {
+                Ok(SyncEvent::Cancel) => StorageEvent::Failed("Sync request cancelled".into()),
+                Ok(SyncEvent::Reply { id, result }) => StorageEvent::Reply { id, result },
+                Err(error) => StorageEvent::Failed(error),
+            };
+            let _ = replies.try_send(event);
+        },
+        move || {
+            let _ = malformed.try_send(StorageEvent::Malformed);
+        },
+    );
+    let result = storage_job::run(
+        events,
+        commands,
+        async move |storage| library_sync::run(&bytes, storage).await,
+        |id, bytes| {
+            let bytes = Uint8Array::from(bytes.as_slice());
+            let transfer = Array::of1(&bytes.buffer());
+            let message = object(&[("kind", "storage".into()), ("id", id.into()), ("bytes", bytes.into())]);
+            port.raw.post_message_with_transferable(&message, &transfer).map_err(|error| error_message(&error))
+        },
+    )
+    .await;
+    // Keep the callback owner alive until the service posts the final reply.
+    Outcome { port, result }
+}
+
+enum Command {
+    Request { key: String, request: Request },
+    Fail(String),
+}
+
+struct State {
+    policy: SyncJobs<Request>,
+    jobs: FuturesUnordered<LocalBoxFuture<'static, (String, Outcome)>>,
+}
+impl State {
+    fn reply(request: Request, result: &JsValue) {
+        let _ = request.port.post_message(result);
+        // Request::drop closes the port and releases both admission reservations.
+    }
+
+    fn start(&mut self, key: &str) {
+        let Some(request) = self.policy.active_mut(key) else { return };
+        let port = request.port.clone();
+        let bytes = take(&mut request.bytes);
+        let key = key.to_owned();
+        self.jobs.push(Box::pin(async move { (key, run_job(port, bytes).await) }));
+    }
+
+    fn fail(&mut self, error: &str) {
+        let requests = self.policy.fail(error.to_owned());
+        let result = object(&[("kind", "error".into()), ("error", error.into())]);
+        // Send errors while the job ports are still live, then drop the futures.
+        // Dropping those owners cancels engines and their active storage calls.
+        for request in requests {
+            Self::reply(request, &result);
+        }
+        self.jobs.clear();
+    }
+
+    async fn run(mut self, commands: Receiver<Command>) {
+        enum Update {
+            Command(Command),
+            Complete(String, Outcome),
+            Closed,
+        }
+        loop {
+            let update = tokio::select! {
+                biased;
+                command = commands.recv() => match command { Ok(command) => Update::Command(command), Err(_) => Update::Closed },
+                outcome = self.jobs.next(), if !self.jobs.is_empty() => {
+                    let (key, outcome) = outcome.expect("running sync job");
+                    Update::Complete(key, outcome)
+                },
+            };
+            if commands.is_closed() {
+                if let Update::Command(Command::Request { request, .. }) = update {
+                    Self::reply(request, &object(&[("kind", "error".into()), ("error", "Sync service closed".into())]));
+                }
+                break;
+            }
+            match update {
+                Update::Command(Command::Request { key, request }) => match self.policy.request(key.clone(), request) {
+                    Ok(true) => self.start(&key),
+                    Ok(false) => {}
+                    Err((error, request)) => Self::reply(request, &object(&[("kind", "error".into()), ("error", error.into())])),
+                },
+                Update::Command(Command::Fail(error)) => self.fail(&error),
+                Update::Complete(key, outcome) => {
+                    let kind = if outcome.result.is_ok() { "done" } else { "error" };
+                    let (result, _) = byte_reply(&[("kind", kind.into())], outcome.result);
+                    for request in self.policy.complete(&key) {
+                        Self::reply(request, &result);
+                    }
+                    drop(outcome.port);
+                    self.start(&key);
+                }
+                Update::Closed => break,
+            }
+        }
+        self.fail("Sync service closed");
+        while let Ok(command) = commands.try_recv() {
+            if let Command::Request { request, .. } = command {
+                Self::reply(request, &object(&[("kind", "error".into()), ("error", "Sync service closed".into())]));
+            }
         }
     }
+}
+
+/// The service task owns queued requests and every running sync future.
+/// Admission reservations also bound requests waiting in its mailbox.
+pub struct SyncService {
+    budget: ByteBudget,
+    slots: ByteBudget,
+    commands: Sender<Command>,
+    failure: OnceCell<String>,
+}
+impl Drop for SyncService {
+    fn drop(&mut self) {
+        self.commands.close();
+    }
+}
+impl SyncService {
+    pub fn request_bytes(&self, key: String, bytes: Vec<u8>, port: MessagePort) {
+        if let Some(error) = self.failure.get() {
+            reject(&port, error);
+            return;
+        }
+        let size = bytes.len();
+        let Some(reservation) = self.budget.reserve(size) else {
+            let error = if size > self.budget.limit() { "Sync request exceeds configured input byte limit" } else { "Sync input queue byte limit exceeded; retry after queued work completes" };
+            reject(&port, error);
+            return;
+        };
+        let Some(slot) = self.slots.reserve(1) else {
+            reject(&port, "Sync queue is full");
+            return;
+        };
+        let request = Request { _bytes: reservation, _slot: slot, port, bytes };
+        if let Err(error) = self.commands.try_send(Command::Request { key, request }) {
+            if let Command::Request { request, .. } = error.into_inner() {
+                State::reply(request, &object(&[("kind", "error".into()), ("error", "Sync service closed".into())]));
+            }
+        }
+    }
+
     pub fn with_options(options: SyncOptions) -> Self {
-        Self(Rc::new(Service { budget: ByteBudget::new(options.bytes), state: RefCell::new(State { policy: SyncJobs::new(options.jobs), jobs: HashMap::new() }) }))
+        let (commands, requests) = unbounded();
+        let state = State { policy: SyncJobs::new(options.jobs), jobs: FuturesUnordered::new() };
+        wasm_bindgen_futures::spawn_local(state.run(requests));
+        Self { budget: ByteBudget::new(options.bytes), slots: ByteBudget::new(options.jobs), commands, failure: OnceCell::new() }
     }
 
     pub fn fail(&self, error: JsValue) {
         let error = error_message(&error);
-        let (jobs, requests) = {
-            let mut state = self.0.state.borrow_mut();
-            (state.jobs.values().cloned().collect::<Vec<_>>(), state.policy.fail(error.clone()))
-        };
-        for job in jobs {
-            if let Some(abort) = job.abort.borrow_mut().take() {
-                let _ = abort.send(error.clone());
-            }
-            job.reject_storage(&error);
-        }
-        let result = object(&[("kind", "error".into()), ("error", error.into())]);
-        for request in requests {
-            Service::reply(request, &result);
+        if self.failure.set(error.clone()).is_ok() {
+            let _ = self.commands.try_send(Command::Fail(error));
         }
     }
+}
+
+fn reject(port: &MessagePort, error: &str) {
+    let _ = port.post_message(&object(&[("kind", "error".into()), ("error", error.into())]));
+    port.close();
 }

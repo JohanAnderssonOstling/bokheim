@@ -6,6 +6,10 @@ pub mod bluetooth;
 pub mod brightness;
 pub mod natural_light;
 #[cfg(target_os = "linux")]
+pub mod power;
+#[cfg(target_os = "linux")]
+mod rtc;
+#[cfg(target_os = "linux")]
 pub mod wifi;
 
 use std::fs::{self, OpenOptions};
@@ -24,12 +28,19 @@ const TOUCH_DEACTIVATION_DELAY: Duration = Duration::from_secs(2);
 /// Suspends the Kobo to RAM and performs the hardware recovery required after
 /// the kernel returns. This follows Plato's Kobo suspend/resume ordering.
 pub fn suspend() -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    let session = power::SleepSession::prepare(None)?;
+    let result = suspend_kernel();
+    #[cfg(target_os = "linux")]
+    let result = result.and(session.finish());
+    result
+}
+
+/// One kernel suspend/resume cycle. The logical sleep session owns lights and
+/// Wi-Fi separately, so an unsolicited wake need not restore either of them.
+pub fn suspend_kernel() -> io::Result<()> {
     let total_started = Instant::now();
     eprintln!("KOBO_SUSPEND phase=requested elapsed_ms=0");
-
-    #[cfg(target_os = "linux")]
-    let _wifi_sleep = wifi::prepare_sleep().map_err(|error| io::Error::other(format!("Cannot power Wi-Fi off before sleep: {error}")))?;
-    eprintln!("KOBO_SUSPEND phase=wifi_off elapsed_ms={}", total_started.elapsed().as_millis());
 
     let wake_sources_started = Instant::now();
     if let Err(error) = enable_page_button_wake_sources() {
@@ -112,7 +123,7 @@ fn resume_hardware() -> io::Result<()> {
 }
 
 fn sync_filesystems() {
-    // Avoid spawning BusyBox from a static musl process on Kobo.
+    // Synchronize without spawning a firmware process.
     unsafe { libc::sync() };
 }
 

@@ -10,6 +10,8 @@ web-time = "1"
 uuid = { version = "1", features = ["v4", "js"] }
 sync-common = { path = "../../../../shared/sync-common", default-features = false }
 serde = { version = "1", features = ["derive"] }
+futures-util = "0.3"
+httpdate = "1"
 url = "2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

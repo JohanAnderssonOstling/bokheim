@@ -1,0 +1,30 @@
+{
+  "literary_scope_probes": 642,
+  "scope_failures": [],
+  "classification_probes": 73872,
+  "changed_destinations": 964,
+  "coverage_losses": [],
+  "outside_literature_changes": 3,
+  "source_heading_routes_updated": [],
+  "existing_subjects_reparented": 40,
+  "new_subjects": 162,
+  "reviewed_literary_scopes": 228,
+  "protected_youth_comics_subjects": 1217,
+  "existing_ids_preserved": true,
+  "integrity_check": "ok",
+  "foreign_key_violations": 0,
+  "cycles": 0,
+  "new_duplicate_sibling_labels": 0,
+  "source_heading_identity": 13168,
+  "before_concepts": 15672,
+  "after_concepts": 15834,
+  "catalog_release": 223,
+  "backup": "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+  "before_sha256": "04619b18bf0cb0821d9f6a65a5b98f5b681cfbcdf90d92abbe01df509924ccb8",
+  "after_sha256": "93dd5ff2e1a2d07928062c584fecc1332d024fe254a2cce6cd20a7a8396cbe69",
+  "projection_tests": {
+    "unit_passed": 36,
+    "integration_passed": 4
+  },
+  "subject_browsing_tests_passed": 6
+}

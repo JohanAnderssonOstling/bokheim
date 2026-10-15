@@ -117,9 +117,11 @@ pub fn sidebar(theme: BrowserTheme) -> Scrollable<Div> {
 /// siblings of the content, and the grid paginates rather than scrolls — so the
 /// line marked a boundary the eye already had from a column of tiles meeting a
 /// grid of cards.
+/// The tiles keep their full height so the outer sidebar can scroll to every
+/// destination in a short viewport.
 pub fn nav_rail_destinations(theme: BrowserTheme) -> Div {
     let _ = theme;
-    div().w_full().flex_1().min_h_0().flex().flex_col().gap_0()
+    div().w_full().flex_none().flex().flex_col().gap_0()
 }
 
 /// One line of text that ellipsizes rather than wrapping or widening its row.

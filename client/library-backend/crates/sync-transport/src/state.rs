@@ -5,6 +5,7 @@ use sync_common::api::assets::BlobManifestValidationError;
 use sync_common::transport::WireError;
 use sync_common::{LibraryId, ReplicaId, SyncCursor, SyncExchangeRequest, SyncExchangeResponse};
 use url::ParseError;
+use std::time::Duration;
 
 /// Failures from synchronization endpoints, including the statuses that drive recovery.
 #[derive(Debug)]
@@ -15,6 +16,7 @@ pub enum SyncRequestError {
     Wire(WireError),
     Url(ParseError),
     InvalidManifest(BlobManifestValidationError),
+    RetryAfter { status: StatusCode, delay: Duration },
 }
 
 impl fmt::Display for SyncRequestError {
@@ -26,6 +28,7 @@ impl fmt::Display for SyncRequestError {
             Self::Wire(error) => error.fmt(formatter),
             Self::Url(error) => error.fmt(formatter),
             Self::InvalidManifest(error) => error.fmt(formatter),
+            Self::RetryAfter { status, delay } => write!(formatter, "sync server returned {status}; retry after {} seconds", delay.as_secs()),
         }
     }
 }
@@ -37,7 +40,7 @@ impl Error for SyncRequestError {
             Self::Wire(error) => Some(error),
             Self::Url(error) => Some(error),
             Self::InvalidManifest(error) => Some(error),
-            Self::AuthenticationRequired | Self::CursorRejected => None,
+            Self::AuthenticationRequired | Self::CursorRejected | Self::RetryAfter { .. } => None,
         }
     }
 }
@@ -70,5 +73,19 @@ pub async fn exchange_changes(
     let request = SyncExchangeRequest { library_id, replica_id, mutations, cursor };
     let mut trace = crate::PerformanceTrace::new("exchange_http", "encode_request_response_decode");
     log::debug!(target: "sync_performance", "trace_id={} library_id={} push_count={} cursor={:?}", trace.id(), request.library_id, request.mutations.len(), request.cursor);
-    crate::api::send_with_trace(client.post(credentials.server_url().join("api/sync/exchange")?).bearer_auth(credentials.access_token()), &request, &mut trace).await
+    crate::api::send_with_trace_byte_fields(client.post(credentials.server_url().join("api/sync/exchange")?).bearer_auth(credentials.access_token()), &request, &mut trace).await
+}
+
+pub(crate) fn retry_after(value: &str) -> Option<Duration> {
+    let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).ok()?;
+    retry_after_at(value, now)
+}
+
+fn retry_after_at(value: &str, now: Duration) -> Option<Duration> {
+    let value = value.trim();
+    let delay = match value.parse::<u64>() {
+        Ok(seconds) => Duration::from_secs(seconds),
+        Err(_) => httpdate::parse_http_date(value).ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.saturating_sub(now),
+    };
+    Some(delay.min(Duration::from_secs(24 * 60 * 60)))
 }

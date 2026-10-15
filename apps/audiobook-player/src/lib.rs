@@ -34,6 +34,10 @@ impl Drop for OpeningTiming {
 mod audio_engine;
 
 #[cfg(target_os = "android")]
+#[path = "android_audio.rs"]
+pub mod android;
+
+#[cfg(target_os = "android")]
 use android::AudioEngine;
 #[cfg(all(not(target_os = "android"), not(target_arch = "wasm32")))]
 use audio_engine::AudioEngine;
@@ -116,7 +120,7 @@ type SaveSpeed = fn(f64, &mut App);
 
 /// What the sleep timer is waiting for.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum SleepPlan {
+pub enum SleepPlan {
     /// A wall clock: it runs down whether or not anything is playing, so a
     /// pause to answer the door does not silently extend the night.
     Until(Instant),
@@ -124,10 +128,27 @@ enum SleepPlan {
     EndOfChapter(usize),
 }
 
+impl SleepPlan {
+    pub fn deadline(self) -> Option<Instant> {
+        match self { Self::Until(deadline) => Some(deadline), Self::EndOfChapter(_) => None }
+    }
+
+    pub fn chapter(self) -> Option<usize> {
+        match self { Self::EndOfChapter(chapter) => Some(chapter), Self::Until(_) => None }
+    }
+
+    pub fn label(self, now: Instant) -> SharedString {
+        match self {
+            Self::Until(deadline) => format!("{} min", deadline.saturating_duration_since(now).as_secs().div_ceil(60)).into(),
+            Self::EndOfChapter(_) => "Chapter".into(),
+        }
+    }
+}
+
 /// A choice in the sleep timer menu, shared by the compact sheet and the wide
 /// dropdown.
 #[derive(Clone, Copy)]
-enum SleepChoice {
+pub enum SleepChoice {
     Minutes(u64),
     EndOfChapter,
     Off,
@@ -155,7 +176,7 @@ impl SleepChoice {
         }
     }
 
-    fn plan(self, active_chapter: usize) -> Option<SleepPlan> {
+    pub fn plan(self, active_chapter: usize) -> Option<SleepPlan> {
         match self {
             SleepChoice::Minutes(minutes) => Some(SleepPlan::Until(Instant::now() + Duration::from_secs(minutes * 60))),
             SleepChoice::EndOfChapter => Some(SleepPlan::EndOfChapter(active_chapter)),
@@ -171,7 +192,7 @@ fn sleep_status(remaining: &str) -> String {
 
 /// A playback menu's contents, shared by the wide dropdown and the compact
 /// sheet: an optional status line over its choices.
-struct PlaybackMenu<T> {
+pub struct PlaybackMenu<T> {
     id: &'static str,
     title: &'static str,
     status: Option<String>,
@@ -185,18 +206,34 @@ struct PlaybackChoice<T> {
     value: T,
 }
 
-fn speed_menu(current_rate: f64) -> PlaybackMenu<f64> {
+pub fn speed_menu(current_rate: f64) -> PlaybackMenu<f64> {
     let choices = PLAYBACK_SPEEDS.into_iter().map(|rate| PlaybackChoice { id: format!("speed-{rate}").into(), label: format_playback_rate(rate).into(), checked: same_rate(rate, current_rate), value: rate }).collect();
     PlaybackMenu { id: "playback-speed", title: "Playback speed", status: None, choices }
 }
 
-fn sleep_menu(remaining: Option<&str>) -> PlaybackMenu<SleepChoice> {
-    let choices = SleepChoice::offered(remaining.is_some()).map(|choice| PlaybackChoice { id: choice.id(), label: choice.label(), checked: false, value: choice }).collect();
-    PlaybackMenu { id: "sleep", title: "Sleep timer", status: remaining.map(sleep_status), choices }
+pub fn sleep_menu(remaining: Option<&str>) -> PlaybackMenu<SleepChoice> {
+    sleep_menu_for_section(remaining, "chapter")
+}
+
+/// Reader narration can end at a PDF page instead of an audio chapter.
+pub fn sleep_menu_for_section(remaining: Option<&str>, section: &str) -> PlaybackMenu<SleepChoice> {
+    let choices = SleepChoice::offered(remaining.is_some()).map(|choice| PlaybackChoice {
+        id: choice.id(),
+        label: if matches!(choice, SleepChoice::EndOfChapter) { format!("End of {section}").into() } else { choice.label() },
+        checked: false,
+        value: choice,
+    }).collect();
+    let status = remaining.map(|remaining| if remaining == "Chapter" { format!("Until end of {section}") } else { sleep_status(remaining) });
+    PlaybackMenu { id: "sleep", title: "Sleep timer", status, choices }
+}
+
+fn chapters_menu(chapters: &[AudiobookChapter], active: usize) -> PlaybackMenu<usize> {
+    let choices = chapters.iter().enumerate().map(|(index, chapter)| PlaybackChoice { id: format!("chapter-{index}").into(), label: chapter_display_title(&chapter.title).into(), checked: index == active, value: index }).collect();
+    PlaybackMenu { id: "chapters", title: "Chapters", status: None, choices }
 }
 
 impl<T: Copy + 'static> PlaybackMenu<T> {
-    fn dropdown(self, mut menu: PopupMenu, choose: impl Fn(T, &mut App) + Clone + 'static) -> PopupMenu {
+    pub fn dropdown(self, mut menu: PopupMenu, choose: impl Fn(T, &mut App) + Clone + 'static) -> PopupMenu {
         if let Some(status) = self.status {
             menu = menu.item(ui_components::menu_section(status));
         }
@@ -224,7 +261,7 @@ impl<T: Copy + 'static> PlaybackMenu<T> {
     }
 }
 
-fn format_playback_rate(rate: f64) -> String {
+pub fn format_playback_rate(rate: f64) -> String {
     let formatted = format!("{rate:.2}");
     format!("{}×", formatted.trim_end_matches('0').trim_end_matches('.'))
 }

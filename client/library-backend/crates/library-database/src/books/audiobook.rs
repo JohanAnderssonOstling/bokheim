@@ -1,8 +1,8 @@
 //! Audiobook playback state and chapter navigation.
 
-use content_address::ContentHash;
 pub(crate) use crate::shared_sql::SharedSql;
 pub(crate) use crate::{Database, DatabaseError};
+use content_address::ContentHash;
 pub(crate) use include_sqlite_sql::include_sql;
 pub(crate) use library_model::BookTocEntry;
 
@@ -13,7 +13,49 @@ pub(crate) use library_model::BookTocEntry;
 // write call with its own transaction. Callers never hold a connection or
 // transaction across the inspection work that produces the metadata.
 
-pub(crate) use book_model::AudiobookChapter;
+pub(crate) use book_model::{AudiobookChapter, BookFormat};
+
+/// A verified download already has immutable playback facts keyed by its
+/// content hash. Reuse complete facts without claiming this device inspected
+/// the audio. Missing or inconsistent metadata must still go through inspection.
+#[cfg(feature = "scanner")]
+pub(crate) fn reusable_playback_format(hash: ContentHash, format: Option<BookFormat>, duration_ms: Option<i64>, toc_json: Option<&str>, tracks_json: Option<&str>) -> Option<BookFormat> {
+    use book_model::{AudiobookTrack, audiobook_toc_position, tracks_match_archive};
+    use std::collections::HashSet;
+
+    let format = format.filter(|format| matches!(format, BookFormat::M4b | BookFormat::Mp3Folder))?;
+    let duration = u64::try_from(duration_ms?).ok().filter(|duration| *duration > 0)?;
+    let entries: Vec<BookTocEntry> = serde_json::from_str(toc_json?).ok()?;
+    if entries.is_empty() {
+        return None;
+    }
+    let mut previous = None;
+    for entry in entries {
+        let start = audiobook_toc_position(&entry.target)?;
+        if !entry.children.is_empty() || start >= duration || previous.is_some_and(|previous| start <= previous) {
+            return None;
+        }
+        previous = Some(start);
+    }
+    if format == BookFormat::Mp3Folder {
+        let tracks: Vec<AudiobookTrack> = serde_json::from_str(tracks_json?).ok()?;
+        if !tracks_match_archive(&tracks, hash) {
+            return None;
+        }
+        let mut end = 0;
+        let mut names = HashSet::new();
+        for track in tracks {
+            if track.start_ms != end || !names.insert(track.name) {
+                return None;
+            }
+            end = track.end_ms;
+        }
+        if end != duration {
+            return None;
+        }
+    }
+    Some(format)
+}
 
 /// A chapter is an interval; a navigation entry is a point. The end is the next
 /// chapter's start, and the last chapter runs to the end of the audio.
@@ -80,3 +122,35 @@ impl Database {
 }
 
 include_sql!("src/books/sql/audiobook.sql");
+
+#[cfg(all(test, feature = "scanner"))]
+mod tests {
+    use super::*;
+    use book_model::{AudiobookTrack, audiobook_toc_target};
+
+    #[test]
+    fn playback_reuse_requires_complete_metadata_for_the_same_archive() {
+        let hash = ContentHash::new(&"a".repeat(64));
+        let toc = serde_json::to_string(&vec![BookTocEntry { title: "Chapter".into(), target: audiobook_toc_target(0), children: vec![] }]).unwrap();
+        let track = AudiobookTrack { name: "01.mp3".into(), start_ms: 0, end_ms: 1000, offset: 0, length: 100, archive_hash: Some(hash) };
+        let tracks = serde_json::to_string(&vec![track.clone()]).unwrap();
+        let reuse = |format, duration, toc, tracks| reusable_playback_format(hash, Some(format), duration, toc, tracks);
+        assert_eq!(reuse(BookFormat::Mp3Folder, Some(1000), Some(toc.as_str()), Some(tracks.as_str())), Some(BookFormat::Mp3Folder));
+        assert_eq!(reuse(BookFormat::M4b, Some(1000), Some(toc.as_str()), None), Some(BookFormat::M4b));
+        for duration in [None, Some(0), Some(-1)] {
+            assert_eq!(reuse(BookFormat::M4b, duration, Some(toc.as_str()), None), None);
+        }
+        for incomplete_toc in [None, Some("[]"), Some("invalid")] {
+            assert_eq!(reuse(BookFormat::M4b, Some(1000), incomplete_toc, None), None);
+        }
+        for incomplete_tracks in [None, Some("[]"), Some("invalid")] {
+            assert_eq!(reuse(BookFormat::Mp3Folder, Some(1000), Some(toc.as_str()), incomplete_tracks), None);
+        }
+        let mut wrong_archive = track.clone();
+        wrong_archive.archive_hash = Some(ContentHash::new(&"b".repeat(64)));
+        let wrong_archive = serde_json::to_string(&vec![wrong_archive]).unwrap();
+        assert_eq!(reuse(BookFormat::Mp3Folder, Some(1000), Some(toc.as_str()), Some(wrong_archive.as_str())), None);
+        assert_eq!(reuse(BookFormat::Mp3Folder, Some(2000), Some(toc.as_str()), Some(tracks.as_str())), None);
+        assert_eq!(reuse(BookFormat::Epub, Some(1000), Some(toc.as_str()), Some(tracks.as_str())), None);
+    }
+}

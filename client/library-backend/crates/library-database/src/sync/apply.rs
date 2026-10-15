@@ -1,11 +1,13 @@
 //! Pull-page commit: wire decoding plus one atomic apply transaction.
 
 use crate::query_methods::query_rows;
+pub(crate) use crate::sync::{SyncApplySql, invalid_integer_column, nonnegative_u64, parse_uuid_column, read_pull_cursor, storage_i64, write_pull_cursor};
 #[cfg(test)]
 pub use crate::transactions::commit;
-pub(crate) use crate::sync::{PullCursorKey, SyncApplySql, invalid_integer_column, nonnegative_u64, parse_revision, parse_uuid_column, read_cursor_revision, storage_i64, write_cursor_revision};
 pub(crate) use crate::{Database, DatabaseError};
 pub(crate) use library_replica::{LibraryStateEntry, VersionKey};
+use std::collections::BTreeSet;
+use subject_projection::{most_specific_concept_ids, project_subject_concepts};
 use sync_common::StateKey;
 pub(crate) use sync_common::{PullStateResponse, ReplicaSeq};
 
@@ -38,7 +40,7 @@ pub(crate) fn read_version(conn: &rusqlite::Connection, kind: &str, key: &StateK
 /// opaque transport token solely for acknowledgements and exact republication.
 pub(crate) fn publication_version(conn: &rusqlite::Connection, kind: &str, key: &StateKey, subkey: &str) -> Result<Option<VersionKey>, DatabaseError> {
     if records::is_record(kind) {
-        return Ok(records::snapshot(conn, kind, key, subkey)?.map(|(_, token)| token));
+        return records::publication_version(conn, kind, key, subkey);
     }
     read_version(conn, kind, key, subkey)
 }
@@ -69,12 +71,7 @@ pub(crate) fn project_book(metadata: &book_model::BookMetadata) -> Result<Prepar
     let mut metadata = metadata.clone();
     metadata.infer_embedded_subject_isbns().map_err(|e| invalid(e.to_string()))?;
     let subject_codes = subject_projection::project_subject_codes(&metadata.subjects);
-    let mut concepts = Vec::new();
-    for (index, code) in subject_codes.iter().enumerate() {
-        for path in subject_projection::unified_subject_paths(code.system_id(), code.code()) {
-            concepts.push((index, subject_projection::unified_concept_id(&path).expect("projected subject exists in the taxonomy")));
-        }
-    }
+    let concepts = project_subject_concepts(&subject_codes);
     Ok(PreparedBook { metadata, subject_codes, concepts })
 }
 
@@ -82,7 +79,6 @@ pub(crate) mod pull;
 
 pub(crate) mod records;
 pub(crate) mod registers;
-
 
 /// Replace a book's complete local subject projection inside the caller's transaction.
 pub(crate) fn write_subject_projection(tx: &rusqlite::Transaction<'_>, book_id: i64, projected: &PreparedBook) -> Result<(), DatabaseError> {
@@ -102,6 +98,12 @@ pub(crate) fn write_subject_projection(tx: &rusqlite::Transaction<'_>, book_id: 
             concepts.extend(retained.into_iter().map(|concept| (index, concept)));
         }
     }
+
+    // Retained manual identities may have moved since the initial projection.
+    let excluded = projected.subject_codes.iter().flat_map(|code| code.excluded_concept_ids.iter().copied()).collect::<BTreeSet<_>>();
+    concepts.retain(|(_, concept)| !excluded.contains(concept));
+    let retained = most_specific_concept_ids(concepts.iter().map(|(_, concept)| *concept));
+    concepts.retain(|(_, concept)| retained.contains(concept));
 
     tx.subject_projection_clear_subjects(book_id)?;
     // Deleting assignments also deletes their evidence through the foreign key.
@@ -141,7 +143,7 @@ mod subject_projection_tests {
     fn prepared(concept: i64, system: &str) -> PreparedBook {
         PreparedBook {
             metadata: BookMetadata { subjects: vec![BookSubject::new(None, "Subject", "test", None, None).unwrap()], ..BookMetadata::default() },
-            subject_codes: vec![ProjectedSubjectCode { system_id: system.into(), code: "Original path".into(), evidence_positions: vec![0] }],
+            subject_codes: vec![ProjectedSubjectCode { system_id: system.into(), code: "Original path".into(), evidence_positions: vec![0], excluded_concept_ids: Vec::new() }],
             // Different matches may lead to the same assignment and evidence.
             concepts: vec![(0, concept), (0, concept)],
         }
@@ -184,5 +186,49 @@ mod subject_projection_tests {
         db.write(|tx| write_subject_projection(tx, book, &changed)).unwrap();
         assert_eq!(counts(&db, book), (1, 1, 1));
         assert_eq!(db.connection.fixtures_subject_projection_concept(book, |row| row.get::<_, i64>(0)).unwrap(), concept);
+    }
+
+    #[test]
+    fn most_specific_assignments_are_persisted_without_deleting_source_subjects() {
+        let (db, book, _) = database();
+        let metadata = BookMetadata {
+            subjects: vec![
+                BookSubject::new(None, "PZ3", "metadata:work", Some("lcc".into()), Some("PZ3".into())).unwrap(),
+                BookSubject::new(None, "PR4550", "metadata:work", Some("lcc".into()), Some("PR4550".into())).unwrap(),
+                BookSubject::new(None, "Mystery", "manual:subject", Some("unified".into()), Some("Literature / Genres / Mystery & Thrillers / Mystery & Detective".into())).unwrap(),
+            ],
+            ..Default::default()
+        };
+        let projected = project_book(&metadata).unwrap();
+        assert_eq!(projected.metadata.subjects, metadata.subjects);
+        db.write(|tx| write_subject_projection(tx, book, &projected)).unwrap();
+        let ids = query_rows(|callback| db.connection.fixtures_subject_projection_concepts(book, callback), |row| row.get::<_, i64>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(ids, [3915, 4034]);
+        assert_eq!(counts(&db, book), (3, 2, 2));
+    }
+
+    #[test]
+    fn curated_exclusions_preserve_raw_classifications_and_override_retained_identity() {
+        let (db, book, concept) = database();
+        let original = prepared(concept, subject_projection::UNIFIED_SYSTEM_ID);
+        db.write(|tx| write_subject_projection(tx, book, &original)).unwrap();
+        let mut excluded = original;
+        excluded.subject_codes[0].excluded_concept_ids.push(concept);
+        db.write(|tx| write_subject_projection(tx, book, &excluded)).unwrap();
+        assert_eq!(counts(&db, book), (1, 0, 0));
+
+        let metadata = BookMetadata {
+            subjects: vec![
+                BookSubject::new(None, "PZ3", "metadata:work", Some("lcc".into()), Some("PZ3".into())).unwrap(),
+                BookSubject::new(None, "Mystery", "manual:subject", Some("unified".into()), Some("Literature / Genres / Mystery & Thrillers / Mystery & Detective".into())).unwrap(),
+                BookSubject::new(None, "English", subject_projection::MANUAL_SUBJECT_EXCLUSION_SOURCE, Some("unified".into()), Some("Literature / By Language / English".into())).unwrap(),
+            ],
+            ..Default::default()
+        };
+        let projected = project_book(&metadata).unwrap();
+        db.write(|tx| write_subject_projection(tx, book, &projected)).unwrap();
+        let ids = query_rows(|callback| db.connection.fixtures_subject_projection_concepts(book, callback), |row| row.get::<_, i64>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(ids, [4034]);
+        assert_eq!(counts(&db, book), (3, 1, 1));
     }
 }

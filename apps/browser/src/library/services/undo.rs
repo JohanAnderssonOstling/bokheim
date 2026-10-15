@@ -9,9 +9,7 @@
 //! fail, and a folder can come back under a different name if its old one was
 //! taken while it was away.
 
-use std::cell::RefCell;
 use std::future::Future;
-use std::rc::Rc;
 
 use library_backend::LibraryClient;
 use sync_common::{ContentHash, DirId};
@@ -54,7 +52,18 @@ impl UndoStep {
 pub(crate) struct UndoEntry {
     /// What was done, in the words the notification will use: "Moved 3 books".
     pub(crate) label: String,
-    steps: Vec<UndoStep>,
+    steps: Vec<UndoAction>,
+}
+
+#[derive(Clone)]
+struct UndoAction {
+    library: Option<LibraryClient>,
+    step: UndoStep,
+}
+impl std::fmt::Debug for UndoAction {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("UndoAction").field("library", &self.library.as_ref().map(LibraryClient::id)).field("step", &self.step).finish()
+    }
 }
 
 impl UndoEntry {
@@ -63,12 +72,18 @@ impl UndoEntry {
     }
 
     pub(crate) fn with(mut self, step: UndoStep) -> Self {
-        self.steps.push(step);
+        self.push(step);
         self
     }
 
     pub(crate) fn push(&mut self, step: UndoStep) {
-        self.steps.push(step);
+        self.steps.push(UndoAction { library: None, step });
+    }
+
+    /// Cross-library actions retain the backend that owns each inverse step.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn push_in(&mut self, library: &LibraryClient, step: UndoStep) {
+        self.steps.push(UndoAction { library: Some(library.clone()), step });
     }
 
     /// Stop at the first failure, retaining undo for every completed item.
@@ -94,32 +109,32 @@ impl UndoEntry {
 const UNDO_DEPTH: usize = 32;
 
 /// The stack of reversible actions, shared by every page of one library.
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub(crate) struct UndoStack {
-    entries: Rc<RefCell<Vec<UndoEntry>>>,
+    entries: Vec<UndoEntry>,
 }
 
 impl UndoStack {
-    pub(crate) fn push(&self, entry: UndoEntry) {
+    pub(crate) fn push(&mut self, entry: UndoEntry) {
         if entry.is_empty() {
             return;
         }
-        let mut entries = self.entries.borrow_mut();
+        let entries = &mut self.entries;
         entries.push(entry);
         if entries.len() > UNDO_DEPTH {
             entries.remove(0);
         }
     }
 
-    pub(crate) fn take(&self) -> Option<UndoEntry> {
-        self.entries.borrow_mut().pop()
+    pub(crate) fn take(&mut self) -> Option<UndoEntry> {
+        self.entries.pop()
     }
 
     /// Steps run in reverse: the last change made is the first undone, so a
     /// move that displaced something is put back before whatever displaced it.
     pub(crate) async fn apply(entry: UndoEntry, library: &LibraryClient) -> Result<(), String> {
-        for step in entry.steps.into_iter().rev() {
-            step.apply(library).await?;
+        for action in entry.steps.into_iter().rev() {
+            action.step.apply(action.library.as_ref().unwrap_or(library)).await?;
         }
         Ok(())
     }
@@ -148,9 +163,9 @@ mod tests {
         assert_eq!(result, Err("failed".into()));
         assert_eq!(attempted, [0, 1, 2]);
         assert_eq!(entry.steps.len(), 2);
-        assert!(matches!(&entry.steps[0], UndoStep::RenameDirectory { name, .. } if name == "0"));
-        assert!(matches!(&entry.steps[1], UndoStep::RenameDirectory { name, .. } if name == "1"));
-        let stack = UndoStack::default();
+        assert!(matches!(&entry.steps[0].step, UndoStep::RenameDirectory { name, .. } if name == "0"));
+        assert!(matches!(&entry.steps[1].step, UndoStep::RenameDirectory { name, .. } if name == "1"));
+        let mut stack = UndoStack::default();
         stack.push(entry);
         assert_eq!(stack.take().unwrap().steps.len(), 2);
     }
@@ -160,7 +175,7 @@ mod tests {
         let mut entry = UndoEntry::new("Batch");
         let result = entry.record([()], |_| ready(Err("failed".into()))).now_or_never().unwrap();
         assert!(result.is_err());
-        let stack = UndoStack::default();
+        let mut stack = UndoStack::default();
         stack.push(entry);
         assert!(stack.take().is_none());
     }

@@ -8,10 +8,6 @@ use ui_components::BrowserTheme;
 pub(crate) mod browse;
 pub(crate) mod trash;
 
-pub(crate) fn section_empty_state(theme: BrowserTheme) -> AnyElement {
-    ui_components::browser_actionable_empty("Nothing here", "There is nothing to display in this section.", gpui::div(), theme).into_any_element()
-}
-
 /// Keeps existing page content visible alongside a failed request and its retry.
 pub(crate) fn with_retry_banner(body: AnyElement, error: Option<SharedString>, retry_id: impl Into<ElementId>, theme: BrowserTheme, on_retry: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {
     if let Some(error) = error {

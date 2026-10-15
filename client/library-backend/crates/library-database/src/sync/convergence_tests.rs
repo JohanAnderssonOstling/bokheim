@@ -3,7 +3,7 @@ use crate::query_methods::query_rows;
 use crate::{Database, sync::apply};
 use library_replica::{BookDetails, BookLifecycleState, DirectoryLifecycleState, LibraryStateEntry, ReadingPositionState};
 use rusqlite::OptionalExtension;
-use sync_common::{ContentHash, LibraryRevision, PullStateResponse, ROOT_DIR_ID, ReplicaSeq, StateDelivery, SyncCursor};
+use sync_common::{ContentHash, LibraryRevision, PullStateResponse, ROOT_DIR_ID, ReplicaId, ReplicaSeq, StateDelivery, SyncCursor, SyncGeneration};
 
 pub(super) fn db() -> Database {
     let db = Database::open(":memory:").unwrap();
@@ -76,7 +76,95 @@ fn publication_snapshot_survives_reopen() {
     std::fs::remove_file(path).unwrap();
 }
 
-impl Database {
+impl Database {}
+
+fn checkpoint(generation: SyncGeneration, revision: u64) -> SyncCursor {
+    let revision = LibraryRevision::new(revision).unwrap();
+    SyncCursor { generation: Some(generation), lifecycle_revision: Some(revision), field_revision: Some(revision) }
+}
+
+#[test]
+fn generation_checkpoint_rolls_back_with_failed_pull_application() {
+    let database = db();
+    let dir = uuid::Uuid::from_u128(7);
+    database.create_directory_with_id(&dir, &ROOT_DIR_ID, &"Before".into()).unwrap();
+    let sent = database.sync_publishable_mutations().unwrap();
+    let old = checkpoint(SyncGeneration::from_u128(1), 10);
+    database.set_sync_pull_cursor(&old).unwrap();
+    let timestamp = sent.iter().map(|row| row.state.version.changed_at).max().unwrap() + 1;
+    let remote = LibraryStateEntry::DirectoryName { dir_id: dir, name: "After".into() }.publication(ReplicaId::from_u128(8), timestamp, ReplicaSeq::new(90).unwrap());
+    let page = PullStateResponse {
+        mutations: vec![StateDelivery { state: sync_common::transport::representation(&remote.state).unwrap(), revision: LibraryRevision::new(20).unwrap() }],
+        next_cursor: checkpoint(SyncGeneration::from_u128(2), 20),
+        has_more: false,
+    };
+    let ids = sent.iter().map(|row| row.publisher_seq).collect::<Vec<_>>();
+    database.connection.fixtures_fail_pull_generation_commit().unwrap();
+    assert!(database.sync_commit_pull_response(&ids, &page).unwrap_err().to_string().contains("injected cursor failure"));
+    assert_eq!(database.sync_pull_cursor().unwrap(), old);
+    assert_eq!(database.sync_publishable_mutations().unwrap(), sent);
+    assert_eq!(database.connection.fixtures_read_dir_name(&(dir.to_string()), |r| r.get::<_, String>(0)).unwrap(), "Before");
+    database.connection.fixtures_allow_pull_generation_commit().unwrap();
+    database.sync_commit_pull_response(&ids, &page).unwrap();
+    assert_eq!(database.sync_pull_cursor().unwrap(), page.next_cursor);
+    assert!(database.sync_publishable_mutations().unwrap().is_empty());
+    assert_eq!(database.connection.fixtures_read_dir_name(&(dir.to_string()), |r| r.get::<_, String>(0)).unwrap(), "After");
+}
+
+#[test]
+fn history_checkpoint_survives_reopen_and_recovery_clears_it_without_losing_state() {
+    let path = std::env::temp_dir().join(format!("history-checkpoint-{}.sqlite3", uuid::Uuid::new_v4()));
+    let database = Database::open(&path).unwrap();
+    database.initialize_library().unwrap();
+    database.create_directory_with_id(&uuid::Uuid::from_u128(7), &ROOT_DIR_ID, &"Retained".into()).unwrap();
+    let authored = database.sync_publishable_mutations().unwrap();
+    let saved = checkpoint(SyncGeneration::from_u128(1), 1_000);
+    database.set_sync_pull_cursor(&saved).unwrap();
+    drop(database);
+    let database = Database::open(&path).unwrap();
+    database.initialize_library().unwrap();
+    assert_eq!(database.sync_pull_cursor().unwrap(), saved);
+    database.sync_begin_cursor_recovery().unwrap();
+    assert_eq!(database.sync_pull_cursor().unwrap(), SyncCursor::default());
+    assert!(database.sync_cursor_recovery_pending().unwrap());
+    assert_eq!(database.sync_publishable_mutations().unwrap(), authored);
+    drop(database);
+    let database = Database::open(&path).unwrap();
+    database.initialize_library().unwrap();
+    assert!(database.sync_cursor_recovery_pending().unwrap());
+    assert_eq!(database.sync_pull_cursor().unwrap(), SyncCursor::default());
+    assert_eq!(database.sync_publishable_mutations().unwrap(), authored);
+    drop(database);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn existing_libraries_upgrade_without_discarding_numeric_checkpoints_or_authored_state() {
+    for version in [36, 37] {
+        let database = db();
+        let replica = database.initialize_library().unwrap();
+        database.create_directory_with_id(&uuid::Uuid::from_u128(7), &ROOT_DIR_ID, &"Retained".into()).unwrap();
+        let authored = database.sync_publishable_mutations().unwrap();
+        let saved = checkpoint(SyncGeneration::from_u128(1), 1_000);
+        database.set_sync_pull_cursor(&saved).unwrap();
+        // This in-memory fixture must have the actual older schema before
+        // upgrading: remove columns introduced by later migrations so each
+        // migration can add its column without a duplicate-column error.
+        crate::browse::revision::remove(&database.connection).unwrap();
+        database.connection.fixtures_revert_history_to_schema_37().unwrap();
+        if database.connection.fixtures_has_popularity_projection(|row| row.get::<_, bool>(0)).unwrap() {
+            database.connection.fixtures_remove_popularity_projection().unwrap();
+        }
+        database.connection.pragma_update(None, "user_version", version).unwrap();
+        assert_eq!(database.initialize_library().unwrap(), replica);
+        let migrated = database.sync_pull_cursor().unwrap();
+        assert_eq!(migrated.generation, None);
+        assert_eq!(migrated.lifecycle_revision, saved.lifecycle_revision);
+        assert_eq!(migrated.field_revision, saved.field_revision);
+        assert!(!migrated.belongs_to(SyncGeneration::from_u128(2)));
+        assert_eq!(database.sync_publishable_mutations().unwrap(), authored);
+        assert_eq!(database.initialize_library().unwrap(), replica, "the upgrade must be repeatable");
+    }
 }
 
 /// Model server acknowledgement only after proving these publications already

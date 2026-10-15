@@ -1,0 +1,146 @@
+{
+  "after_synthesis": {
+    "anonymous_rss_kib": 363092,
+    "peak_rss_kib": 391204,
+    "rss_kib": 391204
+  },
+  "cpu": "AMD Ryzen 7 6800HS Creator Edition",
+  "host": "Rust; standalone reader-speech example; statically linked native sherpa-onnx",
+  "limitations": [
+    "Standalone speech process; excludes reader UI and audio device",
+    "Background desktop activity was not controlled",
+    "Static Rust-linked and Python wheel native libraries may have different build configurations"
+  ],
+  "load_seconds": 0.985771441,
+  "max_num_sentences": 1,
+  "median_audio_seconds": 32.325260770975056,
+  "median_cpu_seconds": 4.78,
+  "median_seconds": 1.204080105,
+  "memory_metric": "Linux /proc/self/status VmRSS and highest observed VmHWM; fresh executable per model",
+  "model": "/home/johan/.local/share/bokheim/tts/alba/en_GB-alba-medium.onnx",
+  "model_bytes": 63201430,
+  "native_git_sha1": "11afbd00",
+  "native_onnxruntime": "1.28.2",
+  "opening_sentence_seconds": 0.228391059,
+  "passage": "On 14 October, Dr. Andersson opened the old library at half past eight. \u201cAre we ready?\u201d she asked. The temperature was 12.5 degrees, but sunlight warmed the room. A reader paused beside the window, considered the unfamiliar name on the cover, and began again. Some sentences were short. Others unfolded slowly, with a quiet interruption in the middle, before arriving at their final thought. Outside, the rain had stopped. \u201cTake your time,\u201d she said. \u201cThere is another chapter tomorrow.\u201d He turned the page and continued reading, listening to the rhythm of the words and the silence between them.",
+  "peak_rss_kib": 391204,
+  "phases": [
+    {
+      "anonymous_rss_kib": 628,
+      "elapsed_seconds": 4.7219e-05,
+      "peak_rss_kib": 22840,
+      "phase": "before_load",
+      "rss_kib": 22840
+    },
+    {
+      "anonymous_rss_kib": 84284,
+      "elapsed_seconds": 0.985878292,
+      "peak_rss_kib": 111724,
+      "phase": "after_load",
+      "rss_kib": 111724
+    },
+    {
+      "anonymous_rss_kib": 159908,
+      "elapsed_seconds": 1.214347539,
+      "peak_rss_kib": 188020,
+      "phase": "after_opening_sentence",
+      "rss_kib": 188020
+    },
+    {
+      "anonymous_rss_kib": 248076,
+      "elapsed_seconds": 2.456898258,
+      "peak_rss_kib": 276188,
+      "phase": "first_native_audio_retained",
+      "rss_kib": 276188
+    },
+    {
+      "anonymous_rss_kib": 248344,
+      "elapsed_seconds": 2.457282285,
+      "peak_rss_kib": 276456,
+      "phase": "native_and_rust_pcm_retained",
+      "rss_kib": 276456
+    },
+    {
+      "anonymous_rss_kib": 248344,
+      "elapsed_seconds": 2.45730557,
+      "peak_rss_kib": 276456,
+      "phase": "rust_pcm_retained",
+      "rss_kib": 276456
+    },
+    {
+      "anonymous_rss_kib": 248344,
+      "elapsed_seconds": 2.457329435,
+      "peak_rss_kib": 276456,
+      "phase": "after_run_0_audio_released",
+      "rss_kib": 276456
+    },
+    {
+      "anonymous_rss_kib": 291264,
+      "elapsed_seconds": 3.66176317,
+      "peak_rss_kib": 319376,
+      "phase": "after_run_1_audio_released",
+      "rss_kib": 319376
+    },
+    {
+      "anonymous_rss_kib": 363092,
+      "elapsed_seconds": 4.87335779,
+      "peak_rss_kib": 391204,
+      "phase": "after_run_2_audio_released",
+      "rss_kib": 391204
+    },
+    {
+      "anonymous_rss_kib": 363092,
+      "elapsed_seconds": 6.026754704,
+      "peak_rss_kib": 391204,
+      "phase": "after_run_3_audio_released",
+      "rss_kib": 391204
+    },
+    {
+      "anonymous_rss_kib": 104880,
+      "elapsed_seconds": 6.057836819,
+      "peak_rss_kib": 390272,
+      "phase": "after_voice_unload",
+      "rss_kib": 133204
+    },
+    {
+      "anonymous_rss_kib": 104880,
+      "elapsed_seconds": 8.058013927,
+      "peak_rss_kib": 390272,
+      "phase": "two_seconds_after_unload",
+      "rss_kib": 133204
+    }
+  ],
+  "runs": [
+    {
+      "audio_seconds": 32.65251700680272,
+      "cpu_seconds": 4.91,
+      "run": 0,
+      "wall_seconds": 1.2424324150000001
+    },
+    {
+      "audio_seconds": 32.325260770975056,
+      "cpu_seconds": 4.78,
+      "run": 1,
+      "wall_seconds": 1.204080105
+    },
+    {
+      "audio_seconds": 32.81061224489796,
+      "cpu_seconds": 4.8,
+      "run": 2,
+      "wall_seconds": 1.211237765
+    },
+    {
+      "audio_seconds": 31.898639455782313,
+      "cpu_seconds": 4.59,
+      "run": 3,
+      "wall_seconds": 1.153001364
+    }
+  ],
+  "sherpa_onnx": "1.13.8",
+  "silence_scale": 0.2,
+  "speaker": "en_GB-alba-medium",
+  "speaker_id": 0,
+  "threads": 4,
+  "times_realtime": 26.84643707403093,
+  "warm_repeats": 3
+}

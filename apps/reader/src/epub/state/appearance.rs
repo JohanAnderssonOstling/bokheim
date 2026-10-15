@@ -91,7 +91,8 @@ impl ReaderView {
         // ends, and those come from the application rather than from any reader
         // preference.
         let theme = crate::settings::library_theme_adaptation(cx);
-        self.apply_appearance(cx, update, move |preferences| RendererCommand::SetReaderStyleOverrides(preferences.style_overrides(Some(theme))));
+        let link_foreground = crate::settings::library_link_foreground(cx);
+        self.apply_appearance(cx, update, move |preferences| RendererCommand::SetReaderStyleOverrides(preferences.style_overrides(Some(theme), link_foreground)));
     }
 
     pub(in crate::epub) fn adjust_font_size(&self, delta: f32, cx: &mut Context<Self>) {
@@ -107,8 +108,8 @@ impl ReaderView {
         self.apply_style_override(cx, |preferences| preferences.text_alignment = text_alignment);
     }
 
-    pub(in crate::epub) fn adjust_line_height(&self, delta: f32, cx: &mut Context<Self>) {
-        let line_height = (ReaderSettings::preferences(cx).line_height + delta).clamp(LINE_HEIGHT_MIN, LINE_HEIGHT_MAX);
+    pub(in crate::epub) fn set_line_height(&self, line_height: f32, cx: &mut Context<Self>) {
+        let line_height = line_height.clamp(LINE_HEIGHT_MIN, LINE_HEIGHT_MAX);
         self.apply_style_override(cx, |preferences| preferences.line_height = line_height);
     }
 
@@ -121,21 +122,10 @@ impl ReaderView {
         });
     }
 
-    pub(in crate::epub) fn adjust_min_line_width_ch(&self, delta: f64, window: &Window, cx: &mut Context<Self>) {
+    pub(in crate::epub) fn set_line_width_range(&self, range: (f64, f64), window: &Window, cx: &mut Context<Self>) {
         self.apply_line_width_range(window, cx, |minimum, maximum| {
-            *minimum = (*minimum + delta).clamp(20.0, 100.0);
-            if *minimum > *maximum {
-                *maximum = *minimum;
-            }
-        });
-    }
-
-    pub(in crate::epub) fn adjust_max_line_width_ch(&self, delta: f64, window: &Window, cx: &mut Context<Self>) {
-        self.apply_line_width_range(window, cx, |minimum, maximum| {
-            *maximum = (*maximum + delta).clamp(20.0, 100.0);
-            if *maximum < *minimum {
-                *minimum = *maximum;
-            }
+            *minimum = range.0.clamp(20.0, 100.0);
+            *maximum = range.1.clamp(*minimum, 100.0);
         });
     }
 
@@ -157,22 +147,22 @@ impl ReaderView {
         notify(cx, Component::ReaderShell, "line_width_range_changed");
     }
 
-    pub(in crate::epub) fn adjust_horizontal_margin(&self, delta: f32, cx: &mut Context<Self>) {
-        let value = (ReaderSettings::preferences(cx).horizontal_margin_px + delta).clamp(READER_SPACING_MIN, READER_SPACING_MAX);
+    pub(in crate::epub) fn set_horizontal_margin(&self, value: f32, cx: &mut Context<Self>) {
+        let value = value.clamp(READER_SPACING_MIN, READER_SPACING_MAX);
         if ReaderSettings::update(cx, |preferences| preferences.horizontal_margin_px = value) {
             notify(cx, Component::ReaderShell, "horizontal_margin_changed");
         }
     }
 
-    pub(in crate::epub) fn adjust_vertical_margin(&self, delta: f32, cx: &mut Context<Self>) {
-        let value = (ReaderSettings::preferences(cx).vertical_margin_px + delta).clamp(READER_SPACING_MIN, READER_SPACING_MAX);
+    pub(in crate::epub) fn set_vertical_margin(&self, value: f32, cx: &mut Context<Self>) {
+        let value = value.clamp(READER_SPACING_MIN, READER_SPACING_MAX);
         if ReaderSettings::update(cx, |preferences| preferences.vertical_margin_px = value) {
             notify(cx, Component::ReaderShell, "vertical_margin_changed");
         }
     }
 
-    pub(in crate::epub) fn adjust_min_column_gap(&self, delta: f32, cx: &mut Context<Self>) {
-        let value = (ReaderSettings::preferences(cx).min_column_gap_px + delta).clamp(READER_SPACING_MIN, READER_SPACING_MAX);
+    pub(in crate::epub) fn set_min_column_gap(&self, value: f32, cx: &mut Context<Self>) {
+        let value = value.clamp(READER_SPACING_MIN, READER_SPACING_MAX);
         if ReaderSettings::update(cx, |preferences| preferences.min_column_gap_px = value) {
             notify(cx, Component::ReaderShell, "column_gap_changed");
         }

@@ -6,11 +6,13 @@ REPOSITORY_ROOT=$(cd "$SCRIPT_DIR/../../../.." && pwd)
 PACKAGE_VERSION=${1:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$REPOSITORY_ROOT/apps/desktop-gpui/Cargo.toml" | head -n 1)}
 RELEASE_DIRECTORY=${RELEASE_DIRECTORY:-"$REPOSITORY_ROOT/release"}
 DESKTOP_BINARY=${DESKTOP_BINARY:-"$REPOSITORY_ROOT/target/release/desktop-gpui"}
+OPDS_BROWSER=${OPDS_BROWSER:-"$(dirname "$DESKTOP_BINARY")/bokheim-opds-webview"}
 LINUXDEPLOY=${LINUXDEPLOY:-linuxdeploy-x86_64.AppImage}
 APPIMAGETOOL=${APPIMAGETOOL:-appimagetool-x86_64.AppImage}
 
 test -n "$PACKAGE_VERSION"
 test -x "$DESKTOP_BINARY"
+test -x "$OPDS_BROWSER"
 command -v "$LINUXDEPLOY" >/dev/null 2>&1 || test -x "$LINUXDEPLOY"
 command -v "$APPIMAGETOOL" >/dev/null 2>&1 || test -x "$APPIMAGETOOL"
 
@@ -22,8 +24,10 @@ STAGED_ICON="$PACKAGE_WORK_DIRECTORY/se.bokheim.Bokheim.png"
 DESKTOP_FILE="$REPOSITORY_ROOT/apps/desktop-gpui/linux/se.bokheim.Bokheim.desktop"
 ICON_DIRECTORY="$REPOSITORY_ROOT/apps/ui/design-tokens/assets/icon"
 
+install -Dm644 "$(dirname "$DESKTOP_BINARY")/taxonomy.sqlite3" "$APPDIR/usr/bin/taxonomy.sqlite3"
 install -Dm644 "$ICON_DIRECTORY/bokheim-512.png" "$STAGED_ICON"
 python3 "$REPOSITORY_ROOT/shared/pdfium/prepare.py" --target x86_64-unknown-linux-gnu --dest "$APPDIR/usr/bin/pdfium"
+python3 "$REPOSITORY_ROOT/shared/reader-speech/prepare.py" --voice all --dest "$APPDIR/usr/bin/tts"
 
 "$LINUXDEPLOY" \
   --appdir "$APPDIR" \
@@ -32,6 +36,10 @@ python3 "$REPOSITORY_ROOT/shared/pdfium/prepare.py" --target x86_64-unknown-linu
   --desktop-file "$DESKTOP_FILE" \
   --icon-file "$STAGED_ICON" \
   --custom-apprun "$SCRIPT_DIR/AppRun"
+
+# The webview helper links against the system's WebKitGTK 4.1, so it bypasses
+# linuxdeploy: no bundled libraries and no rpath into usr/lib.
+install -Dm755 "$OPDS_BROWSER" "$APPDIR/usr/bin/bokheim-opds-webview"
 
 for size in 16 24 32 48 64 128 256 512; do
   install -Dm644 \

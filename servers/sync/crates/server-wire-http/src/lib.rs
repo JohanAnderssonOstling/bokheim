@@ -36,11 +36,19 @@ fn wire_decode_status(error: WireError) -> StatusCode {
 }
 
 pub fn decode_request<T: DeserializeOwned>(headers: &HeaderMap, body: &[u8], decoded_limit: usize) -> Result<T, StatusCode> {
+    decode_request_with(headers, body, decoded_limit, wire::decode)
+}
+
+pub fn decode_request_byte_fields<T: DeserializeOwned>(headers: &HeaderMap, body: &[u8], decoded_limit: usize) -> Result<T, StatusCode> {
+    decode_request_with(headers, body, decoded_limit, wire::decode_byte_fields)
+}
+
+fn decode_request_with<T>(headers: &HeaderMap, body: &[u8], decoded_limit: usize, decode: fn(&[u8], usize) -> Result<T, WireError>) -> Result<T, StatusCode> {
     if !content_encoding_supported(headers) {
         return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
     match content_type(headers) {
-        Some(value) if wire::is_current_media_type(value) => wire::decode(body, decoded_limit).map_err(wire_decode_status),
+        Some(value) if wire::is_current_media_type(value) => decode(body, decoded_limit).map_err(wire_decode_status),
         Some(value) if value.split(';').next().is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case(wire::MEDIA_TYPE_BASE)) => Err(StatusCode::UPGRADE_REQUIRED),
         _ => Err(StatusCode::UNSUPPORTED_MEDIA_TYPE),
     }
@@ -64,4 +72,34 @@ pub fn response<T: Serialize>(request_headers: &HeaderMap, value: T) -> Result<R
     response.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static(wire::MEDIA_TYPE));
     response.headers_mut().insert(header::VARY, HeaderValue::from_static("Accept"));
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize, PartialEq, Serialize)]
+    struct Payload {
+        #[serde(with = "serde_bytes")]
+        bytes: Vec<u8>,
+    }
+
+    #[test]
+    fn compact_request_decode_keeps_http_contract_checks() {
+        let payload = Payload { bytes: (0..=255).collect() };
+        let encoded = wire::encode(&payload).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(wire::MEDIA_TYPE));
+        assert_eq!(decode_request_byte_fields::<Payload>(&headers, &encoded, 4096).unwrap(), payload);
+        assert_eq!(decode_request_byte_fields::<Payload>(&headers, &encoded, 1), Err(StatusCode::PAYLOAD_TOO_LARGE));
+        let mut old_body = encoded.clone();
+        old_body[1] = 28;
+        assert_eq!(decode_request_byte_fields::<Payload>(&headers, &old_body, 4096), Err(StatusCode::UPGRADE_REQUIRED));
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/vnd.bokheim+protobuf; version=28"));
+        assert_eq!(decode_request_byte_fields::<Payload>(&headers, &encoded, 4096), Err(StatusCode::UPGRADE_REQUIRED));
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(wire::MEDIA_TYPE));
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        assert_eq!(decode_request_byte_fields::<Payload>(&headers, &encoded, 4096), Err(StatusCode::UNSUPPORTED_MEDIA_TYPE));
+    }
 }

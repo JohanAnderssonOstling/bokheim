@@ -3,31 +3,52 @@
 use async_channel::{Receiver, Sender};
 use std::collections::{HashMap, HashSet};
 
+use crate::reading_positions::ReadingPositionPolicy;
 use crate::scheduler::SyncScheduler;
 use library_model::{BookDownloadStatus, DownloadState, LibraryUpdate};
 use sync_common::ContentHash;
+use tokio::sync::watch;
 
 #[derive(Clone, Debug)]
 pub enum LibraryEvent {
     /// Book bytes are now present on the server; lifecycle metadata can publish.
     BooksUploaded,
+    /// Selection is reported with the policy revision observed by the scan.
+    ReadingPositionsSelected(Vec<(ContentHash, u64)>),
     /// Metadata acknowledgement may have made covers uploadable.
     AssetWorkAvailable,
     /// File replay finished and admitted uploads; enrichment can look again.
     FilesPrepared,
-    ThumbnailGenerated { content_hash: ContentHash },
-    DownloadStatusChanged { content_hash: ContentHash, state: DownloadState },
+    ThumbnailGenerated {
+        content_hash: ContentHash,
+    },
+    DownloadStatusChanged {
+        content_hash: ContentHash,
+        state: DownloadState,
+    },
     ContentsChanged,
     /// A committed write whose notification is suppressed during a directory import.
     ContentsCommitted,
     /// A presentation update that does not schedule another worker pass.
     Update(LibraryUpdate),
+    /// Activity guards report their lifecycle; only the actor applies it.
+    DirectoryImportStarted {
+        id: uuid::Uuid,
+    },
+    DirectoryImportFinished {
+        id: uuid::Uuid,
+        scanning: bool,
+    },
     ImportStarted,
     /// `busy`: another import or a scan is still running.
-    ImportComplete { busy: bool },
+    ImportComplete {
+        busy: bool,
+    },
     ScanStarted,
     /// `busy`: a folder import is still running.
-    ScanComplete { busy: bool },
+    ScanComplete {
+        busy: bool,
+    },
 }
 
 /// Send-only capability for workers and callbacks. Mutable coordination stays
@@ -35,6 +56,7 @@ pub enum LibraryEvent {
 #[derive(Clone)]
 pub struct LibraryEventRouter {
     sender: Sender<LibraryEvent>,
+    pub reading_positions: watch::Receiver<ReadingPositionPolicy>,
     pub sync: SyncScheduler,
     pub assets: SyncScheduler,
     pub files: SyncScheduler,
@@ -44,7 +66,11 @@ pub struct LibraryEventRouter {
 impl LibraryEventRouter {
     pub fn new(sync: SyncScheduler, assets: SyncScheduler, files: SyncScheduler, enrichment: SyncScheduler) -> (Self, LibraryEventState) {
         let (sender, receiver) = async_channel::unbounded();
-        (Self { sender, sync, assets, files, enrichment }, LibraryEventState { receiver, updates: Vec::new(), latest_downloads: HashMap::new(), directory_imports: HashSet::new(), closed: false })
+        let (position_updates, reading_positions) = watch::channel(ReadingPositionPolicy::default());
+        (
+            Self { sender, reading_positions, sync, assets, files, enrichment },
+            LibraryEventState { receiver, position_policy: ReadingPositionPolicy::default(), position_updates, updates: Vec::new(), latest_downloads: HashMap::new(), directory_imports: HashSet::new(), closed: false },
+        )
     }
 
     /// Announces that the set of books or folders changed.
@@ -84,10 +110,11 @@ impl LibraryEventRouter {
     }
 }
 
-
-/// Exclusively owned by the library session. Download observations and import
+/// Exclusively owned by the library actor. Download observations and import
 /// tracking are operational state, independent of subscriber bookkeeping.
 pub struct LibraryEventState {
+    position_policy: ReadingPositionPolicy,
+    position_updates: watch::Sender<ReadingPositionPolicy>,
     receiver: Receiver<LibraryEvent>,
     closed: bool,
     updates: Vec<Sender<LibraryUpdate>>,
@@ -96,6 +123,14 @@ pub struct LibraryEventState {
 }
 
 impl LibraryEventState {
+    pub fn reading_position_changed(&mut self, hash: ContentHash, router: &LibraryEventRouter) {
+        self.position_policy.changed(hash, web_time::Instant::now());
+        self.position_updates.send_replace(self.position_policy.clone());
+        // Every edit schedules its quiet deadline. An earlier maximum-wait
+        // wake is retained by the scheduler; unrelated passes re-arm it.
+        router.sync.wake_after(std::time::Duration::from_secs(5));
+    }
+
     pub fn receiver(&self) -> Receiver<LibraryEvent> {
         self.receiver.clone()
     }
@@ -157,6 +192,19 @@ impl LibraryEventState {
             return;
         }
         let event = match event {
+            LibraryEvent::ReadingPositionsSelected(positions) => {
+                self.position_policy.selected(&positions);
+                self.position_updates.send_replace(self.position_policy.clone());
+                return;
+            }
+            LibraryEvent::DirectoryImportStarted { id } => {
+                self.begin_directory_import(id, router);
+                return;
+            }
+            LibraryEvent::DirectoryImportFinished { id, scanning } => {
+                self.finish_directory_import(id, scanning, router);
+                return;
+            }
             LibraryEvent::ContentsCommitted => {
                 if self.directory_imports_active() {
                     return;
@@ -180,7 +228,12 @@ impl LibraryEventState {
                 self.latest_downloads.insert(content_hash, state.clone());
                 LibraryUpdate::Download(BookDownloadStatus::new(content_hash, state))
             }
-            LibraryEvent::AssetWorkAvailable | LibraryEvent::FilesPrepared | LibraryEvent::ContentsCommitted => return,
+            LibraryEvent::AssetWorkAvailable
+            | LibraryEvent::FilesPrepared
+            | LibraryEvent::ContentsCommitted
+            | LibraryEvent::DirectoryImportStarted { .. }
+            | LibraryEvent::DirectoryImportFinished { .. }
+            | LibraryEvent::ReadingPositionsSelected(_) => return,
             LibraryEvent::ScanStarted | LibraryEvent::ImportStarted => LibraryUpdate::Scanning(true),
             LibraryEvent::ContentsChanged | LibraryEvent::BooksUploaded => LibraryUpdate::Contents,
             LibraryEvent::ScanComplete { busy } | LibraryEvent::ImportComplete { busy } => {
@@ -271,6 +324,24 @@ mod tests {
         router.emit(LibraryEvent::DownloadStatusChanged { content_hash: hash, state: DownloadState::Queued });
         state.drain(&router);
         assert_eq!(state.download_state(&hash), Some(&DownloadState::Queued));
+    }
+
+    #[test]
+    fn sync_selection_uses_its_snapshot_revision_and_preserves_a_newer_edit() {
+        let (router, mut state, _) = fixture();
+        let hash = ContentHash::from_bytes([7; 32]);
+        state.reading_position_changed(hash, &router);
+        let scan_policy = router.reading_positions.borrow().clone();
+        let selected = scan_policy.revisions([hash]);
+        state.reading_position_changed(hash, &router);
+        router.emit(LibraryEvent::ReadingPositionsSelected(selected));
+        state.drain(&router);
+        let current = router.reading_positions.borrow().clone();
+        assert_ne!(scan_policy.revisions([hash]), current.revisions([hash]));
+        assert!(current.waiting(web_time::Instant::now()).contains(&hash));
+        router.emit(LibraryEvent::ReadingPositionsSelected(current.revisions([hash])));
+        state.drain(&router);
+        assert!(router.reading_positions.borrow().revisions([hash]).is_empty());
     }
 
     #[test]

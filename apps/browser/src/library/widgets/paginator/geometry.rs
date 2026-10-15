@@ -87,7 +87,7 @@ pub(super) fn fallback_width(data: &PaginatorData, rem_size: Pixels) -> Pixels {
     px(data.groups.iter().map(|group| f32::from(group.policy.width.width(rem_size))).fold(1.0, f32::max))
 }
 
-pub(super) fn next_forward_row(data: &PaginatorData, geometries: &[GroupGeometry], next_child: &mut usize) -> Option<AssignedRow> {
+pub(super) fn next_forward_row(data: &PaginatorData, widths: &[Pixels], geometries: &[GroupGeometry], next_child: &mut usize) -> Option<AssignedRow> {
     if *next_child >= data.children.len() {
         return None;
     }
@@ -100,7 +100,7 @@ pub(super) fn next_forward_row(data: &PaginatorData, geometries: &[GroupGeometry
     let mut items = Vec::new();
     let mut x = geometry.leading;
     while row_end < group.end {
-        let width = if group.policy.intrinsic { data.children[row_end].measured_width.get().max(px(1.0)).min(geometry.child_width) } else { geometry.child_width };
+        let width = if group.policy.intrinsic { widths.get(row_end).copied().unwrap_or_default().max(px(1.0)).min(geometry.child_width) } else { geometry.child_width };
         if !items.is_empty() && (if group.policy.intrinsic { x + width > geometry.leading + geometry.child_width } else { items.len() >= geometry.columns }) {
             break;
         }
@@ -114,12 +114,12 @@ pub(super) fn next_forward_row(data: &PaginatorData, geometries: &[GroupGeometry
 
 /// Normalizes an exact child range forward. The start remains stable and only
 /// the final row of each group can be incomplete.
-pub(super) fn forward_rows_in_range(data: &PaginatorData, geometries: &[GroupGeometry], start: usize, end: usize) -> Vec<AssignedRow> {
+pub(super) fn forward_rows_in_range(data: &PaginatorData, widths: &[Pixels], geometries: &[GroupGeometry], start: usize, end: usize) -> Vec<AssignedRow> {
     let end = end.min(data.children.len());
     let mut next_child = start.min(end);
     let mut rows = Vec::new();
     while next_child < end {
-        let Some(mut row) = next_forward_row(data, geometries, &mut next_child) else {
+        let Some(mut row) = next_forward_row(data, widths, geometries, &mut next_child) else {
             break;
         };
         if let Some(first_after_range) = row.items.iter().position(|item| item.child_index >= end) {
@@ -139,18 +139,20 @@ pub(super) fn gap_between(data: &PaginatorData, previous: &AssignedRow, next: &A
     px(f32::from(data.groups[previous.group_index].policy.row_gap).max(f32::from(data.groups[next.group_index].policy.row_gap)))
 }
 
-pub(super) fn page_rows(data: &PaginatorData, geometries: &[GroupGeometry], direction: AssignmentDirection, child_offset: usize, maximum_rows: Option<usize>, available_height: Pixels, rem_size: Pixels) -> Vec<AssignedRow> {
+pub(super) fn page_rows(
+    data: &PaginatorData, widths: &[Pixels], geometries: &[GroupGeometry], direction: AssignmentDirection, child_offset: usize, maximum_rows: Option<usize>, available_height: Pixels, rem_size: Pixels,
+) -> Vec<AssignedRow> {
     match direction {
-        AssignmentDirection::Forward => forward_page_rows(data, geometries, child_offset, maximum_rows, available_height, rem_size),
-        AssignmentDirection::Backward => backward_page_rows(data, geometries, child_offset, maximum_rows, available_height, rem_size),
+        AssignmentDirection::Forward => forward_page_rows(data, widths, geometries, child_offset, maximum_rows, available_height, rem_size),
+        AssignmentDirection::Backward => backward_page_rows(data, widths, geometries, child_offset, maximum_rows, available_height, rem_size),
     }
 }
 
-fn forward_page_rows(data: &PaginatorData, geometries: &[GroupGeometry], child_offset: usize, maximum_rows: Option<usize>, available_height: Pixels, rem_size: Pixels) -> Vec<AssignedRow> {
+fn forward_page_rows(data: &PaginatorData, widths: &[Pixels], geometries: &[GroupGeometry], child_offset: usize, maximum_rows: Option<usize>, available_height: Pixels, rem_size: Pixels) -> Vec<AssignedRow> {
     let mut next_child = child_offset.min(data.children.len());
     let mut rows = Vec::new();
     while maximum_rows.is_none_or(|maximum_rows| rows.len() < maximum_rows) {
-        let Some(row) = next_forward_row(data, geometries, &mut next_child) else {
+        let Some(row) = next_forward_row(data, widths, geometries, &mut next_child) else {
             break;
         };
         let mut candidate = rows.clone();
@@ -167,7 +169,7 @@ fn forward_page_rows(data: &PaginatorData, geometries: &[GroupGeometry], child_o
 ///
 /// Walks backward one group at a time. Uniform row heights determine how
 /// many rows fit; intrinsic widths determine which children those rows hold.
-fn backward_page_start(data: &PaginatorData, geometries: &[GroupGeometry], page_end: usize, maximum_rows: Option<usize>, available_height: Pixels, rem_size: Pixels) -> usize {
+fn backward_page_start(data: &PaginatorData, widths: &[Pixels], geometries: &[GroupGeometry], page_end: usize, maximum_rows: Option<usize>, available_height: Pixels, rem_size: Pixels) -> usize {
     let budget = f32::from(available_height).max(1.0);
     let mut start = page_end;
     let mut used = 0.0;
@@ -201,7 +203,7 @@ fn backward_page_start(data: &PaginatorData, geometries: &[GroupGeometry], page_
                 let mut left = end;
                 let mut occupied = Pixels::ZERO;
                 while left > group.start {
-                    let width = data.children[left - 1].measured_width.get().max(px(1.0)).min(geometry.child_width);
+                    let width = widths.get(left - 1).copied().unwrap_or_default().max(px(1.0)).min(geometry.child_width);
                     let next = occupied + width + if left == end { Pixels::ZERO } else { geometry.column_gap };
                     if left < end && next > geometry.child_width {
                         break;
@@ -241,10 +243,10 @@ fn backward_page_start(data: &PaginatorData, geometries: &[GroupGeometry], page_
 /// Fixed columns use division; intrinsic groups greedily pack from the end.
 /// Packing the resulting contiguous range forward needs no more rows, and
 /// preserves reading order even when the first or last row is partial.
-fn backward_page_rows(data: &PaginatorData, geometries: &[GroupGeometry], child_offset: usize, maximum_rows: Option<usize>, available_height: Pixels, rem_size: Pixels) -> Vec<AssignedRow> {
+fn backward_page_rows(data: &PaginatorData, widths: &[Pixels], geometries: &[GroupGeometry], child_offset: usize, maximum_rows: Option<usize>, available_height: Pixels, rem_size: Pixels) -> Vec<AssignedRow> {
     let page_end = child_offset.saturating_add(1).min(data.children.len());
-    let start = backward_page_start(data, geometries, page_end, maximum_rows, available_height, rem_size);
-    forward_rows_in_range(data, geometries, start, page_end)
+    let start = backward_page_start(data, widths, geometries, page_end, maximum_rows, available_height, rem_size);
+    forward_rows_in_range(data, widths, geometries, start, page_end)
 }
 
 pub(super) fn rows_height(data: &PaginatorData, rows: &[AssignedRow], rem_size: Pixels) -> Pixels {
@@ -256,4 +258,43 @@ pub(super) fn rows_height(data: &PaginatorData, rows: &[AssignedRow], rem_size: 
         }
     }
     height
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{PaginatorChild, PaginatorGroup, PaginatorSizing, PaginatorWidthPolicy};
+    use super::*;
+
+    fn intrinsic_data() -> PaginatorData {
+        let mut policy = PaginatorGroupPolicy::new(PaginatorWidthPolicy::pixels(px(100.0)), PaginatorSizing::pixels(px(10.0)), px(0.0));
+        policy.intrinsic = true;
+        policy.column_gap = px(0.0);
+        PaginatorData::new([PaginatorGroup::new(policy, (0..3).map(|_| PaginatorChild::new(|_, _, _| unreachable!())))])
+    }
+
+    fn child_indices(rows: Vec<AssignedRow>) -> Vec<Vec<usize>> {
+        rows.into_iter().map(|row| row.items.into_iter().map(|item| item.child_index).collect()).collect()
+    }
+
+    #[test]
+    fn independent_measurement_snapshots_pack_the_same_definitions_differently() {
+        let data = intrinsic_data();
+        let geometry = group_geometries(&data, px(100.0), px(16.0));
+        let small = [px(60.0), px(30.0), px(60.0)];
+        let large = [px(80.0), px(70.0), px(80.0)];
+        assert_eq!(child_indices(forward_rows_in_range(&data, &small, &geometry, 0, 3)), vec![vec![0, 1], vec![2]]);
+        assert_eq!(child_indices(forward_rows_in_range(&data, &large, &geometry, 0, 3)), vec![vec![0], vec![1], vec![2]]);
+        assert_eq!(child_indices(forward_rows_in_range(&data, &small, &geometry, 0, 3)), vec![vec![0, 1], vec![2]]);
+    }
+
+    #[test]
+    fn backward_pagination_uses_the_supplied_measurements() {
+        let data = intrinsic_data();
+        let geometry = group_geometries(&data, px(100.0), px(16.0));
+        let widths = [px(60.0), px(60.0), px(40.0)];
+        let backward = page_rows(&data, &widths, &geometry, AssignmentDirection::Backward, 2, Some(1), px(100.0), px(16.0));
+        assert_eq!(child_indices(backward), vec![vec![1, 2]]);
+        let forward = page_rows(&data, &widths, &geometry, AssignmentDirection::Forward, 0, Some(1), px(100.0), px(16.0));
+        assert_eq!(child_indices(forward), vec![vec![0]]);
+    }
 }

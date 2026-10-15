@@ -39,9 +39,67 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class MainActivity extends GameActivity {
+    public static String taxonomyFile(android.content.Context context) throws IOException {
+        return TaxonomyAssets.prepare(context).getAbsolutePath();
+    }
+
+    // Called on the Rust speech worker; waits for startup extraction if still running.
+    public static String speechModelDirectory(android.content.Context context, String voice) throws IOException {
+        return SpeechAssets.prepare(context, voice).getAbsolutePath();
+    }
+
     private static volatile java.lang.ref.WeakReference<MainActivity> accountActivity = new java.lang.ref.WeakReference<>(null);
     private AccountDialog accountDialog;
     private native void nativeAuthenticationRequest(long id, String message);
+    private final java.util.Map<Long, BookBrowserSurface> bookBrowsers = new java.util.HashMap<>();
+    private native void nativeBackPressed();
+    private final BackButtonRouter backButtons = new BackButtonRouter(this::navigateBack);
+    private static native void nativeBookBrowserEvent(long id, String message);
+
+    private void navigateBack() {
+        nativeBackPressed();
+    }
+
+    /** Called from GPUI; only the webpage is hosted on Android's UI thread. */
+    public static void bookBrowserCommand(String encoded) {
+        MainActivity activity = accountActivity.get();
+        if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
+            throw new IllegalStateException("No active book browser window");
+        }
+        activity.runOnUiThread(() -> activity.applyBookBrowserCommand(encoded));
+    }
+
+    private void applyBookBrowserCommand(String encoded) {
+        long id = 0;
+        try {
+            org.json.JSONObject message = new org.json.JSONObject(encoded);
+            id = message.getLong("id");
+            if (message.getString("command").equals("close")) {
+                BookBrowserSurface browser = bookBrowsers.remove(id);
+                if (browser != null) browser.close();
+                return;
+            }
+            if (!message.getString("command").equals("open")) {
+                BookBrowserSurface browser = bookBrowsers.get(id);
+                if (browser != null) browser.command(message);
+                return;
+            }
+            if (isFinishing() || isDestroyed()) throw new IllegalStateException("The book browser window closed");
+            BookBrowserSurface browser = new BookBrowserSurface(this, id, message.getJSONObject("request"), mSurfaceView, (session, event) -> {
+                nativeBookBrowserEvent(session, event);
+                if (event.equals("{\"kind\":\"closed\"}")) {
+                    bookBrowsers.remove(session);
+                }
+            });
+            bookBrowsers.put(id, browser);
+        } catch (Exception error) {
+            BookBrowserSurface browser = bookBrowsers.remove(id);
+            if (browser != null) browser.close();
+            try {
+                nativeBookBrowserEvent(id, new org.json.JSONObject().put("kind", "error").put("message", "Could not open the book browser: " + error.getMessage()).toString());
+            } catch (org.json.JSONException ignored) { }
+        }
+    }
 
     // JNI calls from the GPUI thread; all Android views stay on the main thread.
     public static void authenticationCommand(String encoded) {
@@ -140,6 +198,8 @@ public final class MainActivity extends GameActivity {
     private Insets lastSafeAreaInsets;
     private Insets lastImeInsets;
     private AlertDialog storagePermissionPrompt;
+    private AlertDialog batteryPermissionPrompt;
+    private boolean resumed;
     private Boolean publishedStorageAccess;
 
     private static final class PathPrompt {
@@ -177,6 +237,10 @@ public final class MainActivity extends GameActivity {
     private native void nativeSelectedDirectoryLocalRoot(long requestId, String path);
     private native void nativeStorageAccessChanged(boolean granted, String documentsLibraryRoot);
     private native void nativeOpenBook(String name, int fileDescriptor);
+    static native boolean nativeTransfersAllowed();
+    static native void nativeNetworkCostChanged(int cost);
+    static void startNetworkCostMonitor(android.content.Context context) { NetworkCostMonitor.start(context); }
+    static void useTransferPolicy() { BookDownload.transfersAllowed = MainActivity::nativeTransfersAllowed; }
     private native void nativeVolumeButton(boolean next);
     private native void nativeWindowInsets(
         int safeLeft,
@@ -193,7 +257,11 @@ public final class MainActivity extends GameActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        SpeechAssets.prepareInBackground(getApplicationContext());
         accountActivity = new java.lang.ref.WeakReference<>(this);
+        getOnBackPressedDispatcher().addCallback(this, new androidx.activity.OnBackPressedCallback(true) {
+            @Override public void handleOnBackPressed() { backButtons.onBackPressed(); }
+        });
         updateInstallerLauncher = registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(), result -> {
                 // Keep the approved package on cancellation/failure. The next
@@ -233,6 +301,7 @@ public final class MainActivity extends GameActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        resumed = true;
         applyKeepScreenAwake();
         boolean granted = AllFilesAccess.isGranted();
         if (publishedStorageAccess == null || publishedStorageAccess != granted) {
@@ -311,6 +380,29 @@ public final class MainActivity extends GameActivity {
 
     public static void audiobookCommand(android.content.Context context, String command) {
         AudiobookService.dispatch(context, command);
+        promptForPlaybackBatteryAccess(command, "load");
+    }
+
+    public static void speechCommand(android.content.Context context, String command) {
+        SpeechService.dispatch(context, command);
+        promptForPlaybackBatteryAccess(command, "start");
+    }
+
+    private static void promptForPlaybackBatteryAccess(String encoded, String startCommand) {
+        try {
+            if (!startCommand.equals(new org.json.JSONObject(encoded).optString("command"))) return;
+        } catch (org.json.JSONException malformed) {
+            return;
+        }
+        MainActivity activity = accountActivity.get();
+        if (activity == null) return;
+        activity.runOnUiThread(() -> {
+            if (!activity.resumed || activity.isFinishing() || activity.isDestroyed()) return;
+            if (activity.storagePermissionPrompt != null && activity.storagePermissionPrompt.isShowing()) return;
+            if (activity.batteryPermissionPrompt == null || !activity.batteryPermissionPrompt.isShowing()) {
+                activity.batteryPermissionPrompt = BatteryOptimization.promptIfNeeded(activity);
+            }
+        });
     }
 
     public void setVolumeButtonCapture(boolean enabled) {
@@ -336,6 +428,7 @@ public final class MainActivity extends GameActivity {
 
     @Override
     protected void onPause() {
+        resumed = false;
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         super.onPause();
     }
@@ -343,6 +436,8 @@ public final class MainActivity extends GameActivity {
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
         int keyCode = event.getKeyCode();
+        // Never pass system Back to GameActivity's keyboard/focus dispatch.
+        if (backButtons.dispatchKeyEvent(event)) return true;
         boolean isVolumeButton = keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN;
         if (!captureVolumeButtons || !isVolumeButton) {
             return super.dispatchKeyEvent(event);
@@ -398,7 +493,10 @@ public final class MainActivity extends GameActivity {
 
     @Override
     protected void onDestroy() {
+        if (batteryPermissionPrompt != null) batteryPermissionPrompt.dismiss();
         if (accountDialog != null) accountDialog.dismiss();
+        for (BookBrowserSurface browser : new ArrayList<>(bookBrowsers.values())) browser.close();
+        bookBrowsers.clear();
         if (accountActivity.get() == this) accountActivity.clear();
         fileExecutor.shutdownNow();
         super.onDestroy();
@@ -430,6 +528,14 @@ public final class MainActivity extends GameActivity {
                     WindowInsetsAnimationCompat animation,
                     WindowInsetsAnimationCompat.BoundsCompat bounds
                 ) {
+                    // Showing or dismissing the keyboard can animate the
+                    // navigation bar too. That is not an edge-swipe request
+                    // to reveal the reader's controls.
+                    if ((animation.getTypeMask() & WindowInsetsCompat.Type.ime()) != 0
+                        || lastImeInsets.bottom > 0) {
+                        suppressReaderChromeRevealUntil = android.os.SystemClock.uptimeMillis() + 400;
+                        return bounds;
+                    }
                     // The second system-bar animation after immersive mode has
                     // settled is Android's own edge reveal. It is delivered
                     // even on devices where transient bars do not relayout.
@@ -466,6 +572,9 @@ public final class MainActivity extends GameActivity {
         Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
         if (safeArea.equals(lastSafeAreaInsets) && ime.equals(lastImeInsets)) {
             return;
+        }
+        if (!ime.equals(lastImeInsets)) {
+            suppressReaderChromeRevealUntil = android.os.SystemClock.uptimeMillis() + 400;
         }
         lastSafeAreaInsets = safeArea;
         lastImeInsets = ime;

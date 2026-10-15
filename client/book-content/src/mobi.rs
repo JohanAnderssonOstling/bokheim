@@ -202,6 +202,10 @@ pub(crate) struct MobiResources {
 }
 
 impl MobiResources {
+    pub(crate) fn languages(&self) -> Vec<String> {
+        declared_metadata(&self.metadata).languages
+    }
+
     pub(crate) async fn read_bytes(&self, uri: &str) -> io::Result<Vec<u8>> {
         let range = image_resource_range(&self.metadata, self.length, uri, MAX_BINARY_RESOURCE_BYTES)?;
         read_record(self.factory.reader().as_mut(), range).await

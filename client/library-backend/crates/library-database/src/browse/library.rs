@@ -1,11 +1,12 @@
 //! Library views: book detail.
 
-use crate::books::toc::{entry_title, TocSql};
+use crate::books::toc::{TocSql, entry_title};
 use crate::browse::{DetailSql, invalid_integer_column, invalid_text_column};
-use crate::{chapters_from_navigation, AudiobookSql, Database, DatabaseError};
+use crate::{AudiobookSql, Database, DatabaseError, chapters_from_navigation};
 use book_model::{AUTHOR_MARC_RELATOR_CODE, AuthorId, NARRATOR_MARC_RELATOR_CODE};
 use library_model::{BookDetail, BookDetailAuthor, BookTocEntry};
-use sync_common::ContentHash;
+use library_replica::{EnrichmentResult, LibraryStateEntry};
+use sync_common::{ContentHash, wire};
 
 impl Database {
     /// Everything one book's page states, in one snapshot rather than a request
@@ -18,13 +19,14 @@ impl Database {
             self.connection.book_detail_book(hash, |row| {
                 let chapter_count: Option<i64> = row.get(1)?;
                 let chapter_count = chapter_count.map(usize::try_from).transpose().map_err(|error| invalid_integer_column(1, error.to_string()))?;
-                found = Some((row.get::<_, i64>(0)?, chapter_count));
+                found = Some((row.get::<_, i64>(0)?, chapter_count, row.get::<_, Option<Vec<u8>>>(2)?));
                 Ok(())
             })?;
             // A book the library does not hold may be in the catalog.
-            let Some((id, audiobook_chapter_count)) = found else {
-                return super::catalog::detail(content_hash).ok_or_else(|| rusqlite::Error::QueryReturnedNoRows.into());
+            let Some((id, audiobook_chapter_count, record)) = found else {
+                return super::catalog::detail(content_hash)?.ok_or_else(|| rusqlite::Error::QueryReturnedNoRows.into());
             };
+            let year = year_from_record(record)?;
             let book = self.load_cards(&[id])?.pop().ok_or(rusqlite::Error::QueryReturnedNoRows)?;
 
             // Empty when the book has no stored blurb.
@@ -109,7 +111,21 @@ impl Database {
                 }
             };
 
-            Ok(BookDetail { book, audiobook_chapter_count, description, source_directory_id, path, authors, credits, current_entry, current_target, toc })
+            Ok(BookDetail { book, external_url: None, audiobook_chapter_count, description, year, source_directory_id, path, authors, credits, current_entry, current_target, toc })
         })
+    }
+}
+
+/// The publication year in a book's addition record: the one the file states
+/// wins, and the metadata server's answer stands in where the file has none.
+/// None for a book added offline, which has no record until it syncs.
+fn year_from_record(record: Option<Vec<u8>>) -> Result<Option<i32>, DatabaseError> {
+    let Some(record) = record else { return Ok(None) };
+    match wire::decode::<LibraryStateEntry>(&record, wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)? {
+        LibraryStateEntry::BookAdd { value, .. } => Ok(value.record.book.year.or(match &value.enrichment {
+            Some(EnrichmentResult::Found { record, .. }) => record.book.year,
+            _ => None,
+        })),
+        _ => Err(DatabaseError::message("a book's year requires an immutable book addition")),
     }
 }

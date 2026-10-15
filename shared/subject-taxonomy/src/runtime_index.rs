@@ -1,4 +1,4 @@
-//! Shared taxonomy index compiler and artifact format, used by build.rs and runtime overlays.
+//! Shared taxonomy index compiler and artifact format, used by build.rs and installed snapshots.
 use crate::compact_whitespace;
 use crate::lcc::{lcc_endpoint, lcc_match_keys, parse_lcc_call};
 use serde::{Deserialize, Serialize};
@@ -16,20 +16,24 @@ pub const UNIFIED_VERSION: &str = "1";
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnifiedTaxonomyRuntime {
-    /// Persisted overlays retain their definitions so another overlay can be
-    /// composed in memory. The immutable bundled taxonomy discards this
-    /// redundant source representation from its precomputed lookup indexes.
-    pub concepts: Option<Arc<Vec<UnifiedConceptDefinition>>>,
     pub routes: Arc<RouteIndex>,
     pub selectors: Arc<BTreeMap<String, SelectorIndex>>,
-    pub ancestors: Arc<BTreeMap<i64, BTreeSet<i64>>>,
+    /// Concept IDs and their unique ancestor IDs, both in ascending order.
+    pub ancestors: Arc<Vec<(i64, Vec<i64>)>>,
     pub revision_id: String,
+}
+
+impl UnifiedTaxonomyRuntime {
+    pub fn ancestors(&self, concept_id: i64) -> &[i64] {
+        let index = self.ancestors.binary_search_by_key(&concept_id, |(id, _)| *id).expect("indexed concept must have ancestors");
+        &self.ancestors[index].1
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SelectorIndex {
     #[serde(serialize_with = "serialize_sorted_map")]
-    pub exact: HashMap<String, BTreeSet<i64>>,
+    pub exact: HashMap<String, Vec<i64>>,
     pub prefixes: Vec<(String, i64)>,
     pub lcc_ranges: Vec<LccSelector>,
     pub lcc_intervals: IntervalIndex,
@@ -198,7 +202,7 @@ pub fn normalize_source_label(value: &str) -> String {
     compact_whitespace(value).to_lowercase()
 }
 
-pub fn build_runtime(concepts: Vec<UnifiedConceptDefinition>, retain_concepts: bool) -> Result<UnifiedTaxonomyRuntime, String> {
+pub fn build_runtime(concepts: Vec<UnifiedConceptDefinition>) -> Result<UnifiedTaxonomyRuntime, String> {
     validate(&concepts)?;
     let mut fingerprint = String::new();
     for concept in &concepts {
@@ -209,7 +213,6 @@ pub fn build_runtime(concepts: Vec<UnifiedConceptDefinition>, retain_concepts: b
         }
         writeln!(&mut fingerprint).unwrap();
     }
-    let concepts = Arc::new(concepts);
     let routes = Arc::new(RouteIndex::compile(build_routes(&concepts)?));
     let selectors = Arc::new(build_selectors(&concepts)?);
     let parents = concepts.iter().map(|c| (c.concept_id, c.parent_ids.clone())).collect::<BTreeMap<_, _>>();
@@ -229,11 +232,10 @@ pub fn build_runtime(concepts: Vec<UnifiedConceptDefinition>, retain_concepts: b
     for id in parents.keys() {
         ancestors_of(*id, &parents, &mut ancestors);
     }
-    let ancestors = Arc::new(ancestors);
+    let ancestors = Arc::new(ancestors.into_iter().map(|(id, ancestors)| (id, ancestors.into_iter().collect())).collect());
     const NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([0xa7, 0xed, 0x9f, 0x7d, 0xa1, 0x2a, 0x59, 0xf5, 0xb5, 0x3d, 0x67, 0x4d, 0xe0, 0x80, 0x7c, 0x66]);
     let revision_id = format!("{UNIFIED_VERSION}:{}", uuid::Uuid::new_v5(&NAMESPACE, fingerprint.as_bytes()));
-    let concepts = retain_concepts.then_some(concepts);
-    Ok(UnifiedTaxonomyRuntime { concepts, routes, selectors, ancestors, revision_id })
+    Ok(UnifiedTaxonomyRuntime { routes, selectors, ancestors, revision_id })
 }
 
 pub fn validate(concepts: &[UnifiedConceptDefinition]) -> Result<(), String> {
@@ -339,10 +341,8 @@ fn build_routes(concepts: &[UnifiedConceptDefinition]) -> Result<BTreeMap<String
             continue;
         }
         let path = concept.preferred_label.clone();
-        routes.insert(
-            path.clone(),
-            UnifiedConceptRoute { concept_id: concept.concept_id, path: path.clone(), parent_path: ROOT_SUBJECT_PATH.to_owned(), label: concept.preferred_label.clone(), sort_order: sort_orders[&concept.concept_id] },
-        );
+        routes
+            .insert(path.clone(), UnifiedConceptRoute { concept_id: concept.concept_id, path: path.clone(), parent_path: ROOT_SUBJECT_PATH.to_owned(), label: concept.preferred_label.clone(), sort_order: sort_orders[&concept.concept_id] });
         known.entry(concept.concept_id).or_default().push(path);
         routed_concepts.insert(concept.concept_id);
     }
@@ -421,12 +421,18 @@ fn build_selectors(concepts: &[UnifiedConceptDefinition]) -> Result<BTreeMap<Str
                         index.lcc_subclasses.insert(selector.clone());
                     }
                     let selector = if system_id == LCC_SYSTEM_ID { lcc_match_keys(&selector).and_then(|keys| keys.last().cloned()).unwrap_or(selector) } else { selector };
-                    index.exact.entry(selector).or_default().insert(concept.concept_id);
+                    index.exact.entry(selector).or_default().push(concept.concept_id);
                 }
             }
         }
     }
     for index in indexes.values_mut() {
+        for ids in index.exact.values_mut() {
+            ids.sort_unstable();
+            ids.dedup();
+            ids.shrink_to_fit();
+        }
+        index.exact.shrink_to_fit();
         for subclass in crate::lcc::outline_subclasses() {
             if index.lcc_ranges.iter().any(|r| r.start_letters <= subclass && subclass <= r.end_letters) {
                 index.lcc_subclasses.insert(subclass);

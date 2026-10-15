@@ -1,10 +1,11 @@
-use std::{cell::RefCell, ops::Range, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
 use gpui::{
-    App, Context, ElementId, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
-    IntoElement, KeyBinding, ListSizingBehavior, MouseButton, ParentElement, Render, RenderOnce,
-    SharedString, StyleRefinement, Styled, UniformListScrollHandle, Window, div,
-    prelude::FluentBuilder as _, uniform_list,
+    App, AvailableSpace, Context, ElementId, Entity, EventEmitter, FocusHandle,
+    InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListOffset,
+    ListSizingBehavior, ListState, MouseButton, ParentElement, Render, RenderOnce, ScrollStrategy,
+    SharedString, StyleRefinement, Styled, Window, div, list, prelude::FluentBuilder as _, px,
+    size,
 };
 
 use crate::{
@@ -204,7 +205,8 @@ impl TreeItem {
 pub struct TreeState {
     focus_handle: FocusHandle,
     entries: Vec<TreeEntry>,
-    scroll_handle: UniformListScrollHandle,
+    scroll_handle: ListState,
+    pending_scroll: Option<(usize, ScrollStrategy)>,
     selected_ix: Option<usize>,
     right_clicked_ix: Option<usize>,
     render_item: Rc<dyn Fn(usize, &TreeEntry, bool, &mut Window, &mut App) -> ListItem>,
@@ -222,7 +224,8 @@ impl TreeState {
             selected_ix: None,
             right_clicked_ix: None,
             focus_handle: cx.focus_handle(),
-            scroll_handle: UniformListScrollHandle::default(),
+            scroll_handle: ListState::new(0, ListAlignment::Top, px(500.)),
+            pending_scroll: None,
             entries: Vec::new(),
             render_item: Rc::new(|_, _, _, _, _| ListItem::new(0)),
             context_menu_builder: None,
@@ -236,6 +239,7 @@ impl TreeState {
         for item in items.into_iter() {
             self.add_entry(item, 0);
         }
+        self.scroll_handle.reset(self.entries.len());
         self
     }
 
@@ -246,6 +250,8 @@ impl TreeState {
         for item in items.into_iter() {
             self.add_entry(item, 0);
         }
+        self.scroll_handle.reset(self.entries.len());
+        self.pending_scroll = None;
         self.selected_ix = None;
         self.right_clicked_ix = None;
         cx.notify();
@@ -256,9 +262,16 @@ impl TreeState {
         self.selected_ix
     }
 
+    /// The visible entries, in order.
+    pub fn entries(&self) -> &[TreeEntry] {
+        &self.entries
+    }
+
     /// Visible position of a tree item, independent of the keyboard cursor.
     pub fn index_of_id(&self, id: &str) -> Option<usize> {
-        self.entries.iter().position(|entry| entry.item.id.as_ref() == id)
+        self.entries
+            .iter()
+            .position(|entry| entry.item.id.as_ref() == id)
     }
 
     /// Set the selected index, or `None` to clear selection.
@@ -295,8 +308,8 @@ impl TreeState {
             .and_then(|ix| self.entries.get(ix).map(|entry| &entry.item))
     }
 
-    pub fn scroll_to_item(&mut self, ix: usize, strategy: gpui::ScrollStrategy) {
-        self.scroll_handle.scroll_to_item(ix, strategy);
+    pub fn scroll_to_item(&mut self, ix: usize, strategy: ScrollStrategy) {
+        self.pending_scroll = Some((ix, strategy));
     }
 
     /// Find the flat index of the entry whose `item.id` matches, if present.
@@ -388,10 +401,13 @@ impl TreeState {
             .filter(|e| e.is_root())
             .map(|e| e.item.clone())
             .collect();
+        let scroll_top = self.scroll_handle.logical_scroll_top();
         self.entries.clear();
         for item in root_items.into_iter() {
             self.add_entry(item, 0);
         }
+        self.scroll_handle.reset(self.entries.len());
+        self.scroll_handle.scroll_to(scroll_top);
     }
 
     pub fn focus(&mut self, window: &mut Window, cx: &mut App) {
@@ -441,8 +457,7 @@ impl TreeState {
         }
 
         self.selected_ix = Some(selected_ix);
-        self.scroll_handle
-            .scroll_to_item(selected_ix, gpui::ScrollStrategy::Top);
+        self.scroll_to_item(selected_ix, ScrollStrategy::Top);
         cx.notify();
     }
 
@@ -455,8 +470,7 @@ impl TreeState {
         }
 
         self.selected_ix = Some(selected_ix);
-        self.scroll_handle
-            .scroll_to_item(selected_ix, gpui::ScrollStrategy::Bottom);
+        self.scroll_to_item(selected_ix, ScrollStrategy::Bottom);
         cx.notify();
     }
 
@@ -468,8 +482,61 @@ impl TreeState {
 }
 
 impl Render for TreeState {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let render_item = self.render_item.clone();
+        if let Some((ix, strategy)) = self
+            .pending_scroll
+            .take()
+            .filter(|(ix, _)| *ix < self.entries.len())
+        {
+            if strategy == ScrollStrategy::Nearest {
+                self.scroll_handle.scroll_to_reveal_item(ix);
+            } else {
+                let viewport = self.scroll_handle.viewport_bounds().size;
+                let available_space = size(
+                    AvailableSpace::Definite(viewport.width),
+                    AvailableSpace::MinContent,
+                );
+                let mut item = render_item(
+                    ix,
+                    &self.entries[ix],
+                    Some(ix) == self.selected_ix,
+                    window,
+                    cx,
+                )
+                .into_any_element();
+                let item_height = item.layout_as_root(available_space, window, cx).height;
+                let mut before = match strategy {
+                    ScrollStrategy::Top => px(0.),
+                    ScrollStrategy::Center => (viewport.height - item_height) / 2.,
+                    ScrollStrategy::Bottom => viewport.height - item_height,
+                    ScrollStrategy::Nearest => unreachable!(),
+                }
+                .max(px(0.));
+                let mut top_ix = ix;
+                let mut offset_in_item = px(0.);
+                // Measure preceding rows until the requested alignment is reached.
+                // Heights can differ, including rows not yet visited by the list.
+                while top_ix > 0 && before > px(0.) {
+                    top_ix -= 1;
+                    let mut item = render_item(
+                        top_ix,
+                        &self.entries[top_ix],
+                        Some(top_ix) == self.selected_ix,
+                        window,
+                        cx,
+                    )
+                    .into_any_element();
+                    let height = item.layout_as_root(available_space, window, cx).height;
+                    offset_in_item = (height - before).max(px(0.));
+                    before -= height;
+                }
+                self.scroll_handle.scroll_to(ListOffset {
+                    item_ix: top_ix,
+                    offset_in_item,
+                });
+            }
+        }
         let state = cx.entity().clone();
 
         div()
@@ -505,49 +572,42 @@ impl Render for TreeState {
                 }
             })
             .child(
-                uniform_list("entries", self.entries.len(), {
-                    cx.processor(move |state, visible_range: Range<usize>, window, cx| {
-                        let mut items = Vec::with_capacity(visible_range.len());
-                        for ix in visible_range {
-                            let entry = &state.entries[ix];
-                            let selected = Some(ix) == state.selected_ix;
-                            let right_clicked = Some(ix) == state.right_clicked_ix;
-                            let item = (render_item)(ix, entry, selected, window, cx);
+                list(
+                    self.scroll_handle.clone(),
+                    cx.processor(move |state, ix, window, cx| {
+                        let entry = &state.entries[ix];
+                        let selected = Some(ix) == state.selected_ix;
+                        let right_clicked = Some(ix) == state.right_clicked_ix;
+                        let item = (render_item)(ix, entry, selected, window, cx);
 
-                            let el = div()
-                                .id(ix)
-                                .child(
-                                    item.disabled(entry.item().is_disabled())
-                                        .selected(selected)
-                                        .secondary_selected(right_clicked),
+                        div()
+                            .id(ix)
+                            .w_full()
+                            .child(
+                                item.disabled(entry.item().is_disabled())
+                                    .selected(selected)
+                                    .secondary_selected(right_clicked),
+                            )
+                            .when(!entry.item().is_disabled(), |this| {
+                                this.on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.on_entry_click(ix, window, cx);
+                                    }),
                                 )
-                                .when(!entry.item().is_disabled(), |this| {
-                                    this.on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener({
-                                            move |this, _, window, cx| {
-                                                this.on_entry_click(ix, window, cx);
-                                            }
-                                        }),
-                                    )
-                                    .on_mouse_down(
-                                        MouseButton::Right,
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.right_clicked_ix = Some(ix);
-                                            cx.notify();
-                                        }),
-                                    )
-                                });
-
-                            items.push(el)
-                        }
-
-                        items
-                    })
-                })
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.right_clicked_ix = Some(ix);
+                                        cx.notify();
+                                    }),
+                                )
+                            })
+                            .into_any_element()
+                    }),
+                )
                 .flex_grow_1()
                 .size_full()
-                .track_scroll(&self.scroll_handle)
                 .with_sizing_behavior(ListSizingBehavior::Auto)
                 .into_any_element(),
             )

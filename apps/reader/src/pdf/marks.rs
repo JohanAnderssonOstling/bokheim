@@ -24,8 +24,8 @@ pub(super) fn annotation_overlays(annotations: &[Annotation]) -> Vec<PdfAnnotati
 }
 
 fn overlay_color(rgb: u32, style: PdfAnnotationStyle) -> u32 {
-    let alpha = if style == PdfAnnotationStyle::Highlight { 0x60 } else { 0xff };
-    (rgb << 8) | alpha
+    let alpha = if style == PdfAnnotationStyle::Highlight { ui_components::READER_ANNOTATION_HIGHLIGHT_ALPHA } else { 0xff };
+    (ui_components::reader_annotation_paint_color(rgb) << 8) | u32::from(alpha)
 }
 
 

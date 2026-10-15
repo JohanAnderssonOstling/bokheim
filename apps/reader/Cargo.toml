@@ -6,11 +6,13 @@ edition = "2024"
 [features]
 default = ["native-audio"]
 native-audio = ["audiobook-player/native-rodio"]
+native-tts = ["dep:reader-speech"]
 kobo = ["mobile", "dep:gpui_kobo", "app/kobo", "audiobook-player/kobo", "ui-components/kobo"]
 mobile = ["ui-components/mobile"]
 packaged-pdfium = ["pdf-reader-core/packaged-pdfium"]
 
 [dependencies]
+reader-speech = { path = "../../shared/reader-speech", optional = true }
 futures-lite = "2"
 library-backend = { path = "../../client/library-backend" }
 content-address = { path = "../../shared/content-address" }
@@ -36,4 +38,10 @@ pdf-reader-core = { path = "../../shared/pdf-reader-core" }
 pdf-view-gpui = { path = "crates/pdf/pdf-view" }
 
 [dev-dependencies]
+book-access = { path = "../../client/library-backend/crates/book-access" }
+gpui = { workspace = true, features = ["test-support"] }
+gpui_platform.workspace = true
+html-gpui.workspace = true
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread"] }
 zip.workspace = true

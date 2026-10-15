@@ -1,0 +1,189 @@
+{
+  "cpu": "AMD Ryzen 7 6800HS Creator Edition",
+  "threads": 4,
+  "warm_runs": 3,
+  "note": "Same passage, CPU with 4 threads, median of 3 warm runs; output durations vary by voice. Generation excludes model loading and encoding. Pocket and Kitten use sherpa-onnx 1.13.8 native core through Python; Piper and Kokoro use their Python ONNX runtimes. Peak process RAM includes host runtime and inference allocations, not a Rust application memory estimate.",
+  "samples": [
+    {
+      "engine": "medium",
+      "threads": 4,
+      "model_load_seconds": 1.68,
+      "first_generation_seconds": 0.97,
+      "warm_generation_seconds": [
+        0.93,
+        0.9,
+        0.89
+      ],
+      "median_seconds": 0.9,
+      "audio_seconds": 34.06,
+      "times_realtime": 37.7,
+      "peak_process_ram_mib": 316,
+      "model_files_mb": 63.2,
+      "label": "Piper Lessac medium"
+    },
+    {
+      "engine": "alba",
+      "threads": 4,
+      "runtime": "piper-tts 1.8.0 / ONNX Runtime 1.31.0",
+      "model_load_seconds": 3.92,
+      "first_generation_seconds": 1.44,
+      "warm_generation_seconds": [
+        1.02,
+        1.04,
+        1.08
+      ],
+      "median_seconds": 1.04,
+      "audio_seconds": 36.4,
+      "times_realtime": 34.9,
+      "peak_process_ram_mib": 293,
+      "model_files_mb": 63.2,
+      "label": "Piper Alba medium"
+    },
+    {
+      "engine": "high",
+      "threads": 4,
+      "model_load_seconds": 2.55,
+      "first_generation_seconds": 5.89,
+      "warm_generation_seconds": [
+        5.73,
+        5.92,
+        5.93
+      ],
+      "median_seconds": 5.92,
+      "audio_seconds": 34.7,
+      "times_realtime": 5.9,
+      "peak_process_ram_mib": 386,
+      "model_files_mb": 113.9,
+      "label": "Piper Lessac high"
+    },
+    {
+      "engine": "kokoro",
+      "threads": 4,
+      "model_load_seconds": 4.37,
+      "first_generation_seconds": 8.51,
+      "warm_generation_seconds": [
+        8.89,
+        8.61,
+        8.74
+      ],
+      "median_seconds": 8.74,
+      "audio_seconds": 34.11,
+      "times_realtime": 3.9,
+      "peak_process_ram_mib": 1457,
+      "model_files_mb": 353.7,
+      "label": "Kokoro v1.0 FP32 Heart"
+    },
+    {
+      "engine": "pocket",
+      "threads": 4,
+      "runtime": "sherpa-onnx 1.13.8 native core via Python",
+      "model_load_seconds": 0.74,
+      "first_generation_seconds": 15.26,
+      "warm_generation_seconds": [
+        12.7,
+        12.73,
+        12.69
+      ],
+      "median_seconds": 12.7,
+      "audio_seconds": 25.56,
+      "times_realtime": 2.0,
+      "peak_process_ram_mib": 628,
+      "model_files_mb": 198.3,
+      "label": "Pocket TTS INT8 Alba MacKenna"
+    },
+    {
+      "engine": "kitten",
+      "threads": 4,
+      "runtime": "sherpa-onnx 1.13.8 native core via Python",
+      "model_load_seconds": 2.15,
+      "first_generation_seconds": 17.68,
+      "warm_generation_seconds": [
+        15.15,
+        15.03,
+        14.93
+      ],
+      "median_seconds": 15.03,
+      "audio_seconds": 56.6,
+      "times_realtime": 3.8,
+      "peak_process_ram_mib": 379,
+      "model_files_mb": 44.7,
+      "label": "Kitten Micro 0.8 Bella"
+    },
+    {
+      "engine": "cori-high",
+      "threads": 4,
+      "runtime": "piper-tts 1.8.0 / ONNX Runtime 1.31.0",
+      "model_load_seconds": 2.48,
+      "first_generation_seconds": 6.23,
+      "warm_generation_seconds": [
+        6.35,
+        6.54,
+        6.44
+      ],
+      "median_seconds": 6.44,
+      "audio_seconds": 36.94,
+      "times_realtime": 5.7,
+      "peak_process_ram_mib": 400,
+      "model_files_mb": 114.2,
+      "label": "Piper Cori high",
+      "source": "https://huggingface.co/rhasspy/piper-voices/tree/main/en/en_GB/cori/high"
+    },
+    {
+      "engine": "amy",
+      "threads": 4,
+      "runtime": "piper-tts 1.8.0 / ONNX Runtime 1.31.0",
+      "model_load_seconds": 1.62,
+      "first_generation_seconds": 7.04,
+      "warm_generation_seconds": [
+        6.77,
+        6.65,
+        6.96
+      ],
+      "median_seconds": 6.77,
+      "audio_seconds": 36.58,
+      "times_realtime": 5.4,
+      "peak_process_ram_mib": 401,
+      "model_files_mb": 114.2,
+      "label": "Piper Amy high \u00b7 community",
+      "source": "https://huggingface.co/csukuangfj/vits-piper-en_GB-sweetbbak-amy"
+    },
+    {
+      "engine": "miro",
+      "threads": 4,
+      "runtime": "piper-tts 1.8.0 / ONNX Runtime 1.31.0",
+      "model_load_seconds": 0.89,
+      "first_generation_seconds": 1.13,
+      "warm_generation_seconds": [
+        1.08,
+        1.14,
+        1.08
+      ],
+      "median_seconds": 1.08,
+      "audio_seconds": 38.31,
+      "times_realtime": 35.3,
+      "peak_process_ram_mib": 413,
+      "model_files_mb": 63.2,
+      "label": "Piper Miro high \u00b7 community",
+      "source": "https://huggingface.co/csukuangfj/vits-piper-en_GB-miro-high"
+    },
+    {
+      "engine": "dii",
+      "threads": 4,
+      "runtime": "piper-tts 1.8.0 / ONNX Runtime 1.31.0",
+      "model_load_seconds": 0.9,
+      "first_generation_seconds": 1.18,
+      "warm_generation_seconds": [
+        1.16,
+        1.17,
+        1.13
+      ],
+      "median_seconds": 1.16,
+      "audio_seconds": 40.99,
+      "times_realtime": 35.3,
+      "peak_process_ram_mib": 345,
+      "model_files_mb": 63.2,
+      "label": "Piper Dii high \u00b7 community",
+      "source": "https://huggingface.co/csukuangfj/vits-piper-en_GB-dii-high"
+    }
+  ]
+}

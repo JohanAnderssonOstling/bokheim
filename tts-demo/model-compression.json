@@ -1,0 +1,54 @@
+{
+  "scope": "ONNX model weights only; lossless archive compression; supporting voice and pronunciation assets excluded",
+  "measurement": "Compressed byte count from codec stdout; single compression worker per job; at most two jobs at once",
+  "results": [
+    {
+      "model": "Piper Alba",
+      "codec": "zstd-9",
+      "original_bytes": 63201430,
+      "compressed_bytes": 58314655,
+      "reduction_percent": 7.732063973868941,
+      "compression_seconds": 0.3523393819996272
+    },
+    {
+      "model": "Piper Alba",
+      "codec": "gzip-6",
+      "original_bytes": 63201430,
+      "compressed_bytes": 58369900,
+      "reduction_percent": 7.644652976997513,
+      "compression_seconds": 2.4912342520037782
+    },
+    {
+      "model": "Kokoro George FP32",
+      "codec": "zstd-9",
+      "original_bytes": 325560556,
+      "compressed_bytes": 301008361,
+      "reduction_percent": 7.541514027884877,
+      "compression_seconds": 1.8616082489970722
+    },
+    {
+      "model": "Kokoro George FP32",
+      "codec": "gzip-6",
+      "original_bytes": 325560556,
+      "compressed_bytes": 301327530,
+      "reduction_percent": 7.443477274316979,
+      "compression_seconds": 12.197156121001171
+    },
+    {
+      "model": "Kokoro George INT8",
+      "codec": "zstd-9",
+      "original_bytes": 114203756,
+      "compressed_bytes": 88296386,
+      "reduction_percent": 22.68521711317446,
+      "compression_seconds": 2.739396978999139
+    },
+    {
+      "model": "Kokoro George INT8",
+      "codec": "gzip-6",
+      "original_bytes": 114203756,
+      "compressed_bytes": 89189400,
+      "reduction_percent": 21.903269100886668,
+      "compression_seconds": 4.163249280994933
+    }
+  ]
+}

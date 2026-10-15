@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en" data-theme="warm-light" data-view="library">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bokheim · UI font comparison</title>
+  <style>
+    @font-face { font-family: "Libertinus Serif"; src: url("assets/fonts/libertinus-comparison/LibertinusSerif-Regular.otf") format("opentype"); font-weight: 400; }
+    @font-face { font-family: "Libertinus Serif"; src: url("assets/fonts/libertinus-comparison/LibertinusSerif-Bold.otf") format("opentype"); font-weight: 700; }
+    @font-face { font-family: "Libertinus Serif"; src: url("assets/fonts/libertinus-comparison/LibertinusSerif-Italic.otf") format("opentype"); font-weight: 400; font-style: italic; }
+    @font-face { font-family: "NV Garamond"; src: url("../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf") format("truetype"); font-weight: 400; }
+    @font-face { font-family: "NV Garamond"; src: url("../../desktop-gpui/assets/fonts/NV_Garamond-Bold.ttf") format("truetype"); font-weight: 700; }
+    @font-face { font-family: "NV Garamond"; src: url("../../desktop-gpui/assets/fonts/NV_Garamond-Italic.ttf") format("truetype"); font-weight: 400; font-style: italic; }
+    @font-face { font-family: "NV Garamond"; src: url("../../desktop-gpui/assets/fonts/NV_Garamond-BoldItalic.ttf") format("truetype"); font-weight: 700; font-style: italic; }
+    @font-face { font-family: "NV Jost"; src: url("../../desktop-gpui/assets/fonts/NV_Jost-Regular.ttf") format("truetype"); font-weight: 400; }
+    @font-face { font-family: "NV Jost"; src: url("../../desktop-gpui/assets/fonts/NV_Jost-Bold.ttf") format("truetype"); font-weight: 700; }
+    @font-face { font-family: "NV Jost"; src: url("../../desktop-gpui/assets/fonts/NV_Jost-Italic.ttf") format("truetype"); font-weight: 400; font-style: italic; }
+    @font-face { font-family: "NV Jost"; src: url("../../desktop-gpui/assets/fonts/NV_Jost-BoldItalic.ttf") format("truetype"); font-weight: 700; font-style: italic; }
+    @font-face { font-family: "Bodoni Moda"; src: url("../../desktop-gpui/assets/fonts/BodoniModa-Regular.ttf") format("truetype"); font-weight: 400; }
+    :root {
+      color-scheme: light;
+      --canvas: #eae5dc; --paper: #f6f2eb; --raised: #fff; --ink: #22201d;
+      --muted: #6b675f; --rule: #c5bdac; --border: #8c7f64; --accent: #466853;
+      --accent-ink: #fffdfa; --wash: #d9e8de; --hover: #0000000d; --ui-size: 16px;
+    }
+    [data-theme="cool-light"] {
+      --canvas: #e4e9f1; --paper: #eff3f9; --raised: #fff; --ink: #262627;
+      --muted: #65686a; --rule: #b9bec4; --border: #798189; --accent: #224a7f;
+      --accent-ink: #fdfdfe; --wash: #dbe4f1; --hover: #0000000d;
+    }
+    [data-theme="warm-dark"] {
+      color-scheme: dark;
+      --canvas: #1c1a16; --paper: #11100d; --raised: #2a2720; --ink: #efe6d0;
+      --muted: #a69c86; --rule: #4e4334; --border: #786644; --accent: #d3b271;
+      --accent-ink: #11100d; --wash: #3c3423; --hover: #d3b27114;
+    }
+    [data-theme="cool-dark"] {
+      color-scheme: dark;
+      --canvas: #191d23; --paper: #0f1216; --raised: #20252c; --ink: #e3e8ef;
+      --muted: #929aa5; --rule: #374456; --border: #53667f; --accent: #8fb0dc;
+      --accent-ink: #0f1216; --wash: #2b3541; --hover: #8fb0dc14;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--canvas); color: var(--ink); font: 14px/1.5 system-ui, sans-serif; }
+    button, input, select { font: inherit; }
+    button, select { cursor: pointer; }
+    button { color: inherit; }
+    button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    main { max-width: 1800px; margin: auto; padding: 40px 32px 28px; }
+    .eyebrow { margin: 0 0 8px; color: var(--muted); font-size: 11px; letter-spacing: .16em; text-transform: uppercase; }
+    h1 { margin: 0; font: 400 clamp(32px, 3vw, 48px)/1.15 "Bodoni Moda", serif; }
+    .intro { margin: 12px 0 24px; color: var(--muted); }
+    .controls { display: flex; align-items: center; flex-wrap: wrap; gap: 16px 28px; padding: 16px 0; border-block: 1px solid var(--rule); }
+    .segmented { display: flex; }
+    .segmented button { border: 1px solid var(--border); background: transparent; padding: 7px 14px; }
+    .segmented button + button { border-left: 0; }
+    .segmented button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+    .control { display: flex; align-items: center; gap: 10px; }
+    .control select { padding: 7px; background: var(--paper); border: 1px solid var(--border); color: var(--ink); }
+    input { accent-color: var(--accent); }
+    input[type="range"] { width: 100px; }
+    output { min-width: 34px; font-variant-numeric: tabular-nums; }
+    .display-control { color: var(--muted); }
+    .comparison { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; margin-top: 28px; }
+    .version-heading { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+    .number { font-size: 12px; color: var(--muted); }
+    h2 { margin: 0; font-size: 18px; font-weight: 500; }
+    .badge { margin-left: auto; padding: 2px 6px; border: 1px solid var(--rule); color: var(--muted); font-size: 10px; white-space: nowrap; }
+    .mockup { height: 650px; display: flex; flex-direction: column; border: 1px solid var(--border); background: var(--paper); font: 400 var(--ui-size)/1.4 var(--family); font-synthesis: none; }
+    .app-toolbar { display: flex; align-items: center; gap: 10px; height: 64px; flex: none; padding: 0 16px; border-bottom: 1px solid var(--rule); }
+    .app-mark { width: 26px; height: 26px; }
+    .brand { font-size: 1.375em; }
+    .sync { margin-left: auto; color: var(--muted); font-size: .875em; }
+    .sync-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); margin-right: 5px; }
+    .app-body { display: flex; min-height: 0; flex: 1; }
+    .rail { width: 104px; flex: none; border-right: 1px solid var(--rule); padding: 16px 8px; display: flex; flex-direction: column; gap: 8px; }
+    .rail button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; min-height: 72px; padding: 8px 2px; border: 0; background: transparent; font-size: .75em; }
+    .rail button:hover { background: var(--hover); }
+    .rail button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+    .rail svg { width: 25px; height: 25px; stroke: currentColor; fill: none; stroke-width: 1; }
+    .smallcaps { font-feature-settings: "smcp" 1, "c2sc" 1; }
+    .rail .bottom { margin-top: auto; }
+    .screen { min-width: 0; flex: 1; overflow: auto; padding: 24px 16px; }
+    .display { font-family: "Bodoni Moda", serif; font-size: 1.6875em; font-weight: 400; line-height: 1.15; margin: 0 0 6px; }
+    .all-display .mockup .display { font-family: var(--family); }
+    .subheading { margin: 0 0 20px; color: var(--muted); font-size: .875em; }
+    .search { display: flex; align-items: center; gap: 8px; border: 1px solid var(--border); padding: 8px; margin-bottom: 20px; color: var(--muted); font-size: .875em; }
+    .search svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1; flex: none; }
+    .section-label { margin: 0 0 12px; font-size: .875em; color: var(--muted); }
+    .books { display: grid; grid-template-columns: 1fr 1fr; gap: 20px 16px; }
+    .book { min-width: 0; }
+    .cover { position: relative; aspect-ratio: 2 / 3; max-height: 190px; padding: 16px 9px; display: flex; flex-direction: column; align-items: center; justify-content: space-between; overflow: hidden; border: 1px solid #0003; color: #f1e5c7; background: #294438; font: 400 16px/1.12 "Bodoni Moda", serif; text-align: center; }
+    .cover::before { content: ""; position: absolute; inset: 7px; border: 1px solid currentColor; opacity: .5; }
+    .cover > * { position: relative; }
+    .cover small { font: 9px/1.3 system-ui; letter-spacing: .12em; text-transform: uppercase; }
+    .cover .ornament { width: 38px; height: 38px; border: 1px solid currentColor; border-radius: 50%; opacity: .7; }
+    .cover.blue { background: #263e58; color: #f4e9cd; }
+    .cover.red { background: #7c3d37; color: #f4e9cd; }
+    .cover.gold { background: #c4aa73; color: #333025; }
+    .book-title { margin: 9px 0 2px; font-size: 1em; line-height: 1.25; }
+    .author { margin: 0; font-size: .875em; color: var(--muted); }
+    .progress { height: 3px; background: var(--rule); margin-top: 8px; }
+    .progress span { display: block; height: 100%; width: 38%; background: var(--accent); }
+    .app-footer { padding: 8px 16px; border-top: 1px solid var(--rule); font-size: .875em; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
+    .view { display: none; }
+    [data-view="library"] .view-library, [data-view="settings"] .view-settings, [data-view="specimen"] .view-specimen { display: block; }
+    .setting-group { border-bottom: 1px solid var(--rule); padding: 16px 0; }
+    .setting-group:first-of-type { padding-top: 0; }
+    .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 0; font-size: 1em; }
+    .stepper { display: flex; border: 1px solid var(--border); align-items: center; flex: none; }
+    .stepper span { min-width: 40px; text-align: center; padding: 3px; }
+    .stepper .sign { min-width: 24px; }
+    .mock-choice { display: flex; border: 1px solid var(--border); }
+    .mock-choice span { flex: 1; min-width: 0; padding: 6px; text-align: center; font-size: .875em; }
+    .mock-choice span + span { border-left: 1px solid var(--rule); }
+    .mock-choice .selected { background: var(--accent); color: var(--accent-ink); }
+    .note { margin: 10px 0; color: var(--muted); font-size: .875em; }
+    .specimen-text { font-size: 1.125em; line-height: 1.5; margin: 20px 0; }
+    .specimen-row { padding: 14px 0; border-top: 1px solid var(--rule); overflow-wrap: anywhere; }
+    .specimen-row .section-label { margin-bottom: 6px; }
+    .caption { margin: 12px 0 0; font-size: 12px; color: var(--muted); }
+    .font-status { margin: 16px 0 0; font-size: 12px; color: var(--muted); }
+    footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 12px; }
+    @media (max-width: 1150px) { .comparison { overflow-x: auto; grid-template-columns: repeat(3, minmax(360px, 1fr)); padding-bottom: 12px; } }
+    @media (max-width: 600px) { main { padding: 24px 16px; } .comparison { grid-template-columns: 1fr; overflow: visible; gap: 28px; } .mockup { height: 650px; } .controls { gap: 16px; } .display-control { width: 100%; } }
+    @media print { .controls, .font-status { display: none; } main { padding: 0; } .comparison { overflow: visible; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; } .mockup { height: auto; min-height: 650px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="eyebrow">Bokheim / Interface studies</p>
+    <h1>Three typefaces, one library.</h1>
+    <p class="intro">Compare the same interface at the same size. Switch views to see book titles, settings, and longer text.</p>
+    <div class="controls" aria-label="Comparison controls">
+      <div class="segmented" role="group" aria-label="Preview view">
+        <button type="button" data-view-button="library" aria-pressed="true">Library</button>
+        <button type="button" data-view-button="settings" aria-pressed="false">Reader settings</button>
+        <button type="button" data-view-button="specimen" aria-pressed="false">Type specimen</button>
+      </div>
+      <label class="control">Theme <select id="theme"><option value="warm-light">Warm · Light</option><option value="warm-dark">Warm · Dark</option><option value="cool-light">Cool · Light</option><option value="cool-dark">Cool · Dark</option></select></label>
+      <label class="control" for="size">UI size <input id="size" type="range" min="12" max="24" step="1" value="16"><output id="size-value" for="size">16px</output></label>
+      <label class="control display-control"><input id="display-font" type="checkbox">Use each font for display headings</label>
+    </div>
+    <div class="comparison" id="comparison"></div>
+    <p class="font-status" id="font-status" role="status">Loading bundled fonts…</p>
+    <footer><span>Shared spacing, type scale, and app palettes. Display headings use Bodoni Moda by default.</span><span>UI mockups · UI typeface is selectable in Appearance settings.</span></footer>
+  </main>
+  <template id="panel-template">
+    <section>
+      <div class="version-heading"><span class="number"></span><h2></h2><span class="badge"></span></div>
+      <div class="mockup">
+        <header class="app-toolbar"><img class="app-mark" src="assets/icon/bokheim-small.svg" alt=""><span class="brand">Bokheim</span><span class="sync"><span class="sync-dot"></span>Synced</span></header>
+        <div class="app-body">
+          <nav class="rail" aria-label="Preview navigation">
+            <button type="button" data-view-button="library" aria-pressed="true"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 6h6v21H5zM13 6h6v21h-6zM22 6l5-1 4 21-5 1z"/></svg><span class="smallcaps">Library</span></button>
+            <button type="button" data-view-button="specimen" aria-pressed="false"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 6h10q2 0 2 2v21q-1-3-4-3H4zM28 6H18q-2 0-2 2v21q1-3 4-3h8z"/></svg><span class="smallcaps">Reading</span></button>
+            <button type="button" class="bottom" data-view-button="settings" aria-pressed="false"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 8h24M4 16h24M4 24h24M10 4v8M22 12v8M14 20v8"/></svg><span class="smallcaps">Settings</span></button>
+          </nav>
+          <div class="screen">
+            <div class="view view-library">
+              <h3 class="display">Your library</h3><p class="subheading">A little room for discovery.</p>
+              <div class="search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/></svg><span>Search books and authors</span></div>
+              <p class="section-label smallcaps">Continue reading</p>
+              <div class="books">
+                <article class="book"><div class="cover"><small>Jane Austen</small><span>Pride<br>and Prejudice</span><span class="ornament"></span><small>A novel</small></div><p class="book-title">Pride and Prejudice</p><p class="author">Jane Austen</p><div class="progress"><span></span></div></article>
+                <article class="book"><div class="cover blue"><small>Virginia Woolf</small><span>To the<br>Lighthouse</span><span class="ornament"></span><small>A novel</small></div><p class="book-title">To the Lighthouse</p><p class="author">Virginia Woolf</p><div class="progress"><span style="width:62%"></span></div></article>
+                <article class="book"><div class="cover red"><small>Franz Kafka</small><span>The<br>Metamorphosis</span><span class="ornament"></span><small>1915</small></div><p class="book-title">The Metamorphosis</p><p class="author">Franz Kafka</p></article>
+                <article class="book"><div class="cover gold"><small>Selma Lagerlöf</small><span>Gösta Berlings<br>saga</span><span class="ornament"></span><small>1891</small></div><p class="book-title">Gösta Berlings saga</p><p class="author">Selma Lagerlöf</p></article>
+              </div>
+            </div>
+            <div class="view view-settings">
+              <h3 class="display">Reader settings</h3><p class="subheading">Make yourself comfortable.</p>
+              <div class="setting-group"><p class="section-label smallcaps">Typeface</p><div class="mock-choice"><span>Book</span><span class="selected">Serif</span><span>Sans serif</span></div></div>
+              <div class="setting-group"><div class="setting-row"><span>Font size</span><div class="stepper"><span class="sign">−</span><span>20px</span><span class="sign">+</span></div></div><div class="setting-row"><span>Line height</span><div class="stepper"><span class="sign">−</span><span>1.5</span><span class="sign">+</span></div></div></div>
+              <div class="setting-group"><div class="setting-row"><span>Side margins</span><div class="stepper"><span class="sign">−</span><span>32px</span><span class="sign">+</span></div></div><div class="setting-row"><span>Line width</span><div class="stepper"><span class="sign">−</span><span>65ch</span><span class="sign">+</span></div></div></div>
+              <p class="note">Your reading preferences are saved automatically.</p>
+            </div>
+            <div class="view view-specimen">
+              <h3 class="display">A quiet afternoon</h3><p class="subheading">Chapter titles, body text, and details.</p>
+              <p class="specimen-text">A good library invites you to linger. Between familiar stories and unexpected discoveries, there is always another page to turn.</p>
+              <div class="specimen-row"><p class="section-label">Regular · Bold · Italic</p><span>Continue reading</span><br><strong>A passage to remember</strong><br><em>Return to the last page.</em></div>
+              <div class="specimen-row"><p class="section-label">Small-cap labels</p><span class="smallcaps">Library · Settings · ÅÄÖ åäö</span></div>
+              <div class="specimen-row"><p class="section-label">Swedish characters</p><span>Ångström · Österlen · äldre böcker</span></div>
+              <div class="specimen-row"><p class="section-label">Numbers and punctuation</p><span>0123456789 · 38% · 20px<br>“A reader’s notes” — 14:32</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="app-footer"><span>24 books</span><span>Last opened today</span></div>
+      </div>
+      <p class="caption"></p>
+    </section>
+  </template>
+  <script>
+    const families = [
+      { name: 'Libertinus Serif', badge: 'Previous UI', caption: 'The previous interface face. Includes true small caps.' },
+      { name: 'NV Garamond', badge: 'Default UI', caption: 'The default serif interface face. Includes true small caps.' },
+      { name: 'NV Jost', badge: 'Previous sans serif', caption: 'A geometric sans serif. No small-cap glyphs; those labels use normal letters.' }
+    ];
+    const comparison = document.getElementById('comparison');
+    families.forEach((family, index) => {
+      const panel = document.getElementById('panel-template').content.cloneNode(true);
+      const section = panel.querySelector('section');
+      section.style.setProperty('--family', `"${family.name}"`);
+      section.setAttribute('aria-labelledby', `font-${index}`);
+      panel.querySelector('h2').id = `font-${index}`;
+      panel.querySelector('h2').textContent = family.name;
+      panel.querySelector('.number').textContent = String(index + 1).padStart(2, '0');
+      panel.querySelector('.badge').textContent = family.badge;
+      panel.querySelector('.caption').textContent = family.caption;
+      section.querySelector('nav').setAttribute('aria-label', `${family.name} preview navigation`);
+      comparison.append(panel);
+    });
+    function setView(view) {
+      document.documentElement.dataset.view = view;
+      document.querySelectorAll('[data-view-button]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.viewButton === view)));
+      document.querySelectorAll('.app-footer').forEach(footer => {
+        footer.firstElementChild.textContent = view === 'library' ? '24 books' : view === 'settings' ? 'Preferences' : 'Chapter 1 of 12';
+        footer.lastElementChild.textContent = view === 'library' ? 'Last opened today' : view === 'settings' ? 'Saved automatically' : '38% complete';
+      });
+    }
+    document.querySelectorAll('[data-view-button]').forEach(button => button.addEventListener('click', () => setView(button.dataset.viewButton)));
+    document.getElementById('theme').addEventListener('change', event => document.documentElement.dataset.theme = event.target.value);
+    document.getElementById('size').addEventListener('input', event => {
+      document.documentElement.style.setProperty('--ui-size', `${event.target.value}px`);
+      document.getElementById('size-value').textContent = `${event.target.value}px`;
+    });
+    document.getElementById('display-font').addEventListener('change', event => document.documentElement.classList.toggle('all-display', event.target.checked));
+    async function checkFonts() {
+      const status = document.getElementById('font-status');
+      try {
+        const names = [...families.map(family => family.name), 'Bodoni Moda'];
+        const loaded = await Promise.all(names.map(name => document.fonts.load(`16px "${name}"`)));
+        if (loaded.some(faces => faces.length === 0)) throw new Error('Missing font');
+        await document.fonts.ready;
+        status.textContent = 'All bundled fonts loaded. Ready to compare.';
+        status.dataset.loaded = 'true';
+      } catch {
+        status.textContent = 'Some fonts could not load. Keep this page in apps/ui/design-tokens so the relative font paths resolve.';
+        status.dataset.loaded = 'false';
+      }
+    }
+    checkFonts();
+  </script>
+</body>
+</html>

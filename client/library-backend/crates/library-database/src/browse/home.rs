@@ -4,23 +4,24 @@
 use crate::browse::books::MatchingBooks;
 use crate::browse::{BrowseOptions, BrowseRow, HomeSql};
 use crate::{Database, DatabaseError};
-use library_model::{BrowseLocation, HomeShelf};
+use library_model::{BrowseBookSort, BrowseLocation, HomeShelf};
 use std::collections::{HashMap, HashSet};
 
 /// How many books a shelf holds.
 const SHELF_BOOK_COUNT: i32 = 20;
 
-struct HomeShelfBooks {
-    shelf: HomeShelf,
-    books: Vec<i64>,
+pub(super) struct HomeShelfBooks {
+    pub(super) shelf: HomeShelf,
+    pub(super) books: Vec<i64>,
 }
 
-struct HomeShelves {
-    shelves: Vec<HomeShelfBooks>,
-    matching: MatchingBooks,
+pub(super) struct HomeShelves {
+    pub(super) shelves: Vec<HomeShelfBooks>,
+    pub(super) matching: MatchingBooks,
 }
 
 impl Database {
+    #[cfg(test)]
     pub(super) fn browse_home(&self, shelf: Option<HomeShelf>, query: &library_model::LibraryBrowseQuery, downloaded_only: bool) -> Result<super::LibraryBrowseData, DatabaseError> {
         let options = BrowseOptions::from_query(query, downloaded_only);
         self.with_browse_snapshot(|| {
@@ -37,7 +38,7 @@ impl Database {
                     .filter_map(|parent| {
                         let BrowseLocation::Home(Some(shelf)) = parent.id else { return None };
                         let books = shelves.iter().find(|found| found.shelf == shelf)?.books.iter().map(|book| cards[book].clone()).collect();
-                        Some(library_model::BrowseSection { parent: parent.clone(), children: Vec::new(), books })
+                        Some(library_model::BrowseSection { parent: parent.clone(), children: Vec::new(), books, book_count: None })
                     })
                     .collect()
             } else {
@@ -45,10 +46,11 @@ impl Database {
             };
             let (language_counts, format_counts) = self.library_facets(&options)?;
             let path = shelf.map(|shelf| library_model::BrowsePathSegment { id: BrowseLocation::Home(Some(shelf)), name: shelf.label().to_owned() }).into_iter().collect();
-            Ok(super::LibraryBrowseData { contents, sections, path, ancestors: Vec::new(), language_counts, format_counts, feed: None })
+            Ok(super::LibraryBrowseData { contents, sections, path, ancestors: Vec::new(), language_counts, format_counts, feed: None, page: None })
         })
     }
 
+    #[cfg(test)]
     pub(super) fn browse_home_contents(&self, shelf: Option<HomeShelf>, query: &library_model::LibraryBrowseQuery, downloaded_only: bool) -> Result<library_model::BrowseContents, DatabaseError> {
         let options = BrowseOptions::from_query(query, downloaded_only);
         self.with_browse_snapshot(|| {
@@ -60,7 +62,7 @@ impl Database {
     /// Every shelf with its books in shelf order, keeping only the books that
     /// pass the page's filters. A shelf with nothing left is still listed; it
     /// is the rows that leave it out.
-    fn home_shelves(&self, options: &BrowseOptions) -> Result<HomeShelves, DatabaseError> {
+    pub(super) fn home_shelves(&self, options: &BrowseOptions) -> Result<HomeShelves, DatabaseError> {
         let downloaded_only = i32::from(options.downloaded_only);
         // The most recently read books: up to a shelf's worth still in
         // progress, then up to a shelf's worth finished, each with whether it
@@ -85,18 +87,30 @@ impl Database {
         let matching = self.matching_books(&candidates, options)?;
         let passes = |book: &i64| matching.books.contains(book) && (options.search.is_empty() || matching.text_matches.contains(book));
         let shelf = |finished: bool| read.iter().filter(|(book, done)| *done == finished && passes(book)).map(|(book, _)| *book).collect::<Vec<_>>();
-        let shelves = vec![
+        let mut shelves = vec![
             HomeShelfBooks { shelf: HomeShelf::RecentlyRead, books: shelf(false) },
             HomeShelfBooks { shelf: HomeShelf::Finished, books: shelf(true) },
             HomeShelfBooks { shelf: HomeShelf::RecentlyAdded, books: added.into_iter().filter(|book| passes(book)).collect() },
         ];
+        if options.book_sort != BrowseBookSort::DefaultOrder {
+            for shelf in &mut shelves {
+                shelf.books = self.ordered_books(&shelf.books.iter().copied().collect(), options)?;
+            }
+        }
+        let mut rows = shelves.iter().map(|shelf| BrowseRow { id: BrowseLocation::Home(Some(shelf.shelf)), name: shelf.shelf.label().to_owned(), path: None, book_count: shelf.books.len(), downloaded_book_count: 0 }).collect::<Vec<_>>();
+        super::popularity::sort_rows(&mut rows, options.chip_sort, |row| {
+            shelves.iter().find(|shelf| row.id == BrowseLocation::Home(Some(shelf.shelf))).and_then(|shelf| super::popularity::sum(&shelf.books.iter().copied().collect(), &matching))
+        });
+        let positions: HashMap<_, _> = rows.iter().enumerate().map(|(index, row)| (row.id, index)).collect();
+        shelves.sort_by_key(|shelf| positions[&BrowseLocation::Home(Some(shelf.shelf))]);
         Ok(HomeShelves { shelves, matching })
     }
 
     /// Home holds its shelves, or under a search the books on them that match
     /// it; a shelf holds its books and nothing below them.
+    #[cfg(test)]
     fn home_contents(&self, shelf: Option<HomeShelf>, shelves: &[HomeShelfBooks], matching: &MatchingBooks, options: &BrowseOptions) -> Result<library_model::BrowseContents, DatabaseError> {
-        let (children, books) = match shelf {
+        let (children, mut books) = match shelf {
             Some(shelf) => (Vec::new(), shelves.iter().find(|found| found.shelf == shelf).map(|shelf| shelf.books.clone()).unwrap_or_default()),
             None if options.search.is_empty() => {
                 let rows = shelves
@@ -117,6 +131,9 @@ impl Database {
                 (Vec::new(), shelves.iter().flat_map(|shelf| shelf.books.iter().copied()).filter(|book| seen.insert(*book)).collect())
             }
         };
+        if options.book_sort != BrowseBookSort::DefaultOrder {
+            books = self.ordered_books(&books.iter().copied().collect(), options)?;
+        }
         Ok(library_model::BrowseContents { children, books: self.load_cards(&books)? })
     }
 }

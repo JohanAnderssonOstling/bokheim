@@ -156,8 +156,24 @@ fn failed_radio_shutdown_aborts_sleep_and_releases_operation_guard() {
     assert!(!controller.sleeping);
     assert!(controller.snapshot.error.is_some());
     assert_ne!(controller.snapshot.phase, Phase::Off);
+    assert!(controller.restore_after_ui);
+    let mut restored = false;
+    controller.resume_after_ui_with(|_| { restored = true; Ok(()) });
+    assert!(restored, "partially stopped services must be restored after failed suspend");
+    assert!(!controller.restore_after_ui);
 }
 
+#[test]
+fn an_off_radio_without_a_control_helper_does_not_block_sleep() {
+    let mut controller = Controller::new();
+    controller.socket_path = None;
+    controller.snapshot.phase = Phase::Off;
+    controller.snapshot.power_available = false;
+    controller.prepare_sleep_with(|_| panic!("already-off unavailable radio must not invoke the helper")).unwrap();
+    assert!(controller.sleeping);
+    controller.sleeping = false;
+    controller.resume_after_ui_with(|_| panic!("radio must remain off"));
+}
 
 #[test]
 fn wake_preserves_off_setting_and_explicit_user_override() {

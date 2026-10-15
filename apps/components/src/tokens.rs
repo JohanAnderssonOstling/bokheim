@@ -10,13 +10,23 @@ use crate::theme::BrowserTheme;
 /// and a solid accent in others, and pages picked palette values directly.
 ///
 ///   rest      untouched
-///   hover     `theme.hover` — translucent, correct over any surface
-///   current   `accent` with `accent_text` on it — persistent "you are here"
-///             state, not a transient pick; outranks hover
+///   hover     `theme.hover` — the light wash under the pointer; translucent,
+///             correct over any surface
+///   keyboard  `accent_wash` — the keyboard cursor and the selection, which
+///             is transient however it was made. The value chosen in a
+///             settings control keeps this wash too, with its underline.
+///   current   `accent` with `accent_text` on it — state the app holds: the
+///             place you are, a mode that is on, a filter narrowing the
+///             content, the sort and filters chosen in the sort & filter menu
 ///
-/// A transient pick (a row a reader clicked to look at, not a place the app
-/// considers itself "in") is a third tier, `accent_wash`, that this trait does
-/// not cover — see `contents_row`, which lays out all three together.
+/// Nothing is drawn as an outline for hover or the cursor. The pointer on a
+/// keyboard item steps it to `accent_wash_hover`; the pointer or the cursor on
+/// a current item steps it to `accent_hover`. `contents_row` lays out all of
+/// them together. Book cards keep their own selection and cursor marks — see
+/// `book_card`.
+///
+/// This trait covers rest, hover and current; the keyboard tier is the call
+/// site's, because only it knows where the cursor is.
 ///
 /// Do not call this on an element that already sets its own `hover`: gpui
 /// asserts a hover style is only set once. A `gpui_component` `Button` is such
@@ -113,6 +123,13 @@ pub const SPACE_2XL: f32 = 48.0;
 pub const SPACE_3XL: f32 = 64.0;
 pub const SPACE_4XL: f32 = 96.0;
 
+/// Phone builds are driven by fingers, so their controls take the 48dp
+/// minimum touch target (3rem at the default 16px UI font) where pointer
+/// builds use 2rem, and their layout is the phone's own. Kobo keeps its own
+/// e-ink geometry, and a narrow desktop or web window keeps the desktop's.
+pub const TOUCH_UI: bool = cfg!(all(feature = "mobile", not(feature = "kobo")));
+pub const TOUCH_TARGET_REM: f32 = 3.0;
+
 /// Native surfaces and controls use square corners. Semantic pills and
 /// progress indicators may still opt into a fully rounded shape explicitly.
 pub const RADIUS_SM: f32 = 0.0;
@@ -130,9 +147,8 @@ pub const RADIUS_MD: f32 = 0.0;
 /// 1rem. Captions remain readable at 0.875rem, while titles have enough room
 /// above body text to establish hierarchy without relying on a different font.
 ///
-/// The scale is tuned for Libertinus, whose x-height is smaller than Noto Sans;
-/// the nominal rem values therefore keep the same comfortable visual density
-/// when the interface font changes.
+/// Both interface faces share this scale; changing the family preserves the
+/// user's chosen rem size.
 pub const TEXT_XS: f32 = 0.875;
 pub const TEXT_SM: f32 = 1.0;
 pub const TEXT_MD: f32 = 1.125;
@@ -140,27 +156,26 @@ pub const TEXT_LG: f32 = 1.375;
 pub const TITLE_MD: f32 = 1.6875;
 pub const TITLE_LG: f32 = 2.125;
 
-/// Display face for prominent application headings. Reading text keeps the
-/// interface's Libertinus Serif default.
+/// Display face for prominent headings in the serif UI. The sans-serif UI
+/// uses its selected interface face for headings too.
 pub const DISPLAY_FONT_FAMILY: &str = "Bodoni Moda";
 
-/// Real small caps from the interface face, not uppercased text.
+/// Request small-cap glyphs from the selected interface face.
 ///
 /// `smcp` maps lowercase onto the small-cap glyphs; `c2sc` does the same for
-/// capitals, so a label reads uniformly whatever case it was written in and no
-/// call site has to lowercase its strings. Libertinus carries both, covering
-/// a-z plus å, ä and ö.
+/// capitals, so no call site has to lowercase its strings. NV Garamond covers
+/// a-z plus å, ä and ö; Raleway's small-cap coverage omits the Swedish letters.
 ///
-/// Small caps stand at 0.483em against the face's 0.429em x-height, so a label
-/// set this way runs slightly larger than its nominal size suggests — see
-/// `NAV_RAIL_LABEL_SIZE`, which is set from that measurement rather than from
-/// the lowercase scale.
+/// Small caps stand at 0.483em against the face's 0.429em x-height, so text
+/// set this way runs slightly larger than its nominal size suggests.
 pub fn small_caps() -> gpui::FontFeatures {
     gpui::FontFeatures(std::sync::Arc::new(vec![("smcp".to_owned(), 1), ("c2sc".to_owned(), 1)]))
 }
 
 pub const BOOK_COVER_WIDTH: f32 = 200.0;
-pub const BOOK_COVER_ASPECT_RATIO: f32 = 1.0 / 1.5;
+/// Placeholder proportions and the tallest cover frame reserved by book cards.
+/// GPUI uses width over height; card JPEG generation enforces this limit.
+pub const BOOK_COVER_ASPECT_RATIO: f32 = 1.0 / 1.6;
 /// However narrow the window, the book grid keeps at least this many columns.
 /// One cover stretched across a phone screen is not a grid, and the covers are
 /// what the reader scans.
@@ -196,32 +211,27 @@ pub const BOOK_CARD_PADDING: f32 = CONTENT_INSET;
 /// them reads as a misalignment. Each carries it as its own padding rather than
 /// a container supplying it, so a selected card can still fill its whole cell.
 pub const CONTENT_INSET: f32 = SPACE_SM;
-/// Book-card text reserves two title lines and one subtitle line — the title
-/// gets first claim on the space, so a long subtitle is what clips. Keep
+/// Book-card text shares three lines between title and subtitle, reserving
+/// one for each when both exist and giving the title first claim. Keep
 /// those blocks in rems: the interface font can have different glyph widths,
 /// and the user's UI font size must enlarge the card instead of being
 /// clipped by the 16px-reference geometry in the application contract.
 /// On the scale rather than beside it: this was 16.0, a value that appeared
 /// nowhere else and sat between two steps.
-pub const BOOK_CARD_TITLE_SIZE: f32 = TEXT_MD;
+pub const BOOK_CARD_TITLE_SIZE: f32 = TEXT_SM;
 /// Main titles carry more weight than subtitles.
 pub const BOOK_CARD_TITLE_WEIGHT: FontWeight = FontWeight::SEMIBOLD;
 pub const BOOK_CARD_TITLE_LINE_HEIGHT_EM: f32 = 1.25;
+pub const BOOK_CARD_TEXT_LINES: usize = 3;
 pub const BOOK_CARD_TITLE_LINES: usize = 2;
-pub const BOOK_CARD_SUBTITLE_SIZE: f32 = TEXT_SM;
-pub const BOOK_CARD_SUBTITLE_LINES: usize = 1;
+pub const BOOK_CARD_SUBTITLE_SIZE: f32 = TEXT_XS;
+pub const BOOK_CARD_SUBTITLE_LINES: usize = 2;
 /// Author lines run at `TEXT_XS`.
 pub const BOOK_CARD_AUTHOR_LINE_HEIGHT_EM: f32 = 1.0;
 /// Compact card spacing for the GPUI browser surface.
 pub const BOOK_CARD_COVER_CONTENT_GAP: f32 = SPACE_SM;
-pub const BOOK_CARD_TITLE_HEIGHT_REM: f32 = {
-    // The title always claims its full two lines, subtitle or not, so the
-    // reserved box is that plus the subtitle's one line when there is one —
-    // never a max() between two shapes, since the title no longer shrinks.
-    let title_only = BOOK_CARD_TITLE_SIZE * BOOK_CARD_TITLE_LINE_HEIGHT_EM * BOOK_CARD_TITLE_LINES as f32;
-    let with_subtitle = title_only + BOOK_CARD_SUBTITLE_SIZE * BOOK_CARD_TITLE_LINE_HEIGHT_EM * BOOK_CARD_SUBTITLE_LINES as f32;
-    if title_only > with_subtitle { title_only } else { with_subtitle }
-};
+// Three main-title lines are the tallest allocation of the shared budget.
+pub const BOOK_CARD_TITLE_HEIGHT_REM: f32 = BOOK_CARD_TITLE_SIZE * BOOK_CARD_TITLE_LINE_HEIGHT_EM * BOOK_CARD_TEXT_LINES as f32;
 /// The reader's place in the book, drawn on the cover's own bottom edge.
 pub const BOOK_COVER_PROGRESS_HEIGHT: f32 = 3.0;
 /// How tall a stripe of the cover the progress mark's scrim darkens, so the
@@ -234,8 +244,8 @@ pub const BOOK_COVER_SPINE_WIDTH: f32 = 10.0;
 /// deliberate departure rather than a change to the shared radius scale.
 /// Applied to the outer (right) edge only — see `book_cover_image`.
 pub const BOOK_COVER_RADIUS: f32 = 4.0;
-/// A download action's hit area — the badge on a cover, the slot at the end of
-/// a folder or subject chip — and the glyph inside it. Rems, so the glyph keeps
+/// A download action's size — the badge drawn on a cover, the slot at the end
+/// of a folder or subject chip — and the glyph inside it. Rems, so the glyph keeps
 /// its size against the text beside a chip and the target keeps up with it.
 pub const DOWNLOAD_ACTION_SIZE_REM: f32 = 1.75;
 pub const DOWNLOAD_ICON_SIZE_REM: f32 = 0.875;
@@ -248,16 +258,17 @@ pub const BOOK_COVER_BADGE_INSET: f32 = SPACE_XS + 2.0;
 pub const BOOK_CARD_NO_TEXT_HEIGHT_REM: f32 = 0.0;
 pub const BOOK_CARD_NO_TEXT_FIXED_HEIGHT: f32 = 0.0;
 
-/// The compact detail page's single measure. Desktop reading columns use the
-/// narrower limits below.
+/// The compact detail page's single measure.
 pub const BOOK_DETAIL_PAGE_WIDTH_REM: f32 = 38.5;
-/// Desktop book detail widths approximate the 56ch contents and 65ch
-/// description limits in the HTML mock. GPUI lengths do not support `ch`.
-pub const BOOK_DETAIL_COVER_WIDTH: f32 = 300.0;
-pub const BOOK_DETAIL_SIDEBAR_WIDTH_REM: f32 = 18.75;
-pub const BOOK_DETAIL_CONTENTS_WIDTH_REM: f32 = 28.0;
-pub const BOOK_DETAIL_DESCRIPTION_WIDTH_REM: f32 = 32.5;
-pub const BOOK_DETAIL_WIDE_PAGE_WIDTH_REM: f32 = BOOK_DETAIL_SIDEBAR_WIDTH_REM + BOOK_DETAIL_CONTENTS_WIDTH_REM + BOOK_DETAIL_DESCRIPTION_WIDTH_REM + 4.0;
+/// The cover's width; on desktop, also the player column's width.
+pub const BOOK_DETAIL_COVER_WIDTH: f32 = 360.0;
+/// Desktop contents and description columns grow together to this cap;
+/// the player column uses the cover's width. Spare width goes to margins and gaps.
+pub const BOOK_DETAIL_COLUMN_MAX_WIDTH_REM: f32 = 30.0;
+/// The least room between two desktop columns, and between a column and the
+/// page's edge. Spare width is shared equally among all of them.
+pub const BOOK_DETAIL_COLUMN_GAP: f32 = SPACE_XL;
+pub const BOOK_DETAIL_PAGE_MARGIN: f32 = SPACE_LG;
 /// The cover takes at most half the hero, so a narrow window never leaves the
 /// title in a column one word wide.
 pub const BOOK_DETAIL_COVER_FRACTION: f32 = 0.5;
@@ -278,18 +289,12 @@ pub const SHELF_ROW_WIDTH_REM: f32 = 1000.0;
 
 /// The navigation rail and library switcher scale with the UI rem.
 ///
-/// The rail's width has a floor set by its labels: the widest destination name
-/// ("Settings") sets 48.5px in Libertinus small caps at `NAV_RAIL_LABEL_SIZE`
-/// with the tracking below, so 5rem is the least this can be, and that floor is
-/// what the rail is set to: the rail is navigation, not content, and every rem
-/// it gives back goes to the list beside it. The destination tile is also the
-/// unit the folder chips are cut from — see `COMPACT_HIERARCHY_ITEM_HEIGHT_REM`,
-/// which is half of it. Because both the rail and the label are expressed in
-/// rems, the label fit holds at every UI font size.
+/// The rail reserves 5rem for icons and destination labels. The
+/// destination tile is also the unit the folder chips are cut from — see
+/// `COMPACT_HIERARCHY_ITEM_HEIGHT_REM`, which is half of it. Both the rail
+/// and its labels scale with the chosen UI size.
 ///
-/// Measure again before adding a destination longer than "Settings", and note
-/// that small caps are wider than the lowercase this was once sized against —
-/// 4rem would leave under a SPACE_SM margin and is no longer enough.
+/// Measure both interface faces before adding a longer destination label.
 pub const NAV_RAIL_SIZE_REM: f32 = 5.0;
 /// Rail destinations are square: their height is the rail's width. Changing
 /// the rail's width deliberately changes their height with it.
@@ -303,9 +308,7 @@ pub const NAV_RAIL_SIZE_REM: f32 = 5.0;
 /// smaller than ordinary caption text: the icon is the primary cue and the word
 /// confirms it. Smaller here also buys margin against longer names before the
 /// label has to ellipsize.
-/// Set in small caps, whose letters stand at 0.483em against Libertinus'
-/// 0.429em x-height. 12px therefore renders at the optical size 11px sans did,
-/// and the label is not on the lowercase scale above.
+/// Destination labels in their original case, sized to fit the rail.
 pub const NAV_RAIL_LABEL_SIZE: f32 = 0.75;
 pub const NAV_RAIL_ICON_SIZE_REM: f32 = 1.5;
 pub const BOTTOM_NAV_HEIGHT_REM: f32 = 4.0;
@@ -315,15 +318,18 @@ pub const BOTTOM_NAV_HEIGHT_REM: f32 = 4.0;
 /// rather than staying fixed, because a height made of a rem part and a pixel
 /// part cannot be given to a single element.
 pub const TOPBAR_HEIGHT_REM: f32 = TOPBAR_ACTION_HEIGHT_REM + 2.0 * CONTENT_INSET / 16.0;
-pub const TOPBAR_ACTION_HEIGHT_REM: f32 = 2.0;
+/// Also the size of every square icon button (`outlined_icon_button`).
+pub const TOPBAR_ACTION_HEIGHT_REM: f32 = if TOUCH_UI { TOUCH_TARGET_REM } else { 2.0 };
 pub const TOPBAR_ACTION_LABEL_WEIGHT: FontWeight = FontWeight::NORMAL;
-pub const TOPBAR_ACTION_GAP: f32 = SPACE_SM;
+/// Touch-sized icon buttons already carry their spacing as padding around the
+/// glyph, and a row of them must still fit a phone's width beside the title.
+pub const TOPBAR_ACTION_GAP: f32 = if TOUCH_UI { 0.0 } else { SPACE_SM };
 pub const TOPBAR_ACTION_HORIZONTAL_PADDING: f32 = SPACE_SM;
 
 /// The switcher and the compact "More" sheet are one row height throughout —
 /// library rows, their delete buttons, the add button and the header all sit on
 /// it. It was repeated as a bare `40.0` in five places.
-pub const NAVIGATION_MODAL_ROW_HEIGHT_REM: f32 = 2.0;
+pub const NAVIGATION_MODAL_ROW_HEIGHT_REM: f32 = if TOUCH_UI { TOUCH_TARGET_REM } else { 2.0 };
 /// The list stops growing here and scrolls instead.
 pub const NAVIGATION_MODAL_MAX_HEIGHT_REM: f32 = 32.0;
 /// Wide enough for a library name without being wider than a modal wants to be,
@@ -344,13 +350,15 @@ pub const COMPACT_HIERARCHY_ITEM_CONTENT_GAP: f32 = SPACE_SM;
 
 /// Section cards: a title and total over columns of child entries, with a
 /// single row of covers in the space left by the first column.
+/// Preferred width for two cover cells, a 48px peek and the container insets.
+pub const SECTION_CARD_WIDTH: f32 = (SECTION_CARD_COVER_WIDTH + BOOK_CARD_PADDING * 2.0) * 2.0 + SPACE_2XL + SPACE_MD;
 pub const SECTION_CARD_HEADING_HEIGHT_REM: f32 = 2.5;
+pub const SECTION_CARD_HEADING_PADDING_REM: f32 = 0.5;
 pub const SECTION_CARD_SUBJECT_ROW_HEIGHT_REM: f32 = 1.5;
-pub const SECTION_CARD_SUBJECT_ROWS_PER_COLUMN: usize = 10;
 pub const SECTION_CARD_COLUMN_GAP: f32 = SPACE_MD;
 /// The cover art in a section card's strip. The cell adds the book card's
 /// padding around it.
-pub const SECTION_CARD_COVER_WIDTH: f32 = 150.0;
+pub const SECTION_CARD_COVER_WIDTH: f32 = 200.0;
 
 /// The contents list, shared by the reader's sidebar, the audiobook player's
 /// chapter table and the library's detail page.
@@ -372,12 +380,16 @@ pub const CONTENTS_ROW_GAP: f32 = SPACE_XS;
 /// the audiobook player, in pixels; in rems it keeps its proportion when the
 /// interface font grows.
 pub const CONTENTS_AMOUNT_WIDTH_REM: f32 = 5.125;
+/// One digit of an entry's number, in ems of the number's own size. GPUI has
+/// no `ch`; this is a little over the interface face's figure width, so a
+/// column sized by digit count never clips its widest number.
+pub const CONTENTS_DIGIT_WIDTH_EM: f32 = 0.55;
 
 /// The rule a tab draws under its own label to say the panel below belongs to
 /// it. Thicker than `rule`'s hairline on purpose: it is a state, not a divider.
 pub const TAB_UNDERLINE_HEIGHT: f32 = 2.0;
 
 /// Shared geometry for settings controls.
-pub const SETTINGS_CONTROL_SIZE_REM: f32 = 2.0;
+pub const SETTINGS_CONTROL_SIZE_REM: f32 = if TOUCH_UI { TOUCH_TARGET_REM } else { 2.0 };
 pub const SETTINGS_STEPPER_VALUE_WIDTH_REM: f32 = 4.5;
 pub const SETTINGS_CONTROL_GAP: f32 = 1.0;

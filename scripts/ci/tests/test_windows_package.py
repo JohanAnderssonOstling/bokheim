@@ -15,6 +15,12 @@ class WindowsPackageTests(unittest.TestCase):
             root = Path(temp)
             binary = root / 'desktop-gpui.exe'
             binary.write_bytes(b'MZ executable')
+            (root / 'taxonomy.sqlite3').write_bytes(b'SQLite format 3\0')
+            (root / 'bokheim-opds-webview.exe').write_bytes(b'MZ helper')
+            (root / 'tts/alba').mkdir(parents=True)
+            (root / 'tts/alba/en_GB-alba-medium.onnx').write_bytes(b'voice')
+            (root / 'tts/george').mkdir(parents=True)
+            (root / 'tts/george/model.onnx').write_bytes(b'george-fp32')
             (root / 'pdfium').mkdir()
             (root / 'pdfium/pdfium.dll').write_bytes(b'MZ library')
             icon = root / 'icon.ico'
@@ -24,7 +30,7 @@ class WindowsPackageTests(unittest.TestCase):
             module.package(binary, icon, second)
             self.assertEqual(first.read_bytes(), second.read_bytes())
             with zipfile.ZipFile(first) as archive:
-                self.assertEqual(set(archive.namelist()), {'Bokheim.exe', 'Bokheim.ico'})
+                self.assertEqual(set(archive.namelist()), {'Bokheim.exe', 'Bokheim.ico', 'bokheim-opds-webview.exe', 'taxonomy.sqlite3', 'tts/alba/en_GB-alba-medium.onnx', 'tts/george/model.onnx'})
                 self.assertNotIn('pdfium/pdfium.dll', archive.namelist())
             self.assertTrue(first.with_suffix('.zip.sha256').read_text().endswith('  first.zip\n'))
             binary.write_bytes(b'invalid executable')

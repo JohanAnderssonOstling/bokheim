@@ -1,0 +1,26 @@
+{
+  "variant": "int8-matmul",
+  "threads": 4,
+  "speaker": "bm_george",
+  "speaker_id": 26,
+  "model_bytes": 311185663,
+  "load_seconds": 1.7330044749978697,
+  "opening_sentence_seconds": 2.204670494997117,
+  "first_full_passage_seconds": 13.145842436002567,
+  "warm_generation_seconds": [
+    13.848495389000163,
+    12.648039569998218,
+    12.36822455899528
+  ],
+  "median_seconds": 12.648039569998218,
+  "median_cpu_seconds": 49.836935483000005,
+  "audio_seconds": 36.88008333333333,
+  "times_realtime": 2.9158734940088844,
+  "peak_process_ram_mib": 888.6171875,
+  "sample_rate": 24000,
+  "file": "george-int8-matmul-4threads.wav",
+  "peak_amplitude": 0.5177735090255737,
+  "rms": 0.075490186735106,
+  "peak_rss_measurement_valid": false,
+  "memory_metric": "historical resource.getrusage(RUSAGE_SELF).ru_maxrss; may include pre-exec launcher RSS"
+}

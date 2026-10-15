@@ -1,6 +1,6 @@
 //! OPDS 1.2: Atom feeds. An entry with acquisition links is a publication;
 //! any other entry linking to a catalog page is navigation.
-use crate::{choose_download, push_facet, Facet, Feed, NavigationLink, Publication, Search};
+use crate::{bare_media_type, choose_download, protected, push_facet, Facet, Feed, NavigationLink, Publication, Search};
 use roxmltree::Node;
 use url::Url;
 
@@ -10,6 +10,7 @@ const THREAD: &str = "http://purl.org/syndication/thread/1.0";
 const OPENSEARCH: &str = "http://a9.com/-/spec/opensearch/1.1/";
 const ACQUISITION: &str = "http://opds-spec.org/acquisition";
 const OPEN_ACCESS: &str = "http://opds-spec.org/acquisition/open-access";
+const BUY: &str = "http://opds-spec.org/acquisition/buy";
 const FACET: &str = "http://opds-spec.org/facet";
 /// Cover links, full size first.
 const COVERS: [&str; 2] = ["http://opds-spec.org/image", "http://opds-spec.org/image/thumbnail"];
@@ -40,20 +41,32 @@ pub(crate) fn parse(xml: &str, base: &Url) -> Result<Feed, String> {
             let open = links
                 .iter()
                 .filter(|link| matches!(link.attribute("rel"), Some(ACQUISITION | OPEN_ACCESS)))
-                .filter_map(|link| Some((base.join(link.attribute("href")?).ok()?, link.attribute("type").unwrap_or_default().to_owned())))
+                .filter_map(|link| Some((base.join(link.attribute("href")?).ok()?, link.attribute("type").unwrap_or_default().to_owned(), link.attribute("length").and_then(|length| length.parse().ok()))))
                 .collect();
+            let download = choose_download(open);
+            let buy = links.iter().find(|link| link.attribute("rel") == Some(BUY));
+            // A book offered only with DRM, sold, lent or free, is not listed.
+            let offered_types = links
+                .iter()
+                .filter(|link| link.attribute("rel").is_some_and(|rel| rel.starts_with(ACQUISITION)))
+                .flat_map(|link| link.descendants().filter(move |node| *node == *link || is(node, OPDS, "indirectAcquisition")))
+                .filter_map(|node| node.attribute("type"));
+            if download.is_none() && protected(offered_types) {
+                continue;
+            }
             feed.publications.push(Publication {
                 id: child_text(&entry, "id"),
                 title: child_text(&entry, "title"),
                 subtitle: None,
                 authors: children(&entry, "author").map(|author| child_text(&author, "name")).filter(|name| !name.is_empty()).collect(),
-                download: choose_download(open),
+                download,
+                buy: buy.and_then(|link| base.join(link.attribute("href")?).ok()),
                 cover: COVERS.into_iter().find_map(|rel| links.iter().find(|link| link.attribute("rel") == Some(rel))?.attribute("href").and_then(|href| base.join(href).ok())),
                 description: description(&entry, xml),
             });
             continue;
         }
-        let Some(page) = links.iter().find(|link| link.attribute("type").is_some_and(|kind| kind.contains("opds-catalog"))) else { continue };
+        let Some(page) = links.iter().find(|link| link.attribute("type").is_some_and(|kind| kind.contains("opds-catalog") || bare_media_type(kind) == "application/atom+xml")) else { continue };
         let Some(href) = page.attribute("href").and_then(|href| base.join(href).ok()) else { continue };
         feed.navigation.push(NavigationLink { title: child_text(&entry, "title"), href, count: page.attribute((THREAD, "count")).and_then(|count| count.parse().ok()) });
     }

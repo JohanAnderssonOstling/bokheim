@@ -1,13 +1,13 @@
 //! Library creation, selection, and switcher overlay rendering.
 
 use gpui::prelude::*;
-use gpui::{Context, Entity, KeyDownEvent, MouseButton, PathPromptOptions, PromptLevel, SharedString, Window};
+use gpui::{Context, Entity, KeyDownEvent, MouseButton, PathPromptOptions, SharedString, Window};
 use gpui::{Focusable, Subscription};
-use gpui_component::Disableable;
 use gpui_component::button::ButtonVariants;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::PopupMenu;
+use gpui_component::{Disableable, WindowExt};
 use sync_common::LibraryId;
 use ui_components as components;
 
@@ -137,7 +137,7 @@ impl Sidebar {
         cx.notify();
     }
 
-    fn render_library_name_dialog(&self, emitter: Entity<Self>, cx: &gpui::App) -> Option<gpui::AnyElement> {
+    fn render_library_name_dialog(&self, emitter: Entity<Self>, window: &gpui::Window, cx: &gpui::App) -> Option<gpui::AnyElement> {
         let dialog = self.library_name_dialog.as_ref()?;
         let theme = components::browser_theme(cx);
         let cancel = emitter.clone();
@@ -195,14 +195,19 @@ impl Sidebar {
         // Keep this in the normal content tree. KoboKeyboardRoot paints its
         // keyboard after application content; a deferred modal would be
         // painted above the keyboard and make its keys appear disabled.
+        // Anchoring is not deferral: it places the layer, it does not reorder
+        // painting.
         Some(
-            components::modal_overlay()
-                .occlude()
-                // Do not dismiss this dialog from the full-window scrim.
-                // On Kobo, keyboard taps are outside the panel bounds.
-                .child(components::modal_scrim("library-rename-scrim", theme))
-                .child(panel)
-                .into_any_element(),
+            components::anchor_to_window(
+                components::modal_overlay()
+                    .occlude()
+                    // Do not dismiss this dialog from the full-window scrim.
+                    // On Kobo, keyboard taps are outside the panel bounds.
+                    .child(components::modal_scrim("library-rename-scrim", theme))
+                    .child(panel),
+                window,
+            )
+            .into_any_element(),
         )
     }
 
@@ -305,29 +310,31 @@ impl Sidebar {
         }
     }
 
-    /// Both pointer and keyboard menu actions use the same confirmation.
+    /// Both pointer and keyboard menu actions use the same confirmation. It is
+    /// the one command in the library that asks first: everything else lands
+    /// in Trash or on the undo stack, and a deleted library does neither.
     fn prompt_delete_library(&mut self, id: LibraryId, window: &mut Window, cx: &mut Context<Self>) {
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            "Delete this library?",
-            Some("Local database and state are removed immediately. Server deletion runs in the background, or automatically after the next sign-in. Local files and stored server blobs are kept."),
-            &["Delete library", "Cancel"],
-            cx,
-        );
-        cx.spawn(async move |navigation, cx| {
-            if answer.await.ok() != Some(0) {
-                return;
-            }
-            // The switcher stays open: deleting is a management action, and
-            // there is usually more than one to do. Closing it also threw the
-            // reader back to a page whose library might be the one just removed.
-            let _ = navigation.update(cx, |navigation, cx| {
-                navigation.libraries.update(cx, |libraries, cx| libraries.delete_library(id, cx));
-                navigation.clamp_switcher_cursor(cx);
-                cx.notify();
+        let Some(library) = self.libraries(cx).into_iter().find(|library| library.id == id) else { return };
+        let question: SharedString = format!("Delete “{}”?", library.name).into();
+        let navigation = cx.weak_entity();
+        window.open_alert_dialog(cx, move |dialog, window, cx| {
+            let theme = components::browser_theme(cx);
+            let navigation = navigation.clone();
+            let cancel = components::dialog_cancel_button("cancel-delete-library", "Cancel").on_click(|_, window, cx| window.close_dialog(cx));
+            let delete = components::base_button("delete-library").label("Delete").danger().on_click(move |_, window, cx| {
+                window.close_dialog(cx);
+                // The switcher stays open: deleting is a management action,
+                // and there is usually more than one to do. Closing it also
+                // threw the reader back to a page whose library might be the
+                // one just removed.
+                let _ = navigation.update(cx, |navigation, cx| {
+                    navigation.libraries.update(cx, |libraries, cx| libraries.delete_library(id, cx));
+                    navigation.clamp_switcher_cursor(cx);
+                    cx.notify();
+                });
             });
-        })
-        .detach();
+            components::confirmation_dialog_row(components::confirmation_dialog(dialog, window), question.clone(), cancel, delete, theme)
+        });
     }
 
     pub(crate) fn close_library_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -346,7 +353,7 @@ impl Sidebar {
     }
 
     pub(crate) fn library_switcher_overlay(&self, emitter: Entity<Self>, window: &gpui::Window, cx: &gpui::App) -> Option<gpui::AnyElement> {
-        if self.switcher_open { Some(self.render_library_switcher_overlay(emitter, window, cx)) } else { self.render_library_name_dialog(emitter, cx) }
+        if self.switcher_open { Some(self.render_library_switcher_overlay(emitter, window, cx)) } else { self.render_library_name_dialog(emitter, window, cx) }
     }
 
     pub(crate) fn choose_library_folders(&mut self, cx: &mut Context<Self>) {
@@ -441,6 +448,7 @@ impl Sidebar {
             let select = emitter.clone();
             let select_id = library_id;
             let manage = emitter.clone();
+            let menu_was_open = self.library_menu.as_ref().is_some_and(|(id, _, _)| *id == library_id);
             panel = panel.child(components::library_switcher_row(
                 components::library_switcher_item(format!("library-switcher-{library_id}"), library.name.clone(), selected, cursor == SwitcherCursor::Library { index, menu: false }, theme).on_click(move |_, _window, cx| {
                     select.update(cx, |navigation, cx| {
@@ -453,14 +461,23 @@ impl Sidebar {
                     .flex_none()
                     .child(
                         components::library_switcher_menu_button(format!("library-switcher-menu-{library_id}"), library.name, cursor == SwitcherCursor::Library { index, menu: true }, theme)
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(move |_, window, cx| {
+                            .debug_selector(move || format!("library-switcher-menu-{library_id}"))
+                            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                                 cx.stop_propagation();
                                 manage.update(cx, |navigation, cx| {
                                     navigation.switcher_cursor = SwitcherCursor::Library { index, menu: true };
-                                    navigation.open_library_menu(library_id, window, cx);
+                                    // Outside-click dismissal runs during capture. Use the
+                                    // state from before this press so the trigger cannot reopen it.
+                                    if menu_was_open {
+                                        navigation.library_menu = None;
+                                        navigation.switcher_focus.focus(window, cx);
+                                        cx.notify();
+                                    } else {
+                                        navigation.open_library_menu(library_id, window, cx);
+                                    }
                                 });
-                            }),
+                            })
+                            .on_click(|_, _, cx| cx.stop_propagation()),
                     )
                     .children(
                         self.library_menu
@@ -471,11 +488,11 @@ impl Sidebar {
             ));
         }
 
-        let library_name_dialog = self.render_library_name_dialog(emitter.clone(), cx);
+        let library_name_dialog = self.render_library_name_dialog(emitter.clone(), window, cx);
         let dismiss = emitter;
         components::absolute_full_size()
             .child(
-                gpui::deferred(
+                gpui::deferred(components::anchor_to_window(
                     components::modal_overlay()
                         .occlude()
                         .child(components::modal_scrim("library-switcher-scrim", theme).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(move |_, window, cx| {
@@ -490,7 +507,8 @@ impl Sidebar {
                                 .pl(gpui::px(components::SPACE_MD - components::SPACE_SM))
                                 .child(panel),
                         ),
-                )
+                    window,
+                ))
                 .with_priority(1),
             )
             .children(library_name_dialog)
@@ -502,5 +520,70 @@ impl Sidebar {
         components::library_switcher_group(theme).child(components::library_switcher_trigger(self.active_library_name(cx), theme).on_click(move |_, window, cx| {
             emitter.update(cx, |navigation, cx| navigation.open_library_switcher(window, cx));
         }))
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32"), not(feature = "kobo")))]
+mod tests {
+    use super::*;
+    use crate::navigation::LibrarySummary;
+    use gpui::{AppContext, Modifiers, Render, TestAppContext, VisualTestContext, div};
+    use std::rc::Rc;
+
+    struct SwitcherHarness {
+        sidebar: Entity<Sidebar>,
+        _changes: Subscription,
+    }
+
+    impl Render for SwitcherHarness {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().children(self.sidebar.read(cx).library_switcher_overlay(self.sidebar.clone(), window, cx))
+        }
+    }
+
+    #[gpui::test]
+    async fn more_button_closes_its_open_menu_and_can_open_another_library_menu(cx: &mut TestAppContext) {
+        let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        cx.executor().allow_parking();
+        let directory = tempfile::tempdir().unwrap();
+        let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
+        let (backend, _) = app::AppClient::start_native(launch).unwrap();
+        let first = backend.create_library_with_asset_storage("First".into(), true).await.unwrap();
+        let second = backend.create_library_with_asset_storage("Second".into(), true).await.unwrap();
+        let first_id = *first.library_id();
+        let second_id = *second.library_id();
+        let entries = backend.libraries().await.unwrap().iter().map(LibrarySummary::from_entry).collect();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            components::init_page_scrolling(cx);
+        });
+        let backend = Rc::new(backend);
+        let window = cx.add_window(|window, cx| {
+            let libraries = cx.new(|cx| crate::navigation::Libraries::new(backend, Rc::new(|_, _, _, _, _| {}), entries, None, cx));
+            let sidebar = cx.new(|cx| Sidebar::new(libraries, Rc::new(|_, _, _| {}), cx));
+            sidebar.update(cx, |sidebar, cx| sidebar.open_library_switcher(window, cx));
+            let changes = cx.observe(&sidebar, |_, _, cx| cx.notify());
+            SwitcherHarness { sidebar, _changes: changes }
+        });
+        let sidebar = window.read_with(cx, |view, _| view.sidebar.clone()).unwrap();
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        let first_selector = Box::leak(format!("library-switcher-menu-{first_id}").into_boxed_str());
+        let second_selector = Box::leak(format!("library-switcher-menu-{second_id}").into_boxed_str());
+        let first_position = visual.debug_bounds(first_selector).unwrap().center();
+        let second_position = visual.debug_bounds(second_selector).unwrap().center();
+        let open_menu = |cx: &VisualTestContext| sidebar.read_with(cx, |sidebar, _| sidebar.library_menu.as_ref().map(|(id, _, _)| *id));
+
+        visual.simulate_click(first_position, Modifiers::default());
+        assert_eq!(open_menu(&visual), Some(first_id));
+        visual.simulate_click(first_position, Modifiers::default());
+        assert_eq!(open_menu(&visual), None, "the same press must close the menu without reopening it on mouse-up");
+        visual.update(|window, cx| assert!(sidebar.read(cx).switcher_focus.is_focused(window)));
+
+        visual.simulate_click(first_position, Modifiers::default());
+        assert_eq!(open_menu(&visual), Some(first_id));
+        visual.simulate_click(second_position, Modifiers::default());
+        assert_eq!(open_menu(&visual), Some(second_id));
+        visual.simulate_click(second_position, Modifiers::default());
+        assert_eq!(open_menu(&visual), None);
     }
 }

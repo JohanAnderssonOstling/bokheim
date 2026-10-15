@@ -101,3 +101,39 @@ impl<T> CpuJobs<T> {
         self.active.take().into_iter().chain(self.pending.drain(..)).map(|(_, job)| job).collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_requests_coalesce_and_promote_the_latest_pending_input() {
+        let mut jobs = SyncJobs::new(4);
+        assert_eq!(jobs.request("a".into(), 1), Ok(true));
+        assert_eq!(jobs.request("a".into(), 2), Ok(false));
+        assert_eq!(jobs.request("a".into(), 3), Ok(false));
+        assert_eq!(jobs.request("b".into(), 4), Ok(true));
+        assert_eq!(jobs.request("a".into(), 5), Err(("Sync queue is full".into(), 5)));
+        assert_eq!(jobs.complete("a"), vec![1]);
+        assert_eq!(jobs.active_mut("a"), Some(&mut 3));
+        assert_eq!(jobs.count(), 3);
+        assert_eq!(jobs.complete("a"), vec![2, 3]);
+        assert_eq!(jobs.complete("b"), vec![4]);
+        assert_eq!(jobs.count(), 0);
+        assert_eq!(jobs.request("a".into(), 6), Ok(true));
+    }
+
+    #[test]
+    fn sync_failure_drains_active_and_queued_requests_and_is_terminal() {
+        let mut jobs = SyncJobs::new(3);
+        jobs.request("a".into(), 1).unwrap();
+        jobs.request("a".into(), 2).unwrap();
+        jobs.request("b".into(), 3).unwrap();
+        let mut failed = jobs.fail("host stopped".into());
+        failed.sort();
+        assert_eq!(failed, vec![1, 2, 3]);
+        assert_eq!(jobs.count(), 0);
+        assert!(jobs.complete("a").is_empty());
+        assert_eq!(jobs.request("a".into(), 4), Err(("host stopped".into(), 4)));
+    }
+}

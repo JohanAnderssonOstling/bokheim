@@ -1,11 +1,12 @@
 //! Storage-independent state synchronization orchestration.
 
+use library_replica::StatePublication;
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::Display;
 use std::future::Future;
 use std::pin::Pin;
-use library_replica::{StatePublication, coalesce_mutations_for_push, prepare_push};
-use sync_common::{LibraryId, ReplicaSeq, MutationIssue, PullStateResponse, PushMutationsResponse, ReplicaId, SyncCursor};
+use sync_common::{ContentHash, LibraryId, MutationIssue, OpaquePublication, PullStateResponse, PushBatcher, PushMutationsResponse, ReplicaId, ReplicaSeq, SyncCursor};
 
 pub type StoreError = Box<dyn Error + Send + Sync>;
 
@@ -15,14 +16,17 @@ pub type StoreFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, StoreError>>
 /// Persistence required by state synchronization. Implementations own their
 /// transaction semantics; the engine owns protocol and recovery policy.
 pub trait SyncStore {
+    type Outbox;
+    /// Prepare once. Pages are unique by state identity and globally ordered
+    /// with book lifecycles first; newer edits stay outside this scan.
+    fn prepare_outbox(&self) -> StoreFuture<'_, Self::Outbox>;
     fn cursor_recovery_pending(&self) -> StoreFuture<'_, bool>;
     fn begin_cursor_recovery(&self) -> StoreFuture<'_, ()>;
     fn complete_cursor_recovery(&self) -> StoreFuture<'_, usize>;
     fn pull_cursor(&self) -> StoreFuture<'_, SyncCursor>;
-    fn pending_mutations(&self) -> StoreFuture<'_, Vec<StatePublication>>;
+    fn pending_mutations<'a>(&'a self, scan: &'a mut Self::Outbox) -> StoreFuture<'a, Vec<StatePublication>>;
+    fn record_mutation_issues(&self, issues: &[MutationIssue]) -> StoreFuture<'_, ()>;
     fn acknowledge_mutations(&self, mutation_ids: &[ReplicaSeq]) -> StoreFuture<'_, ()>;
-    /// Atomically applies the mutations and advances the cursor.
-    fn apply_pull_page(&self, page: &PullStateResponse) -> StoreFuture<'_, ()>;
     /// Persists validated push acknowledgments and a pull page. Implementations
     /// may share a commit, but must retain acknowledgments if applying pull fails.
     fn apply_exchange_response(&self, ids: &[ReplicaSeq], page: &PullStateResponse) -> StoreFuture<'_, ()>;
@@ -68,6 +72,48 @@ pub struct SyncOutcome {
     pub mutation_issues: Vec<MutationIssue>,
 }
 
+struct Acknowledgements {
+    completed: Vec<ReplicaSeq>,
+    issues: Vec<MutationIssue>,
+}
+
+struct SubmittedBatch {
+    ids: Vec<ReplicaSeq>,
+    creations: Vec<(ReplicaSeq, ContentHash)>,
+}
+
+impl SubmittedBatch {
+    fn new(mutations: &[OpaquePublication]) -> Self {
+        Self {
+            ids: mutations.iter().map(|mutation| mutation.publisher_seq).collect(),
+            creations: mutations.iter().filter(|mutation| mutation.state.value.address.kind == "book_lifecycle").filter_map(|mutation| mutation.state.value.address.entity_key.book().map(|book| (mutation.publisher_seq, book))).collect(),
+        }
+    }
+
+    fn defer_rejected_fields<T>(&self, remaining: &mut Outgoing<T>, response: &PushMutationsResponse) {
+        if self.creations.is_empty() || response.rejected.is_empty() {
+            return;
+        }
+        let rejected: HashSet<_> = response.rejected.iter().map(|rejection| rejection.publisher_seq).collect();
+        let books = self.creations.iter().filter(|(id, _)| rejected.contains(id)).map(|(_, book)| *book).collect::<Vec<_>>();
+        remaining.deferred.extend(books.iter().copied());
+        remaining.batches.defer_book_fields(&books);
+    }
+}
+
+struct Outgoing<T> {
+    scan: Option<T>,
+    page: std::vec::IntoIter<StatePublication>,
+    batches: PushBatcher,
+    deferred: HashSet<ContentHash>,
+}
+
+impl<T> Outgoing<T> {
+    fn new(scan: Option<T>) -> Self {
+        Self { scan, page: Vec::new().into_iter(), batches: PushBatcher::default(), deferred: HashSet::new() }
+    }
+}
+
 pub struct SyncEngine<'a, S: SyncStore> {
     store: S,
     http_client: &'a reqwest::Client,
@@ -86,29 +132,24 @@ pub struct SyncEngineConfig<'a, S: SyncStore> {
 
 impl<'a, S: SyncStore> SyncEngine<'a, S> {
     pub fn new(config: SyncEngineConfig<'a, S>) -> Self {
-        Self {
-            store: config.store,
-            http_client: config.http_client,
-            library_id: config.library_id,
-            replica_id: config.replica_id,
-            credentials: config.credentials,
-        }
+        Self { store: config.store, http_client: config.http_client, library_id: config.library_id, replica_id: config.replica_id, credentials: config.credentials }
     }
 
     /// Publish only committed local mutations. Exchange replies may contain a
     /// pull page, but an inactive library must neither apply nor advance it.
     pub async fn drain_outbox(&self) -> Result<SyncOutcome, SyncError> {
-        let changes = coalesce_mutations_for_push(self.store.pending_mutations().await.map_err(SyncError::failed)?);
-        let mut remaining = prepare_push(changes).map_err(SyncError::failed)?;
-        let mut result = SyncOutcome { mutation_issues: remaining.untransmittable().iter().copied().map(MutationIssue::Untransmittable).collect() };
-        while !remaining.is_empty() {
-            let requested = remaining.next_batch();
-            let creations = requested.iter().filter(|m| m.state.value.address.kind == "book_lifecycle").map(|m| (m.publisher_seq, m.state.value.address.entity_key.clone())).collect::<Vec<_>>();
-            let ids = requested.iter().map(|mutation| mutation.publisher_seq).collect::<Vec<_>>();
+        let mut remaining = self.prepare_outbox().await?;
+        let mut result = SyncOutcome::default();
+        loop {
+            let requested = self.next_push_batch(&mut remaining, &mut result).await?;
+            if requested.is_empty() { break; }
+            let submitted = SubmittedBatch::new(&requested);
             let credentials = self.current_credentials()?;
             let response = sync_transport::exchange_changes(self.http_client, &credentials, self.library_id, self.replica_id, requested, SyncCursor::default()).await?;
-            result.mutation_issues.extend(self.apply_push_response_semantics(&ids, &response.push).await?);
-            defer_rejected_creation_fields(&mut remaining, &creations, &response.push);
+            let acknowledgements = self.prepare_acknowledgements(&submitted, &response.push).await?;
+            self.acknowledge_completed(&acknowledgements.completed).await?;
+            result.mutation_issues.extend(acknowledgements.issues);
+            submitted.defer_rejected_fields(&mut remaining, &response.push);
         }
         Ok(result)
     }
@@ -138,7 +179,7 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
 
     async fn resume_cursor_recovery(&self) -> Result<(), SyncError> {
         let mut result = SyncOutcome::default();
-        let mut remaining = prepare_push(Vec::new()).map_err(SyncError::failed)?;
+        let mut remaining = Outgoing::new(None);
         let credentials = self.current_credentials()?;
         self.exchange_until_idle(&credentials, SyncCursor::default(), &mut remaining, &mut result).await?;
         let inserted = self.store.complete_cursor_recovery().await.map_err(SyncError::failed)?;
@@ -149,10 +190,8 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
     pub async fn exchange_events_with_server(&self, starting_cursor: SyncCursor) -> Result<SyncOutcome, SyncError> {
         let mut trace = sync_transport::PerformanceTrace::new("sync_exchange", "load_and_batch_outbox");
         log::debug!(target: "sync_performance", "trace_id={} library_id={} initial_cursor={:?} from_zero={}", trace.id(), self.library_id, starting_cursor, starting_cursor == SyncCursor::default());
-        let changes = coalesce_mutations_for_push(self.store.pending_mutations().await.map_err(SyncError::failed)?);
-        let mut remaining = prepare_push(changes).map_err(SyncError::failed)?;
-        let untransmittable = remaining.untransmittable().to_vec();
-        let mut result = SyncOutcome { mutation_issues: untransmittable.iter().copied().map(MutationIssue::Untransmittable).collect() };
+        let mut remaining = self.prepare_outbox().await?;
+        let mut result = SyncOutcome::default();
         let credentials = self.current_credentials()?;
         trace.phase("pages");
         self.exchange_until_idle(&credentials, starting_cursor, &mut remaining, &mut result).await?;
@@ -160,46 +199,74 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
         Ok(result)
     }
 
-    async fn apply_push_response_semantics(&self, requested_ids: &[ReplicaSeq], response: &PushMutationsResponse) -> Result<Vec<MutationIssue>, SyncError> {
-        let validated = sync_transport::validate_push_response(requested_ids, response).map_err(SyncError::failed)?;
-        let completed = validated.completed_sequences();
-        if !completed.is_empty() {
-            self.store.acknowledge_mutations(&completed).await.map_err(SyncError::failed)?;
-        }
-        Ok(validated.issues)
+    async fn prepare_outbox(&self) -> Result<Outgoing<S::Outbox>, SyncError> {
+        Ok(Outgoing::new(Some(self.store.prepare_outbox().await.map_err(SyncError::failed)?)))
     }
 
-    async fn exchange_until_idle(&self, credentials: &sync_transport::SyncCredentials, mut cursor: SyncCursor, remaining: &mut sync_common::PushBatcher, result: &mut SyncOutcome) -> Result<(), SyncError> {
+    async fn next_push_batch(&self, remaining: &mut Outgoing<S::Outbox>, result: &mut SyncOutcome) -> Result<Vec<OpaquePublication>, SyncError> {
+        while !remaining.batches.has_batch() {
+            if let Some(publication) = remaining.page.next() {
+                if publication.state.value.book().is_some_and(|book| remaining.deferred.contains(&book)) {
+                    continue;
+                }
+                let opaque = sync_common::transport::representation(&publication).map_err(SyncError::failed)?;
+                remaining.batches.push(opaque).map_err(SyncError::failed)?;
+            } else {
+                let Some(scan) = remaining.scan.as_mut() else { break };
+                remaining.page = self.store.pending_mutations(scan).await.map_err(SyncError::failed)?.into_iter();
+                if remaining.page.len() == 0 {
+                    remaining.scan = None;
+                    break;
+                }
+            }
+        }
+        let issues: Vec<_> = remaining.batches.take_untransmittable().into_iter().map(MutationIssue::Untransmittable).collect();
+        self.record_issues(&issues).await?;
+        result.mutation_issues.extend(issues);
+        Ok(remaining.batches.next_batch())
+    }
+
+    async fn prepare_acknowledgements(&self, submitted: &SubmittedBatch, response: &PushMutationsResponse) -> Result<Acknowledgements, SyncError> {
+        let validated = sync_transport::validate_push_response(&submitted.ids, response).map_err(SyncError::failed)?;
+        self.record_issues(&validated.issues).await?;
+        Ok(Acknowledgements { completed: validated.completed_sequences(), issues: validated.issues })
+    }
+
+    async fn acknowledge_completed(&self, completed: &[ReplicaSeq]) -> Result<(), SyncError> {
+        if !completed.is_empty() {
+            self.store.acknowledge_mutations(completed).await.map_err(SyncError::failed)?;
+        }
+        Ok(())
+    }
+
+    async fn exchange_until_idle(&self, credentials: &sync_transport::SyncCredentials, mut cursor: SyncCursor, remaining: &mut Outgoing<S::Outbox>, result: &mut SyncOutcome) -> Result<(), SyncError> {
         let mut page_number = 0_u64;
+        let mut requested = self.next_push_batch(remaining, result).await?;
         loop {
             page_number += 1;
             let mut trace = sync_transport::PerformanceTrace::new("sync_page", "prepare_request");
-            let requested = remaining.next_batch();
-            let creations = requested.iter().filter(|m| m.state.value.address.kind == "book_lifecycle").map(|m| (m.publisher_seq, m.state.value.address.entity_key.clone())).collect::<Vec<_>>();
-            let requested_ids = requested.iter().map(|mutation| mutation.publisher_seq).collect::<Vec<_>>();
+            let submitted = SubmittedBatch::new(&requested);
             log::debug!(target: "sync_performance", "trace_id={} library_id={} page={page_number} push_count={} cursor={cursor:?}", trace.id(), self.library_id, requested.len());
             trace.phase("http_roundtrip");
             let response = sync_transport::exchange_changes(self.http_client, credentials, self.library_id, self.replica_id, requested, cursor).await?;
             trace.phase("validate_response");
-            log::debug!(target: "sync_performance", "trace_id={} accepted={} rejected={} pull_count={} has_more={}", trace.id(), requested_ids.len().saturating_sub(response.push.rejected.len()), response.push.rejected.len(), response.pull.mutations.len(), response.pull.has_more);
-            let validated = sync_transport::validate_push_response(&requested_ids, &response.push).map_err(SyncError::failed)?;
-            let completed = validated.completed_sequences();
-            result.mutation_issues.extend(validated.issues);
+            log::debug!(target: "sync_performance", "trace_id={} accepted={} rejected={} pull_count={} has_more={}", trace.id(), submitted.ids.len().saturating_sub(response.push.rejected.len()), response.push.rejected.len(), response.pull.mutations.len(), response.pull.has_more);
+            let acknowledgements = self.prepare_acknowledgements(&submitted, &response.push).await?;
+            result.mutation_issues.extend(acknowledgements.issues);
             let has_more = response.pull.has_more;
             if let Err(error) = sync_transport::validate_pull_batch(&response.pull, cursor) {
                 // Preserve the old failure policy: a malformed pull response
                 // must not discard independently valid push acknowledgments.
-                if !completed.is_empty() {
-                    self.store.acknowledge_mutations(&completed).await.map_err(SyncError::failed)?;
-                }
+                self.acknowledge_completed(&acknowledgements.completed).await?;
                 return Err(SyncError::failed(error));
             }
             cursor = response.pull.next_cursor;
             trace.phase("apply_local_transaction");
-            self.store.apply_exchange_response(&completed, &response.pull).await.map_err(SyncError::failed)?;
-            defer_rejected_creation_fields(remaining, &creations, &response.push);
+            self.store.apply_exchange_response(&acknowledgements.completed, &response.pull).await.map_err(SyncError::failed)?;
+            submitted.defer_rejected_fields(remaining, &response.push);
             trace.finish(true);
-            if remaining.is_empty() && !has_more {
+            requested = self.next_push_batch(remaining, result).await?;
+            if requested.is_empty() && !has_more {
                 return Ok(());
             }
         }
@@ -208,9 +275,15 @@ impl<'a, S: SyncStore> SyncEngine<'a, S> {
     fn current_credentials(&self) -> Result<sync_transport::SyncCredentials, SyncError> {
         self.credentials.clone().ok_or(SyncError::AuthenticationRequired)
     }
+
+    async fn record_issues(&self, issues: &[MutationIssue]) -> Result<(), SyncError> {
+        if !issues.is_empty() {
+            self.store.record_mutation_issues(issues).await.map_err(SyncError::failed)?;
+        }
+        Ok(())
+    }
 }
 
-fn defer_rejected_creation_fields(remaining: &mut sync_common::PushBatcher, creations: &[(ReplicaSeq, sync_common::StateKey)], response: &PushMutationsResponse) {
-    let books = creations.iter().filter(|(id, _)| response.rejected.iter().any(|rejection| rejection.publisher_seq == *id)).filter_map(|(_, key)| key.book()).collect::<Vec<_>>();
-    remaining.defer_book_fields(&books);
-}
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "engine_tests.rs"]
+mod tests;

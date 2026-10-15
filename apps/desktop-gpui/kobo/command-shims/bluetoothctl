@@ -1,0 +1,11 @@
+#!/bin/sh
+# Older reader binaries run these diagnostics synchronously before their UI.
+REAL_COMMAND=${BOKHEIM_KOBO_BLUETOOTHCTL_REAL:-}
+[ -n "$REAL_COMMAND" ] || exit 127
+case "$*" in
+    'devices Connected'|'info')
+        SHIM_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+        exec /bin/sh "$SHIM_DIR/../command-timeout.sh" 5 "$REAL_COMMAND" "$@"
+        ;;
+    *) exec "$REAL_COMMAND" "$@" ;;
+esac

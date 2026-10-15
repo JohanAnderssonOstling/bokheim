@@ -3,9 +3,9 @@
 use crate::invalidation::notify;
 use std::sync::Arc;
 
-use gpui::{Context, ScrollStrategy, Window};
-use gpui_component::tree::TreeItem;
+use gpui::{Context, Window};
 use html_view_core::RendererEvent;
+use html_view_core::cfi::source_position_cfi;
 
 use crate::epub::marks;
 use crate::epub::{LoadState, ReaderView, Selection};
@@ -13,24 +13,31 @@ use crate::invalidation::Component;
 use crate::settings::ReaderSettings;
 use crate::shell::persistence::StoredPosition;
 
-/// The CFI to persist, or `None` when the renderer re-reported the one
-/// already recorded.
-fn update_cfi_position(current: &mut Option<String>, next: &Option<String>) -> Option<String> {
-    if current == next {
-        return None;
-    }
-    current.clone_from(next);
-    current.clone()
-}
-
 impl ReaderView {
     pub(super) fn handle_renderer_event(&mut self, event: &RendererEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            RendererEvent::CfiChanged(cfi) => {
-                if let Some(cfi) = update_cfi_position(&mut self.current_cfi, cfi) {
-                    self.reading_positions.record(StoredPosition::epub(cfi, self.progress.fraction).within(self.toc.active_link()));
+            RendererEvent::ReadingPositionChanged(position) => {
+                if self.reading_position.as_ref() == Some(position) {
+                    return;
                 }
+                let document_changed = self.reading_position.as_ref().is_none_or(|previous| previous.source.document != position.source.document);
+                let toc_changed = self.toc.update_position(&position.source);
+                self.progress.update(position.fraction, position.document_fraction, position.location, position.total_locations, position.source.document, position.document_count);
+                self.reading_position = Some(position.clone());
+                if document_changed {
+                    self.refresh_chapter_search(cx);
+                }
+                if toc_changed {
+                    self.sync_toc_position(cx);
+                }
+                self.record_current_reading_position();
+                #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+                self.tts_navigation_changed(cx);
+                notify(cx, Component::ReaderShell, "reading_position_changed");
             }
+            // Compatibility signals remain available to other renderer hosts.
+            // This reader projects all position state from the settled snapshot.
+            RendererEvent::CfiChanged(_) | RendererEvent::NavAnchorChanged { .. } | RendererEvent::ReadingProgress { .. } => {}
             RendererEvent::TitleChanged(title) => {
                 let title = title.clone().unwrap_or_else(|| self.book_title.clone());
                 if self.title != title {
@@ -39,21 +46,6 @@ impl ReaderView {
                 }
             }
             RendererEvent::TocChanged(_) | RendererEvent::HistoryAvailability { .. } => {}
-            RendererEvent::NavAnchorChanged { doc, anchor } => {
-                let next = self.toc.link_at(*doc, anchor);
-                if self.toc.set_active_link(next.clone()) {
-                    self.toc_tree.update(cx, |tree, cx| {
-                        if let Some(link) = next.as_ref() {
-                            let selected = TreeItem::new(link.clone(), link.clone());
-                            tree.set_selected_item(Some(&selected), cx);
-                            tree.reveal_item(&selected.id, ScrollStrategy::Center, cx);
-                        } else {
-                            tree.set_selected_item(None, cx);
-                        }
-                    });
-                    notify(cx, Component::ReaderShell, "toc_position_changed");
-                }
-            }
             RendererEvent::SearchActiveChanged(active) => {
                 if self.search.query.is_some() != *active {
                     if *active {
@@ -79,15 +71,14 @@ impl ReaderView {
                     notify(cx, Component::ReaderShell, "scale_changed");
                 }
             }
-            RendererEvent::ReadingProgress { fraction, location, total_locations, doc, doc_count, .. } => {
-                // TODO(2026-08-19): wire this to the renderer's `doc_fraction`
-                // field once HtmlViewCore has been updated to emit it.
-                if self.progress.update(*fraction, 0.0, *location, *total_locations, *doc, *doc_count) {
-                    self.record_current_reading_position();
-                    notify(cx, Component::ReaderShell, "reading_progress_changed");
-                }
-            }
             RendererEvent::SelectionFinished { cfi_range, exact_text, .. } => {
+                // A released handle can queue several ranges. Ignore snapshots
+                // that were superseded or dismissed before they reach the shell.
+                if let LoadState::Ready(renderer) = &self.load_state {
+                    if renderer.read(cx).selected_passage().is_none_or(|(current, _)| current != *cfi_range) {
+                        return;
+                    }
+                }
                 if marks::set_selection(&mut self.selection, Selection { cfi_range: cfi_range.clone(), text: exact_text.clone() }) {
                     self.annotation_popup_anchor = Some(window.mouse_position());
                     notify(cx, Component::ReaderShell, "selection_finished");
@@ -128,19 +119,26 @@ impl ReaderView {
                     notify(cx, Component::ReaderShell, "search_match_changed");
                 }
             }
-            RendererEvent::SearchResults(_) => {}
+            RendererEvent::SearchResults(results) => {
+                self.search.results = results.clone();
+                self.search.rebuild_rows(&self.toc);
+                notify(cx, Component::ReaderShell, "search_results_changed");
+            }
             RendererEvent::OperationFailed { operation, message } => {
                 log::warn!("renderer failed to {operation}: {message}");
+                #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+                if *operation == html_view_core::RendererOperation::UpdateDocument {
+                    self.tts_document_failed(message, cx);
+                }
             }
             _ => {}
         }
     }
 
-    /// CFI and progress are emitted as separately deduplicated renderer
-    /// signals. Persist whenever either half changes.
-    fn record_current_reading_position(&self) {
-        if let Some(cfi) = self.current_cfi.clone() {
-            self.reading_positions.record(StoredPosition::epub(cfi, self.progress.fraction).within(self.toc.active_link()));
+    /// Save the source address, progress and resolved entry from one snapshot.
+    pub(super) fn record_current_reading_position(&self) {
+        if let Some(position) = &self.reading_position {
+            self.reading_positions.record(StoredPosition::epub(source_position_cfi(&position.source), position.fraction).within(self.toc.active_link()));
         }
     }
 }

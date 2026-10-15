@@ -71,10 +71,12 @@ pub struct Notification {
     message: Option<SharedString>,
     icon: Option<Icon>,
     autohide: bool,
+    close_button_always_visible: bool,
     action_builder: Option<Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>) -> Button>>,
     content_builder: Option<Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>) -> AnyElement>>,
     on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
     on_close: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    on_close_button_click: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     closing: bool,
 }
 
@@ -129,10 +131,12 @@ impl Notification {
             type_: None,
             icon: None,
             autohide: true,
+            close_button_always_visible: false,
             action_builder: None,
             content_builder: None,
             on_click: None,
             on_close: None,
+            on_close_button_click: None,
             closing: false,
         }
     }
@@ -216,6 +220,12 @@ impl Notification {
         self
     }
 
+    /// Show the close button without requiring hover, including on touch devices.
+    pub fn close_button_always_visible(mut self, visible: bool) -> Self {
+        self.close_button_always_visible = visible;
+        self
+    }
+
     /// Set the click callback of the notification.
     pub fn on_click(
         mut self,
@@ -231,6 +241,12 @@ impl Notification {
     /// (close button, middle-click, autohide, click handler, or programmatic close).
     pub fn on_close(mut self, on_close: impl Fn(&mut Window, &mut App) + 'static) -> Self {
         self.on_close = Some(Rc::new(on_close));
+        self
+    }
+
+    /// Invoked only when the user clicks the close button.
+    pub fn on_close_button_click(mut self, callback: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_close_button_click = Some(Rc::new(callback));
         self
     }
 
@@ -302,12 +318,16 @@ impl Render for Notification {
             .map(|builder| builder(self, window, cx).small().mr_3p5());
 
         let closing = self.closing;
+        let close_button_always_visible = self.close_button_always_visible;
         let icon = match self.type_ {
             None => self.icon.clone(),
             Some(type_) => Some(type_.icon(cx)),
         };
         let has_icon = icon.is_some();
         let placement = cx.theme().notification.placement;
+        let margins = &cx.theme().notification.margins;
+        let available_width =
+            (window.viewport_size().width - margins.left - margins.right).max(px(0.));
 
         h_flex()
             .id("notification")
@@ -324,13 +344,19 @@ impl Render for Notification {
             .px_4()
             .gap_3()
             .refine_style(&self.style)
+            // Right-anchored desktop toasts otherwise extend past the left
+            // edge on narrow windows. Keep both edge margins when shrinking.
+            .max_w(available_width)
             .when_some(icon, |this, icon| {
                 this.child(div().absolute().top(px(18.)).left_4().child(icon))
             })
             .child(
                 v_flex()
                     .flex_1()
+                    .min_w_0()
+                    .whitespace_normal()
                     .overflow_hidden()
+                    .when(close_button_always_visible, |this| this.pr_6())
                     .when(has_icon, |this| this.pl_6())
                     .when_some(self.title.clone(), |this, title| {
                         this.child(div().text_sm().font_semibold().child(title))
@@ -346,15 +372,19 @@ impl Render for Notification {
                     .absolute()
                     .top_1()
                     .right_1()
-                    .invisible()
-                    .group_hover("", |this| this.visible())
+                    .when(!close_button_always_visible, |this| {
+                        this.invisible().group_hover("", |this| this.visible())
+                    })
                     .child(
                         Button::new("close")
                             .icon(IconName::Close)
                             .ghost()
                             .xsmall()
+                            .when(close_button_always_visible, |this| this.small())
+                            .debug_selector(|| "notification-close".into())
                             .on_click(cx.listener(|this, _, window, cx| {
                                 cx.stop_propagation();
+                                if let Some(callback) = &this.on_close_button_click { callback(window, cx); }
                                 this.dismiss(window, cx);
                             })),
                     ),
@@ -541,6 +571,19 @@ impl NotificationList {
 
     pub fn clear(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.notifications.clear();
+        cx.notify();
+    }
+
+    /// Immediately discard notifications owned by the given type, leaving other
+    /// notifications and their subscriptions intact.
+    pub fn clear_by_type<T: 'static>(&mut self, cx: &mut Context<Self>) {
+        let type_id = TypeId::of::<T>();
+        self.notifications.retain(|note| match &note.read(cx).id {
+            NotificationId::Id(t) | NotificationId::IdAndElementId(t, _) => *t != type_id,
+        });
+        self._subscriptions.retain(|id, _| match id {
+            NotificationId::Id(t) | NotificationId::IdAndElementId(t, _) => *t != type_id,
+        });
         cx.notify();
     }
 

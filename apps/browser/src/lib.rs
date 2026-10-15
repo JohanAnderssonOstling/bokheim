@@ -9,6 +9,7 @@ mod model;
 mod navigation;
 mod root;
 mod services;
+mod session;
 mod stores;
 mod universal;
 
@@ -73,19 +74,29 @@ fn directory_import(selected: gpui::SelectedDirectory) -> DirectoryImport {
 }
 
 pub use navigation::{GlobalRoute, LibraryRoute, Route};
-pub use root::{BookDetailDismissed, BrowserRoot, OpenBookRequested};
+pub use root::{BrowserRoot, NowPlaying, NowPlayingBook, OpenBookRequested};
 #[cfg(feature = "kobo")]
 pub use services::SaveKoboAutoRotate;
 pub use services::{AppServices, AppStartup, UpdateAction, UpdateActionHandler, UpdateControls, UpdateView};
 pub use services::{LibraryRemovalHook, LibraryRemovalPreparation, LibraryRemovalService, library_is_being_removed};
+pub use session::{BrowsePageSession, NavigationSession, ReaderSession, SaveNavigationSession, WindowSession};
 #[cfg(target_arch = "wasm32")]
 pub use universal::sync::SyncEvent;
+/// Switches the selected library to one of its browse views, from the menu in
+/// the phone's view heading.
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(no_json)]
+pub(crate) struct OpenLibraryView(pub(crate) LibraryRoute);
+
 pub use universal::sync::SyncState;
 
-actions!(
-    bokheim_browser,
-    [DismissSettings, OpenTrash, ShowSettings, DecreaseUiFontSize, IncreaseUiFontSize, PreviousDestination, NextDestination, OpenLibrarySwitcher, FocusNextSetting, FocusPreviousSetting, UndoLibraryAction]
-);
+/// Release retained library cover images before displaying a reader. Cached
+/// pages preserve navigation and reload their artwork when rendered again.
+pub fn evict_covers(cx: &mut App) {
+    library::evict_covers(cx);
+}
+
+actions!(bokheim_browser, [DismissSettings, OpenTrash, ShowSettings, DecreaseUiFontSize, IncreaseUiFontSize, PreviousDestination, NextDestination, OpenLibrarySwitcher, FocusNextSetting, FocusPreviousSetting, UndoLibraryAction]);
 
 #[derive(Clone, Debug, PartialEq, gpui::Action)]
 #[action(no_json)]
@@ -97,7 +108,8 @@ pub fn bind_keys(cx: &mut App) {
     // Number shortcuts follow the order drawn by the navigation rail.
     cx.bind_keys([
         KeyBinding::new("escape", DismissSettings, Some("Browser")),
-        #[cfg(feature = "mobile")]
+        // Only platforms with an OS back button/gesture send this key.
+        #[cfg(not(target_os = "android"))]
         KeyBinding::new("back", DismissSettings, Some("Browser")),
         KeyBinding::new("ctrl--", DecreaseUiFontSize, Some("Browser")),
         KeyBinding::new("ctrl-=", IncreaseUiFontSize, Some("Browser")),
@@ -141,6 +153,14 @@ mod tests {
     }
 }
 
-
 #[cfg(target_os = "android")]
 pub mod android_authentication;
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::Mutex;
+
+    // Native backends configure one process-wide transfer-policy file. Keep
+    // their temporary directories alive throughout each backend fixture.
+    pub(crate) static BACKEND: Mutex<()> = Mutex::new(());
+}

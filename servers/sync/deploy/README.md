@@ -28,7 +28,7 @@ credentials and the installed schema before stopping services.
 
 The script builds `sync-server`, transfers its release artifact and systemd
 unit over SSH, and invokes the fixed root-owned sync activation helper. It
-runs a schema check and never recreates the PostgreSQL database. Provision a
+runs a transactional schema upgrade and check and never recreates the PostgreSQL database. Provision a
 fresh database with `sync-server migrate` before the first release. Catalogue
 and metadata services are deployed independently. The
 script defaults to `192.168.1.68`;
@@ -309,19 +309,48 @@ The installer retains the previous `/etc/caddy/Caddyfile` as a timestamped
 backup and restores it automatically if the reload or metadata health check
 fails. It reloads only Caddy and does not restart the Bokheim services.
 
-## No backups: the database is disposable
+## Database recovery and synchronization history
 
-This is a development deployment target, not a production one. `install-server.sh`
-drops and recreates the `bokheim` database on every deploy, so there is no
-schema upgrade history and nothing to back up -- redeploying is the recovery
-procedure. Do not point this at a deployment expected to hold data that must
-survive a redeploy without a design change to persist it first.
+The sync activation helper preserves PostgreSQL state. Normal restarts,
+deployments, and repeated schema upgrades also preserve the `sync_history`
+generation UUID. Do not rotate it during an ordinary release.
+
+After restoring a PostgreSQL backup or replacing database history:
+
+1. Stop `bokheim-sync.service` and any other synchronization-server process
+   that uses the same database. Keep traffic stopped throughout restoration.
+2. Restore the database. If the backup has an older schema, run the installed
+   `sync-server upgrade` with its database credentials before continuing.
+3. Explicitly rotate the history generation using the installed database
+   credential, then restart synchronization:
+
+```sh
+sudo systemd-run --wait --pipe --collect --service-type=exec --uid=bokheim \
+  --setenv=RUST_LOG=info \
+  --property=LoadCredential=database_url:/etc/bokheim/database-url \
+  /usr/local/bin/sync-server rotate-sync-generation
+sudo systemctl start bokheim-sync.service
+```
+
+Only restart the service if the rotation command succeeds. It updates one
+singleton UUID without changing state values, authored versions, or sequence
+numbers. New databases receive a fresh UUID during `migrate`; a database
+recreated from scratch therefore already has a new history.
+
+Rotation is required after every backup restore: the backup contains the old
+UUID, and its numeric head can later pass a client's checkpoint without
+restoring the missing cells. Clients with the old generation receive HTTP 410
+and reconcile from zero. They retain local state and queued edits, then
+republish canonical cells with their original authored versions. Client-retained
+state can repair missing server state; data absent from both the backup and
+all clients cannot be recovered by this protocol.
 
 ### Existing production baseline
 
 `sync-server upgrade` transactionally adopts the deployed v14 baseline with
 cloud-storage support. It retains user/library/blob/sync data, updates the two
 LWW triggers to permit revision-only repair, and records schema version 1.
-The old migration history is retained. Repeated upgrades are no-ops; older
+Subsequent migrations bring this baseline to schema 11, including the persisted
+sync history UUID. The old migration history is retained. Repeated upgrades are no-ops; older
 unsupported baselines fail without partial changes. Server startup still only
 verifies the schema. Never run `migrate` against an existing production database.

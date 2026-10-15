@@ -1,0 +1,765 @@
+{
+  "description": "Move Erotica directly under adult Genres, retaining all its descendants; merge the remaining Relationships subtrees and their classification selectors into the Relationships leaf.",
+  "target_concept_id": 55024,
+  "target_label": "Relationships",
+  "parent_concept_id": 5583,
+  "promoted_concept_id": 3972,
+  "retained_erotica_concept_ids": [
+    3972,
+    3973,
+    3974,
+    3975,
+    3976,
+    3977,
+    3978,
+    3979,
+    3980,
+    3981
+  ],
+  "merged_concepts": [
+    {
+      "concept_id": 3983,
+      "label": "Family Life Fiction"
+    },
+    {
+      "concept_id": 3984,
+      "label": "Marriage & Divorce"
+    },
+    {
+      "concept_id": 3985,
+      "label": "Siblings"
+    },
+    {
+      "concept_id": 4002,
+      "label": "Friendship Fiction"
+    },
+    {
+      "concept_id": 4058,
+      "label": "Romance"
+    },
+    {
+      "concept_id": 4059,
+      "label": "Action & Adventure Romance"
+    },
+    {
+      "concept_id": 4060,
+      "label": "African American & Black"
+    },
+    {
+      "concept_id": 4061,
+      "label": "Billionaire Romance"
+    },
+    {
+      "concept_id": 4062,
+      "label": "Clean & Wholesome"
+    },
+    {
+      "concept_id": 4063,
+      "label": "Collections & Anthologies"
+    },
+    {
+      "concept_id": 4064,
+      "label": "Contemporary Romance"
+    },
+    {
+      "concept_id": 4065,
+      "label": "Erotic"
+    },
+    {
+      "concept_id": 4066,
+      "label": "Fantasy"
+    },
+    {
+      "concept_id": 4067,
+      "label": "Firefighter Romance"
+    },
+    {
+      "concept_id": 4068,
+      "label": "Historical Romance"
+    },
+    {
+      "concept_id": 4069,
+      "label": "20th Century"
+    },
+    {
+      "concept_id": 4070,
+      "label": "American Historical Romance"
+    },
+    {
+      "concept_id": 4071,
+      "label": "Ancient World"
+    },
+    {
+      "concept_id": 4072,
+      "label": "Gilded Age"
+    },
+    {
+      "concept_id": 4073,
+      "label": "Medieval Romance"
+    },
+    {
+      "concept_id": 4074,
+      "label": "Regency"
+    },
+    {
+      "concept_id": 4075,
+      "label": "Renaissance Romance"
+    },
+    {
+      "concept_id": 4076,
+      "label": "Scottish"
+    },
+    {
+      "concept_id": 4077,
+      "label": "Tudor"
+    },
+    {
+      "concept_id": 4078,
+      "label": "Victorian"
+    },
+    {
+      "concept_id": 4079,
+      "label": "Viking"
+    },
+    {
+      "concept_id": 4080,
+      "label": "Holiday"
+    },
+    {
+      "concept_id": 4081,
+      "label": "LGBTQ+"
+    },
+    {
+      "concept_id": 4082,
+      "label": "Bisexual"
+    },
+    {
+      "concept_id": 4083,
+      "label": "Gay"
+    },
+    {
+      "concept_id": 4084,
+      "label": "Lesbian"
+    },
+    {
+      "concept_id": 4085,
+      "label": "Transgender"
+    },
+    {
+      "concept_id": 4086,
+      "label": "Later in Life"
+    },
+    {
+      "concept_id": 4087,
+      "label": "Medical Romance"
+    },
+    {
+      "concept_id": 4088,
+      "label": "Military Romance"
+    },
+    {
+      "concept_id": 4089,
+      "label": "Multicultural & Interracial"
+    },
+    {
+      "concept_id": 4090,
+      "label": "New Adult"
+    },
+    {
+      "concept_id": 4091,
+      "label": "Paranormal"
+    },
+    {
+      "concept_id": 4092,
+      "label": "Shifters"
+    },
+    {
+      "concept_id": 4093,
+      "label": "Vampires"
+    },
+    {
+      "concept_id": 4094,
+      "label": "Witches"
+    },
+    {
+      "concept_id": 4095,
+      "label": "Law Enforcement Romance"
+    },
+    {
+      "concept_id": 4096,
+      "label": "Polyamory"
+    },
+    {
+      "concept_id": 4097,
+      "label": "Rock Star Romance"
+    },
+    {
+      "concept_id": 4098,
+      "label": "Romantic Comedy"
+    },
+    {
+      "concept_id": 4099,
+      "label": "Royal Romance"
+    },
+    {
+      "concept_id": 4100,
+      "label": "Science Fiction"
+    },
+    {
+      "concept_id": 4101,
+      "label": "Sports Romance"
+    },
+    {
+      "concept_id": 4102,
+      "label": "Romantic Suspense"
+    },
+    {
+      "concept_id": 4103,
+      "label": "Time Travel"
+    },
+    {
+      "concept_id": 4104,
+      "label": "Western Romance"
+    },
+    {
+      "concept_id": 4105,
+      "label": "Workplace Romance"
+    },
+    {
+      "concept_id": 5863,
+      "label": "Contemporary Life & Lifestyles"
+    },
+    {
+      "concept_id": 5866,
+      "label": "Identity & Relationship Forms"
+    },
+    {
+      "concept_id": 5868,
+      "label": "Tone, Occasion & Collections"
+    }
+  ],
+  "historical_path_aliases": [
+    {
+      "path": "Literature / Genres / Relationships / Erotica",
+      "concept_id": 3972
+    },
+    {
+      "path": "Literature / Genres / Relationships / Erotica / BDSM",
+      "concept_id": 3973
+    },
+    {
+      "path": "Literature / Genres / Relationships / Erotica / Collections & Anthologies",
+      "concept_id": 3974
+    },
+    {
+      "path": "Literature / Genres / Relationships / Erotica / Historical Erotica",
+      "concept_id": 3975
+    },
+    {
+      "path": "Literature / Genres / Relationships / Erotica / LGBTQ+",
+      "concept_id": 3976
+    },
+    {
+      "path": "Literature / Genres / Relationships / Erotica / LGBTQ+ / Bisexual",
+      "concept_id": 3977
+    },
+    {
+      "path": "Literature / Genres / Relationships / Erotica / LGBTQ+ / Gay",
+      "concept_id": 3978
+    },
+    {
+      "path": "Literature / Genres / Relationships / Erotica / LGBTQ+ / Lesbian",
+      "concept_id": 3979
+    },
+    {
+      "path": "Literature / Genres / Relationships / Erotica / LGBTQ+ / Transgender",
+      "concept_id": 3980
+    },
+    {
+      "path": "Literature / Genres / Relationships / Erotica / Science Fiction, Fantasy & Horror",
+      "concept_id": 3981
+    },
+    {
+      "path": "Literature / Genres / Relationships / Family Life Fiction",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Family Life Fiction / Marriage & Divorce",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Family Life Fiction / Siblings",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Friendship Fiction",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Action & Adventure Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Billionaire Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Fantasy",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Firefighter Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / 20th Century",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / American Historical Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / Ancient World",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / Gilded Age",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / Medieval Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / Regency",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / Renaissance Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / Scottish",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / Tudor",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / Victorian",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Historical Romance / Viking",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Medical Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Military Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Paranormal",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Paranormal / Shifters",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Paranormal / Vampires",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Paranormal / Witches",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Law Enforcement Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Rock Star Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Royal Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Science Fiction",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Sports Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Romantic Suspense",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Time Travel",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Western Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Workplace Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Contemporary Life & Lifestyles",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Contemporary Life & Lifestyles / Contemporary Romance",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Contemporary Life & Lifestyles / Later in Life",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Contemporary Life & Lifestyles / New Adult",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Identity & Relationship Forms",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Identity & Relationship Forms / African American & Black",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Identity & Relationship Forms / LGBTQ+",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Identity & Relationship Forms / LGBTQ+ / Bisexual",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Identity & Relationship Forms / LGBTQ+ / Gay",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Identity & Relationship Forms / LGBTQ+ / Lesbian",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Identity & Relationship Forms / LGBTQ+ / Transgender",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Identity & Relationship Forms / Multicultural & Interracial",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Identity & Relationship Forms / Polyamory",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Tone, Occasion & Collections",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Tone, Occasion & Collections / Clean & Wholesome",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Tone, Occasion & Collections / Collections & Anthologies",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Tone, Occasion & Collections / Erotic",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Tone, Occasion & Collections / Holiday",
+      "concept_id": 55024
+    },
+    {
+      "path": "Literature / Genres / Relationships / Romance / Tone, Occasion & Collections / Romantic Comedy",
+      "concept_id": 55024
+    }
+  ],
+  "bisac_remapping": [
+    {
+      "code": "FIC027000",
+      "previous_concept_id": 4058,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027010",
+      "previous_concept_id": 4065,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027020",
+      "previous_concept_id": 4064,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027030",
+      "previous_concept_id": 4066,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027050",
+      "previous_concept_id": 4068,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027070",
+      "previous_concept_id": 4074,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027080",
+      "previous_concept_id": 4063,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027090",
+      "previous_concept_id": 4103,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027100",
+      "previous_concept_id": 4104,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027110",
+      "previous_concept_id": 4102,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027120",
+      "previous_concept_id": 4091,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027130",
+      "previous_concept_id": 4100,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027140",
+      "previous_concept_id": 4071,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027150",
+      "previous_concept_id": 4073,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027160",
+      "previous_concept_id": 4076,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027170",
+      "previous_concept_id": 4078,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027180",
+      "previous_concept_id": 4079,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027190",
+      "previous_concept_id": 4083,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027200",
+      "previous_concept_id": 4069,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027210",
+      "previous_concept_id": 4084,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027220",
+      "previous_concept_id": 4088,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027230",
+      "previous_concept_id": 4089,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027240",
+      "previous_concept_id": 4090,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027250",
+      "previous_concept_id": 4098,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027260",
+      "previous_concept_id": 4059,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027270",
+      "previous_concept_id": 4062,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027280",
+      "previous_concept_id": 4077,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027290",
+      "previous_concept_id": 4080,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027300",
+      "previous_concept_id": 4081,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027310",
+      "previous_concept_id": 4092,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027320",
+      "previous_concept_id": 4093,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027330",
+      "previous_concept_id": 4101,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027340",
+      "previous_concept_id": 4061,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027350",
+      "previous_concept_id": 4067,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027360",
+      "previous_concept_id": 4070,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027370",
+      "previous_concept_id": 4075,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027380",
+      "previous_concept_id": 4086,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027390",
+      "previous_concept_id": 4082,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027400",
+      "previous_concept_id": 4085,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027410",
+      "previous_concept_id": 4087,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027420",
+      "previous_concept_id": 4095,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027430",
+      "previous_concept_id": 4105,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027440",
+      "previous_concept_id": 4094,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027450",
+      "previous_concept_id": 4099,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027460",
+      "previous_concept_id": 4072,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027470",
+      "previous_concept_id": 4096,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC027480",
+      "previous_concept_id": 4097,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC045000",
+      "previous_concept_id": 3983,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC045010",
+      "previous_concept_id": 3984,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC045020",
+      "previous_concept_id": 3985,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC049060",
+      "previous_concept_id": 4060,
+      "concept_id": 55024
+    },
+    {
+      "code": "FIC071000",
+      "previous_concept_id": 4002,
+      "concept_id": 55024
+    }
+  ]
+}

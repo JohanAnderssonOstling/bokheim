@@ -1,0 +1,150 @@
+{
+  "scope": "LCC only; current curated catalog P-class codes; active 2025 PQ/PR/PS/PT reference endpoints and numeric midpoints; 228 reviewed mixed-language literary scopes; all Literature subtree rules",
+  "limitations": [
+    "A missing match is not proof a catalog classification is bibliographically correct.",
+    "Reference probes do not enumerate every possible Cutter or validate interpolated midpoint allocations.",
+    "Broad literary matches are listed separately and are not automatically missing coverage.",
+    "Mixed language/literature subclasses are audited via the reviewed scopes, stored literary rules and catalog evidence, not every reference entry.",
+    "Entry impact is based on individual LCC matching; other classification systems or other LCC codes may still assign the book."
+  ],
+  "input_paths": {
+    "taxonomy": "/home/johan/Hem/Programmering/RustroverProjects/Html-Prototype/shared/subject-projection/data/unified-taxonomy-v2.sqlite3",
+    "catalog": "/home/johan/.local/share/bokheim/catalog/curation.sqlite3",
+    "installed": "/home/johan/.local/share/bokheim/catalog.sqlite3",
+    "reference": "/home/johan/Hem/Programmering/RustroverProjects/Html-Prototype/shared/subject-projection/data/lcc-mdsconnect-2016.sqlite3"
+  },
+  "input_sha256": {
+    "taxonomy": "9c7be13173e92d65ac2db454799386ed4e94b1cbef654653a9720b978c449218",
+    "catalog": "07d59b029d612e88a6460883c0010e6454fe89a02d39af4fad067431861dca2e",
+    "installed": "15a6e0564743d2c6e9ef094c72b71ec90b1e83b0879aaeb21ef40ebd276f9c00",
+    "reference": "857476434bd99f47b8bd4811e67c09615ac8cae6912bfd8b8775bb6419e36187"
+  },
+  "matcher_revision": "taxonomy revision: 1:11910429-f14c-5bb5-92ed-d0606ce58057",
+  "installed_release": 247,
+  "literature_concepts": 1502,
+  "unique_probes": 71528,
+  "catalog_entries_with_p_lcc": 3074,
+  "catalog_unique_p_codes": 12631,
+  "catalog_code_status": {
+    "outside_literature": 831,
+    "literature": 7564,
+    "unmatched": 2075,
+    "broad_literature": 2161
+  },
+  "core_catalog_code_status": {
+    "literature": 6042,
+    "broad_literature": 605,
+    "unmatched": 1976
+  },
+  "catalog_entries_with_core_literature_problem": 541,
+  "catalog_entries_only_language_with_core_problem": 50,
+  "catalog_entries_with_core_problem_without_other_literary_lcc_match": 120,
+  "core_catalog_gap_number_evidence": {
+    "2025_reference_number": 1902,
+    "catalog_number_requires_review": 57,
+    "above_documented_umbrella_review_metadata": 17
+  },
+  "core_catalog_gaps_by_subclass": {
+    "PQ": {
+      "codes": 581,
+      "entries": 17
+    },
+    "PR": {
+      "codes": 1348,
+      "entries": 502
+    },
+    "PS": {
+      "codes": 47,
+      "entries": 31
+    }
+  },
+  "reference_entries": 50620,
+  "reference_unique_probes": 56559,
+  "reference_probe_status": {
+    "unmatched": 5616,
+    "literature": 48323,
+    "broad_literature": 2616,
+    "outside_literature": 4
+  },
+  "reference_entries_with_gaps": 5233,
+  "reference_gap_probes_by_subclass": {
+    "PQ": 2591,
+    "PR": 3025,
+    "PS": 4
+  },
+  "reviewed_scopes": 228,
+  "reviewed_scope_gap_probes": 8,
+  "stored_rule_gap_probes": 90,
+  "atomic_spans": 88,
+  "findings": [
+    {
+      "issue": "Missing English author coverage",
+      "scope": "PR6001-PR6049",
+      "catalog_entries": 450,
+      "catalog_distinct_codes": 1287,
+      "reference_context": "1900-1960",
+      "priority": 1
+    },
+    {
+      "issue": "Later English author coverage",
+      "scopes": [
+        "PR6051-PR6076",
+        "PR6101-PR6126"
+      ],
+      "priority": 2
+    },
+    {
+      "issue": "Romance literature gaps",
+      "areas": [
+        "Spanish authors and collections",
+        "Portuguese authors and collections",
+        "French collections PQ1100-PQ1297"
+      ],
+      "priority": 2
+    },
+    {
+      "issue": "Canadian literary codes lack numeric fallback",
+      "stored_atomic_selector": "PS8001-PS8599",
+      "priority": 2
+    },
+    {
+      "issue": "Reviewed mixed-language scope still unresolved",
+      "scope": "PL3512-PL3512.9",
+      "label": "Malaysian literature",
+      "priority": 3
+    },
+    {
+      "issue": "Routing review rather than missing match",
+      "codes": [
+        "PS126",
+        "PS128",
+        "PS129",
+        "PS138"
+      ],
+      "current_root": "Biography",
+      "priority": 3
+    },
+    {
+      "issue": "Printed span selectors do not provide interval coverage",
+      "selectors": 88,
+      "examples": [
+        "PR1-PR9680",
+        "PQ6001-PQ8929",
+        "PQ9000-PQ9999",
+        "PQ1-PQ3999",
+        "PS8001-PS8599"
+      ]
+    },
+    {
+      "issue": "Metadata review required",
+      "example": "PR35602014",
+      "reason": "Apparent class number and publication year joined together; do not add a taxonomy rule for this value."
+    }
+  ],
+  "recommended_next_steps": [
+    "Materialize documented literature intervals into structured lcc_range rows, retaining narrower author and subject rules.",
+    "Prioritize PR6001-PR6049, then later English author periods and the uncovered Romance and Canadian literature intervals.",
+    "Review unrecognized or oversized catalog numbers separately before accepting them as legitimate classification evidence.",
+    "Reproject the catalog after reviewed changes and compare affected entries, including other direct assignments."
+  ]
+}

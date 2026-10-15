@@ -3,16 +3,16 @@
 //! The session supplies an immutable database snapshot. Inspection retries
 //! unstable files locally; the session owns scan scheduling and commits.
 
-use std::sync::Arc;
-use crate::ingestion::ingest_file;
-use futures_util::StreamExt;
 use crate::ingestion::fingerprint as book_fingerprint;
+use crate::ingestion::{ingest_audiobook_folder, ingest_file};
+use futures_util::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use book_model::BookFormat;
 use library_database::{FilesystemScan, InspectedFilesystemScan, ScanDirectoryObservation, ScanFileObservation, ScanSnapshot, ScannedBook};
-use sync_common::{ContentHash, DirId, ROOT_DIR_ID};
+use sync_common::{DirId, ROOT_DIR_ID};
 
 pub const PUBLISH_BATCH_SIZE: usize = 32;
 const MAX_CONCURRENT_INSPECTIONS: usize = 8;
@@ -28,14 +28,14 @@ fn supported(path: &Path) -> bool {
     path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| BookFormat::from_extension(&extension.to_ascii_lowercase()).is_some())
 }
 
-fn other_book_in_audiobook_candidate(folder: &Path, root: &Path, snapshot: &ScanSnapshot) -> std::io::Result<bool> {
+fn other_book_in_audiobook_candidate(folder: &Path, root: &Path, excluded: impl Fn(&Path) -> bool) -> std::io::Result<bool> {
     let mut children = Vec::new();
     for entry in std::fs::read_dir(folder)? {
         let entry = entry?;
         if entry.file_name().to_string_lossy().starts_with('.') {
             continue;
         }
-        if entry.path().strip_prefix(root).is_ok_and(|path| excluded(snapshot, path)) {
+        if entry.path().strip_prefix(root).is_ok_and(&excluded) {
             continue;
         }
         if entry.file_type()?.is_file() && supported(&entry.path()) {
@@ -52,7 +52,7 @@ fn other_book_in_audiobook_candidate(folder: &Path, root: &Path, snapshot: &Scan
             if entry.file_name().to_string_lossy().starts_with('.') {
                 continue;
             }
-            if entry.path().strip_prefix(root).is_ok_and(|path| excluded(snapshot, path)) {
+            if entry.path().strip_prefix(root).is_ok_and(&excluded) {
                 continue;
             }
             let kind = entry.file_type()?;
@@ -92,12 +92,14 @@ fn folder_fingerprint(folder: &Path, tracks: &[audiobook_archive::Track]) -> std
     library_files::filesystem::audiobook_fingerprint(folder, tracks)
 }
 
-
-fn require_folder_unchanged(path: &Path, fingerprint: u64) -> std::io::Result<()> {
-    if (|path: &Path| -> std::io::Result<u64> { folder_fingerprint(path, &audiobook_folder::discover(path)?) })(path)? != fingerprint {
-        return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "audiobook folder changed during inspection"));
+/// Whether a dropped directory is one audiobook rather than a collection
+/// containing other books. Use the same boundaries as filesystem discovery.
+pub fn is_audiobook_folder(folder: &Path) -> std::io::Result<bool> {
+    let tracks = audiobook_folder::discover(folder);
+    if tracks.as_ref().is_ok_and(|tracks| tracks.is_empty()) || other_book_in_audiobook_candidate(folder, folder, |_| false)? {
+        return Ok(false);
     }
-    Ok(())
+    Ok(!tracks?.is_empty())
 }
 
 /// Walk `root` and return directory/file observations. Marker creation is
@@ -160,11 +162,11 @@ pub fn discover(root: impl Into<PathBuf>, snapshot: &ScanSnapshot) -> Filesystem
                 continue;
             }
             match audiobook_folder::discover(entry.path()) {
-                Ok(tracks) if !tracks.is_empty() && excluded_audiobook_member(relative, &snapshot.excluded_paths) && !other_book_in_audiobook_candidate(entry.path(), &root, snapshot).unwrap_or(true) => {
+                Ok(tracks) if !tracks.is_empty() && excluded_audiobook_member(relative, &snapshot.excluded_paths) && !other_book_in_audiobook_candidate(entry.path(), &root, |path| excluded(snapshot, path)).unwrap_or(true) => {
                     walk.skip_current_dir();
                     continue;
                 }
-                Ok(tracks) if !tracks.is_empty() && !other_book_in_audiobook_candidate(entry.path(), &root, snapshot).unwrap_or(true) => {
+                Ok(tracks) if !tracks.is_empty() && !other_book_in_audiobook_candidate(entry.path(), &root, |path| excluded(snapshot, path)).unwrap_or(true) => {
                     match (relative.to_str(), folder_fingerprint(entry.path(), &tracks)) {
                         (Some(path), Ok(fingerprint)) => result.files.push(ScanFileObservation { directory: parent_id, name, path: path.to_owned(), fingerprint }),
                         _ => result.readable = false,
@@ -255,7 +257,8 @@ pub async fn inspect(root: impl Into<PathBuf>, scan: &FilesystemScan, snapshot: 
     let known = snapshot.books.iter().map(|book| ((book.directory, book.name.as_str()), book)).collect::<HashMap<_, _>>();
     let candidates = scan.files.iter().filter(|file| {
         // Keep all observations for mark-seen, but only read and parse books
-        // whose placement is new or whose bytes may have changed. Legacy
+        // whose placement is new or whose bytes may have changed. Verified
+        // audiobooks can reuse complete synced playback facts; other legacy
         // records without an inspection must still be populated once.
         let format = if root.join(&file.path).is_dir() {
             Some(BookFormat::Mp3Folder)
@@ -263,7 +266,9 @@ pub async fn inspect(root: impl Into<PathBuf>, scan: &FilesystemScan, snapshot: 
             Path::new(&file.name).extension().and_then(|extension| extension.to_str()).and_then(|extension| BookFormat::from_extension(&extension.to_ascii_lowercase()))
         };
         let version = format.map(book_inspection::inspection_version);
-        !known.get(&(file.directory, file.name.as_str())).is_some_and(|book| book.fingerprint == file.fingerprint && version.is_some() && book.inspection_version == version)
+        !known.get(&(file.directory, file.name.as_str())).is_some_and(|book| {
+            book.fingerprint == file.fingerprint && version.is_some() && (book.inspection_version == version || (book.inspection_version.is_none() && book.cached_audiobook_format.is_some() && book.cached_audiobook_format == format))
+        })
     });
     let mut inspections = futures_util::stream::iter(candidates.map(|file| {
         let path = root.join(&file.path);
@@ -272,60 +277,14 @@ pub async fn inspect(root: impl Into<PathBuf>, scan: &FilesystemScan, snapshot: 
         async move {
             for attempt in 0..3 {
                 match (async |host: &dyn cpu_host::CpuHost, path: PathBuf, root: &Path, excluded_paths: &[String], file: &ScanFileObservation| -> std::io::Result<ScannedBook> {
-                    if path.is_dir() {
-                        let (content_hash, fingerprint, size_bytes, reader) = client_platform_runtime::executor::run_blocking({
-                            let path = path.clone();
-                            let root = root.to_owned();
-                            let excluded_paths = excluded_paths.to_vec();
-                            move || {
-                                (|path: &Path, root: &Path, excluded_paths: &[String]| -> std::io::Result<(ContentHash, u64, u64, std::fs::File)> {
-                                    use std::io::{Read as _, Seek as _};
-                                    let tracks = audiobook_folder::discover(path)?;
-                                    if excluded_audiobook_member(path.strip_prefix(root).unwrap_or(path), excluded_paths) {
-                                        return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "audiobook contains a temporarily excluded file"));
-                                    }
-                                    let fingerprint = folder_fingerprint(path, &tracks)?;
-                                    require_folder_unchanged(path, fingerprint)?;
-                                    let nfo = audiobook_folder::discover_nfo(path)?;
-                                    let cue = audiobook_folder::discover_cue(path)?;
-                                    let cover = audiobook_folder::discover_cover(path)?;
-                                    let mut archive = audiobook_archive::write_archive_with_sidecars(tempfile::tempfile()?, &tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref())?;
-                                    require_folder_unchanged(path, fingerprint)?;
-                                    archive.rewind()?;
-                                    let mut hasher = blake3::Hasher::new();
-                                    let mut size = 0u64;
-                                    let mut bytes = [0u8; 64 * 1024];
-                                    loop {
-                                        let read = archive.read(&mut bytes)?;
-                                        if read == 0 {
-                                            break;
-                                        }
-                                        hasher.update(&bytes[..read]);
-                                        size = size.saturating_add(read as u64);
-                                    }
-                                    archive.rewind()?;
-                                    Ok((ContentHash::from(hasher.finalize()), fingerprint, size, archive))
-                                })(&path, &root, &excluded_paths)
-                            }
-                        })
-                        .await
-                        .map_err(|error| std::io::Error::other(error.to_string()))??;
-                        let format = BookFormat::Mp3Folder;
-                        let inspection = cpu_host::submit_book(host, cpu_host::Inspect { source_name: file.name.clone(), format, content_hash: Some(content_hash) }, cpu_host::as_cpu_reader(reader)).await;
-                        require_folder_unchanged(&path, fingerprint)?;
-                        return Ok(ScannedBook {
-                            directory: file.directory,
-                            name: file.name.clone(),
-                            path: file.path.clone(),
-                            fingerprint,
-                            content_hash,
-                            size_bytes,
-                            extension: format.canonical_extension().to_owned(),
-                            inspection: inspection.map_err(std::io::Error::other)?,
-                            inspection_version: book_inspection::inspection_version(format),
-                        });
-                    }
-                    let ingested = ingest_file(path, file.name.clone(), host).await?;
+                    let ingested = if path.is_dir() {
+                        if excluded_audiobook_member(path.strip_prefix(root).unwrap_or(&path), excluded_paths) {
+                            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "audiobook contains a temporarily excluded file"));
+                        }
+                        ingest_audiobook_folder(path, file.name.clone(), host).await?
+                    } else {
+                        ingest_file(path, file.name.clone(), host).await?
+                    };
                     let crate::ingestion::IngestedFile { content_hash, size_bytes, fingerprint, format, inspection } = ingested;
                     let extension = format.canonical_extension().to_owned();
                     Ok(ScannedBook {
@@ -369,6 +328,7 @@ pub async fn inspect(root: impl Into<PathBuf>, scan: &FilesystemScan, snapshot: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sync_common::ContentHash;
 
     /// Inspection dispatch is unreachable here: fixtures exercise selection and
     /// failure plumbing with the book file absent, so hashing fails first.
@@ -607,6 +567,7 @@ mod tests {
                 name: "book.epub".into(),
                 fingerprint: 42,
                 inspection_version: Some(book_inspection::inspection_version(BookFormat::Epub)),
+                cached_audiobook_format: None,
             }],
         };
         let unchanged = inspect(root.path(), &scan, &snapshot, &host()).await;
@@ -624,5 +585,44 @@ mod tests {
         snapshot.books[0].inspection_version = Some(book_inspection::inspection_version(BookFormat::Epub));
         snapshot.books[0].name = "old-name.epub".into();
         assert!(!inspect(root.path(), &scan, &snapshot, &host()).await.readable, "new placements require inspection");
+    }
+
+    #[tokio::test]
+    async fn synced_audiobook_metadata_skips_verified_unchanged_audio_only() {
+        let root = tempfile::tempdir().unwrap();
+        // Empty on purpose: opening these files for inspection must fail. The
+        // verified fingerprint and complete synced metadata avoid that work.
+        std::fs::create_dir(root.path().join("Audio")).unwrap();
+        let scan = FilesystemScan { files: vec![ScanFileObservation { directory: ROOT_DIR_ID, name: "Audio".into(), path: "Audio".into(), fingerprint: 42 }], readable: true, ..Default::default() };
+        let mut snapshot = ScanSnapshot {
+            work_revision: 0,
+            scan_id: 1,
+            excluded_paths: vec![],
+            directories: vec![],
+            placements: vec![],
+            tombstoned_files: vec![],
+            books: vec![library_database::ScanKnownBook {
+                content_hash: ContentHash::new(&"a".repeat(64)),
+                directory: ROOT_DIR_ID,
+                name: "Audio".into(),
+                fingerprint: 42,
+                inspection_version: None,
+                cached_audiobook_format: Some(BookFormat::Mp3Folder),
+            }],
+        };
+        let reused = inspect(root.path(), &scan, &snapshot, &host()).await;
+        assert!(reused.readable);
+        assert!(reused.books.is_empty(), "complete synced facts require no parser call");
+
+        snapshot.books[0].fingerprint = 41;
+        assert!(!inspect(root.path(), &scan, &snapshot, &host()).await.readable, "changed audio must be inspected");
+        snapshot.books[0].fingerprint = 42;
+        snapshot.books[0].cached_audiobook_format = None;
+        assert!(!inspect(root.path(), &scan, &snapshot, &host()).await.readable, "incomplete metadata must be inspected");
+        snapshot.books[0].cached_audiobook_format = Some(BookFormat::M4b);
+        assert!(!inspect(root.path(), &scan, &snapshot, &host()).await.readable, "metadata must describe the observed format");
+        snapshot.books[0].cached_audiobook_format = Some(BookFormat::Mp3Folder);
+        snapshot.books[0].inspection_version = Some(book_inspection::inspection_version(BookFormat::Mp3Folder) - 1);
+        assert!(!inspect(root.path(), &scan, &snapshot, &host()).await.readable, "explicitly stale inspections still need upgrading");
     }
 }

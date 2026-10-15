@@ -7,9 +7,13 @@ publish = false
 [dependencies]
 ui-components = { path = "../../../../components" }
 gpui.workspace = true
+gpui-image-eviction = { path = "../../../../../shared/gpui-image-eviction" }
 gpui-component.workspace = true
 image = { version = "0.25", default-features = false }
 log = "0.4"
 pdf-reader-core = { path = "../../../../../shared/pdf-reader-core" }
 smallvec = "1"
 web-time = "1"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

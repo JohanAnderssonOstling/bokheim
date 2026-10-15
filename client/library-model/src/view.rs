@@ -37,6 +37,7 @@ pub enum LibraryUpdate {
     Contents,
     Covers(Vec<ContentHash>),
     Download(crate::BookDownloadStatus),
+    CatalogImport { entry: CardKey, progress: crate::CatalogImportProgress },
     Scanning(bool),
 }
 
@@ -82,15 +83,20 @@ pub enum BrowseChipSort {
     #[default]
     Alphabetical,
     BookCount,
+    Popularity,
+    /// Home's existing shelf order, offered only by Home.
+    DefaultOrder,
 }
 
 impl BrowseChipSort {
-    pub const ALL: [Self; 2] = [Self::Alphabetical, Self::BookCount];
+    pub const ALL: [Self; 3] = [Self::Alphabetical, Self::BookCount, Self::Popularity];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Alphabetical => "Alphabetical",
             Self::BookCount => "Book count",
+            Self::Popularity => "Popularity",
+            Self::DefaultOrder => "Default order",
         }
     }
 }
@@ -102,24 +108,30 @@ pub enum BrowseBookSort {
     #[default]
     Alphabetical,
     RecentlyRead,
+    Popularity,
+    /// Home's existing activity order, offered only by Home.
+    DefaultOrder,
 }
 
 impl BrowseBookSort {
-    pub const ALL: [Self; 2] = [Self::Alphabetical, Self::RecentlyRead];
+    pub const ALL: [Self; 3] = [Self::Alphabetical, Self::RecentlyRead, Self::Popularity];
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Alphabetical => "Alphabetical",
             Self::RecentlyRead => "Recently read",
+            Self::Popularity => "Popularity",
+            Self::DefaultOrder => "Default order",
         }
     }
 }
 
 /// A browsable node: all books, a folder, a route in the subject hierarchy, an author,
-/// a shelf of Home, a route in the public-domain catalog's subject hierarchy, or
-/// a page of one of the user's OPDS feeds. `Author(None)` is the author index, every credited
-/// name; `Home(None)` is Home itself, its shelves. An author or a shelf holds
-/// books and nothing below them.
+/// a shelf of Home, a route in the public-domain catalog's subject hierarchy, an
+/// author of the catalog's books, or a page of one of the user's OPDS feeds.
+/// `Author(None)` is the author index, every credited name, and
+/// `CatalogAuthor(None)` the catalog's; `Home(None)` is Home itself, its
+/// shelves. An author or a shelf holds books and nothing below them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum BrowseLocation {
     Folder(DirId),
@@ -128,9 +140,16 @@ pub enum BrowseLocation {
     Home(Option<HomeShelf>),
     Books,
     Catalog(i64),
+    CatalogAuthor(Option<AuthorId>),
     /// `page` is `None` for the feed's root, otherwise a page this session
     /// has visited, by its index in the session's page table.
-    Opds { source: OpdsSourceId, page: Option<u32> },
+    Opds {
+        source: OpdsSourceId,
+        page: Option<u32>,
+    },
+    /// A store's chip at the catalog root. Opening it opens the store's
+    /// window; there is nothing to browse.
+    Store(StoreId),
 }
 
 impl BrowseLocation {
@@ -180,8 +199,11 @@ impl std::fmt::Display for BrowseLocation {
             Self::Home(None) => write!(formatter, "home:"),
             Self::Home(Some(shelf)) => write!(formatter, "home:{}", shelf.slug()),
             Self::Catalog(route) => write!(formatter, "catalog:{route}"),
+            Self::CatalogAuthor(None) => write!(formatter, "catalog-author:"),
+            Self::CatalogAuthor(Some(id)) => write!(formatter, "catalog-author:{id}"),
             Self::Opds { source, page: None } => write!(formatter, "opds:{source}"),
             Self::Opds { source, page: Some(page) } => write!(formatter, "opds:{source}:{page}"),
+            Self::Store(id) => write!(formatter, "store:{id}"),
         }
     }
 }
@@ -221,6 +243,65 @@ pub struct BrowseSection {
     pub parent: BrowseRow,
     pub children: Vec<BrowseRow>,
     pub books: Vec<BookCardRow>,
+    /// Total directly displayed books when only the first page is included.
+    /// Absent for complete sections, including older browse responses.
+    #[serde(default)]
+    pub book_count: Option<usize>,
+}
+
+/// A bounded range of a section's books, in the active browse order.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BrowseBookPage {
+    pub books: Vec<BookCardRow>,
+    pub offset: usize,
+    pub total: usize,
+}
+
+/// Initial section covers include a small buffer for responsive layouts.
+pub const BROWSE_SECTION_BOOK_LIMIT: usize = 8;
+pub const MAX_BROWSE_SECTION_BOOK_LIMIT: usize = 128;
+
+/// Independent windows for the outer section list and the direct book grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowsePageRequest {
+    pub section_offset: usize,
+    pub section_limit: usize,
+    pub book_offset: usize,
+    pub book_limit: usize,
+}
+
+impl Default for BrowsePageRequest {
+    fn default() -> Self {
+        Self { section_offset: 0, section_limit: 24, book_offset: 0, book_limit: 48 }
+    }
+}
+
+/// Tree navigation stays complete; flat author headings use a bounded window.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BrowsePageState {
+    pub section_ids: Vec<BrowseLocation>,
+    pub section_offset: usize,
+    pub book_offset: usize,
+    pub book_total: usize,
+    #[serde(default)]
+    pub headings: Option<BrowseHeadingState>,
+    /// Selection, ordering and state revision shared by every continuation.
+    #[serde(default)]
+    pub result_revision: Option<String>,
+}
+
+impl BrowsePageState {
+    pub fn heading_count(&self) -> usize {
+        self.headings.as_ref().map_or(self.section_ids.len(), |headings| headings.total)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowseHeadingState {
+    pub total: usize,
+    /// Detect reordered or changed headings before merging another window.
+    pub revision: String,
+    pub cards: bool,
 }
 
 /// Number of visible library books tagged with a base language.
@@ -271,16 +352,38 @@ pub struct Dir {
 }
 
 /// Where a card's book is, which decides what it offers: a library book is
-/// opened, read and downloaded; a catalog or feed book is added to the library.
+/// opened, read and downloaded; hosted catalog and feed books are added to the
+/// library, while external catalog entries open their source page.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BookSource {
-    Library { content_hash: ContentHash },
-    Catalog { content_hash: ContentHash, in_library: bool },
+    Library {
+        content_hash: ContentHash,
+    },
+    /// A catalog book the library does not hold; catalog browsing leaves out
+    /// the ones it does.
+    Catalog {
+        content_hash: ContentHash,
+    },
     /// A publication in one of the user's OPDS feeds. It has no file, and so
     /// no content hash, until it is downloaded into the library, where it
     /// is listed as a library book.
-    /// `downloadable` when the feed offers it openly, as an EPUB or PDF.
-    Opds { source: OpdsSourceId, entry: CardKey, downloadable: bool },
+    /// `downloadable` when the feed offers it openly, as an EPUB or PDF;
+    /// `buyable` when it links a store page that sells it and this system
+    /// can open a store window. A book sold only with DRM is not listed.
+    Opds {
+        source: OpdsSourceId,
+        entry: CardKey,
+        downloadable: bool,
+        buyable: bool,
+    },
+    /// A catalog entry whose book stays on the source's website.
+    /// Its opaque entry key identifies metadata, never a downloaded file.
+    /// `downloadable` when the source offers the audiobook as an archive,
+    /// which adding the entry downloads into the library.
+    ExternalCatalog {
+        entry: CardKey,
+        downloadable: bool,
+    },
 }
 
 /// A user's OPDS feed, by the id of its synced entry.
@@ -292,6 +395,25 @@ pub struct OpdsSource {
     pub id: OpdsSourceId,
     pub name: String,
     pub url: String,
+}
+
+/// A bookstore added on this device, by the id it was added under.
+pub type StoreId = uuid::Uuid;
+
+/// A bookstore's website: opened in a window of its own, where what is
+/// bought and downloaded goes into the library's root.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Store {
+    pub id: StoreId,
+    pub name: String,
+    pub url: String,
+}
+
+/// Adding a feed can pause until this device supplies credentials.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AddOpdsFeedResult {
+    Added,
+    SignInRequired,
 }
 
 /// What a feed asks for, sent as HTTP basic auth. Kept on the device that
@@ -376,7 +498,7 @@ impl BookCardRow {
     pub fn key(&self) -> CardKey {
         match self.source {
             BookSource::Library { content_hash } | BookSource::Catalog { content_hash, .. } => CardKey(*content_hash.as_bytes()),
-            BookSource::Opds { entry, .. } => entry,
+            BookSource::Opds { entry, .. } | BookSource::ExternalCatalog { entry, .. } => entry,
         }
     }
 
@@ -385,7 +507,7 @@ impl BookCardRow {
     pub fn library_file(&self) -> Option<ContentHash> {
         match self.source {
             BookSource::Library { content_hash } => Some(content_hash),
-            BookSource::Catalog { .. } | BookSource::Opds { .. } => None,
+            BookSource::Catalog { .. } | BookSource::Opds { .. } | BookSource::ExternalCatalog { .. } => None,
         }
     }
 
@@ -394,7 +516,7 @@ impl BookCardRow {
     pub fn content_hash(&self) -> Option<ContentHash> {
         match self.source {
             BookSource::Library { content_hash } | BookSource::Catalog { content_hash, .. } => Some(content_hash),
-            BookSource::Opds { .. } => None,
+            BookSource::Opds { .. } | BookSource::ExternalCatalog { .. } => None,
         }
     }
 }
@@ -403,6 +525,7 @@ impl BookCardRow {
 pub struct TrashedBook {
     pub content_hash: ContentHash,
     pub title: String,
+    pub author: String,
     pub format: String,
     pub deleted_at: i64,
 }
@@ -411,6 +534,8 @@ pub struct TrashedBook {
 pub struct TrashedFolder {
     pub id: DirId,
     pub name: String,
+    /// The folder it was in; none when that was the library's root.
+    pub parent_name: Option<String>,
     pub deleted_at: i64,
 }
 
@@ -453,12 +578,18 @@ pub struct BookDetailCredit {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BookDetail {
     pub book: BookCardRow,
+    /// The source page for a catalog entry read outside the library.
+    #[serde(default)]
+    pub external_url: Option<String>,
     /// Navigation entry count for an audiobook, when its contents are known.
     #[serde(default)]
     pub audiobook_chapter_count: Option<usize>,
     /// The publisher's blurb, as stored (HTML). Only the detail page shows it,
     /// so browse queries never read it.
     pub description: String,
+    /// Publication year, when known: the file's own, else the metadata server's.
+    #[serde(default)]
+    pub year: Option<i32>,
     /// One live placement that can act as the source for copy/move actions.
     /// A detail screen is not itself scoped to a folder.
     pub source_directory_id: Option<String>,

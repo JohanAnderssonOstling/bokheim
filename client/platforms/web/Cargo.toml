@@ -27,4 +27,8 @@ js-sys = "0.3"
 web-sys = { version = "0.3", features = ["WebSocket", "BinaryType", "Url", "File", "RequestInit", "WorkerGlobalScope", "Blob", "MessagePort", "MessageChannel", "MessageEvent", "MessageEventInit", "Event", "EventTarget", "Worker", "SharedWorker", "WorkerOptions", "WorkerType", "DedicatedWorkerGlobalScope", "AbortController", "AbortSignal", "Request", "Response", "Headers", "ReadableStream", "ReadableStreamDefaultReader", "ReadableStreamDefaultController", "Window", "Location", "PageTransitionEvent"] }
 
 [dev-dependencies]
+futures-channel = "0.3"
+async-channel = "2"
+futures-util = "0.3"
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
 rusqlite = { version = "0.40.0", features = ["bundled"] }

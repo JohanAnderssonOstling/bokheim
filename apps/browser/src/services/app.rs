@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use app::AppClient;
 #[cfg(feature = "kobo")]
 use gpui::App;
@@ -18,7 +17,6 @@ pub struct AppStartup {
 #[derive(Clone)]
 pub struct AppServices {
     pub(crate) updates: Option<gpui::Entity<super::UpdateControls>>,
-    pub(crate) browsing_preferences: Rc<RefCell<app_preferences::BrowsingPreferences>>,
     pub(crate) backend: Rc<AppClient>,
     pub(crate) startup: Rc<AppStartup>,
     #[cfg(target_arch = "wasm32")]
@@ -35,7 +33,6 @@ impl AppServices {
 
     pub async fn for_new_window(&self) -> Result<Self, String> {
         let mut startup = (*self.startup).clone();
-        startup.browsing_preferences = self.browsing_preferences.borrow().clone();
         startup.libraries = self.backend.libraries().await?;
         let mut services = self.clone();
         services.startup = Rc::new(startup);
@@ -45,7 +42,6 @@ impl AppServices {
     pub fn new(backend: AppClient, startup: AppStartup, #[cfg(feature = "kobo")] save_kobo_auto_rotate: SaveKoboAutoRotate) -> Self {
         Self {
             updates: None,
-            browsing_preferences: Rc::new(RefCell::new(startup.browsing_preferences.clone())),
             backend: Rc::new(backend),
             startup: Rc::new(startup),
             #[cfg(target_arch = "wasm32")]

@@ -107,6 +107,13 @@ def svg(scale, detail=True, bg=None):
         + (' mask="url(#cut)">' if detail else ">") + body + "</g>" + win + "</g></svg>")
 
 
+def kobo_icons(out, small_svg):
+    """Transparent monochrome marks for Kobo's normal and active nav states."""
+    for name, ink in (("bokheim-kobo", "#666666"), ("bokheim-kobo-active", "#000000")):
+        subprocess.run(["rsvg-convert", "-w", "128", "-h", "128", "-o", str(out / f"{name}.png")],
+                       input=small_svg.replace(INK, ink).encode(), check=True)
+
+
 def main(outdir):
     out = Path(outdir); out.mkdir(parents=True, exist_ok=True)
     variants = {
@@ -119,6 +126,7 @@ def main(outdir):
     }
     for name, doc in variants.items():
         (out / f"{name}.svg").write_text(doc)
+    kobo_icons(out, variants["bokheim-small"])
 
     # detail is sub-pixel below ~96px, so small sizes use the lineless variant
     png = []

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>ManyBooks.net</title>
+  <updated>2026-10-11T18:38:16-04:00</updated>
+  <author>
+    <name>manybooks.net</name>
+    <url>http://manybooks.net</url>
+    <email>info@manybooks.net</email>
+  </author>
+  <subtitle>Online Catalog for Manybooks.net</subtitle>
+  <id>urn:manybooks:7e22e659-9f4e-7dd3-9942-b49d2cd5</id>
+  <link rel="search" title="Search Catalog" type="application/atom+xml" href="https://manybooks.net/opds/search?q={searchTerms}"/>
+  <link rel="self" type="application/atom+xml" href="https://manybooks.net/opds"/>
+  <entry>
+    <title>New Titles</title>
+    <id>urn:manybooks:d121d09d-c307-c6e2-98be-6fd9a2bf</id>
+    <updated>2026-10-11T18:38:16-04:00</updated>
+    <content type="text">Recently Added books</content>
+    <link type="application/atom+xml" href="https://manybooks.net/opds/new_titles"/>
+  </entry>
+  <entry>
+    <title>Authors</title>
+    <id>urn:manybooks:d8cb3bf7-5528-3aca-cbb0-64e77fe6</id>
+    <updated>2026-10-11T18:38:16-04:00</updated>
+    <content type="text">Alphabetical listing</content>
+    <link type="application/atom+xml" href="https://manybooks.net/opds/authors"/>
+  </entry>
+  <entry>
+    <title>Titles</title>
+    <id>urn:manybooks:c2090bb2-b90f-3941-641a-661ccb00</id>
+    <updated>2026-10-11T18:38:16-04:00</updated>
+    <content type="text">All titles, listed alphabetically</content>
+    <link type="application/atom+xml" href="https://manybooks.net/opds/titles"/>
+  </entry>
+  <entry>
+    <title>Genres</title>
+    <id>urn:manybooks:88dc8dff-7125-46bc-8c73-9f2c75ea</id>
+    <updated>2026-10-11T18:38:16-04:00</updated>
+    <content type="text">Titles grouped by category</content>
+    <link type="application/atom+xml" href="https://manybooks.net/opds/genres"/>
+  </entry>
+</feed>

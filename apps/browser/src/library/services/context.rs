@@ -1,16 +1,14 @@
-use crate::services::import_failure_message;
 use crate::BOOK_IMPORT_EXTENSIONS;
-use gpui::{App, Context, Entity, FileDialogFilter, PathPromptOptions, Window};
-use library_backend::LibraryClient;
+use crate::services::import_failure_message;
+use gpui::{App, Context, Entity, FileDialogFilter, PathPromptOptions, WeakEntity, Window};
+use library_backend::{DownloadState, LibraryClient};
 use library_model::BookLocator;
 use std::rc::Rc;
 use sync_common::{ContentHash, DirId};
 
-use super::{LibraryUpdateBridge, UndoStack};
+use super::{DownloadSubscription, LibraryUpdateBridge, UndoEntry};
+use crate::navigation::LibrarySession;
 pub(crate) type OpenBook = Rc<dyn Fn(BookLocator, String, Option<String>, &mut Window, &mut App)>;
-/// Notifies the owning shell that the cached book detail page just closed, so
-/// e.g. an audiobook dock expanded to show it can collapse back down.
-pub(crate) type BookDetailClosed = Rc<dyn Fn(&mut App)>;
 
 /// UI state associated with one selected library.
 ///
@@ -23,14 +21,13 @@ pub(crate) struct LibraryContext {
     app: Rc<app::AppClient>,
     backend: Rc<LibraryClient>,
     open_book: OpenBook,
-    book_detail_closed: BookDetailClosed,
     updates: Entity<LibraryUpdateBridge>,
-    undo: UndoStack,
+    session: WeakEntity<LibrarySession>,
 }
 
 impl LibraryContext {
-    pub(crate) fn new(app: Rc<app::AppClient>, backend: Rc<LibraryClient>, open_book: OpenBook, book_detail_closed: BookDetailClosed, updates: Entity<LibraryUpdateBridge>) -> Self {
-        Self { app, backend, open_book, book_detail_closed, updates, undo: UndoStack::default() }
+    pub(crate) fn new(app: Rc<app::AppClient>, backend: Rc<LibraryClient>, open_book: OpenBook, updates: Entity<LibraryUpdateBridge>, session: WeakEntity<LibrarySession>) -> Self {
+        Self { app, backend, open_book, updates, session }
     }
 
     pub(crate) fn app(&self) -> &app::AppClient {
@@ -41,12 +38,22 @@ impl LibraryContext {
         self.backend.as_ref()
     }
 
-    pub(crate) fn undo(&self) -> &UndoStack {
-        &self.undo
+    /// Pages hold a weak command target; the session owns their undo history.
+    pub(crate) fn session(&self) -> WeakEntity<LibrarySession> {
+        self.session.clone()
+    }
+
+    pub(crate) fn take_undo(&self, cx: &mut App) -> Option<UndoEntry> {
+        self.session.update(cx, |session, _| session.take_undo()).ok().flatten()
     }
 
     pub(crate) fn updates(&self) -> Entity<LibraryUpdateBridge> {
         self.updates.clone()
+    }
+
+    pub(crate) fn subscribe_download<T: 'static>(&self, content_hash: ContentHash, cx: &mut Context<T>, callback: impl FnMut(&mut T, &DownloadState, &mut Context<T>) + 'static) -> DownloadSubscription {
+        let source = self.updates.update(cx, |updates, cx| updates.download_source(content_hash, cx));
+        LibraryUpdateBridge::subscribe_download(source, cx, callback)
     }
 
     /// Prompts for one book and imports it into the requested folder.
@@ -66,10 +73,7 @@ impl LibraryContext {
                             let mut source = file.source;
                             source.path = vec![file.name.clone()];
                             let directory = crate::directory_import(gpui::SelectedDirectory { local_path: None, name: file.name, directories: Vec::new(), files: vec![source] });
-                            library
-                                .import_directory(parent_id, directory, false)
-                                .await
-                                .and_then(|failures| if failures.is_empty() { Ok(()) } else { Err(failures.iter().map(import_failure_message).collect::<Vec<_>>().join("\n")) })
+                            library.import_directory(parent_id, directory, false).await.and_then(|failures| if failures.is_empty() { Ok(()) } else { Err(failures.iter().map(import_failure_message).collect::<Vec<_>>().join("\n")) })
                         };
                         result.map(|_| ())
                     }
@@ -90,7 +94,12 @@ impl LibraryContext {
 
     /// Imports a folder from the picker through the same copy flow as a drop.
     pub(crate) fn choose_and_import_folder<C: 'static>(&self, parent_id: DirId, cx: &mut Context<C>) {
-        let extensions = BOOK_IMPORT_EXTENSIONS.into_iter().map(str::to_owned).collect();
+        let extensions = BOOK_IMPORT_EXTENSIONS.into_iter();
+        // Native document providers filter the files they enumerate. Include
+        // audiobook members so the backend can classify the complete folder.
+        #[cfg(not(target_arch = "wasm32"))]
+        let extensions = extensions.chain(["mp3folder", "mp3", "nfo", "cue", "jpg", "jpeg", "png", "webp"]);
+        let extensions = extensions.map(str::to_owned).collect();
         let selection = cx.prompt_for_directories_with_filters(PathPromptOptions { files: false, directories: true, multiple: false, prompt: Some("Add folder".into()) }, vec![FileDialogFilter { name: "Books".to_owned(), extensions }]);
         let library = self.backend.clone();
         cx.spawn(async move |view, cx| {
@@ -116,9 +125,10 @@ impl LibraryContext {
             let _ = view.update_in(cx, |_, window, cx| match result {
                 Ok(failures) if !failures.is_empty() => crate::services::notify_warning("add-folder-warning", failures.iter().map(import_failure_message).collect::<Vec<_>>().join("\n"), window, cx),
                 Err(error) => crate::services::notify_error("add-folder-error", format!("Could not add folder: {error}"), window, cx),
-                _ => {},
+                _ => {}
             });
-        }).detach();
+        })
+        .detach();
     }
 
     /// Copies or moves a desktop drop into the library, then imports it in place.
@@ -135,7 +145,8 @@ impl LibraryContext {
             if let Some(message) = message {
                 let _ = view.update_in(cx, |_, window, cx| crate::services::notify_warning("drop-import-warning", message, window, cx));
             }
-        }).detach();
+        })
+        .detach();
     }
 
     /// Opens the book where the reader asked for it — a contents entry rather
@@ -144,9 +155,5 @@ impl LibraryContext {
     pub(crate) fn open_book_at(&self, content_hash: ContentHash, title: String, target: Option<String>, window: &mut Window, cx: &mut App) {
         let locator = BookLocator::new(*self.backend.id(), content_hash);
         (self.open_book)(locator, title, target, window, cx);
-    }
-
-    pub(crate) fn notify_book_detail_closed(&self, cx: &mut App) {
-        (self.book_detail_closed)(cx);
     }
 }

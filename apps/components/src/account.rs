@@ -1,216 +1,197 @@
-//! Account section visuals: the identity block, the storage meter, and the
-//! library usage rows that read against it — each of which reports what its
-//! library is doing when it is doing something.
+//! Account section visuals: who is signed in, the storage meter with what each
+//! library holds of it, and the table of this device's libraries.
 //!
-//! The section opens with who is signed in, and the sync state is one line
-//! inside that block rather than a banner above it. Only that line and the
-//! activity dots carry a semantic colour, and only while something is actually
-//! waiting; everything else is quiet.
+//! Only the status dots and the upload reservation carry a semantic colour, and
+//! only while something is actually waiting; everything else is quiet.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Div, FontWeight, Hsla, SharedString, div, px, relative};
-use gpui_component::button::{Button, ButtonVariants};
 
-use crate::{BrowserTheme, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, TEXT_SM, TEXT_XS, TITLE_LG};
+use crate::{BrowserTheme, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, TEXT_SM, TEXT_XS};
 
-/// Height of the account quota meter.
-const METER_HEIGHT: f32 = 10.0;
-/// The initial beside the address in the header chip.
-const ACCOUNT_AVATAR_SIZE_REM: f32 = 1.5;
-/// How much header an address may take before it truncates.
-const ACCOUNT_CHIP_MAX_WIDTH_REM: f32 = 16.0;
-/// Keeps a library row the height it had when its name was a button, so the
-/// list reads at the same rhythm as the rest of the account section.
+/// Height of the account quota meter. A line under the figures rather than a
+/// bar of its own: the breakdown below it carries the detail.
+const METER_HEIGHT: f32 = 6.0;
+/// The initial beside the address.
+const ACCOUNT_AVATAR_SIZE_REM: f32 = 2.5;
+/// The swatch tying a breakdown line to its segment of the meter.
+const SEGMENT_SWATCH_SIZE: f32 = 8.0;
+/// A breakdown line's share and size columns, wide enough for "100%" and
+/// "999.9 MB" so the figures line up down the list.
+const BREAKDOWN_SHARE_WIDTH_REM: f32 = 3.0;
+const BREAKDOWN_BYTES_WIDTH_REM: f32 = 4.5;
+/// The height a breakdown line keeps, so the list reads at one rhythm.
+const BREAKDOWN_ROW_HEIGHT_REM: f32 = 1.5;
+/// The library table's fixed columns. The name takes what is left.
+const LIBRARY_SIZE_COLUMN_WIDTH_REM: f32 = 6.5;
+const LIBRARY_STATUS_COLUMN_WIDTH_REM: f32 = 9.0;
+const LIBRARY_CLOUD_COLUMN_WIDTH_REM: f32 = 3.0;
+/// The column gap in the library table.
+const LIBRARY_COLUMN_GAP: f32 = 12.0;
+/// Keeps the empty line the height a library row's name has.
 const LIBRARY_NAME_HEIGHT_REM: f32 = 2.5;
-/// The label column of a library's facts. Wide enough for the longest of them —
-/// "On this device" — so every value in the list starts at the same x and the
-/// column can be read downwards.
-const LIBRARY_FACT_LABEL_WIDTH_REM: f32 = 7.0;
-const LIBRARY_FACT_LABEL_MAX_WIDTH: f32 = 160.0;
-/// The height a fact's value keeps whatever it carries, so a row of text and a
-/// row holding a control sit on the same rhythm.
-const LIBRARY_FACT_HEIGHT_REM: f32 = 1.5;
 
-/// Who is signed in, as the control in the account group's header.
+/// Who is signed in, as the first line of the account section.
 ///
-/// The account was a block of its own — avatar, address, a status line and a
-/// sign-out button — which is a lot of page for a thing you touch twice a year.
-/// It is a chip now: the address is the only part worth a permanent line, and
-/// what you can do to the account hangs off it in a menu.
-///
-/// The address truncates rather than wrapping; the caller gives the button the
-/// full address as its tooltip, because a header cannot grow.
-pub fn account_chip(id: impl Into<gpui::ElementId>, initial: impl Into<SharedString>, email: impl Into<SharedString>, theme: BrowserTheme) -> Button {
-    crate::base_button(id).ghost().h(gpui::rems(crate::SETTINGS_CONTROL_SIZE_REM)).max_w(gpui::rems(ACCOUNT_CHIP_MAX_WIDTH_REM)).px(px(SPACE_XS)).rounded(px(crate::RADIUS_SM)).border_1().border_color(theme.border).child(
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(SPACE_SM))
-            .min_w_0()
-            .child(
-                div()
-                    .w(gpui::rems(ACCOUNT_AVATAR_SIZE_REM))
-                    .h(gpui::rems(ACCOUNT_AVATAR_SIZE_REM))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(theme.accent)
-                    .text_color(theme.accent_text)
-                    .text_size(gpui::rems(TEXT_XS))
-                    .child(initial.into()),
-            )
-            .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(TEXT_XS)).text_color(theme.text).child(email.into())),
-    )
+/// The address with the two things that can be done to the account beside it.
+/// They used to hang off a chip in the header, in a menu; as links they are
+/// findable without opening anything, and they are quiet enough not to make
+/// leaving the account the most prominent thing about having one.
+pub fn account_identity(initial: impl Into<SharedString>, email: impl Into<SharedString>, actions: impl IntoIterator<Item = impl IntoElement>, theme: BrowserTheme) -> Div {
+    div()
+        .w_full()
+        .py(px(SPACE_SM))
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap(px(SPACE_MD))
+        .child(
+            div()
+                .w(gpui::rems(ACCOUNT_AVATAR_SIZE_REM))
+                .h(gpui::rems(ACCOUNT_AVATAR_SIZE_REM))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme.accent)
+                .text_color(theme.accent_text)
+                .text_size(gpui::rems(TEXT_SM))
+                .child(initial.into()),
+        )
+        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(TEXT_SM)).text_color(theme.text).child(email.into()))
+        .child(div().flex_none().flex().flex_row().items_center().gap(px(SPACE_MD)).children(actions))
 }
 
-/// The quota as a figure rather than a sentence: the used amount is the largest
-/// text on the page after the verdict, and what is left sits opposite it.
-pub fn storage_figures(used: impl Into<SharedString>, of_quota: impl Into<SharedString>, available: impl Into<SharedString>, theme: BrowserTheme) -> Div {
+/// The quota as one line: what is used against the quota, and what is left
+/// opposite it.
+pub fn storage_summary(used: impl Into<SharedString>, of_quota: impl Into<SharedString>, available: impl Into<SharedString>, theme: BrowserTheme) -> Div {
     div()
         .w_full()
         .flex()
         .flex_row()
+        .flex_wrap()
         .items_baseline()
         .justify_between()
         .gap(px(SPACE_MD))
-        .child(div().flex().flex_row().items_baseline().gap(px(SPACE_XS)).child(div().text_size(gpui::rems(TITLE_LG)).child(used.into())).child(div().text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(of_quota.into())))
-        .child(div().text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(available.into()))
+        .text_size(gpui::rems(TEXT_SM))
+        .child(div().flex().flex_row().items_baseline().gap(px(SPACE_XS)).child(div().text_color(theme.text).child(used.into())).child(div().text_color(theme.text_muted).child(of_quota.into())))
+        .child(div().text_color(theme.text_muted).child(available.into()))
 }
 
-/// The quota meter and its matching legend. Each tuple is `(fraction, color,
-/// label)`; fractions are clamped to the track while labels retain the same
-/// color association below it.
-pub fn storage_meter(segments: impl IntoIterator<Item = (f32, Hsla, SharedString)>, theme: BrowserTheme) -> Div {
+/// The quota meter. Each tuple is `(fraction, color)`; fractions are clamped to
+/// the track.
+pub fn storage_meter(segments: impl IntoIterator<Item = (f32, Hsla)>, theme: BrowserTheme) -> Div {
     let mut track = div().w_full().h(px(METER_HEIGHT)).flex().flex_row().overflow_hidden().border_1().border_color(theme.rule).bg(theme.page_bg);
-    let mut legend = div().w_full().flex().flex_row().flex_wrap().gap_x(px(SPACE_MD)).gap_y(px(SPACE_XS));
-    for (fraction, color, label) in segments {
+    for (fraction, color) in segments {
         track = track.child(div().h_full().w(relative(fraction.clamp(0.0, 1.0))).bg(color));
-        legend = legend.child(div().flex().flex_row().items_center().gap(px(SPACE_XS)).child(div().w(px(8.0)).h(px(8.0)).flex_none().bg(color)).child(div().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(label)));
     }
-    div().w_full().flex().flex_col().gap(px(SPACE_SM)).child(track).child(legend)
+    track
 }
 
-/// Shades for the quota segments, walking the accent away from itself so
-/// adjacent libraries stay distinguishable without introducing a second hue.
+/// What each library holds of the quota, one line apiece under the meter.
 ///
-/// Past the shades that stay legible the sequence repeats rather than fading
-/// into the track; a library with a colour it shares with another is a smaller
-/// error than a library that appears to occupy nothing.
+/// A legend wrapped along one line made the figures impossible to compare;
+/// down a column, with the share and size in fixed columns, the largest
+/// library is the one that reads largest.
+pub fn storage_breakdown(rows: impl IntoIterator<Item = Div>) -> Div {
+    div().w_full().flex().flex_col().gap(px(SPACE_XXS)).children(rows)
+}
+
+/// One line of [`storage_breakdown`]: the segment's colour, its name, its share
+/// of the quota, and its size.
+pub fn storage_breakdown_row(color: Hsla, name: impl Into<SharedString>, share: impl Into<SharedString>, bytes: impl Into<SharedString>, theme: BrowserTheme) -> Div {
+    div()
+        .w_full()
+        .min_h(gpui::rems(BREAKDOWN_ROW_HEIGHT_REM))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(SPACE_SM))
+        .text_size(gpui::rems(TEXT_XS))
+        // E-ink draws no meter, so a swatch would key nothing.
+        .when(!cfg!(feature = "kobo"), |row| row.child(div().size(px(SEGMENT_SWATCH_SIZE)).flex_none().bg(color)))
+        .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_color(theme.text).child(name.into()))
+        .child(div().w(gpui::rems(BREAKDOWN_SHARE_WIDTH_REM)).flex_none().flex().justify_end().text_color(theme.text_muted).child(share.into()))
+        .child(div().w(gpui::rems(BREAKDOWN_BYTES_WIDTH_REM)).flex_none().flex().justify_end().text_color(theme.text_muted).child(bytes.into()))
+}
+
+/// Categorical quota colours from the active palette. The meter and its legend
+/// use the same colour for each library, with brighter colours in dark mode.
+/// The sequence repeats once all five colours have been used.
 pub fn usage_segment_color(index: usize, theme: BrowserTheme) -> Hsla {
-    const STEPS: usize = 5;
-    let step = (index % STEPS) as f32 / STEPS as f32;
-    let mut color = theme.accent;
-    color.l = (color.l + step * 0.34).clamp(0.0, 0.92);
-    color.s = (color.s - step * 0.18).clamp(0.0, 1.0);
-    color
-}
-
-/// A complete library-usage list with the shared row rhythm.
-///
-/// A library is several lines tall — its facts, and whatever it is doing — so
-/// the rows are ruled apart. Padding alone told two libraries apart while a row
-/// was one line; it stopped doing so the moment a row became a block, and the
-/// group's border cannot say where one library ends and the next begins.
-///
-/// The rule goes between rows rather than under every one of them: the last
-/// library must not be followed by a hairline that reads as an empty row, and
-/// the first must not be cut off from the heading that names the list.
-pub fn library_usage_list(rows: impl IntoIterator<Item = Div>, theme: BrowserTheme) -> Div {
-    let mut list = div().w_full().flex().flex_col();
-    for (index, row) in rows.into_iter().enumerate() {
-        list = list.child(if index == 0 { row } else { row.border_t_1().border_color(theme.rule) });
-    }
-    list
+    theme.usage_segments[index % theme.usage_segments.len()]
 }
 
 /// The list with no libraries in it. A line of its own rather than an empty
-/// group, which would read as something that failed to load.
+/// table, which would read as something that failed to load.
 pub fn library_usage_empty(text: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().w_full().px(px(SPACE_MD)).py(px(SPACE_SM)).min_h(gpui::rems(LIBRARY_NAME_HEIGHT_REM)).flex().items_center().text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(text.into())
+    div().w_full().py(px(SPACE_SM)).min_h(gpui::rems(LIBRARY_NAME_HEIGHT_REM)).flex().items_center().border_t_1().border_color(theme.rule).text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(text.into())
 }
 
-/// The name a library is read by in the server-storage list. Nothing is done to
-/// a library from here — the switcher owns renaming, opening and deleting — so
-/// it is a plain line of text rather than a control.
+/// The library table's column headings.
 ///
-/// It carries no inset of its own: the row it sits in owns the inset, and a
-/// name that padded itself was being unpadded again at the call site.
-pub fn library_usage_name(name: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().w_full().min_w_0().min_h(gpui::rems(LIBRARY_NAME_HEIGHT_REM)).flex().items_center().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(gpui::rems(TEXT_SM)).text_color(theme.text).child(name.into())
+/// Every library states the same things, and a reader comparing two of them is
+/// reading down a column, so the columns are named once rather than labelled in
+/// every row. A compact window has no room for the columns and draws no heading.
+pub fn library_table_header(theme: BrowserTheme) -> Div {
+    let heading = |label: &'static str| div().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).font_features(crate::small_caps()).child(label);
+    library_table_line(theme)
+        .py(px(SPACE_XS))
+        .child(heading("Library").flex_1().min_w_0())
+        .child(heading("On this device").w(gpui::rems(LIBRARY_SIZE_COLUMN_WIDTH_REM)).flex_none())
+        .child(heading("Status").w(gpui::rems(LIBRARY_STATUS_COLUMN_WIDTH_REM)).flex_none())
+        .child(heading("Cloud").w(gpui::rems(LIBRARY_CLOUD_COLUMN_WIDTH_REM)).flex_none())
 }
 
-/// One library: its name, the facts about it, and whatever it is doing.
+/// One library: its name and folder, what it occupies here, where it stands
+/// with the server, and whether it is stored in the cloud.
 ///
-/// The facts are a label/value list rather than a line of values, because every
-/// library states the same things — what it occupies here, where it stands with
-/// the server, which folder it is, whether it is stored in the cloud — and a
-/// reader comparing two libraries is reading down a column, not along a line.
-/// Unlabelled values only worked while there were two of them; a size, a tag, a
-/// path and a checkbox strung together say nothing about which is which.
+/// Nothing is folded away. The folder and the cloud switch were behind a
+/// details button, which hid the one control on the row and made every library
+/// a two-step read.
 ///
-/// Every control the row carries is a value in that list, so it shares the
-/// row's one inset. They were previously appended to the row inside padding of
-/// their own, which put a checkbox 32px from the group edge while the name it
-/// belonged to sat at 16px.
-pub fn library_usage_row(name: impl Into<SharedString>, facts: impl IntoIterator<Item = (SharedString, AnyElement)>, activity: impl IntoIterator<Item = Div>, compact: bool, theme: BrowserTheme) -> Div {
+/// A compact window keeps the status and cloud columns and moves the size
+/// under the name, where it does not need a column of its own.
+pub fn library_table_row(name: impl Into<SharedString>, path: Option<AnyElement>, size: impl Into<SharedString>, status: (impl Into<SharedString>, Hsla), cloud: impl IntoElement, compact: bool, theme: BrowserTheme) -> Div {
+    let size = div().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(size.into());
     let title = div()
-        .w_full()
+        .flex_1()
         .min_w_0()
-        .min_h(gpui::rems(LIBRARY_FACT_HEIGHT_REM))
+        .flex()
+        .flex_col()
+        .items_start()
+        .gap(px(SPACE_XS))
+        .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().font_weight(FontWeight::SEMIBOLD).text_size(gpui::rems(TEXT_SM)).text_color(theme.text).child(name.into()))
+        .children(path.map(|path| div().max_w_full().min_w_0().child(path)));
+    let (status, status_color) = status;
+    let status = div()
+        .min_w_0()
         .flex()
         .items_center()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_ellipsis()
-        .text_size(gpui::rems(TEXT_SM))
-        .font_weight(FontWeight::SEMIBOLD)
+        .gap(px(6.0))
+        .text_size(gpui::rems(TEXT_XS))
         .text_color(theme.text)
-        .child(name.into());
-    let mut list = div().w_full().flex().flex_col().gap(px(SPACE_XS));
-    for (label, value) in facts {
-        list = list.child(library_fact(label, value, compact, theme));
-    }
-    div().w_full().px(px(SPACE_MD)).py(px(SPACE_MD)).flex().flex_col().gap(px(SPACE_SM)).child(title).child(list).children(activity)
-}
-
-/// The controls and less frequently needed facts revealed from a summary row.
-pub fn library_usage_details(facts: impl IntoIterator<Item = (SharedString, AnyElement)>, compact: bool, theme: BrowserTheme) -> Div {
-    let mut list = div().w_full().flex().flex_col().gap(px(SPACE_XS));
-    for (label, value) in facts {
-        list = list.child(library_fact(label, value, compact, theme));
-    }
-    list
-}
-
-/// One labelled fact about a library.
-///
-/// The label column is fixed rather than sized to its contents, because the
-/// point of it is that the values line up; a column that fits each row's own
-/// label is four columns, not one.
-///
-/// A compact window stacks the label over its value instead. The row does not
-/// simply wrap: a wrapped value returns to the left edge and lands under the
-/// label column, which reads as a third column appearing. Below the medium
-/// width there is not enough left of the row to be worth 112px of label anyway.
-fn library_fact(label: SharedString, value: AnyElement, compact: bool, theme: BrowserTheme) -> Div {
-    let unlabelled = label.is_empty();
-    let label = div().flex_none().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(label);
-    let value = div().flex_1().min_w_0().min_h(gpui::rems(LIBRARY_FACT_HEIGHT_REM)).flex().flex_row().items_center().overflow_hidden().text_size(gpui::rems(TEXT_XS)).text_color(theme.text).child(value);
-    // A control that names itself keeps the value column but takes no label.
-    // Stacked, an empty label is an empty line, so only the value is drawn.
-    if compact && unlabelled {
-        return div().w_full().flex().child(value);
-    }
+        .child(div().size(px(SEGMENT_SWATCH_SIZE)).flex_none().rounded(px(SEGMENT_SWATCH_SIZE / 2.0)).bg(status_color))
+        .child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(status.into()));
+    let cloud = div().flex_none().flex().items_center().child(cloud);
     if compact {
-        div().w_full().flex().flex_col().gap(px(SPACE_XXS)).child(label).child(value)
-    } else {
-        div().w_full().flex().flex_row().items_center().gap(px(SPACE_MD)).child(label.w(gpui::rems(LIBRARY_FACT_LABEL_WIDTH_REM)).max_w(px(LIBRARY_FACT_LABEL_MAX_WIDTH))).child(value)
+        return library_table_line(theme).py(px(12.0)).child(title.child(size)).child(status.flex_none()).child(cloud);
     }
+    library_table_line(theme)
+        .py(px(12.0))
+        .child(title)
+        .child(size.w(gpui::rems(LIBRARY_SIZE_COLUMN_WIDTH_REM)).flex_none())
+        .child(status.w(gpui::rems(LIBRARY_STATUS_COLUMN_WIDTH_REM)).flex_none())
+        .child(cloud.w(gpui::rems(LIBRARY_CLOUD_COLUMN_WIDTH_REM)))
 }
 
-/// Vertical rhythm for the storage block/// The signed-out form: a title, the inputs, the actions, and whatever the last
+/// A table line, ruled above like every row in Settings.
+fn library_table_line(theme: BrowserTheme) -> Div {
+    div().w_full().flex().flex_row().items_center().gap(px(LIBRARY_COLUMN_GAP)).border_t_1().border_color(theme.rule)
+}
+
+/// The signed-out form: a title, the inputs, the actions, and whatever the last
 /// attempt had to say, in one measure.
 ///
 /// The inputs inside it carry their own placeholders and are never given a
@@ -226,7 +207,7 @@ pub fn form_hint(text: impl Into<SharedString>, theme: BrowserTheme) -> Div {
     div().text_size(gpui::rems(TEXT_XS)).text_color(theme.text_muted).child(text.into())
 }
 
-/// Vertical rhythm for the storage block: figures, meter, legend.
+/// Vertical rhythm for the storage block: summary, meter, breakdown.
 pub fn storage_block() -> Div {
     div().w_full().flex().flex_col().gap(px(SPACE_SM)).pt(px(SPACE_XS))
 }

@@ -4,20 +4,49 @@ use super::runtime_index::{compare_cutter_endpoint, compare_upper_cutters, cutte
 pub use super::runtime_index::{lcc_subject_sort_orders, UnifiedConceptDefinition, UnifiedConceptRoute};
 use super::{compact_whitespace, DDC_SYSTEM_ID, LCC_SYSTEM_ID};
 use crate::LccMatchReport;
+use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock, RwLock};
 
-/// The immutable taxonomy bundled locally in every native client build.
-/// Explicit builds without default features can produce a reduced seed. The
-/// browser bundles none: its host installs a downloaded image before use.
-#[cfg(not(target_arch = "wasm32"))]
-pub const DEFAULT_UNIFIED_TAXONOMY_SQLITE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/unified-taxonomy-client-v2.sqlite3"));
 /// Release identifier of the bundled taxonomy image. Keep this cheap constant
 /// separate from the runtime so an already-projected library can be opened
 /// without materializing the complete taxonomy matcher.
 pub const BUNDLED_UNIFIED_TAXONOMY_REVISION_ID: &str = include_str!(concat!(env!("OUT_DIR"), "/unified-taxonomy-revision-id.txt"));
 
 static RUNTIME: OnceLock<RwLock<Arc<UnifiedTaxonomyRuntime>>> = OnceLock::new();
+
+#[derive(Deserialize)]
+struct ReviewedPathAliases {
+    aliases: Vec<ReviewedPathAlias>,
+}
+
+#[derive(Deserialize)]
+struct ReviewedPathAlias {
+    path: String,
+    concept_id: i64,
+}
+
+fn reviewed_path_aliases() -> &'static BTreeMap<String, i64> {
+    static ALIASES: OnceLock<BTreeMap<String, i64>> = OnceLock::new();
+    ALIASES.get_or_init(|| {
+        let reviewed: ReviewedPathAliases = serde_json::from_str(include_str!("../data/reviewed-literature-path-aliases.json")).expect("reviewed path aliases must be valid");
+        let mut aliases = BTreeMap::new();
+        for alias in reviewed.aliases {
+            assert!(aliases.insert(alias.path, alias.concept_id).is_none(), "reviewed path aliases must be unique");
+        }
+        aliases
+    })
+}
+
+fn concept_for_path(runtime: &UnifiedTaxonomyRuntime, path: &str) -> Option<i64> {
+    if let Some(route) = runtime.routes.find(path) {
+        return Some(runtime.routes.concept_id(route));
+    }
+    let identity = *reviewed_path_aliases().get(path)?;
+    // A selected/installed taxonomy may omit a subject. Never manufacture
+    // assignments to identities absent from the active graph.
+    runtime.routes.paths_for_concept(identity).next().map(|_| identity)
+}
 
 /// An owned, immutable taxonomy matcher suitable for servers and tools that
 /// must not replace the process-wide client taxonomy.
@@ -28,7 +57,7 @@ pub struct UnifiedTaxonomy {
 
 impl UnifiedTaxonomy {
     pub fn from_concepts(concepts: Vec<UnifiedConceptDefinition>) -> Result<Self, String> {
-        Ok(Self { runtime: Arc::new(build_runtime(concepts, false)?) })
+        Ok(Self { runtime: Arc::new(build_runtime(concepts)?) })
     }
 
     pub fn revision_id(&self) -> &str {
@@ -37,6 +66,10 @@ impl UnifiedTaxonomy {
 
     pub fn matching_concept_ids(&self, system_id: &str, code: &str) -> Vec<i64> {
         matching_concepts(&self.runtime, system_id, code).into_iter().collect()
+    }
+
+    pub fn most_specific_concept_ids(&self, concepts: impl IntoIterator<Item = i64>) -> BTreeSet<i64> {
+        most_specific_concept_ids_in(&self.runtime, concepts)
     }
 
     /// Returns candidates for one code, or independently resolved subjects for an explicit LCC list.
@@ -60,8 +93,8 @@ impl UnifiedTaxonomy {
                     .exact
                     .iter()
                     .filter_map(|(code, ids)| {
-                        let shadowed = ids.iter().flat_map(|id| self.runtime.ancestors[id].iter().copied()).collect::<BTreeSet<_>>();
-                        let specific = ids.difference(&shadowed).copied().collect::<Vec<_>>();
+                        let shadowed = ids.iter().flat_map(|id| self.runtime.ancestors(*id).iter().copied()).collect::<BTreeSet<_>>();
+                        let specific = ids.iter().copied().filter(|id| !shadowed.contains(id)).collect::<Vec<_>>();
                         (specific.len() > 1).then(|| (code.clone(), specific))
                     })
                     .collect()
@@ -78,28 +111,11 @@ pub(super) fn current() -> Arc<UnifiedTaxonomyRuntime> {
     RUNTIME.get_or_init(|| RwLock::new(default_runtime())).read().expect("unified taxonomy runtime lock must not be poisoned").clone()
 }
 
-pub fn unified_concept_definitions() -> Vec<UnifiedConceptDefinition> {
-    let Some(runtime) = RUNTIME.get() else {
-        return default_concepts();
-    };
-    runtime.read().ok().and_then(|runtime| runtime.concepts.as_deref().cloned()).unwrap_or_else(default_concepts)
-}
-
 pub fn install_unified_taxonomy_concepts(concepts: Vec<UnifiedConceptDefinition>) -> Result<(), String> {
-    let replacement = Arc::new(build_runtime(concepts, true)?);
+    let replacement = Arc::new(build_runtime(concepts)?);
     let runtime = RUNTIME.get_or_init(|| RwLock::new(replacement.clone()));
     *runtime.write().map_err(|_| "unified taxonomy runtime lock is poisoned".to_owned())? = replacement;
     Ok(())
-}
-
-/// Rebuilds the runtime from the embedded client snapshot plus a persisted
-/// on-demand overlay. This also removes concepts from an obsolete overlay.
-pub fn install_unified_taxonomy_overlay(concepts: Vec<UnifiedConceptDefinition>) -> Result<(), String> {
-    let mut merged = default_concepts().into_iter().map(|concept| (concept.concept_id().to_owned(), concept)).collect::<BTreeMap<_, _>>();
-    for concept in concepts {
-        merged.insert(concept.concept_id().to_owned(), concept);
-    }
-    install_unified_taxonomy_concepts(merged.into_values().collect())
 }
 
 pub fn unified_taxonomy_revision_id() -> String {
@@ -115,9 +131,29 @@ pub fn loaded_unified_taxonomy_revision_id() -> Option<String> {
 pub fn unified_subject_paths(system_id: &str, code: &str) -> Vec<String> {
     let runtime = current();
     if system_id == crate::UNIFIED_SYSTEM_ID {
-        return runtime.routes.find(code).is_some().then(|| code.to_owned()).into_iter().collect();
+        if runtime.routes.find(code).is_some() {
+            return vec![code.to_owned()];
+        }
+        return concept_for_path(&runtime, code).into_iter().flat_map(|id| runtime.routes.paths_for_concept(id)).collect();
     }
     matching_concepts(&runtime, system_id, code).into_iter().flat_map(|id| runtime.routes.paths_for_concept(id)).collect::<BTreeSet<_>>().into_iter().collect()
+}
+
+/// Remove only assigned ancestors of other assignments. Sibling branches and
+/// unrelated roots remain independent, regardless of their depth or source code.
+pub fn most_specific_concept_ids(concepts: impl IntoIterator<Item = i64>) -> BTreeSet<i64> {
+    most_specific_concept_ids_in(&current(), concepts)
+}
+
+fn most_specific_concept_ids_in(runtime: &UnifiedTaxonomyRuntime, concepts: impl IntoIterator<Item = i64>) -> BTreeSet<i64> {
+    let mut concepts = concepts.into_iter().collect::<BTreeSet<_>>();
+    let ancestors = concepts
+        .iter()
+        .filter_map(|id| runtime.ancestors.binary_search_by_key(id, |(id, _)| *id).ok())
+        .flat_map(|index| runtime.ancestors[index].1.iter().copied())
+        .collect::<BTreeSet<_>>();
+    concepts.retain(|id| !ancestors.contains(id));
+    concepts
 }
 
 /// True only when the installed taxonomy names this precise external code.
@@ -152,7 +188,7 @@ pub fn unified_subject_similarity_keys(system_id: &str, code: &str) -> Vec<Strin
 /// Returns the ID assigned in the immutable taxonomy; unknown paths have no ID.
 pub fn unified_concept_id(path: &str) -> Option<i64> {
     let runtime = current();
-    runtime.routes.find(path).map(|id| runtime.routes.concept_id(id))
+    concept_for_path(&runtime, path)
 }
 
 pub fn unified_subject_sort_order(path: &str) -> i64 {
@@ -267,7 +303,7 @@ fn matching_candidates(runtime: &UnifiedTaxonomyRuntime, system_id: &str, code: 
             }
         }
     }
-    let shadowed = matches.iter().flat_map(|(id, _)| runtime.ancestors[id].iter().copied()).collect::<BTreeSet<_>>();
+    let shadowed = matches.iter().flat_map(|(id, _)| runtime.ancestors(*id).iter().copied()).collect::<BTreeSet<_>>();
     matches.retain(|(id, _)| !shadowed.contains(id));
     let compare = |left: &Rank<'_>, right: &Rank<'_>| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)).then_with(|| left.2.cmp(&right.2)).then_with(|| right.3.total_cmp(&left.3));
     let Some(best) = matches.iter().map(|(_, rank)| rank).max_by(|a, b| compare(a, b)) else { return BTreeSet::new() };
@@ -292,13 +328,13 @@ fn default_runtime() -> Arc<UnifiedTaxonomyRuntime> {
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/unified-taxonomy-matcher.bin"));
     let (runtime, consumed): (UnifiedTaxonomyRuntime, usize) = bincode::serde::decode_from_slice(bytes, bincode::config::standard()).expect("bundled taxonomy matcher must be valid");
     assert_eq!(consumed, bytes.len(), "bundled taxonomy matcher has trailing bytes");
-    assert_eq!(runtime.revision_id, BUNDLED_UNIFIED_TAXONOMY_REVISION_ID, "bundled taxonomy revision constant must track the embedded database");
+    assert_eq!(runtime.revision_id, BUNDLED_UNIFIED_TAXONOMY_REVISION_ID, "bundled taxonomy revision constant must track the compiled matcher");
     Arc::new(runtime)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 fn default_concepts() -> Vec<UnifiedConceptDefinition> {
-    crate::taxonomy_sqlite::read_embedded_unified_taxonomy().expect("embedded unified taxonomy SQLite must be readable")
+    crate::taxonomy_sqlite::read_bundled_unified_taxonomy().expect("bundled unified taxonomy SQLite must be readable")
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -306,15 +342,53 @@ fn default_runtime() -> Arc<UnifiedTaxonomyRuntime> {
     panic!("the browser host installs the taxonomy before using it")
 }
 
-#[cfg(target_arch = "wasm32")]
-fn default_concepts() -> Vec<UnifiedConceptDefinition> {
-    panic!("the browser host installs the taxonomy before using it")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::runtime_index::validate;
+
+    #[test]
+    fn most_specific_assignments_keep_divergent_branches_and_shared_routes() {
+        let taxonomy = UnifiedTaxonomy::from_concepts(vec![
+            concept(1, "Literature", &[], &[]),
+            concept(2, "English", &[1], &[]),
+            concept(3, "English periods", &[2], &[]),
+            concept(4, "Mystery", &[1], &[]),
+            concept(5, "History", &[], &[]),
+            concept(6, "Shared topic", &[3, 5], &[]),
+        ])
+        .unwrap();
+        assert_eq!(taxonomy.most_specific_concept_ids([1, 2, 3, 4, 5, 3]), BTreeSet::from([3, 4, 5]));
+        assert_eq!(taxonomy.most_specific_concept_ids([1, 2, 3, 4, 5, 6]), BTreeSet::from([4, 6]));
+        assert_eq!(taxonomy.most_specific_concept_ids([2, 4]), BTreeSet::from([2, 4]));
+        assert_eq!(taxonomy.most_specific_concept_ids([2]), BTreeSet::from([2]));
+        assert_eq!(taxonomy.most_specific_concept_ids([]), BTreeSet::new());
+        // Unknown identities must still reach normal database validation.
+        assert_eq!(taxonomy.most_specific_concept_ids([0, 2]), BTreeSet::from([0, 2]));
+    }
+
+    #[test]
+    fn compact_indexes_preserve_shared_ancestry_and_exact_selector_conflicts() {
+        let taxonomy = UnifiedTaxonomy::from_concepts(vec![
+            concept(1, "Root", &[], &[]),
+            concept(2, "Branch", &[1], &["QA10"]),
+            concept(3, "Other branch", &[1], &[]),
+            concept(4, "Shared leaf", &[2, 3], &["QA10", "QA10.0"]),
+            concept(5, "Unrelated", &[], &["QA10"]),
+        ])
+        .unwrap();
+        assert_eq!(taxonomy.runtime.ancestors(4), &[1, 2, 3]);
+        assert_eq!(taxonomy.match_candidates(LCC_SYSTEM_ID, "QA10"), vec![4, 5]);
+        assert_eq!(taxonomy.lcc_selector_conflicts()["QA10"], vec![4, 5]);
+
+        let bytes = bincode::serde::encode_to_vec(taxonomy.runtime.as_ref(), bincode::config::standard()).unwrap();
+        let (decoded, consumed): (UnifiedTaxonomyRuntime, usize) = bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
+        assert_eq!(consumed, bytes.len());
+        assert_eq!(&decoded, taxonomy.runtime.as_ref());
+        let restored = UnifiedTaxonomy { runtime: Arc::new(decoded) };
+        assert_eq!(restored.match_candidates(LCC_SYSTEM_ID, "QA10"), vec![4, 5]);
+        assert_eq!(restored.lcc_selector_conflicts(), taxonomy.lcc_selector_conflicts());
+    }
 
     #[test]
     fn reviewed_history_ranges_cover_their_complete_boundaries() {
@@ -366,12 +440,33 @@ mod tests {
 
     #[test]
     fn bundled_matcher_equals_runtime_compilation() {
-        let rebuilt = build_runtime(default_concepts(), false).expect("compile bundled definitions");
+        let rebuilt = build_runtime(default_concepts()).expect("compile bundled definitions");
         let bundled = default_runtime();
         assert_eq!(bundled.as_ref(), &rebuilt);
         // Also verifies deterministic encoding despite randomized HashMap seeds.
         let encoded = bincode::serde::encode_to_vec(&rebuilt, bincode::config::standard()).unwrap();
         assert_eq!(encoded.as_slice(), include_bytes!(concat!(env!("OUT_DIR"), "/unified-taxonomy-matcher.bin")));
+    }
+
+    #[cfg(feature = "authoritative-taxonomy")]
+    #[test]
+    fn bundled_computer_science_calls_do_not_fall_through_to_mathematics() {
+        let taxonomy = UnifiedTaxonomy::from_concepts(default_concepts()).unwrap();
+        for code in ["QA75.5", "QA75.51", "QA76.76", "QA76.76 .F634 2005", "QA76.94", "QA76.95"] {
+            let ids = taxonomy.matching_concept_ids(LCC_SYSTEM_ID, code);
+            assert!(!ids.is_empty(), "{code}");
+            for id in ids {
+                assert!(id == 36 || taxonomy.runtime.ancestors(id).contains(&36), "{code} must resolve under Computing");
+                assert!(id != 4916 && !taxonomy.runtime.ancestors(id).contains(&4916), "{code} must not resolve under Mathematics");
+            }
+        }
+        assert_eq!(taxonomy.matching_concept_ids(LCC_SYSTEM_ID, "QA76.76.D47 F634 2005"), vec![168]);
+        // The new interval must not take adjacent mathematics classifications.
+        for code in ["QA75.49", "QA77", "QA99", "QA699"] {
+            let ids = taxonomy.matching_concept_ids(LCC_SYSTEM_ID, code);
+            assert!(!ids.is_empty(), "{code}");
+            assert!(ids.iter().all(|id| *id == 4916 || taxonomy.runtime.ancestors(*id).contains(&4916)), "{code} must remain under Mathematics");
+        }
     }
 
     #[test]
@@ -400,7 +495,6 @@ mod tests {
         assert_eq!(taxonomy.match_candidates(LCC_SYSTEM_ID, "QA1.C5"), vec![1, 2]);
         assert_eq!(taxonomy.match_candidates(LCC_SYSTEM_ID, "QA2.C83"), vec![3, 4]);
     }
-
 
     #[test]
     fn equivalent_range_labels_do_not_choose_between_conflicting_subjects() {
@@ -437,7 +531,6 @@ mod tests {
         assert!(taxonomy.match_candidates(LCC_SYSTEM_ID, "QX2-9").is_empty());
     }
 
-
     #[test]
     fn equally_specific_lcc_matches_are_unresolved() {
         let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(3, "Management", &[], &["HD69"]), concept(12, "Consultants", &[3], &["HD69.C6"]), concept(23, "Consulting", &[3], &["HD 69 .C6"])]).unwrap();
@@ -445,7 +538,6 @@ mod tests {
         assert_eq!(taxonomy.match_candidates(LCC_SYSTEM_ID, "HD69.C6 R38"), vec![12, 23]);
         assert_eq!(taxonomy.lcc_selector_conflicts()["HD69.C6"], vec![12, 23]);
     }
-
 
     #[test]
     fn specificity_unrelated_ties_are_unresolved_for_every_code_system() {
@@ -458,7 +550,6 @@ mod tests {
         assert_eq!(taxonomy.match_candidates(LCC_SYSTEM_ID, "QA5.A1"), vec![15, 21]);
         assert!(taxonomy.matching_concept_ids("bisac", "COM000000").is_empty());
     }
-
 
     #[test]
     fn specificity_uses_all_parent_paths_and_not_absolute_depth() {
@@ -490,7 +581,6 @@ mod tests {
         assert!(taxonomy.matching_concept_ids("bisac", "COM000000").is_empty());
         assert_eq!(taxonomy.match_candidates("bisac", "COM000000"), vec![2, 3]);
     }
-
 
     #[test]
     fn printed_paren_range_spellings_are_rejected() {
@@ -554,14 +644,12 @@ mod tests {
         assert_eq!(taxonomy.match_candidates(LCC_SYSTEM_ID, "PZ7.S28 E"), vec![1]);
     }
 
-
     #[test]
     fn item_shaped_list_tails_do_not_create_spurious_subjects() {
         let taxonomy = UnifiedTaxonomy::from_concepts(vec![concept(1, "Psychoanalysis", &[], &["BF175..BF175"]), concept(2, "Philosophy", &[], &["B1..B100"])]).unwrap();
         assert_eq!(taxonomy.matching_concept_ids(LCC_SYSTEM_ID, "BF175; B43"), vec![1]);
         assert_eq!(taxonomy.matching_concept_ids(LCC_SYSTEM_ID, "BF175 B43"), vec![1]);
     }
-
 
     #[test]
     fn validation_rejects_parallel_taxonomy_structures() {
@@ -574,7 +662,6 @@ mod tests {
         let duplicate_source_record = vec![concept(22, "Humanities", &[], &[]), concept(15, "Ethnography", &[22], &["GN301"]), concept(20, "Social Sciences", &[], &[]), concept(21, "Ethnography.", &[20], &["GN301"])];
         assert!(validate(&duplicate_source_record).unwrap_err().contains("duplicate source selector"));
     }
-
 
     #[test]
     fn pz_work_marks_match_author_exceptions_and_numeric_ranges() {
@@ -608,5 +695,4 @@ mod tests {
         assert_eq!(taxonomy.matching_concept_ids("lcc", "PL2800.A1 <Hebr>"), vec![1]);
         assert_eq!(taxonomy.matching_concept_ids("lcc", "PL2780.F4 <UNKNOWN>"), vec![2]);
     }
-
 }

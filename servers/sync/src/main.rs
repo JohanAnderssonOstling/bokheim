@@ -37,7 +37,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some(command) if command == "migrate" && arguments.next().is_none() => run_migrate().await,
         Some(command) if command == "upgrade" && arguments.next().is_none() => run_upgrade().await,
         Some(command) if command == "verify-schema" && arguments.next().is_none() => run_verify_schema().await,
-        Some(command) => Err(io::Error::new(io::ErrorKind::InvalidInput, format!("unknown sync-server command: {}; expected no command, 'migrate', 'upgrade', or 'verify-schema'", command.to_string_lossy())).into()),
+        Some(command) if command == "rotate-sync-generation" && arguments.next().is_none() => run_rotate_sync_generation().await,
+        Some(command) => Err(io::Error::new(io::ErrorKind::InvalidInput, format!("unknown sync-server command: {}; expected no command, 'migrate', 'upgrade', 'verify-schema', or 'rotate-sync-generation'", command.to_string_lossy())).into()),
     }
 }
 
@@ -61,6 +62,14 @@ async fn run_verify_schema() -> Result<(), Box<dyn Error>> {
     let database_url = secret_from_environment_or_systemd_credential("DATABASE_URL", "database_url")?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DATABASE_URL or the database_url systemd credential is required"))?;
     let database = server_postgres::connect(&database_url).await?;
     server_postgres::verify_schema(&database).await?;
+    Ok(())
+}
+
+async fn run_rotate_sync_generation() -> Result<(), Box<dyn Error>> {
+    let database_url = secret_from_environment_or_systemd_credential("DATABASE_URL", "database_url")?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DATABASE_URL or the database_url systemd credential is required"))?;
+    let database = server_postgres::connect(&database_url).await?;
+    let generation = server_postgres::rotate_sync_generation(&database).await?;
+    println!("{generation}");
     Ok(())
 }
 

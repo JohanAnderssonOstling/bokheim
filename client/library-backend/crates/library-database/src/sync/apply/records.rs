@@ -16,6 +16,11 @@ pub(crate) fn snapshot(conn: &Connection, kind: &str, key: &StateKey, subkey: &s
     stored.map(|(body, token)| Ok((body, wire::decode(&token, wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)?))).transpose()
 }
 
+pub(crate) fn publication_version(conn: &Connection, kind: &str, key: &StateKey, subkey: &str) -> Result<Option<VersionKey>, DatabaseError> {
+    let token: Option<Vec<u8>> = conn.records_publication_version(&kind, &key, &subkey, |row| row.get(0)).optional()?;
+    token.map(|token| wire::decode(&token, wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)).transpose()
+}
+
 /// Keep an offline addition locally until it has a definitive enrichment answer.
 pub(crate) fn stage(conn: &Connection, hash: &sync_common::ContentHash, value: library_replica::BookAddition) -> Result<(), DatabaseError> {
     if value.enrichment.is_some() {
@@ -96,7 +101,7 @@ mod tests {
             content_hash: hash,
             value: library_replica::BookAddition {
                 facts: library_replica::BookFacts { added_at: 1, format: book_model::BookFormat::Epub },
-                record: book_model::BookRecord { metadata: Default::default(), description: String::new() },
+                record: book_model::BookRecord { metadata: Default::default(), description: "x".repeat(64 * 1024) },
                 navigation: None,
                 pdf: None,
                 recording: None,
@@ -115,6 +120,12 @@ mod tests {
         drop(db);
         let reopened = Database::open(path.to_str().unwrap()).unwrap();
         assert_eq!(reopened.sync_publishable_mutations().unwrap(), pending);
+        reopened.sync_acknowledge_mutations(&[pending[0].publisher_seq]).unwrap();
+        assert_eq!(reopened.sync_enqueue_missing_state_cells(&[pending[0].state.value.address()]).unwrap(), 1);
+        let recovered = reopened.sync_publishable_mutations().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].state, pending[0].state);
+        assert_ne!(recovered[0].publisher_seq, pending[0].publisher_seq);
         drop(reopened);
         std::fs::remove_file(path).unwrap();
     }

@@ -20,6 +20,8 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("enter", Confirm { secondary: false }, Some(CONTEXT)),
         KeyBinding::new("escape", Cancel, Some(CONTEXT)),
+        #[cfg(not(target_os = "android"))]
+        KeyBinding::new("back", Cancel, Some(CONTEXT)),
         KeyBinding::new("up", SelectUp, Some(CONTEXT)),
         KeyBinding::new("down", SelectDown, Some(CONTEXT)),
         KeyBinding::new("left", SelectLeft, Some(CONTEXT)),
@@ -303,6 +305,7 @@ impl PopupMenuItem {
 }
 
 pub struct PopupMenu {
+    open: bool,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) menu_items: Vec<PopupMenuItem>,
     /// The focus handle of Entity to handle actions.
@@ -322,6 +325,7 @@ pub struct PopupMenu {
     /// The parent menu of this menu, if this is a submenu
     parent_menu: Option<WeakEntity<Self>>,
     scrollable: bool,
+    dismiss_on_select: bool,
     touch_friendly: bool,
     external_link_icon: bool,
     scroll_handle: ScrollHandle,
@@ -345,8 +349,17 @@ pub struct PopupMenu {
 }
 
 impl PopupMenu {
+    pub(crate) fn is_open(&self) -> bool { self.open }
+
+    pub(crate) fn deactivate(&mut self) { self.open = false; }
+
+    pub(crate) fn cancel_from_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss(&Cancel, window, cx);
+    }
+
     pub(crate) fn new(cx: &mut App) -> Self {
         Self {
+            open: false,
             focus_handle: cx.focus_handle(),
             action_context: None,
             previous_focus_handle: None,
@@ -359,6 +372,7 @@ impl PopupMenu {
             check_side: Side::Left,
             bounds: Bounds::default(),
             scrollable: false,
+            dismiss_on_select: true,
             touch_friendly: false,
             scroll_handle: ScrollHandle::default(),
             external_link_icon: true,
@@ -444,6 +458,12 @@ impl PopupMenu {
     /// NOTE: If this is true, the sub-menus will cannot be support.
     pub fn scrollable(mut self, scrollable: bool) -> Self {
         self.scrollable = scrollable;
+        self
+    }
+
+    /// Keep a multi-select menu open until Escape or an outside click.
+    pub fn dismiss_on_select(mut self, dismiss: bool) -> Self {
+        self.dismiss_on_select = dismiss;
         self
     }
 
@@ -874,7 +894,11 @@ impl PopupMenu {
                             self.dispatch_confirm_action(action, window, cx);
                         }
 
-                        self.dismiss(&Cancel, window, cx)
+                        if self.dismiss_on_select {
+                            self.dismiss(&Cancel, window, cx)
+                        } else {
+                            cx.notify();
+                        }
                     }
                     Some(PopupMenuItem::ElementItem {
                         handler, action, ..
@@ -884,7 +908,11 @@ impl PopupMenu {
                         } else if let Some(action) = action.as_ref() {
                             self.dispatch_confirm_action(action, window, cx);
                         }
-                        self.dismiss(&Cancel, window, cx)
+                        if self.dismiss_on_select {
+                            self.dismiss(&Cancel, window, cx)
+                        } else {
+                            cx.notify();
+                        }
                     }
                     _ => {}
                 }
@@ -1070,6 +1098,7 @@ impl PopupMenu {
             return;
         }
 
+        self.open = false;
         cx.emit(DismissEvent);
 
         // Focus back to the previous focused handle.
@@ -1417,6 +1446,8 @@ struct RenderOptions {
 
 impl Render for PopupMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.open = true;
+        crate::Root::register_menu(cx.entity().downgrade(), window, cx);
         self.update_submenu_menu_anchor(window);
 
         // Submenus attached via the public `item()` + `PopupMenuItem::submenu()`

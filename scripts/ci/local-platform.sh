@@ -53,6 +53,7 @@ case "$platform" in
     ;;
   web)
     : "${PLAYWRIGHT_MODULE:?Set PLAYWRIGHT_MODULE to the installed playwright/index.mjs}"
+    command -v brotli >/dev/null
     command -v wasm-opt >/dev/null
     command -v wasm-bindgen >/dev/null
     python3 shared/pdfium/prepare.py --target wasm32-unknown-unknown
@@ -60,6 +61,7 @@ case "$platform" in
     cargo check --release -p web-backend-worker --example cpu_worker --example sync_coordinator --target wasm32-unknown-unknown
     cargo check --release -p web-backend-worker -p web-gpui --target wasm32-unknown-unknown
     node --test client/platforms/web/tests/signal.mjs
+    python3 -m unittest discover -s apps/web-gpui/scripts/tests
     BOKHEIM_WEB_OUTPUT_DIR="$output" bash apps/web-gpui/scripts/build.sh
     ;;
   *) echo "Unknown local platform: $platform" >&2; exit 2 ;;

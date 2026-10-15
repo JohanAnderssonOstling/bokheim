@@ -26,7 +26,7 @@ pub(crate) fn sync_error(error: server_postgres::SyncError) -> StatusCode {
     match error {
         server_postgres::SyncError::Forbidden => StatusCode::FORBIDDEN,
         server_postgres::SyncError::LibraryOwnershipConflict => StatusCode::CONFLICT,
-        server_postgres::SyncError::CursorAhead => StatusCode::GONE,
+        server_postgres::SyncError::CursorAhead | server_postgres::SyncError::HistoryMismatch => StatusCode::GONE,
         server_postgres::SyncError::UpgradeRequired => StatusCode::UPGRADE_REQUIRED,
         server_postgres::SyncError::InvalidLibraryName | server_postgres::SyncError::InvalidOpdsFeed => StatusCode::BAD_REQUEST,
         server_postgres::SyncError::OpdsFeedConflict => StatusCode::CONFLICT,

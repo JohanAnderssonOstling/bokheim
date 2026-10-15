@@ -276,7 +276,7 @@ fn identifier_scheme_from_type(identifier_type: &MetadataIdentifierType) -> Opti
     (!matches!(parsed, IdentifierScheme::Unspecified | IdentifierScheme::Other(_))).then_some(parsed)
 }
 
-fn parse_opf_metadata(opf_xml: &str) -> DeclaredMetadata {
+pub(super) fn parse_opf_metadata(opf_xml: &str) -> DeclaredMetadata {
     let mut reader = quick_xml::Reader::from_str(opf_xml);
     reader.trim_text(true);
     let mut buf = Vec::new();

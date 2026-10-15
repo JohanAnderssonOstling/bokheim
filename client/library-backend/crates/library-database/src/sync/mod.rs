@@ -1,12 +1,15 @@
 //! Replica sync: pull commits, cursors, outbox, sync functions.
 
 use crate::SqlParam;
-use sync_common::StateKey;
+pub(crate) use crate::shared_sql::SharedSql;
 use content_address::ContentHash;
 use std::io::{Error, ErrorKind};
-pub(crate) use crate::shared_sql::SharedSql;
+use sync_common::{LibraryRevision, StateKey, SyncCursor, SyncGeneration};
 pub(crate) mod apply;
 pub(crate) mod outbox;
+pub use outbox::OutboxScan;
+mod issues;
+pub(crate) mod reading_positions;
 pub(crate) mod state;
 pub use state::CURSOR_RECOVERY_PENDING_KEY;
 #[cfg(test)]
@@ -20,6 +23,7 @@ include_sql!("src/sync/sql/schema/index.sql");
 include_sql!("src/sync/sql/sync_apply.sql");
 
 include_sql!("src/sync/sql/sync_state.sql");
+include_sql!("src/sync/sql/mutation_issues.sql");
 
 include_sql!("src/sync/sql/sync_outbox.sql");
 
@@ -47,57 +51,32 @@ pub(crate) fn toc_entry_count(entries: &[library_model::BookTocEntry]) -> usize 
     entries.iter().map(|entry| 1 + toc_entry_count(&entry.children)).sum()
 }
 
-pub(crate) fn parse_revision(value: Option<String>) -> Result<Option<sync_common::LibraryRevision>, DatabaseError> {
+pub(crate) fn parse_revision(value: Option<String>) -> Result<Option<LibraryRevision>, DatabaseError> {
     value
         .map(|value| {
             let raw = value.parse::<u64>().map_err(|error| DatabaseError::message(format!("stored revision is not readable: {error}")))?;
-            sync_common::LibraryRevision::new(raw).map_err(|error| DatabaseError::message(format!("stored revision is not readable: {error}")))
+            LibraryRevision::new(raw).map_err(|error| DatabaseError::message(format!("stored revision is not readable: {error}")))
         })
         .transpose()
 }
 
-pub(crate) fn read_cursor_revision(conn: &rusqlite::Connection, key: PullCursorKey) -> Result<Option<String>, DatabaseError> {
-    // Single-statement read used twice by the commit (pre-transaction fast
-    // path and in-transaction recheck). It takes the connection rather than
-    // the transaction: it never manages transaction boundaries.
-    let mut revision = None;
-    match key {
-        PullCursorKey::Lifecycle => conn.shared_cursor_lifecycle_select(|row| {
-            revision = row.get::<_, Option<String>>(0)?;
-            Ok(())
-        })?,
-        PullCursorKey::Field => conn.shared_cursor_field_select(|row| {
-            revision = row.get::<_, Option<String>>(0)?;
-            Ok(())
-        })?,
-    };
-    Ok(revision)
+/// Reads the generation and both revisions from the same SQLite statement.
+pub(crate) fn read_pull_cursor(conn: &rusqlite::Connection) -> Result<SyncCursor, DatabaseError> {
+    let mut raw = None;
+    conn.sync_pull_cursor(|row| {
+        raw = Some((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?));
+        Ok(())
+    })?;
+    let (generation, lifecycle, field) = raw.ok_or_else(|| DatabaseError::message("sync metadata row is missing"))?;
+    Ok(SyncCursor { generation: generation.map(|value| SyncGeneration::parse_str(&value).map_err(DatabaseError::operation)).transpose()?, lifecycle_revision: parse_revision(lifecycle)?, field_revision: parse_revision(field)? })
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum PullCursorKey {
-    Lifecycle,
-    Field,
-}
-
-pub(crate) fn write_cursor_revision(tx: &rusqlite::Connection, key: PullCursorKey, revision: Option<sync_common::LibraryRevision>) -> Result<(), DatabaseError> {
-    // Counterpart to the read above: one statement, no boundary management.
-    // It takes the connection rather than the transaction for the same
-    // reason; the commit passes its transaction, which dereferences.
-    match (key, revision) {
-        (PullCursorKey::Lifecycle, Some(revision)) => {
-            tx.cursor_lifecycle_upsert(&revision.get().to_string()).map_err(DatabaseError::operation)?;
-        }
-        (PullCursorKey::Lifecycle, None) => {
-            tx.cursor_lifecycle_clear().map_err(DatabaseError::operation)?;
-        }
-        (PullCursorKey::Field, Some(revision)) => {
-            tx.cursor_field_upsert(&revision.get().to_string()).map_err(DatabaseError::operation)?;
-        }
-        (PullCursorKey::Field, None) => {
-            tx.cursor_field_clear().map_err(DatabaseError::operation)?;
-        }
-    }
+/// One statement, run within the same transaction as the applied page.
+pub(crate) fn write_pull_cursor(tx: &rusqlite::Connection, cursor: &SyncCursor) -> Result<(), DatabaseError> {
+    let generation = cursor.generation.map(|generation| generation.to_string());
+    let lifecycle = cursor.lifecycle_revision.map(|revision| storage_i64(revision.get(), "lifecycle revision")).transpose()?;
+    let field = cursor.field_revision.map(|revision| storage_i64(revision.get(), "field revision")).transpose()?;
+    tx.sync_write_pull_cursor(generation.as_deref(), lifecycle, field).map_err(DatabaseError::operation)?;
     Ok(())
 }
 
@@ -119,4 +98,3 @@ pub(crate) fn unix_millis() -> Result<i64, DatabaseError> {
     let millis = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map_err(DatabaseError::operation)?.as_millis();
     i64::try_from(millis).map_err(DatabaseError::operation)
 }
-

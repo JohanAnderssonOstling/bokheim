@@ -1,5 +1,6 @@
 //! PDF page and outline navigation.
 
+use crate::shell::toolbar::SidebarTarget;
 use book_model::BookTocEntry;
 use gpui::prelude::*;
 use gpui::{Context, Entity, ScrollStrategy, Window};
@@ -8,29 +9,28 @@ use ui_components as components;
 
 use super::PdfReaderView;
 use crate::pdf::toc::pdf_toc_tree_items;
+use crate::shell::state_panel::{self, TocActivation};
 
 impl PdfReaderView {
     pub(super) fn load_database_toc(&self, cx: &mut Context<Self>) {
         let library = self.library.clone();
         let content_hash = self.locator.content_hash();
-        cx.spawn(async move |this, cx| {
-            match library.book_detail(content_hash).await {
-                Ok(detail) => {
-                    let _ = this.update(cx, |this, cx| {
-                        this.set_toc(detail.toc, cx);
-                        let current_page = this.current_page;
-                        this.update_active_toc(current_page, cx);
-                    });
-                }
-                Err(error) => log::warn!("could not load PDF table of contents from library database: {error}"),
+        cx.spawn(async move |this, cx| match library.book_detail(content_hash).await {
+            Ok(detail) => {
+                let _ = this.update(cx, |this, cx| {
+                    this.set_toc(detail.toc, cx);
+                    let current_page = this.current_page;
+                    this.update_active_toc(current_page, cx);
+                });
             }
+            Err(error) => log::warn!("could not load PDF table of contents from library database: {error}"),
         })
         .detach();
     }
 
     /// Reclaim document focus on hover without interrupting sidebar keyboard input.
     pub(super) fn reclaim_hover_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sidebar_focus.contains_focused(window, cx) {
+        if self.sidebar_focus.contains_focused(window, cx) || self.rail_focus.contains_focused(window, cx) || self.marks.selected().is_some() {
             return;
         }
         window.activate_window();
@@ -73,9 +73,11 @@ impl PdfReaderView {
     }
 
     pub(super) fn render_toc_body(&self, entity: Entity<Self>, theme: components::BrowserTheme, cx: &gpui::App) -> gpui::AnyElement {
-        let toc = crate::shell::state_panel::reader_toc_tree(&self.toc_tree, &entity, self.toc.active_id(), theme, cx, |id, window, this: &mut Self, cx| {
+        let toc = state_panel::reader_toc_tree(&self.toc_tree, &entity, self.toc.active_id(), self.settings_navigation.keyboard_visible(), theme, cx, |id, activation, window, this: &mut Self, cx| {
             this.navigate_to_toc(id, cx);
-            this.focus_document(window, cx);
+            if activation == TocActivation::Pointer {
+                this.focus_sidebar_body(window, cx);
+            }
         });
         components::reader_toc(theme).child(toc).into_any_element()
     }

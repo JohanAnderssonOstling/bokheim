@@ -63,6 +63,12 @@ impl PdfReaderView {
         let positions = ReadingPositionWriter::new(cx, locator.content_hash(), library.clone());
         let mut marks = MarkSession::new(cx, library.clone());
         marks.merge_loaded(imported);
+        #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+        let tts = crate::shell::tts::Narration::default()
+            .with_title(title.clone())
+            .with_rate(ReaderSettings::preferences(cx).audiobook_speed)
+            .with_pauses(ReaderSettings::preferences(cx).narration_pauses)
+            .with_voice(ReaderSettings::preferences(cx).narration_voice);
         let reader = Self {
             #[cfg(feature = "kobo")]
             brightness: cx.new(|cx| crate::shell::brightness::BrightnessControls::new(_app.clone(), window, cx)),
@@ -75,17 +81,28 @@ impl PdfReaderView {
             toc_tree,
             toc: PdfTocState::default(),
             sidebar: SidebarState::from_preferences(cx),
-            chrome: crate::shell::chrome::ChromeState::new(Component::PdfShell),
+            chrome: crate::shell::chrome::ChromeState::from_preferences(Component::PdfShell, cx),
             marks,
             annotation_note_input,
             annotation_popup_anchor: None,
             context_sheet: None,
             current_page: 0,
+            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            tts,
+            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            tts_fragments: Vec::new(),
+            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            tts_request: 0,
+            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            tts_page: 0,
+            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            tts_navigation_revision: 0,
             page_count: 0,
             positions,
             close_reader,
             focus,
             sidebar_focus: cx.focus_handle().tab_index(0).tab_stop(true),
+            rail_focus: cx.focus_handle().tab_stop(true),
             settings_navigation: Default::default(),
             _subscriptions: vec![pdf_subscription, search_subscription],
         };
@@ -103,6 +120,8 @@ impl PdfReaderView {
                 self.current_page = current_page;
                 self.page_count = *total;
                 self.update_active_toc(current_page, cx);
+                #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+                self.tts_navigation_changed(current_page, full_page_position, cx);
                 if unchanged {
                     return;
                 }
@@ -118,12 +137,13 @@ impl PdfReaderView {
             }
             PdfViewEvent::PageTapped => self.toggle_mobile_controls(window, cx),
             PdfViewEvent::AnnotationActivated { id, position } => {
-                crate::shell::state_panel::select_tab(&mut self.sidebar, SidebarTab::Annotations, cx);
+                crate::shell::state_panel::select_tab(&mut self.sidebar, SidebarTab::Notes, cx);
                 self.annotation_popup_anchor = Some(*position);
                 self.select_annotation(id.clone(), window, cx);
             }
             PdfViewEvent::LoadFailed(error) => {
                 log::error!("failed to load PDF reader for book {}: {error}", self.title);
+                cx.emit(crate::BookOpenFailed(error.clone()));
             }
         }
     }

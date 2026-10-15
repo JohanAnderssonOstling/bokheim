@@ -5,6 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
+client-platform-runtime = { path = "../../../platforms/runtime" }
 blake3 = { workspace = true }
 image = { version = "0.25", default-features = false }
 thumbnail = { path = "../thumbnail" }
@@ -15,4 +16,13 @@ serde_json = "1"
 url = "2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+librqbit-core = { version = "9.0.1", default-features = false, features = ["sha1-ring"] }
+app-preferences = { path = "../../../preferences" }
 reqwest = { workspace = true, default-features = false, features = ["rustls-tls"] }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["process", "io-util", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt"] }

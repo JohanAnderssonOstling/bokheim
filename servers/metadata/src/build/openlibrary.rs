@@ -1,10 +1,5 @@
 use crate::{fmt, Connection, Deserialize, KeyReference, MetadataError, OpenFlags, Path, PathBuf, Pool, SqliteConnectionManager, MAX_DESCRIPTION_BYTES, QUERY_CONCURRENCY, READ_CACHE_KIB, READ_MMAP_BYTES};
 
-pub(crate) fn open_read_pool(path: &Path) -> Result<Pool<SqliteConnectionManager>, MetadataError> {
-    let manager = SqliteConnectionManager::file(path.canonicalize().map_err(error)?).with_flags(OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).with_init(configure_read_only);
-    Pool::builder().max_size(QUERY_CONCURRENCY).min_idle(Some(1)).build(manager).map_err(error)
-}
-
 pub(crate) fn open_description_pool(path: &Path) -> Result<Pool<SqliteConnectionManager>, MetadataError> {
     let manager = SqliteConnectionManager::file(path.canonicalize().map_err(error)?).with_flags(OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).with_init(configure_read_only);
     Pool::builder().max_size(QUERY_CONCURRENCY).min_idle(Some(1)).build(manager).map_err(error)
@@ -128,6 +123,7 @@ pub(crate) fn authority_edition_key(id: i64) -> String {
 /// per builder connection. Resolution always sees the current input schema.
 pub(crate) fn open_builder_pool(path: &Path) -> Result<Pool<SqliteConnectionManager>, MetadataError> {
     let manager = SqliteConnectionManager::file(path.canonicalize().map_err(error)?).with_flags(OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).with_init(|c| {
+        c.set_prepared_statement_cache_capacity(64);
         for (name, definition) in [
             ("edition_description", "edition_id INTEGER PRIMARY KEY,description TEXT NOT NULL"),
             ("isbn_lcc", "isbn13 INTEGER,notation TEXT,lc_record_id TEXT"),

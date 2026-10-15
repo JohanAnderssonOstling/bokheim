@@ -1,7 +1,7 @@
 //! Ingest a native book already present on disk, whether copied or discovered.
 
-use std::path::Path;
-use std::{io, path::PathBuf};
+use std::io::{self, Read, Seek};
+use std::path::{Path, PathBuf};
 
 use book_model::BookFormat;
 use sync_common::ContentHash;
@@ -24,7 +24,6 @@ pub async fn ingest_file(path: PathBuf, name: String, host: &dyn cpu_host::CpuHo
     let (content_hash, size_bytes, fingerprint, reader) = client_platform_runtime::executor::run_blocking({
         let path = path.clone();
         move || -> io::Result<_> {
-            use std::io::{Read as _, Seek as _};
             let fingerprint = fingerprint(&path)?;
             let mut reader = library_files::filesystem::open(&path)?;
             let mut hasher = blake3::Hasher::new();
@@ -56,6 +55,56 @@ pub async fn ingest_file(path: PathBuf, name: String, host: &dyn cpu_host::CpuHo
     // with a content_hash and metadata from different revisions.
     require_unchanged(&path, fingerprint)?;
     Ok(IngestedFile { content_hash, size_bytes, fingerprint, format, inspection: inspection.map_err(io::Error::other)? })
+}
+
+/// Inspect the reproducible archive of a native MP3 folder, while keeping its
+/// tracks and sidecars as ordinary files at the library placement.
+pub async fn ingest_audiobook_folder(path: PathBuf, name: String, host: &dyn cpu_host::CpuHost) -> io::Result<IngestedFile> {
+    let (content_hash, size_bytes, fingerprint, reader) = client_platform_runtime::executor::run_blocking({
+        let path = path.clone();
+        move || -> io::Result<_> {
+            let tracks = audiobook_folder::discover(&path)?;
+            if tracks.is_empty() {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "audiobook folder has no MP3 tracks"));
+            }
+            let fingerprint = library_files::filesystem::audiobook_fingerprint(&path, &tracks)?;
+            require_folder_unchanged(&path, fingerprint)?;
+            let nfo = audiobook_folder::discover_nfo(&path)?;
+            let cue = audiobook_folder::discover_cue(&path)?;
+            let cover = audiobook_folder::discover_cover(&path)?;
+            let mut archive = audiobook_archive::write_archive_with_sidecars(tempfile::tempfile()?, &tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref())?;
+            require_folder_unchanged(&path, fingerprint)?;
+            archive.rewind()?;
+            let mut hasher = blake3::Hasher::new();
+            let mut bytes = [0u8; 64 * 1024];
+            loop {
+                let read = match archive.read(&mut bytes) {
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    result => result?,
+                };
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&bytes[..read]);
+            }
+            archive.rewind()?;
+            Ok((ContentHash::from(hasher.finalize()), hasher.count(), fingerprint, archive))
+        }
+    })
+    .await
+    .map_err(|error| io::Error::other(error.to_string()))??;
+    let format = BookFormat::Mp3Folder;
+    let inspection = cpu_host::submit_book(host, cpu_host::Inspect { source_name: name, format, content_hash: Some(content_hash) }, cpu_host::as_cpu_reader(reader)).await;
+    require_folder_unchanged(&path, fingerprint)?;
+    Ok(IngestedFile { content_hash, size_bytes, fingerprint, format, inspection: inspection.map_err(io::Error::other)? })
+}
+
+fn require_folder_unchanged(path: &Path, fingerprint: u64) -> io::Result<()> {
+    let tracks = audiobook_folder::discover(path)?;
+    if library_files::filesystem::audiobook_fingerprint(path, &tracks)? != fingerprint {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "audiobook folder changed during inspection"));
+    }
+    Ok(())
 }
 
 fn require_unchanged(path: &Path, fingerprint: u64) -> io::Result<()> {

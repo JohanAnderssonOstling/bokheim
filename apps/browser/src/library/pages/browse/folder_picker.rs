@@ -253,27 +253,16 @@ impl Render for FolderPicker {
             )
             .child(column_strip);
         let dismiss_picker = picker;
-        // Anchored to the window rather than left to flow: a picker opened
-        // from folder editing lives inside one pane of a possibly-split
-        // browse view, and `modal_overlay`'s `size_full` would only ever
-        // cover that one narrow pane. Anchoring at the window's origin with
-        // its own viewport-sized child escapes that nesting, so the picker
-        // always gets the window's full width regardless of how many split
-        // panes are open beside it.
-        let viewport = window.viewport_size();
-        gpui::deferred(
-            gpui::anchored().position(gpui::point(px(0.0), px(0.0))).child(
-                components::modal_overlay()
-                    .w(viewport.width)
-                    .h(viewport.height)
-                    .occlude()
-                    .child(components::modal_scrim("folder-picker-scrim", theme).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(move |_, _, cx| {
-                        cx.stop_propagation();
-                        dismiss_picker.update(cx, |picker, cx| picker.cancel(cx));
-                    }))
-                    .child(panel),
-            ),
-        )
+        gpui::deferred(components::anchor_to_window(
+            components::modal_overlay()
+                .occlude()
+                .child(components::modal_scrim("folder-picker-scrim", theme).on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    dismiss_picker.update(cx, |picker, cx| picker.cancel(cx));
+                }))
+                .child(panel),
+            window,
+        ))
         .with_priority(2)
     }
 }

@@ -88,10 +88,10 @@ pub(crate) fn file_auth_error(error: library_runtime::account::AccountSessionErr
 pub(crate) async fn authenticated_file_request<T, F: Future<Output = Result<T, RemoteFileError>>>(account: &library_runtime::account::LibraryAccount, mut request: impl FnMut(account_client::Session) -> F) -> Result<T, RemoteFileError> {
     let session = account.refresh_if_needed().await.map_err(file_auth_error)?.ok_or("sign in to read this remote file")?;
     let token = session.token().to_owned();
-    match request(session).await {
+    match client_platform_runtime::transfers::retry(|| request(session.clone())).await {
         Err(RemoteFileError::Unauthorized) => {
             let refreshed = account.refresh_after_unauthorized(&token).await.map_err(file_auth_error)?.ok_or("sign in to read this remote file")?;
-            request(refreshed).await
+            client_platform_runtime::transfers::retry(|| request(refreshed.clone())).await
         }
         result => result,
     }

@@ -1,9 +1,9 @@
 //! Sync cursor and recovery primitives.
 
-use sync_common::StateKey;
 use crate::shared_sql::SharedSql;
-use crate::sync::{write_cursor_revision, PullCursorKey, SyncStateSql};
+use crate::sync::{SyncStateSql, read_pull_cursor, write_pull_cursor};
 use crate::{Database, DatabaseError};
+use sync_common::StateKey;
 
 // Sync cursor and recovery primitives.
 //
@@ -13,28 +13,13 @@ use crate::{Database, DatabaseError};
 
 use sync_common::{StateAddress, SyncCursor};
 
-fn parse_stored_revision(value: Option<String>) -> Result<Option<sync_common::LibraryRevision>, DatabaseError> {
-    value
-        .map(|value| {
-            let raw = value.parse::<u64>().map_err(DatabaseError::operation)?;
-            sync_common::LibraryRevision::new(raw).map_err(DatabaseError::operation)
-        })
-        .transpose()
-}
-
 /// Durable marker key for an in-progress cursor recovery.
 pub const CURSOR_RECOVERY_PENDING_KEY: &str = "cursor_recovery_pending";
 
 impl Database {
-    /// Reads the lifecycle and field pull checkpoints.
+    /// Reads the server history and both pull checkpoints together.
     pub fn sync_pull_cursor(&self) -> Result<SyncCursor, DatabaseError> {
-        let mut raw = None;
-        self.connection.sync_pull_cursor(|row| {
-            raw = Some((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?));
-            Ok(())
-        })?;
-        let (lifecycle, field) = raw.ok_or_else(|| DatabaseError::message("sync metadata row is missing"))?;
-        Ok(SyncCursor { lifecycle_revision: parse_stored_revision(lifecycle)?, field_revision: parse_stored_revision(field)? })
+        read_pull_cursor(&self.connection)
     }
 
     /// Whether a rejected cursor still needs recovery.
@@ -47,23 +32,21 @@ impl Database {
         Ok(pending == Some(1))
     }
 
-    /// Resets both pull checkpoints and persists the recovery marker in one commit.
+    /// Clears the generation and both checkpoints, persisting the recovery marker.
     pub fn sync_begin_cursor_recovery(&self) -> Result<(), DatabaseError> {
         self.connection.sync_begin_cursor_recovery().map(|_| ()).map_err(Into::into)
     }
 
-    /// Persists both pull checkpoints. A missing revision clears its channel.
+    /// Persists the generation and both checkpoints in one transaction.
     pub fn set_sync_pull_cursor(&self, cursor: &SyncCursor) -> Result<(), DatabaseError> {
-        write_cursor_revision(&self.connection, PullCursorKey::Lifecycle, cursor.lifecycle_revision)?;
-        write_cursor_revision(&self.connection, PullCursorKey::Field, cursor.field_revision)?;
-        Ok(())
+        self.write(|tx| write_pull_cursor(tx, cursor))
     }
 
     /// Writes one explicit sync_metadata column. Only the columns written
     /// from outside this crate are accepted.
     pub fn set_sync_metadata(&self, key: &str, value: &str) -> Result<(), DatabaseError> {
-        use crate::assets::ActivitySql;
         use crate::OwnerSql;
+        use crate::assets::ActivitySql;
         match key {
             "server_library_created" => self.connection.owner_set_server_library_created(value)?,
             "last_successful_sync_at" => self.connection.activity_set_last_successful_sync_at(value)?,

@@ -9,7 +9,13 @@ import zipfile
 
 def package(binary, icon, output):
     binary = binary.resolve(strict=True)
-    files = {'Bokheim.exe': binary, 'Bokheim.ico': icon.resolve(strict=True)}
+    files = {'Bokheim.exe': binary, 'Bokheim.ico': icon.resolve(strict=True),
+             'bokheim-opds-webview.exe': binary.with_name('bokheim-opds-webview.exe').resolve(strict=True)}
+    files['taxonomy.sqlite3'] = (binary.parent / 'taxonomy.sqlite3').resolve(strict=True)
+    speech = binary.parent / 'tts'
+    if not (speech / 'alba/en_GB-alba-medium.onnx').is_file() or not (speech / 'george/model.onnx').is_file():
+        raise ValueError('Prepare both desktop speech voices before packaging')
+    files.update({path.relative_to(binary.parent).as_posix(): path for path in speech.rglob('*') if path.is_file()})
     with binary.open('rb') as stream:
         if stream.read(2) != b'MZ':
             raise ValueError('Bokheim.exe is not a Windows PE image')

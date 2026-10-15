@@ -3,7 +3,7 @@
 use crate::ContentHash;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use crate::transport::encode;
+use crate::transport::encoded_len;
 use crate::{MAX_PUSH_BATCH_BYTES, MAX_PUSH_MUTATIONS, ReplicaSeq};
 use crate::{LibraryRevision, MutationRejection, MutationRejectionReason, PullStateResponse, PushMutationsResponse, SyncCursor, OpaquePublication};
 use std::collections::{HashSet, VecDeque};
@@ -23,20 +23,43 @@ struct EncodedMutation {
 pub struct PushBatcher {
     ready: VecDeque<EncodedMutation>,
     untransmittable: Vec<ReplicaSeq>,
+    ready_bytes: usize,
 }
 
 impl PushBatcher {
     pub fn new(mutations: Vec<OpaquePublication>) -> Result<Self, crate::transport::WireError> {
-        let mut batcher = Self { ready: VecDeque::with_capacity(mutations.len()), untransmittable: Vec::new() };
+        Self::try_from_publications(mutations.into_iter().map(Ok))
+    }
+
+    /// Convert and size publications as they arrive, without an intermediate
+    /// vector of opaque payloads alongside the replica's typed snapshot.
+    pub fn try_from_publications(mutations: impl IntoIterator<Item = Result<OpaquePublication, crate::transport::WireError>>) -> Result<Self, crate::transport::WireError> {
+        let mutations = mutations.into_iter();
+        let mut batcher = Self { ready: VecDeque::with_capacity(mutations.size_hint().0), untransmittable: Vec::new(), ready_bytes: 0 };
         for mutation in mutations {
-            let bytes = encode(&mutation)?.len();
-            if bytes > MAX_PUSH_BATCH_BYTES {
-                batcher.untransmittable.push(mutation.publisher_seq);
-            } else {
-                batcher.ready.push_back(EncodedMutation { publication: mutation, bytes });
-            }
+            batcher.push(mutation?)?;
         }
         Ok(batcher)
+    }
+
+    /// Append one publication; streaming callers stop once a batch is ready.
+    pub fn push(&mut self, publication: OpaquePublication) -> Result<(), crate::transport::WireError> {
+        let bytes = encoded_len(&publication)?;
+        if bytes > MAX_PUSH_BATCH_BYTES {
+            self.untransmittable.push(publication.publisher_seq);
+        } else {
+            self.ready_bytes += bytes;
+            self.ready.push_back(EncodedMutation { publication, bytes });
+        }
+        Ok(())
+    }
+
+    pub fn has_batch(&self) -> bool {
+        self.ready.len() >= MAX_PUSH_MUTATIONS || self.ready_bytes >= MAX_PUSH_BATCH_BYTES
+    }
+
+    pub fn take_untransmittable(&mut self) -> Vec<ReplicaSeq> {
+        std::mem::take(&mut self.untransmittable)
     }
 
     pub fn untransmittable(&self) -> &[ReplicaSeq] {
@@ -51,7 +74,16 @@ impl PushBatcher {
     /// exchange. Sending them in a later page would look like standalone
     /// absent-book edits, which the server correctly acknowledges as no-ops.
     pub fn defer_book_fields(&mut self, books: &[ContentHash]) {
-        self.ready.retain(|row| !row.publication.state.value.book.is_some_and(|book| books.contains(&book)));
+        if books.is_empty() {
+            return;
+        }
+        if books.len() < 16 {
+            self.ready.retain(|row| !row.publication.state.value.book.is_some_and(|book| books.contains(&book)));
+        } else {
+            let books: HashSet<_> = books.iter().copied().collect();
+            self.ready.retain(|row| !row.publication.state.value.book.is_some_and(|book| books.contains(&book)));
+        }
+        self.ready_bytes = self.ready.iter().map(|row| row.bytes).sum();
     }
 
     pub fn next_batch(&mut self) -> Vec<OpaquePublication> {
@@ -65,6 +97,7 @@ impl PushBatcher {
             bytes = bytes.saturating_add(next.bytes);
             batch.push(self.ready.pop_front().expect("the inspected mutation is still queued").publication);
         }
+        self.ready_bytes -= bytes;
         batch
     }
 }
@@ -102,6 +135,17 @@ fn revision(value: Option<LibraryRevision>) -> u64 {
 }
 
 pub fn validate_pull_batch(response: &PullStateResponse, cursor: SyncCursor) -> Result<(), PullBatchError> {
+    if response.mutations.len() > crate::MAX_PULL_CHANGES {
+        return Err(PullBatchError("a pull page contains too many cells".into()));
+    }
+    let bytes = response.mutations.iter().fold(0usize, |sum, row| sum.saturating_add(row.state.value.delivery_byte_budget()));
+    if response.mutations.len() > 1 && bytes > crate::MAX_PULL_BATCH_BYTES {
+        return Err(PullBatchError("a pull page exceeds its byte budget".into()));
+    }
+    let generation = response.next_cursor.generation.ok_or_else(|| PullBatchError("a pull page must name its server history".into()))?;
+    if !cursor.belongs_to(generation) {
+        return Err(PullBatchError("a pull page belongs to a different server history".into()));
+    }
     let next_lifecycle = revision(response.next_cursor.lifecycle_revision);
     let next_field = revision(response.next_cursor.field_revision);
     let mut observed_lifecycle = revision(cursor.lifecycle_revision);
@@ -192,4 +236,41 @@ pub fn validate_push_response(requested: &[ReplicaSeq], response: &PushMutations
     }
     let accepted = requested.iter().copied().filter(|seq| !accounted.contains(seq)).collect();
     Ok(ValidatedPushResponse { accepted, issues })
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    use crate::SyncGeneration;
+
+    fn cursor(generation: Option<SyncGeneration>, revision: u64) -> SyncCursor {
+        let revision = LibraryRevision::new(revision).unwrap();
+        SyncCursor { generation, lifecycle_revision: Some(revision), field_revision: Some(revision) }
+    }
+
+    #[test]
+    fn history_is_required_for_nonzero_checkpoints_and_stable_between_pages() {
+        let history = SyncGeneration::from_u128(1);
+        let old = cursor(Some(history), 1_000);
+        let next = cursor(Some(history), 1_100);
+        let mut page = PullStateResponse { mutations: Vec::new(), next_cursor: next, has_more: false };
+        assert!(validate_pull_batch(&page, old).is_ok());
+        assert!(validate_pull_batch(&page, SyncCursor::default()).is_ok());
+        assert!(validate_pull_batch(&page, cursor(None, 1_000)).is_err());
+        page.next_cursor.generation = Some(SyncGeneration::from_u128(2));
+        assert!(validate_pull_batch(&page, old).is_err(), "a higher head cannot make another history valid");
+        page.next_cursor.generation = None;
+        assert!(validate_pull_batch(&page, SyncCursor::default()).is_err());
+    }
+
+    #[test]
+    fn persisted_legacy_checkpoints_require_recovery() {
+        let old: SyncCursor = serde_json::from_str(r#"{"lifecycle_revision":1000,"field_revision":1000}"#).unwrap();
+        let history = SyncGeneration::from_u128(1);
+        assert!(!old.belongs_to(history));
+        assert!(SyncCursor::default().belongs_to(history));
+        let bound = cursor(Some(history), 1_000);
+        let decoded: SyncCursor = crate::transport::decode(&crate::transport::encode(&bound).unwrap(), 1024).unwrap();
+        assert_eq!(decoded, bound);
+    }
 }

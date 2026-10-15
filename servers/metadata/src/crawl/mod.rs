@@ -59,30 +59,28 @@ pub(crate) fn reserve_librarything(c: &Connection, now: i64) -> Result<(), Metad
 /// Reloads the ranked wanted table each pass, so swapping the snapshot feeds a running crawler.
 /// It never queries ISBN answers or owns a dump database.
 pub async fn crawl(answers: &Path, providers: &Path, key: Option<&Path>, once: bool) -> Result<(), MetadataError> {
+    let initial = crate::snapshot::open(answers)?;
+    crate::snapshot::require_separate(&initial, providers, "provider")?;
+    drop(initial);
     let mut db = open_provider(providers)?;
     db.execute_batch("PRAGMA temp_store=FILE").map_err(error)?;
     let mut loaded = None;
+    let mut loaded_base = None;
     let lc = LibraryOfCongressClient::new()?.with_cache(providers)?;
     let lt = key.map(|k| crate::crawl::librarything::LibraryThingClient::open(k, providers)).transpose()?;
     loop {
-        let wanted = crate::build::read_connection(answers)?;
+        let wanted = crate::snapshot::open(answers)?;
         let version: i64 = wanted.query_row("SELECT schema_version FROM snapshot WHERE singleton=1", [], |r| r.get(0)).map_err(error)?;
         if version != schema::ANSWER_VERSION {
             return Err(MetadataError("unsupported wanted schema".into()));
         }
         let signature: (i64, String, i64) = wanted.query_row("SELECT built_at_ms,dump_date,provider_results_through_ms FROM snapshot WHERE singleton=1", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(error)?;
         if loaded.as_ref() != Some(&signature) {
-            // Copy only the queue into TEMP; provider joins remain local and indexed.
-            db.execute_batch("DROP TABLE IF EXISTS temp.wanted; CREATE TEMP TABLE wanted(isbn13 INTEGER PRIMARY KEY,rank INTEGER,work_id INTEGER); CREATE INDEX temp.wanted_by_work ON wanted(work_id);").map_err(error)?;
-            {
-                let tx = db.transaction().map_err(error)?;
-                let mut q = wanted.prepare("SELECT isbn13,rank,work_id FROM wanted ORDER BY rank,isbn13").map_err(error)?;
-                for row in q.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?))).map_err(error)? {
-                    let (isbn, rank, work) = row.map_err(error)?;
-                    tx.execute("INSERT INTO temp.wanted VALUES(?1,?2,?3)", params![isbn, rank, work]).map_err(error)?;
-                }
-                tx.commit().map_err(error)?;
-            }
+            let base = crate::snapshot::base_path(&wanted)?;
+            let incremental = loaded_base.as_ref() == Some(&base) && crate::snapshot::is_update(&wanted)?;
+            let rows = reload_wanted(&mut db, &wanted, incremental)?;
+            tracing::info!(rows, incremental, "loaded crawler queue");
+            loaded_base = Some(base);
             loaded = Some(signature);
         }
         drop(wanted);
@@ -118,6 +116,51 @@ pub async fn crawl(answers: &Path, providers: &Path, key: Option<&Path>, once: b
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
 }
+
+fn reload_wanted(db: &mut Connection, snapshot: &Connection, incremental: bool) -> Result<u64, MetadataError> {
+    if !incremental {
+        db.execute_batch("DROP TABLE IF EXISTS temp.wanted; DROP TABLE IF EXISTS temp.wanted_override; CREATE TEMP TABLE wanted(isbn13 INTEGER PRIMARY KEY,rank INTEGER,work_id INTEGER); CREATE INDEX temp.wanted_by_work ON wanted(work_id); CREATE TEMP TABLE wanted_override(isbn13 INTEGER PRIMARY KEY);").map_err(error)?;
+    }
+    let tx = db.transaction().map_err(error)?;
+    tx.execute_batch("CREATE TEMP TABLE next_wanted_override(isbn13 INTEGER PRIMARY KEY)").map_err(error)?;
+    if crate::snapshot::is_update(snapshot)? {
+        let mut keys = snapshot.prepare("SELECT isbn13 FROM main.overlay_key_wanted ORDER BY isbn13").map_err(error)?;
+        let mut put = tx.prepare_cached("INSERT INTO temp.next_wanted_override VALUES(?1)").map_err(error)?;
+        for isbn in keys.query_map([], |r| r.get::<_, i64>(0)).map_err(error)? {
+            put.execute([isbn.map_err(error)?]).map_err(error)?;
+        }
+    }
+    let mut rows = 0;
+    if incremental {
+        // Reapply cumulative overrides to the existing base queue. Point lookups
+        // avoid materializing the entire merged wanted view during a join.
+        // Include old overrides too: rolling back to an earlier update must
+        // restore rows that only the discarded generation changed or deleted.
+        let mut keys = tx.prepare("SELECT isbn13 FROM temp.wanted_override UNION SELECT isbn13 FROM temp.next_wanted_override ORDER BY isbn13").map_err(error)?;
+        let mut get = snapshot.prepare_cached("SELECT rank,work_id FROM wanted WHERE isbn13=?1").map_err(error)?;
+        let mut delete = tx.prepare_cached("DELETE FROM temp.wanted WHERE isbn13=?1").map_err(error)?;
+        let mut put = tx.prepare_cached("INSERT INTO temp.wanted VALUES(?1,?2,?3)").map_err(error)?;
+        for isbn in keys.query_map([], |r| r.get::<_, i64>(0)).map_err(error)? {
+            let isbn = isbn.map_err(error)?;
+            delete.execute([isbn]).map_err(error)?;
+            if let Some((rank, work)) = get.query_row([isbn], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))).optional().map_err(error)? {
+                put.execute(params![isbn, rank, work]).map_err(error)?;
+            }
+            rows += 1;
+        }
+    } else {
+        let mut q = snapshot.prepare("SELECT isbn13,rank,work_id FROM wanted ORDER BY rank,isbn13").map_err(error)?;
+        let mut put = tx.prepare_cached("INSERT INTO temp.wanted VALUES(?1,?2,?3)").map_err(error)?;
+        for row in q.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?))).map_err(error)? {
+            let (isbn, rank, work) = row.map_err(error)?;
+            put.execute(params![isbn, rank, work]).map_err(error)?;
+            rows += 1;
+        }
+    }
+    tx.execute_batch("DROP TABLE temp.wanted_override; ALTER TABLE temp.next_wanted_override RENAME TO wanted_override;").map_err(error)?;
+    tx.commit().map_err(error)?;
+    Ok(rows)
+}
 fn select_pending(c: &Connection, provider: &str, now: i64, limit: usize) -> Result<Vec<Isbn13>, MetadataError> {
     let mut q=c.prepare("SELECT w.isbn13 FROM temp.wanted w
 WHERE NOT EXISTS(SELECT 1 FROM provider_result r WHERE r.provider=?1 AND r.isbn13=w.isbn13)
@@ -143,6 +186,38 @@ mod tests {
     }
     fn lcc() -> Vec<Classification> {
         vec![Classification { scheme: ClassificationScheme::LibraryOfCongress, notation: "QA76".into(), source: ClassificationSource::ExactEdition, evidence: vec![] }]
+    }
+    #[test]
+    fn crawler_applies_only_queue_overrides_and_restores_discarded_updates_on_rollback() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = crate::build::tests::snapshot_from(temp.path(), &[
+            serde_json::json!({"key":"/books/OL1M","isbn_13":["9780306406157"]}),
+            serde_json::json!({"key":"/books/OL2M","isbn_13":["9780131103627"]}),
+        ], &[], &[]);
+        let base = temp.path().join("base.sqlite");
+        crate::build_answers(&source, None, None, None, &base).unwrap();
+        let first = temp.path().join("first.sqlite");
+        let out = crate::snapshot::create_update(&base, &first).unwrap();
+        out.execute_batch("DELETE FROM wanted WHERE isbn13=9780306406157; UPDATE wanted SET rank=-9 WHERE isbn13=9780131103627; INSERT INTO wanted VALUES(9781691706631,-5,NULL);").unwrap();
+        drop(out);
+        let second = temp.path().join("second.sqlite");
+        let out = crate::snapshot::create_update(&first, &second).unwrap();
+        out.execute_batch("DELETE FROM wanted WHERE isbn13=9781691706631; UPDATE wanted SET rank=-18 WHERE isbn13=9780131103627; INSERT INTO wanted VALUES(9780306406157,0,NULL);").unwrap();
+        drop(out);
+        let empty = temp.path().join("empty.sqlite");
+        drop(crate::snapshot::create_update(&base, &empty).unwrap());
+        let read = |c: &Connection| {
+            let mut q = c.prepare("SELECT isbn13,rank,work_id FROM wanted ORDER BY isbn13").unwrap();
+            q.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<i64>>(2)?))).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        let mut provider = open_provider(Path::new(":memory:")).unwrap();
+        assert_eq!(reload_wanted(&mut provider, &crate::snapshot::open(&base).unwrap(), false).unwrap(), 2);
+        for file in [&first, &second, &empty, &first] {
+            let snapshot = crate::snapshot::open(file).unwrap();
+            assert_eq!(crate::snapshot::base_path(&snapshot).unwrap(), base.canonicalize().unwrap());
+            assert_eq!(reload_wanted(&mut provider, &snapshot, true).unwrap(), 3);
+            assert_eq!(read(&provider), read(&snapshot));
+        }
     }
     #[test]
     fn lc_completion_retry_and_work_codes_control_queue() {

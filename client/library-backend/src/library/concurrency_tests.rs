@@ -1,10 +1,10 @@
 use super::*;
-use crate::library::{LibraryDirectory, LibraryNotifications, ReadyCommand, LibraryCommand};
+use crate::library::{LibraryCommand, LibraryDirectory, LibraryNotifications, ReadyCommand};
 use library_runtime::interest::{InterestState, NotificationInterest};
 use std::sync::Arc;
+use std::time::Duration;
 use sync_common::api::notifications::NotificationMessage;
 use web_time::Instant;
-use std::time::Duration;
 
 #[derive(Clone, Debug)]
 struct Account(account_client::Session);
@@ -20,7 +20,7 @@ impl account_client::SessionPersistence for Account {
     }
 }
 
-fn fixture(root: &std::path::Path, url: account_client::Url) -> (LibraryActor, LibraryHandle, async_channel::Receiver<LibraryActorCommand>) {
+pub(in crate::library) fn fixture(root: &std::path::Path, url: account_client::Url) -> (LibraryActor, LibraryHandle, async_channel::Receiver<LibraryActorCommand>) {
     let account = library_runtime::account::LibraryAccountSession::load(Account(account_client::Session::try_new(url.clone(), "user".into(), "reader@example.com".into(), "a".repeat(43)).unwrap()), url.clone()).unwrap();
     let session = LibrarySession::open(super::super::LibraryRuntimeSpec {
         config: super::super::LibraryOpenConfig {
@@ -30,6 +30,7 @@ fn fixture(root: &std::path::Path, url: account_client::Url) -> (LibraryActor, L
             database_locator: root.join("library.sqlite").to_string_lossy().into_owned(),
             default_sync_server_url: url,
             metadata_server_url: "http://127.0.0.1:1".into(),
+            google_books_api_key: None,
             asset_storage_enabled: true,
             reset_cloud_presence: false,
         },
@@ -41,6 +42,68 @@ fn fixture(root: &std::path::Path, url: account_client::Url) -> (LibraryActor, L
     let handle = LibraryHandle { id: session.id, commands };
     let actor = LibraryActor::new(session);
     (actor, handle, inbox)
+}
+
+#[tokio::test]
+async fn saving_a_reading_position_schedules_a_delayed_sync_without_other_activity() {
+    use crate::library::commands::prepare_library_request;
+    use library_runtime::scheduler::SyncRequest;
+    use sync_common::ROOT_DIR_ID;
+
+    let root = tempfile::tempdir().unwrap();
+    let (mut actor, _, _) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
+    let hash = ContentHash::from(blake3::hash(b"reading-position wake"));
+    actor
+        .session
+        .db
+        .commit_import(library_database::ImportCommit {
+            parent_id: ROOT_DIR_ID,
+            file_name: "Book.epub".into(),
+            format: book_model::BookFormat::Epub,
+            content_hash: hash,
+            size_bytes: 100,
+            inspection_version: 1,
+            inspection: Some(book_inspection::InspectedBook {
+                pdf: None,
+                audiobook: None,
+                metadata: book_model::BookRecord { metadata: book_model::BookDetails { title: "Book".into(), ..Default::default() }, description: String::new() },
+                toc: Vec::new(),
+            }),
+            published: library_model::PublishedStagedBook { name: "Book.epub".into(), relative_path: "/Book.epub".into(), published: false, fingerprint: None },
+            request_thumbnail: false,
+            restore_paths: Vec::new(),
+        })
+        .unwrap();
+    let requests = actor.requests.as_ref().unwrap().sync.clone();
+    assert!(requests.is_empty());
+    prepare_library_request(&mut actor, LibraryCommand::Ready(ReadyCommand::UpdateReadingPosition { content_hash: hash, position: "epubcfi(/6/2)".into(), progress: Some(10.0), entry: None })).unwrap();
+    let SyncRequest::WakeAfter(delay) = requests.try_recv().unwrap() else { panic!("position changes should schedule their own publication deadline") };
+    assert!(delay <= Duration::from_secs(5) && delay > Duration::from_secs(4));
+    assert_eq!(actor.session.db.reading_position(&hash).unwrap().as_deref(), Some("epubcfi(/6/2)"));
+    let mut outbox = actor.session.db.sync_prepare_outbox_excluding_positions(actor.session.events.reading_positions.borrow().waiting(web_time::Instant::now())).unwrap();
+    assert!(actor.session.db.sync_next_outbox_page(&mut outbox).unwrap().iter().all(|p| p.state.value.kind() != "reading_position"));
+}
+
+#[tokio::test]
+async fn thumbnails_load_by_hash_without_book_records_or_current_card_variants() {
+    use crate::ThumbnailResolution;
+    use library_model::BlobKind;
+
+    let root = tempfile::tempdir().unwrap();
+    let (actor, _, _) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
+    let session = &actor.session;
+    let hash = ContentHash::from(blake3::hash(b"existing book"));
+    let master = b"existing cover";
+    session.assets.write(BlobKind::Thumbnail, &hash, master).await.unwrap();
+    for resolution in [ThumbnailResolution::Browse, ThumbnailResolution::CardHighDensity, ThumbnailResolution::HighDensity] {
+        assert_eq!(session.thumbnail(hash, resolution).await.unwrap().as_deref(), Some(master.as_slice()));
+    }
+    assert_eq!(session.db.thumbnail_work_state(&hash).unwrap(), None);
+
+    session.assets.write_thumbnail_set(&hash, master, b"browse card", b"dense card").await.unwrap();
+    assert_eq!(session.thumbnail(hash, ThumbnailResolution::Browse).await.unwrap().as_deref(), Some(b"browse card".as_slice()));
+    assert_eq!(session.thumbnail(hash, ThumbnailResolution::CardHighDensity).await.unwrap().as_deref(), Some(b"dense card".as_slice()));
+    assert_eq!(session.thumbnail(hash, ThumbnailResolution::HighDensity).await.unwrap().as_deref(), Some(master.as_slice()));
 }
 
 #[tokio::test]
@@ -145,7 +208,8 @@ async fn foreground_resume_reconciles_libraries_without_a_socket_and_does_not_po
 async fn subscription_registers_with_initial_state_and_receives_callback_events() {
     let root = tempfile::tempdir().unwrap();
     let (mut actor, handle, inbox) = fixture(root.path(), "http://127.0.0.1:1".parse().unwrap());
-    actor.session.begin_directory_import(uuid::Uuid::from_u128(1));
+    let session = actor.session.clone();
+    let _activity = session.directory_import_activity();
     let events = actor.session.events.clone();
     let hash = ContentHash::from_bytes([3; 32]);
     let exercise = async {
@@ -159,7 +223,9 @@ async fn subscription_registers_with_initial_state_and_receives_callback_events(
     };
     tokio::time::timeout(Duration::from_secs(5), async {
         tokio::join!(actor.serve(inbox), exercise);
-    }).await.expect("subscription and event delivery must make progress");
+    })
+    .await
+    .expect("subscription and event delivery must make progress");
 }
 
 #[tokio::test]
@@ -200,10 +266,7 @@ async fn mutations_publish_queued_events_before_acknowledgement() {
     let (updates, _) = result.try_recv().unwrap().unwrap();
 
     let (reply, result) = async_channel::bounded(1);
-    actor.handle_command(LibraryActorCommand::Ui {
-        command: LibraryCommand::Ready(ReadyCommand::CreateDirectory { parent_id: sync_common::ROOT_DIR_ID, name: "Shelf".into() }),
-        reply,
-    });
+    actor.handle_command(LibraryActorCommand::Ui { command: LibraryCommand::Ready(ReadyCommand::CreateDirectory { parent_id: sync_common::ROOT_DIR_ID, name: "Shelf".into() }), reply });
     assert!(result.try_recv().unwrap().is_ok());
     assert_eq!(updates.try_recv().unwrap(), library_model::LibraryUpdate::Contents);
 
@@ -213,7 +276,10 @@ async fn mutations_publish_queued_events_before_acknowledgement() {
         events.emit(LibraryEvent::ContentsChanged);
         Ok(())
     });
-    actor.operations.next().await.unwrap();
+    let completion = actor.operations.next().await.unwrap();
+    assert!(result.is_empty(), "workers return their result to the actor before replying");
+    assert!(updates.is_empty(), "only the actor applies queued coordination events");
+    actor.complete_operation(completion);
     assert!(result.try_recv().unwrap().is_ok());
     assert_eq!(updates.try_recv().unwrap(), library_model::LibraryUpdate::Contents);
 }
@@ -245,51 +311,98 @@ async fn folder_replay_follows_renames_while_the_actor_serves() {
 }
 
 #[tokio::test]
+async fn browser_download_import_appears_on_home_before_enrichment() {
+    use library_model::{BrowseLocation, HomeShelf, LibraryBrowseQuery, LibraryUpdate};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use sync_common::ROOT_DIR_ID;
+
+    let library = tempfile::tempdir().unwrap();
+    let downloads = tempfile::tempdir().unwrap();
+    let source = downloads.path().join("download.epub");
+    let bytes = include_bytes!("../../crates/book-inspection/tests/fixtures/back-matter-evidence.epub");
+    std::fs::write(&source, bytes).unwrap();
+    let hash = ContentHash::from(blake3::hash(bytes));
+    let (mut actor, _, _) = fixture(library.path(), "http://127.0.0.1:1".parse().unwrap());
+    let updates = actor.coordination.subscribe_updates();
+    let started = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap();
+
+    let failures = actor.session.import_paths(ROOT_DIR_ID, vec![source.clone()], true).await.unwrap();
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(!source.exists());
+    assert_eq!(std::fs::read(library.path().join("download.epub")).unwrap(), bytes);
+    actor.coordination.drain(&actor.session.events);
+    assert!(std::iter::from_fn(|| updates.try_recv().ok()).any(|update| update == LibraryUpdate::Contents));
+
+    let mut query = LibraryBrowseQuery {
+        location: BrowseLocation::Home(Some(HomeShelf::RecentlyAdded)),
+        search: String::new(),
+        file_types: Vec::new(),
+        languages: Vec::new(),
+        chip_sort: Default::default(),
+        book_sort: Default::default(),
+        hide_finished: false,
+        include_direct_child_books: false,
+    };
+    for downloaded_only in [false, true] {
+        let page = actor.session.db.browse(&query, downloaded_only).unwrap();
+        assert_eq!(page.contents.books.len(), 1);
+        let book = &page.contents.books[0];
+        assert_eq!(book.content_hash(), Some(hash));
+        assert!(book.downloaded);
+        assert!(book.added_at >= started);
+    }
+    query.location = BrowseLocation::Home(None);
+    let home = actor.session.db.browse(&query, false).unwrap();
+    let recent = home.sections.iter().find(|section| section.parent.id == BrowseLocation::Home(Some(HomeShelf::RecentlyAdded))).unwrap();
+    assert_eq!(recent.books[0].content_hash(), Some(hash));
+}
+
+#[tokio::test]
 async fn external_import_leaves_failed_imports_on_disk_for_retry() {
     for moving in [false, true] {
-    let library = tempfile::tempdir().unwrap();
-    let external = tempfile::tempdir().unwrap();
-    let source = external.path().join("broken.epub");
-    std::fs::write(&source, b"invalid EPUB").unwrap();
-    let (actor, _, _) = fixture(library.path(), "http://127.0.0.1:1".parse().unwrap());
-    let shelf = actor.session.placement.create_directory(&sync_common::ROOT_DIR_ID, "Shelf").unwrap();
-    let failures = actor.session.import_paths(shelf.id, vec![source.clone()], moving).await.unwrap();
-    assert_eq!(failures.len(), 1);
-    assert_eq!(source.exists(), !moving);
-    let moved = library.path().join("Shelf/broken.epub");
-    assert_eq!(std::fs::read(&moved).unwrap(), b"invalid EPUB");
-    let failures = actor.session.import_paths(shelf.id, vec![moved.clone()], true).await.unwrap();
-    assert_eq!(failures.len(), 1);
-    assert_eq!(std::fs::read(&moved).unwrap(), b"invalid EPUB");
-    assert!(!library.path().join("Shelf/broken 2.epub").exists());
+        let library = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let source = external.path().join("broken.epub");
+        std::fs::write(&source, b"invalid EPUB").unwrap();
+        let (actor, _, _) = fixture(library.path(), "http://127.0.0.1:1".parse().unwrap());
+        let shelf = actor.session.placement.create_directory(&sync_common::ROOT_DIR_ID, "Shelf").unwrap();
+        let failures = actor.session.import_paths(shelf.id, vec![source.clone()], moving).await.unwrap();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(source.exists(), !moving);
+        let moved = library.path().join("Shelf/broken.epub");
+        assert_eq!(std::fs::read(&moved).unwrap(), b"invalid EPUB");
+        let failures = actor.session.import_paths(shelf.id, vec![moved.clone()], true).await.unwrap();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(std::fs::read(&moved).unwrap(), b"invalid EPUB");
+        assert!(!library.path().join("Shelf/broken 2.epub").exists());
     }
 }
 
 #[tokio::test]
 async fn external_import_places_nested_books_before_registration() {
     for moving in [false, true] {
-    let library = tempfile::tempdir().unwrap();
-    let external = tempfile::tempdir().unwrap();
-    let source = external.path().join("Books");
-    std::fs::create_dir_all(source.join("Nested")).unwrap();
-    let bytes = include_bytes!("../../crates/book-inspection/tests/fixtures/back-matter-evidence.epub");
-    std::fs::write(source.join("Nested/book.epub"), bytes).unwrap();
-    std::fs::write(source.join("notes.txt"), b"sidecar").unwrap();
-    let (actor, _, _) = fixture(library.path(), "http://127.0.0.1:1".parse().unwrap());
-    let shelf = actor.session.placement.create_directory(&sync_common::ROOT_DIR_ID, "Shelf").unwrap();
-    let failures = actor.session.import_paths(shelf.id, vec![source.clone()], moving).await.unwrap();
-    assert!(failures.is_empty(), "{failures:?}");
-    assert_eq!(source.exists(), !moving);
-    assert_eq!(std::fs::read(library.path().join("Shelf/Books/Nested/book.epub")).unwrap(), bytes);
-    assert_eq!(std::fs::read(library.path().join("Shelf/Books/notes.txt")).unwrap(), b"sidecar");
-    let hash = ContentHash::from(blake3::hash(bytes));
-    let mut paths: Vec<_> = actor.session.db.book_paths(&hash).unwrap().iter().map(|path| path.to_string()).collect();
-    paths.sort();
-    paths.dedup();
-    assert_eq!(paths, vec!["/Shelf/Books/Nested/book.epub"]);
-    let failures = actor.session.import_paths(shelf.id, vec![library.path().join("Shelf/Books")], true).await.unwrap();
-    assert!(failures.is_empty(), "{failures:?}");
-    assert!(!library.path().join("Shelf/Books 2").exists());
+        let library = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let source = external.path().join("Books");
+        std::fs::create_dir_all(source.join("Nested")).unwrap();
+        let bytes = include_bytes!("../../crates/book-inspection/tests/fixtures/back-matter-evidence.epub");
+        std::fs::write(source.join("Nested/book.epub"), bytes).unwrap();
+        std::fs::write(source.join("notes.txt"), b"sidecar").unwrap();
+        let (actor, _, _) = fixture(library.path(), "http://127.0.0.1:1".parse().unwrap());
+        let shelf = actor.session.placement.create_directory(&sync_common::ROOT_DIR_ID, "Shelf").unwrap();
+        let failures = actor.session.import_paths(shelf.id, vec![source.clone()], moving).await.unwrap();
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(source.exists(), !moving);
+        assert_eq!(std::fs::read(library.path().join("Shelf/Books/Nested/book.epub")).unwrap(), bytes);
+        assert_eq!(std::fs::read(library.path().join("Shelf/Books/notes.txt")).unwrap(), b"sidecar");
+        let hash = ContentHash::from(blake3::hash(bytes));
+        let mut paths: Vec<_> = actor.session.db.book_paths(&hash).unwrap().iter().map(|path| path.to_string()).collect();
+        paths.sort();
+        paths.dedup();
+        assert_eq!(paths, vec!["/Shelf/Books/Nested/book.epub"]);
+        let failures = actor.session.import_paths(shelf.id, vec![library.path().join("Shelf/Books")], true).await.unwrap();
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(!library.path().join("Shelf/Books 2").exists());
     }
 }
 
@@ -301,7 +414,9 @@ async fn selected_import_copies_all_files_before_shared_inspection() {
     struct InterruptedReader(bool);
     impl std::io::Read for InterruptedReader {
         fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
-            if self.0 { return Err(std::io::Error::other("copy interrupted")); }
+            if self.0 {
+                return Err(std::io::Error::other("copy interrupted"));
+            }
             self.0 = true;
             let count = bytes.len().min(4);
             bytes[..count].copy_from_slice(&b"data"[..count]);
@@ -318,21 +433,17 @@ async fn selected_import_copies_all_files_before_shared_inspection() {
         name: "Selected books".into(),
         directories: vec![],
         files: vec![
-            DirectoryImportFile {
-                path: vec!["broken.epub".into()],
-                source: ImportSource::new(Box::new(|| Box::pin(async { Ok(Box::new(Cursor::new(b"invalid EPUB")) as DirectoryImportReader) }))),
-            },
+            DirectoryImportFile { path: vec!["broken.epub".into()], source: ImportSource::new(Box::new(|| Box::pin(async { Ok(Box::new(Cursor::new(b"invalid EPUB")) as DirectoryImportReader) }))) },
             DirectoryImportFile {
                 path: vec!["book.epub".into()],
-                source: ImportSource::new(Box::new(move || Box::pin(async move {
-                    assert!(!destination.join("broken.epub").exists(), "copy the whole selection before publication or inspection");
-                    Ok(Box::new(Cursor::new(bytes)) as DirectoryImportReader)
-                }))),
+                source: ImportSource::new(Box::new(move || {
+                    Box::pin(async move {
+                        assert!(!destination.join("broken.epub").exists(), "copy the whole selection before publication or inspection");
+                        Ok(Box::new(Cursor::new(bytes)) as DirectoryImportReader)
+                    })
+                })),
             },
-            DirectoryImportFile {
-                path: vec!["interrupted.epub".into()],
-                source: ImportSource::new(Box::new(|| Box::pin(async { Ok(Box::new(InterruptedReader(false)) as DirectoryImportReader) }))),
-            },
+            DirectoryImportFile { path: vec!["interrupted.epub".into()], source: ImportSource::new(Box::new(|| Box::pin(async { Ok(Box::new(InterruptedReader(false)) as DirectoryImportReader) }))) },
         ],
     };
     let failures = actor.session.import_selected_directory(shelf.id, directory, false, &|| false).await.unwrap();
@@ -360,10 +471,7 @@ async fn selected_folder_import_uses_shared_folder_collision_handling() {
     let directory = DirectoryImport {
         name: "Books".into(),
         directories: vec![vec!["Nested".into()], vec!["Empty".into()]],
-        files: vec![DirectoryImportFile {
-            path: vec!["Nested".into(), "book.epub".into()],
-            source: ImportSource::new(Box::new(move || Box::pin(async move { Ok(Box::new(Cursor::new(bytes)) as DirectoryImportReader) }))),
-        }],
+        files: vec![DirectoryImportFile { path: vec!["Nested".into(), "book.epub".into()], source: ImportSource::new(Box::new(move || Box::pin(async move { Ok(Box::new(Cursor::new(bytes)) as DirectoryImportReader) }))) }],
     };
     let failures = actor.session.import_selected_directory(shelf.id, directory, true, &|| false).await.unwrap();
     assert!(failures.is_empty(), "{failures:?}");

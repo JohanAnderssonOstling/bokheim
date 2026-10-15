@@ -1,59 +1,93 @@
 //! One book's page.
 //!
 //! Its owner keeps the browse view mounted in memory and caches this entity
-//! when returning to it, preserving its contents and decoded cover.
+//! when returning to it, preserving its contents. Reader entry drops the
+//! page's cover reference; the shared image budget controls pixel retention.
 //!
-//! It opens already drawn. The card that was clicked holds the whole
-//! `BookCardRow` and a decoded cover, and both are handed over at construction,
-//! so the top of the page paints in the same frame as the click with the same
-//! image the grid was showing. The request that follows fills in only what a
-//! card never knew: the credits, the contents, and which entry
-//! the reader is inside.
+//! Details, cover art and torrent information load concurrently. The page
+//! uses its current pane bounds to reveal the complete book in its final
+//! layout rather than moving the title and controls as requests finish.
 
-use crate::services::{BookConfirmation, notify_error, notify_info};
+use crate::services::{book_transfer_error_message, notify_error, notify_info, track_catalog_import};
 use library_backend::{DownloadState, ThumbnailResolution};
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use gpui::prelude::*;
-use gpui::{Anchor, App, AppContext, Context, Entity, FocusHandle, Focusable, IntoElement, MouseButton, Render, SharedString, Task, Window, div};
-use gpui_component::IconName;
-use gpui_component::menu::DropdownMenu as _;
-use library_model::{BookCardRow, BookDetail, BookSource, BookTocEntry, CardKey, LibraryFileTypeFilter};
-use sync_common::{ContentHash, DirId};
-use ui_components as components;
+use gpui::{AnyElement, App, AppContext, AvailableSpace, Context, Entity, FocusHandle, Focusable, IntoElement, MouseButton, Render, SharedString, Task, Window, canvas, div};
+use gpui_component::{IconName, WindowExt as _};
+use gpui_image_eviction::track_image;
+use library_model::{BookCardRow, BookDetail, BookLocator, BookSource, BookTocEntry, CardKey, LibraryFileTypeFilter};
+use sync_common::ContentHash;
 use ui_components::ScrollableElement as _;
+use ui_components::{self as components, BrowserDownloadPhase, BrowserDownloadUpdate, BrowserDownloads};
 
 use crate::library::pages::with_retry_banner;
-use crate::library::services::{LibraryContext, LibraryDownloadChanged};
-use crate::library::widgets::{LoadedCover, cover_aspect_ratio, loaded_cover_from_jpeg, mark_feed_book_added};
+use crate::library::services::{DownloadSubscription, LibraryContext};
+use crate::library::widgets::{CoversEvicted, LoadedCover, cover_aspect_ratio, cover_generation, generated_cover_variant, loaded_cover_from_jpeg, mark_feed_book_added};
 
-/// Leaves a discarded book's page for the folder it was opened from. Owned by
-/// the browse page, which is what knows how to leave the detail location.
+/// Leaves the book's page for the location it was opened from on Back.
+/// Owned by the browse page, which is what knows how to leave the detail location.
 pub(super) struct CloseBookDetail;
 
-const BOOK_DETAIL_SIDEBAR_BREAKPOINT: f32 = 760.0;
+/// The page's own width — its pane's, not the window's — at which it takes
+/// each layout. Below the sidebar breakpoint a column beside the player would
+/// be too narrow to read; below the stacked one, so would the title beside
+/// the cover.
+const BOOK_DETAIL_SIDEBAR_BREAKPOINT: f32 = 950.0;
 const BOOK_DETAIL_THREE_COLUMN_BREAKPOINT: f32 = 1200.0;
+const BOOK_DETAIL_STACKED_BREAKPOINT: f32 = 600.0;
+/// Where the title steps up to its larger size outside the columns.
+const BOOK_DETAIL_LARGE_TITLE_WIDTH: f32 = 760.0;
+
+#[derive(Clone, Copy, PartialEq)]
+enum DetailLayout {
+    /// The player column beside the contents and description, each scrolling
+    /// on its own.
+    Columns,
+    /// One page: the cover beside the title, the player under both at full
+    /// width, then the contents and description.
+    Hero,
+    /// One page, too narrow for anything beside the cover: the cover, then the
+    /// title centred under it, the player, the contents and description.
+    Stacked,
+}
 
 pub(crate) struct BookDetailPage {
     ui: LibraryContext,
     /// What the grid knew, replaced by the request's own copy when it lands.
-    /// The two agree about almost everything; the point of starting from the
-    /// card is that there is no moment where the page has nothing to say.
+    /// The card supplies the identity used to request the full details and art.
     book: BookCardRow,
+    /// Once revealed, background refreshes keep the book visible.
+    ready: bool,
     detail: Option<BookDetail>,
     error: Option<SharedString>,
     cover: Option<LoadedCover>,
+    cover_missing: bool,
+    cover_needs_reload: bool,
+    cover_loading: bool,
+    _cover_evictions: gpui::Subscription,
     /// Contents open collapsed, so a book with two hundred entries does not bury
     /// everything under it. This is what the reader has opened since.
     expanded: HashSet<String>,
+    /// Whether the contents and the description sections are open, where they
+    /// can be folded: in two columns and narrower.
+    contents_open: bool,
+    description_open: bool,
     focus: FocusHandle,
     /// The load in flight. Replacing it drops the one before, which cancels it.
     request: Option<Task<()>>,
     _cover_task: Option<Task<()>>,
     download_requested_by_page: bool,
-    /// Adding a catalog or feed book to the library, while it runs.
-    add_task: Option<Task<()>>,
-    _download_updates: gpui::Subscription,
+    /// The window owns the import so leaving this page does not cancel feedback.
+    adding: bool,
+    _download_updates: Option<DownloadSubscription>,
+    #[cfg(not(target_arch = "wasm32"))]
+    torrents: Vec<library_backend::BookTorrent>,
+    #[cfg(not(target_arch = "wasm32"))]
+    torrents_loading: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    torrent_task: Option<Task<()>>,
 }
 
 impl gpui::EventEmitter<CloseBookDetail> for BookDetailPage {}
@@ -61,32 +95,68 @@ impl gpui::EventEmitter<CloseBookDetail> for BookDetailPage {}
 /// A feed book's page: what the feed says of it. A feed knows no contents,
 /// credits or reading position.
 fn feed_detail(book: BookCardRow, description: String) -> BookDetail {
-    BookDetail { book, audiobook_chapter_count: None, description, source_directory_id: None, path: Vec::new(), authors: Vec::new(), credits: Vec::new(), current_entry: None, current_target: None, toc: Vec::new() }
+    BookDetail {
+        book,
+        external_url: None,
+        audiobook_chapter_count: None,
+        description,
+        year: None,
+        source_directory_id: None,
+        path: Vec::new(),
+        authors: Vec::new(),
+        credits: Vec::new(),
+        current_entry: None,
+        current_target: None,
+        toc: Vec::new(),
+    }
 }
 
 impl BookDetailPage {
     /// The page of a library, catalog or feed book.
     pub(crate) fn create(book: BookCardRow, cover: Option<LoadedCover>, ui: LibraryContext, cx: &mut impl AppContext) -> Entity<Self> {
         cx.new(|cx| {
-            // Only library books have a download state; catalog and feed books are added.
-            if let Some(content_hash) = book.library_file() {
-                ui.updates().update(cx, |updates, _| updates.track_download(content_hash, book.downloaded, book.download_requested));
+            if let Some(cover) = &cover {
+                track_image(&cover.image, cx);
             }
-            let download_updates = {
-                let updates = ui.updates();
-                cx.subscribe(&updates, move |page: &mut Self, _, event: &LibraryDownloadChanged, cx| {
-                    if Some(event.status.content_hash) == page.book.library_file() {
-                        cx.notify();
-                    }
-                })
+            let download_updates = Self::download_subscription(&book, &ui, cx);
+            let cover_evictions = cx.observe_global::<CoversEvicted>(|page: &mut Self, cx| {
+                page._cover_task.take();
+                page.cover.take();
+                page.cover_needs_reload = true;
+                page.cover_missing = false;
+                cx.notify();
+            });
+            let mut page = Self {
+                ui,
+                book,
+                ready: false,
+                detail: None,
+                error: None,
+                cover,
+                cover_missing: false,
+                cover_needs_reload: false,
+                cover_loading: false,
+                _cover_evictions: cover_evictions,
+                expanded: HashSet::new(),
+                contents_open: true,
+                description_open: true,
+                focus: cx.focus_handle(),
+                request: None,
+                _cover_task: None,
+                download_requested_by_page: false,
+                adding: false,
+                _download_updates: download_updates,
+                #[cfg(not(target_arch = "wasm32"))]
+                torrents: Vec::new(),
+                #[cfg(not(target_arch = "wasm32"))]
+                torrents_loading: false,
+                #[cfg(not(target_arch = "wasm32"))]
+                torrent_task: None,
             };
-            let mut page = Self { ui, book, detail: None, error: None, cover, expanded: HashSet::new(), focus: cx.focus_handle(), request: None, _cover_task: None, download_requested_by_page: false, add_task: None, _download_updates: download_updates };
             page.load(cx);
-            // Only when the grid had not got to it yet: a card that is drawn is
-            // a card whose cover is already decoded.
-            if page.cover.is_none() {
-                page.load_cover(cx);
-            }
+            // Detail art must be fetched separately because card thumbnails
+            // already carry their crop.
+            page.load_cover(cx);
             page
         })
     }
@@ -96,8 +166,18 @@ impl BookDetailPage {
         self.book.key()
     }
 
+    /// Where the book is in this library; none for a catalog or feed book.
+    pub(super) fn locator(&self) -> Option<BookLocator> {
+        self.book.library_file().map(|content_hash| BookLocator::new(*self.ui.backend().id(), content_hash))
+    }
+
     fn load(&mut self, cx: &mut Context<Self>) {
+        self.error = None;
         match self.book.source {
+            BookSource::ExternalCatalog { entry, .. } => {
+                let library = self.ui.backend().clone();
+                self.finish_load(async move { library.external_catalog_detail(entry).await }, cx);
+            }
             BookSource::Opds { entry, .. } => {
                 let app = self.ui.app().clone();
                 let book = self.book.clone();
@@ -108,11 +188,63 @@ impl BookDetailPage {
                 self.load_library(content_hash, cx);
             }
         }
+        cx.notify();
     }
 
     fn load_library(&mut self, content_hash: ContentHash, cx: &mut Context<Self>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.load_torrents(content_hash, cx);
         let library = self.ui.backend().clone();
         self.finish_load(async move { library.book_detail(content_hash).await }, cx);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_torrents(&mut self, hash: ContentHash, cx: &mut Context<Self>) {
+        let library = self.ui.backend().clone();
+        self.torrents_loading = true;
+        self.torrent_task = Some(cx.spawn(async move |page, cx| {
+            let result = library.book_torrents(hash).await;
+            let _ = page.update(cx, |page, cx| {
+                page.torrents_loading = false;
+                match result {
+                    Ok(mut links) => {
+                        links.dedup_by(|a, b| a.info_hash == b.info_hash);
+                        page.torrents = links;
+                    }
+                    Err(error) => log::warn!("could not load book torrents: {error}"),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn change_torrent(&mut self, hash: String, keep: Option<bool>, cx: &mut Context<Self>) {
+        let library = self.ui.backend().clone();
+        let book = self.book.library_file();
+        self.torrent_task = Some(cx.spawn(async move |page, cx| {
+            let result = match keep {
+                Some(keep) => library.keep_torrent_seeding(hash, keep).await,
+                None => library.forget_torrent(hash).await,
+            };
+            let _ = page.update_in(cx, |page, window, cx| match result {
+                Ok(()) => {
+                    if let Some(book) = book {
+                        page.load_torrents(book, cx);
+                    }
+                    if keep.is_none() {
+                        notify_info("torrent-forgotten", "Torrent removed; downloaded files are kept", window, cx);
+                    }
+                }
+                Err(error) => notify_error("torrent-error", error, window, cx),
+            });
+        }));
+    }
+
+    fn download_subscription(book: &BookCardRow, ui: &LibraryContext, cx: &mut Context<Self>) -> Option<DownloadSubscription> {
+        let hash = book.library_file()?;
+        ui.updates().update(cx, |updates, _| updates.track_download(hash, book.downloaded, book.download_requested));
+        Some(ui.subscribe_download(hash, cx, |_: &mut Self, _, cx| cx.notify()))
     }
 
     fn finish_load(&mut self, load: impl std::future::Future<Output = Result<BookDetail, String>> + 'static, cx: &mut Context<Self>) {
@@ -124,8 +256,8 @@ impl BookDetailPage {
                     Ok(detail) => {
                         // A catalog or feed book may already be, or have just
                         // become, a library book.
-                        if let (Some(content_hash), None) = (detail.book.library_file(), page.book.library_file()) {
-                            page.ui.updates().update(cx, |updates, _| updates.track_download(content_hash, detail.book.downloaded, detail.book.download_requested));
+                        if detail.book.library_file() != page.book.library_file() {
+                            page._download_updates = Self::download_subscription(&detail.book, &page.ui, cx);
                         }
                         page.book = detail.book.clone();
                         page.detail = Some(detail);
@@ -139,46 +271,89 @@ impl BookDetailPage {
         self.request = Some(task);
     }
 
-    /// Adds the catalog or feed book to the library, then loads the library
-    /// book's page in its place, with Read.
-    fn add(&mut self, cx: &mut Context<Self>) {
-        if self.add_task.is_some() {
+    /// Adds the catalog or feed book, or an external audiobook from its
+    /// source, to the library, then loads the library book's page in its
+    /// place, with Read.
+    fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.adding || matches!(self.book.source, BookSource::ExternalCatalog { downloadable: false, .. }) {
             return;
         }
         let (source, title) = (self.book.source, self.book.title.clone());
+        let key = self.book.key();
         let library = self.ui.backend().clone();
         let app = self.ui.app().clone();
-        self.add_task = Some(cx.spawn(async move |page, cx| {
-            let result = match source {
-                BookSource::Catalog { content_hash, .. } => library.add_catalog_book(sync_common::ROOT_DIR_ID, content_hash).await,
-                // The app fetches from the feed; the library imports the file.
-                BookSource::Opds { source, entry, .. } => match app.download_opds_book(source, entry).await {
-                    Ok((file_name, bytes)) => library.import_downloaded_book(sync_common::ROOT_DIR_ID, file_name, bytes).await,
-                    Err(error) => Err(error),
-                },
-                BookSource::Library { content_hash } => Ok(content_hash),
+        let download = uuid::Uuid::new_v4().to_string();
+        let mut downloads = BrowserDownloads::default();
+        downloads.apply(BrowserDownloadUpdate { download: download.clone(), replaces: None, name: title.to_string(), phase: BrowserDownloadPhase::Downloading, percent: None, message: None }, window, cx);
+        self.adding = true;
+        cx.spawn_in(window, async move |page, cx| {
+            let operation = async {
+                match source {
+                    BookSource::Catalog { content_hash, .. } => library.add_catalog_book(sync_common::ROOT_DIR_ID, content_hash).await,
+                    // The app fetches from the feed; the library imports the file.
+                    BookSource::Opds { source, entry, .. } => match app.download_opds_book(source, entry).await {
+                        Ok((file_name, bytes)) => library.import_downloaded_book(sync_common::ROOT_DIR_ID, file_name, bytes).await,
+                        Err(error) => Err(error),
+                    },
+                    BookSource::Library { content_hash } => Ok(content_hash),
+                    BookSource::ExternalCatalog { entry, downloadable: true } => library.add_external_catalog_audiobook(sync_common::ROOT_DIR_ID, entry).await,
+                    BookSource::ExternalCatalog { downloadable: false, .. } => Err("this book is read on its source website".into()),
+                }
             };
-            let _ = page.update_in(cx, |page, window, cx| {
-                page.add_task.take();
-                match result {
-                    Ok(content_hash) => {
-                        if matches!(source, BookSource::Opds { .. }) {
-                            mark_feed_book_added(page.book.key(), cx);
+            let result = if matches!(source, BookSource::Catalog { .. } | BookSource::ExternalCatalog { .. }) { track_catalog_import(&library, key, &download, &mut downloads, cx, operation).await } else { operation.await };
+            let _ = cx.update(|window, cx| {
+                let (phase, message) = match &result {
+                    Ok(_) => {
+                        if matches!(source, BookSource::Opds { .. } | BookSource::ExternalCatalog { .. }) {
+                            mark_feed_book_added(key, cx);
                         }
-                        notify_info("catalog-add", format!("Added “{title}” to the library"), window, cx);
-                        page.load_library(content_hash, cx);
+                        (BrowserDownloadPhase::Completed, "Added to library".to_owned())
                     }
-                    Err(error) => notify_error("catalog-add-error", format!("Could not add “{title}”: {error}"), window, cx),
+                    Err(error) => {
+                        log::warn!("Could not add catalog/feed book {key:?} to library: {error}");
+                        (BrowserDownloadPhase::Failed, book_transfer_error_message(error).to_owned())
+                    }
+                };
+                downloads.apply(BrowserDownloadUpdate { download, replaces: None, name: title.to_string(), phase, percent: None, message: Some(message) }, window, cx);
+            });
+            let _ = page.update_in(cx, |page, _, cx| {
+                page.adding = false;
+                if let Ok(content_hash) = result {
+                    page.load_library(content_hash, cx);
                 }
                 cx.notify();
             });
-        }));
+        })
+        .detach();
         cx.notify();
+    }
+
+    /// Opens the store page that sells the feed book.
+    fn buy(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let BookSource::Opds { entry, .. } = self.book.source else { return };
+        let (app, library_id) = (self.ui.app().clone(), *self.ui.backend().id());
+        cx.spawn_in(window, async move |page, cx| {
+            if let Err(error) = app.buy_opds_book(entry, library_id).await {
+                let _ = page.update_in(cx, |_, window, cx| notify_error("book-buy-error", format!("Could not open the store: {error}"), window, cx));
+            }
+        })
+        .detach();
     }
 
     /// The page's own cover, at the resolution a page-sized cover needs rather
     /// than the one a card in a grid does.
     fn load_cover(&mut self, cx: &mut Context<Self>) {
+        // With "generated covers only", no art is read or decoded at all.
+        if crate::stores::generated_covers_only(cx) {
+            self._cover_task = None;
+            self.cover = None;
+            self.cover_loading = false;
+            self.cover_missing = true;
+            return;
+        }
+        self.cover_missing = false;
+        self.cover_loading = true;
+        let generation = cover_generation(cx);
         let title = self.book.title.clone();
         let library = self.ui.backend().clone();
         let app = self.ui.app().clone();
@@ -186,6 +361,7 @@ impl BookDetailPage {
         let load = async move {
             match (source, content_hash) {
                 (BookSource::Opds { source, entry, .. }, _) => app.opds_cover(source, entry, ThumbnailResolution::HighDensity.width()).await,
+                (BookSource::ExternalCatalog { entry, .. }, _) => library.external_catalog_cover(entry, ThumbnailResolution::HighDensity).await,
                 (_, Some(content_hash)) => library.thumbnail(content_hash, ThumbnailResolution::HighDensity).await,
                 (_, None) => Ok(None),
             }
@@ -193,15 +369,27 @@ impl BookDetailPage {
         let decoder = cx.background_executor().clone();
         self._cover_task = Some(cx.spawn(async move |page, cx| {
             let cover = match load.await {
-                Ok(Some(bytes)) => decoder.spawn(async move { loaded_cover_from_jpeg(bytes) }).await,
-                Ok(None) => None,
-                Err(error) => {
-                    log::error!("failed to load the cover for book {title:?}: {error}");
-                    None
-                }
+                Ok(Some(bytes)) => decoder.spawn(async move { loaded_cover_from_jpeg(bytes) }).await.map(Some).ok_or_else(|| "cover is not a readable JPEG".to_owned()),
+                Ok(None) => Ok(None),
+                Err(error) => Err(error),
             };
             let _ = page.update(cx, |page, cx| {
-                page.cover = cover;
+                if generation != cover_generation(cx) {
+                    return;
+                }
+                page.cover_loading = false;
+                match cover {
+                    Ok(Some(cover)) => {
+                        track_image(&cover.image, cx);
+                        page.cover_missing = false;
+                        page.cover = Some(cover);
+                    }
+                    Ok(None) => page.cover_missing = page.cover.is_none(),
+                    Err(error) => {
+                        page.cover_missing = page.cover.is_none();
+                        log::error!("failed to load the cover for book {title:?}: {error}");
+                    }
+                }
                 cx.notify();
             });
         }));
@@ -224,7 +412,8 @@ impl BookDetailPage {
             let _ = page.update_in(cx, |page, window, cx| {
                 page.download_requested_by_page = false;
                 if let Err(error) = result {
-                    notify_error("book-download-error", format!("Could not download book: {error}"), window, cx);
+                    log::warn!("Could not download library book {content_hash}: {error}");
+                    notify_error("book-download-error", book_transfer_error_message(&error), window, cx);
                 }
                 cx.notify();
             });
@@ -238,36 +427,6 @@ impl BookDetailPage {
             self.expanded.insert(target.to_owned());
         }
         cx.notify();
-    }
-
-    /// Runs a confirmed auxiliary command from the overflow menu. The
-    /// operation reports whether the page's book is gone afterwards: a
-    /// discarded page closes onto its folder, while a book that stays in the
-    /// library reloads the detail instead.
-    fn confirm_page_action(target: Entity<Self>, confirmation: BookConfirmation, detail: String, operation: impl std::future::Future<Output = Result<bool, String>> + 'static, window: &mut Window, cx: &mut App) {
-        let answer = confirmation.prompt(&detail, window, cx);
-        target.update(cx, |_, cx| {
-            cx.spawn(async move |page, cx| {
-                if !answer.await {
-                    return;
-                }
-                match operation.await {
-                    Ok(discard) => {
-                        if discard {
-                            let _ = page.update(cx, |_, cx| cx.emit(CloseBookDetail));
-                        } else {
-                            let _ = page.update(cx, |page, cx| page.load(cx));
-                        }
-                    }
-                    Err(error) => {
-                        let _ = page.update_in(cx, |_, window, cx| {
-                            confirmation.report_failure(error, window, cx);
-                        });
-                    }
-                }
-            })
-            .detach();
-        });
     }
 }
 
@@ -337,29 +496,87 @@ fn chapter_durations(entries: &[BookTocEntry], total_ms: Option<u64>) -> HashMap
 }
 
 impl Render for BookDetailPage {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = components::browser_theme(cx);
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.cover_needs_reload {
+            self.cover_needs_reload = false;
+            self.load_cover(cx);
+        }
         let page = cx.entity();
-        let viewport_width = f32::from(window.viewport_size().width);
-        let desktop_layout = viewport_width >= BOOK_DETAIL_SIDEBAR_BREAKPOINT;
+        // Build at the actual pane width in this frame. No stored measurement
+        // or extra invalidation is needed when a split or window changes size.
+        canvas(
+            move |bounds, window, cx| {
+                let mut body = page.update(cx, |page, cx| page.render_pane(f32::from(bounds.size.width), cx));
+                body.prepaint_as_root(bounds.origin, bounds.size.map(AvailableSpace::Definite), window, cx);
+                body
+            },
+            |_, mut body, window, cx| body.paint(window, cx),
+        )
+        .size_full()
+        .min_w_0()
+        .min_h_0()
+    }
+}
 
-        // The card's row until the request lands, then the request's own. There
-        // is no frame in which the page has nothing to say about the book.
+impl BookDetailPage {
+    fn render_pane(&mut self, width: f32, cx: &mut Context<Self>) -> AnyElement {
+        let theme = components::browser_theme(cx);
+        let back = (cfg!(feature = "kobo") || !components::has_native_back_button()).then(|| components::book_detail_back("book-detail-back", theme).on_click(cx.listener(|_, _, _, cx| cx.emit(CloseBookDetail))));
+        let page = cx.entity();
+        let loaded = self.detail.is_some() && !self.cover_loading;
+        #[cfg(not(target_arch = "wasm32"))]
+        let loaded = loaded && !self.torrents_loading;
+        self.ready |= loaded && width > 0.0;
+        if !self.ready {
+            let label = if self.error.is_some() { "Could not load book details" } else { "Loading book…" };
+            let body = components::book_detail_page()
+                .track_focus(&self.focus)
+                .when_some(back, |body, back| body.child(components::book_detail_measure().child(back)))
+                .child(div().flex_1().w_full().flex().items_center().justify_center().child(components::browser_loading_message(label, theme)))
+                .into_any_element();
+            return with_retry_banner(body, self.error.clone(), "retry-book-detail", theme, move |_, _, cx| page.update(cx, |page, cx| page.load(cx)));
+        }
+
+        // The initial requests are complete before the book is displayed.
         let book = self.book.clone();
         let detail = self.detail.clone();
 
-        let audiobook = book.format_category == LibraryFileTypeFilter::Audiobook;
+        // Columns only when there is something to put beside the player.
+        let has_sections = detail.as_ref().is_some_and(|detail| !detail.toc.is_empty() || !detail.description.trim().is_empty());
+        let layout = if width >= BOOK_DETAIL_SIDEBAR_BREAKPOINT && has_sections {
+            DetailLayout::Columns
+        } else if width >= BOOK_DETAIL_STACKED_BREAKPOINT {
+            DetailLayout::Hero
+        } else {
+            DetailLayout::Stacked
+        };
+        let beside_cover = layout == DetailLayout::Hero;
+        let large_title = !beside_cover || width >= BOOK_DETAIL_LARGE_TITLE_WIDTH;
 
-        let cover = (if desktop_layout { components::book_detail_sidebar_cover_slot() } else { components::book_detail_cover_slot() })
+        let audiobook = book.format_category == LibraryFileTypeFilter::Audiobook;
+        // The book that is playing: its controls, and where playback is now.
+        // The library's saved position lags behind, so its cover bar and
+        // chapter mark follow the player instead.
+        let locator = self.locator();
+        let playing = cx.try_global::<crate::NowPlaying>().and_then(|now_playing| now_playing.book.as_ref()).filter(|playing| Some(&playing.locator) == locator.as_ref()).map(|playing| (playing.controls.clone(), playing.position.clone()));
+        let listening = playing.as_ref().and_then(|(_, position)| position(cx));
+        let progress = listening.map(|(_, progress)| progress).unwrap_or(book.progress);
+
+        let cover = (if beside_cover { components::book_detail_cover_slot() } else { components::book_detail_sidebar_cover_slot() })
+            .id("book-detail-open-cover")
+            .when(book.library_file().is_some(), |cover| cover.cursor_pointer().on_click(cx.listener(|page, _, window, cx| page.open(None, window, cx))))
             .child(match self.cover.clone() {
                 Some(cover) => components::book_cover(theme, cover_aspect_ratio(&cover.image)).child(components::book_cover_image(format!("book-detail-cover-{}", book.key()), cover.image, 1.0, false, theme)),
-                None => components::missing_book_cover(if audiobook { "Audiobook" } else { "No cover" }, theme),
+                None if self.cover_missing => {
+                    components::book_cover_generated(book.title.clone(), book.subtitle.as_deref(), &book.author, generated_cover_variant(book.key()), theme).aspect_ratio(if audiobook { 1.0 } else { components::BOOK_COVER_ASPECT_RATIO })
+                }
+                None => components::book_cover(theme, if audiobook { 1.0 } else { components::BOOK_COVER_ASPECT_RATIO }),
             })
-            // Nothing under an unopened book: the line beside it already says
-            // "Not started", and an empty track says it again at length.
-            .children(components::book_cover_progress(book.progress, theme));
+            // Show the cover's progress bar only after the book has been started.
+            .children(components::book_cover_progress(progress, theme));
 
-        let mut headline = components::book_detail_headline().child(components::book_detail_title(book.title.clone(), book.subtitle.as_deref(), desktop_layout, theme));
+        let headline = if beside_cover { components::book_detail_headline() } else { components::book_detail_sidebar_headline() };
+        let mut headline = headline.child(components::book_detail_title(book.title.clone(), book.subtitle.as_deref(), large_title, theme));
 
         // The card knows one author line; the request knows who each of them is
         // and where their page lives. Until it lands the line is stated rather
@@ -367,15 +584,19 @@ impl Render for BookDetailPage {
         // becomes clickable.
         match detail.as_ref().filter(|detail| !detail.authors.is_empty()) {
             Some(detail) => {
-                let mut byline = components::book_detail_credit_line(None::<SharedString>, theme);
+                let mut byline = components::book_detail_authors(theme);
                 for author in &detail.authors {
                     let open = crate::OpenAuthor { author: author.id, name: author.name.clone() };
-                    byline = byline.child(components::book_detail_name_link(format!("book-detail-author-{}", author.id), author.name.clone(), theme).on_click(move |_, window, cx| window.dispatch_action(Box::new(open.clone()), cx)));
+                    byline = byline.child(components::book_detail_name_link(format!("book-detail-author-{}", author.id), author.name.clone(), theme).min_w_0().max_w_full().on_click(move |_, window, cx| {
+                        if !window.has_text_selection(cx) {
+                            window.dispatch_action(Box::new(open.clone()), cx);
+                        }
+                    }));
                 }
                 headline = headline.child(byline);
             }
             None if !book.author.trim().is_empty() => {
-                headline = headline.child(components::book_detail_credit_line(None::<SharedString>, theme).child(div().child(book.author.clone())));
+                headline = headline.child(components::book_detail_authors(theme).child(div().min_w_0().max_w_full().child(components::book_detail_text("book-detail-author", book.author.clone()))));
             }
             None => {}
         }
@@ -385,21 +606,35 @@ impl Render for BookDetailPage {
                 "nrt" => "Narrated by",
                 _ => continue,
             };
-            headline = headline.child(components::book_detail_credit_line(Some(role), theme).child(components::book_detail_name_link(format!("book-detail-credit-{}-{}", credit.role, credit.id), credit.name.clone(), theme)));
+            headline = headline.child(components::book_detail_credit_line(Some(role), theme).id(format!("book-detail-credit-row-{}-{}", credit.role, credit.id)).child(components::book_detail_name_link(
+                format!("book-detail-credit-{}-{}", credit.role, credit.id),
+                credit.name.clone(),
+                theme,
+            )));
         }
 
-        // How long it runs and how many chapters, for a book where that is a
-        // question. Nothing about the file — neither what kind it is nor when it
-        // arrived, which are facts about the library rather than about the book.
+        // The year it was published, then how long it runs and how many
+        // chapters, for a book where that is a question. Nothing about the
+        // file — neither what kind it is nor when it arrived, which are facts
+        // about the library rather than about the book. An audiobook with
+        // chapters listed heads that list with the last two instead.
+        // The year is bare rather than "Published 1998": for an ebook edition
+        // it can be the edition's year, not the work's.
+        let chapter_list = audiobook && detail.as_ref().is_some_and(|detail| !detail.toc.is_empty());
         let mut facts = Vec::new();
-        if let Some(duration) = book.audiobook_duration_ms {
-            facts.push(SharedString::from(spoken_duration(duration)));
+        if let Some(year) = detail.as_ref().and_then(|detail| detail.year) {
+            facts.push(SharedString::from(year.to_string()));
         }
-        if let Some(chapters) = detail.as_ref().and_then(|detail| detail.audiobook_chapter_count) {
-            facts.push(SharedString::from(format!("{chapters} chapters")));
+        if !chapter_list {
+            if let Some(duration) = book.audiobook_duration_ms {
+                facts.push(SharedString::from(spoken_duration(duration)));
+            }
+            if let Some(chapters) = detail.as_ref().and_then(|detail| detail.audiobook_chapter_count) {
+                facts.push(SharedString::from(format!("{chapters} chapters")));
+            }
         }
         if !facts.is_empty() {
-            headline = headline.child(components::book_detail_facts(facts, theme));
+            headline = headline.child(components::book_detail_facts(facts, theme).id("book-detail-metadata"));
         }
 
         // Where the reader is and what they can do about it, beside the cover
@@ -409,14 +644,17 @@ impl Render for BookDetailPage {
         // `progress` is already a percentage, as the grid's bar has always read
         // it. Multiplying it by a hundred again put "2201%" beside the title of
         // a book a fifth of the way through.
-        let percentage = (book.progress > 0.0).then(|| SharedString::from(format!("{}%", book.progress.round() as i32)));
-        let position = components::book_detail_position(detail.as_ref().and_then(|detail| detail.current_entry.clone()).map(SharedString::from), percentage, theme);
+        let position = book.library_file().and_then(|_| {
+            let entry = detail.as_ref().and_then(|detail| detail.current_entry.clone()).filter(|entry| !entry.trim().is_empty()).map(SharedString::from);
+            let percentage = (book.progress > 0.0).then(|| SharedString::from(format!("{}%", book.progress.round() as i32)));
+            (entry.is_some() || percentage.is_some()).then(|| components::book_detail_position(entry, percentage, theme))
+        });
 
         let download_state = book.library_file().and_then(|content_hash| self.ui.updates().read(cx).download_state(content_hash)).unwrap_or(DownloadState::Queued);
         let downloaded = matches!(download_state, DownloadState::Downloaded);
         let downloading = matches!(download_state, DownloadState::Queued | DownloadState::Downloading(_));
         let open_icon: gpui_component::Icon = if audiobook { components::Headphones.into() } else { IconName::BookOpen.into() };
-        let action_padding = if desktop_layout { components::SPACE_SM } else { components::SPACE_MD };
+        let action_padding = if width >= BOOK_DETAIL_LARGE_TITLE_WIDTH { components::SPACE_SM } else { components::SPACE_MD };
         let mut actions = components::book_detail_actions().child(components::primary_action_button("book-detail-open", if audiobook { "Listen" } else { "Read" }, open_icon, false).px(gpui::px(action_padding)).on_click({
             let page = page.clone();
             move |_, window, cx| page.update(cx, |page, cx| page.open(None, window, cx))
@@ -429,126 +667,121 @@ impl Render for BookDetailPage {
                 move |_, _, cx| page.update(cx, |page, cx| page.download(cx))
             }));
         }
-        // Auxiliary commands live behind an overflow button rather than as
-        // more buttons: reading and downloading are the page's work, while
-        // discarding the download or the book itself is the exception.
-        if let Some(content_hash) = book.library_file() {
-            let trigger = components::outlined_icon_button("book-detail-more", "More actions", IconName::Ellipsis, theme);
-            let action_page = page.clone();
-            let title = book.title.clone();
-            // The detail is not scoped to a folder, but one live placement can
-            // still act as the source of a folder removal.
-            let source = book.source_directory.or_else(|| detail.as_ref().and_then(|detail| detail.source_directory_id.as_deref()).and_then(|id| DirId::parse_str(id).ok()));
-            let backend = self.ui.backend().clone();
-            actions = actions.child(trigger.dropdown_menu_with_anchor(Anchor::TopRight, move |mut menu, _, _| {
-                if downloaded {
-                    let library = backend.clone();
-                    let evict_page = action_page.clone();
-                    menu = menu
-                        .item(components::menu_item_with_icon(if cfg!(target_arch = "wasm32") { "Remove local copy" } else { "Remove download" }, IconName::HardDrive, move |_, _, cx| {
-                            let library = library.clone();
-                            let operation = async move { library.remove_local_book_copy(content_hash).await.map(|_| ()) };
-                            evict_page.update(cx, |_, cx| {
-                                cx.spawn(async move |page, cx| {
-                                    if let Err(error) = operation.await {
-                                        let _ = page.update_in(cx, |_, window, cx| {
-                                            notify_error("book-evict-error", format!("Could not remove download: {error}"), window, cx);
-                                        });
-                                    }
-                                })
-                                .detach();
-                            });
-                        }))
-                        .separator();
-                }
-                if let Some(source_id) = source {
-                    let library = backend.clone();
-                    let remove_page = action_page.clone();
-                    let remove_detail = format!("“{title}” stays in its other folders. If this is its last folder, it moves to Trash.");
-                    menu = menu.item(components::menu_item_with_icon("Remove from folder", components::navigation_icon(components::NavigationIcon::Folder), move |_, window, cx| {
-                        let library = library.clone();
-                        let operation = async move { library.remove_book_from_directory(content_hash, source_id).await };
-                        Self::confirm_page_action(remove_page.clone(), BookConfirmation::RemoveFromFolder, remove_detail.clone(), operation, window, cx);
-                    }));
-                }
-                let library = backend.clone();
-                let trash_page = action_page.clone();
-                let trash_detail = format!("“{title}” will be moved to Trash.");
-                menu = menu.item(components::menu_item_with_icon("Move to Trash", components::navigation_icon(components::NavigationIcon::Trash2), move |_, window, cx| {
-                    let library = library.clone();
-                    let operation = async move { library.move_book_to_trash(content_hash).await.map(|_| true) };
-                    Self::confirm_page_action(trash_page.clone(), BookConfirmation::TrashBook, trash_detail.clone(), operation, window, cx);
-                }));
-                menu
-            }));
-        }
-        // A catalog or feed book the library does not hold has one action:
-        // adding it. A feed book the feed only sells, lends or locks has none.
+        // Hosted catalog books, open feed books and external audiobooks can
+        // be added. Other external entries keep reading on the source website.
         match book.source {
+            BookSource::ExternalCatalog { downloadable: false, .. } => {
+                let url = detail.as_ref().and_then(|detail| detail.external_url.clone());
+                let label = if url.as_deref().is_some_and(|url| url.starts_with("https://litteraturbanken.se/")) { "Open on Litteraturbanken" } else { "Open at source" };
+                actions = components::book_detail_actions().child(components::primary_action_button("book-detail-external", label, IconName::ExternalLink, url.is_none()).px(gpui::px(action_padding)).on_click(move |_, _, cx| {
+                    if let Some(url) = &url {
+                        cx.open_url(url);
+                    }
+                }));
+            }
             BookSource::Library { .. } => {}
+            // Sold, not offered: the store's page opens in a store window,
+            // and what is bought there goes into the library's root.
+            BookSource::Opds { downloadable: false, buyable: true, .. } => {
+                actions = components::book_detail_actions().child(components::primary_action_button("book-detail-buy", "Buy", components::buy_glyph(), false).px(gpui::px(action_padding)).on_click({
+                    let page = page.clone();
+                    move |_, window, cx| page.update(cx, |page, cx| page.buy(window, cx))
+                }));
+            }
             BookSource::Opds { downloadable: false, .. } => {
                 actions = components::book_detail_actions();
-                headline = headline.child(components::book_detail_facts(vec![SharedString::from("Not offered for download")], theme));
+                headline = headline.child(components::book_detail_facts(vec![SharedString::from("Not offered for download")], theme).id("book-detail-status"));
             }
-            BookSource::Catalog { .. } | BookSource::Opds { downloadable: true, .. } => {
-                actions = components::book_detail_actions().child(components::primary_action_button("book-detail-add", "Add to library", IconName::Plus, self.add_task.is_some()).px(gpui::px(action_padding)).on_click({
-                    let page = page.clone();
-                    move |_, _, cx| page.update(cx, |page, cx| page.add(cx))
-                }));
+            BookSource::Catalog { .. } | BookSource::Opds { downloadable: true, .. } | BookSource::ExternalCatalog { downloadable: true, .. } => {
+                actions = components::book_detail_actions().child(
+                    components::primary_action_button("book-detail-add", if self.adding { "Adding…" } else { "Add to library" }, components::download_glyph(), self.adding).px(gpui::px(action_padding)).on_click({
+                        let page = page.clone();
+                        move |_, window, cx| page.update(cx, |page, cx| page.add(window, cx))
+                    }),
+                );
             }
         }
-        headline = headline.child(position).child(actions);
+        #[cfg(not(target_arch = "wasm32"))]
+        for (index, torrent) in self.torrents.iter().enumerate() {
+            let hash = torrent.info_hash.clone();
+            let keep = !torrent.keep_seeding;
+            let target = page.clone();
+            actions = actions.child(
+                components::secondary_action_button(("book-torrent-seeding", index), if keep { "Keep seeding torrent" } else { "Stop seeding torrent" }, IconName::ArrowUp, false)
+                    .on_click(move |_, _, cx| target.update(cx, |page, cx| page.change_torrent(hash.clone(), Some(keep), cx))),
+            );
+            let hash = torrent.info_hash.clone();
+            let target = page.clone();
+            actions = actions
+                .child(components::secondary_action_button(("book-torrent-forget", index), "Remove torrent", IconName::Close, false).on_click(move |_, _, cx| target.update(cx, |page, cx| page.change_torrent(hash.clone(), None, cx))));
+        }
+        // The book that is playing is controlled here rather than offered: its
+        // controls stand where Listen and the reading position would. Beside
+        // the cover they would get half the row, so there they go under both.
+        let player = playing.map(|(controls, _)| controls);
+        if player.is_none() {
+            headline = headline.children(position).child(actions);
+        }
+        let player_under_hero = if beside_cover {
+            player
+        } else {
+            headline = headline.children(player);
+            None
+        };
         if let DownloadState::Downloading(progress) = download_state
             && progress.value() > 0.0
         {
             headline = headline.child(components::progress_track(theme).w(gpui::px(240.0)).max_w_full().child(components::progress_fill(progress.value(), theme)));
         }
 
+        // Three columns show the contents and the description side by side;
+        // stacked, in two columns or fewer, either can be folded away.
+        let three_columns = layout == DetailLayout::Columns && width >= BOOK_DETAIL_THREE_COLUMN_BREAKPOINT && detail.as_ref().is_some_and(|detail| !detail.toc.is_empty() && !detail.description.trim().is_empty());
+        let collapsible = !three_columns;
         // Empty contents and descriptions do not occupy a section.
-        let contents = detail
-            .as_ref()
-            .filter(|detail| !detail.toc.is_empty())
-            .map(|detail| components::book_detail_section().max_w(gpui::rems(components::BOOK_DETAIL_CONTENTS_WIDTH_REM)).child(self.render_contents(detail, audiobook, theme, cx)));
+        let contents = detail.as_ref().filter(|detail| !detail.toc.is_empty()).map(|detail| self.render_contents(detail, audiobook, listening.map(|(position, _)| position), collapsible, theme, cx));
         // A description containing only markup is empty.
-        let description = detail
-            .as_ref()
-            .and_then(|detail| components::book_detail_description(&detail.description, theme))
-            .map(|description| components::book_detail_section().max_w(gpui::rems(components::BOOK_DETAIL_DESCRIPTION_WIDTH_REM)).child(description));
+        let description = detail.as_ref().and_then(|detail| components::book_detail_description(&detail.description, theme)).map(|description| {
+            let open = !collapsible || self.description_open;
+            let heading = components::book_detail_section_heading("Description", None::<SharedString>, collapsible.then_some(open), theme).id("book-detail-description-heading").when(collapsible, |heading| {
+                heading.on_click(cx.listener(|page, _, window, cx| {
+                    if !window.has_text_selection(cx) {
+                        page.description_open = !page.description_open;
+                        cx.notify();
+                    }
+                }))
+            });
+            components::book_detail_section().child(heading).when(open, |section| section.child(description))
+        });
+        // A description of markup alone has no section after all.
+        let three_columns = three_columns && description.is_some();
 
-        let content = if desktop_layout && (contents.is_some() || description.is_some()) {
-            let sidebar = components::book_detail_sidebar().child(cover).child(headline.flex_none());
-            if viewport_width >= BOOK_DETAIL_THREE_COLUMN_BREAKPOINT && contents.is_some() && description.is_some() {
-                components::book_detail_wide_measure()
-                    .child(
-                        components::book_detail_columns()
-                            .child(sidebar.flex_1().w_0())
-                            .child(components::book_detail_contents_column().child(contents.expect("three columns require contents")))
-                            .child(components::book_detail_description_column().child(description.expect("three columns require description"))),
-                    )
-                    .into_any_element()
+        // On desktop each column scrolls on its own and the page does not; the
+        // narrower pages scroll as one.
+        let body = if layout == DetailLayout::Columns {
+            let sidebar = components::book_detail_sidebar_column().child(components::book_detail_sidebar().child(components::book_detail_introduction().children(back).child(cover)).child(headline.flex_none()).overflow_y_scrollbar());
+            let mut columns = components::book_detail_columns_page().debug_selector(|| "book-detail-columns".into()).track_focus(&self.focus).child(components::book_detail_page_margin()).child(sidebar);
+            if three_columns {
+                let contents = components::book_detail_column_body().children(contents).overflow_y_scrollbar();
+                let description = components::book_detail_column_body().children(description).overflow_y_scrollbar();
+                columns = columns
+                    .child(components::book_detail_column_gap(theme))
+                    .child(components::book_detail_contents_column().child(contents))
+                    .child(components::book_detail_column_gap(theme))
+                    .child(components::book_detail_description_column().child(description));
             } else {
-                let mut reading = components::book_detail_description_column();
-                if let Some(contents) = contents {
-                    reading = reading.child(contents);
-                }
-                if let Some(description) = description {
-                    reading = reading.child(description);
-                }
-                components::book_detail_medium_measure().child(components::book_detail_columns().child(sidebar).child(reading)).into_any_element()
+                let reading = components::book_detail_column_body().children(contents).children(description).overflow_y_scrollbar();
+                columns = columns.child(components::book_detail_column_gap(theme)).child(components::book_detail_description_column().child(reading));
             }
+            columns.child(components::book_detail_page_margin()).into_any_element()
         } else {
-            let hero = components::book_detail_hero().child(cover).child(headline);
-            let mut sections = components::book_detail_sections();
-            if let Some(contents) = contents {
-                sections = sections.child(contents);
-            }
-            if let Some(description) = description {
-                sections = sections.child(description);
-            }
-            let introduction = div().w_full().min_w_0().flex().flex_col().gap(gpui::px(components::SPACE_SM)).child(hero);
-            components::book_detail_measure().child(introduction).child(sections).into_any_element()
+            let introduction = match layout {
+                DetailLayout::Stacked => components::book_detail_stacked_introduction().debug_selector(|| "book-detail-stacked".into()).children(back).child(cover).child(headline),
+                _ => components::book_detail_introduction().children(back).child(components::book_detail_hero().debug_selector(|| "book-detail-hero".into()).child(cover).child(headline)).children(player_under_hero),
+            };
+            let content = components::book_detail_measure().child(introduction).child(components::book_detail_sections().children(contents).children(description));
+            components::book_detail_page().track_focus(&self.focus).child(content).overflow_y_scrollbar().into_any_element()
         };
-        let body = components::book_detail_page().track_focus(&self.focus).child(content).overflow_y_scrollbar().into_any_element();
 
         // A failed request loses the credits and the contents —
         // not the book. Everything the card already knew is on screen and stays
@@ -561,13 +794,10 @@ impl BookDetailPage {
     /// Called only for a book that has navigation stored: a page with no
     /// contents has no Contents section at all, rather than a heading over a
     /// sentence explaining the library to the reader.
-    fn render_contents(&self, detail: &BookDetail, audiobook: bool, theme: components::BrowserTheme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        // The entry the reader is inside, and only that one: a parent is not
-        // partly read, because a navigation document says where a section
-        // starts and never how far into it anyone has got. Matched on the
-        // target rather than the wording — two entries can be called the same
-        // thing, and `current_entry` is the wording.
-        let marked = detail.current_target.as_deref();
+    /// `listening` is where the player is, when this is the book playing.
+    /// `collapsible`: the heading folds the list away, as it does in two
+    /// columns and narrower.
+    fn render_contents(&self, detail: &BookDetail, audiobook: bool, listening: Option<Duration>, collapsible: bool, theme: components::BrowserTheme, cx: &mut Context<Self>) -> AnyElement {
         let durations = if audiobook { chapter_durations(&detail.toc, detail.book.audiobook_duration_ms) } else { HashMap::new() };
         let mut drawn = Vec::new();
         drawn_entries(&detail.toc, &self.expanded, 0, &mut drawn);
@@ -581,42 +811,217 @@ impl BookDetailPage {
             }
         }
         visit(&detail.toc, &mut ordered);
+        // The entry the reader is inside, and only that one: a parent is not
+        // partly read, because a navigation document says where a section
+        // starts and never how far into it anyone has got. Matched on the
+        // target rather than the wording — two entries can be called the same
+        // thing, and `current_entry` is the wording. While the book plays,
+        // it is the last chapter starting at or before the player's position.
+        let playing_target = listening.and_then(|position| {
+            let position = position.as_millis() as u64;
+            ordered.iter().filter(|entry| book_model::audiobook_toc_position(&entry.target).is_some_and(|start| start <= position)).last().map(|entry| entry.target.as_str())
+        });
+        let marked = playing_target.or(detail.current_target.as_deref());
         let read_targets: HashSet<&str> =
             ordered.iter().position(|entry| marked == Some(entry.target.as_str())).map(|current| ordered[..current].iter().filter(|entry| entry.children.is_empty()).map(|entry| entry.target.as_str()).collect()).unwrap_or_default();
+        // A closed part holding the current entry carries the mark itself, so
+        // where the reader is never disappears into it.
+        fn holds(entry: &BookTocEntry, target: &str) -> bool {
+            entry.children.iter().any(|child| child.target == target || holds(child, target))
+        }
 
         let page = cx.entity();
+        let can_open = self.book.library_file().is_some();
+        // Every entry is numbered by its place in reading order, so the number
+        // stays put when a part is opened or closed. The caret column is kept
+        // only in a contents that has parts at all.
+        let number_digits = components::contents_digits(ordered.len());
+        let nested = detail.toc.iter().any(|entry| !entry.children.is_empty());
         let mut panel = components::contents_panel(theme);
         for (index, DrawnEntry { entry, depth }) in drawn.into_iter().enumerate() {
+            let expanded = self.expanded.contains(&entry.target);
             let row = components::ContentsRow {
                 depth,
                 has_children: !entry.children.is_empty(),
-                expanded: self.expanded.contains(&entry.target),
-                marked: marked == Some(entry.target.as_str()),
+                expanded,
+                marked: marked.is_some_and(|marked| marked == entry.target || (!expanded && holds(entry, marked))),
                 read: read_targets.contains(entry.target.as_str()),
                 focused: false,
+                number: ordered.iter().position(|ordered| std::ptr::eq(*ordered, entry)).map(|position| position + 1),
+                number_digits,
             };
             // The chevron opens the entry and the row goes to it, so the two
             // clicks have to be separable. Attach the toggle directly to the
             // disclosure, and leave leaf entries transparent to the row click.
-            let disclosure = components::contents_disclosure(format!("book-detail-disclosure-{index}"), row, theme).when(row.has_children, |disclosure| {
-                let page = page.clone();
-                let target = entry.target.clone();
-                disclosure.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(move |_, _, cx| page.update(cx, |page, cx| page.toggle_entry(&target, cx)))
+            let disclosure = nested.then(|| {
+                components::contents_disclosure(format!("book-detail-disclosure-{index}"), row, theme).when(row.has_children, |disclosure| {
+                    let page = page.clone();
+                    let target = entry.target.clone();
+                    disclosure.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(move |_, _, cx| page.update(cx, |page, cx| page.toggle_entry(&target, cx)))
+                })
             });
             let amount = durations.get(entry.target.as_str()).cloned();
-            let number = audiobook.then_some(index + 1);
-            panel = panel.child(components::contents_row(format!("book-detail-entry-{index}"), row, disclosure, entry.title.clone(), number, amount, theme).on_click({
-                let page = page.clone();
-                let target = entry.target.clone();
-                move |_, window, cx| page.update(cx, |page, cx| page.open(Some(target.clone()), window, cx))
-            }));
+            panel = panel.child(
+                components::contents_row(format!("book-detail-entry-{index}"), row, disclosure, components::book_detail_text(format!("book-detail-entry-title-{index}"), entry.title.clone()), amount, theme)
+                    .when(can_open, |row| {
+                        row.on_click({
+                            let page = page.clone();
+                            let target = entry.target.clone();
+                            move |_, window, cx| {
+                                if !window.has_text_selection(cx) {
+                                    page.update(cx, |page, cx| page.open(Some(target.clone()), window, cx));
+                                }
+                            }
+                        })
+                    })
+                    .when(!can_open, |row| row.cursor_default()),
+            );
         }
-        panel.into_any_element()
+        // An audiobook's heading says how many chapters and how long, on the
+        // heading's own line.
+        let summary = audiobook.then(|| {
+            let chapters = detail.audiobook_chapter_count.unwrap_or(detail.toc.len());
+            match detail.book.audiobook_duration_ms {
+                Some(duration) => format!("{chapters} chapters · {}", spoken_duration(duration)),
+                None => format!("{chapters} chapters"),
+            }
+        });
+        let open = !collapsible || self.contents_open;
+        let heading = components::book_detail_section_heading(if audiobook { "Chapters" } else { "Contents" }, summary, collapsible.then_some(open), theme).id("book-detail-contents-heading").when(collapsible, |heading| {
+            heading.on_click(cx.listener(|page, _, window, cx| {
+                if !window.has_text_selection(cx) {
+                    page.contents_open = !page.contents_open;
+                    cx.notify();
+                }
+            }))
+        });
+        components::book_detail_section().child(heading).when(open, |section| section.child(panel)).into_any_element()
     }
 }
 
 impl Focusable for BookDetailPage {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32"), not(feature = "kobo")))]
+mod tests {
+    use super::*;
+    use crate::navigation::LibrarySession;
+    use gpui::{Pixels, StyleRefinement, TestAppContext, VisualTestContext, px, size};
+    use std::{cell::Cell, rc::Rc};
+
+    struct Neighbor(Rc<Cell<usize>>);
+
+    impl Render for Neighbor {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.0.set(self.0.get() + 1);
+            div().size_full()
+        }
+    }
+
+    struct DetailFixture {
+        page: Entity<BookDetailPage>,
+        neighbor: Entity<Neighbor>,
+        width: Pixels,
+    }
+
+    impl Render for DetailFixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().flex().child(div().w(self.width).h_full().flex_none().child(self.page.clone())).child(div().w(px(50.0)).h_full().child(self.neighbor.clone().cached(StyleRefinement::default().size_full())))
+        }
+    }
+
+    #[gpui::test]
+    async fn detail_uses_current_pane_width_without_followup_invalidation(cx: &mut TestAppContext) {
+        let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (_directory, _session, library) = LibrarySession::test_context(cx).await;
+        let book = BookCardRow {
+            source: BookSource::Library { content_hash: ContentHash::from_bytes([15; 32]) },
+            title: "Book".into(),
+            subtitle: None,
+            author: "Author".into(),
+            progress: 0.0,
+            downloaded: true,
+            download_requested: false,
+            format_category: LibraryFileTypeFilter::Book,
+            audiobook_duration_ms: None,
+            added_at: 0,
+            source_directory: None,
+        };
+        let page = BookDetailPage::create(book.clone(), None, library, cx);
+        page.update(cx, |page, _| {
+            page.request.take();
+            page._cover_task.take();
+            page.torrent_task.take();
+            page.detail = Some(feed_detail(book, "A description".into()));
+            page.cover_loading = false;
+            page.cover_missing = true;
+            page.torrents_loading = false;
+        });
+        let notifications = Rc::new(Cell::new(0));
+        let observed = notifications.clone();
+        let _observation = cx.update(|cx| cx.observe(&page, move |_, _| observed.set(observed.get() + 1)));
+        let neighbor_renders = Rc::new(Cell::new(0));
+        let neighbor = cx.new(|_| Neighbor(neighbor_renders.clone()));
+        let root = cx.open_window(size(px(1500.0), px(800.0)), |_, _| DetailFixture { page, neighbor, width: px(450.0) });
+        let mut visual = VisualTestContext::from_window(root.into(), cx);
+        for (index, (width, selector)) in [(450.0, "book-detail-stacked"), (800.0, "book-detail-hero"), (1000.0, "book-detail-columns"), (1300.0, "book-detail-columns"), (450.0, "book-detail-stacked")].into_iter().enumerate() {
+            if index > 0 {
+                root.update(cx, |root, _, cx| {
+                    root.width = px(width);
+                    cx.notify();
+                })
+                .unwrap();
+            }
+            // Opening the window and each notified width change draw a frame
+            // immediately. Check it before explicitly drawing another one.
+            assert!(visual.debug_bounds(selector).is_some(), "the first frame at {width}px must use the right layout");
+            assert_eq!(notifications.get(), 0, "layout must not invalidate the page again");
+            let rendered = neighbor_renders.get();
+            visual.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            assert_eq!(neighbor_renders.get(), rendered, "detail layout must not force a window-wide cache refresh");
+        }
+    }
+
+    #[gpui::test]
+    async fn catalog_detail_subscribes_when_loaded_as_a_library_book(cx: &mut TestAppContext) {
+        let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (_directory, _session, library) = LibrarySession::test_context(cx).await;
+        let updates = library.updates();
+        let hash = ContentHash::from_bytes([16; 32]);
+        let mut book = BookCardRow {
+            source: BookSource::Catalog { content_hash: hash },
+            title: "Catalog book".into(),
+            subtitle: None,
+            author: String::new(),
+            progress: 0.0,
+            downloaded: false,
+            download_requested: false,
+            format_category: LibraryFileTypeFilter::Book,
+            audiobook_duration_ms: None,
+            added_at: 0,
+            source_directory: None,
+        };
+        let page = BookDetailPage::create(book.clone(), None, library, cx);
+        page.update(cx, |page, cx| {
+            page.request.take();
+            page._cover_task.take();
+            page.torrent_task.take();
+            assert!(page._download_updates.is_none());
+            book.source = BookSource::Library { content_hash: hash };
+            page.finish_load(async move { Ok(feed_detail(book, String::new())) }, cx);
+        });
+        cx.condition(&page, |page, _| page.book.library_file() == Some(hash)).await;
+        let notifications = Rc::new(Cell::new(0));
+        let observed = notifications.clone();
+        let _observation = cx.update(|cx| cx.observe(&page, move |_, _| observed.set(observed.get() + 1)));
+        for state in [DownloadState::Queued, DownloadState::Downloading(library_model::DownloadProgress::ZERO), DownloadState::Downloaded] {
+            updates.update(cx, |updates, cx| updates.set_download_state_for_test(hash, state, cx));
+        }
+        assert_eq!(notifications.get(), 3, "the page must receive progress after its source becomes a library book");
     }
 }

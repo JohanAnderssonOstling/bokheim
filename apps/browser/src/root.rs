@@ -1,17 +1,17 @@
 //! Window-level browser shell.
 
-use std::rc::Rc;
 use app_preferences::{ApplicationTheme, BrowsingPreferencePatch, ResolvedAppearance};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render, Subscription, Window, px};
 use gpui_component::{Root, WindowExt, dialog::DialogButtonProps};
 use library_model::BookLocator;
+use std::rc::Rc;
 use ui_components::theme::{PaletteSelectionHandler, PaletteSelectionService};
 
 use crate::navigation::{BrowserShell, GlobalRoute};
 use crate::services::AppServices;
 use crate::stores::Preferences;
-use crate::{DecreaseUiFontSize, DismissSettings, IncreaseUiFontSize, ShowSettings};
+use crate::{DecreaseUiFontSize, DismissSettings, IncreaseUiFontSize, NavigationSession, ShowSettings};
 
 pub struct OpenBookRequested {
     pub locator: BookLocator,
@@ -19,9 +19,24 @@ pub struct OpenBookRequested {
     pub initial_target: Option<String>,
 }
 
-/// The cached book detail page just closed — e.g. an audiobook dock expanded
-/// to show it can collapse back down.
-pub struct BookDetailDismissed;
+/// The audiobook that is playing, published by the application shell. That
+/// book's detail page shows `controls` in place of Listen and its reading
+/// position, and the shell hides the dock while the page is on screen.
+#[derive(Default)]
+pub struct NowPlaying {
+    pub book: Option<NowPlayingBook>,
+}
+
+pub struct NowPlayingBook {
+    pub locator: BookLocator,
+    pub controls: gpui::AnyView,
+    /// Where playback is now and the per cent of the book that is, read live
+    /// from the player, so the page's chapter mark and cover bar keep up
+    /// rather than waiting for the position to be saved and reloaded.
+    pub position: Rc<dyn Fn(&App) -> Option<(std::time::Duration, f32)>>,
+}
+
+impl gpui::Global for NowPlaying {}
 
 struct PalettePreferences {
     preferences: Entity<Preferences>,
@@ -43,6 +58,7 @@ pub struct BrowserRoot {
     shell: Entity<BrowserShell>,
     focus: FocusHandle,
     _shell_subscription: Subscription,
+    _preference_subscription: Subscription,
     updates: Option<Entity<crate::services::UpdateControls>>,
     _update_subscription: Option<Subscription>,
 }
@@ -60,6 +76,11 @@ impl BrowserRoot {
         self.shell.update(cx, |shell, cx| shell.open_book_detail(library_id, content_hash, window, cx));
     }
 
+    /// The library book whose detail page is on screen, if one is.
+    pub fn shown_book_detail(&self, cx: &App) -> Option<BookLocator> {
+        self.shell.read(cx).shown_book_detail(cx)
+    }
+
     pub fn open_folder(&mut self, library_id: sync_common::LibraryId, directory_id: sync_common::DirId, title: String, window: &mut Window, cx: &mut Context<Self>) {
         self.shell.update(cx, |shell, cx| shell.open_folder(library_id, directory_id, title, window, cx));
     }
@@ -69,9 +90,10 @@ impl BrowserRoot {
     }
 
     /// Builds the window root and its browser shell.
-    pub fn new(services: AppServices, sync_state: Entity<crate::SyncState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(services: AppServices, saved: NavigationSession, sync_state: Entity<crate::SyncState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         cx.set_system_bars_visible(true);
-        let preferences = cx.new(|cx| Preferences::new(services.clone(), cx));
+        let preferences = Preferences::shared(&services, cx);
+        let preference_subscription = cx.observe(&preferences, |_, _, cx| cx.notify());
         cx.set_global(PaletteSelectionHandler(Rc::new(PalettePreferences { preferences: preferences.clone() })));
         let appearance_preferences = preferences.clone();
         window
@@ -87,11 +109,7 @@ impl BrowserRoot {
         let open_book: crate::library::OpenBook = Rc::new(move |locator, title, initial_target, _, cx| {
             let _ = browser.update(cx, |_, cx| cx.emit(OpenBookRequested { locator, title, initial_target }));
         });
-        let browser = cx.entity().downgrade();
-        let book_detail_closed: crate::library::BookDetailClosed = Rc::new(move |cx| {
-            let _ = browser.update(cx, |_, cx| cx.emit(BookDetailDismissed));
-        });
-        let shell = cx.new(|cx| BrowserShell::new(services.clone(), sync_state, open_book, book_detail_closed, preferences.clone(), window, cx));
+        let shell = cx.new(|cx| BrowserShell::new(services.clone(), saved, sync_state, open_book, preferences.clone(), window, cx));
         let shell_subscription = cx.observe(&shell, |_, _, cx| cx.notify());
 
         let updates = services.updates.clone();
@@ -103,14 +121,7 @@ impl BrowserRoot {
 
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        Self {
-            preferences,
-            shell,
-            focus,
-            _shell_subscription: shell_subscription,
-            updates,
-            _update_subscription: update_subscription,
-        }
+        Self { preferences, shell, focus, _shell_subscription: shell_subscription, _preference_subscription: preference_subscription, updates, _update_subscription: update_subscription }
     }
 
     fn prompt_for_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -123,8 +134,7 @@ impl BrowserRoot {
         window.open_alert_dialog(cx, move |dialog, window, _| {
             let handler = handler.clone();
             let shell = shell.clone();
-            dialog
-                .width(px((f32::from(window.viewport_size().width) - 32.0).clamp(1.0, 448.0)))
+            ui_components::confirmation_dialog(dialog, window)
                 .title("Update available")
                 .description("A new Bokheim update is available. Would you like to update now?")
                 .button_props(DialogButtonProps::default().ok_text("Update").cancel_text("Later").show_cancel(true))
@@ -142,6 +152,10 @@ impl BrowserRoot {
         });
     }
 
+    pub fn navigation_session(&self, cx: &App) -> NavigationSession {
+        self.shell.read(cx).navigation_session(cx)
+    }
+
     pub fn contains_library(&self, library_id: &sync_common::LibraryId, cx: &App) -> bool {
         self.shell.read(cx).contains_library(library_id, cx)
     }
@@ -150,6 +164,10 @@ impl BrowserRoot {
     /// the browser from somewhere else.
     pub fn focus_active_page(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.shell.update(cx, |shell, cx| shell.focus_active_page(window, cx));
+    }
+
+    pub fn navigate_back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.shell.update(cx, |shell, cx| shell.navigate_back(window, cx))
     }
 
     /// Imports a staged native file through the browser shell.
@@ -164,6 +182,12 @@ impl BrowserRoot {
     }
 
     /// Closes shell UI before allowing the action to propagate.
+    fn capture_dismiss(&mut self, _: &DismissSettings, window: &mut Window, cx: &mut Context<Self>) {
+        if self.shell.update(cx, |shell, cx| shell.dismiss(window, cx)) {
+            cx.stop_propagation();
+        }
+    }
+
     fn on_dismiss(&mut self, _: &DismissSettings, window: &mut Window, cx: &mut Context<Self>) {
         let handled = self.shell.update(cx, |shell, cx| shell.dismiss(window, cx));
         if !handled {
@@ -185,7 +209,6 @@ impl BrowserRoot {
 }
 
 impl EventEmitter<OpenBookRequested> for BrowserRoot {}
-impl EventEmitter<BookDetailDismissed> for BrowserRoot {}
 
 impl Focusable for BrowserRoot {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -195,6 +218,7 @@ impl Focusable for BrowserRoot {
 
 impl Render for BrowserRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        window.set_page_scroll_on_swipe(cfg!(feature = "mobile") || cx.supports_touch_input());
         let theme = ui_components::browser_theme(cx);
         let preferences = self.preferences.read(cx);
         let ui_font_size = preferences.ui_font_size_px();
@@ -203,9 +227,15 @@ impl Render for BrowserRoot {
         ui_components::app_page(preferences.interface_font_name(), ui_font_size, theme)
             .key_context("Browser")
             .track_focus(&self.focus)
+            .capture_action(cx.listener(Self::capture_dismiss))
             .on_action(cx.listener(Self::on_dismiss))
             .on_action(cx.listener(|root, _: &DecreaseUiFontSize, window, cx| root.adjust_ui_font_size(-1, window, cx)))
             .on_action(cx.listener(|root, _: &IncreaseUiFontSize, window, cx| root.adjust_ui_font_size(1, window, cx)))
+            // Handled here, the ancestor of everything, because it is sent from
+            // a popup menu rather than from the page that opened it.
+            .on_action(cx.listener(|root, open: &crate::OpenLibraryView, window, cx| {
+                root.shell.update(cx, |shell, cx| shell.navigate(crate::Route::Library(open.0), window, cx));
+            }))
             .on_action(cx.listener(|root, _: &crate::PreviousDestination, window, cx| {
                 root.shell.update(cx, |shell, cx| shell.step_destination(-1, window, cx));
             }))
@@ -221,5 +251,82 @@ impl Render for BrowserRoot {
             .child(self.shell.clone())
             .children(Root::render_dialog_layer(window, cx))
             .into_any_element()
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32"), not(feature = "kobo")))]
+mod session_tests {
+    use super::*;
+    use crate::{AppStartup, LibraryRoute, NavigationSession, Route, SyncState};
+    use gpui::TestAppContext;
+    use sync_common::ROOT_DIR_ID;
+
+    #[gpui::test]
+    async fn selected_library_and_page_restore_and_snapshots_follow_navigation(cx: &mut TestAppContext) {
+        let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        cx.executor().allow_parking();
+        let directory = tempfile::tempdir().unwrap();
+        let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
+        let (backend, startup) = app::AppClient::start_native(launch).unwrap();
+        let first = backend.create_library_with_asset_storage("First".into(), true).await.unwrap();
+        let second = backend.create_library_with_asset_storage("Second".into(), true).await.unwrap();
+        let startup = AppStartup { libraries: backend.libraries().await.unwrap(), browsing_preferences: startup.browsing_preferences, account_status: startup.account_status };
+        let saved = NavigationSession { library_id: Some(*second.library_id()), route: Route::Library(LibraryRoute::Authors), ..Default::default() };
+        let services = AppServices::new(backend, startup);
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            ui_components::init_page_scrolling(cx);
+        });
+        let sync = cx.new(|_| SyncState::new(&services));
+        let window = cx.add_window(|window, cx| BrowserRoot::new(services.clone(), saved.clone(), sync, window, cx));
+        let snapshot = window.update(cx, |root, _, cx| root.navigation_session(cx)).unwrap();
+        assert_eq!(snapshot.library_id, saved.library_id);
+        assert_eq!(snapshot.route, saved.route);
+
+        window.update(cx, |root, window, cx| root.open_folder(*first.library_id(), ROOT_DIR_ID, "Folders".into(), window, cx)).unwrap();
+        cx.run_until_parked();
+        let snapshot = window.update(cx, |root, _, cx| root.navigation_session(cx)).unwrap();
+        assert_eq!(snapshot.library_id, Some(*first.library_id()));
+        assert_eq!(snapshot.route, Route::Library(LibraryRoute::Folders));
+
+        window.update(cx, |root, window, cx| root.shell.update(cx, |shell, cx| shell.navigate(GlobalRoute::Settings.into(), window, cx))).unwrap();
+        cx.run_until_parked();
+        let snapshot = window.update(cx, |root, _, cx| root.navigation_session(cx)).unwrap();
+        assert_eq!(snapshot.route, Route::Global(GlobalRoute::Settings));
+    }
+
+    #[gpui::test]
+    async fn windows_share_preferences_but_keep_independent_navigation(cx: &mut TestAppContext) {
+        let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        cx.executor().allow_parking();
+        let directory = tempfile::tempdir().unwrap();
+        let launch = app::host::BackendLaunch::initialize(app::AppDataLocation::native_path(directory.path())).unwrap();
+        let (backend, startup) = app::AppClient::start_native(launch).unwrap();
+        let library = backend.create_library_with_asset_storage("Shared".into(), true).await.unwrap();
+        let services = AppServices::new(backend.clone(), AppStartup { libraries: backend.libraries().await.unwrap(), browsing_preferences: startup.browsing_preferences, account_status: startup.account_status });
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            ui_components::init_page_scrolling(cx);
+        });
+        let sync = cx.new(|_| SyncState::new(&services));
+        let first = cx.add_window(|window, cx| BrowserRoot::new(services.clone(), NavigationSession::default(), sync.clone(), window, cx));
+        first.update(cx, |root, _, cx| root.preferences.update(cx, |preferences, cx| preferences.update_browsing(BrowsingPreferencePatch::UiFontSizePx(18), cx)).unwrap()).unwrap();
+        // A new window receives startup data from before the edit. It must read
+        // the live application owner instead of resetting it to that snapshot.
+        let extra_services = services.for_new_window().await.unwrap();
+        let second = cx.add_window(|window, cx| BrowserRoot::new(extra_services, NavigationSession::default(), sync, window, cx));
+        let first_preferences = first.update(cx, |root, _, _| root.preferences.clone()).unwrap();
+        let second_preferences = second.update(cx, |root, _, _| root.preferences.clone()).unwrap();
+        assert_eq!(first_preferences.entity_id(), second_preferences.entity_id());
+        assert_eq!(second.update(cx, |root, _, cx| root.preferences.read(cx).ui_font_size_px()).unwrap(), 18);
+        let metered_save = first.update(cx, |root, _, cx| root.preferences.update(cx, |preferences, cx| preferences.save_metered_transfers(true, cx))).unwrap();
+        second.update(cx, |root, _, cx| root.preferences.update(cx, |preferences, cx| preferences.update_browsing(BrowsingPreferencePatch::CatalogLanguages(Some(vec!["swe".into()])), cx)).unwrap()).unwrap();
+        metered_save.await.unwrap();
+        assert!(second.update(cx, |root, _, cx| root.preferences.read(cx).browsing().allow_metered_transfers()).unwrap());
+        assert_eq!(first.update(cx, |root, _, cx| root.preferences.read(cx).browsing().catalog_languages().map(<[String]>::to_vec)).unwrap(), Some(vec!["swe".into()]));
+        first.update(cx, |root, window, cx| root.open_folder(*library.library_id(), ROOT_DIR_ID, "Folders".into(), window, cx)).unwrap();
+        cx.run_until_parked();
+        assert_eq!(first.update(cx, |root, _, cx| root.navigation_session(cx).route).unwrap(), Route::Library(LibraryRoute::Folders));
+        assert_eq!(second.update(cx, |root, _, cx| root.navigation_session(cx).route).unwrap(), Route::Library(LibraryRoute::Home));
     }
 }

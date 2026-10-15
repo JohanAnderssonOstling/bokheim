@@ -2,7 +2,7 @@
 
 use std::{cell::Cell, rc::Rc};
 
-use gpui::{App, Div, canvas, prelude::*};
+use gpui::{App, Div, MouseButton, canvas, div, prelude::*, px};
 use ui_components as components;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -16,8 +16,7 @@ pub(crate) enum SettingsRow {
     SideMargins,
     VerticalMargins,
     ColumnGap,
-    MinLineWidth,
-    MaxLineWidth,
+    LineLength,
     PdfMargins,
     PdfFit,
     PdfPages,
@@ -26,38 +25,52 @@ pub(crate) enum SettingsRow {
 
 #[derive(Default)]
 pub(crate) struct SettingsNavigation {
-    selected: SettingsRow,
+    selected: Rc<Cell<SettingsRow>>,
     scroll_pending: Rc<Cell<bool>>,
+    keyboard_visible: Rc<Cell<bool>>,
 }
 
 impl SettingsNavigation {
+    pub(crate) fn keyboard_visibility(&self) -> Rc<Cell<bool>> {
+        self.keyboard_visible.clone()
+    }
+
+    pub(crate) fn keyboard_visible(&self) -> bool {
+        self.keyboard_visible.get()
+    }
+
     pub(crate) fn selected(&self, rows: &[SettingsRow]) -> SettingsRow {
-        if rows.contains(&self.selected) { self.selected } else { rows[0] }
+        if rows.contains(&self.selected.get()) { self.selected.get() } else { rows[0] }
     }
 
     pub(crate) fn move_row(&mut self, rows: &[SettingsRow], direction: i32) {
         let index = rows.iter().position(|row| *row == self.selected(rows)).unwrap_or(0);
         let next = (index as i32 + direction).clamp(0, rows.len() as i32 - 1) as usize;
-        self.selected = rows[next];
+        self.selected.set(rows[next]);
         self.scroll_pending.set(true);
     }
 
     /// Marks the selected row and scrolls it into view after keyboard movement.
     pub(crate) fn row(&self, row: SettingsRow, rows: &[SettingsRow], content: Div, theme: components::BrowserTheme) -> Div {
-        let selected = self.selected(rows) == row;
+        let selected = self.keyboard_visible() && self.selected(rows) == row;
+        let selection = self.selected.clone();
         let pending = self.scroll_pending.clone();
-        content.relative().border_l_2().border_color(if selected { theme.accent } else { gpui::transparent_black() }).child(
-            canvas(
-                move |bounds, window, _| {
-                    if selected && pending.replace(false) {
-                        window.request_autoscroll(bounds);
-                    }
-                },
-                |_, (), _, _| {},
+        content
+            .relative()
+            .on_mouse_down(MouseButton::Left, move |_, _, _| selection.set(row))
+            .when(selected, |content| content.child(div().debug_selector(move || format!("reader-settings-marker-{row:?}")).absolute().left(px(-components::CONTENT_INSET)).top_0().bottom_0().w(px(2.0)).bg(theme.accent)))
+            .child(
+                canvas(
+                    move |bounds, window, _| {
+                        if selected && pending.replace(false) {
+                            window.request_autoscroll(bounds);
+                        }
+                    },
+                    |_, (), _, _| {},
+                )
+                .absolute()
+                .size_full(),
             )
-            .absolute()
-            .size_full(),
-        )
     }
 }
 
@@ -65,6 +78,13 @@ impl SettingsNavigation {
 pub(crate) fn adjacent_value<T: Copy + PartialEq>(values: &[T], current: T, direction: i32) -> T {
     let index = values.iter().position(|value| *value == current).unwrap_or(0) as i32;
     values[(index + direction).clamp(0, values.len() as i32 - 1) as usize]
+}
+
+/// The tile one step from `current` on an ordered row of steps. A stored value
+/// that falls between two steps moves to the nearer step in the direction
+/// pressed, so the first press always lands on a tile.
+pub(crate) fn adjacent_step<T: Copy + PartialOrd>(steps: &[T], current: T, direction: i32) -> T {
+    if direction > 0 { steps.iter().copied().find(|step| *step > current).unwrap_or(steps[steps.len() - 1]) } else { steps.iter().rev().copied().find(|step| *step < current).unwrap_or(steps[0]) }
 }
 
 pub(crate) fn adjust_theme(direction: i32, cx: &mut App) {

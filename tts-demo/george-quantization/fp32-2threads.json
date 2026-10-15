@@ -1,0 +1,26 @@
+{
+  "variant": "fp32",
+  "threads": 2,
+  "speaker": "bm_george",
+  "speaker_id": 26,
+  "model_bytes": 325560556,
+  "load_seconds": 4.539533558003313,
+  "opening_sentence_seconds": 5.585582078005245,
+  "first_full_passage_seconds": 20.02022804599983,
+  "warm_generation_seconds": [
+    33.752607618000184,
+    38.927976134000346,
+    25.32702220500505
+  ],
+  "median_seconds": 33.752607618000184,
+  "median_cpu_seconds": 55.494248791,
+  "audio_seconds": 38.052458333333334,
+  "times_realtime": 1.1273931414128742,
+  "peak_process_ram_mib": 740.74609375,
+  "sample_rate": 24000,
+  "file": "george-fp32-2threads.wav",
+  "peak_amplitude": 0.5724962949752808,
+  "rms": 0.07739799146358896,
+  "peak_rss_measurement_valid": false,
+  "memory_metric": "historical resource.getrusage(RUSAGE_SELF).ru_maxrss; may include pre-exec launcher RSS"
+}

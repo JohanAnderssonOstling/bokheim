@@ -37,7 +37,6 @@ impl Database {
         })?;
         Ok(rows)
     }
-
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -48,15 +47,15 @@ mod tests {
     fn download_cursor_pages_raw_hashes_at_equal_timestamps() {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
-        let first = ContentHash::from_bytes([0;32]);
-        let second = ContentHash::from_bytes([0xff;32]);
+        let first = ContentHash::from_bytes([0; 32]);
+        let second = ContentHash::from_bytes([0xff; 32]);
         for hash in [second, first] {
             db.connection.fixtures_insert_book_7(&hash).unwrap();
             db.connection.fixtures_insert_book_transfer(&hash).unwrap();
         }
-        assert_eq!(db.book_download_requests(-1,None,1).unwrap(),vec![(first,10)]);
-        assert_eq!(db.book_download_requests(10,Some(&first),1).unwrap(),vec![(second,10)]);
-        assert!(db.book_download_requests(10,Some(&second),1).unwrap().is_empty());
+        assert_eq!(db.book_download_requests(-1, None, 1).unwrap(), vec![(first, 10)]);
+        assert_eq!(db.book_download_requests(10, Some(&first), 1).unwrap(), vec![(second, 10)]);
+        assert!(db.book_download_requests(10, Some(&second), 1).unwrap().is_empty());
     }
 }
 

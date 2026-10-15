@@ -1,6 +1,6 @@
 //! Local file facts shared by import, scan, download, and physical reconciliation.
-use crate::SqlParam;
 pub(crate) use crate::DatabaseError;
+use crate::SqlParam;
 pub(crate) use crate::shared_sql::SharedSql;
 pub(crate) use rusqlite::Connection;
 pub(crate) use sync_common::ContentHash;
@@ -50,4 +50,3 @@ pub(crate) fn forget_file(connection: &Connection, directory: &str, hash: &Conte
 }
 
 include_sqlite_sql::include_sql!("src/native/sql/observations.sql");
-

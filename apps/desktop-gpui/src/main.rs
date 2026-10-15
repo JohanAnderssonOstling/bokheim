@@ -6,6 +6,7 @@ fn main() {
         return;
     }
     let backend_context = BackendLaunch::initialize(AppDataLocation::SharedDesktop).expect("failed to initialize backend app-data directory");
+    app::host::configure_opds_browser(backend_context.app_data_dir().join("opds-webview"));
     app::init_logging();
 
     #[cfg(target_os = "windows")]

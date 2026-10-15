@@ -8,6 +8,6 @@
   "origins": {
     "https://updates.bokheim.se": "updates",
     "https://taxonomy.bokheim.se": "taxonomy",
-    "https://catalog.bokheim.se": "catalog"
+    "https://catalogs.bokheim.se": "catalog"
   }
 }

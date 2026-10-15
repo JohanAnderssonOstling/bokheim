@@ -2,11 +2,11 @@
 //! coordinator's network worker; this WASM entry point never opens storage.
 #![cfg(target_arch = "wasm32")]
 
-use std::rc::Rc;
-use library_runtime::events::{LibraryEvent, LibraryEventRouter};
-use serde::{Deserialize, Serialize};
-use sync_common::{LibraryId, ReplicaSeq, PullStateResponse, ReplicaId, SyncCursor};
 use crate::engine::{StoreFuture, SyncStore};
+use crate::state_sync::{PublicationOutbox, acknowledge, apply_response, next_outbox_page, prepare_outbox};
+use library_runtime::events::LibraryEventRouter;
+use serde::{Deserialize, Serialize};
+use sync_common::{LibraryId, PullStateResponse, ReplicaId, ReplicaSeq, SyncCursor};
 
 #[derive(Serialize, Deserialize)]
 struct SyncInput {
@@ -28,13 +28,14 @@ enum StorageCommand {
     BeginCursorRecovery,
     CompleteCursorRecovery,
     PullCursor,
-    OutboxWatermark,
-    PendingMutations { after: i64, through: i64 },
+    PrepareOutbox,
+    PendingMutations,
     AcknowledgeMutations(Vec<ReplicaSeq>),
-    ApplyPullPage(PullStateResponse),
+    ApplyExchangeResponse { ids: Vec<ReplicaSeq>, page: PullStateResponse },
+    RecordMutationIssues(Vec<sync_common::MutationIssue>),
 }
 
-async fn storage_command(database: &library_database::Database, events: Option<&LibraryEventRouter>, bytes: &[u8]) -> Result<Vec<u8>, String> {
+async fn storage_command(database: &library_database::Database, events: Option<&LibraryEventRouter>, scan: &mut Option<PublicationOutbox>, bytes: &[u8]) -> Result<Vec<u8>, String> {
     let command: StorageCommand = rmp_serde::from_slice(bytes).map_err(|error| error.to_string())?;
     macro_rules! reply {
         ($value:expr) => {
@@ -42,6 +43,13 @@ async fn storage_command(database: &library_database::Database, events: Option<&
         };
     }
     match command {
+        StorageCommand::RecordMutationIssues(issues) => {
+            database.sync_record_mutation_issues(&issues).map_err(|error| error.to_string())?;
+            if let Some(events) = events {
+                events.publish_update(library_model::LibraryUpdate::Contents);
+            }
+            rmp_serde::to_vec_named(&()).map_err(|error| error.to_string())
+        }
         StorageCommand::CursorRecoveryPending => reply!(database.sync_cursor_recovery_pending()),
         StorageCommand::BeginCursorRecovery => reply!(database.sync_begin_cursor_recovery()),
         StorageCommand::CompleteCursorRecovery => {
@@ -49,29 +57,16 @@ async fn storage_command(database: &library_database::Database, events: Option<&
             rmp_serde::to_vec_named(&inserted).map_err(|error| error.to_string())
         }
         StorageCommand::PullCursor => reply!(database.sync_pull_cursor()),
-        StorageCommand::OutboxWatermark => reply!(database.sync_outbox_watermark()),
-        StorageCommand::PendingMutations { after, through } => reply!(database.sync_pending_mutations_page(after, through)),
-        StorageCommand::AcknowledgeMutations(ids) => {
-            // One commit per bounded batch, rather than one OPFS flush per ID.
-            for chunk in ids.chunks(256) {
-                database.sync_acknowledge_mutations(chunk).map_err(|error| error.to_string())?;
-            }
-            if !ids.is_empty() {
-                if let Some(events) = events { let _ = events.emit(LibraryEvent::AssetWorkAvailable); }
-            }
+        StorageCommand::PrepareOutbox => {
+            *scan = Some(prepare_outbox(database, events).map_err(|error| error.to_string())?);
             rmp_serde::to_vec_named(&()).map_err(|error| error.to_string())
         }
-        StorageCommand::ApplyPullPage(page) => {
-            // Acknowledgement and apply stay separate commands on the browser
-            // protocol; empty ids apply without acknowledging.
-            let changed = database.sync_commit_pull_response(&[], &page).map_err(|error| error.to_string())?;
-            if changed {
-                if let Some(events) = events {
-                    let _ = events.emit(LibraryEvent::ContentsChanged);
-                }
-            }
-            rmp_serde::to_vec_named(&()).map_err(|error| error.to_string())
+        StorageCommand::PendingMutations => {
+            let scan = scan.as_mut().ok_or_else(|| "outbox scan has not been prepared".to_owned())?;
+            reply!(next_outbox_page(database, events, scan))
         }
+        StorageCommand::AcknowledgeMutations(ids) => reply!(acknowledge(database, events, &ids)),
+        StorageCommand::ApplyExchangeResponse { ids, page } => reply!(apply_response(database, events, &ids, &page)),
     }
 }
 
@@ -80,12 +75,8 @@ pub async fn synchronize(
 ) -> Result<crate::engine::SyncOutcome, crate::engine::SyncError> {
     let input = SyncInput { outbox_only, library_id, replica_id, server_url: credentials.server_url().to_string(), access_token: credentials.access_token().to_owned() };
     let bytes = rmp_serde::to_vec_named(&input).map_err(|error| crate::engine::SyncError::Failed(error.to_string()))?;
-    let callback_database = database;
-    let storage: client_platform_web::transport::BytesOperation = Rc::new(move |bytes| {
-        let database = callback_database.clone();
-        let events = events.clone();
-        Box::pin(async move { storage_command(&database, events.as_ref(), &bytes).await })
-    });
+    let mut scan = None;
+    let storage = async move |bytes: Vec<u8>| storage_command(&database, events.as_ref(), &mut scan, &bytes).await;
     let key = format!("{}|{user_id}|{library_id}|state", credentials.server_url());
     let result = async {
         let response = client_platform_web::transport::bridge::sync_request(key, bytes, storage).map_err(|error| format!("coordinator unavailable: {error:?}"))?;
@@ -110,6 +101,14 @@ impl CoordinatorStore {
 }
 
 impl SyncStore for CoordinatorStore {
+    type Outbox = ();
+
+    fn prepare_outbox(&self) -> StoreFuture<'_, Self::Outbox> {
+        self.command(StorageCommand::PrepareOutbox)
+    }
+    fn record_mutation_issues(&self, issues: &[sync_common::MutationIssue]) -> StoreFuture<'_, ()> {
+        self.command(StorageCommand::RecordMutationIssues(issues.to_vec()))
+    }
     fn cursor_recovery_pending(&self) -> StoreFuture<'_, bool> {
         self.command(StorageCommand::CursorRecoveryPending)
     }
@@ -122,38 +121,14 @@ impl SyncStore for CoordinatorStore {
     fn pull_cursor(&self) -> StoreFuture<'_, SyncCursor> {
         self.command(StorageCommand::PullCursor)
     }
-    fn pending_mutations(&self) -> StoreFuture<'_, Vec<library_replica::StatePublication>> {
-        Box::pin(async {
-            let through = self.command(StorageCommand::OutboxWatermark).await?;
-            let mut after = i64::MIN;
-            let mut mutations = Vec::new();
-            loop {
-                let page: Vec<library_replica::StatePublication> = self.command(StorageCommand::PendingMutations { after, through }).await?;
-                if page.is_empty() {
-                    return Ok(mutations);
-                }
-                after = page.last().unwrap().publisher_seq.get() as i64;
-                mutations.extend(page);
-            }
-        })
+    fn pending_mutations<'a>(&'a self, _scan: &'a mut Self::Outbox) -> StoreFuture<'a, Vec<library_replica::StatePublication>> {
+        self.command(StorageCommand::PendingMutations)
     }
     fn acknowledge_mutations(&self, ids: &[ReplicaSeq]) -> StoreFuture<'_, ()> {
         self.command(StorageCommand::AcknowledgeMutations(ids.to_vec()))
     }
-    fn apply_pull_page(&self, page: &PullStateResponse) -> StoreFuture<'_, ()> {
-        self.command(StorageCommand::ApplyPullPage(page.clone()))
-    }
     fn apply_exchange_response(&self, ids: &[ReplicaSeq], page: &PullStateResponse) -> StoreFuture<'_, ()> {
-        let ids = ids.to_vec();
-        let page = page.clone();
-        Box::pin(async move {
-            // Preserve the existing browser command protocol. The combined
-            // transaction optimization currently applies to native storage.
-            if !ids.is_empty() {
-                self.acknowledge_mutations(&ids).await?;
-            }
-            self.apply_pull_page(&page).await
-        })
+        self.command(StorageCommand::ApplyExchangeResponse { ids: ids.to_vec(), page: page.clone() })
     }
 }
 

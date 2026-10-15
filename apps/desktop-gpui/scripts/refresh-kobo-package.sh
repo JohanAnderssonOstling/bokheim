@@ -1,7 +1,6 @@
 #!/bin/sh
-# Rebuild the committed Kobo package. The ARMv7 musl cross toolchain is only
-# available from musl.cc, a single volunteer-run host that is regularly
-# unreachable, so the package is cross-compiled here and committed to the
+# Rebuild the committed Kobo package with ARM PDFium and its bundled glibc
+# runtime. The package is cross-compiled here and committed to the
 # repository instead of being built or downloaded by CI. The installer
 # workflow embeds whatever this script last committed, so run it whenever the
 # Kobo application changes.
@@ -26,9 +25,13 @@ test -s "$ARCHIVE"
 listing=$(tar -tzf "$ARCHIVE")
 for required in \
     ./.adds/bokheim/desktop-gpui-kobo \
+    ./.adds/bokheim/taxonomy.sqlite3 \
     ./.adds/bokheim/fbink \
     ./.adds/bokheim/run.sh \
     ./.adds/bokheim/run-monitored.sh \
+    ./.adds/bokheim/pdfium/libpdfium.so \
+    ./.adds/bokheim/runtime/ld-linux-armhf.so.3 \
+    ./.adds/bokheim/runtime/libc.so.6 \
     ./.adds/nm/desktop-gpui-kobo; do
     printf '%s\n' "$listing" | grep -Fxq "$required" || {
         printf 'The package is missing %s\n' "$required" >&2

@@ -1,9 +1,12 @@
 -- name: book_detail_book?
 -- param: content_hash: &ContentHash
 -- The book's id when it is visible (not deleted or hidden, with a live
--- placement), and its audiobook chapter count.
+-- placement), its audiobook chapter count, and its addition record, which
+-- holds the publication year.
 SELECT book.row_id,
-       CASE WHEN book.duration_ms IS NOT NULL THEN book.entry_count END AS audiobook_chapter_count
+       CASE WHEN book.duration_ms IS NOT NULL THEN book.entry_count END AS audiobook_chapter_count,
+       (SELECT body FROM sync_book_record record
+        WHERE record.state_kind='book_add' AND record.content_hash=book.content_hash)
 FROM book
 WHERE book.content_hash=:content_hash AND book.deleted_at IS NULL
   AND EXISTS(SELECT 1 FROM library_book_presence presence

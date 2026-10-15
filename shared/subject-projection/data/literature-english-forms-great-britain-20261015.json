@@ -1,0 +1,311 @@
+{
+  "description": "Flatten the uncoded English Forms grouping into English / Great Britain, preserving children, descendants, selectors and historical saved paths.",
+  "removed_concept_id": 55178,
+  "removed_label": "English Forms",
+  "previous_parent_concept_id": 54951,
+  "parent_concept_id": 60178,
+  "path": "Literature / By Language / English / Great Britain",
+  "previous_path": "Literature / By Language / English Forms",
+  "child_edges": [
+    [
+      3906,
+      55178,
+      1
+    ],
+    [
+      3907,
+      55178,
+      3
+    ],
+    [
+      3909,
+      55178,
+      4
+    ],
+    [
+      3910,
+      55178,
+      5
+    ],
+    [
+      3919,
+      55178,
+      12
+    ],
+    [
+      3923,
+      55178,
+      15
+    ],
+    [
+      3926,
+      55178,
+      18
+    ],
+    [
+      3927,
+      55178,
+      19
+    ],
+    [
+      3930,
+      55178,
+      2
+    ],
+    [
+      7801,
+      55178,
+      23
+    ]
+  ],
+  "historical_path_aliases": [
+    {
+      "path": "Literature / By Language / English Forms",
+      "concept_id": 60178
+    },
+    {
+      "path": "Literature / By Language / English Forms / Drama",
+      "concept_id": 3906
+    },
+    {
+      "path": "Literature / By Language / English Forms / Drama / English Drama Forms",
+      "concept_id": 7384
+    },
+    {
+      "path": "Literature / By Language / English Forms / Poetry",
+      "concept_id": 3930
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays",
+      "concept_id": 3907
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / Individual English Essays",
+      "concept_id": 7652
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / English Essays & Speeches",
+      "concept_id": 6220
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / Biography, memoirs, letters, etc",
+      "concept_id": 6247
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / English Children’s",
+      "concept_id": 6296
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / Letters",
+      "concept_id": 6422
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / Cross-Period Topics",
+      "concept_id": 6473
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / Humor",
+      "concept_id": 7527
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / Anonymous",
+      "concept_id": 7917
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / Prose",
+      "concept_id": 9029
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / Diaries",
+      "concept_id": 3920
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / English & World",
+      "concept_id": 3928
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / English & World / Lit. Translation into English",
+      "concept_id": 7321
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / English & World / English Translation",
+      "concept_id": 7784
+    },
+    {
+      "path": "Literature / By Language / English Forms / English essays / English & World / English & Classical",
+      "concept_id": 9916
+    },
+    {
+      "path": "Literature / By Language / English Forms / Humor",
+      "concept_id": 3909
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters",
+      "concept_id": 3910
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / English Essays & Speeches",
+      "concept_id": 6220
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / Biography, memoirs, letters, etc",
+      "concept_id": 6247
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / English Children’s",
+      "concept_id": 6296
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / Letters",
+      "concept_id": 6422
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / Cross-Period Topics",
+      "concept_id": 6473
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / Humor",
+      "concept_id": 7527
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / Prose",
+      "concept_id": 9029
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / Diaries",
+      "concept_id": 3920
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / English & World",
+      "concept_id": 3928
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / English & World / Lit. Translation into English",
+      "concept_id": 7321
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / English & World / English Translation",
+      "concept_id": 7784
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / English & World / English & Classical",
+      "concept_id": 9916
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / Individual English Essays",
+      "concept_id": 7652
+    },
+    {
+      "path": "Literature / By Language / English Forms / English letters / Anonymous",
+      "concept_id": 7917
+    },
+    {
+      "path": "Literature / By Language / English Forms / English Literary Collections",
+      "concept_id": 3919
+    },
+    {
+      "path": "Literature / By Language / English Forms / English Literary Collections / English Essay Collections",
+      "concept_id": 6623
+    },
+    {
+      "path": "Literature / By Language / English Forms / English Literary Collections / Diaries",
+      "concept_id": 6807
+    },
+    {
+      "path": "Literature / By Language / English Forms / English Literary Collections / Letters",
+      "concept_id": 7641
+    },
+    {
+      "path": "Literature / By Language / English Forms / English Literary Collections / Oratory",
+      "concept_id": 7827
+    },
+    {
+      "path": "Literature / By Language / English Forms / English Literary Collections / Drama",
+      "concept_id": 9057
+    },
+    {
+      "path": "Literature / By Language / English Forms / English Literary Collections / Prose",
+      "concept_id": 9089
+    },
+    {
+      "path": "Literature / By Language / English Forms / English Literary Collections / Poetry",
+      "concept_id": 9208
+    },
+    {
+      "path": "Literature / By Language / English Forms / Folk",
+      "concept_id": 3923
+    },
+    {
+      "path": "Literature / By Language / English Forms / Folk / Special forms",
+      "concept_id": 9171
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches",
+      "concept_id": 3926
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / Anonymous",
+      "concept_id": 7917
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / English Essays & Speeches",
+      "concept_id": 6220
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / Biography, memoirs, letters, etc",
+      "concept_id": 6247
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / English Children’s",
+      "concept_id": 6296
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / Letters",
+      "concept_id": 6422
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / Cross-Period Topics",
+      "concept_id": 6473
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / Humor",
+      "concept_id": 7527
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / Prose",
+      "concept_id": 9029
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / Diaries",
+      "concept_id": 3920
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / English & World",
+      "concept_id": 3928
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / English & World / Lit. Translation into English",
+      "concept_id": 7321
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / English & World / English Translation",
+      "concept_id": 7784
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / English & World / English & Classical",
+      "concept_id": 9916
+    },
+    {
+      "path": "Literature / By Language / English Forms / Oratory & Speeches / Individual English Essays",
+      "concept_id": 7652
+    },
+    {
+      "path": "Literature / By Language / English Forms / Prose",
+      "concept_id": 3927
+    },
+    {
+      "path": "Literature / By Language / English Forms / English Fiction Anthologies",
+      "concept_id": 7801
+    }
+  ]
+}

@@ -234,6 +234,10 @@ fn read_xml_attr(attrs: quick_xml::events::attributes::Attributes, key: &[u8]) -
 }
 
 impl EpubProvider {
+    pub(crate) fn languages(&self) -> Vec<String> {
+        inspection::parse_opf_metadata(&self.package.opf_xml).languages
+    }
+
     /// Load a lazy resource using its own cursor and async decompressor.
     pub(crate) async fn read_bytes_async(&self, uri: &str) -> io::Result<Vec<u8>> {
         self.archive.read(uri, MAX_BINARY_RESOURCE_BYTES).await

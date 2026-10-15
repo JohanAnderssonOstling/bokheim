@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Annotation colors · Three palettes compared</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --canvas: #eae5dc;
+      --paper: #f6f2eb;
+      --ink: #22201d;
+      --muted: #6b675f;
+      --rule: #c5bdac;
+      --accent: #466853;
+      --wash: #d9e8de;
+      --hover: #eae6df;
+      --shadow: 0 8px 28px #22201d16;
+    }
+    [data-theme="dark"] {
+      color-scheme: dark;
+      --canvas: #1c1a16;
+      --paper: #11100d;
+      --ink: #efe6d0;
+      --muted: #a69c86;
+      --rule: #4e4334;
+      --accent: #d3b271;
+      --wash: #3c3423;
+      --hover: #201d15;
+      --shadow: 0 8px 28px #0005;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--canvas);
+      color: var(--ink);
+      font: 14px/1.5 system-ui, sans-serif;
+    }
+    button, textarea { font: inherit; }
+    button { cursor: pointer; }
+    main { max-width: 1480px; margin: 0 auto; padding: 64px 40px 40px; }
+    .eyebrow { margin: 0 0 12px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; }
+    h1 { margin: 0; font: 500 clamp(30px, 4vw, 44px)/1.12 Georgia, serif; letter-spacing: -.035em; }
+    .intro { max-width: 620px; margin: 16px 0 28px; color: var(--muted); font-size: 15px; }
+    .controls { display: flex; align-items: center; flex-wrap: wrap; gap: 24px; padding: 16px 0; border-top: 1px solid var(--rule); }
+    .themes { display: flex; gap: 4px; }
+    .themes button { padding: 5px 12px; border: 1px solid transparent; background: transparent; color: var(--muted); }
+    .themes button[aria-pressed="true"] { color: var(--ink); background: var(--paper); border-color: var(--rule); }
+    .grayscale-control { display: flex; align-items: center; gap: 8px; color: var(--muted); cursor: pointer; }
+    input[type="checkbox"] { accent-color: var(--accent); }
+    .selection-status { margin-left: auto; color: var(--muted); }
+    .selection-status strong { color: var(--ink); font-weight: 500; }
+    .comparison { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; margin-top: 18px; }
+    .version-heading { display: flex; align-items: baseline; gap: 12px; margin-bottom: 16px; }
+    .version-heading span { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+    h2 { margin: 0; font-size: 18px; font-weight: 500; }
+    .stage { min-height: 330px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 28px; padding: 32px 20px; border: 1px solid var(--rule); background: var(--paper); }
+    .grayscale .stage { filter: grayscale(1); }
+    .editor {
+      width: 360px;
+      max-width: 100%;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      border: 1px solid var(--rule);
+      background: var(--paper);
+      box-shadow: var(--shadow);
+      font-family: "Libertinus Serif", Georgia, serif;
+    }
+    .note-row { width: 100%; padding: 4px; border: 1px solid var(--rule); }
+    textarea { width: 100%; min-height: 48px; padding: 4px; display: block; resize: vertical; border: 0; background: transparent; color: var(--ink); font-size: 14px; line-height: 1.4; }
+    textarea:focus { outline: none; }
+    .note-row:focus-within { border-color: var(--accent); }
+    .styles { width: 100%; display: flex; gap: 8px; }
+    .styles button { flex: 1 1 auto; min-width: 0; height: 32px; padding: 0 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-size: 14px; }
+    .styles button[aria-pressed="true"] { background: var(--wash); }
+    .styles button:hover { background: var(--hover); }
+    .palette { width: 100%; display: flex; align-items: center; justify-content: space-between; }
+    .swatch { width: 32px; height: 32px; min-width: 20px; flex: 0 1 32px; display: flex; align-items: center; justify-content: center; padding: 0; background: transparent; cursor: pointer; color: var(--ink); }
+    .dot { display: flex; align-items: center; justify-content: center; flex: none; border-radius: 50%; background: var(--color); }
+    .swatch { border: 0; }
+    .dot { width: 16px; height: 16px; border: 1px solid var(--rule); }
+    .swatch.selected { background: var(--wash); }
+    .swatch:not(.selected):hover { background: var(--hover); }
+    button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .caption { margin: 16px 0 0; color: var(--muted); font-size: 13px; }
+    .keyboard-hint { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+    kbd { font: inherit; color: var(--ink); }
+    footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 12px; }
+    @media (max-width: 1100px) {
+      main { padding: 36px 20px; }
+      .comparison { grid-template-columns: 1fr; }
+      .selection-status { margin-left: 0; }
+      .stage { min-height: 260px; }
+    }
+    @media (max-width: 420px) {
+      main { padding: 28px 12px; }
+      .stage { padding: 24px 8px; }
+      .editor { padding: 12px; }
+      .styles { gap: 4px; }
+      .styles button { font-size: 12px; padding: 0 4px; }
+    }
+  
+    .passage { width: 360px; max-width: 100%; margin: 0; font: 16px/1.8 "Libertinus Serif", Georgia, serif; }
+    .marked { color: inherit; background: var(--highlight); padding: 1px 0; }
+    .marked[data-style="Underline"] { background: transparent; text-decoration: underline; text-decoration-color: var(--selected-color); text-decoration-thickness: 2px; text-underline-offset: 3px; }
+    .marked[data-style="Squiggly"] { background: transparent; text-decoration: underline wavy; text-decoration-color: var(--selected-color); text-decoration-thickness: 1.5px; text-underline-offset: 3px; }
+    .marked[data-style="Strike"] { background: transparent; text-decoration: line-through; text-decoration-color: var(--selected-color); text-decoration-thickness: 2px; }
+    .values { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 22px; }
+    .value { padding: 0; min-width: 0; border: 1px solid transparent; background: transparent; color: var(--ink); text-align: left; }
+    .value[aria-pressed="true"] { border-color: var(--rule); }
+    .value-color { display: block; width: 100%; height: 40px; background: var(--color); }
+    .value-name { display: block; margin: 6px 6px 0; font-size: 12px; }
+    .value-hex { display: block; margin: 1px 6px 6px; font: 11px/1.5 ui-monospace, monospace; color: var(--muted); }
+    .grayscale .values { filter: grayscale(1); }
+    .selection-status strong { text-transform: none; }
+    [data-palette="balanced"] .stage { border-color: var(--accent); }
+    [data-palette="balanced"] h2 { color: var(--accent); }
+    .value-preview { display: block; margin: 8px 6px 6px; font: 14px/1.6 Georgia, serif; color: var(--ink); }
+    .value-preview mark { color: inherit; background: var(--sample-highlight); }
+    .grayscale .value-preview { filter: grayscale(1); }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">EPUB reader · Color proposal</p>
+      <h1>Soft colors, clearer choices</h1>
+      <p class="intro">Compare the current palette, the softer proposal, and a middle ground with more distinct hues. All three use the previous 16 px swatches. Choosing a color updates every preview.</p>
+    </header>
+    <div class="controls" aria-label="Preview settings">
+      <div class="themes" role="group" aria-label="Appearance">
+        <button type="button" data-theme-choice="light" aria-pressed="true">Light</button>
+        <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
+      </div>
+      <label class="grayscale-control"><input id="grayscale" type="checkbox"> Grayscale</label>
+      <div class="selection-status" aria-live="polite">Selected color: <strong id="current-color">Yellow</strong></div>
+    </div>
+    <div class="comparison">
+      <section data-palette="current" aria-labelledby="current-heading">
+        <div class="version-heading"><span>01</span><h2 id="current-heading">Current colors</h2></div>
+        <div class="stage">
+          <p class="passage">Reading gives us room to pause, to notice <mark class="marked" data-style="Highlight">an idea worth coming back to</mark>, and to make it our own.</p>
+          <div class="editor" aria-label="Current colors annotation editor">
+            <div class="note-row"><textarea aria-label="Note with current colors" rows="2" placeholder="Add a note">An idea worth coming back to.</textarea></div>
+            <div class="styles" role="group" aria-label="Annotation style with current colors"></div>
+            <div class="palette" role="radiogroup" aria-label="Current colors"></div>
+          </div>
+        </div>
+        <p class="caption">The existing bright palette.</p>
+        <div class="values" aria-label="Current colors values"></div>
+      </section>
+      <section data-palette="proposed" aria-labelledby="proposed-heading">
+        <div class="version-heading"><span>02</span><h2 id="proposed-heading">Softer proposal</h2></div>
+        <div class="stage">
+          <p class="passage">Reading gives us room to pause, to notice <mark class="marked" data-style="Highlight">an idea worth coming back to</mark>, and to make it our own.</p>
+          <div class="editor" aria-label="Softer proposal annotation editor">
+            <div class="note-row"><textarea aria-label="Note with softer colors" rows="2" placeholder="Add a note">An idea worth coming back to.</textarea></div>
+            <div class="styles" role="group" aria-label="Annotation style with softer colors"></div>
+            <div class="palette" role="radiogroup" aria-label="Softer proposal"></div>
+          </div>
+        </div>
+        <p class="caption">Muted tones. Red/pink and blue/purple sit closer together.</p>
+        <div class="values" aria-label="Softer proposal values"></div>
+      </section>
+      <section data-palette="balanced" aria-labelledby="balanced-heading">
+        <div class="version-heading"><span>03</span><h2 id="balanced-heading">Middle ground</h2></div>
+        <div class="stage">
+          <p class="passage">Reading gives us room to pause, to notice <mark class="marked" data-style="Highlight">an idea worth coming back to</mark>, and to make it our own.</p>
+          <div class="editor" aria-label="Middle ground annotation editor">
+            <div class="note-row"><textarea aria-label="Note with balanced colors" rows="2" placeholder="Add a note">An idea worth coming back to.</textarea></div>
+            <div class="styles" role="group" aria-label="Annotation style with balanced colors"></div>
+            <div class="palette" role="radiogroup" aria-label="Middle ground"></div>
+          </div>
+        </div>
+        <p class="caption">Preferred: warm red vs. cooler pink; violet purple vs. clearer blue. More color separation, with restrained saturation.</p>
+        <div class="values" aria-label="Middle ground values"></div>
+      </section>
+    </div>
+    <footer>Click the swatches or the larger color samples. Each sample also shows its color over text. Try Highlight, Underline, Squiggly and Strike. Highlight previews use the reader’s 38% opacity.</footer>
+  </main>
+  <script>
+    const palettes = {"current": [["Yellow", "#f6c945"], ["Orange", "#fb923c"], ["Red", "#f87171"], ["Pink", "#f472b6"], ["Purple", "#c084fc"], ["Blue", "#60a5fa"], ["Teal", "#2dd4bf"], ["Green", "#4ade80"]], "proposed": [["Yellow", "#d8b653"], ["Orange", "#d99564"], ["Red", "#cb7e82"], ["Pink", "#cb91ac"], ["Purple", "#a394c6"], ["Blue", "#7f9fca"], ["Teal", "#72ada7"], ["Green", "#9fac74"]], "balanced": [["Yellow", "#e0bb4b"], ["Orange", "#e09a57"], ["Red", "#d57868"], ["Pink", "#c880b2"], ["Purple", "#9d80c9"], ["Blue", "#6e9dcb"], ["Teal", "#57aaa1"], ["Green", "#94ad65"]]};
+    const styles = ['Highlight', 'Underline', 'Squiggly', 'Strike'];
+    let selectedColor = 0;
+    let selectedStyle = 'Highlight';
+
+    function updateColor(index) {
+      selectedColor = index;
+      document.getElementById('current-color').textContent = palettes.current[index][0];
+      document.querySelectorAll('[data-palette]').forEach(section => {
+        const [name, hex] = palettes[section.dataset.palette][index];
+        const rgb = [1, 3, 5].map(offset => parseInt(hex.slice(offset, offset + 2), 16));
+        section.style.setProperty('--selected-color', hex);
+        section.style.setProperty('--highlight', `rgba(${rgb.join(',')},${96 / 255})`);
+        section.querySelectorAll('.swatch, .value').forEach(item => {
+          const selected = Number(item.dataset.index) === index;
+          item.classList.toggle('selected', selected);
+          if (item.classList.contains('swatch')) {
+            item.setAttribute('aria-checked', String(selected));
+            item.tabIndex = selected ? 0 : -1;
+          } else {
+            item.setAttribute('aria-pressed', String(selected));
+          }
+        });
+      });
+    }
+
+    document.querySelectorAll('[data-palette]').forEach(section => {
+      const colors = palettes[section.dataset.palette];
+      const picker = section.querySelector('.palette');
+      colors.forEach(([name, hex], index) => {
+        const swatch = document.createElement('button');
+        swatch.type = 'button';
+        swatch.className = 'swatch';
+        swatch.dataset.index = index;
+        swatch.style.setProperty('--color', hex);
+        swatch.setAttribute('role', 'radio');
+        swatch.setAttribute('aria-label', name);
+        swatch.title = `${name} · ${hex.toUpperCase()}`;
+        const dot = document.createElement('span');
+        dot.className = 'dot';
+        dot.setAttribute('aria-hidden', 'true');
+        swatch.append(dot);
+        swatch.addEventListener('click', () => updateColor(index));
+        swatch.addEventListener('keydown', event => {
+          if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+          let next;
+          switch (event.key) {
+            case 'ArrowLeft': case 'ArrowUp': next = (index + colors.length - 1) % colors.length; break;
+            case 'ArrowRight': case 'ArrowDown': next = (index + 1) % colors.length; break;
+            case 'Home': next = 0; break;
+            case 'End': next = colors.length - 1; break;
+            default: return;
+          }
+          event.preventDefault();
+          updateColor(next);
+          picker.children[next].focus();
+        });
+        picker.append(swatch);
+        const sample = document.createElement('button');
+        sample.type = 'button';
+        sample.className = 'value';
+        sample.dataset.index = index;
+        sample.style.setProperty('--color', hex);
+        const sampleRgb = [1, 3, 5].map(offset => parseInt(hex.slice(offset, offset + 2), 16));
+        sample.style.setProperty('--sample-highlight', `rgba(${sampleRgb.join(',')},${96 / 255})`);
+        sample.setAttribute('aria-label', `${name}, ${hex}, ${section.dataset.palette} palette`);
+        for (const [className, text] of [['value-color', ''], ['value-name', name], ['value-hex', hex.toUpperCase()]]) {
+          const element = document.createElement('span');
+          element.className = className;
+          element.textContent = text;
+          sample.append(element);
+        }
+        const textPreview = document.createElement('span');
+        textPreview.className = 'value-preview';
+        const mark = document.createElement('mark');
+        mark.textContent = 'An idea to keep';
+        textPreview.append(mark);
+        sample.append(textPreview);
+        sample.addEventListener('click', () => updateColor(index));
+        section.querySelector('.values').append(sample);
+      });
+      styles.forEach(style => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = style;
+        button.dataset.style = style;
+        button.setAttribute('aria-pressed', String(style === selectedStyle));
+        button.addEventListener('click', () => {
+          selectedStyle = style;
+          document.querySelectorAll('[data-style]').forEach(item => {
+            if (item.classList.contains('marked')) item.dataset.style = style;
+            else item.setAttribute('aria-pressed', String(item.dataset.style === style));
+          });
+        });
+        section.querySelector('.styles').append(button);
+      });
+    });
+    document.querySelectorAll('textarea').forEach(input => input.addEventListener('input', () => {
+      document.querySelectorAll('textarea').forEach(other => { if (other !== input) other.value = input.value; });
+    }));
+    document.querySelectorAll('[data-theme-choice]').forEach(button => button.addEventListener('click', () => {
+      document.documentElement.dataset.theme = button.dataset.themeChoice;
+      document.querySelectorAll('[data-theme-choice]').forEach(item => item.setAttribute('aria-pressed', String(item === button)));
+    }));
+    document.getElementById('grayscale').addEventListener('change', event => document.body.classList.toggle('grayscale', event.target.checked));
+    updateColor(selectedColor);
+  </script>
+</body>
+</html>

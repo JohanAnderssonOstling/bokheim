@@ -381,6 +381,9 @@ impl RenderOnce for Popover {
         });
 
         let open = state.read(cx).open;
+        if open {
+            crate::Root::register_popover(state.downgrade(), window, cx);
+        }
         let focus_handle = state.read(cx).focus_handle.clone();
         let trigger_bounds = state.read(cx).trigger_bounds;
         let trigger_bounds_captured = state.read(cx).trigger_bounds_captured;

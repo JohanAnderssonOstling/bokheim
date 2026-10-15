@@ -6,11 +6,7 @@
 //! past a tap's slop, and a child's click checks [`InfiniteCanvas::panned`] so
 //! that a pan ending over it does not also open it.
 
-use gpui::{
-    AnyElement, App, Bounds, ElementTransform, Entity, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Pixels, Point, RenderOnce, ScrollDelta, Styled, Window,
-    canvas, div, point, px, size,
-};
+use gpui::{AnyElement, App, AvailableSpace, Bounds, ElementTransform, Entity, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, RenderOnce, ScrollDelta, Styled, Window, canvas, div, point, px, size};
 
 use crate::browser_theme;
 
@@ -47,10 +43,7 @@ impl CanvasCamera {
     }
 
     fn element_transform(&self) -> ElementTransform {
-        ElementTransform::default()
-            .translate(self.pan)
-            .scale(size(self.zoom, self.zoom))
-            .origin(point(0.0, 0.0))
+        ElementTransform::default().translate(self.pan).scale(size(self.zoom, self.zoom)).origin(point(0.0, 0.0))
     }
 }
 
@@ -79,11 +72,12 @@ pub struct InfiniteCanvas {
     press: Option<Press>,
     /// Whether the last press, now released, panned.
     last_panned: bool,
+    touch_pan_origin: Option<Point<Pixels>>,
 }
 
 impl InfiniteCanvas {
     pub fn new(min_zoom: f32, max_zoom: f32) -> Self {
-        Self { camera: CanvasCamera::default(), min_zoom, max_zoom, bounds: None, press: None, last_panned: false }
+        Self { camera: CanvasCamera::default(), min_zoom, max_zoom, bounds: None, press: None, last_panned: false, touch_pan_origin: None }
     }
 
     /// Whether the press in progress, or the one just released, panned rather
@@ -130,13 +124,23 @@ impl InfiniteCanvas {
 /// A pannable, zoomable view of `state`'s world. Add children positioned in world
 /// coordinates.
 pub fn infinite_canvas(state: &Entity<InfiniteCanvas>) -> InfiniteCanvasView {
-    InfiniteCanvasView { state: state.clone(), children: Vec::new() }
+    InfiniteCanvasView { state: state.clone(), children: Vec::new(), visible_content: None }
 }
 
 #[derive(IntoElement)]
 pub struct InfiniteCanvasView {
     state: Entity<InfiniteCanvas>,
     children: Vec<AnyElement>,
+    visible_content: Option<Box<dyn FnOnce(Bounds<f32>, CanvasCamera) -> AnyElement>>,
+}
+
+impl InfiniteCanvasView {
+    /// Build world content after layout, using this frame's visible world bounds.
+    /// Offscreen elements can be omitted before they are constructed or measured.
+    pub fn visible_content(mut self, build: impl FnOnce(Bounds<f32>, CanvasCamera) -> AnyElement + 'static) -> Self {
+        self.visible_content = Some(Box::new(build));
+        self
+    }
 }
 
 impl ParentElement for InfiniteCanvasView {
@@ -150,6 +154,20 @@ impl RenderOnce for InfiniteCanvasView {
         let theme = browser_theme(cx);
         let state = self.state;
         let camera = state.read(cx).camera;
+        let visible_content = self.visible_content.map(|build| {
+            canvas(
+                move |bounds, window, cx| {
+                    let origin = camera.to_world(point(px(0.0), px(0.0)));
+                    let viewport = Bounds::new(point(f32::from(origin.x), f32::from(origin.y)), size(f32::from(bounds.size.width) / camera.zoom, f32::from(bounds.size.height) / camera.zoom));
+                    let mut content = div().relative().size_full().transform(camera.element_transform()).child(build(viewport, camera)).into_any_element();
+                    content.prepaint_as_root(bounds.origin, bounds.size.map(AvailableSpace::Definite), window, cx);
+                    content
+                },
+                |_, mut content, window, cx| content.paint(window, cx),
+            )
+            .absolute()
+            .size_full()
+        });
         div()
             .id("infinite-canvas")
             .relative()
@@ -198,12 +216,36 @@ impl RenderOnce for InfiniteCanvasView {
             // Wheel and trackpad scrolling both zoom around the pointer.
             .on_scroll_wheel({
                 let state = state.clone();
-                move |event, _, cx| {
+                move |event, window, cx| {
                     state.update(cx, |canvas, cx| {
+                        if window.is_page_scroll_swipe() {
+                            if event.touch_phase == gpui::TouchPhase::Started {
+                                canvas.touch_pan_origin = Some(canvas.camera.pan);
+                            }
+                            if let ScrollDelta::Pixels(delta) = event.delta {
+                                canvas.camera.pan += delta;
+                            }
+                            cx.notify();
+                            return;
+                        }
+                        if matches!(event.delta, ScrollDelta::Pages(_)) {
+                            if let Some(origin) = canvas.touch_pan_origin.take() {
+                                if event.touch_phase == gpui::TouchPhase::Cancelled {
+                                    canvas.camera.pan = origin;
+                                }
+                                cx.notify();
+                                return;
+                            }
+                        }
                         match event.delta {
                             ScrollDelta::Lines(lines) => {
                                 let zoom = canvas.camera.zoom * ZOOM_PER_LINE.powf(lines.y);
                                 canvas.zoom_at(event.position, zoom);
+                            }
+                            ScrollDelta::Pages(delta) => {
+                                if let Some(bounds) = canvas.bounds {
+                                    canvas.camera.pan += point(bounds.size.width * delta.x, bounds.size.height * delta.y);
+                                }
                             }
                             ScrollDelta::Pixels(delta) => {
                                 if cfg!(target_os = "android") {
@@ -242,5 +284,6 @@ impl RenderOnce for InfiniteCanvasView {
                 .size_full(),
             )
             .child(div().absolute().top_0().left_0().size_full().transform(camera.element_transform()).children(self.children))
+            .children(visible_content)
     }
 }

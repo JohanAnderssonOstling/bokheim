@@ -33,7 +33,10 @@ CloseApplications=yes
 RestartApplications=no
 
 [Files]
+Source: "{#ExtractFilePath(SourceExe)}taxonomy.sqlite3"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "Bokheim.exe"; Flags: ignoreversion
+Source: "{#ExtractFilePath(SourceExe)}bokheim-opds-webview.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#ExtractFilePath(SourceExe)}tts\*"; DestDir: "{app}\tts"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#IconFile}"; DestDir: "{app}"; DestName: "Bokheim.ico"; Flags: ignoreversion
 
 [Icons]

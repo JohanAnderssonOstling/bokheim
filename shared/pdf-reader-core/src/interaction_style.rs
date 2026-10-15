@@ -25,6 +25,8 @@ pub struct ReaderInteractionStyle {
     pub active_search_match: RgbaColor,
     pub annotation: RgbaColor,
     pub active_annotation: RgbaColor,
+    /// The passage being read aloud.
+    pub reading: RgbaColor,
 }
 
 impl ReaderInteractionStyle {
@@ -34,6 +36,7 @@ impl ReaderInteractionStyle {
         active_search_match: RgbaColor::new(190, 116, 55, 164),
         annotation: RgbaColor::new(236, 204, 91, 104),
         active_annotation: RgbaColor::new(196, 126, 57, 148),
+        reading: RgbaColor::new(151, 188, 159, 56),
     };
 }
 

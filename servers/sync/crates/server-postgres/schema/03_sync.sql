@@ -107,6 +107,14 @@ CREATE SEQUENCE sync_server_sequence
     NO MAXVALUE
     CACHE 1;
 
+-- Stable across restarts and schema upgrades. Explicitly rotate this ID after
+-- restoring/replacing database history, before accepting synchronization.
+CREATE TABLE sync_history (
+    singleton boolean PRIMARY KEY CHECK (singleton),
+    generation uuid NOT NULL
+);
+INSERT INTO sync_history(singleton, generation) VALUES (true, gen_random_uuid());
+
 CREATE TABLE sync_library_revision (
     library_id text PRIMARY KEY REFERENCES libraries(id) ON DELETE CASCADE,
     current_revision bigint NOT NULL CHECK (current_revision > 0)

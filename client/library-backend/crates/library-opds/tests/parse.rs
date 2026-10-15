@@ -22,6 +22,15 @@ fn gutenberg_root_is_navigation_with_opensearch() {
 }
 
 #[test]
+fn manybooks_root_lists_categories_with_plain_atom_links() {
+    let feed = parse(&fixture("manybooks-root.xml"), Some("application/xml"), &url("https://manybooks.net/opds")).unwrap();
+    assert_eq!(feed.navigation.iter().map(|link| link.title.as_str()).collect::<Vec<_>>(), ["New Titles", "Authors", "Titles", "Genres"]);
+    assert_eq!(feed.navigation[0].href, url("https://manybooks.net/opds/new_titles"));
+    let Some(Search::Template(template)) = feed.search else { panic!("the catalog has no search") };
+    assert_eq!(Search::url(&template, "pride & prejudice").unwrap(), url("https://manybooks.net/opds/search?q=pride+%26+prejudice"));
+}
+
+#[test]
 fn gutenberg_search_results_link_each_book_to_its_page() {
     let feed = parse(&fixture("gutenberg-search.xml"), None, &url("https://www.gutenberg.org/ebooks/search.opds/?sort_order=downloads")).unwrap();
     // Each book is a link to its own page, which holds the downloads.
@@ -31,15 +40,17 @@ fn gutenberg_search_results_link_each_book_to_its_page() {
 }
 
 #[test]
-fn gutenberg_book_page_offers_open_epubs() {
+fn gutenberg_book_page_offers_the_illustrated_edition() {
     let feed = parse(&fixture("gutenberg-book.xml"), Some("application/atom+xml"), &url("https://www.gutenberg.org/ebooks/1342.opds")).unwrap();
-    assert_eq!(feed.publications.iter().map(|publication| publication.id.as_str()).collect::<Vec<_>>(), ["urn:gutenberg:1342:2", "urn:gutenberg:1342:3"]);
+    // The editions without and with images are one book; the larger,
+    // illustrated one is kept.
+    assert_eq!(feed.publications.iter().map(|publication| publication.id.as_str()).collect::<Vec<_>>(), ["urn:gutenberg:1342:3"]);
     let first = &feed.publications[0];
     assert_eq!(first.title, "Pride and Prejudice");
     assert_eq!(first.authors, ["Austen, Jane"]);
     let download = first.download.as_ref().unwrap();
     assert_eq!(download.media_type, EPUB);
-    assert_eq!(download.href, url("https://www.gutenberg.org/ebooks/1342.epub.noimages"));
+    assert_eq!(download.href, url("https://www.gutenberg.org/ebooks/1342.epub3.images"));
     // The full-size image over the thumbnail.
     assert_eq!(first.cover, Some(url("https://www.gutenberg.org/cache/epub/1342/pg1342.cover.medium.jpg")));
 }
@@ -54,14 +65,15 @@ fn opensearch_description_gives_the_feed_template() {
 #[test]
 fn acquisition_feed_offers_open_downloads_facets_paging_and_search() {
     let feed = parse(&fixture("acquisition.xml"), Some("application/atom+xml"), &url("http://calibre.local:8080/opds")).unwrap();
-    assert_eq!(feed.publications.len(), 3);
+    // The DRM-only entry is not listed.
+    assert_eq!(feed.publications.iter().map(|publication| publication.title.as_str()).collect::<Vec<_>>(), ["The Hobbit", "For Sale"]);
     // XHTML content is kept as markup.
     assert!(feed.publications[0].description.starts_with("<div") && feed.publications[0].description.contains("<p>In a hole in the ground there lived a hobbit.</p>"));
     // EPUB is chosen over the PDF the entry also offers.
     assert_eq!(feed.publications[0].download.as_ref().unwrap().href, url("http://calibre.local:8080/get/epub/12/Calibre"));
-    // A DRM-only and a buy-only entry are listed but offer nothing to download.
+    // The buy-only entry offers nothing to download, but its store page.
     assert!(feed.publications[1].download.is_none());
-    assert!(feed.publications[2].download.is_none());
+    assert_eq!(feed.publications[1].buy, Some(url("https://shop.example.org/book/14")));
     assert_eq!(feed.navigation.iter().map(|link| link.title.as_str()).collect::<Vec<_>>(), ["Authors"]);
     assert_eq!(feed.next, Some(url("http://calibre.local:8080/opds/navcatalog/4e6577657374?library_id=Calibre&offset=2")));
     assert_eq!(feed.facets.len(), 1);

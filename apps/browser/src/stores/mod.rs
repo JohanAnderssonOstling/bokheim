@@ -1,9 +1,5 @@
-//! Shared observable state, injected downward.
-//!
-//! Stores outlive whichever pages read them and are owned by
-//! [`BrowserRoot`](crate::root::BrowserRoot). Anything read by two siblings
-//! lives here rather than being reached through a shared parent.
+//! Application-owned observable state, read by all browser windows.
 
 pub(crate) mod preferences;
 
-pub(crate) use preferences::{CoverTextSetting, Preferences, current_cover_text};
+pub(crate) use preferences::{CoverTextSetting, GeneratedCoversOnly, Preferences, current_catalog_grouping, current_catalog_languages, current_cover_text, generated_covers_only, save_catalog_grouping, save_catalog_languages};

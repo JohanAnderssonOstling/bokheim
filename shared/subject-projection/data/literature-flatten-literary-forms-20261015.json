@@ -1,0 +1,635 @@
+{
+  "description": "Flatten adult Literary Forms and then Forms & Literary Traditions into Genres, preserving all remaining subject identities, selectors, descendants, and historical saved paths.",
+  "stages": [
+    {
+      "removed_concept_id": 55027,
+      "removed_label": "Literary Forms",
+      "parent_concept_id": 5583,
+      "child_concept_ids": [
+        3876,
+        4280,
+        4416,
+        5630
+      ]
+    },
+    {
+      "removed_concept_id": 5630,
+      "removed_label": "Forms & Literary Traditions",
+      "parent_concept_id": 5583,
+      "child_concept_ids": [
+        3935,
+        3946,
+        3964,
+        3971,
+        4027,
+        4029,
+        4030,
+        4032,
+        4106,
+        4124
+      ]
+    }
+  ],
+  "historical_path_aliases": [
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga",
+      "concept_id": 614
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Action & Adventure",
+      "concept_id": 615
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Crime & Mystery",
+      "concept_id": 616
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Dystopian",
+      "concept_id": 617
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Erotica & Hentai",
+      "concept_id": 618
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Fantasy",
+      "concept_id": 619
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Historical Fiction",
+      "concept_id": 620
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Horror",
+      "concept_id": 621
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Humorous",
+      "concept_id": 622
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Isekai",
+      "concept_id": 623
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / LGBTQ+",
+      "concept_id": 624
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Light Novel",
+      "concept_id": 625
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Magical Girl",
+      "concept_id": 626
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Mecha",
+      "concept_id": 627
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Media Tie-In",
+      "concept_id": 628
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Nonfiction",
+      "concept_id": 629
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Romance",
+      "concept_id": 630
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / School Life",
+      "concept_id": 631
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Science Fiction",
+      "concept_id": 632
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Sports",
+      "concept_id": 633
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Supernatural",
+      "concept_id": 634
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Yaoi",
+      "concept_id": 635
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / Manga / Yuri",
+      "concept_id": 636
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama",
+      "concept_id": 3876
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / African Drama",
+      "concept_id": 3877
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / African American & Black",
+      "concept_id": 3878
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Ancient Drama",
+      "concept_id": 3879
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Anthologies",
+      "concept_id": 3880
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Australian & Oceanian",
+      "concept_id": 3882
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Caribbean & Latin American",
+      "concept_id": 3884
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / European Drama",
+      "concept_id": 3885
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / European Drama / British & Irish Drama",
+      "concept_id": 3886
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / European Drama / Spanish & Portuguese",
+      "concept_id": 3890
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Indigenous Peoples of the Americas",
+      "concept_id": 3891
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / LGBTQ+",
+      "concept_id": 3892
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Medieval Drama",
+      "concept_id": 3893
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Middle Eastern",
+      "concept_id": 3894
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Religious & Liturgical",
+      "concept_id": 3895
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Russian & Former Soviet Union",
+      "concept_id": 3896
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Shakespeare",
+      "concept_id": 3897
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Drama / Women Authors",
+      "concept_id": 3898
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Adaptations & Pastiche",
+      "concept_id": 3935
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Adaptations & Pastiche",
+      "concept_id": 3935
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Anthologies",
+      "concept_id": 3946
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Anthologies",
+      "concept_id": 3946
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Classics",
+      "concept_id": 3964
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Classics",
+      "concept_id": 3964
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Epistolary",
+      "concept_id": 3971
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Epistolary",
+      "concept_id": 3971
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Literary",
+      "concept_id": 4027
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Literary",
+      "concept_id": 4027
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Mashups",
+      "concept_id": 4029
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Mashups",
+      "concept_id": 4029
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Media Tie-In",
+      "concept_id": 4030
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Media Tie-In",
+      "concept_id": 4030
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Multiple Timelines",
+      "concept_id": 4032
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Multiple Timelines",
+      "concept_id": 4032
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Sagas",
+      "concept_id": 4106
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Sagas",
+      "concept_id": 4106
+    },
+    {
+      "path": "Literature / Genres / Forms & Literary Traditions / Short Stories",
+      "concept_id": 4124
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Forms & Literary Traditions / Short Stories",
+      "concept_id": 4124
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections",
+      "concept_id": 4280
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / African Literary Collections",
+      "concept_id": 4281
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Ancient Literary Collections",
+      "concept_id": 4282
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Asian Literary Collections",
+      "concept_id": 4283
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Asian Literary Collections / Chinese Literary Collections",
+      "concept_id": 4284
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Asian Literary Collections / Indic",
+      "concept_id": 4285
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Asian Literary Collections / Japanese Literary Collections",
+      "concept_id": 4286
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Australian & Oceanian",
+      "concept_id": 4287
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Canadian Literary Collections",
+      "concept_id": 4288
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Caribbean & Latin American",
+      "concept_id": 4289
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Diaries & Journals",
+      "concept_id": 4290
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Literary Essays",
+      "concept_id": 4291
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / European Literary Collections",
+      "concept_id": 4292
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / European Literary Collections / Eastern",
+      "concept_id": 4293
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / European Literary Collections / British & Irish Lit. Collections",
+      "concept_id": 4294
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / European Literary Collections / French Literary Collections",
+      "concept_id": 4295
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / European Literary Collections / German Literary Collections",
+      "concept_id": 4296
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / European Literary Collections / Italian Literary Collections",
+      "concept_id": 4297
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / European Literary Collections / Scandinavian Lit. Collections",
+      "concept_id": 4298
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / European Literary Collections / Spanish & Portuguese",
+      "concept_id": 4299
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Indigenous Peoples of the Americas",
+      "concept_id": 4300
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Interviews",
+      "concept_id": 4301
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / LGBTQ+",
+      "concept_id": 4302
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Letters",
+      "concept_id": 4303
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Medieval Literary Collections",
+      "concept_id": 4304
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Middle Eastern",
+      "concept_id": 4305
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Russian & Former Soviet Union",
+      "concept_id": 4306
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Speeches",
+      "concept_id": 4307
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Women Authors",
+      "concept_id": 4308
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry",
+      "concept_id": 4416
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / African Poetry",
+      "concept_id": 4417
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / American Poetry",
+      "concept_id": 4418
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / American Poetry / African American & Black",
+      "concept_id": 4419
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / American Poetry / Asian American & Pacific Islander",
+      "concept_id": 4420
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / American Poetry / Hispanic & Latino",
+      "concept_id": 4421
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / American Poetry / Native American",
+      "concept_id": 4422
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Ancient Poetry",
+      "concept_id": 4423
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Anthologies",
+      "concept_id": 4424
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Asian Poetry",
+      "concept_id": 4425
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Asian Poetry / Chinese Poetry",
+      "concept_id": 4426
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Australian & Oceanian",
+      "concept_id": 4428
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Indigenous",
+      "concept_id": 4429
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Caribbean & Latin American",
+      "concept_id": 4430
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Epic",
+      "concept_id": 4431
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / European Poetry",
+      "concept_id": 4432
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / European Poetry / British & Irish Poetry",
+      "concept_id": 4433
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / European Poetry / Spanish & Portuguese",
+      "concept_id": 4437
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Haiku",
+      "concept_id": 4438
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / LGBTQ+",
+      "concept_id": 4439
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Medieval Poetry",
+      "concept_id": 4440
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Middle Eastern",
+      "concept_id": 4441
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Russian & Former Soviet Union",
+      "concept_id": 4442
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Shakespeare",
+      "concept_id": 4443
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Subjects & Themes",
+      "concept_id": 4444
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Subjects & Themes / Death, Grief, Loss",
+      "concept_id": 4445
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Subjects & Themes / Family",
+      "concept_id": 4446
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Subjects & Themes / Inspirational & Religious",
+      "concept_id": 4447
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Subjects & Themes / Love & Erotica",
+      "concept_id": 4448
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Subjects & Themes / Nature",
+      "concept_id": 4449
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Subjects & Themes / Places",
+      "concept_id": 4450
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Poetry / Women Authors",
+      "concept_id": 4451
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Anacreontic",
+      "concept_id": 6442
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics",
+      "concept_id": 6748
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Literary Extracts & Commonplaces",
+      "concept_id": 6957
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Selections for daily reading",
+      "concept_id": 8512
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Literary Collections Miscellany",
+      "concept_id": 9349
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Poetry & Prose About Music",
+      "concept_id": 9419
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Proverbs",
+      "concept_id": 9602
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / U.S. Comics by Form & Creator",
+      "concept_id": 12470
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / British Comics",
+      "concept_id": 12471
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / French Comics",
+      "concept_id": 12472
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Italian Comics",
+      "concept_id": 12473
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Canadian Comics",
+      "concept_id": 12474
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics",
+      "concept_id": 12475
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / Other National Comics / South Korean Comics",
+      "concept_id": 51865
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Themed Literary Collections",
+      "concept_id": 52306
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / U.S. Comics by Form & Creator / U.S. Comics — General & History",
+      "concept_id": 53205
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / U.S. Comics by Form & Creator / U.S. Comic Collections",
+      "concept_id": 53206
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / U.S. Comics by Form & Creator / U.S. Comics Creators",
+      "concept_id": 53207
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Comics / U.S. Comics by Form & Creator / U.S. Comic Titles & Characters",
+      "concept_id": 53208
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / American English",
+      "concept_id": 54038
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / English",
+      "concept_id": 54039
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Other Germanic",
+      "concept_id": 54040
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / French, Occitan & Catalan",
+      "concept_id": 54041
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Italian & Romanian",
+      "concept_id": 54042
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Spanish & Portuguese",
+      "concept_id": 54043
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Slavic",
+      "concept_id": 54044
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Scandinavian",
+      "concept_id": 54045
+    },
+    {
+      "path": "Literature / Genres / Literary Forms / Literary Collections / Other Languages",
+      "concept_id": 54046
+    }
+  ]
+}

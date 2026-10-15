@@ -3,16 +3,18 @@
 //! Row assignment and geometry stay in `geometry`; this module is responsible
 //! only for child preparation, placement, and painting.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, AvailableSpace, BorderStyle, Bounds, ContentMask, DispatchPhase, Element, ElementId, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Style, WeakEntity, Window, div, point, px, quad, relative, size,
+    MouseUpEvent, Pixels, Point, Style, WeakEntity, Window, div, point, px, quad, relative, size,
 };
 use ui_components as components;
 
 use super::geometry::{self, AssignedRow, GroupGeometry};
+use super::layout_cache::{LayoutCache, LayoutKey, PageLayout};
 use super::{AssignmentDirection, Paginator, PaginatorAxis, PaginatorData, PaginatorState, PrefetchKey, VisiblePage};
 
 const NEXT_PAGE_PEEK_PX: f32 = 8.0;
@@ -25,6 +27,9 @@ pub(super) struct PaginatorElement {
     reported_visible_page: Option<VisiblePage>,
     children_revision: usize,
     data: Rc<PaginatorData>,
+    widths: Rc<Vec<Pixels>>,
+    layout_cache: Rc<RefCell<LayoutCache>>,
+    warm_direction: Option<AssignmentDirection>,
     maximum_rows: Option<usize>,
     child_offset: usize,
     direction: AssignmentDirection,
@@ -43,6 +48,7 @@ pub(super) struct PaginatorElement {
     /// using the container's height is what left a gap between pages whenever a
     /// page did not fill it.
     vertical_pixels: Pixels,
+    drag_offset: Point<Pixels>,
     reported_content_height: Option<Pixels>,
     /// Rubber-band selection, drawn and driven only where the page asked for it.
     selectable: bool,
@@ -62,6 +68,9 @@ impl PaginatorElement {
             reported_visible_page,
             children_revision,
             data,
+            widths: Rc::default(),
+            layout_cache: Rc::default(),
+            warm_direction: None,
             maximum_rows,
             child_offset,
             direction,
@@ -74,10 +83,16 @@ impl PaginatorElement {
             horizontal_offset: 0.0,
             vertical_offset: 0.0,
             vertical_pixels: Pixels::ZERO,
+            drag_offset: Point::default(),
             reported_content_height: None,
             selectable: false,
             marquee: None,
         }
+    }
+
+    pub(super) fn with_warm_direction(mut self, direction: Option<AssignmentDirection>) -> Self {
+        self.warm_direction = direction;
+        self
     }
 
     pub(super) fn passive(mut self) -> Self {
@@ -94,6 +109,11 @@ impl PaginatorElement {
     pub(super) fn with_page_pixels(mut self, vertical: Pixels, reported_content_height: Option<Pixels>) -> Self {
         self.vertical_pixels = vertical;
         self.reported_content_height = reported_content_height;
+        self
+    }
+
+    pub(super) fn with_drag_offset(mut self, offset: Point<Pixels>) -> Self {
+        self.drag_offset = offset;
         self
     }
 
@@ -199,21 +219,81 @@ impl PaginatorElement {
         }
     }
 
-    fn prepare_adjacent_pages(&self, page: VisiblePage, geometries: &[GroupGeometry], available_height: Pixels, window: &mut Window, cx: &mut App) {
-        if page.first_child > 0 {
-            let previous = self.measure_page_from(page.first_child - 1, AssignmentDirection::Backward, geometries, available_height, window, cx);
-            if let Some(previous_page) = measured_visible_page(&previous) {
-                self.prepare_page(previous_page, window, cx);
-            }
-        }
+    fn page_layout(&self, bounds: Bounds<Pixels>, child_offset: usize, direction: AssignmentDirection, forced_page: Option<VisiblePage>) -> Rc<PageLayout> {
+        self.layout_cache.borrow_mut().resolve(LayoutKey {
+            data: self.data.clone(),
+            widths: self.widths.clone(),
+            width: self.current_page_width(bounds.size.width),
+            height: self.current_page_height(bounds.size.height),
+            rem_size: self.rem_size,
+            maximum_rows: self.maximum_rows,
+            child_offset,
+            direction,
+            forced_page,
+        })
+    }
 
-        let next_child = page.last_child.saturating_add(1);
-        if next_child < self.data.children.len() {
-            let next = self.measure_page_from(next_child, AssignmentDirection::Forward, geometries, available_height, window, cx);
-            if let Some(next_page) = measured_visible_page(&next) {
-                self.prepare_page(next_page, window, cx);
+    fn adjacent_layout(&self, page: VisiblePage, direction: AssignmentDirection, bounds: Bounds<Pixels>) -> Option<Rc<PageLayout>> {
+        let child_offset = page.adjacent_offset(direction, self.data.children.len())?;
+        Some(self.page_layout(bounds, child_offset, direction, None))
+    }
+
+    fn prepare_adjacent_pages(&self, page: VisiblePage, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        for direction in [AssignmentDirection::Backward, AssignmentDirection::Forward] {
+            if let Some(layout) = self.adjacent_layout(page, direction, bounds) {
+                if let Some(page) = layout.page {
+                    self.prepare_page(page, window, cx);
+                }
             }
         }
+    }
+
+    fn warm_adjacent_page(&self, page: VisiblePage, bounds: Bounds<Pixels>, source: &PrefetchKey, window: &mut Window, cx: &mut App) {
+        let Some(direction) = self.warm_direction else { return };
+        let needed = self.paginator.update(cx, |paginator, _| paginator.warmed_page.as_ref().is_none_or(|warmed| warmed.direction != direction || warmed.source != *source || !Rc::ptr_eq(&warmed.widths, &self.widths))).unwrap_or(false);
+        if !needed {
+            return;
+        }
+        let request = self
+            .paginator
+            .update(cx, |paginator, _| {
+                if let Some(request) = &paginator.warm_request {
+                    if request.source == *source && request.direction == direction {
+                        return (request.ready.clone(), false);
+                    }
+                }
+                let ready = Rc::new(std::cell::Cell::new(false));
+                paginator.warm_request = Some(super::PageWarmup { source: source.clone(), direction, ready: ready.clone() });
+                (ready, true)
+            })
+            .ok();
+        let Some((ready, schedule)) = request else { return };
+        if !ready.get() {
+            if schedule {
+                // Present the first drag frame before doing speculative work.
+                let paginator = self.paginator.clone();
+                window.on_next_frame(move |_, cx| {
+                    let _ = paginator.update(cx, |paginator, cx| {
+                        if paginator.swipe.is_some() && paginator.warm_request.as_ref().is_some_and(|request| Rc::ptr_eq(&request.ready, &ready)) {
+                            ready.set(true);
+                            cx.notify();
+                        }
+                    });
+                });
+            }
+            return;
+        }
+        let Some(layout) = self.adjacent_layout(page, direction, bounds) else { return };
+        let Some(page) = layout.page else { return };
+        // Warm only the requested page's layout. No prepaint or paint means
+        // no offscreen hitboxes, selection handlers or recursive prefetch.
+        let measured = self.measure_assignments(layout.rows.clone(), bounds.size.height, window, cx);
+        let content_height = measured.rows.iter().fold(Pixels::ZERO, |height, row| height + row.height + row.gap_before);
+        let source = source.clone();
+        let widths = self.widths.clone();
+        let _ = self.paginator.update(cx, |paginator, _| {
+            paginator.warmed_page = Some(super::WarmedPage { source, widths, direction, page, content_height });
+        });
     }
 
     /// Builds a row at the height its policy declares. Children are laid out
@@ -226,21 +306,21 @@ impl PaginatorElement {
 
         for item in &assignment.items {
             let child = &self.data.children[item.child_index];
-            let mut element = div().w(item.width).h(height).overflow_hidden().child((child.render)(&self.state, window, cx)).into_any_element();
+            let mut element = div()
+                .w(item.width)
+                .h(height)
+                .overflow_hidden()
+                .when(policy.item_shadow, |cell| {
+                    let theme = components::browser_theme(cx);
+                    cell.bg(theme.page_bg).shadow(components::section_card_shadow(theme))
+                })
+                .child((child.render)(&self.state, window, cx))
+                .into_any_element();
             element.layout_as_root(size(AvailableSpace::Definite(item.width), AvailableSpace::Definite(height)), window, cx);
             items.push(MeasuredItem { child_index: item.child_index, x: item.x, width: item.width, element });
         }
 
         MeasuredRow { assignment, items, height, gap_before: Pixels::ZERO }
-    }
-
-    fn measure_page(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) -> MeasuredPage {
-        let available_height = self.current_page_height(bounds.size.height);
-        let geometries = self.geometries(bounds);
-        let page = self.forced_page.or_else(|| self.page_range(&geometries, available_height));
-        let mut measured = page.map_or_else(|| MeasuredPage { rows: Vec::new() }, |page| self.measure_range(page, &geometries, available_height, window, cx));
-        set_vertical_gaps(&self.data, &mut measured.rows);
-        measured
     }
 
     fn minimum_next_page_peek(&self, available_extent: Pixels) -> Pixels {
@@ -260,30 +340,8 @@ impl PaginatorElement {
 
     fn measure_next_preview(&self, page: VisiblePage, geometries: &[GroupGeometry], available_height: Pixels, window: &mut Window, cx: &mut App) -> Option<MeasuredRow> {
         let mut next_child = page.last_child.saturating_add(1);
-        let assignment = geometry::next_forward_row(&self.data, geometries, &mut next_child)?;
+        let assignment = geometry::next_forward_row(&self.data, &self.widths, geometries, &mut next_child)?;
         Some(self.measure_row(assignment, available_height, window, cx))
-    }
-
-    /// Geometry is a pure function of the data, the usable width and the rem
-    /// size, so it is recomputed where needed rather than carried around.
-    fn geometries(&self, bounds: Bounds<Pixels>) -> Vec<GroupGeometry> {
-        geometry::group_geometries(&self.data, self.current_page_width(bounds.size.width), self.rem_size)
-    }
-
-    /// Which children the page covers. Row heights are known from the policy,
-    /// so this settles the range without building anything.
-    fn page_range(&self, geometries: &[GroupGeometry], available_height: Pixels) -> Option<VisiblePage> {
-        let rows = geometry::page_rows(&self.data, geometries, self.direction, self.child_offset, self.maximum_rows, available_height, self.rem_size);
-        let first_child = rows.first()?.items.first()?.child_index;
-        let last_child = rows.last()?.items.last()?.child_index;
-        Some(VisiblePage { first_child, last_child })
-    }
-
-    /// Builds a whole page in one pass. Which rows belong to it is decided by
-    /// arithmetic before anything is built, in either direction.
-    fn measure_page_from(&self, child_offset: usize, direction: AssignmentDirection, geometries: &[GroupGeometry], available_height: Pixels, window: &mut Window, cx: &mut App) -> MeasuredPage {
-        let assignments = geometry::page_rows(&self.data, geometries, direction, child_offset, self.maximum_rows, available_height, self.rem_size);
-        self.measure_assignments(assignments, available_height, window, cx)
     }
 
     fn measure_assignments(&self, assignments: Vec<AssignedRow>, maximum_height: Pixels, window: &mut Window, cx: &mut App) -> MeasuredPage {
@@ -293,11 +351,6 @@ impl PaginatorElement {
         }
         set_vertical_gaps(&self.data, &mut rows);
         MeasuredPage { rows }
-    }
-
-    fn measure_range(&self, page: VisiblePage, geometries: &[GroupGeometry], maximum_height: Pixels, window: &mut Window, cx: &mut App) -> MeasuredPage {
-        let assignments = geometry::forward_rows_in_range(&self.data, geometries, page.first_child, page.last_child.saturating_add(1));
-        self.measure_assignments(assignments, maximum_height, window, cx)
     }
 }
 
@@ -322,11 +375,10 @@ impl Element for PaginatorElement {
     }
 
     fn request_layout(&mut self, _id: Option<&GlobalElementId>, _inspector_id: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, Self::RequestLayoutState) {
-        for child in &self.data.children {
-            if let Some(measure) = &child.intrinsic_width {
-                child.measured_width.set(measure.measure(window, cx));
-            }
-        }
+        (self.widths, self.layout_cache) = self
+            .paginator
+            .update(cx, |paginator, cx| (paginator.measure_widths(self.children_revision, &self.data, window, cx), paginator.layout_cache.clone()))
+            .unwrap_or_else(|_| (super::measure_widths(&self.data, window, cx), Rc::default()));
         let mut style = Style::default();
         style.size.width = relative(1.0).into();
 
@@ -336,7 +388,9 @@ impl Element for PaginatorElement {
         }
 
         let data = self.data.clone();
+        let widths = self.widths.clone();
         let maximum_rows = self.maximum_rows;
+        let layout_cache = self.layout_cache.clone();
         let child_offset = self.child_offset;
         let direction = self.direction;
         let rem_size = self.rem_size;
@@ -350,27 +404,28 @@ impl Element for PaginatorElement {
                 AvailableSpace::Definite(height) => height,
                 AvailableSpace::MinContent | AvailableSpace::MaxContent => px(f32::MAX / 4.0),
             };
-            let geometries = geometry::group_geometries(&data, width, rem_size);
-            let rows = geometry::page_rows(&data, &geometries, direction, child_offset, maximum_rows, available_height, rem_size);
-            size(width, geometry::rows_height(&data, &rows, rem_size).min(available_height))
+            let layout = layout_cache.borrow_mut().resolve(LayoutKey { data: data.clone(), widths: widths.clone(), width, height: available_height, rem_size, maximum_rows, child_offset, direction, forced_page: None });
+            size(width, geometry::rows_height(&data, &layout.rows, rem_size).min(available_height))
         });
         (layout_id, ())
     }
 
     fn prepaint(&mut self, _id: Option<&GlobalElementId>, _inspector_id: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _layout: &mut Self::RequestLayoutState, window: &mut Window, cx: &mut App) -> Self::PrepaintState {
-        let mut page = self.measure_page(bounds, window, cx);
-        let geometries = self.geometries(bounds);
+        let layout = self.page_layout(bounds, self.child_offset, self.direction, self.forced_page);
+        let mut page = self.measure_assignments(layout.rows.clone(), bounds.size.height, window, cx);
+        let geometries = &layout.geometries;
         let visible_page = measured_visible_page(&page);
 
         if self.active {
             if let Some(visible_page) = visible_page {
                 let prefetch_key =
                     PrefetchKey { children_revision: self.children_revision, page: visible_page, width: self.current_page_width(bounds.size.width), height: self.current_page_height(bounds.size.height), rem_size: self.rem_size };
+                self.warm_adjacent_page(visible_page, bounds, &prefetch_key, window, cx);
                 if self.prefetched.as_ref() != Some(&prefetch_key) {
-                    self.prepare_adjacent_pages(visible_page, &geometries, bounds.size.height, window, cx);
+                    self.prepare_adjacent_pages(visible_page, bounds, window, cx);
                     let paginator = self.paginator.clone();
                     window.defer(cx, move |_window, cx| {
-                        let _ = paginator.update(cx, |paginator, cx| paginator.set_prefetched(prefetch_key, cx));
+                        let _ = paginator.update(cx, |paginator, _| paginator.set_prefetched(prefetch_key));
                     });
                 }
             }
@@ -395,8 +450,8 @@ impl Element for PaginatorElement {
             }
         }
 
-        let row_left = bounds.left() + bounds.size.width * self.horizontal_offset;
-        let mut row_top = bounds.top() + bounds.size.height * self.vertical_offset + self.vertical_pixels;
+        let row_left = bounds.left() + bounds.size.width * self.horizontal_offset + self.drag_offset.x;
+        let mut row_top = bounds.top() + bounds.size.height * self.vertical_offset + self.drag_offset.y + self.vertical_pixels;
         let mut elements = Vec::new();
         // Only the page the reader is on: the peek row below it belongs to the
         // next page, and a band drawn over this one must not reach it.
@@ -436,9 +491,9 @@ impl Element for PaginatorElement {
                 PaginatorAxis::Horizontal => {
                     let occupied_width = measured_page_width(&page.rows);
                     let natural_left = row_left + occupied_width + preview.assignment.column_gap;
-                    let reserved_left = bounds.left() + self.current_page_width(bounds.size.width) + bounds.size.width * self.horizontal_offset;
+                    let reserved_left = bounds.left() + self.current_page_width(bounds.size.width) + bounds.size.width * self.horizontal_offset + self.drag_offset.x;
                     let preview_left = natural_left.min(reserved_left);
-                    let preview_top = bounds.top() + bounds.size.height * self.vertical_offset;
+                    let preview_top = bounds.top() + bounds.size.height * self.vertical_offset + self.drag_offset.y;
                     if self.data.groups[preview.assignment.group_index].policy.grid_rules
                         && let Some(grid_row) = GridRow::from_row(&preview, preview_left, preview_top, true)
                     {
@@ -454,7 +509,7 @@ impl Element for PaginatorElement {
                 PaginatorAxis::Vertical => {
                     let gap_before = page.rows.last().map_or(Pixels::ZERO, |row| geometry::gap_between(&self.data, &row.assignment, &preview.assignment));
                     let natural_top = row_top + gap_before;
-                    let reserved_top = bounds.top() + self.current_page_height(bounds.size.height) + bounds.size.height * self.vertical_offset;
+                    let reserved_top = bounds.top() + self.current_page_height(bounds.size.height) + bounds.size.height * self.vertical_offset + self.drag_offset.y + self.vertical_pixels;
                     let preview_top = natural_top.min(reserved_top);
                     if self.data.groups[preview.assignment.group_index].policy.grid_rules
                         && let Some(grid_row) = GridRow::from_row(&preview, row_left, preview_top, true)
@@ -592,5 +647,32 @@ fn measured_page_width(rows: &[MeasuredRow]) -> Pixels {
 fn set_vertical_gaps(data: &PaginatorData, rows: &mut [MeasuredRow]) {
     for index in 1..rows.len() {
         rows[index].gap_before = geometry::gap_between(data, &rows[index - 1].assignment, &rows[index].assignment);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{PaginatorChild, PaginatorGroup, PaginatorGroupPolicy, PaginatorSizing, PaginatorWidthPolicy};
+    use super::*;
+    use gpui::{AppContext, TestAppContext};
+    use std::cell::RefCell;
+
+    #[gpui::test]
+    fn adjacent_prefetch_prepares_only_the_neighbor_ranges_without_rendering(cx: &mut TestAppContext) {
+        let prepared = Rc::new(RefCell::new(Vec::new()));
+        let policy = PaginatorGroupPolicy::new(PaginatorWidthPolicy::pixels(px(100.0)), PaginatorSizing::pixels(px(100.0)), px(0.0)).with_gap(px(0.0)).flush_edges();
+        let children = (0..12).map(|index| {
+            let prepared = prepared.clone();
+            PaginatorChild::new(|_, _, _| panic!("prefetch must not render offscreen children")).with_prepare(move |_, _| prepared.borrow_mut().push(index))
+        });
+        let paginator = cx.new(|_| Paginator::new("prefetch-test", [PaginatorGroup::new(policy, children)]));
+        let data = cx.update(|cx| paginator.read(cx).data.clone());
+        let window = cx.add_empty_window();
+        window.update(|window, cx| {
+            let mut element = PaginatorElement::new("prefetch-test".into(), paginator.downgrade(), None, 0, data, None, 4, AssignmentDirection::Forward, None, None, px(16.0), PaginatorAxis::Vertical, Rc::default());
+            element.widths = Rc::new(vec![Pixels::ZERO; element.data.children.len()]);
+            element.prepare_adjacent_pages(VisiblePage { first_child: 4, last_child: 7 }, Bounds::new(point(px(0.0), px(0.0)), size(px(200.0), px(200.0))), window, cx);
+        });
+        assert_eq!(*prepared.borrow(), [0, 1, 2, 3, 8, 9, 10, 11]);
     }
 }

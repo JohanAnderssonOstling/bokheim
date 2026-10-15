@@ -25,6 +25,8 @@ pub enum SyncError {
     UpgradeRequired,
     #[error("client synchronization cursor is ahead of server state")]
     CursorAhead,
+    #[error("client synchronization cursor belongs to a different server history")]
+    HistoryMismatch,
     #[error("synchronization persistence failed: {0}")]
     Internal(String),
 }
@@ -62,6 +64,7 @@ pub(crate) fn internal(error: impl std::fmt::Display) -> SyncError {
 fn fetch_error(error: sync_store::FetchChangesError) -> SyncError {
     match error {
         sync_store::FetchChangesError::CursorAhead => SyncError::CursorAhead,
+        sync_store::FetchChangesError::HistoryMismatch => SyncError::HistoryMismatch,
         other => internal(other),
     }
 }

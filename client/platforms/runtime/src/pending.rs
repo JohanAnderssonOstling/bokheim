@@ -70,17 +70,6 @@ impl<F: FnOnce()> Drop for OnDrop<F> {
     }
 }
 
-/// Cancellation/completion of an older command must not remove its successor.
-pub fn take_matching<T>(slot: &RefCell<Option<(u32, T)>>, id: u32) -> Option<T> {
-    let mut pending = slot.borrow_mut();
-    if pending.as_ref().map(|(active, _)| *active) == Some(id) {
-        pending.take().map(|(_, value)| value)
-    } else {
-        None
-    }
-}
-
-
 /// Cancellation wins ties and drops the operation before returning to its owner.
 pub async fn until_cancelled<T>(operation: impl Future<Output = T>, cancelled: impl Future) -> Option<T> {
     futures_util::pin_mut!(operation, cancelled);

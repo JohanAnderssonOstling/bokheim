@@ -26,8 +26,9 @@ pub fn initialize(data: &Path, bridge: impl Fn(&str) -> Result<String, String> +
             return Ok(false);
         }
     };
-    let mut host = AndroidHost::open(data, env!("CARGO_PKG_VERSION"), config, &format!("android-{}-apk", std::env::consts::ARCH))?;
-    let trial = host.startup(|path| command(serde_json::json!({ "action": "prepare", "path": path })).map(|_| ()))?;
+    let (host, trial) = AndroidHost::open_and_startup(data, env!("CARGO_PKG_VERSION"), config, &format!("android-{}-apk", std::env::consts::ARCH), |path| {
+        command(serde_json::json!({ "action": "prepare", "path": path })).map(|_| ())
+    })?;
     HOST.with_borrow_mut(|slot| {
         if slot.is_some() {
             return Err("Android update host already initialized");

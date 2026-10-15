@@ -20,15 +20,17 @@ impl SqliteStore {
         if version > 1 {
             return Err("unsupported update state schema".into());
         }
-        connection
-            .execute_batch(
-                "PRAGMA synchronous=FULL;
-            BEGIN IMMEDIATE;
-            CREATE TABLE IF NOT EXISTS update_state(id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, payload TEXT NOT NULL);
-            PRAGMA user_version=1;
-            COMMIT;",
-            )
-            .map_err(|e| e.to_string())?;
+        connection.pragma_update(None, "synchronous", "FULL").map_err(|e| e.to_string())?;
+        if version == 0 {
+            connection
+                .execute_batch(
+                    "BEGIN IMMEDIATE;
+                CREATE TABLE IF NOT EXISTS update_state(id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, payload TEXT NOT NULL);
+                PRAGMA user_version=1;
+                COMMIT;",
+                )
+                .map_err(|e| e.to_string())?;
+        }
         Ok(Self { connection })
     }
 }
@@ -176,5 +178,41 @@ impl<S: Store> Coordinator<S> {
             paths.push((entry.kind, path));
         }
         Ok(paths)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reopening_current_state_does_not_commit_database_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = SqliteStore::open(directory.path()).unwrap();
+        let record = Record { revision: 1, trust_scope: "unchanged".into(), ..Record::default() };
+        store.save(0, &record).unwrap();
+        drop(store);
+
+        let observer = Connection::open(directory.path().join("state.sqlite")).unwrap();
+        let before: u32 = observer.pragma_query_value(None, "data_version", |r| r.get(0)).unwrap();
+        let reopened = SqliteStore::open(directory.path()).unwrap();
+        assert_eq!(reopened.load().unwrap().trust_scope, "unchanged");
+        assert_eq!(reopened.connection.pragma_query_value(None, "synchronous", |r| r.get::<_, u32>(0)).unwrap(), 2);
+        let after: u32 = observer.pragma_query_value(None, "data_version", |r| r.get(0)).unwrap();
+        assert_eq!(before, after, "reopening current update state must not commit a write");
+    }
+
+    #[test]
+    fn unversioned_state_is_initialized_without_losing_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = Connection::open(directory.path().join("state.sqlite")).unwrap();
+        connection.execute_batch("CREATE TABLE update_state(id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, payload TEXT NOT NULL);").unwrap();
+        let record = Record { revision: 1, trust_scope: "retained".into(), ..Record::default() };
+        connection.execute("INSERT INTO update_state VALUES(1,1,?1)", [serde_json::to_string(&record).unwrap()]).unwrap();
+        drop(connection);
+
+        let store = SqliteStore::open(directory.path()).unwrap();
+        assert_eq!(store.connection.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0)).unwrap(), 1);
+        assert_eq!(store.load().unwrap().trust_scope, "retained");
     }
 }

@@ -6,6 +6,7 @@ use crate::placements::directory_relative_path;
 use crate::shared_sql::SharedSql;
 use crate::sync::apply::registers::{canonical_body, record_local};
 use crate::sync::{normalized_description, toc_entry_count, unix_millis};
+use crate::transfer::BookTransferState;
 use crate::{Database, DatabaseError};
 use include_sqlite_sql::include_sql;
 
@@ -20,7 +21,7 @@ use include_sqlite_sql::include_sql;
 use crate::books::audiobook::navigation_from_chapters;
 
 include_sql!("src/import/sql/import_commit.sql");
-use book_model::BookTocDocument;
+use book_model::{BookRecord, BookTocDocument};
 use library_replica::{BookAddition, BookFacts, LibraryStateEntry};
 use sync_common::{ContentHash, DirId, StateKey};
 
@@ -92,6 +93,12 @@ impl Database {
 
     /// Apply the caller's provisional contributor matching rule atomically with the import.
     pub fn commit_import_with_contributor_matching(&self, import: ImportCommit, matcher: Option<ContributorNameMatcher>) -> Result<(), DatabaseError> {
+        self.commit_import_with_catalog_answer(import, matcher, None)
+    }
+
+    /// Save matching catalog metadata before the imported draft can be enriched.
+    pub fn commit_import_with_catalog_answer(&self, import: ImportCommit, matcher: Option<ContributorNameMatcher>, catalog_record: Option<BookRecord>) -> Result<(), DatabaseError> {
+        let content_hash = import.content_hash;
         {
             let imports: Vec<ImportCommit> = vec![import];
 
@@ -123,9 +130,16 @@ impl Database {
                     }
                     commit_one(tx, import, prepared, matcher)?;
                 }
+                if let Some(record) = catalog_record {
+                    crate::enrichment::facts::record_catalog_answer(tx, &content_hash, record)?;
+                }
                 Ok(crate::transactions::WriteOutcome::Commit(()))
             })
         }
+    }
+
+    pub fn commit_transfer_import(&self, import: ImportCommit, source: BookTransferState) -> Result<bool, DatabaseError> {
+        self.write(|tx| commit_one_with_transfer(tx, import, None, None, Some(source)))
     }
 
     /// Placement rows for one book with their remembered materialized paths.
@@ -155,12 +169,16 @@ impl Database {
 /// directory can vanish between [`Database::commit_imports`]'s pre-check and
 /// here, so the destination is re-validated.
 pub(crate) fn commit_one(tx: &rusqlite::Transaction<'_>, import: ImportCommit, prepared: Option<PreparedInspection>, matcher: Option<ContributorNameMatcher>) -> Result<(), DatabaseError> {
+    commit_one_with_transfer(tx, import, prepared, matcher, None).map(|_| ())
+}
+
+fn commit_one_with_transfer(tx: &rusqlite::Transaction<'_>, import: ImportCommit, prepared: Option<PreparedInspection>, matcher: Option<ContributorNameMatcher>, transfer: Option<BookTransferState>) -> Result<bool, DatabaseError> {
     let ImportCommit { parent_id, file_name: _file_name, format, content_hash, size_bytes, inspection_version, inspection: _inspection, published, request_thumbnail, restore_paths } = import;
     let hash = &content_hash;
     if directory_relative_path(tx, &parent_id)?.is_none() {
         return Err(DatabaseError::message(format!("library folder does not exist: {parent_id}")));
     }
-    if prepared.is_none() {
+    if prepared.is_none() && transfer.is_none() {
         let mut inspected: Option<bool> = None;
         tx.has_import_inspection_select(hash, format as i64, inspection_version, |row| {
             inspected = row.get(0)?;
@@ -170,6 +188,42 @@ pub(crate) fn commit_one(tx: &rusqlite::Transaction<'_>, import: ImportCommit, p
         let inspected = inspected.ok_or(rusqlite::Error::QueryReturnedNoRows).map_err(DatabaseError::operation)?;
         if !inspected {
             return Err(DatabaseError::message("book changed during import; retry the import"));
+        }
+    }
+    let placement_created = tx.query_row(
+        "SELECT NOT EXISTS(SELECT 1 FROM book_dir bd JOIN book b ON b.row_id=bd.book_row_id WHERE bd.dir_id=?1 AND b.content_hash=?2 AND bd.deleted_at IS NULL AND b.deleted_at IS NULL)",
+        rusqlite::params![parent_id.to_string(), hash],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if let Some(source) = transfer {
+        if source.content_hash != content_hash || source.addition.facts.format != format {
+            return Err(DatabaseError::message("transferred book identity does not match its bytes"));
+        }
+        let has_facts: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM local_book_draft WHERE content_hash=?1) OR EXISTS(SELECT 1 FROM sync_book_record WHERE state_kind='book_add' AND content_hash=?1)", [hash], |row| row.get(0))?;
+        tx.ingestion_ensure_book(hash)?;
+        record_local(tx, LibraryStateEntry::BookLifecycle { content_hash, value: library_replica::BookLifecycleState::Present })?;
+        if !has_facts {
+            if source.addition.enrichment.is_some() {
+                record_local(tx, LibraryStateEntry::BookAdd { content_hash, value: source.addition })?;
+            } else {
+                crate::sync::apply::records::stage(tx, hash, source.addition)?;
+            }
+        }
+        if let Some(reading) = source.reading {
+            if reading.book() != Some(content_hash) || reading.kind() != "reading_position" {
+                return Err(DatabaseError::message("invalid transferred reading position"));
+            }
+            if canonical_body(tx, "reading_position", &StateKey::Book(content_hash), "")?.is_none() {
+                record_local(tx, reading)?;
+            }
+        }
+        for annotation in source.annotations {
+            if annotation.content_hash != content_hash {
+                return Err(DatabaseError::message("invalid transferred annotation"));
+            }
+            if canonical_body(tx, "annotation", &StateKey::Text(annotation.id.clone()), "")?.is_none() {
+                record_local(tx, LibraryStateEntry::Annotation { value: annotation })?;
+            }
         }
     }
     if let Some(prepared) = prepared {
@@ -215,7 +269,7 @@ pub(crate) fn commit_one(tx: &rusqlite::Transaction<'_>, import: ImportCommit, p
     for path in &restore_paths {
         tx.shared_placements_queue_file_work("materialize", hash, path).map_err(DatabaseError::operation)?;
     }
-    Ok(())
+    Ok(placement_created)
 }
 
 include_sqlite_sql::include_sql!("src/import/sql/ingestion.sql");

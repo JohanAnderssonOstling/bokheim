@@ -54,11 +54,22 @@ storage CDNs work. External packages are not copied to the website. Unconfigured
 external directories are rejected; the client protocol remains provider independent.
 
 The manifest's optional `catalog` entry names the public-domain catalog
-snapshot on `https://catalog.bokheim.se` (directory `catalog`). Clients fetch it
+snapshot on `https://catalogs.bokheim.se` (directory `catalog`). Clients fetch it
 quietly, without the approval and restart an application or taxonomy update
 takes. `catalog DIR publish OUT_DIR N` (servers/catalog) writes the tree that
 origin serves, `releases/N/catalog.sqlite3`, `books/` and `covers/`, and prints
-the entry to put in the manifest. Copy OUT_DIR to
+the entry to put in the manifest. Publication also writes `catalog.sqlite3.gz`
+with gzip level 9 and `catalog.sqlite3.zst` with Zstandard level 19. Copy these
+alongside the SQLite file: Caddy negotiates the precompressed representation,
+and clients verify and store the decoded SQLite bytes. The manifest still names
+the ordinary `.sqlite3` URL, size, and SHA-256. Existing snapshots can gain these
+representations with `catalog compress-snapshot INPUT`, preserving their bytes.
+Catalog format 8 uses 8 KiB SQLite pages, 32-byte binary book hashes, shared
+descriptions, and integer references to subject source and authority labels.
+The app reads only format 8. Convert an existing format-7 local snapshot once
+with `catalog compact-snapshot INPUT OUTPUT`; this preserves its release ID
+and all records. Install the converted file after updating the application.
+Copy OUT_DIR to
 `/srv/bokheim-updates/public/catalog/`; the publisher then verifies the
 snapshot's existing bytes like any previously published artifact. Books and
 covers are not manifest artifacts: the snapshot names them by hash.

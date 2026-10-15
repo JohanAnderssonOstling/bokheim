@@ -1,8 +1,10 @@
+use client_platform_runtime::transfers;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(super) use super::data::AppDataLocation;
 pub(super) use super::data::{BackendContext, LibraryEntry, LibraryRegistry};
-use crate::executor::{BackendExecutor, BackendOutput, BackendSend, BackendTask};
 use crate::AppStartupState;
+use crate::host::startup_profile::StartupProfile;
+use crate::executor::{BackendExecutor, BackendOutput, BackendSend, BackendTask};
 use library_backend::library::LibraryDirectory;
 use serde::Serialize;
 pub(super) use std::collections::HashSet;
@@ -74,12 +76,15 @@ impl AppBackend {
     }
 
     pub fn new(context: BackendContext) -> Result<Self, BackendError> {
+        let mut profile = StartupProfile::new("backend_construct");
         let executor = BackendExecutor::new().map_err(BackendError::operation)?;
+        profile.mark("executor");
         let notification_interest = crate::notification_interest::NotificationInterest::default();
         let library_directory = Arc::new(LibraryDirectory::default());
         let (account_wake, account_requests) = watch::channel(());
         let api_server = crate::api_server_url();
         let account = DeviceAccountSession::load(context.clone(), api_server).map_err(BackendError::operation)?;
+        profile.mark("account_load");
         let state = Arc::new_cyclic(|weak| AppState {
             account_task: Some(super::account::start(&executor, weak, account.clone(), account_wake.clone(), account_requests, notification_interest.clone(), library_directory.clone())),
             executor: executor.clone(),
@@ -90,12 +95,22 @@ impl AppBackend {
             account_wake,
             notification_interest: notification_interest.clone(),
         });
-        // Libraries attach the catalog when they open, so activate it first.
-        super::catalog::start(&context.app_data_dir, &executor);
         let core = Self { state };
+        profile.mark("state_and_account_task");
+        let allow_metered = core.browsing_preferences()?.allow_metered_transfers();
+        #[cfg(not(target_arch = "wasm32"))]
+        transfers::initialize(&context.app_data_dir, allow_metered).map_err(BackendError::operation)?;
+        #[cfg(target_arch = "wasm32")]
+        transfers::POLICY.set_allow_metered(allow_metered);
+        profile.mark("transfer_policy");
+        // Catalog queries share one disk database; activate it before libraries open.
+        super::catalog::start(&context.app_data_dir, &executor, core.state.library_directory.clone());
+        profile.mark("catalog_activate");
         core.open_registered_libraries()?;
+        profile.mark("libraries_open");
         core.start_pending_local_purges();
         core.state.account_wake.send_replace(());
+        profile.mark("maintenance_schedule");
         Ok(core)
     }
 

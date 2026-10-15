@@ -70,7 +70,7 @@ pub(crate) fn bind_reader_keys(cx: &mut App) {
         // button/gesture does the same on native mobile, where the on-screen
         // back button is hidden.
         KeyBinding::new("backspace", ReturnToLibrary, Some("Reader")),
-        #[cfg(feature = "mobile")]
+        #[cfg(not(target_os = "android"))]
         KeyBinding::new("back", ReturnToLibrary, Some("Reader")),
         #[cfg(target_os = "android")]
         KeyBinding::new("f24", ToggleToc, None),

@@ -1,0 +1,96 @@
+{
+  "merges": {
+    "4520": 4507
+  },
+  "surviving_label": "Philosophical Traditions",
+  "moved_children": [
+    {
+      "id": 4521,
+      "label": "Analytic Philosophy"
+    },
+    {
+      "id": 4522,
+      "label": "Critical Theory"
+    },
+    {
+      "id": 4523,
+      "label": "Deconstruction"
+    },
+    {
+      "id": 4529,
+      "label": "Post-Structuralism"
+    },
+    {
+      "id": 4533,
+      "label": "Structuralism"
+    },
+    {
+      "id": 5533,
+      "label": "Modern Movements"
+    }
+  ],
+  "retained_children": [
+    {
+      "id": 4508,
+      "label": "Ancient"
+    },
+    {
+      "id": 4509,
+      "label": "Medieval Philosophy"
+    },
+    {
+      "id": 4510,
+      "label": "Modern Philosophy"
+    },
+    {
+      "id": 4511,
+      "label": "Renaissance Philosophy"
+    },
+    {
+      "id": 4521,
+      "label": "Analytic Philosophy"
+    },
+    {
+      "id": 4522,
+      "label": "Critical Theory"
+    },
+    {
+      "id": 4523,
+      "label": "Deconstruction"
+    },
+    {
+      "id": 4529,
+      "label": "Post-Structuralism"
+    },
+    {
+      "id": 4533,
+      "label": "Structuralism"
+    },
+    {
+      "id": 5533,
+      "label": "Modern Movements"
+    },
+    {
+      "id": 7830,
+      "label": "Modern Philosophy Schools"
+    }
+  ],
+  "bisac_selectors": [
+    "PHI009000",
+    "PHI031000"
+  ],
+  "ddc_selectors": [
+    "109",
+    "140",
+    "149",
+    "180"
+  ],
+  "validation": {
+    "exact_row_remapping": true,
+    "integrity_check": "ok",
+    "foreign_key_violations": 0,
+    "cycles": 0,
+    "surviving_ids_and_autoincrement_preserved": true
+  },
+  "renamed_from": "Philosophical Traditions & Schools"
+}

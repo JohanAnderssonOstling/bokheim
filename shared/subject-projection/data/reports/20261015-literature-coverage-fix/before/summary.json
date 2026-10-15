@@ -1,0 +1,79 @@
+{
+  "scope": "LCC only; current curated catalog P-class codes; active 2025 PQ/PR/PS/PT reference endpoints and numeric midpoints; 228 reviewed mixed-language literary scopes; all Literature subtree rules",
+  "limitations": [
+    "A missing match is not proof a catalog classification is bibliographically correct.",
+    "Reference probes do not enumerate every possible Cutter or validate interpolated midpoint allocations.",
+    "Broad literary matches are listed separately and are not automatically missing coverage.",
+    "Mixed language/literature subclasses are audited via the reviewed scopes, stored literary rules and catalog evidence, not every reference entry.",
+    "Entry impact is based on individual LCC matching; other classification systems or other LCC codes may still assign the book."
+  ],
+  "input_paths": {
+    "taxonomy": "shared/subject-projection/data/reports/20261015-literature-coverage-fix/taxonomy-before.sqlite3",
+    "catalog": "/home/johan/.local/share/bokheim/catalog/curation.sqlite3",
+    "installed": "/home/johan/.local/share/bokheim/catalog.sqlite3",
+    "reference": "/home/johan/Hem/Programmering/RustroverProjects/Html-Prototype/shared/subject-projection/data/lcc-mdsconnect-2016.sqlite3"
+  },
+  "input_sha256": {
+    "taxonomy": "9c7be13173e92d65ac2db454799386ed4e94b1cbef654653a9720b978c449218",
+    "catalog": "07d59b029d612e88a6460883c0010e6454fe89a02d39af4fad067431861dca2e",
+    "installed": "15a6e0564743d2c6e9ef094c72b71ec90b1e83b0879aaeb21ef40ebd276f9c00",
+    "reference": "857476434bd99f47b8bd4811e67c09615ac8cae6912bfd8b8775bb6419e36187"
+  },
+  "matcher_revision": "taxonomy revision: 1:11910429-f14c-5bb5-92ed-d0606ce58057",
+  "installed_release": 247,
+  "literature_concepts": 1502,
+  "unique_probes": 71528,
+  "catalog_entries_with_p_lcc": 3074,
+  "catalog_unique_p_codes": 12631,
+  "catalog_code_status": {
+    "outside_literature": 831,
+    "literature": 7564,
+    "unmatched": 2075,
+    "broad_literature": 2161
+  },
+  "core_catalog_code_status": {
+    "literature": 6042,
+    "broad_literature": 605,
+    "unmatched": 1976
+  },
+  "catalog_entries_with_core_literature_problem": 541,
+  "catalog_entries_only_language_with_core_problem": 50,
+  "catalog_entries_with_core_problem_without_other_literary_lcc_match": 120,
+  "core_catalog_gap_number_evidence": {
+    "2025_reference_number": 1902,
+    "catalog_number_requires_review": 57,
+    "above_documented_umbrella_review_metadata": 17
+  },
+  "core_catalog_gaps_by_subclass": {
+    "PQ": {
+      "codes": 581,
+      "entries": 17
+    },
+    "PR": {
+      "codes": 1348,
+      "entries": 502
+    },
+    "PS": {
+      "codes": 47,
+      "entries": 31
+    }
+  },
+  "reference_entries": 50620,
+  "reference_unique_probes": 56559,
+  "reference_probe_status": {
+    "literature": 48323,
+    "unmatched": 5616,
+    "broad_literature": 2616,
+    "outside_literature": 4
+  },
+  "reference_entries_with_gaps": 5233,
+  "reference_gap_probes_by_subclass": {
+    "PQ": 2591,
+    "PR": 3025,
+    "PS": 4
+  },
+  "reviewed_scopes": 228,
+  "reviewed_scope_gap_probes": 8,
+  "stored_rule_gap_probes": 90,
+  "atomic_spans": 88
+}

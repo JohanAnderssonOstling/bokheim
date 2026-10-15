@@ -43,11 +43,19 @@ def verify(apk, version, certificate, metadata, apksigner, aapt):
     require(not re.search(r'^application-debuggable(?:\s|$)', badging, re.M), 'Debuggable APK cannot be distributed')
     require(re.search(r"^native-code: 'arm64-v8a'\s*$", badging, re.M), 'Expected ARM64 APK')
     with zipfile.ZipFile(apk) as archive:
-        for name in ('libdesktop_gpui.so', 'libpdfium.so'):
+        for name in ('libdesktop_gpui.so', 'libpdfium.so', 'libsherpa-onnx-c-api.so', 'libonnxruntime.so'):
             with archive.open('lib/arm64-v8a/' + name) as library:
                 header = library.read(20)
             require(header[:6] == b'\x7fELF\x02\x01' and int.from_bytes(header[18:20], 'little') == 183,
                     f'Missing or invalid ARM64 native library: {name}')
+        for name in ('taxonomy.sqlite3', 'taxonomy.digest'):
+            require(archive.getinfo('assets/' + name).file_size > 0, f'Missing taxonomy asset: {name}')
+        for name in ('en_GB-alba-medium.onnx', 'tokens.txt', 'voice.sha256', 'VOICE-LICENSE.txt'):
+            require(archive.getinfo('assets/tts/alba/' + name).file_size > 0, f'Missing alba speech asset: {name}')
+        require(any(name.startswith('assets/tts/alba/espeak-ng-data/') for name in archive.namelist()),
+                'Missing alba speech phonemizer data')
+        require(not any(name.startswith('assets/tts/george/') for name in archive.namelist()),
+                'George speech assets must not be bundled on Android')
     info = dict(metadata)
     require(info.get('application') == version and type(info.get('schema')) is int and info['schema'] > 0
             and info.get('taxonomy_formats') and info.get('update_trust'), 'Missing build compatibility/trust metadata')

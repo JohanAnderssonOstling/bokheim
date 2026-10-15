@@ -152,7 +152,7 @@ membership in a directory, and ordinary field edits do not change quota referenc
 
 Every typed account, library, preference, asset-manifest, and
 synchronization body negotiates the versioned
-`application/vnd.bokheim+protobuf; version=26` representation. The wire body
+`application/vnd.bokheim+protobuf; version=29` representation. The wire body
 is a versioned protobuf envelope whose value preserves the Serde data model
 and numeric enum variants. Bodies use identity encoding and retain the 8 MiB
 request limit. JSON is neither accepted nor returned by this protocol;
@@ -197,6 +197,24 @@ materialize unresolved directories as hidden tombstoned placeholders and
 activate the hierarchy only when its real parent state arrives. A child or book
 placement can consequently commit on one page without violating foreign keys or
 becoming visible before a dependency delivered by a later page.
+
+Protocol 29 binds each pull cursor to a persisted server history UUID. The
+generation is returned even for empty libraries and is committed with both
+client cursor revisions. A different generation, or a nonzero checkpoint with
+no generation, returns HTTP 410 before a push can commit. Clients use their
+durable cursor recovery: pull from zero, then republish retained canonical
+cells without changing their original authored versions. Server schema 11
+adds the history singleton; repeated upgrades and ordinary startups keep its
+ID. SQLite's history migration, introduced in schema 38, upgrades versions
+36 and 37 without removing state or
+outbox work. HTTP clients and servers must upgrade together; opaque domain
+payloads stored with protocol 28 remain readable.
+
+After restoring or replacing PostgreSQL history, run `sync-server
+rotate-sync-generation` while synchronization traffic is stopped. This changes
+only the history UUID, not values, authored versions, or revision numbers.
+It must run after every restore, even when the restored revision head has
+already passed clients' checkpoints. See the [restore procedure](deploy/README.md#database-recovery-and-synchronization-history).
 
 Book and thumbnail routes retain their original bytes, content hashes, content lengths,
 and byte-range semantics and never pass through the sync codec.

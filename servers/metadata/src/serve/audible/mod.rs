@@ -23,7 +23,8 @@ const GROUPS: &str = "product_desc,product_attrs,contributors,product_extended_a
 
 struct CachedResponse {
     cached_at: Instant,
-    bytes: Arc<Vec<u8>>,
+    // None is Audible's explicit redirect for a search with no results.
+    bytes: Option<Arc<Vec<u8>>>,
 }
 
 #[derive(Clone)]
@@ -55,6 +56,10 @@ impl AudibleClient {
     }
 
     async fn get(&self, url: reqwest::Url) -> Result<Arc<Vec<u8>>, String> {
+        self.get_response(url).await?.ok_or_else(|| "Audiobook provider returned no search results instead of content".into())
+    }
+
+    async fn get_response(&self, url: reqwest::Url) -> Result<Option<Arc<Vec<u8>>>, String> {
         let key = url.to_string();
         if let Some(response) = self.cache.lock().await.get(&key) {
             if response.cached_at.elapsed() < Duration::from_secs(6 * 3600) {
@@ -69,6 +74,22 @@ impl AudibleClient {
             *previous = Some(Instant::now());
         }
         let response = self.http.get(url).send().await.map_err(|e| e.to_string())?;
+        // Audible signals an empty search with a same-origin redirect rather
+        // than an HTML results page. Do not follow it into a regional redirect,
+        // and do not mistake login or other redirects for a definitive miss.
+        if response.status() == reqwest::StatusCode::FOUND
+            && response.url().path() == "/search"
+            && response.headers().get(reqwest::header::LOCATION).and_then(|location| location.to_str().ok())
+                .and_then(|location| response.url().join(location).ok())
+                .is_some_and(|target| target.origin() == response.url().origin() && target.path() == "/no-search-results")
+        {
+            let mut cache = self.cache.lock().await;
+            if cache.len() >= 256 {
+                cache.clear();
+            }
+            cache.insert(key, CachedResponse { cached_at: Instant::now(), bytes: None });
+            return Ok(None);
+        }
         if !response.status().is_success() {
             return Err(format!("{} HTTP {}", response.url().host_str().unwrap_or("audiobook provider"), response.status()));
         }
@@ -91,11 +112,11 @@ impl AudibleClient {
             return Err("Audible website challenge; retry later".into());
         }
         let mut cache = self.cache.lock().await;
-        if cache.len() >= 256 || cache.values().map(|response| response.bytes.len()).sum::<usize>() + bytes.len() > 16 * 1024 * 1024 {
+        if cache.len() >= 256 || cache.values().filter_map(|response| response.bytes.as_ref()).map(|bytes| bytes.len()).sum::<usize>() + bytes.len() > 16 * 1024 * 1024 {
             cache.clear();
         }
-        cache.insert(key, CachedResponse { cached_at: Instant::now(), bytes: bytes.clone() });
-        Ok(bytes)
+        cache.insert(key, CachedResponse { cached_at: Instant::now(), bytes: Some(bytes.clone()) });
+        Ok(Some(bytes))
     }
 
     async fn json(&self, origin: &str, path: &str, query: &[(&str, &str)]) -> Result<Value, String> {
@@ -184,8 +205,8 @@ impl AudibleClient {
             for query in &website_queries(request) {
                 let mut url = reqwest::Url::parse(&format!("{web}/search")).expect("configured origin");
                 url.query_pairs_mut().append_pair("keywords", &query.1).append_pair("ipRedirectOverride", "true");
-                match self.get(url).await {
-                    Ok(html) => match website_asins(&String::from_utf8_lossy(&html)) {
+                match self.get_response(url).await {
+                    Ok(Some(html)) => match website_asins(&String::from_utf8_lossy(&html)) {
                         Ok(asins) => {
                             for asin in asins.into_iter().take(8) {
                                 if candidates.iter().any(|c| c.region == *region && c.asin == asin) {
@@ -199,6 +220,7 @@ impl AudibleClient {
                         }
                         Err(error) => errors.push(error),
                     },
+                    Ok(None) => {},
                     Err(error) => errors.push(error),
                 }
             }
@@ -359,6 +381,7 @@ mod tests {
     }
 
     use axum::{extract::Path, response::IntoResponse, routing::get, Router};
+    use axum::http::{header::LOCATION, StatusCode};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -375,6 +398,54 @@ mod tests {
         json!({"asin":asin,"title":"A Specific Book","authors":[{"name":"John Smith"}],"narrators":[{"name":"Narrator One"}],
             "runtime_length_min":99,"isbn":"9780306406157"})
     }
+
+    async fn redirect_fixture(location: &'static str) -> (AudibleClient, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let websites = Arc::new(AtomicUsize::new(0));
+        let count = websites.clone();
+        let router = Router::new()
+            .route("/1.0/catalog/products", get(|| async { axum::Json(json!({"products":[]})) }))
+            .route("/search", get(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+                async move { (StatusCode::FOUND, [(LOCATION, location)]) }
+            }));
+        // There is deliberately no redirect destination: an empty search
+        // must be recognized from the redirect, without another request.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+        let mut client = AudibleClient::new();
+        client.audnexus_origin = origin.clone();
+        client.origins = Arc::new(vec![("us".into(), origin.clone(), origin)]);
+        (client, websites, task)
+    }
+
+    #[tokio::test]
+    async fn empty_search_redirect_is_a_cached_miss() {
+        let (client, websites, server) = redirect_fixture("/no-search-results?keywords=A+Specific+Book").await;
+        let result = client.lookup(request()).await;
+        assert_eq!(result.status, LookupStatus::NoMatch, "{}", result.detail);
+        assert!(result.candidates.is_empty());
+        assert!(result.chapter_plan.is_none());
+        assert!(result.used_website_fallback);
+        let before = websites.load(Ordering::SeqCst);
+        assert!(before > 0);
+        assert_eq!(client.lookup(request()).await.status, LookupStatus::NoMatch);
+        assert_eq!(websites.load(Ordering::SeqCst), before, "cache must retain an explicit empty search");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn other_redirects_remain_retryable_failures() {
+        for location in ["/signin", "https://another-provider.example/no-search-results"] {
+            let (client, _, server) = redirect_fixture(location).await;
+            let result = client.lookup(request()).await;
+            assert_eq!(result.status, LookupStatus::Unavailable, "{location}: {}", result.detail);
+            assert!(result.detail.contains("302"));
+            assert!(result.chapter_plan.is_none());
+            server.abort();
+        }
+    }
+
     async fn fixture(api_correct: bool, unavailable: bool) -> (AudibleClient, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
         let websites = Arc::new(AtomicUsize::new(0));
         let count = websites.clone();

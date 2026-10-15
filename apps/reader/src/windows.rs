@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use book_content::{Book, BookFormat as BookSourceFormat};
 use gpui::prelude::*;
-use gpui::{AnyView, App, AppContext, BackgroundExecutor, Context, EventEmitter, IntoElement, Render, SharedString, Task, Window};
+use gpui::{AnyView, App, AppContext, BackgroundExecutor, Context, Entity, EventEmitter, FocusHandle, IntoElement, Render, SharedString, Task, Window};
 use html_view_core::{RendererInitialConfig, RendererPreparation};
 use library_backend::{BookFormat, BoxedBookReader, DocumentSource, LibraryClient, ResolvedBook};
 use library_model::BookLocator;
@@ -18,6 +18,7 @@ use crate::settings::{ReaderPreferences, ReaderSettings, SaveReaderSettings};
 use crate::CloseReader;
 
 pub struct CloseRequested;
+pub struct BookOpenFailed(pub String);
 pub struct AudiobookOpened(pub gpui::Entity<audiobook_player::PlaybackSession>);
 
 enum PreparedBook {
@@ -39,10 +40,14 @@ enum ReaderState {
 pub struct ReaderView {
     title: SharedString,
     state: ReaderState,
+    focus: FocusHandle,
     _load_task: Task<()>,
 }
 
 pub fn configure(preferences: ReaderPreferences, save: SaveReaderSettings, cx: &mut App) {
+    if let Err(error) = ui_components::register_fonts(cx) {
+        log::warn!("failed to install reader fonts: {error}");
+    }
     cx.set_global(ReaderSettings { preferences, save });
 }
 
@@ -110,13 +115,44 @@ async fn load_book(locator: &BookLocator, library: &LibraryClient, executor: &Ba
 }
 
 impl ReaderView {
+    pub fn native_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let ReaderState::Ready(view) = &self.state {
+            let view = view.clone();
+            // Closing a format view calls back into this lifecycle owner.
+            // Release its current lease before running that transition.
+            window.defer(cx, move |window, cx| match view.downcast::<EpubReaderView>() {
+                Ok(reader) => reader.update(cx, |reader, cx| reader.native_back(window, cx)),
+                Err(view) => {
+                    if let Ok(reader) = view.downcast::<PdfReaderView>() {
+                        reader.update(cx, |reader, cx| reader.native_back(window, cx));
+                    }
+                }
+            });
+        } else {
+            self.request_close(cx);
+        }
+    }
+
     fn request_close(&mut self, cx: &mut Context<Self>) {
         cx.emit(CloseRequested);
     }
 
+    fn opening_failed(&mut self, error: String, cx: &mut Context<Self>) {
+        log::error!("cannot load reader page for {:?}: {error}", self.title);
+        self.state = ReaderState::Error(error.clone().into());
+        cx.emit(BookOpenFailed(error));
+        cx.notify();
+    }
+
+    fn watch_open_failure<T: EventEmitter<BookOpenFailed> + 'static>(&self, reader: &Entity<T>, cx: &mut Context<Self>) {
+        cx.subscribe(reader, |this, _, error: &BookOpenFailed, cx| this.opening_failed(error.0.clone(), cx)).detach();
+    }
+
     pub fn new(locator: BookLocator, title: String, initial_target: Option<String>, app: app::AppClient, library: Rc<LibraryClient>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         window.set_window_title(&title);
-        if ui_components::uses_mobile_navigation(window) {
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        if ui_components::uses_mobile_reader_controls(window) {
             cx.set_system_bars_visible(true);
         }
         let reader_view = cx.entity().downgrade();
@@ -133,9 +169,15 @@ impl ReaderView {
                     let _ = reader_view.update_in(cx, move |reader_view, window, cx| {
                         let view: AnyView = match book {
                             PreparedBook::Pdf { reader, metadata, page_source, initial_page, initial_full_page_position } => {
-                                cx.new(|cx| PdfReaderView::new(locator, title, app, library, reader, metadata, page_source, initial_page, initial_full_page_position, close_reader, window, cx)).into()
+                                let reader = cx.new(|cx| PdfReaderView::new(locator, title, app, library, reader, metadata, page_source, initial_page, initial_full_page_position, close_reader, window, cx));
+                                reader_view.watch_open_failure(&reader, cx);
+                                reader.into()
                             }
-                            PreparedBook::Book { book, preparation } => cx.new(|cx| EpubReaderView::new(locator, title, app, library, book, *preparation, close_reader, window, cx)).into(),
+                            PreparedBook::Book { book, preparation } => {
+                                let reader = cx.new(|cx| EpubReaderView::new(locator, title, app, library, book, *preparation, close_reader, window, cx));
+                                reader_view.watch_open_failure(&reader, cx);
+                                reader.into()
+                            }
                             PreparedBook::Audiobook { resolved, initial_target } => {
                                 let session = crate::open_audiobook(locator, library.as_ref().clone(), resolved, initial_target, cx);
                                 cx.emit(AudiobookOpened(session));
@@ -147,27 +189,7 @@ impl ReaderView {
                     });
                 }
                 Err(error) => {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        let library_id = *library.id();
-                        let library_missing = match app.libraries().await {
-                            Ok(libraries) => !libraries.iter().any(|entry| entry.library_id() == &library_id),
-                            Err(check_error) => {
-                                log::warn!("could not verify reader library {library_id} after load failure: {check_error}");
-                                error.contains("library not found:")
-                            }
-                        };
-                        if library_missing {
-                            log::warn!("reader library {library_id} no longer exists; returning to the library browser");
-                            let _ = reader_view.update(cx, Self::request_close);
-                            return;
-                        }
-                    }
-                    let _ = reader_view.update(cx, move |reader_view, cx| {
-                        log::error!("cannot load reader page for {:?}: {error}", reader_view.title);
-                        reader_view.state = ReaderState::Error(SharedString::from(error));
-                        cx.notify();
-                    });
+                    let _ = reader_view.update(cx, move |reader_view, cx| reader_view.opening_failed(error, cx));
                 }
             }
         });
@@ -175,11 +197,14 @@ impl ReaderView {
         if let Err(error) = gpui_kobo::request_experience_mode(gpui_kobo::KoboExperienceMode::ReaderQuality) {
             log::error!("failed to enter Kobo reader quality mode: {error}");
         }
-        Self { title: reader_title, state: ReaderState::Loading, _load_task: load_task }
+        Self { title: reader_title, state: ReaderState::Loading, focus, _load_task: load_task }
     }
 }
 
 impl EventEmitter<CloseRequested> for ReaderView {}
+impl EventEmitter<BookOpenFailed> for ReaderView {}
+impl EventEmitter<BookOpenFailed> for EpubReaderView {}
+impl EventEmitter<BookOpenFailed> for PdfReaderView {}
 impl EventEmitter<AudiobookOpened> for ReaderView {}
 
 impl Render for ReaderView {
@@ -190,17 +215,67 @@ impl Render for ReaderView {
             ReaderState::Error(error) => error.clone(),
         };
         let theme = ui_components::browser_theme(cx);
-        let content = gpui::div().size_full().flex().items_center().justify_center().bg(theme.page_bg).text_color(theme.text).child(message).into_any_element();
-        if ui_components::uses_mobile_navigation(window) {
-            let back = ui_components::mobile_back_button(theme).on_click(cx.listener(|reader, _, _, cx| reader.request_close(cx)));
+        let content = gpui::div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .gap(gpui::rems(1.0))
+            .items_center()
+            .justify_center()
+            .bg(theme.page_bg)
+            .text_color(theme.text)
+            .child(message)
+            .child(ui_components::outlined_text_button("cancel-reader-loading", "Back").on_click(cx.listener(|reader, _, _, cx| reader.request_close(cx))))
+            .into_any_element();
+        let content = if ui_components::uses_mobile_reader_controls(window) {
+            let back = Some(ui_components::mobile_back_button(theme).on_click(cx.listener(|reader, _, _, cx| reader.request_close(cx))));
             gpui::div()
                 .relative()
                 .size_full()
                 .child(content)
-                .child(gpui::div().absolute().top_0().left_0().right_0().pt(window.insets().safe_area.top).bg(theme.page_bg).child(ui_components::mobile_navigation_bar(self.title.clone(), Some(back), theme)))
+                .child(gpui::div().absolute().top_0().left_0().right_0().pt(window.insets().safe_area.top).bg(theme.page_bg).child(ui_components::mobile_navigation_bar(self.title.clone(), back, theme)))
                 .into_any_element()
         } else {
             content
-        }
+        };
+        gpui::div()
+            .size_full()
+            .key_context("Reader")
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|reader, _: &crate::ReturnToLibrary, _, cx| reader.request_close(cx)))
+            .on_action(cx.listener(|reader, _: &crate::CloseSearch, _, cx| reader.request_close(cx)))
+            .child(content)
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use std::cell::Cell;
+
+    #[gpui::test]
+    fn native_back_and_escape_work_before_the_document_is_ready(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            ui_components::register_fonts(cx).unwrap();
+            crate::bind_keys(cx);
+        });
+        let (reader, cx) = cx.add_window_view(|window, cx| {
+            let focus = cx.focus_handle();
+            focus.focus(window, cx);
+            ReaderView { title: "Loading test".into(), state: ReaderState::Loading, focus, _load_task: cx.spawn(async |_, _| std::future::pending::<()>().await) }
+        });
+        let closed = Rc::new(Cell::new(0));
+        let count = closed.clone();
+        let _subscription = cx.update(|_, cx| cx.subscribe(&reader, move |_, _: &CloseRequested, _| count.set(count.get() + 1)));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("back");
+        cx.run_until_parked();
+        assert_eq!(closed.get(), 1);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(closed.get(), 2);
     }
 }

@@ -1,8 +1,8 @@
 //! PDFium is owned by one dedicated worker. Only Rust values cross its boundary;
 //! PDFium handles and JavaScript bindings never leave that worker.
 
-use std::task::Poll;
 use super::*;
+use futures_channel::oneshot;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -81,8 +81,7 @@ async fn request<T: Send + 'static>(work: impl FnOnce() -> PdfResult<T> + Send +
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let result = Arc::new(concurrent_queue::ConcurrentQueue::bounded(1));
     let worker_result = result.clone();
-    let state = Rc::new(RefCell::new((None, None::<std::task::Waker>)));
-    let completion_state = state.clone();
+    let (sender, response) = oneshot::channel();
     PENDING.with(|pending| {
         pending.borrow_mut().insert(
             id,
@@ -91,14 +90,7 @@ async fn request<T: Send + 'static>(work: impl FnOnce() -> PdfResult<T> + Send +
                     Some(error) => Err(PdfError::new(error)),
                     None => result.pop().unwrap_or_else(|_| Err(PdfError::new("PDF worker completed without a result"))),
                 };
-                let waker = {
-                    let mut state = completion_state.borrow_mut();
-                    state.0 = Some(value);
-                    state.1.take()
-                };
-                if let Some(waker) = waker {
-                    waker.wake();
-                }
+                let _ = sender.send(value);
             }),
         );
     });
@@ -115,17 +107,8 @@ async fn request<T: Send + 'static>(work: impl FnOnce() -> PdfResult<T> + Send +
             complete_pdf_worker_job(&id.to_string());
         }
     }))?;
-    // Completion messages wake the caller on its own JavaScript thread.
-    std::future::poll_fn(|cx| {
-        let mut state = state.borrow_mut();
-        if let Some(result) = state.0.take() {
-            Poll::Ready(result)
-        } else {
-            state.1 = Some(cx.waker().clone());
-            Poll::Pending
-        }
-    })
-    .await
+    // The channel wakes the caller on its own JavaScript thread.
+    response.await.map_err(|_| PdfError::new("PDF worker stopped before completing the request"))?
 }
 
 struct DocumentHandle(u64);

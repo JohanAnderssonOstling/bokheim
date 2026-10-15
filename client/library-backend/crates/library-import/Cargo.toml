@@ -32,3 +32,10 @@ tempfile = "3"
 client-platform-web = { path = "../../../platforms/web" }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+library-database = { path = "../library-database", features = ["scanner"] }
+thumbnail = { path = "../thumbnail" }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+rusqlite = { version = "0.40.0", features = ["bundled"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

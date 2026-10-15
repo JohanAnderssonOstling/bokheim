@@ -3,7 +3,7 @@
 use book_content::{Book, BookFormat as BookSourceFormat, ReadingBook};
 use futures_lite::future::block_on;
 use html::document::ImageSource;
-use html::resources::{ImageLoadCompletion, ImageLoader, ResourceMetadata, ResourceProvider, load_image_bytes_async};
+use html::resources::{ImageLoadCompletion, ImageLoader, ImageResourceContext, ResourceMetadata, ResourceProvider, load_image_bytes_async};
 use std::future::Future;
 use std::io::{self, Read, Seek};
 use std::pin::Pin;
@@ -35,17 +35,29 @@ impl ResourceProvider for Provider {
 }
 
 type ImageTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+struct BookImageContext(Arc<ReadingBook>);
+
+impl ImageResourceContext for BookImageContext {
+    fn resolve(&self, base: &str, href: &str) -> String {
+        self.0.resources.resolve(base, href)
+    }
+
+    fn metadata(&self, uri: &str) -> io::Result<ResourceMetadata> {
+        Ok(ResourceMetadata { media_type: self.0.resources.media_type(uri)?, charset: None })
+    }
+}
+
 struct BookImageLoader {
     content: Arc<ReadingBook>,
-    provider: Arc<dyn ResourceProvider>,
     spawn: Arc<dyn Fn(ImageTask) + Send + Sync>,
 }
 impl ImageLoader for BookImageLoader {
     fn load(&self, source: ImageSource, complete: ImageLoadCompletion) {
         let content = self.content.clone();
-        let provider = self.provider.clone();
         (self.spawn)(Box::pin(async move {
-            let bytes = load_image_bytes_async(provider.as_ref(), &source, |uri| content.read_resource(uri)).await;
+            let context = BookImageContext(content.clone());
+            let bytes = load_image_bytes_async(&context, &source, |uri| content.read_resource(uri)).await;
             complete(bytes);
         }));
     }
@@ -55,6 +67,9 @@ impl BookSource {
     pub fn new(content: ReadingBook) -> Self {
         let content = Arc::new(content);
         Self { provider: Arc::new(Provider(content.clone())), content }
+    }
+    pub fn languages(&self) -> Vec<String> {
+        self.content.languages()
     }
     pub fn document_uris(&self) -> &[String] {
         self.content.document_uris()
@@ -70,7 +85,7 @@ impl BookSource {
         block_on(book.prepare_reading()).map(Self::new)
     }
     pub fn image_loader(&self, spawn: impl Fn(ImageTask) + Send + Sync + 'static) -> Arc<dyn ImageLoader> {
-        Arc::new(BookImageLoader { content: self.content.clone(), provider: self.provider.clone(), spawn: Arc::new(spawn) })
+        Arc::new(BookImageLoader { content: self.content.clone(), spawn: Arc::new(spawn) })
     }
 }
 
@@ -91,9 +106,13 @@ mod tests {
         archive.start_file("META-INF/container.xml", stored).unwrap();
         archive.write_all(br#"<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#).unwrap();
         archive.start_file("OEBPS/content.opf", stored).unwrap();
-        archive.write_all(br#"<package><manifest><item id="cover" href="Text/titlepage.xhtml" media-type="application/xhtml+xml"/><item id="image" href="Images/cover.jpeg" media-type="image/jpeg"/></manifest><spine><itemref idref="cover"/></spine></package>"#).unwrap();
+        archive
+            .write_all(br#"<package><manifest><item id="cover" href="Text/titlepage.xhtml" media-type="application/xhtml+xml"/><item id="image" href="Images/cover.jpeg" media-type="image/jpeg"/></manifest><spine><itemref idref="cover"/></spine></package>"#)
+            .unwrap();
         archive.start_file("OEBPS/Text/titlepage.xhtml", stored).unwrap();
-        archive.write_all(br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1 1"><image width="1" height="1" xlink:href="../Images/cover.jpeg"/></svg></body></html>"#).unwrap();
+        archive
+            .write_all(br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1 1"><image width="1" height="1" xlink:href="../Images/cover.jpeg"/></svg></body></html>"#)
+            .unwrap();
         archive.start_file("OEBPS/Images/cover.jpeg", stored).unwrap();
         archive.write_all(&[0xff, 0xd8, 0xff, 0xd9]).unwrap();
 

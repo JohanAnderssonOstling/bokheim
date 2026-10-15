@@ -1,0 +1,80 @@
+{
+  "date": "2026-10-14",
+  "cpu": "AMD Ryzen 7 6800HS Creator Edition, Linux desktop",
+  "voice": "Alba en_GB medium, CPU provider, 2 inference threads",
+  "command": "target/debug/examples/alba_memory 60",
+  "warmup_passages": 8,
+  "measurement": "Process resident memory from /proc/self/status, in KiB (1024 bytes), sampled at each phase",
+  "idle_seconds": 60,
+  "limitations": [
+    "Isolated voice/runtime benchmark; reader UI and audio output are excluded.",
+    "The example explicitly drops the model after 60 seconds idle, matching the worker unload operation; it does not exercise the worker timer.",
+    "Resident-memory snapshots cannot attribute retained allocations to the runtime or system allocator.",
+    "Allocation reuse can hide the small PCM copy in resident-memory snapshots."
+  ],
+  "results": [
+    {
+      "phase": "before_load",
+      "elapsed_seconds": 0.0,
+      "rss_kib": 23512,
+      "anonymous_rss_kib": 632,
+      "peak_rss_kib": 23512
+    },
+    {
+      "phase": "after_load",
+      "elapsed_seconds": 0.88,
+      "rss_kib": 111944,
+      "anonymous_rss_kib": 84176,
+      "peak_rss_kib": 111944
+    },
+    {
+      "phase": "native_audio_retained",
+      "elapsed_seconds": 10.41,
+      "rss_kib": 696684,
+      "anonymous_rss_kib": 668280,
+      "peak_rss_kib": 696684
+    },
+    {
+      "phase": "native_and_rust_pcm_retained",
+      "elapsed_seconds": 10.41,
+      "rss_kib": 696684,
+      "anonymous_rss_kib": 668280,
+      "peak_rss_kib": 696684
+    },
+    {
+      "phase": "rust_pcm_retained",
+      "elapsed_seconds": 10.41,
+      "rss_kib": 696684,
+      "anonymous_rss_kib": 668280,
+      "peak_rss_kib": 696684
+    },
+    {
+      "phase": "audio_released",
+      "elapsed_seconds": 10.41,
+      "rss_kib": 696684,
+      "anonymous_rss_kib": 668280,
+      "peak_rss_kib": 696684
+    },
+    {
+      "phase": "idle_before_unload",
+      "elapsed_seconds": 70.41,
+      "rss_kib": 696556,
+      "anonymous_rss_kib": 668280,
+      "peak_rss_kib": 696556
+    },
+    {
+      "phase": "after_voice_unload",
+      "elapsed_seconds": 70.48,
+      "rss_kib": 128908,
+      "anonymous_rss_kib": 100336,
+      "peak_rss_kib": 696120
+    },
+    {
+      "phase": "five_seconds_after_unload",
+      "elapsed_seconds": 75.48,
+      "rss_kib": 128908,
+      "anonymous_rss_kib": 100336,
+      "peak_rss_kib": 696120
+    }
+  ]
+}

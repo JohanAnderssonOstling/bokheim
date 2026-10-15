@@ -1,7 +1,7 @@
 //! Thumbnail jobs, upload preparation, and the metadata server's answers.
 
-use std::collections::HashSet;
 pub(crate) use crate::shared_sql::SharedSql;
+use std::collections::HashSet;
 // ---- enrichment ----
 // Typed thumbnail-work queue operations.
 
@@ -79,7 +79,6 @@ impl Database {
         })?;
         Ok(state)
     }
-
 }
 
 include_sql!("src/enrichment/sql/enrichment.sql");
@@ -168,7 +167,6 @@ mod schema_tests {
         db.initialize_library().unwrap();
         assert_eq!(db.connection.fixtures_read_enrichment_work(|r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, bool>(1)?))).unwrap(), (Some(999999), true));
     }
-
 }
 
 #[cfg(test)]

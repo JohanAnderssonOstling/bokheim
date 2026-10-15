@@ -842,13 +842,7 @@ impl PlaybackSession {
     }
 
     pub(super) fn sleep_label(&self) -> Option<SharedString> {
-        match self.sleep? {
-            SleepPlan::Until(deadline) => {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                Some(format!("{} min", remaining.as_secs().div_ceil(60)).into())
-            }
-            SleepPlan::EndOfChapter(_) => Some("Chapter".into()),
-        }
+        self.sleep.map(|plan| plan.label(Instant::now()))
     }
 
     pub(super) fn choose_sleep(&mut self, choice: SleepChoice, cx: &mut Context<Self>) {
@@ -998,6 +992,14 @@ impl PlaybackSession {
         self.finish_seek(cx);
     }
 
+    /// Seeks to the start of a chapter picked from the chapter list.
+    pub(super) fn go_to_chapter(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(start) = self.book.as_ref().and_then(|book| book.chapters.get(index)).map(|chapter| chapter.start()) {
+            self.seek_to(start);
+        }
+        self.finish_seek(cx);
+    }
+
     /// Seeks to a fraction of the current chapter, as a scrub on the progress bar.
     pub(super) fn seek_in_chapter(&mut self, fraction: f32, cx: &mut Context<Self>) {
         let target = self.book.as_ref().and_then(|book| book.chapters.get(self.active_chapter_index())).map(|chapter| chapter_position_at_fraction(chapter.start(), chapter.end(), fraction));
@@ -1014,6 +1016,14 @@ impl PlaybackSession {
 
     pub fn is_playing(&self) -> bool {
         self.audio.as_ref().is_some_and(AudioEngine::is_playing)
+    }
+
+    /// Where playback is and how far through the book that is, in per cent —
+    /// live, for the playing book's detail page, which would otherwise show
+    /// the last position saved to the library.
+    pub fn listening_position(&self) -> Option<(Duration, f32)> {
+        let book = self.book.as_ref()?;
+        Some((self.position, playback_progress(self.position, book.duration)))
     }
 
     pub(super) fn active_chapter_index(&self) -> usize {

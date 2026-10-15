@@ -3,7 +3,7 @@
 use crate::invalidation::notify;
 use std::time::Duration;
 
-use gpui::{Context, Window};
+use gpui::Context;
 use html_view_core::{RendererCommand, SearchScope};
 
 use crate::epub::ReaderView;
@@ -38,10 +38,24 @@ impl ReaderView {
         .detach();
     }
 
+    /// A local result's occurrence index belongs to the old document. Drop it
+    /// before queuing the current query for the newly loaded chapter.
+    pub(super) fn refresh_chapter_search(&mut self, cx: &mut Context<Self>) {
+        if self.search.options.scope != SearchScope::CurrentDocument {
+            return;
+        }
+        let Some(query) = self.search.query.clone() else { return };
+        let options = self.search.options;
+        self.search.clear_results();
+        self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::SetSearch { query: String::new(), options }, cx));
+        self.queue_search(query, cx);
+    }
+
     pub(super) fn apply_pending_search(&mut self, cx: &mut Context<Self>) -> bool {
         let Some((renderer_query, options)) = self.search.take_pending() else {
             return false;
         };
+        self.search.clear_results();
         if options.scope == SearchScope::CurrentDocument || renderer_query.is_empty() {
             self.with_renderer(cx, move |renderer, cx| renderer.apply(RendererCommand::SetSearch { query: renderer_query, options }, cx));
             return true;
@@ -69,18 +83,11 @@ impl ReaderView {
 }
 
 impl SearchBarTarget for ReaderView {
-    fn search_navigate(&mut self, direction: i8, cx: &mut Context<Self>) {
-        self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::NavigateSearch(direction), cx));
+    fn search_position(&self) -> (usize, usize) {
+        self.search.match_position.unwrap_or((0, 0))
     }
 
-    fn search_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.search.clear();
-        self.search_input.update(cx, |input, cx| input.set_value("", window, cx));
-        self.with_renderer(cx, |renderer, cx| {
-            renderer.apply(RendererCommand::SetSearchQuery(String::new()), cx);
-            renderer.apply(RendererCommand::DeactivateSearch, cx);
-        });
-        self.focus_document(window, cx);
-        notify(cx, Component::ReaderShell, "search_closed");
+    fn search_navigate(&mut self, direction: i8, cx: &mut Context<Self>) {
+        self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::NavigateSearch(direction), cx));
     }
 }

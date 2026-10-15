@@ -5,26 +5,29 @@
 //! Ported from the client workers (`library-backend/src/library/enrichment`)
 //! and the `apply_*` rules in `library-database/src/enrichment`.
 use crate::query::run_database;
-use crate::{MetadataError, MetadataService};
-use crate::serve::resolution::{authoritative_author_resolutions, classification_only_fallback, match_author_resolutions, merge_rich_matches, rich_subjects};
+use crate::serve::resolution::{authoritative_author_resolutions, match_author_resolutions, merge_rich_matches, rich_subjects, sibling_consensus_subjects};
 use crate::serve::{alternatives, related_isbn};
-use book_model::{AgentId, BookRecord, BookSubject, BookTocEntry, Contributor, Identifier, Scheme, Scope, AUTHOR_MARC_RELATOR_CODE};
+use crate::{MetadataError, MetadataService};
+use book_model::{AgentId, BookMetadata, BookRecord, BookSubject, BookTocEntry, Contributor, Identifier, Scheme, Scope, AUTHOR_MARC_RELATOR_CODE};
 use metadata_contract::audible::{LookupRequest, LookupResponse, LookupStatus as AudibleStatus};
 use metadata_contract::books::{BookEnrichment, BookEnrichmentRequest, BookEnrichmentResponse, BookEnrichmentStatus, BookFacts, TitleReading, MAX_BOOKS_PER_REQUEST};
 use metadata_contract::{
-    authority_subjects, subject_consensus, EditionClassificationConsensus, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus, LookupStatus, RichIsbnMetadataResult, RichWorkMetadataMatch,
-    MAX_ISBNS_PER_REQUEST,
+    EditionClassificationConsensus, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus, LookupStatus, RichIsbnMetadataResult, RichWorkMetadataMatch, MAX_ISBNS_PER_REQUEST,
 };
 use std::collections::{BTreeSet, HashMap};
 
 /// Bump whenever a lookup or merge rule below changes; clients ask again.
-pub const POLICY: &str = "books_v4";
+pub const POLICY: &str = "books_v27";
 
 // A work union larger than this is replaced by edition consensus when the
 // consensus is smaller.
 const MAX_DIRECT_CLASSIFICATIONS_WITHOUT_CONSENSUS: usize = 12;
 // Subject sources an edition consensus may replace.
 const REPLACEABLE_SUBJECT_SOURCES: [&str; 3] = ["dc:subject", "openlibrary:metadata:sibling-edition", "openlibrary:metadata:work"];
+const BORROWED_CLASSIFICATION_SOURCES: &[&str] = &[
+    "metadata:work", "metadata:shared-edition-classification", "metadata:year-only-edition-consensus",
+    "metadata:edition-subject-consensus", "openlibrary:metadata:sibling-edition", "openlibrary:metadata:work",
+];
 
 /// ISBN lookups for one book, keyed by requested and canonical ISBN.
 type Lookups = HashMap<String, RichIsbnMetadataResult>;
@@ -50,7 +53,7 @@ impl MetadataService {
             let key = facts.key.clone();
             match self.enrich_book(facts).await {
                 Ok(result) => result,
-                Err(error) => BookEnrichment { key, status: BookEnrichmentStatus::Failed, record: None, toc: None, cover: None, detail: error.to_string() },
+                Err(error) => BookEnrichment { key, status: BookEnrichmentStatus::Failed, record: None, toc: None, popularity: None, cover: None, detail: error.to_string() },
             }
         }))
         .await;
@@ -63,14 +66,29 @@ impl MetadataService {
         record.book.infer_embedded_subject_isbns().map_err(|error| MetadataError(error.to_string()))?;
         let mut lookups = Lookups::new();
         let mut found = false;
+        let mut identity_isbns = BTreeSet::new();
 
         // Subjects: the book's ISBNs, then a title/author match, then any ISBN
-        // that match found. A resolved LCC ends the search.
+        // that match found. Only a supported numeric LCC ends the search;
+        // source subclasses such as B or DA still need classification lookup.
         let mut checked = BTreeSet::new();
-        found |= self.classify_new_isbns(&mut record, &mut checked, &mut lookups).await?;
-        if !has_resolved_lcc(&record.book) && !record.title.trim().is_empty() {
-            found |= self.apply_edition_identity(&mut record, &facts.readings).await?;
+        let manually_assigned = record.book.subjects.iter().any(|subject| subject.source().starts_with("manual:"));
+        if !manually_assigned {
+            let previous_count = record.book.subjects.len();
+            record.book.subjects.retain(|subject| {
+                subject.source() != subject_projection::EDITION_SUBTREE_CONSENSUS_SOURCE
+                    && !(subject.authority().is_some_and(|authority| matches!(authority.to_ascii_lowercase().as_str(), "lcc" | "bisac" | "ddc" | "unified"))
+                        && BORROWED_CLASSIFICATION_SOURCES.contains(&subject.source()))
+            });
+            found |= record.book.subjects.len() != previous_count;
             found |= self.classify_new_isbns(&mut record, &mut checked, &mut lookups).await?;
+            if !has_specific_lcc(&record.book) && !record.title.trim().is_empty() {
+                found |= self.apply_edition_identity(&mut record, &facts.readings, &mut identity_isbns).await?;
+                found |= self.classify_new_isbns(&mut record, &mut checked, &mut lookups).await?;
+            }
+            // Raw headings are a fallback only without usable LCC, including
+            // supported sibling subtrees stored as unified assignments.
+            found |= super::source_subjects::recover(&mut record);
         }
 
         let isbns = canonical_isbns(&record);
@@ -91,23 +109,28 @@ impl MetadataService {
                 AudibleStatus::Supported => {
                     let enrichment = apply_audible(&mut record, &response)?;
                     toc = enrichment.toc;
-                    cover = self.resolve_audible_cover(&enrichment.recording.asin, &enrichment.recording.region).await?;
+                    if facts.needs_cover {
+                        cover = self.resolve_audible_cover(&enrichment.recording.asin, &enrichment.recording.region).await?;
+                    }
                     found = true;
                 }
                 AudibleStatus::Unavailable => return Err(MetadataError(format!("audiobook lookup unavailable: {}", response.detail))),
                 AudibleStatus::NoMatch | AudibleStatus::Ambiguous => {}
             }
         }
-        if cover.is_none() {
+        if facts.needs_cover && cover.is_none() {
             let isbns = canonical_isbns(&record);
             if !isbns.is_empty() {
                 cover = self.resolve_isbn_cover(&isbns).await?;
             }
         }
 
-        found |= cover.is_some();
+        let isbns = canonical_isbns(&record).into_iter().chain(identity_isbns).collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+        self.lookup_isbns(&isbns, &mut lookups).await?;
+        let popularity = metadata_contract::unique_work_popularity(isbns.iter().filter_map(|isbn| lookups.get(isbn)).flat_map(|result| &result.matches));
+        found |= cover.is_some() || popularity.is_some();
         let status = if found { BookEnrichmentStatus::Found } else { BookEnrichmentStatus::NoMatch };
-        Ok(BookEnrichment { key: facts.key, status, record: found.then_some(record), toc, cover, detail: String::new() })
+        Ok(BookEnrichment { key: facts.key, status, record: found.then_some(record), toc, cover, popularity, detail: String::new() })
     }
 
     /// Looks up every ISBN not already in `lookups`. An ISBN the lookup
@@ -132,9 +155,9 @@ impl MetadataService {
     }
 
     /// Classifies the book by its ISBNs not yet in `checked`: printed reference
-    /// ISBNs first, then its own. Does nothing once an LCC resolves.
+    /// ISBNs first, then its own. Stops only after a specific LCC resolves.
     async fn classify_new_isbns(&self, record: &mut BookRecord, checked: &mut BTreeSet<String>, lookups: &mut Lookups) -> Result<bool, MetadataError> {
-        if has_resolved_lcc(&record.book) {
+        if has_specific_lcc(&record.book) {
             return Ok(false);
         }
         let mut isbns = related_isbn::lookup_candidates(&record.book.identifiers);
@@ -207,23 +230,16 @@ impl MetadataService {
     /// Title/author edition matching after the book's ISBNs found no subject.
     /// Adds an ISBN only when the evidence names one exact edition and the
     /// book has none.
-    async fn apply_edition_identity(&self, record: &mut BookRecord, readings: &[TitleReading]) -> Result<bool, MetadataError> {
+    async fn apply_edition_identity(&self, record: &mut BookRecord, readings: &[TitleReading], identity_isbns: &mut BTreeSet<String>) -> Result<bool, MetadataError> {
         let resource_isbns = canonical_isbns(record);
-        let base = EditionIdentityQuery {
-            query_id: "0".to_owned(),
-            title: record.title.clone(),
-            authors: record.authors().map(|author| author.name().to_owned()).collect(),
-            author_surname: None,
-            publishers: record.book.publishers.clone(),
-            book_year: record.book.year,
-        };
+        let base = identity_query(record);
         let alternative_queries = alternatives::queries(&base, readings);
         let request = std::iter::once(base.clone()).chain(alternative_queries.iter().cloned()).collect();
         let response = run_database(self.clone(), move |service| service.resolve_editions(request)).await.map_err(|error| MetadataError(format!("lookup worker failed: {error}")))??;
         let results = response.into_iter().map(|result| (result.query_id.clone(), result)).collect::<HashMap<_, _>>();
 
         let supported = |query: &EditionIdentityQuery, result: &EditionIdentityResult| {
-            !alternatives::classifications(query, &resource_isbns, result)
+            result.sibling_subjects.as_ref().is_some_and(|consensus| !consensus.subjects.is_empty()) || !alternatives::classifications(query, &resource_isbns, result)
                 .iter()
                 .flat_map(|classification| match classification.scheme {
                     metadata_contract::ClassificationScheme::LibraryOfCongress => subject_projection::unified_subject_paths(subject_projection::LCC_SYSTEM_ID, &classification.notation),
@@ -253,35 +269,50 @@ impl MetadataService {
             }
         }
         let Some(result) = result else { return Err(MetadataError("metadata response omitted the edition query".to_owned())) };
+        if result.status == EditionIdentityStatus::Matched && !used_alternative {
+            if let Some(matched) = &result.matched {
+                identity_isbns.extend(isbn_key(&matched.canonical_isbn13));
+            }
+        }
 
-        let verified = related_isbn::verified_isbns(&query, &resource_isbns, result);
-        let codes = related_isbn::classifications(&verified, |isbn| {
-            result.matched.iter().chain(&result.candidates).filter(|record| record.canonical_isbn13 == isbn).map(|record| related_isbn::classification_record(record.classifications.clone())).collect()
-        });
+        let codes = alternatives::classifications(&query, &resource_isbns, result);
         if !codes.is_empty() {
             add_classification_subjects(record, &related_isbn::classification_record(codes))?;
             return Ok(true);
         }
-        if let Some(matched) = result.authority_subjects.as_ref().and_then(|matched| authority_subjects::classification_record(&query, matched)) {
-            add_classification_subjects(record, &matched)?;
-            return Ok(true);
-        }
-        let agreed = subject_consensus::resolved_classifications(&query, result);
-        if !agreed.is_empty() {
-            add_classification_subjects(record, &related_isbn::classification_record(agreed))?;
+        if let Some(consensus) = result.sibling_subjects.as_ref().filter(|consensus| !consensus.subjects.is_empty()) {
+            add_subjects(record, sibling_consensus_subjects(consensus)?);
             return Ok(true);
         }
         let mut changed = false;
-        if let Some(fallback) = result.matched.clone().filter(|_| result.status == EditionIdentityStatus::Matched).and_then(|matched| classification_only_fallback(&query, matched)) {
-            add_classification_subjects(record, &fallback)?;
-            changed = true;
-        }
         if result.status == EditionIdentityStatus::Matched && !used_alternative {
             if let Some(matched) = &result.matched {
-                changed |= add_isbn(record, &matched.canonical_isbn13)?;
+                if matched.matched_publisher && matched.matched_book_year && !gutenberg_identifier(record) {
+                    changed |= add_isbn(record, &matched.canonical_isbn13)?;
+                }
             }
         }
         Ok(changed)
+    }
+}
+
+/// Gutenberg's package date is frequently an ebook release date. Keep the
+/// displayed year, but do not use it to select a print edition or its ISBN.
+fn gutenberg_identifier(record: &BookRecord) -> bool {
+    record.book.identifiers.iter().any(|identifier| {
+        reqwest::Url::parse(identifier.value()).ok().is_some_and(|url| {
+            let path = url.path().trim_matches('/');
+            let id = path.strip_prefix("ebooks/").unwrap_or(path);
+            matches!(url.host_str(), Some("gutenberg.org" | "www.gutenberg.org")) && !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    })
+}
+
+fn identity_query(record: &BookRecord) -> EditionIdentityQuery {
+    let title = record.subtitle.as_deref().filter(|subtitle| !subtitle.trim().is_empty()).map_or_else(|| record.title.clone(), |subtitle| format!("{}: {subtitle}", record.title));
+    EditionIdentityQuery {
+        query_id: "0".to_owned(), title, authors: record.authors().map(|author| author.name().to_owned()).collect(),
+        author_surname: None, publishers: record.book.publishers.clone(), book_year: if gutenberg_identifier(record) { None } else { record.book.year },
     }
 }
 
@@ -368,10 +399,11 @@ fn unique_description(isbns: &[String], lookups: &Lookups) -> Option<String> {
     (descriptions.len() == 1).then(|| descriptions.into_iter().next().expect("one description").to_owned())
 }
 
-/// A subject search is finished once an LCC code resolves in the taxonomy.
-/// BISAC and unresolvable LCC codes never end it.
-fn has_resolved_lcc(metadata: &book_model::BookMetadata) -> bool {
-    metadata.subjects.iter().any(|s| s.authority().is_some_and(|a| a.eq_ignore_ascii_case("lcc")) && s.code().is_some_and(|c| !subject_projection::unified_subject_paths(subject_projection::LCC_SYSTEM_ID, c).is_empty()))
+/// A broad subclass is source evidence, not a completed classification search.
+/// Require a class number supported by numeric taxonomy coverage; an unknown
+/// number falling back to a letter-level parent must not stop lookup either.
+fn has_specific_lcc(metadata: &BookMetadata) -> bool {
+    metadata.subjects.iter().any(|subject| subject.authority().is_some_and(|authority| authority.eq_ignore_ascii_case("lcc")) && subject.code().is_some_and(subject_projection::is_specific_lcc_code))
 }
 
 /// Every ISBN as its ISBN-13, so both forms of one edition compare equal.
@@ -392,6 +424,9 @@ fn canonical_isbns(record: &BookRecord) -> Vec<String> {
 
 /// Records an edition ISBN unless the book already has one.
 fn add_isbn(record: &mut BookRecord, isbn: &str) -> Result<bool, MetadataError> {
+    if isbn_key(isbn).is_none() {
+        return Ok(false);
+    }
     if record.book.identifiers.iter().any(|id| id.scheme() == &Scheme::Isbn && id.canonical_value().is_some()) {
         return Ok(false);
     }
@@ -421,6 +456,69 @@ mod tests {
     use super::*;
     use crate::build::tests::snapshot_from;
 
+    #[test]
+    fn ebook_release_year_does_not_rank_print_editions_or_rewrite_the_year() {
+        let mut facts = facts("Peter Pan", None);
+        facts.record.book.year = Some(2008);
+        assert_eq!(identity_query(&facts.record).book_year, Some(2008));
+        facts.record.book.identifiers.push(Identifier::new("http://www.gutenberg.org/ebooks/16", Scheme::Other("URI".into()), Scope::Book).unwrap());
+        assert_eq!(identity_query(&facts.record).book_year, None);
+        assert_eq!(facts.record.book.year, Some(2008));
+    }
+
+    #[tokio::test]
+    async fn unindexed_book_with_an_exact_source_heading_gets_subjects() {
+        let temporary = tempfile::tempdir().unwrap();
+        let service = service(temporary.path());
+        let mut request = facts("The Thing in the Attic", None);
+        request.needs_cover = false;
+        request.record.book.subjects.push(BookSubject::new(None, "Science fiction", "dc:subject", None, None).unwrap());
+        let result = enrich(&service, request).await;
+        assert_eq!(result.status, BookEnrichmentStatus::Found);
+        assert!(result.record.unwrap().book.subjects.iter().any(|subject| subject.code() == Some("FIC028000")));
+    }
+
+    #[test]
+    fn broad_and_unsupported_lcc_codes_do_not_end_subject_lookup() {
+        for (code, expected) in [("B", false), ("DA", false), ("BF", false), ("JC", false), ("E3002", false), ("JC99999", false), ("E757 .A37 1985", true), ("JC143", true)] {
+            let mut metadata = BookMetadata::default();
+            metadata.subjects.push(BookSubject::new(None, code, "catalog:gutenberg.org", Some("lcc".into()), Some(code.into())).unwrap());
+            assert_eq!(has_specific_lcc(&metadata), expected, "{code}");
+        }
+    }
+
+    #[tokio::test]
+    async fn broad_source_lcc_is_preserved_while_isbn_supplies_specific_classification() {
+        let temporary = tempfile::tempdir().unwrap();
+        let service = service(temporary.path());
+        let mut request = facts("Example LCC Book", Some("9780306406157"));
+        request.needs_cover = false;
+        let broad = BookSubject::new(None, "E: History of America", "catalog:gutenberg.org", Some("lcc".into()), Some("E".into())).unwrap();
+        let heading = BookSubject::new(None, "United States -- History", "catalog:gutenberg.org", Some("lcsh".into()), None).unwrap();
+        request.record.book.subjects.extend([broad.clone(), heading.clone()]);
+        let result = enrich(&service, request).await;
+        assert_eq!(result.status, BookEnrichmentStatus::Found, "{}", result.detail);
+        let record = result.record.unwrap();
+        assert!(record.book.subjects.contains(&broad));
+        assert!(record.book.subjects.contains(&heading));
+        assert!(record.book.subjects.iter().any(|subject| subject.code().is_some_and(|code| code.starts_with("E757"))));
+    }
+
+    #[tokio::test]
+    async fn broad_source_lcc_does_not_block_title_author_classification() {
+        let temporary = tempfile::tempdir().unwrap();
+        let service = service(temporary.path());
+        let mut request = facts("Example LCC Book", None);
+        request.needs_cover = false;
+        let broad = BookSubject::new(None, "E", "catalog:gutenberg.org", Some("lcc".into()), Some("E".into())).unwrap();
+        request.record.book.subjects.push(broad.clone());
+        let result = enrich(&service, request).await;
+        assert_eq!(result.status, BookEnrichmentStatus::Found, "{}", result.detail);
+        let record = result.record.unwrap();
+        assert!(record.book.subjects.contains(&broad));
+        assert!(record.book.subjects.iter().any(|subject| subject.code().is_some_and(|code| code.starts_with("E757"))));
+    }
+
     fn facts(title: &str, isbn: Option<&str>) -> BookFacts {
         let author = Contributor::with_id(book_model::agent_id_from_migration_seed(b"local author"), "Alex Smith", AUTHOR_MARC_RELATOR_CODE).unwrap();
         let mut book = book_model::BookMetadata::default();
@@ -428,7 +526,7 @@ mod tests {
             book.identifiers.push(Identifier::new(isbn, Scheme::Isbn, Scope::Book).unwrap());
         }
         let record = BookRecord { metadata: book_model::BookDetails { title: title.to_owned(), subtitle: None, contributors: vec![author], book: book }, description: "File description.".to_owned() };
-        BookFacts { key: "0".to_owned(), record, audiobook: false, readings: Vec::new(), recording: None }
+        BookFacts { key: "0".to_owned(), record, audiobook: false, needs_cover: true, readings: Vec::new(), recording: None }
     }
 
     fn service(directory: &std::path::Path) -> MetadataService {
@@ -446,7 +544,11 @@ mod tests {
         );
         {
             let answers = directory.join("answers.sqlite");
-            crate::build_answers(&database, None, None, None, &answers).unwrap();
+            let ratings = directory.join("ratings.gz");
+            let mut gzip = flate2::write::GzEncoder::new(std::fs::File::create(&ratings).unwrap(), flate2::Compression::fast());
+            std::io::Write::write_all(&mut gzip, b"OL10W\t\t5\t2026-09-01\nOL10W\tOL1M\t4\t2026-09-02\n").unwrap();
+            gzip.finish().unwrap();
+            crate::build_answers_with_ratings(&database, None, None, None, Some(&ratings), &answers).unwrap();
             let service = MetadataService::open(&answers, &directory.join("demand.sqlite")).unwrap();
             service.state.demand.lock().unwrap().execute("INSERT INTO resolved_cover VALUES('isbn-9780306406157',?1)", [b"cached art".as_slice()]).unwrap();
             service
@@ -512,6 +614,39 @@ mod tests {
         assert_eq!(record.contributors[0].agent_id(), expected, "an authority-resolved author gets the same id on every device");
         assert_eq!(record.description, "Open Library summary.", "the server reports its own description, never the file's");
         assert_eq!(result.cover.unwrap().id, "isbn-9780306406157");
+        let popularity = result.popularity.unwrap();
+        assert_eq!(popularity.open_library_work_id, "OL10W");
+        assert_eq!(popularity.rating_count, 2);
+    }
+
+    #[tokio::test]
+    async fn callers_with_covers_keep_full_metadata_without_artwork_lookup() {
+        let temporary = tempfile::tempdir().unwrap();
+        let service = service(temporary.path());
+        // With no cached cover, requesting one would attempt an external GET.
+        service.state.demand.lock().unwrap().execute("DELETE FROM resolved_cover", []).unwrap();
+        let mut request = facts("Example LCC Book", Some("9780306406157"));
+        request.needs_cover = false;
+        let result = enrich(&service, request).await;
+        assert_eq!(result.status, BookEnrichmentStatus::Found, "{}", result.detail);
+        assert!(result.cover.is_none());
+        let record = result.record.unwrap();
+        assert_eq!(record.contributors[0].agent_id(), author_id("open_library:OL20A"));
+        assert!(record.book.subjects.iter().any(|subject| subject.authority() == Some("lcc")));
+        assert_eq!(record.description, "Open Library summary.");
+        assert_eq!(result.popularity.unwrap().rating_count, 2);
+        assert_eq!(service.state.demand.lock().unwrap().query_row("SELECT count(*) FROM resolved_cover", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn old_requests_keep_cover_enrichment_and_new_requests_can_skip_it() {
+        let value = serde_json::to_value(facts("Example LCC Book", None)).unwrap();
+        let mut old = value.clone();
+        old.as_object_mut().unwrap().remove("needs_cover");
+        assert!(serde_json::from_value::<BookFacts>(old).unwrap().needs_cover);
+        let mut new = value;
+        new["needs_cover"] = serde_json::json!(false);
+        assert!(!serde_json::from_value::<BookFacts>(new).unwrap().needs_cover);
     }
 
     #[tokio::test]
@@ -523,6 +658,7 @@ mod tests {
         assert_eq!(result.status, BookEnrichmentStatus::Found, "{}", result.detail);
         let record = result.record.unwrap();
         assert!(record.book.subjects.iter().any(|subject| subject.authority() == Some("lcc")), "{:?}", record.book.subjects);
+        assert_eq!(result.popularity.unwrap().rating_count, 2);
     }
 
     #[tokio::test]

@@ -4,16 +4,63 @@
 use crate::build::tests::snapshot_from;
 use crate::schema::{self, now_ms};
 use crate::*;
+use metadata_contract::{authority_subjects::OPEN_LIBRARY_WORK_PROVIDER, AuthoritySubjectMatch, ClassificationEvidence};
+
+/// Older answer files may already contain a union of work and sibling codes.
+/// Apply the same source priority while reading them; exact LCC remains first.
+fn prefer_declared_work(connection: &Connection, matched: &mut RichWorkMetadataMatch) -> Result<(), MetadataError> {
+    // Cached work classifications may be pooled from other editions in any
+    // scheme. Keep edition-owned codes and re-read the declared work index;
+    // stale BISAC/DDC unions must not bypass sibling support either.
+    matched.classifications.retain(|c| c.source == ClassificationSource::ExactEdition);
+    if matched.classifications.iter().any(|c| c.scheme == ClassificationScheme::LibraryOfCongress && c.source == ClassificationSource::ExactEdition && metadata_contract::classification_consensus_notation(c.scheme, &c.notation).is_some()) {
+        return Ok(());
+    }
+    let Some(work) = matched.open_library_work_id.as_deref() else {
+        matched.classifications.retain(|c| c.scheme != ClassificationScheme::LibraryOfCongress);
+        return Ok(());
+    };
+    let raw: Option<Vec<u8>> = connection
+        .query_row("SELECT codes FROM authority_title WHERE key=?1 AND source=?2 AND control_number=?3", params![format!("openlibrary-work:{work}"), OPEN_LIBRARY_WORK_PROVIDER, work], |r| r.get(0))
+        .optional().map_err(error)?;
+    let Some(raw) = raw else {
+        // Old answers may label an inherited edition union as work evidence.
+        // Without a declared work code it cannot bypass title/author consensus.
+        matched.classifications.retain(|c| c.scheme != ClassificationScheme::LibraryOfCongress);
+        return Ok(());
+    };
+    let mut declared: AuthoritySubjectMatch = serde_json::from_slice(&raw).map_err(error)?;
+    if declared.provider_id != OPEN_LIBRARY_WORK_PROVIDER || declared.record_ids != [work] {
+        return Err(MetadataError("declared work classification identity mismatch".into()));
+    }
+    declared.classifications.retain(|c| c.scheme == ClassificationScheme::LibraryOfCongress && metadata_contract::classification_consensus_notation(c.scheme, &c.notation).is_some());
+    if declared.classifications.is_empty() {
+        matched.classifications.retain(|c| c.scheme != ClassificationScheme::LibraryOfCongress);
+        return Ok(());
+    }
+    for classification in &mut declared.classifications {
+        classification.source = ClassificationSource::Work;
+        classification.evidence = vec![ClassificationEvidence { method: "openlibrary_declared_work_lcc".into(), isbn13: String::new(), open_library_work_id: work.into(), open_library_edition_id: String::new() }];
+    }
+    matched.classifications.retain(|c| c.scheme != ClassificationScheme::LibraryOfCongress);
+    matched.classifications.extend(declared.classifications);
+    Ok(())
+}
+use metadata_contract::books::{BookEnrichmentRequest, BookEnrichmentResponse, BookFacts, MAX_BOOKS_PER_REQUEST};
 use std::sync::Mutex;
 
 pub(crate) mod alternatives;
 pub(crate) mod audible;
 pub(crate) mod books;
+mod candidate_subjects;
+mod sibling_subjects;
 pub(crate) mod covers;
 pub(crate) mod http;
 pub(crate) mod identity;
+mod subject_identity;
 pub(crate) mod related_isbn;
 pub(crate) mod resolution;
+mod source_subjects;
 
 #[derive(Clone)]
 pub struct MetadataService {
@@ -32,13 +79,24 @@ pub(crate) struct ServiceState {
     pub(crate) item_processing_duration_ms: AtomicU64,
 }
 impl MetadataService {
+    /// Evaluate subject recovery without artwork or recording-provider requests.
+    /// Answers are read-only; callers supply a separate scratch demand database.
+    pub async fn evaluate_subjects(&self, facts: Vec<BookFacts>) -> Result<BookEnrichmentResponse, MetadataError> {
+        if facts.iter().any(|book| book.needs_cover || book.recording.is_some()) {
+            return Err(MetadataError("subject evaluation must disable covers and recording lookups".into()));
+        }
+        let mut results = Vec::with_capacity(facts.len());
+        for chunk in facts.chunks(MAX_BOOKS_PER_REQUEST) {
+            results.extend(self.enrich_books(BookEnrichmentRequest { books: chunk.to_vec() }).await?.results);
+        }
+        Ok(BookEnrichmentResponse { policy: books::POLICY.into(), results })
+    }
+
     pub fn open(answers: &Path, demand: &Path) -> Result<Self, MetadataError> {
         let answers = answers.canonicalize().map_err(error)?;
-        if demand.exists() && demand.canonicalize().map_err(error)? == answers {
-            return Err(MetadataError("demand database must be separate from the answer file".into()));
-        }
-        let pool = open_read_pool(&answers)?;
+        let pool = crate::snapshot::pool(&answers)?;
         let c = pool.get().map_err(error)?;
+        crate::snapshot::require_separate(&c, demand, "demand")?;
         let (version, date, built): (i64, String, i64) = c.query_row("SELECT schema_version,dump_date,built_at_ms FROM snapshot WHERE singleton=1", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(error)?;
         if version != schema::ANSWER_VERSION {
             return Err(MetadataError(format!("unsupported answer schema {version}; expected {}", schema::ANSWER_VERSION)));
@@ -98,6 +156,9 @@ impl MetadataService {
             } else {
                 RichIsbnMetadataResult { requested_isbn: requested.clone(), canonical_isbn13: isbn.map(|isbn| isbn.to_string()), status: if isbn.is_some() { LookupStatus::NoMatch } else { LookupStatus::InvalidIsbn }, matches: vec![] }
             };
+            for matched in &mut answer.matches {
+                prefer_declared_work(&c, matched)?;
+            }
             answer.requested_isbn = requested;
             if let Some(isbn) =
                 isbn.filter(|_| !answer.matches.iter().flat_map(|m| &m.classifications).any(|c| c.scheme == ClassificationScheme::LibraryOfCongress && metadata_contract::classification_consensus_notation(c.scheme, &c.notation).is_some()))

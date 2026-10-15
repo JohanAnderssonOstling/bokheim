@@ -9,7 +9,7 @@ use book_access::{FetchFuture, RemoteFileError};
 pub(crate) type Opened = ResolvedBook;
 
 pub(super) async fn local(library: &LibrarySession, hash: ContentHash, info: &BookInfo) -> Result<Option<Opened>, BackendError> {
-    if !matches!(library.download_state(hash)?, DownloadState::Downloaded) {
+    if !matches!(library.persistent_download_state(hash)?, DownloadState::Downloaded) {
         return Ok(None);
     }
     (async |library: &LibrarySession, content_hash: ContentHash, info: &BookInfo| -> Result<Opened, BackendError> {
@@ -129,7 +129,7 @@ impl LibrarySession {
             return Err(BackendError::message("audiobook track index is invalid"));
         }
         let mut path = info.path.ok_or_else(|| BackendError::message("audiobook placement is unavailable"))?;
-        if matches!(self.download_state(hash)?, DownloadState::Downloaded) {
+        if matches!(self.persistent_download_state(hash)?, DownloadState::Downloaded) {
             let mut reader = self.assets.open_book_at_path(path.join(&track.name).map_err(BackendError::operation)?).await.map_err(BackendError::operation)?;
             if reader.is_none() {
                 if let Some(fresh) = refresh_local_path(self, hash).await? {

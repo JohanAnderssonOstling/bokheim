@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an optimized desktop app and stage its PDFium runtime beside it."""
+"""Build the desktop app, its verification browser, and PDFium runtime."""
 import argparse
 import os
 from pathlib import Path
@@ -27,11 +27,19 @@ def main():
     if args.offline:
         command += ["--offline"]
     subprocess.run(command, cwd=ROOT, check=True, env={**os.environ, "PDFIUM_PREPARED_DIR": str(prepared)})
+    helper = ["cargo", "build", "--release", "-p", "opds-webview"]
+    if requested_target:
+        helper += ["--target", target]
+    if args.offline:
+        helper += ["--offline"]
+    subprocess.run(helper, cwd=ROOT, check=True)
     output = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
     if not output.is_absolute():
         output = ROOT / output
     if requested_target:
         output /= target
+    prepare_speech = runpy.run_path(str(ROOT / "shared/reader-speech/prepare.py"))["prepare_all"]
+    prepare_speech(output / "release/tts", offline=args.offline)
     if target != "x86_64-pc-windows-msvc":
         prepare(target, destination=output / "release/pdfium", offline=True)
 

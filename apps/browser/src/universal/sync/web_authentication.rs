@@ -10,6 +10,8 @@ extern "C" {
     fn open_authentication(theme: &str, minimum: u32, submit: &js_sys::Function) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(js_name = closeAuthentication)]
     fn close_authentication(panel: &JsValue);
+    #[wasm_bindgen(js_name = registerAuthenticationFont, catch)]
+    fn register_authentication_font(family: &str, weight: u16, style: &str, data: &[u8]) -> Result<(), JsValue>;
 }
 
 pub(super) struct WebAuthentication {
@@ -35,11 +37,22 @@ impl SyncPage {
             })
         });
         let theme = ui_components::browser_theme(cx);
+        let family = theme.ui_font_family;
+        for face in ui_components::interface_font_faces(family) {
+            if register_authentication_font(family.family_name(), face.weight, face.style, face.data).is_err() {
+                log::warn!("failed to install sign-in form font");
+            }
+        }
         let css = |color: gpui::Hsla| {
             let c = color.to_rgb();
             format!("rgba({},{},{},{})", (c.r * 255.0).round(), (c.g * 255.0).round(), (c.b * 255.0).round(), c.a)
         };
-        let theme = serde_json::json!({"background": css(theme.page_bg), "text": css(theme.text), "muted": css(theme.text_muted), "border": css(theme.border), "accent": css(theme.accent), "accentText": css(theme.accent_text), "textAccent": css(theme.text_accent)});
+        let theme = serde_json::json!({
+            "background": css(theme.page_bg), "text": css(theme.text), "muted": css(theme.text_muted), "border": css(theme.border),
+            "accent": css(theme.accent), "accentText": css(theme.accent_text), "textAccent": css(theme.text_accent),
+            "font-family": format!("\"{}\"", family.family_name()),
+            "font-size": format!("{}px", f32::from(gpui_component::Theme::global(cx).font_size)),
+        });
         // Dispose an earlier panel before opening another modal; never leave
         // duplicate credential forms for password managers to discover.
         self.web_authentication = None;

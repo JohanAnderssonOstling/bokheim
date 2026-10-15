@@ -1,0 +1,11 @@
+{
+  "release_id": 248,
+  "input": "/home/johan/Hem/Programmering/RustroverProjects/Html-Prototype/shared/subject-projection/data/reports/20261015-literature-coverage-fix/publication-input",
+  "output": "/home/johan/Hem/Programmering/RustroverProjects/Html-Prototype/shared/subject-projection/data/reports/20261015-literature-coverage-fix/publication-reviewed",
+  "source_catalog": "/home/johan/.local/share/bokheim/catalog",
+  "installed_catalog": "/home/johan/.local/share/bokheim/catalog.sqlite3",
+  "published_root": "/home/johan/.local/share/bokheim/catalog/published",
+  "note": "Reuse existing immutable book and cover assets; stage snapshot metadata for validation before local installation.",
+  "curation_content_sha256": "a8c0d1f82eadd6038cfe9674b1013f7d0486de9a4bc98416122ca3818c594c5e",
+  "previous_release_id": 247
+}

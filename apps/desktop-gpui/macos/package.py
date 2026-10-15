@@ -33,6 +33,10 @@ def pdfium(app):
     return app / "Contents/Frameworks/libpdfium.dylib"
 
 
+def browser_helper(app):
+    return app / "Contents/MacOS/bokheim-opds-webview"
+
+
 def verify_arches(path, expected):
     actual = set(subprocess.check_output(["lipo", "-archs", str(path)], text=True).split())
     if actual != set(expected):
@@ -42,7 +46,7 @@ def verify_arches(path, expected):
 def sign_and_verify(app):
     # Sign from the inside out. Ad-hoc signatures require no Apple account;
     # users still explicitly approve this unnotarized app in macOS settings.
-    for path in (pdfium(app), executable(app), app):
+    for path in (pdfium(app), browser_helper(app), executable(app), app):
         run("codesign", "--force", "--sign", "-", path)
     run("codesign", "--verify", "--deep", "--strict", app)
 
@@ -60,8 +64,14 @@ def architecture(args, version, source):
         resources.mkdir(parents=True)
         executable(app).parent.mkdir(parents=True)
         shutil.copy2(binary, executable(app))
+        shutil.copy2(binary.parent / "taxonomy.sqlite3", executable(app).parent / "taxonomy.sqlite3")
+        shutil.copy2(binary.with_name("bokheim-opds-webview"), browser_helper(app))
         pdfium(app).parent.mkdir()
         shutil.copy2(prepared / "libpdfium.dylib", pdfium(app))
+        speech = binary.parent / "tts"
+        if not (speech / "alba/en_GB-alba-medium.onnx").is_file() or not (speech / "george/model.onnx").is_file():
+            raise ValueError("Prepare both desktop speech voices before packaging")
+        shutil.copytree(speech, executable(app).parent / "tts")
         notices = resources / "pdfium"
         notices.mkdir()
         for name in ("LICENSE", "VERSION"):
@@ -86,7 +96,7 @@ def architecture(args, version, source):
                     LSMinimumSystemVersion="13.0", NSHighResolutionCapable=True,
                     NSPrincipalClass="NSApplication")
         (app / "Contents/Info.plist").write_bytes(plistlib.dumps(info))
-        for path in (executable(app), pdfium(app)):
+        for path in (executable(app), browser_helper(app), pdfium(app)):
             verify_arches(path, [args.arch])
         sign_and_verify(app)
         archive = args.output / f"Bokheim-macOS-{args.arch}.zip"
@@ -108,7 +118,7 @@ def universal(args, version, source):
             destination = scratch / arch
             run("ditto", "-x", "-k", archive, destination)
             apps[arch] = destination / "Bokheim.app"
-            for path in (executable(apps[arch]), pdfium(apps[arch])):
+            for path in (executable(apps[arch]), browser_helper(apps[arch]), pdfium(apps[arch])):
                 verify_arches(path, [arch])
         if (apps["arm64"] / "Contents/Info.plist").read_bytes() != (apps["x86_64"] / "Contents/Info.plist").read_bytes():
             raise ValueError("The architecture bundles have different application metadata")
@@ -116,7 +126,7 @@ def universal(args, version, source):
         staging.mkdir()
         app = staging / "Bokheim.app"
         shutil.copytree(apps["arm64"], app)
-        for location in ("Contents/MacOS/Bokheim", "Contents/Frameworks/libpdfium.dylib"):
+        for location in ("Contents/MacOS/Bokheim", "Contents/MacOS/bokheim-opds-webview", "Contents/Frameworks/libpdfium.dylib"):
             run("lipo", "-create", apps["arm64"] / location, apps["x86_64"] / location,
                 "-output", app / location)
             verify_arches(app / location, ARCHES)

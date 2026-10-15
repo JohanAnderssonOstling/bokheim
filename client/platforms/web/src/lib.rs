@@ -1,5 +1,11 @@
 //! Browser OPFS storage and durable asset indexing.
 #[cfg(any(target_arch = "wasm32", test))]
+pub mod storage_job;
+#[cfg(any(target_arch = "wasm32", test))]
+pub mod reply;
+#[cfg(any(target_arch = "wasm32", test))]
+mod serial;
+#[cfg(any(target_arch = "wasm32", test))]
 mod asset_index;
 #[cfg(target_arch = "wasm32")]
 pub mod cpu_host;

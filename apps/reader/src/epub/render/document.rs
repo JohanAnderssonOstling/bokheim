@@ -1,7 +1,7 @@
-//! EPUB document surface and its selection/table/image context menu.
+//! EPUB document surface, direct annotation creation, and table/image context menu.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, ClickEvent, Context, Entity, IntoElement, Pixels, Point, Window, px};
+use gpui::{px, AnyElement, App, Context, Entity, IntoElement, LongPressEvent, MouseButton, MouseDownEvent, Pixels, Point, Window};
 use gpui_component::menu::{ContextMenuExt, OpenContextMenu};
 use ui_components as components;
 
@@ -14,14 +14,14 @@ const KOBO_READER_EDGE_INSET: f32 = 2.0;
 
 impl ReaderView {
     pub(in crate::epub) fn toggle_mobile_controls(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
-        if !components::uses_mobile_navigation(window) || self.sidebar.is_visible() && self.chrome.is_visible() {
+        if !components::uses_mobile_reader_controls(window) || self.sidebar.is_visible() && self.chrome.is_visible() {
             return;
         }
         if self.chrome.is_visible() {
             self.chrome.hide(cx);
             self.focus_document(window, cx);
         } else {
-            self.sidebar.close();
+            self.sidebar.close(cx);
             self.chrome.show_from_touch(cx);
         }
     }
@@ -46,9 +46,28 @@ impl ReaderView {
                     reader.toggle_mobile_controls(window, cx);
                 }
             }))
-            .on_aux_click(cx.listener(|reader, event: &ClickEvent, window, cx| {
-                if event.is_secondary() && components::uses_mobile_navigation(window) {
-                    reader.open_context_sheet(event.position(), cx);
+            // Handle the selection before the context-menu wrapper sees the
+            // event, so it cannot open a menu over the annotation editor.
+            .capture_any_mouse_down(cx.listener(|reader, event: &MouseDownEvent, window, cx| {
+                if event.button != MouseButton::Right {
+                    return;
+                }
+                if matches!(&reader.load_state, LoadState::Ready(renderer) if renderer.read(cx).equation_at(event.position)) {
+                    return;
+                }
+                if reader.open_passage_context(event.position, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_long_press(cx.listener(|reader, event: &LongPressEvent, window, cx| {
+                if reader.begin_touch_selection(event, window, cx) || reader.open_passage_context(event.position, window, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .capture_action(cx.listener(|reader, _: &OpenContextMenu, window, cx| {
+                if reader.selection.is_some() {
+                    reader.create_annotation(window, cx);
+                    cx.stop_propagation();
                 }
             }));
         if mobile {
@@ -59,17 +78,28 @@ impl ReaderView {
                     let position = window.mouse_position();
                     context_target.read(cx).context_actions_at(position, cx).popup(menu, &context_target)
                 })
-                .keyboard_menu(move |menu, window, cx| {
-                    keyboard_target.read(cx).keyboard_context_actions(window.mouse_position(), cx).popup(menu, &keyboard_target)
-                })
+                .keyboard_menu(move |menu, window, cx| keyboard_target.read(cx).keyboard_context_actions(window.mouse_position(), cx).popup(menu, &keyboard_target))
                 .into_any_element()
         }
     }
 }
 
 impl ReaderView {
+    fn open_passage_context(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.selection.is_some() && matches!(&self.load_state, LoadState::Ready(renderer) if renderer.read(cx).selection_contains(position)) {
+            self.annotation_popup_anchor = Some(position);
+            self.create_annotation(window, cx);
+            true
+        } else if components::uses_mobile_reader_controls(window) {
+            self.open_context_sheet(position, cx);
+            true
+        } else {
+            false
+        }
+    }
+
     fn context_actions_at(&self, position: Point<Pixels>, cx: &App) -> ContextActions<EpubContextCommand> {
-        self.context_actions(position, false, cx)
+        self.context_actions(position, cx)
     }
 
     fn keyboard_context_actions(&self, pointer: Point<Pixels>, cx: &App) -> ContextActions<EpubContextCommand> {
@@ -77,15 +107,12 @@ impl ReaderView {
             LoadState::Ready(renderer) => renderer.read(cx).selection_bounds().map(|bounds| bounds.center()).unwrap_or(pointer),
             _ => pointer,
         };
-        self.context_actions(position, true, cx)
+        self.context_actions(position, cx)
     }
 
-    fn context_actions(&self, position: Point<Pixels>, keyboard: bool, cx: &App) -> ContextActions<EpubContextCommand> {
+    fn context_actions(&self, position: Point<Pixels>, cx: &App) -> ContextActions<EpubContextCommand> {
         let mut actions = ContextActions::default();
         let LoadState::Ready(renderer) = &self.load_state else { return actions };
-        if self.selection.is_some() && (keyboard || renderer.read(cx).selection_contains(position)) {
-            actions.add_section(vec![ContextAction { label: "Highlight", command: EpubContextCommand::Highlight }, ContextAction { label: "Cite", command: EpubContextCommand::Cite }]);
-        }
         if renderer.read(cx).table_at(position) {
             actions.add_section(vec![
                 ContextAction { label: "Copy Table as Markdown", command: EpubContextCommand::CopyTable { view: renderer.clone(), position, format: TableCopyFormat::Markdown } },
@@ -95,6 +122,9 @@ impl ReaderView {
         }
         if renderer.read(cx).image_at(position) {
             actions.add_section(vec![ContextAction { label: "Copy Image", command: EpubContextCommand::CopyImage { view: renderer.clone(), position } }]);
+        }
+        if renderer.read(cx).equation_at(position) {
+            actions.add_section(vec![ContextAction { label: "Copy as LaTeX", command: EpubContextCommand::CopyEquationLatex { view: renderer.clone(), position } }]);
         }
         actions
     }
@@ -121,10 +151,8 @@ impl ReaderView {
 impl ContextActionTarget for ReaderView {
     type Command = EpubContextCommand;
 
-    fn run_context_action(&mut self, command: Self::Command, window: &mut Window, cx: &mut Context<Self>) {
+    fn run_context_action(&mut self, command: Self::Command, _window: &mut Window, cx: &mut Context<Self>) {
         match command {
-            EpubContextCommand::Highlight => self.highlight_selection(window, cx),
-            EpubContextCommand::Cite => self.copy_selection_citation(cx),
             EpubContextCommand::CopyTable { view, position, format } => {
                 view.update(cx, |view, _| match format {
                     TableCopyFormat::Markdown => view.copy_table_at(position),
@@ -134,6 +162,9 @@ impl ContextActionTarget for ReaderView {
             }
             EpubContextCommand::CopyImage { view, position } => {
                 view.update(cx, |view, _| view.copy_image_at(position));
+            }
+            EpubContextCommand::CopyEquationLatex { view, position } => {
+                view.update(cx, |view, _| view.copy_equation_latex_at(position));
             }
         }
     }

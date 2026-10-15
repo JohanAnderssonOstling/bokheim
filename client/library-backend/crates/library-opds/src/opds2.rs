@@ -1,11 +1,12 @@
 //! OPDS 2: JSON feeds. Read loosely, as feeds vary: `rel` may be a string or
 //! a list, a contributor a string, an object or a list of either.
-use crate::{choose_download, push_facet, Facet, Feed, NavigationLink, Publication, Search};
+use crate::{choose_download, protected, push_facet, Facet, Feed, NavigationLink, Publication, Search};
 use serde_json::Value;
 use url::Url;
 
 const ACQUISITION: &str = "http://opds-spec.org/acquisition";
 const OPEN_ACCESS: &str = "http://opds-spec.org/acquisition/open-access";
+const BUY: &str = "http://opds-spec.org/acquisition/buy";
 
 pub(crate) fn parse(bytes: &[u8], base: &Url) -> Result<Feed, String> {
     let root: Value = serde_json::from_slice(bytes).map_err(|error| format!("not an OPDS 2 feed: {error}"))?;
@@ -46,22 +47,34 @@ fn navigation(links: &Value, base: &Url) -> Vec<NavigationLink> {
 
 fn publications(publications: &Value, base: &Url) -> Vec<Publication> {
     array(publications)
-        .map(|publication| {
+        .filter_map(|publication| {
             let metadata = &publication["metadata"];
             let open = array(&publication["links"])
                 .filter(|link| has_rel(link, ACQUISITION) || has_rel(link, OPEN_ACCESS))
-                .filter_map(|link| Some((base.join(link["href"].as_str()?).ok()?, link["type"].as_str().unwrap_or_default().to_owned())))
+                .filter_map(|link| Some((base.join(link["href"].as_str()?).ok()?, link["type"].as_str().unwrap_or_default().to_owned(), None)))
                 .collect();
-            Publication {
+            let download = choose_download(open);
+            let buy = array(&publication["links"]).find(|link| has_rel(link, BUY));
+            // A book offered only with DRM, sold, lent or free, is not listed.
+            let mut types = Vec::new();
+            for link in array(&publication["links"]).filter(|link| rels(link).any(|rel| rel.starts_with(ACQUISITION))) {
+                types.push(&link["type"]);
+                types.extend(acquisition_types(&link["properties"]["indirectAcquisition"]));
+            }
+            if download.is_none() && protected(types.into_iter().filter_map(Value::as_str)) {
+                return None;
+            }
+            Some(Publication {
                 id: string(&metadata["identifier"]),
                 title: string(&metadata["title"]),
                 subtitle: metadata["subtitle"].as_str().map(str::to_owned),
                 authors: contributors(&metadata["author"]),
-                download: choose_download(open),
+                download,
+                buy: buy.and_then(|link| base.join(link["href"].as_str()?).ok()),
                 // The first image is the cover; OPDS 2 gives no order by size.
                 cover: array(&publication["images"]).find_map(|image| base.join(image["href"].as_str()?).ok()),
                 description: string(&metadata["description"]),
-            }
+            })
         })
         .collect()
 }
@@ -86,6 +99,11 @@ fn has_rel(link: &Value, rel: &str) -> bool {
 
 fn number_of_items(link: &Value) -> Option<u32> {
     link["properties"]["numberOfItems"].as_u64().and_then(|count| u32::try_from(count).ok())
+}
+
+/// The media types of indirect acquisitions, nested through their `child`.
+fn acquisition_types(acquisitions: &Value) -> Vec<&Value> {
+    array(acquisitions).flat_map(|acquisition| std::iter::once(&acquisition["type"]).chain(acquisition_types(&acquisition["child"]))).collect()
 }
 
 fn array(value: &Value) -> impl Iterator<Item = &Value> {

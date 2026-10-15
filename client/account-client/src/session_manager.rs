@@ -1,8 +1,10 @@
-use crate::{AuthError, Session};
+use crate::{AuthError, Session, Url};
 use std::fmt;
 use std::future::Future;
+use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
+use tokio::sync::{watch, Mutex};
 
 #[cfg(not(target_arch = "wasm32"))]
 pub type SessionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -10,18 +12,17 @@ pub type SessionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type SessionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 /// Persistence supplied by the application; writes complete before session readers are notified.
-pub trait SessionPersistence: Clone + std::fmt::Debug + Send + Sync + 'static {
+pub trait SessionPersistence: Clone + fmt::Debug + Send + Sync + 'static {
     /// Runs a complete state-and-persistence operation on the storage owner.
     /// Dispatch must happen before acquiring a session state lock.
-    fn run<T: Send + 'static>(&self, operation: impl FnOnce() -> T + Send + 'static) -> std::io::Result<T> {
+    fn run<T: Send + 'static>(&self, operation: impl FnOnce() -> T + Send + 'static) -> io::Result<T> {
         Ok(operation())
     }
 
-    fn load_account_session(&self) -> std::io::Result<Option<Session>>;
-    fn save_account_session(&self, session: &Session) -> std::io::Result<()>;
-    fn clear_account_session(&self) -> std::io::Result<()>;
+    fn load_account_session(&self) -> io::Result<Option<Session>>;
+    fn save_account_session(&self, session: &Session) -> io::Result<()>;
+    fn clear_account_session(&self) -> io::Result<()>;
 }
-use crate::Url;
 
 const EXPIRY_SAFETY_WINDOW_SECONDS: i64 = 60;
 const REFRESH_WINDOW_SECONDS: i64 = 15 * 60;
@@ -33,12 +34,9 @@ struct SessionState {
 }
 
 #[derive(Debug)]
-struct SharedSession(RwLock<SessionState>);
-
-#[derive(Debug)]
 pub enum AccountSessionError {
     Authentication(AuthError),
-    Persistence(std::io::Error),
+    Persistence(io::Error),
     Poisoned,
     Changed,
 }
@@ -60,9 +58,9 @@ impl std::error::Error for AccountSessionError {}
 pub struct AccountSession<P: SessionPersistence> {
     persistence: P,
     server: Url,
-    state: Arc<SharedSession>,
-    refresh: Arc<tokio::sync::Mutex<()>>,
-    changes: tokio::sync::watch::Sender<u64>,
+    state: Arc<RwLock<SessionState>>,
+    refresh: Arc<Mutex<()>>,
+    changes: watch::Sender<u64>,
 }
 
 impl<P: SessionPersistence> AccountSession<P> {
@@ -72,16 +70,16 @@ impl<P: SessionPersistence> AccountSession<P> {
             persistence.clear_account_session().map_err(AccountSessionError::Persistence)?;
             session = None;
         }
-        Ok(Self { persistence, server, state: Arc::new(SharedSession(RwLock::new(SessionState { session, generation: 0 }))), refresh: Arc::new(tokio::sync::Mutex::new(())), changes: tokio::sync::watch::channel(0).0 })
+        Ok(Self { persistence, server, state: Arc::new(RwLock::new(SessionState { session, generation: 0 })), refresh: Arc::new(Mutex::new(())), changes: watch::channel(0).0 })
     }
 
-    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.changes.subscribe()
     }
 
     /// Read the latest usable session without performing persistence or refresh work.
     pub fn credentials_session(&self) -> Option<Session> {
-        self.state.0.read().ok()?.session.as_ref().filter(|session| !Self::is_expired(session)).cloned()
+        self.state.read().ok()?.session.as_ref().filter(|session| !Self::is_expired(session)).cloned()
     }
 
     pub fn restore_if_empty(&self) -> Result<Option<Session>, AccountSessionError> {
@@ -99,7 +97,7 @@ impl<P: SessionPersistence> AccountSession<P> {
 
     pub fn current(&self) -> Result<Option<Session>, AccountSessionError> {
         // Reading a usable published session needs no persistence operation.
-        let session = self.state.0.read().map_err(|_| AccountSessionError::Poisoned)?.session.clone();
+        let session = self.state.read().map_err(|_| AccountSessionError::Poisoned)?.session.clone();
         if session.as_ref().is_none_or(|session| !Self::is_expired(session)) {
             return Ok(session);
         }
@@ -136,7 +134,7 @@ impl<P: SessionPersistence> AccountSession<P> {
         let this = self.clone();
         self.persistence
             .run(move || {
-                let mut state = this.state.0.write().map_err(|_| AccountSessionError::Poisoned)?;
+                let mut state = this.state.write().map_err(|_| AccountSessionError::Poisoned)?;
                 operation(&this, &mut state)
             })
             .map_err(AccountSessionError::Persistence)?
@@ -250,14 +248,14 @@ mod tests {
     #[derive(Clone, Debug, Default)]
     struct MemoryPersistence(Arc<RwLock<Option<Session>>>);
     impl SessionPersistence for MemoryPersistence {
-        fn load_account_session(&self) -> std::io::Result<Option<Session>> {
+        fn load_account_session(&self) -> io::Result<Option<Session>> {
             Ok(self.0.read().unwrap().clone())
         }
-        fn save_account_session(&self, session: &Session) -> std::io::Result<()> {
+        fn save_account_session(&self, session: &Session) -> io::Result<()> {
             *self.0.write().unwrap() = Some(session.clone());
             Ok(())
         }
-        fn clear_account_session(&self) -> std::io::Result<()> {
+        fn clear_account_session(&self) -> io::Result<()> {
             *self.0.write().unwrap() = None;
             Ok(())
         }

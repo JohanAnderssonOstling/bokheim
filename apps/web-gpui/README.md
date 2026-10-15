@@ -10,6 +10,16 @@ Build the release bundle with:
 ./apps/web-gpui/scripts/build.sh
 ```
 
+The build requires the `brotli` command and generates verified `.br` and `.gz`
+sidecars for WebAssembly, JavaScript, and other text assets, including PDFium.
+The local server and the deployment Caddy configuration negotiate Brotli first,
+then gzip, using the regular asset URLs and `Content-Encoding`. Browsers decode
+responses before WebAssembly streaming compilation; no JavaScript Brotli decoder
+or `DecompressionStream` support is required. Hosts that do not serve sidecars
+continue to serve the original assets. Production Brotli delivery requires
+installing and reloading the updated Caddy configuration as well as deploying
+the assets; the web-only deployment script does not reload Caddy.
+
 Then serve `apps/web-gpui/dist` with cross-origin isolation headers enabled.
 For an isolated test bundle, set `BOKHEIM_WEB_OUTPUT_DIR` to an absolute
 task-specific directory when building, then pass that path to the server's
@@ -36,6 +46,14 @@ coordinator selects a replacement and restores database connections. An
 exclusive database-worker lock prevents overlapping ownership. Interrupted
 requests fail without automatically replaying writes; subscriptions reconnect.
 Network requests execute asynchronously in the shared coordinator.
+
+The release bundle includes a content-addressed, gzip-compressed BISAC reference
+SQLite asset. Workers verify the compressed digest and decode directly into
+SQLite's fixed-size installation buffer, then cache the smaller database in
+their separate OPFS storage pools. The schema derives parent labels and path
+components instead of storing duplicate strings. Queries use a 128 KiB SQLite
+page-cache setting. Cached files track the full database artifact digest so
+schema and normalization changes are picked up on the next worker start.
 
 Browser Back dispatches the same `DismissSettings` action as native Android:
 the focused page dismisses its modal/search or climbs one breadcrumb level,

@@ -223,6 +223,7 @@ fn project_book(tx: &Transaction<'_>, hash: &ContentHash, values: &[(LibraryStat
             project_addition(tx, hash, addition)?;
         } else {
             tx.projection_set_book_facts(hash, None, None)?;
+            tx.projection_set_book_popularity(hash, None)?;
             project_metadata(tx, hash, &BookDetails::default(), None)?;
             tx.projection_clear_title(&hash, &(search_title(None, None)))?;
             tx.projection_clear_description(&hash)?;
@@ -274,7 +275,8 @@ fn project_value(tx: &Transaction<'_>, body: &LibraryStateEntry, purged: &HashSe
         }
         LibraryStateEntry::BookLifecycle { .. } | LibraryStateEntry::ReadingPosition { .. } | LibraryStateEntry::BookAdd { .. } => {
             unreachable!("book records and scalar registers are projected together")
-        }        LibraryStateEntry::Placement { dir_id, content_hash, present, origin_folder_id } => {
+        }
+        LibraryStateEntry::Placement { dir_id, content_hash, present, origin_folder_id } => {
             if *present {
                 // Filenames are a local projection. A tombstoned placement's
                 // old name may have been reused since it was removed.
@@ -313,6 +315,7 @@ fn project_addition(tx: &Transaction<'_>, hash: &ContentHash, addition: &BookAdd
     };
     let description = if addition.record.description.trim().is_empty() { enriched.map(|record| record.description.as_str()).unwrap_or(&addition.record.description) } else { &addition.record.description };
     tx.projection_set_book_facts(hash, Some(addition.facts.format as i64), Some(storage_i64(addition.facts.added_at, "book addition timestamp")?))?;
+    tx.projection_set_book_popularity(hash, popularity_rating_count(addition))?;
     project_metadata(tx, hash, &addition.record.metadata, enriched.map(|record| &record.metadata))?;
     tx.set_description(hash, &normalized_description(description)).map_err(DatabaseError::operation)?;
 
@@ -343,10 +346,35 @@ fn project_addition(tx: &Transaction<'_>, hash: &ContentHash, addition: &BookAdd
     Ok(())
 }
 
+fn popularity_rating_count(addition: &BookAddition) -> Option<f64> {
+    match &addition.enrichment {
+        Some(EnrichmentResult::Found { popularity: Some(popularity), .. }) => Some(popularity.rating_count as f64),
+        _ => None,
+    }
+}
+
+/// Populate the disposable browse column once, without buffering every body
+/// or changing canonical records, publication tokens, or the outbox.
+pub(crate) fn backfill_popularity(tx: &Transaction<'_>) -> Result<(), DatabaseError> {
+    let mut statement = tx.prepare(include_str!("sql/popularity_backfill.sql"))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let hash: ContentHash = row.get(0)?;
+        let body: Vec<u8> = row.get(1)?;
+        let LibraryStateEntry::BookAdd { value, .. } = wire::decode::<LibraryStateEntry>(&body, wire::MAX_DECODED_REQUEST_BYTES).map_err(DatabaseError::operation)? else {
+            return Err(DatabaseError::message("popularity requires an immutable book addition"));
+        };
+        tx.projection_set_book_popularity(&hash, popularity_rating_count(&value))?;
+    }
+    Ok(())
+}
+
 fn project_metadata(tx: &Transaction<'_>, hash: &ContentHash, metadata: &BookDetails, enriched: Option<&BookDetails>) -> Result<(), DatabaseError> {
     let attributes = enriched.unwrap_or(metadata);
     let projected = prepare_book(&attributes.book)?;
-    let credits = crate::contributors::resolve_credits(tx, &attributes.contributors, None)?;
+    // Credits from an enrichment answer or another device carry identities of
+    // their own; matched by name, they join the author import already made.
+    let credits = crate::contributors::resolve_credits(tx, &attributes.contributors, Some(metadata_contract::matching::same_author))?;
     let subtitle = metadata.subtitle.as_deref();
     let search_title = search_title(Some(&metadata.title), subtitle);
     tx.meta_update_book_metadata_state_preserving_ids_update_2(hash, &metadata.title, subtitle, &search_title)?;
@@ -409,7 +437,7 @@ mod tests {
                         navigation: None,
                         pdf: None,
                         recording: None,
-                        enrichment: Some(EnrichmentResult::Found { record: enriched, toc: None, cover_id: None }),
+                        enrichment: Some(EnrichmentResult::Found { record: enriched, toc: None, cover_id: None, popularity: None }),
                     },
                 },
             )?;

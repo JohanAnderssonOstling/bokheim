@@ -28,6 +28,8 @@ pub type UnixMillis = u64;
 pub type ReplicaId = uuid::Uuid;
 /// A synchronized library.
 pub type LibraryId = uuid::Uuid;
+/// The server database history to which a pull checkpoint belongs.
+pub type SyncGeneration = uuid::Uuid;
 /// A synchronized directory.
 pub type DirId = uuid::Uuid;
 /// A file name is user-visible text, not an identity.
@@ -39,6 +41,11 @@ pub const ROOT_DIR_ID: DirId = uuid::Uuid::nil();
 /// Maximum encoded size of a synchronized JPEG cover.
 pub const MAX_THUMBNAIL_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_PULL_CHANGES: usize = 1_000;
+/// Conservative wire budget for a pull page. One historical cell larger than
+/// this target is delivered alone, subject to the hard response limit.
+pub const MAX_PULL_BATCH_BYTES: usize = 4 * 1024 * 1024;
+/// Fixed protobuf wrapper allowance; variable-length fields are counted too.
+pub const STATE_DELIVERY_OVERHEAD_BYTES: usize = 1_024;
 pub const MAX_PUSH_MUTATIONS: usize = 1_000;
 /// Target ceiling for the encoded mutations in one push request.
 pub const MAX_PUSH_BATCH_BYTES: usize = 4 * 1024 * 1024;
@@ -179,10 +186,24 @@ pub fn compare_same_replica_versions(left: (UnixMillis, ConflictRank, ReplicaSeq
 /// `lifecycle_revision`.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SyncCursor {
+    /// Absent only when starting from zero, including cursor recovery.
+    #[serde(default)]
+    pub generation: Option<SyncGeneration>,
     #[serde(default, deserialize_with = "deserialize_library_cursor")]
     pub lifecycle_revision: Option<LibraryRevision>,
     #[serde(default, deserialize_with = "deserialize_library_cursor")]
     pub field_revision: Option<LibraryRevision>,
+}
+
+impl SyncCursor {
+    /// An unbound cursor can only bootstrap from zero. Existing checkpoints
+    /// must name the current history, even when its head has passed them.
+    pub fn belongs_to(self, generation: SyncGeneration) -> bool {
+        match self.generation {
+            Some(stored) => stored == generation,
+            None => self == Self::default(),
+        }
+    }
 }
 
 /// A canonical value and its original last-writer-wins version.
@@ -210,7 +231,16 @@ pub struct Publication<T> {
 pub struct OpaqueStateEntry {
     pub address: StateAddress,
     pub book: Option<ContentHash>,
+    // Keep opaque payloads as byte buffers in the codec's intermediate trees.
+    // Protobuf bytes and the persisted bincode layout stay identical.
+    #[serde(with = "serde_bytes")]
     pub bytes: Vec<u8>,
+}
+
+impl OpaqueStateEntry {
+    pub fn delivery_byte_budget(&self) -> usize {
+        self.bytes.len().saturating_add(self.address.kind.len()).saturating_add(self.address.entity_key.as_bytes().len()).saturating_add(self.address.entity_subkey.len()).saturating_add(STATE_DELIVERY_OVERHEAD_BYTES)
+    }
 }
 
 /// Client-owned serialization and envelope validation. This trait does not

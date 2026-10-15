@@ -1,16 +1,19 @@
 //! EPUB-specific appearance controls in the shared sidebar.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Window};
+use std::{cell::Cell, rc::Rc};
+
+use gpui::{AnyElement, Context, Focusable, Window};
 use ui_components as components;
 
 use crate::epub::ReaderView;
 use crate::invalidation::{Component, notify};
 use crate::settings::{ReaderSettings, SidebarTab};
-use crate::shell::settings_navigation::{self, SettingsRow, adjacent_value};
+use crate::shell::settings_navigation::{self, SettingsRow, adjacent_step, adjacent_value};
 use crate::shell::state_panel;
 use crate::shell::toolbar::SidebarTarget;
 use crate::{ReaderFontFamily, ReaderTextAlignment};
+use app_preferences::{DEFAULT_COLUMN_GAP_PX, DEFAULT_READER_MARGIN_PX};
 
 impl SidebarTarget for ReaderView {
     #[cfg(feature = "kobo")]
@@ -19,12 +22,14 @@ impl SidebarTarget for ReaderView {
     }
 
     fn close_reader(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+        self.tts.close();
         (self.close_reader)(window, cx);
     }
 
     fn hide_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if components::uses_mobile_navigation(window) {
-            if self.sidebar.close() {
+        if components::uses_mobile_reader_controls(window) {
+            if self.sidebar.close(cx) {
                 notify(cx, Component::ReaderShell, "sidebar_closed");
             }
         } else {
@@ -37,6 +42,14 @@ impl SidebarTarget for ReaderView {
         self.sidebar_focus.clone()
     }
 
+    fn rail_focus(&self) -> gpui::FocusHandle {
+        self.rail_focus.clone()
+    }
+
+    fn keyboard_visibility(&self) -> Rc<Cell<bool>> {
+        self.settings_navigation.keyboard_visibility()
+    }
+
     fn sidebar_tab(&self) -> SidebarTab {
         self.sidebar.effective_or_default(self.contents_available())
     }
@@ -47,14 +60,24 @@ impl SidebarTarget for ReaderView {
 
     fn select_sidebar_tab(&mut self, tab: SidebarTab, window: &mut Window, cx: &mut Context<Self>) {
         state_panel::select_tab(&mut self.sidebar, tab, cx);
-        self.sidebar_focus.focus(window, cx);
+        self.chrome.show(cx);
+        if tab == SidebarTab::Search {
+            self.open_search(cx);
+            self.search_input.read(cx).focus_handle(cx).focus(window, cx);
+        }
+        self.focus_sidebar_body(window, cx);
         cx.notify();
     }
 
     fn toggle_sidebar_tab(&mut self, tab: SidebarTab, window: &mut Window, cx: &mut Context<Self>) {
         state_panel::toggle_tab(&mut self.sidebar, tab, true, cx);
         self.chrome.show(cx);
-        if self.sidebar.is_visible() {
+        if self.sidebar.is_visible() && tab == SidebarTab::Search {
+            self.open_search(cx);
+            self.search_input.read(cx).focus_handle(cx).focus(window, cx);
+        } else if self.sidebar.is_visible() {
+            self.focus_sidebar_body(window, cx);
+        } else {
             self.focus_document(window, cx);
         }
         notify(cx, Component::ReaderShell, "mobile_sidebar_tab_changed");
@@ -68,8 +91,16 @@ impl SidebarTarget for ReaderView {
                 }
                 tree.focus(window, cx);
             });
+        } else if self.sidebar_tab() == SidebarTab::Search {
+            self.search_input.read(cx).focus_handle(cx).focus(window, cx);
         } else {
-            window.focus_next(cx);
+            self.sidebar_focus.focus(window, cx);
+            if self.sidebar_tab() == SidebarTab::Notes {
+                window.focus_next(cx);
+                if !self.sidebar_focus.contains_focused(window, cx) {
+                    self.sidebar_focus.focus(window, cx);
+                }
+            }
         }
     }
 
@@ -77,32 +108,48 @@ impl SidebarTarget for ReaderView {
         self.handle_settings_key(key, window, cx)
     }
 
-    fn search_is_open(&self) -> bool {
-        self.search.query.is_some()
+    #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+    fn tts_mark(&self) -> Option<components::ReaderRailMark> {
+        Some(self.tts.button_mark())
     }
 
-    fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        crate::shell::input::CommandTarget::execute(self, &crate::ToggleSearch, window, cx);
+    #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+    fn press_tts(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        crate::shell::tts::TtsReader::press_tts(self, cx);
     }
+}
+
+/// The values a settings tile stores, its name, and its picture. The middle
+/// tile of every row is the preference's default.
+type Steps<T> = [(T, &'static str, &'static str); 3];
+
+const TYPEFACES: [(ReaderFontFamily, &str, Option<&str>); 3] = [(ReaderFontFamily::Publisher, "Book", None), (ReaderFontFamily::Serif, "Serif", Some("NV Garamond")), (ReaderFontFamily::SansSerif, "Sans serif", Some("Raleway"))];
+const ALIGNMENTS: Steps<ReaderTextAlignment> = [
+    (ReaderTextAlignment::Publisher, "Book", "icons/reader-settings/align-book.svg"),
+    (ReaderTextAlignment::Start, "Left", "icons/reader-settings/align-left.svg"),
+    (ReaderTextAlignment::Justify, "Justify", "icons/reader-settings/align-justify.svg"),
+];
+const LINE_SPACINGS: Steps<f32> = [(1.3, "Tight", "icons/reader-settings/line-spacing-tight.svg"), (1.5, "Normal", "icons/reader-settings/line-spacing-normal.svg"), (1.8, "Loose", "icons/reader-settings/line-spacing-loose.svg")];
+/// Minimum and maximum line length in characters.
+const LINE_LENGTHS: Steps<(f64, f64)> =
+    [((35.0, 50.0), "Short", "icons/reader-settings/line-length-short.svg"), ((45.0, 65.0), "Medium", "icons/reader-settings/line-length-medium.svg"), ((60.0, 85.0), "Long", "icons/reader-settings/line-length-long.svg")];
+const SIDE_MARGINS: Steps<f32> =
+    [(8.0, "Narrow", "icons/reader-settings/side-margins-narrow.svg"), (DEFAULT_READER_MARGIN_PX, "Medium", "icons/reader-settings/side-margins-medium.svg"), (64.0, "Wide", "icons/reader-settings/side-margins-wide.svg")];
+const VERTICAL_MARGINS: Steps<f32> =
+    [(8.0, "Narrow", "icons/reader-settings/vertical-margins-narrow.svg"), (DEFAULT_READER_MARGIN_PX, "Medium", "icons/reader-settings/vertical-margins-medium.svg"), (48.0, "Wide", "icons/reader-settings/vertical-margins-wide.svg")];
+const COLUMN_GAPS: Steps<f32> =
+    [(16.0, "Narrow", "icons/reader-settings/column-gap-narrow.svg"), (DEFAULT_COLUMN_GAP_PX, "Medium", "icons/reader-settings/column-gap-medium.svg"), (64.0, "Wide", "icons/reader-settings/column-gap-wide.svg")];
+
+fn step_values<T: Copy>(steps: &Steps<T>) -> [T; 3] {
+    steps.map(|(value, _, _)| value)
 }
 
 impl ReaderView {
     fn settings_rows() -> &'static [SettingsRow] {
         if cfg!(feature = "kobo") {
-            &[SettingsRow::Typeface, SettingsRow::Alignment, SettingsRow::FontSize, SettingsRow::LineHeight, SettingsRow::SideMargins, SettingsRow::VerticalMargins]
+            &[SettingsRow::FontSize, SettingsRow::Typeface, SettingsRow::Alignment, SettingsRow::LineHeight, SettingsRow::SideMargins, SettingsRow::VerticalMargins]
         } else {
-            &[
-                SettingsRow::Theme,
-                SettingsRow::Typeface,
-                SettingsRow::Alignment,
-                SettingsRow::FontSize,
-                SettingsRow::LineHeight,
-                SettingsRow::SideMargins,
-                SettingsRow::VerticalMargins,
-                SettingsRow::ColumnGap,
-                SettingsRow::MinLineWidth,
-                SettingsRow::MaxLineWidth,
-            ]
+            &[SettingsRow::Theme, SettingsRow::FontSize, SettingsRow::Typeface, SettingsRow::Alignment, SettingsRow::LineHeight, SettingsRow::LineLength, SettingsRow::SideMargins, SettingsRow::VerticalMargins, SettingsRow::ColumnGap]
         }
     }
 
@@ -118,15 +165,14 @@ impl ReaderView {
             let current = ReaderSettings::preferences(cx).clone();
             match self.settings_navigation.selected(Self::settings_rows()) {
                 SettingsRow::Theme => settings_navigation::adjust_theme(direction, cx),
-                SettingsRow::Typeface => self.set_reader_font_family(adjacent_value(&[ReaderFontFamily::Publisher, ReaderFontFamily::Serif], current.font_family, direction), cx),
-                SettingsRow::Alignment => self.set_reader_text_alignment(adjacent_value(&[ReaderTextAlignment::Publisher, ReaderTextAlignment::Start, ReaderTextAlignment::Justify], current.text_alignment, direction), cx),
+                SettingsRow::Typeface => self.set_reader_font_family(adjacent_value(&TYPEFACES.map(|(family, _, _)| family), current.font_family, direction), cx),
+                SettingsRow::Alignment => self.set_reader_text_alignment(adjacent_value(&step_values(&ALIGNMENTS), current.text_alignment, direction), cx),
                 SettingsRow::FontSize => self.adjust_font_size(direction as f32, cx),
-                SettingsRow::LineHeight => self.adjust_line_height(direction as f32 * 0.1, cx),
-                SettingsRow::SideMargins => self.adjust_horizontal_margin(direction as f32 * 8.0, cx),
-                SettingsRow::VerticalMargins => self.adjust_vertical_margin(direction as f32 * 8.0, cx),
-                SettingsRow::ColumnGap => self.adjust_min_column_gap(direction as f32 * 8.0, cx),
-                SettingsRow::MinLineWidth => self.adjust_min_line_width_ch(direction as f64 * 5.0, window, cx),
-                SettingsRow::MaxLineWidth => self.adjust_max_line_width_ch(direction as f64 * 5.0, window, cx),
+                SettingsRow::LineHeight => self.set_line_height(adjacent_step(&step_values(&LINE_SPACINGS), current.line_height, direction), cx),
+                SettingsRow::LineLength => self.set_line_width_range(adjacent_step(&step_values(&LINE_LENGTHS), (current.min_line_width_ch, current.max_line_width_ch), direction), window, cx),
+                SettingsRow::SideMargins => self.set_horizontal_margin(adjacent_step(&step_values(&SIDE_MARGINS), current.horizontal_margin_px, direction), cx),
+                SettingsRow::VerticalMargins => self.set_vertical_margin(adjacent_step(&step_values(&VERTICAL_MARGINS), current.vertical_margin_px, direction), cx),
+                SettingsRow::ColumnGap => self.set_min_column_gap(adjacent_step(&step_values(&COLUMN_GAPS), current.min_column_gap_px, direction), cx),
                 _ => return false,
             }
         }
@@ -139,34 +185,9 @@ impl ReaderView {
         let theme = components::browser_theme(cx);
         let current = ReaderSettings::preferences(cx).clone();
         components::reader_settings_tab_body(theme)
-            .when(!cfg!(feature = "kobo"), |body| body.child(self.settings_navigation.row(SettingsRow::Theme, Self::settings_rows(), crate::shell::theme_picker::reader_theme_picker(cx, theme), theme)))
-            .child(
-                components::reader_settings_group(theme)
-                    .child(
-                        components::reader_setting_row_smallcaps("Typeface", theme).map(|row| self.settings_navigation.row(SettingsRow::Typeface, Self::settings_rows(), row, theme)).child(components::reader_choice_button_group(
-                            "reader-font-group",
-                            [
-                                components::reader_choice_button("reader-font-publisher", "Book", current.font_family == ReaderFontFamily::Publisher, theme)
-                                    .on_click(cx.listener(|this, _, _, cx| this.set_reader_font_family(ReaderFontFamily::Publisher, cx))),
-                                components::reader_choice_button("reader-font-serif", "Serif", current.font_family == ReaderFontFamily::Serif, theme)
-                                    .on_click(cx.listener(|this, _, _, cx| this.set_reader_font_family(ReaderFontFamily::Serif, cx))),
-                            ],
-                        )),
-                    )
-                    .child(
-                        components::reader_setting_row_smallcaps("Alignment", theme).map(|row| self.settings_navigation.row(SettingsRow::Alignment, Self::settings_rows(), row, theme)).child(components::reader_choice_button_group(
-                            "reader-alignment-group",
-                            [
-                                components::reader_choice_button("reader-alignment-publisher", "Book", current.text_alignment == ReaderTextAlignment::Publisher, theme)
-                                    .on_click(cx.listener(|this, _, _, cx| this.set_reader_text_alignment(ReaderTextAlignment::Publisher, cx))),
-                                components::reader_choice_button("reader-alignment-start", "Left", current.text_alignment == ReaderTextAlignment::Start, theme)
-                                    .on_click(cx.listener(|this, _, _, cx| this.set_reader_text_alignment(ReaderTextAlignment::Start, cx))),
-                                components::reader_choice_button("reader-alignment-justify", "Justify", current.text_alignment == ReaderTextAlignment::Justify, theme)
-                                    .on_click(cx.listener(|this, _, _, cx| this.set_reader_text_alignment(ReaderTextAlignment::Justify, cx))),
-                            ],
-                        )),
-                    ),
-            )
+            .when(!cfg!(feature = "kobo"), |body| {
+                body.child(components::reader_settings_group(theme).child(self.settings_navigation.row(SettingsRow::Theme, Self::settings_rows(), crate::shell::theme_picker::reader_theme_picker(cx, theme), theme)))
+            })
             .child(
                 components::reader_settings_group(theme)
                     .child(components::reader_setting_row("Font size").map(|row| self.settings_navigation.row(SettingsRow::FontSize, Self::settings_rows(), row, theme)).child(components::settings_stepper(
@@ -175,51 +196,49 @@ impl ReaderView {
                         components::settings_stepper_button("font-size-larger", "+", false, theme).tooltip("Increase font size (Alt++)").on_click(cx.listener(|this, _, _, cx| this.adjust_font_size(1.0, cx))),
                         theme,
                     )))
-                    .child(components::reader_setting_row("Line height").map(|row| self.settings_navigation.row(SettingsRow::LineHeight, Self::settings_rows(), row, theme)).child(components::settings_stepper(
-                        components::settings_stepper_button("line-height-smaller", "−", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_line_height(-0.1, cx))),
-                        format!("{:.1}", current.line_height),
-                        components::settings_stepper_button("line-height-larger", "+", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_line_height(0.1, cx))),
-                        theme,
-                    ))),
+                    .child(self.typeface_row(current.font_family, theme, cx))
+                    .child(self.tile_row("reader-alignment", SettingsRow::Alignment, "Alignment", &ALIGNMENTS, current.text_alignment, theme, cx, |this, alignment, _, cx| this.set_reader_text_alignment(alignment, cx))),
             )
             .child(
                 components::reader_settings_group(theme)
-                    .child(components::reader_setting_row("Side margins").map(|row| self.settings_navigation.row(SettingsRow::SideMargins, Self::settings_rows(), row, theme)).child(components::settings_stepper(
-                        components::settings_stepper_button("side-margins-smaller", "−", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_horizontal_margin(-8.0, cx))),
-                        format!("{:.0}px", current.horizontal_margin_px),
-                        components::settings_stepper_button("side-margins-larger", "+", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_horizontal_margin(8.0, cx))),
-                        theme,
-                    )))
-                    .child(components::reader_setting_row("Top/bottom margins").map(|row| self.settings_navigation.row(SettingsRow::VerticalMargins, Self::settings_rows(), row, theme)).child(components::settings_stepper(
-                        components::settings_stepper_button("vertical-margins-smaller", "−", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_vertical_margin(-8.0, cx))),
-                        format!("{:.0}px", current.vertical_margin_px),
-                        components::settings_stepper_button("vertical-margins-larger", "+", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_vertical_margin(8.0, cx))),
-                        theme,
-                    )))
-                    .when(!cfg!(feature = "kobo"), |section| {
-                        section.child(components::reader_setting_row("Column gap").map(|row| self.settings_navigation.row(SettingsRow::ColumnGap, Self::settings_rows(), row, theme)).child(components::settings_stepper(
-                            components::settings_stepper_button("column-gap-smaller", "−", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_min_column_gap(-8.0, cx))),
-                            format!("{:.0}px", current.min_column_gap_px),
-                            components::settings_stepper_button("column-gap-larger", "+", false, theme).on_click(cx.listener(|this, _, _, cx| this.adjust_min_column_gap(8.0, cx))),
-                            theme,
-                        )))
+                    .child(self.tile_row("reader-line-spacing", SettingsRow::LineHeight, "Line spacing", &LINE_SPACINGS, current.line_height, theme, cx, |this, line_height, _, cx| this.set_line_height(line_height, cx)))
+                    .when(!cfg!(feature = "kobo"), |group| {
+                        group.child(self.tile_row("reader-line-length", SettingsRow::LineLength, "Line length", &LINE_LENGTHS, (current.min_line_width_ch, current.max_line_width_ch), theme, cx, |this, range, window, cx| {
+                            this.set_line_width_range(range, window, cx)
+                        }))
                     }),
             )
-            .child(components::reader_settings_group(theme).when(!cfg!(feature = "kobo"), |section| {
-                section
-                    .child(components::reader_setting_row("Line width min").map(|row| self.settings_navigation.row(SettingsRow::MinLineWidth, Self::settings_rows(), row, theme)).child(components::settings_stepper(
-                        components::settings_stepper_button("line-width-min-smaller", "−", false, theme).on_click(cx.listener(|this, _, window, cx| this.adjust_min_line_width_ch(-5.0, window, cx))),
-                        format!("{:.0}ch", current.min_line_width_ch),
-                        components::settings_stepper_button("line-width-min-larger", "+", false, theme).on_click(cx.listener(|this, _, window, cx| this.adjust_min_line_width_ch(5.0, window, cx))),
-                        theme,
-                    )))
-                    .child(components::reader_setting_row("Line width max").map(|row| self.settings_navigation.row(SettingsRow::MaxLineWidth, Self::settings_rows(), row, theme)).child(components::settings_stepper(
-                        components::settings_stepper_button("line-width-max-smaller", "−", false, theme).on_click(cx.listener(|this, _, window, cx| this.adjust_max_line_width_ch(-5.0, window, cx))),
-                        format!("{:.0}ch", current.max_line_width_ch),
-                        components::settings_stepper_button("line-width-max-larger", "+", false, theme).on_click(cx.listener(|this, _, window, cx| this.adjust_max_line_width_ch(5.0, window, cx))),
-                        theme,
-                    )))
-            }))
+            .child(
+                components::reader_settings_group(theme)
+                    .child(self.tile_row("reader-side-margins", SettingsRow::SideMargins, "Side margins", &SIDE_MARGINS, current.horizontal_margin_px, theme, cx, |this, margin, _, cx| this.set_horizontal_margin(margin, cx)))
+                    .child(self.tile_row("reader-vertical-margins", SettingsRow::VerticalMargins, "Vertical margins", &VERTICAL_MARGINS, current.vertical_margin_px, theme, cx, |this, margin, _, cx| this.set_vertical_margin(margin, cx)))
+                    .when(!cfg!(feature = "kobo"), |group| {
+                        group.child(self.tile_row("reader-column-gap", SettingsRow::ColumnGap, "Column gap", &COLUMN_GAPS, current.min_column_gap_px, theme, cx, |this, gap, _, cx| this.set_min_column_gap(gap, cx)))
+                    }),
+            )
             .into_any_element()
+    }
+
+    /// A labelled row of three picture tiles for one setting. A stored value
+    /// that matches no tile, such as one kept from an older version, simply
+    /// selects none until a tile is chosen.
+    #[allow(clippy::too_many_arguments)]
+    fn tile_row<T: Copy + PartialEq + 'static>(
+        &self, id: &'static str, row: SettingsRow, label: &'static str, steps: &Steps<T>, current: T, theme: components::BrowserTheme, cx: &mut Context<Self>, choose: fn(&mut Self, T, &mut Window, &mut Context<Self>),
+    ) -> gpui::Div {
+        let tiles = steps.iter().enumerate().map(|(index, &(value, name, picture))| {
+            components::reader_picture_tile((id, index), components::reader_tile_picture(picture), name, value == current, theme).on_click(cx.listener(move |this, _, window, cx| choose(this, value, window, cx)))
+        });
+        components::reader_setting_row_smallcaps(label, theme).map(|element| self.settings_navigation.row(row, Self::settings_rows(), element, theme)).child(components::reader_tile_group(id).children(tiles))
+    }
+
+    /// Typeface tiles show "Ag" set in the face they select.
+    fn typeface_row(&self, current: ReaderFontFamily, theme: components::BrowserTheme, cx: &mut Context<Self>) -> gpui::Div {
+        let tiles = TYPEFACES.iter().enumerate().map(|(index, &(family, name, face))| {
+            components::reader_picture_tile(("reader-typeface", index), components::reader_typeface_sample(face), name, family == current, theme).on_click(cx.listener(move |this, _, _, cx| this.set_reader_font_family(family, cx)))
+        });
+        components::reader_setting_row_smallcaps("Typeface", theme)
+            .map(|element| self.settings_navigation.row(SettingsRow::Typeface, Self::settings_rows(), element, theme))
+            .child(components::reader_tile_group("reader-typeface").children(tiles))
     }
 }

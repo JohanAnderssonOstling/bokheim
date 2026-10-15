@@ -31,11 +31,11 @@ impl ThumbnailExtractor {
 impl ThumbnailProcessor for ThumbnailExtractor {
     fn decode(&self, bytes: Vec<u8>) -> BoxedBackendFuture<'_, Result<ThumbnailVersions, BackendError>> {
         let host = self.host.clone();
-        Box::pin(async move { cpu_host::cover(&*host, bytes).await.map(|v| ThumbnailVersions { browse: v.browse, high_density: v.high_density }) })
+        Box::pin(async move { cpu_host::cover(&*host, bytes).await.map(|v| ThumbnailVersions { browse: v.browse, card_high_density: v.card_high_density, high_density: v.high_density }) })
     }
     fn generate(&self, extension: String, reader: BoxedBookReader) -> BoxedBackendFuture<'_, Result<Option<ThumbnailVersions>, BackendError>> {
         let host = self.host.clone();
-        Box::pin(async move { host.generate_thumbnail(extension, cpu_host::as_cpu_reader(reader)).await.map(|v| v.map(|v| ThumbnailVersions { browse: v.browse, high_density: v.high_density })) })
+        Box::pin(async move { host.generate_thumbnail(extension, cpu_host::as_cpu_reader(reader)).await.map(|v| v.map(|v| ThumbnailVersions { browse: v.browse, card_high_density: v.card_high_density, high_density: v.high_density })) })
     }
 }
 
@@ -87,8 +87,13 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
             // master before confirming it, and rebuild its browse variant.
             let (_lease, cached) = if let Some(bytes) = self.assets.read_bytes(BlobKind::Thumbnail, &hash).await.map_err(BackendError::operation)? {
                 drop(lease);
+                let original = bytes.clone();
                 let cached = self.processor.decode(bytes).await.ok();
                 let lease = self.assets.lease_book(&hash).await.map_err(BackendError::operation)?;
+                if self.assets.read_bytes(BlobKind::Thumbnail, &hash).await.map_err(BackendError::operation)?.as_deref() != Some(original.as_slice()) {
+                    // A chosen image replaced the master during CPU decoding.
+                    return Ok(false);
+                }
                 if cached.is_none() {
                     self.assets.remove(BlobKind::Thumbnail, &hash).map_err(BackendError::operation)?;
                 }
@@ -97,6 +102,7 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
                 (lease, None)
             };
             if let Some(versions) = cached {
+                drop(_lease);
                 self.store(hash, &versions, observer).await?;
                 self.db.complete_thumbnail_work(&hash, true)?;
                 return Ok(true);
@@ -114,6 +120,8 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
                 if let Some(bytes) = self.assets.m4b_sidecar_cover(paths).await.map_err(BackendError::operation)? {
                     match self.processor.decode(bytes).await {
                         Ok(versions) => {
+                            drop(_lease);
+                            drop(local_reader);
                             self.store(hash, &versions, observer).await?;
                             self.db.complete_thumbnail_work(&hash, true)?;
                             return Ok(true);
@@ -132,6 +140,8 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
                     if let Some(bytes) = archived {
                         match self.processor.decode(bytes).await {
                             Ok(versions) => {
+                                drop(_lease);
+                                drop(local_reader);
                                 self.store(hash, &versions, observer).await?;
                                 self.db.complete_thumbnail_work(&hash, true)?;
                                 return Ok(true);
@@ -160,7 +170,13 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
             if !self.db.thumbnail_book_format(hash).map(|format| format.is_some())? {
                 return Ok(false);
             }
+            // A selected catalog image may replace the cache while extraction
+            // is in flight. Preserve that completed replacement.
+            if self.db.thumbnail_work_state(&hash)?.as_deref() == Some("ready") && self.assets.thumbnail_set_exists(&hash).map_err(BackendError::operation)? {
+                return Ok(true);
+            }
             let has_cover = versions.is_some();
+            drop(_lease);
             if let Some(versions) = versions {
                 self.store(hash, &versions, observer).await?;
             }
@@ -172,14 +188,13 @@ impl<'a, P: ThumbnailProcessor> ThumbnailJobs<'a, P> {
     }
 
     async fn store(&self, hash: ContentHash, versions: &ThumbnailVersions, observer: &mut impl ThumbnailObserver) -> Result<(), BackendError> {
-        store_thumbnail(self.assets, hash, &versions.browse, &versions.high_density).await.map_err(BackendError::operation)?;
+        store_thumbnail(self.assets, hash, &versions.browse, &versions.card_high_density, &versions.high_density).await.map_err(BackendError::operation)?;
         observer.ready(hash);
         Ok(())
     }
 }
 
-/// Publish both derivatives before reporting a ready thumbnail.
-pub async fn store_thumbnail(assets: &AssetStore, hash: ContentHash, browse: &[u8], high_density: &[u8]) -> Result<(), AssetStoreError> {
-    assets.write(BlobKind::Thumbnail, &hash, high_density).await?;
-    assets.write_thumbnail_variant(&hash, thumbnail::BROWSE_THUMBNAIL_WIDTH, browse).await
+/// Publish the master and both card densities before reporting a ready thumbnail.
+pub async fn store_thumbnail(assets: &AssetStore, hash: ContentHash, browse: &[u8], card_high_density: &[u8], high_density: &[u8]) -> Result<(), AssetStoreError> {
+    assets.write_thumbnail_set(&hash, high_density, browse, card_high_density).await
 }

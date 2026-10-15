@@ -8,7 +8,7 @@
 
 use super::core::*;
 use library_backend::LibraryBrowseData;
-use library_model::{CardKey, LibraryBrowseQuery, OpdsCredentials, OpdsSource};
+use library_model::{AddOpdsFeedResult, CardKey, LibraryBrowseQuery, OpdsCredentials, OpdsSource};
 use sync_common::api::opds_feeds::{OpdsFeed, OpdsFeedId};
 
 const FEEDS: &str = "opds-feeds";
@@ -38,12 +38,12 @@ impl FeedChange {
 }
 
 impl AppBackend {
-    fn read_registry_json<T: serde::de::DeserializeOwned + Default>(&self, key: &str) -> Result<T, BackendError> {
+    pub(super) fn read_registry_json<T: serde::de::DeserializeOwned + Default>(&self, key: &str) -> Result<T, BackendError> {
         let Some(bytes) = self.state.registry.read_value(key).map_err(BackendError::operation)? else { return Ok(T::default()) };
         serde_json::from_slice(&bytes).map_err(BackendError::operation)
     }
 
-    fn write_registry_json(&self, key: &str, value: &impl serde::Serialize) -> Result<(), BackendError> {
+    pub(super) fn write_registry_json(&self, key: &str, value: &impl serde::Serialize) -> Result<(), BackendError> {
         let bytes = serde_json::to_vec(value).map_err(BackendError::operation)?;
         self.state.registry.write_value(key, &bytes).map_err(BackendError::operation)
     }
@@ -124,8 +124,10 @@ impl AppBackend {
     /// Adds the feed at `url`, named `name` or else by its own title. The
     /// feed is fetched once first, so an address that is not a feed, or
     /// credentials it refuses, are refused here.
-    pub(crate) async fn add_opds_feed(&self, url: String, name: Option<String>, credentials: Option<OpdsCredentials>) -> Result<(), BackendError> {
-        let title = library_opds::feed_title(&url, credentials.as_ref()).await.map_err(BackendError::message)?;
+    pub(crate) async fn add_opds_feed(&self, url: String, name: Option<String>, credentials: Option<OpdsCredentials>) -> Result<AddOpdsFeedResult, BackendError> {
+        let Some(title) = library_opds::feed_title(&url, credentials.as_ref()).await.map_err(BackendError::message)? else {
+            return Ok(AddOpdsFeedResult::SignInRequired);
+        };
         let name = name.map(|name| name.trim().to_owned()).filter(|name| !name.is_empty()).unwrap_or(title);
         let feed = OpdsFeed { id: uuid::Uuid::new_v4(), name, url: url.trim().to_owned() };
         if let Some(credentials) = credentials {
@@ -135,7 +137,7 @@ impl AppBackend {
         if let Err(error) = self.sync_opds_feeds().await {
             log::warn!("the new OPDS feed is queued: {error}");
         }
-        Ok(())
+        Ok(AddOpdsFeedResult::Added)
     }
 
     /// Removes a feed from the account, and this device's credentials for it.
@@ -165,13 +167,13 @@ impl AppBackend {
         let library_model::BrowseLocation::Opds { source, page } = query.location else { return Err("not an OPDS feed page".into()) };
         let (source, credentials) = self.opds_access(source)?;
         let (contents, feed) = library_opds::browse(&source, credentials.as_ref(), page, &query.search).await.map_err(BackendError::message)?;
-        Ok(LibraryBrowseData { sections: Vec::new(), contents, path: Vec::new(), ancestors: Vec::new(), language_counts: Vec::new(), format_counts: Vec::new(), feed: Some(feed) })
+        Ok(LibraryBrowseData { sections: Vec::new(), contents, path: Vec::new(), ancestors: Vec::new(), language_counts: Vec::new(), format_counts: Vec::new(), feed: Some(feed), page: None })
     }
 
     /// A listed feed book's cover, as a JPEG `width` pixels wide.
-    pub(crate) async fn opds_cover(&self, source: OpdsFeedId, entry: CardKey, width: u32) -> Result<Option<Vec<u8>>, BackendError> {
+    pub(crate) async fn opds_cover(&self, source: OpdsFeedId, entry: CardKey, width: u32, card: bool) -> Result<Option<Vec<u8>>, BackendError> {
         let (source, credentials) = self.opds_access(source)?;
-        Ok(library_opds::cover(&source, credentials.as_ref(), entry, width).await)
+        Ok(if card { library_opds::card_cover(&source, credentials.as_ref(), entry, width).await } else { library_opds::cover(&source, credentials.as_ref(), entry, width).await })
     }
 
     /// A listed feed book's file and the name to import it under.

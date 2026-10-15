@@ -25,6 +25,10 @@ create table if not exists book(
     -- synchronized register. NULL for a book never opened.
     read_at         INTEGER,
     added_at        INTEGER,
+    -- Browse projection of the immutable enrichment's rating count. REAL
+    -- preserves the existing f64 ordering across the full u64 count range.
+    -- NULL means unknown; zero is a known count.
+    popularity_rating_count REAL CHECK(popularity_rating_count >= 0),
     deleted_at      INTEGER,
     trash_origin_dir_id TEXT,
     -- Navigation belongs to this immutable file identity and is read as a
@@ -168,6 +172,7 @@ CREATE TABLE IF NOT EXISTS sync_projection_dirty(
 create table if not exists sync_metadata(
     singleton                   INTEGER primary key check(singleton = 1),
     replica_id                  TEXT,
+    pull_generation             TEXT,
     last_successful_sync_at     INTEGER check(last_successful_sync_at is null or last_successful_sync_at >= 0),
     last_pull_lifecycle_seq         INTEGER check(last_pull_lifecycle_seq is null or last_pull_lifecycle_seq >= 0),
     last_pull_field_seq       INTEGER check(last_pull_field_seq is null or last_pull_field_seq >= 0),

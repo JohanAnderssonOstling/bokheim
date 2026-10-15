@@ -33,9 +33,7 @@ pub(super) fn page_indicator(visible_page_range: Option<(usize, usize)>, page_co
     if first == last { format!("{}/{page_count}", first + 1) } else { format!("{}–{}/{page_count}", first + 1, last + 1) }
 }
 
-pub(super) fn progress(visible_page_range: Option<(usize, usize)>, page_count: usize) -> String {
-    let Some((_, last)) = visible_page_range else {
-        return "0%".to_owned();
-    };
-    format!("{:.0}%", crate::shell::persistence::StoredPosition::pdf_page(last, 0.0, page_count).percent())
+pub(super) fn progress(visible_page_range: Option<(usize, usize)>, page_count: usize) -> (f32, String) {
+    let percent = visible_page_range.map_or(0.0, |(_, last)| crate::shell::persistence::StoredPosition::pdf_page(last, 0.0, page_count).percent());
+    ((percent / 100.0).clamp(0.0, 1.0), format!("{percent:.0}%"))
 }

@@ -66,7 +66,7 @@ impl MutationWriter {
 }
 
 /// How long a position update waits for a quieter one to supersede it.
-const POSITION_DEBOUNCE: Duration = Duration::from_millis(250);
+const POSITION_DEBOUNCE: Duration = Duration::from_secs(1);
 
 /// Coalesces a stream of reading-position updates into occasional library
 /// writes.
@@ -140,9 +140,8 @@ impl StoredPosition {
         Self { position: book_model::pdf_page_position_reading_position(page_index as u32, offset), percent: book_model::pdf_page_progress(page_index, page_count), entry: Some(book_model::pdf_toc_target(page_index)) }
     }
 
-    /// The entry the position was resolved to, once the reader knows it. An
-    /// EPUB learns this from a separate renderer event than the one that moves
-    /// the position, so it is attached rather than constructed.
+    /// The entry resolved from this reading position. It may become available
+    /// after the publication table of contents finishes loading.
     pub(crate) fn within(mut self, entry: Option<String>) -> Self {
         self.entry = entry;
         self

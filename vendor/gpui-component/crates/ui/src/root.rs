@@ -4,6 +4,8 @@ use crate::{
     focus_trap::FocusTrapManager,
     input::{Copy, InputState},
     native_menu::FallbackMenuOverlay,
+    menu::PopupMenu,
+    popover::PopoverState,
     notification::{Notification, NotificationList},
     sheet::Sheet,
     text::{SelectionScope, TextSelectionController, TextViewState, WindowTextSelection},
@@ -36,6 +38,8 @@ pub(crate) fn init(cx: &mut App) {
 ///
 /// It is used to manage the Sheet, Dialog, and Notification.
 pub struct Root {
+    active_menus: Vec<(WeakEntity<PopupMenu>, usize, bool)>,
+    active_popovers: Vec<(WeakEntity<PopoverState>, usize, bool)>,
     style: StyleRefinement,
     view: AnyView,
     pub(crate) active_sheet: Option<ActiveSheet>,
@@ -99,6 +103,8 @@ impl Root {
 
         Self {
             style: StyleRefinement::default(),
+            active_menus: Vec::new(),
+            active_popovers: Vec::new(),
             view: view.into(),
             active_sheet: None,
             active_dialogs: Vec::new(),
@@ -151,6 +157,81 @@ impl Root {
             .expect("The window root view should be of type `ui::Root`.")
             .unwrap()
             .read(cx)
+    }
+
+    /// Visible modal state owns native Back even when focus is absent or
+    /// belongs to a page underneath it. Cancellation keeps its normal veto
+    /// and close callbacks, and runs after any current entity lease is released.
+    pub fn dismiss_active_overlay(window: &mut Window, cx: &mut App) -> bool {
+        let Some(root) = window.root::<Self>().flatten() else { return false };
+        let (depth, sheet_open) = {
+            let root = root.read(cx);
+            (root.active_dialogs.len(), root.active_sheet.is_some())
+        };
+        let menu = root.read(cx).active_menus.iter().rev().filter(|(_, layer, sheet)| *layer == depth && *sheet == sheet_open)
+            .filter_map(|(menu, _, _)| menu.upgrade()).find(|menu| menu.read(cx).is_open());
+        if let Some(mut menu) = menu {
+            while let Some(child) = menu.read(cx).active_submenu() { menu = child; }
+            window.defer(cx, move |window, cx| {
+                menu.update(cx, |menu, cx| { if menu.is_open() { menu.cancel_from_back(window, cx); } });
+            });
+            return true;
+        }
+        let popover = root.read(cx).active_popovers.iter().rev().filter(|(_, layer, sheet)| *layer == depth && *sheet == sheet_open)
+            .filter_map(|(popover, _, _)| popover.upgrade()).find(|popover| popover.read(cx).is_open());
+        if let Some(popover) = popover {
+            window.defer(cx, move |window, cx| popover.update(cx, |popover, cx| popover.dismiss(window, cx)));
+            return true;
+        }
+        let dialog = root.read(cx).active_dialogs.last().cloned();
+        if let Some(active) = dialog {
+            window.defer(cx, move |window, cx| {
+                let same_root = window.root::<Self>().flatten().is_some_and(|current| current == root);
+                if same_root && root.read(cx).active_dialogs.last().is_some_and(|current| current.focus_handle == active.focus_handle) {
+                    let dialog = (active.builder)(Dialog::new(cx), window, cx);
+                    dialog.cancel_from_back(window, cx);
+                }
+            });
+            return true;
+        }
+        let sheet = root.read(cx).active_sheet.clone();
+        if let Some(active) = sheet {
+            window.defer(cx, move |window, cx| {
+                let same_root = window.root::<Self>().flatten().is_some_and(|current| current == root);
+                let still_active = same_root && {
+                    let root = root.read(cx);
+                    root.active_dialogs.is_empty() && root.active_sheet.as_ref().is_some_and(|current| current.focus_handle == active.focus_handle)
+                };
+                if still_active {
+                    let sheet = (active.builder)(Sheet::new(window, cx), window, cx);
+                    sheet.cancel_from_back(window, cx);
+                }
+            });
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn register_menu(menu: WeakEntity<PopupMenu>, window: &Window, cx: &mut App) {
+        if let Some(root) = window.root::<Self>().flatten() {
+            root.update(cx, |root, _| {
+                root.active_menus.retain(|(entry, _, _)| entry.upgrade().is_some());
+                if !root.active_menus.iter().any(|(entry, _, _)| entry == &menu) {
+                    root.active_menus.push((menu, root.active_dialogs.len(), root.active_sheet.is_some()));
+                }
+            });
+        }
+    }
+
+    pub(crate) fn register_popover(popover: WeakEntity<PopoverState>, window: &Window, cx: &mut App) {
+        if let Some(root) = window.root::<Self>().flatten() {
+            root.update(cx, |root, _| {
+                root.active_popovers.retain(|(entry, _, _)| entry.upgrade().is_some());
+                if !root.active_popovers.iter().any(|(entry, _, _)| entry == &popover) {
+                    root.active_popovers.push((popover, root.active_dialogs.len(), root.active_sheet.is_some()));
+                }
+            });
+        }
     }
 
     // Render Notification layer.
@@ -273,7 +354,9 @@ impl Root {
             }
         }
 
-        Some(div().children(dialogs))
+        // Dialogs must paint above application overlays, including the library
+        // switcher (priority 1) and its context menu (priority 3).
+        Some(gpui::deferred(div().children(dialogs)).with_priority(4))
     }
 
     pub fn open_dialog<F>(&mut self, build: F, window: &mut Window, cx: &mut Context<'_, Root>)
@@ -585,7 +668,9 @@ impl Render for Root {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::TestAppContext;
+    use crate::WindowExt;
+    use gpui::{Modifiers, StatefulInteractiveElement as _, TestAppContext, anchored, deferred, point, px};
+    use std::{cell::Cell, time::Duration};
 
     struct TestView;
 
@@ -593,6 +678,58 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             div()
         }
+    }
+
+    struct DialogLayerTestView;
+
+    impl Render for DialogLayerTestView {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            // The dialog layer lives in application content, while the library
+            // switcher and its menu paint in deferred layers above that content.
+            div().size_full().child(
+                div()
+                    .ml(px(80.))
+                    .mt(px(60.))
+                    .w(px(200.))
+                    .h(px(160.))
+                    .child(
+                        deferred(anchored().position(point(px(0.), px(0.))).child(div().id("switcher").flex_none().w(window.viewport_size().width).h(window.viewport_size().height).occlude())).with_priority(1),
+                    )
+                    .children(Root::render_dialog_layer(window, cx)),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn dialog_layer_centers_in_window_above_switcher(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|_| DialogLayerTestView);
+            Root::new(view, window, cx).bordered(false)
+        });
+        let clicked = Rc::new(Cell::new(false));
+        let clicked_dialog = clicked.clone();
+        cx.update(|window, cx| {
+            window.open_alert_dialog(cx, move |dialog, _, _| {
+                let clicked = clicked_dialog.clone();
+                dialog.min_h_0().gap_0().p_0().footer(div().id("confirmation").debug_selector(|| "confirmation".into()).w_full().h(px(80.)).on_click(move |_, _, _| clicked.set(true)))
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let dialog = cx.debug_bounds("confirmation").unwrap();
+        let viewport = cx.update(|window, _| window.viewport_size());
+        assert!((dialog.center().x - viewport.width / 2.).abs() <= px(1.));
+        assert!((dialog.center().y - viewport.height / 2.).abs() <= px(1.));
+        cx.simulate_click(dialog.center(), Modifiers::default());
+        assert!(clicked.get(), "the dialog must receive clicks above the switcher");
     }
 
     #[gpui::test]

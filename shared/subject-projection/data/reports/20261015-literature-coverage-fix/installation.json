@@ -1,0 +1,8 @@
+{
+  "release_id": 248,
+  "installed": "/home/johan/.local/share/bokheim/catalog.sqlite3",
+  "published": "/home/johan/.local/share/bokheim/catalog/published/releases/248",
+  "backup": "/home/johan/.local/share/bokheim/catalog/audits/literature-code-coverage-20261015/installed-before-247.sqlite3",
+  "installed_at": "2026-10-14T22:28:00.980139+00:00",
+  "snapshot_sha256": "b1473ebb98843f35593a293f1afe85068aa00de1fed23c753812d72dfe206717"
+}

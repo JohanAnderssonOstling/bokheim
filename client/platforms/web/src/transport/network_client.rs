@@ -1,16 +1,19 @@
 //! Fetch-compatible client for HTTP requests executed by the coordinator.
-use super::{field, object, Port};
+use super::{Port, field, object};
 use futures_channel::oneshot;
 use js_sys::{Array, Function, Promise, Reflect, Uint8Array};
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{OnceCell, RefCell},
+    rc::Rc,
+};
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures::{future_to_promise, JsFuture};
+use wasm_bindgen_futures::{JsFuture, future_to_promise};
 use web_sys::{AbortSignal, DedicatedWorkerGlobalScope, MessageChannel, ReadableStreamDefaultController, Request};
 
 thread_local! {
     static ACTIVE: super::pending::Pending<Rc<Pending>> = Default::default();
     static ROUTE: RefCell<Option<Rc<Route>>> = const { RefCell::new(None) };
-    static NATIVE_FETCH: RefCell<Option<Function>> = const { RefCell::new(None) };
+    static NATIVE_FETCH: OnceCell<Function> = const { OnceCell::new() };
 }
 struct Pending {
     id: u64,
@@ -138,11 +141,7 @@ fn construct(name: &str, args: &Array) -> Result<JsValue, JsValue> {
     Reflect::construct(&constructor, args).map(Into::into)
 }
 fn check_abort(signal: &AbortSignal) -> Result<(), JsValue> {
-    if signal.aborted() {
-        Err(signal.reason())
-    } else {
-        Ok(())
-    }
+    if signal.aborted() { Err(signal.reason()) } else { Ok(()) }
 }
 async fn fetch(input: JsValue, init: JsValue) -> Result<JsValue, JsValue> {
     let request: Request = construct("Request", &Array::of2(&input, &init))?.unchecked_into();
@@ -226,7 +225,7 @@ pub fn fail_all(error: JsValue) {
     ACTIVE.with(|active| active.fail_all(|state| state.fail(error.clone())));
 }
 pub fn install() -> Result<(), JsValue> {
-    if NATIVE_FETCH.with(|slot| slot.borrow().is_some()) {
+    if NATIVE_FETCH.with(|slot| slot.get().is_some()) {
         return Ok(());
     }
     let native = Reflect::get(&js_sys::global(), &"fetch".into())?.dyn_into::<Function>()?;
@@ -235,12 +234,12 @@ pub fn install() -> Result<(), JsValue> {
         return Err(js_sys::Error::new("Could not install backend fetch bridge").into());
     }
     let _ = fetch.into_js_value();
-    NATIVE_FETCH.with(|slot| *slot.borrow_mut() = Some(native));
+    NATIVE_FETCH.with(|slot| assert!(slot.set(native).is_ok(), "backend fetch bridge already installed"));
     Ok(())
 }
 
 pub fn native_fetch() -> Result<Function, JsValue> {
-    match NATIVE_FETCH.with(|slot| slot.borrow().clone()) {
+    match NATIVE_FETCH.with(|slot| slot.get().cloned()) {
         Some(fetch) => Ok(fetch),
         None => Reflect::get(&js_sys::global(), &"fetch".into())?.dyn_into(),
     }

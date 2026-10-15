@@ -4,6 +4,8 @@
 use url::Url;
 
 mod browse;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod browser;
 mod fetch;
 mod opds1;
 mod opds2;
@@ -11,8 +13,8 @@ mod pages;
 mod publications;
 
 pub use browse::{browse, feed_title};
-pub use publications::{cover, description, download};
 pub use opds1::opensearch_template;
+pub use publications::{buy_page, card_cover, cover, description, download, evict_cover_cache};
 
 /// One page of a feed: what browsing it shows.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -68,6 +70,8 @@ pub struct Publication {
     /// What Add to library downloads; none for a book offered only to buy,
     /// borrow or behind DRM.
     pub download: Option<Download>,
+    /// The store page that sells the book, opened in the store window.
+    pub buy: Option<Url>,
     /// The cover image, the full-size one where the feed offers both.
     pub cover: Option<Url>,
     /// The feed's description of the book, as HTML or plain text; empty
@@ -78,17 +82,27 @@ pub struct Publication {
 pub const EPUB: &str = "application/epub+zip";
 pub const PDF: &str = "application/pdf";
 
+/// Whether acquisition links' media types, their own and those of their
+/// indirect acquisitions, name a DRM license file the book comes through:
+/// Adobe's or Readium LCP's. A book offered only so is not listed, as
+/// Bokheim cannot read it.
+fn protected<'a>(types: impl IntoIterator<Item = &'a str>) -> bool {
+    types.into_iter().any(|kind| matches!(bare_media_type(kind).as_str(), "application/vnd.adobe.adept+xml" | "application/vnd.readium.lcp.license.v1.0+json"))
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Download {
     pub href: Url,
     /// `EPUB` or `PDF`.
     pub media_type: &'static str,
+    /// The file's size in bytes, where the feed gives it.
+    pub length: Option<u64>,
 }
 
-/// The open-access link to download among `links` (href, media type): an
-/// EPUB, else a PDF.
-fn choose_download(links: Vec<(Url, String)>) -> Option<Download> {
-    [EPUB, PDF].into_iter().find_map(|media_type| links.iter().find(|(_, kind)| bare_media_type(kind) == media_type).map(|(href, _)| Download { href: href.clone(), media_type }))
+/// The open-access link to download among `links` (href, media type,
+/// length): an EPUB, else a PDF.
+fn choose_download(links: Vec<(Url, String, Option<u64>)>) -> Option<Download> {
+    [EPUB, PDF].into_iter().find_map(|media_type| links.iter().find(|(_, kind, _)| bare_media_type(kind) == media_type).map(|(href, _, length)| Download { href: href.clone(), media_type, length: *length }))
 }
 
 /// How a feed is searched: a URL template with `{searchTerms}`, or an
@@ -132,11 +146,26 @@ pub fn parse(bytes: &[u8], content_type: Option<&str>, base: &Url) -> Result<Fee
         Some(value) if value.contains("xml") => false,
         _ => bytes.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{'),
     };
-    if json {
-        opds2::parse(bytes, base)
-    } else {
-        opds1::parse(std::str::from_utf8(bytes).map_err(|_| "the feed is not UTF-8")?, base)
+    let mut feed = if json { opds2::parse(bytes, base)? } else { opds1::parse(std::str::from_utf8(bytes).map_err(|_| "the feed is not UTF-8")?, base)? };
+    merge_editions(&mut feed.publications);
+    Ok(feed)
+}
+
+/// Editions of one book listed as entries of their own, such as Project
+/// Gutenberg's with and without images, are one card: the edition with the
+/// largest download, which is the complete one. Entries are the same book
+/// when their titles and authors are.
+fn merge_editions(publications: &mut Vec<Publication>) {
+    let size = |publication: &Publication| publication.download.as_ref().and_then(|download| download.length).unwrap_or(0);
+    let mut kept: Vec<Publication> = Vec::with_capacity(publications.len());
+    for publication in publications.drain(..) {
+        match kept.iter_mut().find(|other| !publication.title.is_empty() && other.title == publication.title && other.authors == publication.authors) {
+            Some(other) if size(&publication) > size(other) => *other = publication,
+            Some(_) => {}
+            None => kept.push(publication),
+        }
     }
+    *publications = kept;
 }
 
 /// The media type without parameters, lowercase.

@@ -3,6 +3,7 @@
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::time::Duration;
+use sync_common::SyncGeneration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DatabasePoolConfig {
@@ -73,7 +74,7 @@ pub async fn connect_configured(database_url: &str, config: DatabasePoolConfig) 
         .map(PostgresDatabase::from_pool)
 }
 
-const SCHEMA_VERSION: i32 = 10;
+const SCHEMA_VERSION: i32 = 11;
 
 /// Applies the initial schema to an empty database. Files are
 /// applied in filename order -- `01_core.sql` before the domain files that
@@ -127,6 +128,9 @@ pub async fn upgrade_existing(database: &PostgresDatabase) -> Result<(), sqlx::E
     if version <= 9 {
         sqlx::raw_sql(include_str!("../schema/migrations/opds_feeds.sql")).execute(&mut *transaction).await?;
     }
+    if version <= 10 {
+        sqlx::raw_sql(include_str!("../schema/migrations/sync_history.sql")).execute(&mut *transaction).await?;
+    }
     transaction.commit().await?;
     Ok(())
 }
@@ -138,6 +142,14 @@ pub async fn verify_schema(database: &PostgresDatabase) -> Result<(), sqlx::Erro
         return Err(sqlx::Error::Protocol(format!("unsupported sync schema version {version}; expected {SCHEMA_VERSION}")));
     }
     Ok(())
+}
+
+/// Invalidates pre-restore checkpoints without changing state or authored
+/// versions. Run after restoring/replacing history, before resuming traffic.
+pub async fn rotate_sync_generation(database: &PostgresDatabase) -> Result<SyncGeneration, sqlx::Error> {
+    verify_schema(database).await?;
+    let generation = SyncGeneration::new_v4();
+    sqlx::query_scalar("UPDATE sync_history SET generation=$1 WHERE singleton=true RETURNING generation").bind(generation).fetch_one(database.pool()).await
 }
 
 pub async fn check_ready(database: &PostgresDatabase) -> Result<(), sqlx::Error> {

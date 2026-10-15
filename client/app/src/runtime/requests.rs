@@ -58,9 +58,17 @@ pub enum AppCommand {
     RemoveOpdsFeed { id: library_model::OpdsSourceId },
     SetOpdsCredentials { id: library_model::OpdsSourceId, credentials: library_model::OpdsCredentials },
     BrowseOpds { query: library_model::LibraryBrowseQuery },
-    OpdsCover { source: library_model::OpdsSourceId, entry: library_model::CardKey, width: u32 },
+    OpdsCover { source: library_model::OpdsSourceId, entry: library_model::CardKey, width: u32, #[serde(default)] card: bool },
+    EvictCoverCaches,
     DownloadOpdsBook { source: library_model::OpdsSourceId, entry: library_model::CardKey },
     OpdsDescription { entry: library_model::CardKey },
+    BuyOpdsBook { entry: library_model::CardKey, library_id: LibraryId },
+    StoresAvailable,
+    Stores,
+    AddStore { url: String, name: Option<String> },
+    RemoveStore { id: library_model::StoreId },
+    OpenStore { id: library_model::StoreId, library_id: LibraryId },
+    OpenBrowser { library_id: LibraryId },
 }
 
 impl AppCommand {
@@ -149,7 +157,13 @@ pub(super) async fn dispatch_request(backend: AppBackend, command: AppCommand) -
         #[cfg(not(target_arch = "wasm32"))]
         AppCommand::BrowseOpds { query } => reply(backend.browse_opds(query).await.map_err(message)?)?,
         #[cfg(not(target_arch = "wasm32"))]
-        AppCommand::OpdsCover { source, entry, width } => reply(backend.opds_cover(source, entry, width).await.map_err(message)?.map(serde_bytes::ByteBuf::from))?,
+        AppCommand::OpdsCover { source, entry, width, card } => reply(backend.opds_cover(source, entry, width, card).await.map_err(message)?.map(serde_bytes::ByteBuf::from))?,
+        AppCommand::EvictCoverCaches => {
+            library_backend::evict_catalog_cover_caches();
+            #[cfg(not(target_arch = "wasm32"))]
+            library_opds::evict_cover_cache();
+            reply(())?
+        }
         #[cfg(not(target_arch = "wasm32"))]
         AppCommand::DownloadOpdsBook { source, entry } => {
             let (file_name, bytes) = backend.download_opds_book(source, entry).await.map_err(message)?;
@@ -157,12 +171,42 @@ pub(super) async fn dispatch_request(backend: AppBackend, command: AppCommand) -
         }
         #[cfg(not(target_arch = "wasm32"))]
         AppCommand::OpdsDescription { entry } => reply(library_opds::description(entry).map_err(BackendError::message)?)?,
-        // The browser lists no OPDS feeds: most servers refuse a browser's requests.
+        #[cfg(not(target_arch = "wasm32"))]
+        AppCommand::BuyOpdsBook { entry, library_id } => reply(backend.buy_opds_book(entry, library_id).await.map_err(message)?)?,
+        // Asks the helper once, so it waits on a process start.
+        #[cfg(not(target_arch = "wasm32"))]
+        AppCommand::StoresAvailable => reply(client_platform_runtime::executor::run_blocking(library_opds::browser::stores_available).await.map_err(message)?)?,
+        #[cfg(not(target_arch = "wasm32"))]
+        AppCommand::Stores => reply(backend.stores().map_err(message)?)?,
+        #[cfg(not(target_arch = "wasm32"))]
+        AppCommand::AddStore { url, name } => reply(backend.add_store(url, name).map_err(message)?)?,
+        #[cfg(not(target_arch = "wasm32"))]
+        AppCommand::RemoveStore { id } => reply(backend.remove_store(id).map_err(message)?)?,
+        #[cfg(not(target_arch = "wasm32"))]
+        AppCommand::OpenStore { id, library_id } => reply(backend.open_store(id, library_id).await.map_err(message)?)?,
+        #[cfg(not(target_arch = "wasm32"))]
+        AppCommand::OpenBrowser { library_id } => reply(backend.open_browser(library_id).await.map_err(message)?)?,
+        // The browser lists no OPDS feeds: most servers refuse a browser's
+        // requests. Nor stores, which open in the desktop's webview.
         #[cfg(target_arch = "wasm32")]
         AppCommand::OpdsFeeds => reply(Vec::<library_model::OpdsSource>::new())?,
         #[cfg(target_arch = "wasm32")]
-        AppCommand::AddOpdsFeed { .. } | AppCommand::RemoveOpdsFeed { .. } | AppCommand::SetOpdsCredentials { .. } | AppCommand::BrowseOpds { .. } | AppCommand::OpdsCover { .. } | AppCommand::DownloadOpdsBook { .. } | AppCommand::OpdsDescription { .. } => {
+        AppCommand::StoresAvailable => reply(false)?,
+        #[cfg(target_arch = "wasm32")]
+        AppCommand::Stores => reply(Vec::<library_model::Store>::new())?,
+        #[cfg(target_arch = "wasm32")]
+        AppCommand::AddOpdsFeed { .. }
+        | AppCommand::RemoveOpdsFeed { .. }
+        | AppCommand::SetOpdsCredentials { .. }
+        | AppCommand::BrowseOpds { .. }
+        | AppCommand::OpdsCover { .. }
+        | AppCommand::DownloadOpdsBook { .. }
+        | AppCommand::OpdsDescription { .. } => {
             return Err(BackendError::message("OPDS feeds are not available in the browser"));
+        }
+        #[cfg(target_arch = "wasm32")]
+        AppCommand::BuyOpdsBook { .. } | AppCommand::AddStore { .. } | AppCommand::RemoveStore { .. } | AppCommand::OpenStore { .. } | AppCommand::OpenBrowser { .. } => {
+            return Err(BackendError::message("stores are not available in the browser"));
         }
 
         // Routed above; listed so a new settings command cannot be missed.

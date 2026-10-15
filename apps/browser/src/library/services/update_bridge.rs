@@ -4,7 +4,7 @@ use library_backend::{BookDownloadStatus, DownloadState};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use gpui::{AppContext, Context, Entity, EventEmitter, Task};
+use gpui::{AppContext, Context, Entity, EventEmitter, Subscription, Task, WeakEntity};
 use library_backend::LibraryClient;
 use library_model::LibraryUpdate;
 use sync_common::{ContentHash, LibraryId};
@@ -17,6 +17,7 @@ pub(crate) struct LibraryCoversChanged {
     content_hashes: Rc<[ContentHash]>,
 }
 
+/// Library-wide invalidation, emitted only when file availability changes.
 pub(crate) struct LibraryDownloadChanged {
     pub(crate) status: BookDownloadStatus,
 }
@@ -27,9 +28,20 @@ impl LibraryCoversChanged {
     }
 }
 
+pub(super) struct BookDownload;
+
+impl EventEmitter<DownloadState> for BookDownload {}
+
+/// Keeps the per-book event source alive only while a view subscribes.
+pub(crate) struct DownloadSubscription {
+    _subscription: Subscription,
+    _source: Entity<BookDownload>,
+}
+
 pub(crate) struct LibraryUpdateBridge {
     library: LibraryClient,
     downloads: HashMap<ContentHash, DownloadState>,
+    download_events: HashMap<ContentHash, WeakEntity<BookDownload>>,
     scanning: Option<bool>,
     importing: bool,
     book_count: Option<usize>,
@@ -77,7 +89,7 @@ impl LibraryUpdateBridge {
                 cx.defer_update(bridge.clone(), move |bridge, cx| bridge.apply(batch, cx));
             }
         });
-        let mut bridge = Self { library, downloads: HashMap::new(), scanning: None, importing: false, book_count: None, _updates: task, _book_count_request: None };
+        let mut bridge = Self { library, downloads: HashMap::new(), download_events: HashMap::new(), scanning: None, importing: false, book_count: None, _updates: task, _book_count_request: None };
         bridge.refresh_book_count(cx);
         bridge
     }
@@ -108,6 +120,19 @@ impl LibraryUpdateBridge {
         self.downloads.get(&content_hash).cloned()
     }
 
+    pub(super) fn download_source(&mut self, content_hash: ContentHash, cx: &mut Context<Self>) -> Entity<BookDownload> {
+        self.download_events.get(&content_hash).and_then(WeakEntity::upgrade).unwrap_or_else(|| {
+            let source = cx.new(|_| BookDownload);
+            self.download_events.insert(content_hash, source.downgrade());
+            source
+        })
+    }
+
+    pub(super) fn subscribe_download<T: 'static>(source: Entity<BookDownload>, cx: &mut Context<T>, mut callback: impl FnMut(&mut T, &DownloadState, &mut Context<T>) + 'static) -> DownloadSubscription {
+        let subscription = cx.subscribe(&source, move |view, _, state, cx| callback(view, state, cx));
+        DownloadSubscription { _subscription: subscription, _source: source }
+    }
+
     /// Book rows bootstrap the display only once. From then on the update
     /// stream owns the state; a later browse response cannot roll progress or
     /// completion back to an older row snapshot.
@@ -128,8 +153,21 @@ impl LibraryUpdateBridge {
             return;
         }
         self.downloads.insert(content_hash, state.clone());
-        cx.emit(LibraryDownloadChanged { status: BookDownloadStatus::new(content_hash, state) });
-        cx.notify();
+        if let Some(source) = self.download_events.get(&content_hash).and_then(WeakEntity::upgrade) {
+            source.update(cx, |_, cx| cx.emit(state.clone()));
+        } else {
+            self.download_events.remove(&content_hash);
+        }
+        // Only navigators need library-wide availability invalidation. Progress
+        // goes directly to subscribers of this book, without visiting other cards.
+        if matches!(state, DownloadState::Downloaded | DownloadState::NotDownloaded) {
+            cx.emit(LibraryDownloadChanged { status: BookDownloadStatus::new(content_hash, state) });
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_download_state_for_test(&mut self, content_hash: ContentHash, state: DownloadState, cx: &mut Context<Self>) {
+        self.set_download_state(content_hash, state, cx);
     }
 
     fn refresh_book_count(&mut self, cx: &mut Context<Self>) {
@@ -196,6 +234,82 @@ impl UpdateBatch {
                 self.downloads.push(status);
             }
             LibraryUpdate::Scanning(scanning) => self.scanning = Some(scanning),
+            // Catalog imports own their progress subscriptions and toasts.
+            LibraryUpdate::CatalogImport { .. } => {}
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32"), not(feature = "kobo")))]
+mod tests {
+    use super::*;
+    use crate::navigation::LibrarySession;
+    use gpui::TestAppContext;
+    use library_model::DownloadProgress;
+    use std::cell::{Cell, RefCell};
+
+    #[gpui::test]
+    async fn download_progress_emits_precise_events_without_notifying_session_observers(cx: &mut TestAppContext) {
+        let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (_directory, _session, library) = LibrarySession::test_context(cx).await;
+        let updates = library.updates();
+        cx.condition(&updates, |updates, _| !updates.loading()).await;
+        let notifications = Rc::new(Cell::new(0));
+        let observed = notifications.clone();
+        let _observation = cx.update(|cx| cx.observe(&updates, move |_, _| observed.set(observed.get() + 1)));
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let received = events.clone();
+        let _subscription = cx.update(|cx| cx.subscribe(&updates, move |_, event: &LibraryDownloadChanged, _| received.borrow_mut().push(event.status.clone())));
+        let hash = ContentHash::from_bytes([9; 32]);
+        let states = [DownloadState::Queued, DownloadState::Downloading(DownloadProgress::new(0.5).unwrap()), DownloadState::Downloaded];
+        for state in states.iter().cloned() {
+            updates.update(cx, |updates, cx| updates.set_download_state(hash, state, cx));
+        }
+        assert_eq!(notifications.get(), 0);
+        assert_eq!(*events.borrow(), vec![BookDownloadStatus::new(hash, DownloadState::Downloaded)]);
+        updates.update(cx, |updates, cx| updates.apply(UpdateBatch { scanning: Some(true), ..Default::default() }, cx));
+        assert_eq!(notifications.get(), 1, "scan/loading changes must still reach the session");
+    }
+
+    struct DownloadListener {
+        states: Vec<DownloadState>,
+        subscription: Option<DownloadSubscription>,
+    }
+
+    #[gpui::test]
+    async fn downloads_dispatch_only_to_owners_of_the_matching_book(cx: &mut TestAppContext) {
+        let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (_directory, _session, library) = LibrarySession::test_context(cx).await;
+        let updates = library.updates();
+        let hash = ContentHash::from_bytes([11; 32]);
+        let other_hash = ContentHash::from_bytes([12; 32]);
+        let mut listen = |hash| cx.new(|cx| DownloadListener { states: Vec::new(), subscription: Some(library.subscribe_download(hash, cx, |listener: &mut DownloadListener, state, _| listener.states.push(state.clone()))) });
+        let card = listen(hash);
+        let detail = listen(hash);
+        let unrelated = listen(other_hash);
+        let states = [DownloadState::Queued, DownloadState::Downloading(DownloadProgress::ZERO), DownloadState::Downloading(DownloadProgress::new(0.5).unwrap()), DownloadState::Downloaded];
+        for state in states.iter().cloned() {
+            updates.update(cx, |updates, cx| updates.set_download_state(hash, state.clone(), cx));
+            updates.update(cx, |updates, cx| updates.set_download_state(hash, state, cx));
+        }
+        cx.update(|cx| {
+            assert_eq!(card.read(cx).states, states);
+            assert_eq!(detail.read(cx).states, states);
+            assert!(unrelated.read(cx).states.is_empty(), "unrelated callbacks must never run");
+        });
+        updates.update(cx, |updates, _| {
+            updates.track_download(hash, false, true);
+            assert_eq!(updates.download_state(hash), Some(DownloadState::Downloaded), "stale rows must not replace stream state");
+        });
+        card.update(cx, |listener, _| {
+            listener.subscription.take();
+        });
+        cx.update(|cx| assert!(updates.read(cx).download_events[&hash].upgrade().is_some(), "the detail still owns the subscription"));
+        detail.update(cx, |listener, _| {
+            listener.subscription.take();
+        });
+        cx.update(|cx| assert!(updates.read(cx).download_events[&hash].upgrade().is_none(), "the bridge must not keep abandoned event sources alive"));
+        updates.update(cx, |updates, cx| updates.set_download_state(hash, DownloadState::NotDownloaded, cx));
+        cx.update(|cx| assert!(!updates.read(cx).download_events.contains_key(&hash)));
     }
 }

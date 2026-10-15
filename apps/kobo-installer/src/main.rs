@@ -1,6 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-use bokheim_kobo_installer::{KoboDevice, detect_kobo_devices, install_archive_with_progress, validate_archive};
+use bokheim_kobo_installer::{DeviceDetection, DeviceMonitor, EjectOutcome, KoboDevice, detect_kobo_devices, eject_device, install_archive_with_progress, validate_archive};
 use gpui::{App, Bounds, Context, FontWeight, SharedString, Task, Window, WindowBounds, WindowOptions, div, prelude::*, px, relative, rgb, size};
 use semver::Version;
 use serde::Deserialize;
@@ -28,15 +28,17 @@ const PROGRESS: u32 = 0xe1e6d8;
 
 enum InstallerStatus {
     Monitoring,
+    MountFailed(String),
     Ready,
     NickelMenuMissing,
     Installing,
-    Installed,
+    Installed(String),
     Failed(String),
 }
 
 struct Installer {
     devices: Vec<KoboDevice>,
+    mount_error: Option<String>,
     status: InstallerStatus,
     _monitor: Task<()>,
     _update_check: Task<()>,
@@ -109,14 +111,9 @@ fn fetch_newer_package() -> Result<Option<Vec<u8>>, String> {
 impl Installer {
     fn new(cx: &mut Context<Self>) -> Self {
         let monitor = cx.spawn(async move |this, cx| {
+            let mut device_monitor = DeviceMonitor::default();
             loop {
                 let installing = match this.update(cx, |this, cx| {
-                    let detected = detect_kobo_devices();
-                    if detected != this.devices && !matches!(this.status, InstallerStatus::Installing) {
-                        this.devices = detected;
-                        this.status = this.detected_status();
-                        cx.notify();
-                    }
                     let installing = matches!(this.status, InstallerStatus::Installing);
                     if installing {
                         cx.notify();
@@ -126,6 +123,28 @@ impl Installer {
                     Ok(installing) => installing,
                     Err(_) => break,
                 };
+                if !installing {
+                    let (updated_monitor, detected) = cx.background_executor().spawn(async move {
+                        let detected = if PREVIEW_ONLY {
+                            DeviceDetection { devices: detect_kobo_devices(), mount_error: None }
+                        } else {
+                            device_monitor.poll()
+                        };
+                        (device_monitor, detected)
+                    }).await;
+                    device_monitor = updated_monitor;
+                    if this.update(cx, |this, cx| {
+                        if matches!(this.status, InstallerStatus::Installing) { return; }
+                        if detected.devices != this.devices || detected.mount_error != this.mount_error {
+                            this.devices = detected.devices;
+                            this.mount_error = detected.mount_error;
+                            if !matches!(this.status, InstallerStatus::Installed(_)) || !this.devices.is_empty() {
+                                this.status = this.detected_status();
+                            }
+                            cx.notify();
+                        }
+                    }).is_err() { break; }
+                }
                 cx.background_executor().timer(if installing { Duration::from_millis(50) } else { Duration::from_secs(1) }).await;
             }
         });
@@ -141,14 +160,17 @@ impl Installer {
             });
         });
 
-        Self { devices: Vec::new(), status: InstallerStatus::Monitoring, _monitor: monitor, _update_check: update_check, install_task: None, package: KoboPackage::Embedded, checking_for_update: true, progress: Arc::default() }
+        Self { devices: Vec::new(), mount_error: None, status: InstallerStatus::Monitoring, _monitor: monitor, _update_check: update_check, install_task: None, package: KoboPackage::Embedded, checking_for_update: true, progress: Arc::default() }
     }
 
     fn detected_status(&self) -> InstallerStatus {
         match self.devices.first() {
             Some(device) if device.nickel_menu_detected() => InstallerStatus::Ready,
             Some(_) => InstallerStatus::NickelMenuMissing,
-            None => InstallerStatus::Monitoring,
+            None => match &self.mount_error {
+                Some(error) => InstallerStatus::MountFailed(error.clone()),
+                None => InstallerStatus::Monitoring,
+            },
         }
     }
 
@@ -172,13 +194,19 @@ impl Installer {
                 progress.total_bytes.store(update.total_bytes, Ordering::Relaxed);
                 progress.copied_bytes.store(update.copied_bytes, Ordering::Relaxed);
             })
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+            let message = match eject_device(&root) {
+                Ok(EjectOutcome::Ejected) => "Installed and ejected. Disconnect the Kobo, let it restart, then tap Bokheim.".to_owned(),
+                Ok(EjectOutcome::Unmounted) => "Installed and safely unmounted. Disconnect the Kobo, let it restart, then tap Bokheim.".to_owned(),
+                Err(error) => format!("Installed. Safely eject the Kobo manually. Automatic eject failed: {error}"),
+            };
+            Ok::<_, String>(message)
         });
         self.install_task = Some(cx.spawn(async move |this, cx| {
             let result = installation.await;
             let _ = this.update(cx, |this, cx| {
                 this.status = match result {
-                    Ok(_) => InstallerStatus::Installed,
+                    Ok(message) => InstallerStatus::Installed(message),
                     Err(error) => InstallerStatus::Failed(error),
                 };
                 this.install_task = None;
@@ -190,6 +218,7 @@ impl Installer {
     fn status_text(&self) -> SharedString {
         match &self.status {
             InstallerStatus::Monitoring => "Connect your Kobo via USB".into(),
+            InstallerStatus::MountFailed(_) => "Kobo detected — mount required".into(),
             InstallerStatus::Ready | InstallerStatus::NickelMenuMissing => "✓  Kobo eReader".into(),
             InstallerStatus::Installing => {
                 let total = self.progress.total_bytes.load(Ordering::Relaxed);
@@ -197,8 +226,16 @@ impl Installer {
                 let percent = if total == 0 { 0 } else { (copied.saturating_mul(100) / total).min(100) };
                 format!("Installing Bokheim — {percent}%").into()
             }
-            InstallerStatus::Installed => "✓  Installed. Find Bokheim Kobo in NickelMenu.".into(),
-            InstallerStatus::Failed(error) => format!("Installation failed: {error}").into(),
+            InstallerStatus::Installed(_) => "✓  Installed".into(),
+            InstallerStatus::Failed(_) => "Installation failed".into(),
+        }
+    }
+
+    fn status_detail(&self) -> Option<SharedString> {
+        match &self.status {
+            InstallerStatus::MountFailed(error) => Some(format!("Mount the Kobo manually. Automatic mount failed: {error}").into()),
+            InstallerStatus::Installed(message) | InstallerStatus::Failed(message) => Some(message.clone().into()),
+            _ => None,
         }
     }
 }
@@ -207,8 +244,8 @@ impl gpui::Render for Installer {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let can_install = !PREVIEW_ONLY && !self.devices.is_empty() && !self.checking_for_update && !matches!(self.status, InstallerStatus::Installing);
         let status_color = match self.status {
-            InstallerStatus::Failed(_) => rgb(DANGER),
-            InstallerStatus::Ready | InstallerStatus::NickelMenuMissing | InstallerStatus::Installed => rgb(ACCENT),
+            InstallerStatus::Failed(_) | InstallerStatus::MountFailed(_) => rgb(DANGER),
+            InstallerStatus::Ready | InstallerStatus::NickelMenuMissing | InstallerStatus::Installed(_) => rgb(ACCENT),
             InstallerStatus::Monitoring | InstallerStatus::Installing => rgb(MUTED),
         };
         let progress = match self.status {
@@ -217,7 +254,7 @@ impl gpui::Render for Installer {
                 let copied = self.progress.copied_bytes.load(Ordering::Relaxed);
                 if total == 0 { 0.0 } else { (copied as f32 / total as f32).clamp(0.0, 1.0) }
             }
-            InstallerStatus::Installed => 1.0,
+            InstallerStatus::Installed(_) => 1.0,
             _ => 0.0,
         };
         let install_button = div()
@@ -251,7 +288,7 @@ impl gpui::Render for Installer {
             .justify_center()
             .bg(rgb(SURFACE))
             .text_color(rgb(TEXT))
-            .font_family("Libertinus Serif")
+            .font_family("NV Garamond")
             .child(div().mb_4().text_size(px(21.0)).font_weight(FontWeight::BOLD).child("Bokheim Kobo Installation"))
             .child(
                 div()
@@ -276,15 +313,21 @@ impl gpui::Render for Installer {
                     )
                     .child(install_button.flex_none()),
             )
+            .when_some(self.status_detail(), |view, detail| view.child(div().mt_3().text_size(px(13.0)).text_color(status_color).child(detail)))
     }
 }
 
 fn main() {
     gpui_platform::application().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(520.0), px(190.0)), cx);
+        let bounds = Bounds::centered(None, size(px(520.0), px(260.0)), cx);
         cx.text_system()
-            .add_fonts(vec![Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/LibertinusSerif-Regular.otf")), Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/LibertinusSerif-Bold.otf")), Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/LibertinusSerif-Italic.otf")), Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/BodoniModa-Regular.ttf")), Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/BodoniModa-SemiBold.ttf"))])
-            .expect("failed to register embedded Libertinus fonts");
+            .add_fonts(vec![
+                Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf")),
+                Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/NV_Garamond-Bold.ttf")),
+                Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/NV_Garamond-Italic.ttf")),
+                Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/NV_Garamond-BoldItalic.ttf")),
+            ])
+            .expect("failed to register embedded interface fonts");
         cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar: Some(gpui::TitlebarOptions { title: Some("Bokheim".into()), ..Default::default() }), focus: true, ..Default::default() }, |_, cx| {
             cx.new(Installer::new)
         })

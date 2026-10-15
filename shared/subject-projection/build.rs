@@ -1,7 +1,9 @@
-use subject_taxonomy::{runtime_index as runtime, taxonomy_reader};
+use flate2::{write::GzEncoder, Compression};
 use rusqlite::Connection;
 use std::env;
+use std::io::Write;
 use std::path::PathBuf;
+use subject_taxonomy::{runtime_index as runtime, taxonomy_reader};
 
 const CLIENT_TAXONOMY_DEPTH: u8 = 2;
 
@@ -11,8 +13,10 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=data/unified-taxonomy-v2.sqlite3");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_AUTHORITATIVE_TAXONOMY");
+    println!("cargo:rerun-if-env-changed=BOKHEIM_BUILD_TAXONOMY_SQLITE");
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"));
-    let database_path = manifest_dir.join("data/unified-taxonomy-v2.sqlite3");
+    let database_path = env::var_os("BOKHEIM_BUILD_TAXONOMY_SQLITE").map(PathBuf::from).unwrap_or_else(|| manifest_dir.join("data/unified-taxonomy-v2.sqlite3"));
+    println!("cargo:rerun-if-changed={}", database_path.display());
     let connection = Connection::open(&database_path).unwrap_or_else(|error| panic!("failed to open {}: {error}", database_path.display()));
     let integrity: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0)).expect("check taxonomy database integrity");
     assert_eq!(integrity, "ok", "taxonomy database failed its integrity check");
@@ -25,6 +29,24 @@ fn main() {
     assert!(published_release_id > 0, "taxonomy release identifier must be positive");
 
     let output_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set"));
+    let bisac_csv = std::fs::read_to_string(manifest_dir.join("data/bisac-2021.csv")).expect("read BISAC reference");
+    let bisac_revision = blake3::hash(format!("bisac-reference-v1\n{bisac_csv}").as_bytes()).to_hex().to_string();
+    let bisac_path = output_dir.join("bisac-reference.sqlite3");
+    if bisac_path.exists() {
+        std::fs::remove_file(&bisac_path).expect("replace generated BISAC reference");
+    }
+    subject_taxonomy::bisac_reference::compile(&bisac_path, &bisac_csv, &bisac_revision).expect("compile BISAC reference");
+    let bisac_image = std::fs::read(&bisac_path).expect("read compiled BISAC reference");
+    let bisac_digest = blake3::hash(&bisac_image).to_hex().to_string();
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+    encoder.write_all(&bisac_image).expect("compress BISAC reference");
+    let compressed = encoder.finish().expect("finish BISAC reference compression");
+    let compressed_digest = blake3::hash(&compressed).to_hex().to_string();
+    std::fs::write(output_dir.join("bisac-reference.sqlite3.gz"), compressed).expect("write compressed BISAC reference");
+    std::fs::write(output_dir.join("bisac-reference-gzip-digest.txt"), compressed_digest).expect("write compressed BISAC digest");
+    std::fs::write(output_dir.join("bisac-reference-size.rs"), format!("{}usize", bisac_image.len())).expect("write BISAC reference size");
+    std::fs::write(output_dir.join("bisac-reference-revision.txt"), bisac_revision).expect("write BISAC revision");
+    std::fs::write(output_dir.join("bisac-reference-digest.txt"), bisac_digest).expect("write BISAC digest");
     let client_database_path = output_dir.join("unified-taxonomy-client-v2.sqlite3");
     if env::var_os("CARGO_FEATURE_AUTHORITATIVE_TAXONOMY").is_some() {
         std::fs::copy(&database_path, &client_database_path).unwrap_or_else(|error| panic!("failed to copy authoritative taxonomy to {}: {error}", client_database_path.display()));
@@ -35,13 +57,30 @@ fn main() {
     // Route IDs identify occurrences, so a concept can retain several parents.
     client_connection.execute_batch(include_str!("src/route_storage.sql")).expect("compile curated navigation routes");
     // Route and lookup index construction can leave partially filled pages.
-    // Compact the final image before it is embedded in client binaries.
+    // Compact the final database before packaging it as a standalone resource.
     client_connection.execute_batch("VACUUM;").expect("compact bundled taxonomy database");
     let concepts = taxonomy_reader::read_unified_taxonomy_connection(&client_connection, "build-time taxonomy").expect("read bundled taxonomy");
-    let matcher = runtime::build_runtime(concepts, false).expect("compile bundled taxonomy matcher");
+    let matcher = runtime::build_runtime(concepts).expect("compile bundled taxonomy matcher");
     let encoded = bincode::serde::encode_to_vec(&matcher, bincode::config::standard()).expect("encode taxonomy matcher");
     std::fs::write(output_dir.join("unified-taxonomy-matcher.bin"), encoded).expect("write taxonomy matcher");
     std::fs::write(output_dir.join("unified-taxonomy-revision-id.txt"), &matcher.revision_id).expect("write taxonomy revision");
+    std::fs::write(output_dir.join("taxonomy-release.rs"), format!("{published_release_id}u64")).expect("write taxonomy release");
+    let image = std::fs::read(&client_database_path).expect("read prepared taxonomy");
+    let digest = blake3::hash(&image).to_hex().to_string();
+    std::fs::write(output_dir.join("taxonomy.digest"), &digest).expect("write taxonomy digest");
+    if env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("wasm32") {
+        // OUT_DIR is <profile>/build/<crate>/out. Cargo-run and all native
+        // packagers use the same prepared database beside the executable.
+        let profile = output_dir.ancestors().nth(3).expect("Cargo profile directory");
+        for (name, bytes) in [("taxonomy.sqlite3", image.as_slice()), ("taxonomy.digest", digest.as_bytes())] {
+            let destination = profile.join(name);
+            if std::fs::read(&destination).ok().as_deref() != Some(bytes) {
+                let staging = profile.join(format!(".{name}.{}", std::process::id()));
+                std::fs::write(&staging, bytes).expect("stage bundled taxonomy resource");
+                std::fs::rename(staging, destination).expect("publish bundled taxonomy resource");
+            }
+        }
+    }
 }
 
 fn build_client_database(authority_path: &PathBuf, client_path: &PathBuf) {

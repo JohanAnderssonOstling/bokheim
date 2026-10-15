@@ -5,13 +5,14 @@
 
 use crate::BackendError;
 use crate::asset_store::AssetStore;
+use client_platform_runtime::startup_profile::StartupProfile;
 #[cfg(target_arch = "wasm32")]
 use crate::library::discovery::LibraryScanner;
 use crate::notification_interest::NotificationInterest;
 use library_database::Database;
 use library_sync::{LibrarySync, LibrarySyncConfig};
 use std::sync::Arc;
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::Cell, rc::Rc};
 
 use super::LibrarySession;
 
@@ -23,12 +24,14 @@ pub struct LibraryRuntimeSpec {
 
 impl LibrarySession {
     pub(crate) fn open(spec: LibraryRuntimeSpec) -> Result<Self, BackendError> {
+        let mut profile = StartupProfile::for_library("library_resources", spec.config.id);
         let default_sync_server_url = spec.config.default_sync_server_url.clone();
         let metadata_server_url = spec.config.metadata_server_url.clone();
         // One connection per library file, owned by the session. Sync and
         // asset workers borrow it through the owner; their futures stay
         // local to their tasks, so no sharing primitive is needed.
         let database = Arc::new(Database::open(&spec.config.database_locator)?);
+        profile.mark("database_open");
         let cpu = {
             cpu_host::HOST
                 .get_or_init(|| -> std::sync::Arc<dyn cpu_host::CpuHost> {
@@ -43,11 +46,15 @@ impl LibrarySession {
                 })
                 .clone()
         };
+        profile.mark("cpu_host");
         let assets = open_assets(&spec.config.root, &spec.config.database_locator, &cpu)?;
+        profile.mark("asset_store");
         // `Database::open` already configured the connection (pragmas, sync
         // functions) internally.
         let replica_id = database.initialize_library()?;
+        profile.mark("database_initialize");
         database.set_remote_library_name(&spec.config.display_name)?;
+        profile.mark("remote_name");
         let (sync_wake, sync_requests) = library_runtime::scheduler::SyncScheduler::new();
         let (asset_wake, asset_requests) = library_runtime::scheduler::SyncScheduler::new();
         let (file_wake, file_requests) = library_runtime::scheduler::SyncScheduler::new();
@@ -59,7 +66,9 @@ impl LibrarySession {
 
             LibraryScanner { root: root.to_owned() }
         };
+        profile.mark("events_and_scanner");
         database.set_asset_storage_policy(spec.config.asset_storage_enabled, spec.config.reset_cloud_presence)?;
+        profile.mark("storage_policy");
         let sync = Arc::new(LibrarySync::new(LibrarySyncConfig {
             database: database.clone(),
             account: Some(spec.account.clone()),
@@ -75,13 +84,20 @@ impl LibrarySession {
             cpu: cpu.clone(),
         }));
         sync.set_asset_storage_enabled(spec.config.asset_storage_enabled);
+        profile.mark("sync_construct");
+        let client = library_enrichment::MetadataClient::new(&metadata_server_url).map_err(BackendError::operation)?;
+        profile.mark("metadata_client");
+        let covers = library_enrichment::CoverClient::new(spec.config.google_books_api_key.clone());
+        profile.mark("cover_client");
         let enrichment = library_enrichment::LibraryEnrichment {
             database: database.clone(),
             assets: assets.clone(),
-            client: library_enrichment::MetadataClient::new(&metadata_server_url).map_err(BackendError::operation)?,
+            client,
+            covers,
             cpu: cpu.clone(),
             events: events.clone(),
         };
+        profile.mark("enrichment_construct");
         let placement = Arc::new(library_placement::LibraryPlacement { database: database.clone(), assets: assets.clone(), events: events.clone() });
         let import = library_import::LibraryImport {
             database: database.clone(),
@@ -101,14 +117,18 @@ impl LibrarySession {
             import,
             sync,
             events,
-            coordination: RefCell::new(coordination),
+            initial_coordination: Some(coordination),
+            directory_imports: Cell::new(0),
             requests: Some(super::workers::WorkerRequests { sync: sync_requests, assets: asset_requests, files: file_requests, enrichment: enrichment_requests }),
             runtime: Rc::new(crate::library::session::LibraryRuntime::default()),
             account: spec.account,
             _scanner: Arc::new(scanner),
             cpu,
             filesystem_scanning: std::cell::Cell::new(false),
+            #[cfg(not(target_arch = "wasm32"))]
+            torrents: super::torrents::TorrentService::default(),
         };
+        profile.mark("remaining_resources");
         Ok(library)
     }
 }

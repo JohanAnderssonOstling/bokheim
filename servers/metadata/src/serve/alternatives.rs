@@ -37,7 +37,7 @@ pub fn queries(base: &EditionIdentityQuery, readings: &[TitleReading]) -> Vec<Ed
 
 /// Apply the same subject-verification paths used by normal title lookup.
 pub fn classifications(query: &EditionIdentityQuery, resource_isbns: &[String], result: &metadata_contract::EditionIdentityResult) -> Vec<metadata_contract::Classification> {
-    if result.query_id != query.query_id || result.candidates_truncated {
+    if result.query_id != query.query_id {
         return vec![];
     }
     let verified = crate::serve::related_isbn::verified_isbns(query, resource_isbns, result);
@@ -49,6 +49,22 @@ pub fn classifications(query: &EditionIdentityQuery, resource_isbns: &[String], 
     }
     if let Some(record) = result.authority_subjects.as_ref().and_then(|m| metadata_contract::authority_subjects::classification_record(query, m)) {
         return record.classifications;
+    }
+    if result.status == metadata_contract::EditionIdentityStatus::Matched {
+        if let Some(mut matched) = result.matched.clone().filter(|matched| matched.matched_publisher && matched.matched_book_year) {
+            matched.classifications.retain(|code| code.source == metadata_contract::ClassificationSource::ExactEdition);
+            if let Some(record) = crate::serve::resolution::classification_only_fallback(query, matched) {
+                return record.classifications;
+            }
+        }
+    }
+    if let Some(consensus) = &result.sibling_subjects {
+        // Consensus was computed before display truncation. Empty means
+        // abstain; the old candidate union must not undo that decision.
+        return consensus.classifications.clone();
+    }
+    if result.candidates_truncated {
+        return vec![];
     }
     let codes = metadata_contract::subject_consensus::resolved_classifications(query, result);
     if !codes.is_empty() {

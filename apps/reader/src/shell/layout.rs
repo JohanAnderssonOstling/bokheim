@@ -16,13 +16,15 @@ pub(super) fn clamp_reader_sidebar_width(width: f32) -> f32 {
 
 struct ReaderSplitState {
     width: f32,
+    /// The rail's width, which sits left of the resizable panel.
+    rail: f32,
     bounds: Bounds<Pixels>,
     resizing: bool,
 }
 
 impl ReaderSplitState {
     fn new(width: f32) -> Self {
-        Self { width: clamp_reader_sidebar_width(width), bounds: Bounds::default(), resizing: false }
+        Self { width: clamp_reader_sidebar_width(width), rail: 0.0, bounds: Bounds::default(), resizing: false }
     }
 }
 
@@ -34,7 +36,9 @@ impl ReaderSplitState {
 struct ReaderSplit {
     sidebar: AnyElement,
     document: AnyElement,
+    /// The panel's width; the rail is added on top of it.
     width: f32,
+    rail: f32,
 }
 
 impl RenderOnce for ReaderSplit {
@@ -42,12 +46,14 @@ impl RenderOnce for ReaderSplit {
         let theme = browser_theme(cx);
         let requested_width = clamp_reader_sidebar_width(self.width);
         let state = window.use_keyed_state("reader-layout", cx, |_, _| ReaderSplitState::new(requested_width));
+        let rail = self.rail;
         state.update(cx, |state, _| {
+            state.rail = rail;
             if !state.resizing && (state.width - requested_width).abs() >= 0.5 {
                 state.width = requested_width;
             }
         });
-        let width = state.read(cx).width;
+        let width = state.read(cx).width + rail;
 
         let start_resize = state.clone();
         let track_bounds = state.clone();
@@ -119,7 +125,8 @@ impl Element for ReaderSplitEventSink {
                 return;
             }
             let bounds = move_state.read(cx).bounds;
-            let width = clamp_reader_sidebar_width(f32::from(event.position.x - bounds.left()));
+            let rail = move_state.read(cx).rail;
+            let width = clamp_reader_sidebar_width(f32::from(event.position.x - bounds.left()) - rail);
             move_state.update(cx, |state, cx| {
                 if (state.width - width).abs() >= 0.5 {
                     state.width = width;
@@ -143,6 +150,6 @@ impl Element for ReaderSplitEventSink {
     }
 }
 
-pub(super) fn reader_split(sidebar: impl IntoElement, document: impl IntoElement, sidebar_width: f32) -> impl IntoElement {
-    ReaderSplit { sidebar: sidebar.into_any_element(), document: document.into_any_element(), width: sidebar_width }
+pub(super) fn reader_split(sidebar: impl IntoElement, document: impl IntoElement, sidebar_width: f32, rail: f32) -> impl IntoElement {
+    ReaderSplit { sidebar: sidebar.into_any_element(), document: document.into_any_element(), width: sidebar_width, rail }
 }

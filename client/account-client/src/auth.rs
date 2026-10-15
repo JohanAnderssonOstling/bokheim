@@ -1,66 +1,42 @@
+use crate::http::{decode_response, post_empty, request, with_body};
 use crate::session::{AuthError, Session};
 use crate::Url;
 use account_contract::{AuthResponse, EmailRequest, EmailVerificationRequest, LoginRequest, PublicRegistrationRequest, RefreshRequest, ResetPasswordRequest};
-use reqwest::{header, Client};
+use reqwest::Method;
 use serde::Serialize;
-use sync_common::transport as wire;
 
-fn session_from_response(server_url: Url, body: AuthResponse) -> Result<Session, AuthError> {
-    Session::try_new_with_tokens(server_url, body.user_id, body.email, body.token, Some(body.expires_at), Some(body.refresh_token), Some(body.refresh_expires_at))
-}
-
-async fn post_auth(url: Url, request: &impl Serialize) -> Result<AuthResponse, AuthError> {
-    let response = Client::builder().build()?.post(url).header(header::ACCEPT, wire::MEDIA_TYPE).header(header::CONTENT_TYPE, wire::MEDIA_TYPE).body(wire::encode(request)?).send().await?.error_for_status()?;
-    Ok(wire::decode(&response.bytes().await?, wire::MAX_DECODED_RESPONSE_BYTES)?)
+async fn post_auth(server_url: &Url, endpoint: &str, body: &impl Serialize) -> Result<Session, AuthError> {
+    let response: AuthResponse = decode_response(with_body(request(server_url, Method::POST, endpoint)?, body)?).await?;
+    Session::try_new_with_tokens(server_url.clone(), response.user_id, response.email, response.token, Some(response.expires_at), Some(response.refresh_token), Some(response.refresh_expires_at))
 }
 
 pub async fn login(server_url: &Url, email: &str, password: &str) -> Result<Session, AuthError> {
-    let response = post_auth(server_url.join("api/auth/login")?, &LoginRequest { email: email.to_owned(), password: password.to_owned() }).await?;
-    session_from_response(server_url.clone(), response)
+    post_auth(server_url, "api/auth/login", &LoginRequest { email: email.to_owned(), password: password.to_owned() }).await
 }
 
 pub async fn request_public_registration(server_url: &Url, email: &str, password: &str) -> Result<(), AuthError> {
-    let request = PublicRegistrationRequest { email: email.to_owned(), password: password.to_owned() };
-    Client::builder().build()?.post(server_url.join("api/auth/register")?).header(header::ACCEPT, wire::MEDIA_TYPE).header(header::CONTENT_TYPE, wire::MEDIA_TYPE).body(wire::encode(&request)?).send().await?.error_for_status()?;
-    Ok(())
+    post_empty(server_url, "api/auth/register", &PublicRegistrationRequest { email: email.to_owned(), password: password.to_owned() }).await
 }
 
 pub async fn resend_verification(server_url: &Url, email: &str) -> Result<(), AuthError> {
-    let request = EmailRequest { email: email.to_owned() };
-    Client::builder().build()?.post(server_url.join("api/auth/resend-verification")?).header(header::ACCEPT, wire::MEDIA_TYPE).header(header::CONTENT_TYPE, wire::MEDIA_TYPE).body(wire::encode(&request)?).send().await?.error_for_status()?;
-    Ok(())
+    post_empty(server_url, "api/auth/resend-verification", &EmailRequest { email: email.to_owned() }).await
 }
 
 pub async fn verify_email(server_url: &Url, email: &str, pin: &str) -> Result<Session, AuthError> {
-    let response = post_auth(server_url.join("api/auth/verify-email")?, &EmailVerificationRequest { email: email.to_owned(), pin: pin.to_owned() }).await?;
-    session_from_response(server_url.clone(), response)
+    post_auth(server_url, "api/auth/verify-email", &EmailVerificationRequest { email: email.to_owned(), pin: pin.to_owned() }).await
 }
 
 pub async fn request_password_reset(server_url: &Url, email: &str) -> Result<(), AuthError> {
-    let request = EmailRequest { email: email.to_owned() };
-    Client::builder()
-        .build()?
-        .post(server_url.join("api/auth/request-password-reset")?)
-        .header(header::ACCEPT, wire::MEDIA_TYPE)
-        .header(header::CONTENT_TYPE, wire::MEDIA_TYPE)
-        .body(wire::encode(&request)?)
-        .send()
-        .await?
-        .error_for_status()?;
-    Ok(())
+    post_empty(server_url, "api/auth/request-password-reset", &EmailRequest { email: email.to_owned() }).await
 }
 
 pub async fn reset_password(server_url: &Url, token: &str, new_password: &str) -> Result<(), AuthError> {
-    let request = ResetPasswordRequest { token: token.to_owned(), new_password: new_password.to_owned() };
-    Client::builder().build()?.post(server_url.join("api/auth/reset-password")?).header(header::ACCEPT, wire::MEDIA_TYPE).header(header::CONTENT_TYPE, wire::MEDIA_TYPE).body(wire::encode(&request)?).send().await?.error_for_status()?;
-    Ok(())
+    post_empty(server_url, "api/auth/reset-password", &ResetPasswordRequest { token: token.to_owned(), new_password: new_password.to_owned() }).await
 }
 
 pub async fn logout(session: &Session) -> Result<(), AuthError> {
     let refresh_token = session.refresh_token().ok_or_else(|| AuthError::InvalidData("session has no refresh token; sign in again".to_owned()))?;
-    let request = RefreshRequest { refresh_token: refresh_token.to_owned() };
-    Client::builder().build()?.post(session.server_url().join("api/auth/logout")?).header(header::ACCEPT, wire::MEDIA_TYPE).header(header::CONTENT_TYPE, wire::MEDIA_TYPE).body(wire::encode(&request)?).send().await?.error_for_status()?;
-    Ok(())
+    post_empty(session.server_url(), "api/auth/logout", &RefreshRequest { refresh_token: refresh_token.to_owned() }).await
 }
 
 pub async fn refresh_session(session: &Session) -> Result<Session, AuthError> {
@@ -68,8 +44,7 @@ pub async fn refresh_session(session: &Session) -> Result<Session, AuthError> {
     if session.refresh_expires_within(0) {
         return Err(AuthError::InvalidData("refresh token has expired; sign in again".to_owned()));
     }
-    let response = post_auth(session.server_url().join("api/auth/refresh")?, &RefreshRequest { refresh_token: refresh_token.to_owned() }).await?;
-    let refreshed = session_from_response(session.server_url().clone(), response)?;
+    let refreshed = post_auth(session.server_url(), "api/auth/refresh", &RefreshRequest { refresh_token: refresh_token.to_owned() }).await?;
     if refreshed.user_id() != session.user_id() {
         return Err(AuthError::InvalidData("refreshed session changed authenticated user".to_owned()));
     }

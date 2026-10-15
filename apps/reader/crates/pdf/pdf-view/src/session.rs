@@ -33,5 +33,9 @@ mod native {
         pub async fn search(&self, pages: std::ops::Range<usize>, query: String) -> PdfResult<Vec<PdfSearchHit>> {
             self.0.search_pages(pages, query).await
         }
+
+        pub async fn reading_fragments(&self, page: usize) -> PdfResult<Vec<pdf_reader_core::PdfReadingFragment>> {
+            self.0.reading_fragments(page).await
+        }
     }
 }

@@ -1,0 +1,9 @@
+{
+  "release_id": 248,
+  "format_version": 8,
+  "artifact": {
+    "url": "https://catalogs.bokheim.se/releases/248/catalog.sqlite3",
+    "bytes": 10821632,
+    "sha256": "b1473ebb98843f35593a293f1afe85068aa00de1fed23c753812d72dfe206717"
+  }
+}

@@ -1,5 +1,5 @@
 use crate::PerformanceTrace;
-use crate::api::{send, SyncCredentials};
+use crate::api::{encoded_request, send, SyncCredentials};
 use crate::state::SyncRequestError;
 use std::{error::Error, fmt};
 use sync_common::api::assets::{
@@ -128,18 +128,10 @@ pub async fn upload_book_stream(
 pub async fn upload_thumbnail_batch(client: &reqwest::Client, server_url: &reqwest::Url, access_token: &str, library_id: &LibraryId, thumbnails: Vec<ThumbnailBatchEntry>) -> Result<(), AssetResponseError> {
     let mut trace = PerformanceTrace::new("thumbnail_http_upload", "encode");
     log::debug!(target: "sync_performance", "trace_id={} library_id={} thumbnails={}", trace.id(), library_id, thumbnails.len());
-    let body = sync_common::transport::encode(&ThumbnailBatchUploadRequest { thumbnails }).map_err(AssetResponseError::Wire)?;
+    let request =
+        encoded_request(client.put(thumbnail_batch_endpoint(server_url, library_id)).header("x-bokheim-trace-id", trace.id()).bearer_auth(access_token), &ThumbnailBatchUploadRequest { thumbnails }).map_err(AssetResponseError::Wire)?;
     trace.phase("send_body_wait_response");
-    let response = client
-        .put(thumbnail_batch_endpoint(server_url, library_id))
-        .header("x-bokheim-trace-id", trace.id())
-        .bearer_auth(access_token)
-        .header(reqwest::header::ACCEPT, sync_common::transport::MEDIA_TYPE)
-        .header(reqwest::header::CONTENT_TYPE, sync_common::transport::MEDIA_TYPE)
-        .body(body)
-        .send()
-        .await
-        .map_err(AssetResponseError::Retryable)?;
+    let response = request.send().await.map_err(AssetResponseError::Retryable)?;
     log::debug!(target: "sync_performance", "trace_id={} http_status={}", trace.id(), response.status().as_u16());
     let result = validate_streaming_asset_response(response);
     trace.finish(result.is_ok());
@@ -148,17 +140,72 @@ pub async fn upload_thumbnail_batch(client: &reqwest::Client, server_url: &reqwe
 }
 
 pub async fn download_thumbnail_batch(client: &reqwest::Client, server_url: &reqwest::Url, access_token: &str, library_id: &LibraryId, content_hashes: Vec<ContentHash>) -> Result<ThumbnailBatchDownloadResponse, AssetResponseError> {
-    let body = sync_common::transport::encode(&ThumbnailBatchDownloadRequest { content_hashes }).map_err(AssetResponseError::Wire)?;
-    let response = client
-        .post(thumbnail_batch_endpoint(server_url, library_id))
-        .bearer_auth(access_token)
-        .header(reqwest::header::ACCEPT, sync_common::transport::MEDIA_TYPE)
-        .header(reqwest::header::CONTENT_TYPE, sync_common::transport::MEDIA_TYPE)
-        .body(body)
-        .send()
-        .await
-        .map_err(AssetResponseError::Retryable)?;
+    let request = encoded_request(client.post(thumbnail_batch_endpoint(server_url, library_id)).bearer_auth(access_token), &ThumbnailBatchDownloadRequest { content_hashes }).map_err(AssetResponseError::Wire)?;
+    let response = request.send().await.map_err(AssetResponseError::Retryable)?;
     let response = validate_streaming_asset_response(response)?;
-    let bytes = response.bytes().await.map_err(AssetResponseError::Retryable)?;
+    let bytes = crate::body::read(response, sync_common::api::assets::MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES).await.map_err(AssetResponseError::from)?;
     sync_common::transport::decode(&bytes, sync_common::api::assets::MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES).map_err(AssetResponseError::Wire)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use axum::{body::{Body, Bytes}, response::Response, routing::post, Router};
+    use futures_util::StreamExt;
+    use std::{convert::Infallible, time::Duration};
+    use sync_common::{api::assets::MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES, transport::WireError};
+
+    #[tokio::test]
+    async fn thumbnail_requests_preserve_methods_headers_and_payloads() {
+        use axum::http::HeaderMap;
+        use reqwest::header;
+        use sync_common::transport as wire;
+
+        fn check_headers(headers: &HeaderMap) {
+            assert_eq!(headers.get(header::AUTHORIZATION).unwrap(), "Bearer test-token");
+            assert_eq!(headers.get(header::ACCEPT).unwrap(), wire::MEDIA_TYPE);
+            assert_eq!(headers.get(header::CONTENT_TYPE).unwrap(), wire::MEDIA_TYPE);
+        }
+        fn thumbnail() -> ThumbnailBatchEntry {
+            ThumbnailBatchEntry { content_hash: ContentHash::from_bytes([0xab; 32]), bytes: vec![0, 128, 255], browse_bytes: vec![1, 2] }
+        }
+        let app = Router::new().route(
+            "/api/libraries/:id/thumbnail-batch",
+            post(|headers: HeaderMap, body: Bytes| async move {
+                check_headers(&headers);
+                let request: ThumbnailBatchDownloadRequest = wire::decode(&body, wire::MAX_DECODED_REQUEST_BYTES).unwrap();
+                assert_eq!(request.content_hashes, vec![thumbnail().content_hash]);
+                wire::encode(&ThumbnailBatchDownloadResponse { thumbnails: vec![thumbnail()], missing: Vec::new() }).unwrap()
+            })
+            .put(|headers: HeaderMap, body: Bytes| async move {
+                check_headers(&headers);
+                assert!(headers.contains_key("x-bokheim-trace-id"));
+                let request: ThumbnailBatchUploadRequest = wire::decode(&body, wire::MAX_DECODED_REQUEST_BYTES).unwrap();
+                assert_eq!(request.thumbnails, vec![thumbnail()]);
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let library_id = LibraryId::from_u128(1);
+        upload_thumbnail_batch(&client, &origin, "test-token", &library_id, vec![thumbnail()]).await.unwrap();
+        let response = download_thumbnail_batch(&client, &origin, "test-token", &library_id, vec![thumbnail().content_hash]).await.unwrap();
+        assert_eq!(response, ThumbnailBatchDownloadResponse { thumbnails: vec![thumbnail()], missing: Vec::new() });
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn thumbnail_download_rejects_oversized_headers_before_waiting_for_the_body() {
+        let app = Router::new().route("/api/libraries/:id/thumbnail-batch", post(|| async {
+            let body = futures_util::stream::once(async { Ok::<_, Infallible>(Bytes::from_static(b"x")) }).chain(futures_util::stream::pending());
+            Response::builder().header("content-length", (MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES + 1).to_string()).body(Body::from_stream(body)).unwrap()
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let response = tokio::time::timeout(Duration::from_secs(2), download_thumbnail_batch(&reqwest::Client::new(), &origin, "test-token", &LibraryId::from_u128(1), Vec::new())).await.unwrap();
+        assert!(matches!(response, Err(AssetResponseError::Wire(WireError::TooLarge { limit })) if limit == MAX_THUMBNAIL_BATCH_DOWNLOAD_BYTES));
+        server.abort();
+    }
 }

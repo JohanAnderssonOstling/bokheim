@@ -1,7 +1,6 @@
 //! The device's enrichment lane: sends the file facts of books the metadata
-//! server hasn't answered, stores its answers, and fills missing covers from
-//! where those answers point. The server owns every lookup and merge rule;
-//! this only sends facts and stores answers.
+//! server hasn't answered and stores its bibliographic answers. Missing artwork
+//! is looked up and downloaded directly from cover providers on the device.
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -13,10 +12,12 @@ use library_database::Database;
 use library_runtime::events::LibraryEventRouter;
 
 mod client;
+mod cover_client;
 mod covers;
 mod enrich;
 
 pub use client::{MetadataClient, MetadataClientError};
+pub use cover_client::CoverClient;
 
 pub type EnrichmentResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -24,6 +25,7 @@ pub struct LibraryEnrichment {
     pub database: Arc<Database>,
     pub assets: AssetStore,
     pub client: MetadataClient,
+    pub covers: CoverClient,
     pub cpu: Arc<dyn cpu_host::CpuHost>,
     pub events: LibraryEventRouter,
 }

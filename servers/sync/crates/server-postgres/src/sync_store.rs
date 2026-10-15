@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use sync_common::StateAddress;
 use sync_common::api::libraries::{LibraryNameRequest, LibrarySummary};
-use sync_common::{ConflictRank, ContentHash, LibraryId, LibraryRevision, MAX_PULL_CHANGES, MutationRejection, MutationRejectionReason, ReplicaId, ReplicaSeq, StateDelivery, SyncCursor, UnixMillis, VersionKey, OpaquePublication};
+use sync_common::{ConflictRank, ContentHash, LibraryId, LibraryRevision, MAX_PULL_BATCH_BYTES, MAX_PULL_CHANGES, MutationRejection, MutationRejectionReason, ReplicaId, ReplicaSeq, StateDelivery, SyncCursor, SyncGeneration, UnixMillis, VersionKey, OpaquePublication};
 
 const FETCH_LIFECYCLE_PAGE_SQL: &str = include_str!("sql/sync/fetch_lifecycle_page.sql");
 const FETCH_FIELD_PAGE_SQL: &str = include_str!("sql/sync/fetch_field_page.sql");
@@ -240,6 +240,8 @@ pub(super) enum FetchChangesError {
     Database(#[from] sqlx::Error),
     #[error("client cursor is ahead of server state")]
     CursorAhead,
+    #[error("client cursor belongs to a different server history")]
+    HistoryMismatch,
     #[error("corrupt stored state at revision {revision}: {reason}")]
     CorruptStoredEvent { revision: i64, reason: &'static str },
 }
@@ -306,30 +308,51 @@ fn decode_change(row: &PgRow) -> Result<StateDelivery, FetchChangesError> {
 /// fields only at or below the lifecycle cursor, so a replica always holds a
 /// field's book before the field. Callers read `head` and both pages from one
 /// consistent view: under the library lock, or in one snapshot.
-async fn fetch_page(connection: &mut PgConnection, library: &LibraryId, since: SyncCursor, head: i64) -> Result<FetchChangesPage, FetchChangesError> {
+fn append_page_row(changes: &mut Vec<StateDelivery>, bytes_left: &mut usize, row: &PgRow) -> Result<bool, FetchChangesError> {
+    let bytes: i64 = row.try_get("row_bytes")?;
+    let bytes = usize::try_from(bytes).map_err(|_| FetchChangesError::CorruptStoredEvent { revision: row.get("server_seq"), reason: "invalid state byte length" })?;
+    if changes.len() == MAX_PULL_CHANGES || (!changes.is_empty() && bytes > *bytes_left) { return Ok(false); }
+    // Leave space for up to 1,000 push rejections and the outer envelope.
+    if bytes > sync_common::transport::MAX_DECODED_RESPONSE_BYTES - 512 * 1024 {
+        return Err(FetchChangesError::CorruptStoredEvent { revision: row.get("server_seq"), reason: "stored cell exceeds the hard response limit" });
+    }
+    changes.push(decode_change(row)?);
+    *bytes_left = bytes_left.saturating_sub(bytes);
+    Ok(true)
+}
+
+async fn fetch_page(connection: &mut PgConnection, library: &LibraryId, since: SyncCursor, head: i64, generation: SyncGeneration) -> Result<FetchChangesPage, FetchChangesError> {
     let mut changes = Vec::new();
+    let mut bytes_left = MAX_PULL_BATCH_BYTES;
     let mut next_cursor = since;
+    next_cursor.generation = Some(generation);
     let lifecycle_since = revision(since.lifecycle_revision);
     if lifecycle_since < head {
-        let rows = sqlx::query(FETCH_LIFECYCLE_PAGE_SQL).bind(library.to_string()).bind(lifecycle_since).bind(head).bind(MAX_PULL_CHANGES as i64).fetch_all(&mut *connection).await?;
-        changes = rows.iter().map(decode_change).collect::<Result<Vec<_>, _>>()?;
-        if changes.len() == MAX_PULL_CHANGES {
+        let rows = sqlx::query(FETCH_LIFECYCLE_PAGE_SQL).bind(library.to_string()).bind(lifecycle_since).bind(head).bind(MAX_PULL_CHANGES as i64 + 1).bind(bytes_left as i64).bind(true).fetch_all(&mut *connection).await?;
+        for row in &rows {
+            if !append_page_row(&mut changes, &mut bytes_left, row)? {
+                next_cursor.lifecycle_revision = changes.last().map(|change| change.revision);
+                return Ok(FetchChangesPage { changes, next_cursor, has_more: true });
+            }
             next_cursor.lifecycle_revision = changes.last().map(|change| change.revision);
-            return Ok(FetchChangesPage { changes, next_cursor, has_more: true });
         }
     }
     next_cursor.lifecycle_revision = protocol_revision(head)?;
     let field_since = revision(since.field_revision);
     if field_since < head {
         let remaining = MAX_PULL_CHANGES - changes.len();
-        let rows = sqlx::query(FETCH_FIELD_PAGE_SQL).bind(library.to_string()).bind(field_since).bind(head).bind(remaining as i64 + 1).fetch_all(&mut *connection).await?;
-        let has_more = rows.len() > remaining;
-        for row in rows.iter().take(remaining) {
-            changes.push(decode_change(row)?);
-        }
-        if has_more {
+        let query_bytes = if remaining == 0 { 0 } else { bytes_left };
+        let rows = sqlx::query(FETCH_FIELD_PAGE_SQL).bind(library.to_string()).bind(field_since).bind(head).bind(remaining as i64 + 1).bind(query_bytes as i64).bind(changes.is_empty()).fetch_all(&mut *connection).await?;
+        for row in &rows {
+            if !append_page_row(&mut changes, &mut bytes_left, row)? {
+                // A lifecycle-only non-final page ends at its actual last
+                // delivery. The next pass has a fresh byte budget for fields.
+                if let Some(last) = changes.last().filter(|row| row.state.value.address.kind == "book_lifecycle") {
+                    next_cursor.lifecycle_revision = Some(last.revision);
+                }
+                return Ok(FetchChangesPage { changes, next_cursor, has_more: true });
+            }
             next_cursor.field_revision = changes.last().map(|change| change.revision);
-            return Ok(FetchChangesPage { changes, next_cursor, has_more });
         }
     }
     next_cursor.field_revision = protocol_revision(head)?;
@@ -341,18 +364,24 @@ pub(super) async fn fetch_changes(pool: &PgPool, user: &str, library: &LibraryId
     // from hiding a book whose field this page still delivers.
     let mut transaction = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY").execute(&mut *transaction).await?;
-    let head = sqlx::query_scalar::<_, i64>(include_str!("sql/sync/get_pull_heads.sql")).bind(library.to_string()).bind(user).fetch_optional(&mut *transaction).await?;
-    let Some(head) = head else { return Ok(FetchChangesResult::Unauthorized) };
+    let head = sqlx::query_as::<_, (i64, SyncGeneration)>(include_str!("sql/sync/get_pull_heads.sql")).bind(library.to_string()).bind(user).fetch_optional(&mut *transaction).await?;
+    let Some((head, generation)) = head else { return Ok(FetchChangesResult::Unauthorized) };
+    if !since.belongs_to(generation) {
+        return Err(FetchChangesError::HistoryMismatch);
+    }
     if cursor_is_ahead(since, head) {
         return Err(FetchChangesError::CursorAhead);
     }
-    let page = fetch_page(&mut transaction, library, since, head).await?;
+    let page = fetch_page(&mut transaction, library, since, head, generation).await?;
     transaction.commit().await?;
     Ok(FetchChangesResult::Page(page))
 }
 
 pub(super) async fn validate_owned_cursor(tx: &mut Transaction<'_, Postgres>, library: &LibraryId, since: SyncCursor) -> Result<(), FetchChangesError> {
-    let head = sqlx::query_scalar(include_str!("sql/sync/validate_owned_cursor.sql")).bind(library.to_string()).fetch_one(&mut **tx).await?;
+    let (head, generation) = sqlx::query_as::<_, (i64, SyncGeneration)>(include_str!("sql/sync/validate_owned_cursor.sql")).bind(library.to_string()).fetch_one(&mut **tx).await?;
+    if !since.belongs_to(generation) {
+        return Err(FetchChangesError::HistoryMismatch);
+    }
     if cursor_is_ahead(since, head) {
         return Err(FetchChangesError::CursorAhead);
     }
@@ -360,6 +389,6 @@ pub(super) async fn validate_owned_cursor(tx: &mut Transaction<'_, Postgres>, li
 }
 
 pub(super) async fn fetch_owned_changes(tx: &mut Transaction<'_, Postgres>, library: &LibraryId, since: SyncCursor) -> Result<FetchChangesPage, FetchChangesError> {
-    let head = sqlx::query_scalar(include_str!("sql/sync/validate_owned_cursor.sql")).bind(library.to_string()).fetch_one(&mut **tx).await?;
-    fetch_page(tx, library, since, head).await
+    let (head, generation) = sqlx::query_as::<_, (i64, SyncGeneration)>(include_str!("sql/sync/validate_owned_cursor.sql")).bind(library.to_string()).fetch_one(&mut **tx).await?;
+    fetch_page(tx, library, since, head, generation).await
 }

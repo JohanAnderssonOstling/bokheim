@@ -10,6 +10,7 @@ blocking = ["reqwest/blocking"]
 native-state = ["blocking", "dep:rusqlite", "dep:fs2", "dep:zip"]
 
 [dependencies]
+client-platform-runtime = { path = "../platforms/runtime" }
 ring = "0.17"
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
@@ -20,7 +21,7 @@ update-protocol = { path = "../../shared/update-protocol" }
 rusqlite = { version = "0.40.0", features = ["bundled", "backup"], optional = true }
 fs2 = { version = "0.4", optional = true }
 zip = { workspace = true, optional = true }
-reqwest = { workspace = true, default-features = false, features = ["rustls-tls"] }
+reqwest = { workspace = true, default-features = false, features = ["rustls-tls", "gzip", "zstd"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 ring = { version = "0.17", features = ["wasm32_unknown_unknown_js"] }

@@ -3,12 +3,10 @@
 This package owns the browser application's worker topology and entry points:
 
 - `src/lib.rs`: database worker startup and application request dispatch.
-- `examples/sync_coordinator.rs`: shared coordinator entry point.
-- `src/coordinator.rs` and `src/hosts.rs`: wiring backend services to an elected browser host.
+- `examples/sync_coordinator/main.rs`: shared coordinator entry point.
+- `examples/sync_coordinator/coordinator.rs` and `hosts.rs`: wiring backend services to an elected browser host.
 - `examples/cpu_worker.rs`: CPU worker entry point.
 - Worker loader `.js` files: application bootstrap and database ownership configuration.
-- `connection.rs`: deployment identity and worker script URLs, shared with the web UI and worker probes.
-
 `client-platform-web` owns worker creation, tab election, lifetime locks, ports,
 CPU execution queues, transfer coordination, storage mechanisms, and network I/O.
 It accepts opaque payloads and callbacks and has no dependency on the backend.

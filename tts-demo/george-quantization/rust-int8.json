@@ -1,0 +1,146 @@
+{
+  "after_synthesis": {
+    "anonymous_rss_kib": 613684,
+    "peak_rss_kib": 642284,
+    "rss_kib": 642284
+  },
+  "cpu": "AMD Ryzen 7 6800HS Creator Edition",
+  "host": "Rust; standalone reader-speech example; statically linked native sherpa-onnx",
+  "limitations": [
+    "Standalone speech process; excludes reader UI and audio device",
+    "Background desktop activity was not controlled",
+    "Static Rust-linked and Python wheel native libraries may have different build configurations"
+  ],
+  "load_seconds": 1.240133121,
+  "max_num_sentences": 1,
+  "median_audio_seconds": 38.31095833333333,
+  "median_cpu_seconds": 100.14,
+  "median_seconds": 32.779802016,
+  "model": ".test-tmp/kokoro-quantization/model.int8.onnx",
+  "model_bytes": 114203756,
+  "native_git_sha1": "11afbd00",
+  "native_onnxruntime": "1.28.2",
+  "opening_sentence_seconds": 5.024177054,
+  "passage": "On 14 October, Dr. Andersson opened the old library at half past eight. \u201cAre we ready?\u201d she asked. The temperature was 12.5 degrees, but sunlight warmed the room. A reader paused beside the window, considered the unfamiliar name on the cover, and began again. Some sentences were short. Others unfolded slowly, with a quiet interruption in the middle, before arriving at their final thought. Outside, the rain had stopped. \u201cTake your time,\u201d she said. \u201cThere is another chapter tomorrow.\u201d He turned the page and continued reading, listening to the rhythm of the words and the silence between them.",
+  "phases": [
+    {
+      "anonymous_rss_kib": 632,
+      "elapsed_seconds": 4.259e-05,
+      "peak_rss_kib": 22496,
+      "phase": "before_load",
+      "rss_kib": 22496
+    },
+    {
+      "anonymous_rss_kib": 208308,
+      "elapsed_seconds": 1.240247036,
+      "peak_rss_kib": 243856,
+      "phase": "after_load",
+      "rss_kib": 235756
+    },
+    {
+      "anonymous_rss_kib": 293448,
+      "elapsed_seconds": 6.264497088,
+      "peak_rss_kib": 322032,
+      "phase": "after_opening_sentence",
+      "rss_kib": 322032
+    },
+    {
+      "anonymous_rss_kib": 416612,
+      "elapsed_seconds": 39.165929601,
+      "peak_rss_kib": 445212,
+      "phase": "first_native_audio_retained",
+      "rss_kib": 445212
+    },
+    {
+      "anonymous_rss_kib": 417060,
+      "elapsed_seconds": 39.166735247,
+      "peak_rss_kib": 445660,
+      "phase": "native_and_rust_pcm_retained",
+      "rss_kib": 445660
+    },
+    {
+      "anonymous_rss_kib": 417060,
+      "elapsed_seconds": 39.166765785,
+      "peak_rss_kib": 445660,
+      "phase": "rust_pcm_retained",
+      "rss_kib": 445660
+    },
+    {
+      "anonymous_rss_kib": 417060,
+      "elapsed_seconds": 39.1667947,
+      "peak_rss_kib": 445660,
+      "phase": "after_run_0_audio_released",
+      "rss_kib": 445660
+    },
+    {
+      "anonymous_rss_kib": 613684,
+      "elapsed_seconds": 71.947270172,
+      "peak_rss_kib": 642284,
+      "phase": "after_run_1_audio_released",
+      "rss_kib": 642284
+    },
+    {
+      "anonymous_rss_kib": 613684,
+      "elapsed_seconds": 104.746248646,
+      "peak_rss_kib": 642284,
+      "phase": "after_run_2_audio_released",
+      "rss_kib": 642284
+    },
+    {
+      "anonymous_rss_kib": 613684,
+      "elapsed_seconds": 137.249594335,
+      "peak_rss_kib": 642284,
+      "phase": "after_run_3_audio_released",
+      "rss_kib": 642284
+    },
+    {
+      "anonymous_rss_kib": 195984,
+      "elapsed_seconds": 137.373335833,
+      "peak_rss_kib": 640948,
+      "phase": "after_voice_unload",
+      "rss_kib": 224792
+    },
+    {
+      "anonymous_rss_kib": 195984,
+      "elapsed_seconds": 139.373562656,
+      "peak_rss_kib": 640948,
+      "phase": "two_seconds_after_unload",
+      "rss_kib": 224792
+    }
+  ],
+  "runs": [
+    {
+      "audio_seconds": 38.30320833333333,
+      "cpu_seconds": 100.7,
+      "run": 0,
+      "wall_seconds": 32.901323215
+    },
+    {
+      "audio_seconds": 38.309666666666665,
+      "cpu_seconds": 100.36,
+      "run": 1,
+      "wall_seconds": 32.779802016
+    },
+    {
+      "audio_seconds": 38.31095833333333,
+      "cpu_seconds": 100.14,
+      "run": 2,
+      "wall_seconds": 32.798441837
+    },
+    {
+      "audio_seconds": 38.313875,
+      "cpu_seconds": 99.66,
+      "run": 3,
+      "wall_seconds": 32.503026535000004
+    }
+  ],
+  "sherpa_onnx": "1.13.8",
+  "silence_scale": 0.2,
+  "speaker": "bm_george",
+  "speaker_id": 26,
+  "threads": 4,
+  "times_realtime": 1.168736721308858,
+  "warm_repeats": 3,
+  "peak_rss_kib": 642284,
+  "memory_metric": "Linux /proc/self/status VmRSS and highest observed VmHWM; fresh executable per model"
+}

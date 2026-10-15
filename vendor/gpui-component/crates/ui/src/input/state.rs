@@ -379,6 +379,7 @@ pub struct InputState {
     /// The maximum value for [`super::NumberInput`]. See [`Self::max`].
     pub(super) number_max: Option<f64>,
     pub(crate) scroll_handle: ScrollHandle,
+    touch_scroll_origin: Option<Point<Pixels>>,
     /// The deferred scroll offset to apply on next layout.
     pub(crate) deferred_scroll_offset: Option<Point<Pixels>>,
     /// The size of the scrollable content.
@@ -491,6 +492,7 @@ impl InputState {
             last_selected_range: None,
             last_cursor: None,
             scroll_handle: ScrollHandle::new(),
+            touch_scroll_origin: None,
             scroll_size: gpui::size(px(0.), px(0.)),
             editor_scrollbar_paddings: Cell::new(Edges {
                 top: px(0.),
@@ -1739,13 +1741,27 @@ impl InputState {
             .as_ref()
             .map(|layout| layout.line_height)
             .unwrap_or(window.line_height());
-        let delta = event.delta.pixel_delta(line_height);
+        let delta = event.delta.pixel_delta_for_viewport(line_height, self.input_bounds.size);
 
         let old_offset = self.scroll_handle.offset();
-        self.update_scroll_offset(Some(old_offset + delta), cx);
+        let swipe = window.is_page_scroll_swipe();
+        if swipe && event.touch_phase == gpui::TouchPhase::Started {
+            self.touch_scroll_origin = None;
+        }
+        let origin = if matches!(event.delta, gpui::ScrollDelta::Pages(_)) {
+            self.touch_scroll_origin.take()
+        } else {
+            None
+        };
+        self.update_scroll_offset(Some(origin.unwrap_or(old_offset) + delta), cx);
 
-        // Only stop propagation if the offset actually changed
-        if self.scroll_handle.offset() != old_offset {
+        let changed = self.scroll_handle.offset() != old_offset;
+        if swipe && changed {
+            self.touch_scroll_origin.get_or_insert(old_offset);
+        }
+        // A release settles relative to the original offset, and an owned
+        // drag must not also page the surrounding reader at its boundary.
+        if changed || origin.is_some() || (swipe && self.touch_scroll_origin.is_some()) {
             cx.stop_propagation();
         }
     }

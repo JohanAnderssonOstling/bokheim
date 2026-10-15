@@ -8,13 +8,22 @@ use serde::de::DeserializeOwned;
 use std::fmt;
 
 mod value_serializer;
+mod canonical;
+mod deserializer;
+mod serializer;
+mod size_serializer;
+mod serialization;
+#[cfg(test)]
+mod legacy_serializer;
+#[cfg(test)]
+mod compatibility_tests;
 
-pub const MEDIA_TYPE: &str = "application/vnd.bokheim+protobuf; version=28";
+pub const MEDIA_TYPE: &str = "application/vnd.bokheim+protobuf; version=29";
 pub const MEDIA_TYPE_BASE: &str = "application/vnd.bokheim+protobuf";
 pub const MAX_DECODED_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_DECODED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
-const VERSION: u32 = 28;
+const VERSION: u32 = 29;
 
 /// The protobuf protocol version written into every envelope.
 pub const fn version() -> u32 {
@@ -65,11 +74,17 @@ impl std::error::Error for WireError {}
 pub fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, WireError> {
     use prost::Message;
 
-    let value = value_serializer::to_value(value).map_err(|error| WireError::Encode(error.to_string()))?;
-    let envelope = protobuf::Envelope { version: VERSION, value: Some(protobuf_value(value)?) };
+    let value = serializer::to_value(value).map_err(|error| WireError::Encode(error.to_string()))?;
+    let envelope = protobuf::Envelope { version: VERSION, value: Some(value) };
     let mut body = Vec::with_capacity(envelope.encoded_len());
     envelope.encode(&mut body).map_err(|error| WireError::Encode(error.to_string()))?;
     Ok(body)
+}
+
+/// Exact encoded length without encoding a temporary message or copying byte
+/// payloads. Uses the same adapters and map duplicate rules as `encode`.
+pub fn encoded_len<T: Serialize + ?Sized>(value: &T) -> Result<usize, WireError> {
+    size_serializer::encoded_len(value).map_err(|error| WireError::Encode(error.to_string()))
 }
 
 /// Apply serialization adapters without encoding and reparsing an outer byte
@@ -80,20 +95,39 @@ pub fn representation<S: Serialize + ?Sized, D: DeserializeOwned>(value: &S) -> 
 }
 
 pub fn decode<T: DeserializeOwned>(body: &[u8], decoded_limit: usize) -> Result<T, WireError> {
+    decode_versions(body, decoded_limit, &[VERSION], false)
+}
+
+/// For contracts whose byte fields use `serde_bytes`. Keeps protobuf bytes
+/// compact through deserialization instead of allocating one Value per byte.
+/// The wire representation and strict version checks are unchanged.
+pub fn decode_byte_fields<T: DeserializeOwned>(body: &[u8], decoded_limit: usize) -> Result<T, WireError> {
+    decode_versions(body, decoded_limit, &[VERSION], true)
+}
+
+/// Reads opaque domain values retained by the sync relay. Protocol 29 changes
+/// cursors, not domain payloads, so version 28 values remain readable. HTTP and
+/// WebSocket envelopes must still use the strict current-version `decode`.
+pub fn decode_state<T: DeserializeOwned>(body: &[u8], decoded_limit: usize) -> Result<T, WireError> {
+    decode_versions(body, decoded_limit, &[28, VERSION], false)
+}
+
+fn decode_versions<T: DeserializeOwned>(body: &[u8], decoded_limit: usize, versions: &[u32], byte_fields: bool) -> Result<T, WireError> {
     use prost::Message;
 
     if body.len() > decoded_limit {
         return Err(WireError::TooLarge { limit: decoded_limit });
     }
     let envelope = protobuf::Envelope::decode(body).map_err(|error| WireError::Decode(error.to_string()))?;
-    if envelope.encode_to_vec() != body {
+    if !canonical::matches(&envelope, body) {
         return Err(WireError::Decode("non-canonical or trailing protobuf data".to_owned()));
     }
-    if envelope.version != VERSION {
+    if !versions.contains(&envelope.version) {
         return Err(WireError::UnsupportedVersion(envelope.version));
     }
-    let value = domain_value(envelope.value.ok_or(WireError::InvalidHeader)?)?;
-    T::deserialize(value).map_err(|error| WireError::Decode(error.to_string()))
+    let value = envelope.value.ok_or(WireError::InvalidHeader)?;
+    deserializer::validate(&value)?;
+    T::deserialize(deserializer::Deserializer { value, byte_fields }).map_err(|error| WireError::Decode(error.to_string()))
 }
 
 fn protobuf_value(value: serde_value::Value) -> Result<protobuf::Value, WireError> {
@@ -133,7 +167,7 @@ fn protobuf_value(value: serde_value::Value) -> Result<protobuf::Value, WireErro
     Ok(protobuf::Value { kind: Some(kind) })
 }
 
-fn domain_value(value: protobuf::Value) -> Result<serde_value::Value, WireError> {
+fn domain_value(value: protobuf::Value, byte_fields: bool) -> Result<serde_value::Value, WireError> {
     use protobuf::value::Kind;
     use serde_value::Value;
 
@@ -148,10 +182,13 @@ fn domain_value(value: protobuf::Value) -> Result<serde_value::Value, WireError>
         Kind::CharValue(value) => Value::Char(char::from_u32(value).ok_or_else(|| WireError::Decode(format!("invalid protobuf character value {value}")))?),
         Kind::StringValue(value) => Value::String(value),
         Kind::Unit(_) => Value::Unit,
-        Kind::OptionValue(value) => Value::Option(value.value.map(|value| domain_value(*value).map(Box::new)).transpose()?),
-        Kind::NewtypeValue(value) => Value::Newtype(Box::new(domain_value(*value)?)),
-        Kind::Sequence(value) => Value::Seq(value.values.into_iter().map(domain_value).collect::<Result<_, _>>()?),
-        Kind::Map(value) => Value::Map(value.entries.into_iter().map(|entry| Ok((domain_value(entry.key.ok_or(WireError::InvalidHeader)?)?, domain_value(entry.value.ok_or(WireError::InvalidHeader)?)?))).collect::<Result<_, WireError>>()?),
+        Kind::OptionValue(value) => Value::Option(value.value.map(|value| domain_value(*value, byte_fields).map(Box::new)).transpose()?),
+        Kind::NewtypeValue(value) => Value::Newtype(Box::new(domain_value(*value, byte_fields)?)),
+        Kind::Sequence(value) => Value::Seq(value.values.into_iter().map(|value| domain_value(value, byte_fields)).collect::<Result<_, _>>()?),
+        Kind::Map(value) => Value::Map(value.entries.into_iter().map(|entry| Ok((domain_value(entry.key.ok_or(WireError::InvalidHeader)?, byte_fields)?, domain_value(entry.value.ok_or(WireError::InvalidHeader)?, byte_fields)?))).collect::<Result<_, WireError>>()?),
+        // The established encoder also represents empty sequences as bytes.
+        // Keep those deserializable as lists (e.g. no rejections or mutations).
+        Kind::BytesValue(value) if byte_fields && !value.is_empty() => Value::Bytes(value),
         Kind::BytesValue(value) => Value::Seq(value.into_iter().map(Value::U8).collect()),
     })
 }
@@ -178,6 +215,12 @@ mod tests {
     }
 
     #[derive(Debug, Deserialize, PartialEq, Serialize)]
+    struct CompactBlob {
+        #[serde(with = "serde_bytes")]
+        bytes: Vec<u8>,
+    }
+
+    #[derive(Debug, Deserialize, PartialEq, Serialize)]
     enum NumericVariant {
         First,
         Second(u64),
@@ -189,11 +232,21 @@ mod tests {
 
     #[test]
     fn version_and_decoded_size_are_bounded() {
-        assert_eq!(version(), 28);
+        assert_eq!(version(), 29);
         let mut unsupported = encode(&example(1)).unwrap();
         unsupported[1] = (VERSION + 1) as u8;
         assert!(matches!(decode::<Example>(&unsupported, MAX_DECODED_REQUEST_BYTES), Err(WireError::UnsupportedVersion(version)) if version == VERSION + 1));
         assert_eq!(decode::<Example>(&encode(&example(1_000)).unwrap(), 32), Err(WireError::TooLarge { limit: 32 }));
+    }
+
+    #[test]
+    fn retained_state_supports_previous_version_without_downgrading_http() {
+        let mut historical = encode(&example(1)).unwrap();
+        historical[1] = 28;
+        assert!(matches!(decode::<Example>(&historical, MAX_DECODED_REQUEST_BYTES), Err(WireError::UnsupportedVersion(28))));
+        assert_eq!(decode_state::<Example>(&historical, MAX_DECODED_REQUEST_BYTES).unwrap(), example(1));
+        historical[1] = (VERSION + 1) as u8;
+        assert!(matches!(decode_state::<Example>(&historical, MAX_DECODED_REQUEST_BYTES), Err(WireError::UnsupportedVersion(version)) if version == VERSION + 1));
     }
 
     #[test]
@@ -210,5 +263,51 @@ mod tests {
         let encoded = encode(&blob).unwrap();
         assert!(encoded.len() < blob.bytes.len() + 128);
         assert_eq!(decode::<Blob>(&encoded, 2 * 1024 * 1024).unwrap(), blob);
+    }
+
+    #[test]
+    fn compact_bytes_preserve_wire_format_and_both_decoders() {
+        for bytes in [Vec::new(), (0..=255).collect(), vec![0xab; 1024 * 1024]] {
+            let legacy = Blob { bytes: bytes.clone() };
+            let compact = CompactBlob { bytes };
+            let encoded = encode(&compact).unwrap();
+            assert_eq!(encoded, encode(&legacy).unwrap());
+            assert_eq!(decode::<Blob>(&encoded, MAX_DECODED_RESPONSE_BYTES).unwrap(), legacy);
+            assert_eq!(decode::<CompactBlob>(&encoded, MAX_DECODED_RESPONSE_BYTES).unwrap(), compact);
+            assert_eq!(decode_byte_fields::<CompactBlob>(&encoded, MAX_DECODED_RESPONSE_BYTES).unwrap(), compact);
+            let nested = vec![compact];
+            assert_eq!(decode_byte_fields::<Vec<CompactBlob>>(&encode(&nested).unwrap(), MAX_DECODED_RESPONSE_BYTES).unwrap(), nested);
+        }
+    }
+
+    #[test]
+    fn compact_byte_fields_stay_buffers_in_intermediate_trees() {
+        use serde_value::Value;
+
+        let blob = CompactBlob { bytes: vec![0xab; 1024] };
+        let Value::Map(fields) = value_serializer::to_value(&blob).unwrap() else { panic!("expected fields") };
+        assert_eq!(fields.get(&Value::String("bytes".into())), Some(&Value::Bytes(blob.bytes.clone())));
+        let encoded = protobuf_value(Value::Bytes(blob.bytes.clone())).unwrap();
+        assert_eq!(domain_value(encoded, true).unwrap(), Value::Bytes(blob.bytes));
+    }
+
+    #[test]
+    fn compact_decoder_preserves_version_size_and_canonical_checks() {
+        let encoded = encode(&CompactBlob { bytes: vec![1, 2, 3] }).unwrap();
+        assert_eq!(decode_byte_fields::<CompactBlob>(&encoded, encoded.len() - 1), Err(WireError::TooLarge { limit: encoded.len() - 1 }));
+        let mut historical = encoded.clone();
+        historical[1] = 28;
+        assert_eq!(decode_byte_fields::<CompactBlob>(&historical, MAX_DECODED_RESPONSE_BYTES), Err(WireError::UnsupportedVersion(28)));
+        let mut duplicate_version = encoded;
+        duplicate_version.extend_from_slice(&[8, VERSION as u8]);
+        assert!(matches!(decode_byte_fields::<CompactBlob>(&duplicate_version, MAX_DECODED_RESPONSE_BYTES), Err(WireError::Decode(_))));
+    }
+
+    #[test]
+    fn compact_decoder_reads_empty_non_byte_sequences() {
+        let empty = example(0);
+        assert_eq!(decode_byte_fields::<Example>(&encode(&empty).unwrap(), 4096).unwrap(), empty);
+        let blobs: Vec<CompactBlob> = Vec::new();
+        assert_eq!(decode_byte_fields::<Vec<CompactBlob>>(&encode(&blobs).unwrap(), 4096).unwrap(), blobs);
     }
 }

@@ -23,6 +23,13 @@ sha256 = "019665c8877d46fe65f625f80fd714ab07aac68554b0636acf2a2adf9288adb2"
 [targets.x86_64-unknown-linux-gnu.files]
 "lib/libpdfium.so" = "libpdfium.so"
 
+[targets.armv7-unknown-linux-gnueabihf]
+version = "7961"
+url = "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F7961/pdfium-linux-arm.tgz"
+sha256 = "d1a0cb29924f52985668a0b7da775c9f37218852031fa4b38ec14906bbb54b37"
+[targets.armv7-unknown-linux-gnueabihf.files]
+"lib/libpdfium.so" = "libpdfium.so"
+
 [targets.x86_64-pc-windows-msvc]
 version = "8046b"
 linkage = "static"

@@ -12,7 +12,7 @@ pub(crate) fn now() -> i64 {
 }
 
 fn failed(key: String, detail: String) -> BookEnrichment {
-    BookEnrichment { key, status: BookEnrichmentStatus::Failed, record: None, toc: None, cover: None, detail }
+    BookEnrichment { key, status: BookEnrichmentStatus::Failed, record: None, toc: None, popularity: None, cover: None, detail }
 }
 
 impl LibraryEnrichment {
@@ -31,6 +31,7 @@ impl LibraryEnrichment {
                     key: index.to_string(),
                     record: candidate.record.clone(),
                     audiobook: candidate.audiobook,
+                    needs_cover: false,
                     readings: book_inspection::title_readings(&candidate.record, &candidate.filenames),
                     recording: candidate.recording.clone(),
                 })

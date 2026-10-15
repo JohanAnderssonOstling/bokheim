@@ -5,7 +5,7 @@ use app::{
 };
 use futures_channel::oneshot;
 use futures_util::future::{Either, select};
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use wasm_bindgen::{JsCast, JsValue};
@@ -14,16 +14,9 @@ use web_sys::{DedicatedWorkerGlobalScope, MessagePort};
 mod transport;
 
 thread_local! {
-    static STARTUP_PERMIT: RefCell<Option<client_platform_runtime::executor::StartupPermit>> = const { RefCell::new(None) };
-    static BACKEND: RefCell<Option<BackendWorkerHost>> = const { RefCell::new(None) };
-    static STARTUP: RefCell<StartupState> = const { RefCell::new(StartupState::Initializing) };
+    static STARTUP_PERMIT: Cell<Option<client_platform_runtime::executor::StartupPermit>> = const { Cell::new(None) };
+    static BACKEND: OnceCell<Result<BackendWorkerHost, app::BackendError>> = const { OnceCell::new() };
     static PENDING_CONNECTIONS: RefCell<Vec<MessagePort>> = const { RefCell::new(Vec::new()) };
-}
-
-enum StartupState {
-    Initializing,
-    Ready,
-    Failed(app::BackendError),
 }
 
 fn worker_scope() -> DedicatedWorkerGlobalScope {
@@ -33,7 +26,7 @@ fn worker_scope() -> DedicatedWorkerGlobalScope {
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
 pub fn start() -> Result<(), JsValue> {
     console_error_panic_hook::set_once();
-    STARTUP_PERMIT.with(|permit| *permit.borrow_mut() = Some(app::host::defer_background_work()));
+    STARTUP_PERMIT.with(|permit| permit.set(Some(app::host::defer_background_work())));
     app::host::web::network_client::install()?;
     transport::install()?;
     wasm_bindgen_futures::spawn_local(async {
@@ -49,20 +42,19 @@ async fn initialize() -> Result<(BackendWorkerHost, AppStartupState), app::Backe
 }
 
 fn finish_initialize(result: Result<(BackendWorkerHost, AppStartupState), app::BackendError>) {
-    match result {
-        Ok((backend, _)) => {
-            BACKEND.with(|slot| *slot.borrow_mut() = Some(backend));
-            STARTUP.with(|state| *state.borrow_mut() = StartupState::Ready);
-            connect_pending_ports();
-            post_control("backend_ready", None);
-            STARTUP_PERMIT.with(|slot| { if let Some(permit) = slot.borrow_mut().take() { permit.release(); } });
-        }
-        Err(error) => {
-            STARTUP.with(|state| *state.borrow_mut() = StartupState::Failed(error.clone()));
-            connect_pending_ports();
-            post_control("backend_failed", Some(&error.to_string()));
-            worker_scope().close();
-        }
+    let error = result.as_ref().err().map(ToString::to_string);
+    BACKEND.with(|slot| assert!(slot.set(result.map(|(backend, _)| backend)).is_ok(), "backend already initialized"));
+    connect_pending_ports();
+    if let Some(error) = error {
+        post_control("backend_failed", Some(&error));
+        worker_scope().close();
+    } else {
+        post_control("backend_ready", None);
+        STARTUP_PERMIT.with(|slot| {
+            if let Some(permit) = slot.take() {
+                permit.release();
+            }
+        });
     }
 }
 
@@ -84,25 +76,17 @@ fn post_control(transport: &str, error: Option<&str>) {
 
 #[wasm_bindgen::prelude::wasm_bindgen]
 pub fn connect(port: MessagePort) {
-    let initializing = STARTUP.with(|state| matches!(*state.borrow(), StartupState::Initializing));
+    let initializing = BACKEND.with(|slot| slot.get().is_none());
     if initializing {
         PENDING_CONNECTIONS.with(|pending| pending.borrow_mut().push(port));
         return;
     }
 
-    install_request_handler(port.clone());
+    let _ = install_request_handler(port.clone());
     port.start();
-    let startup = STARTUP.with(|state| match &*state.borrow() {
-        StartupState::Initializing => unreachable!("initializing connections are queued"),
-        StartupState::Ready => BACKEND.with(|slot| {
-            slot.borrow()
-                .as_ref()
-                .ok_or_else(|| app::BackendError::message("backend is not initialized"))
-                .and_then(BackendWorkerHost::startup_state)
-                .map(|startup| AppWorkerStartupMessage::Ready { startup })
-                .unwrap_or_else(|error| AppWorkerStartupMessage::Failed { error })
-        }),
-        StartupState::Failed(error) => AppWorkerStartupMessage::Failed { error: error.clone() },
+    let startup = BACKEND.with(|slot| match slot.get().expect("initializing connections are queued") {
+        Ok(backend) => backend.startup_state().map(|startup| AppWorkerStartupMessage::Ready { startup }).unwrap_or_else(|error| AppWorkerStartupMessage::Failed { error }),
+        Err(error) => AppWorkerStartupMessage::Failed { error: error.clone() },
     });
     let failed = matches!(startup, AppWorkerStartupMessage::Failed { .. });
     post_message(&port, &startup);
@@ -162,7 +146,7 @@ fn install_request_handler(port: MessagePort) -> oneshot::Receiver<()> {
             cancellations.borrow_mut().insert(request.id, cancel);
             Box::pin(cancelled)
         });
-        let backend = BACKEND.with(|slot| slot.borrow().clone());
+        let backend = BACKEND.with(|slot| slot.get().and_then(|result| result.as_ref().ok()).cloned());
         let port = response_port.clone();
         let alive = alive.clone();
         let cancellations = cancellations.clone();

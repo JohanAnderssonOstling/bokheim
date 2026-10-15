@@ -3,7 +3,7 @@ use std::{cell::RefCell, rc::Rc};
 use gpui::{
     Anchor, AnyElement, App, Context, DismissEvent, Element, ElementId, Entity, Focusable,
     GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement, IntoElement,
-    KeyBinding, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, StyleRefinement, Styled,
+    KeyBinding, LongPressEvent, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, StyleRefinement, Styled,
     Subscription, Window, actions, anchored, deferred, div, prelude::FluentBuilder, px,
 };
 
@@ -340,6 +340,15 @@ impl<E: InteractiveElement + ParentElement + Styled + IntoElement + 'static> Ele
                 let shared_state = state.shared_state.clone();
 
                 let hitbox = hitbox.clone();
+                let press_state = shared_state.clone();
+                let press_builder = builder.clone();
+                let press_hitbox = hitbox.clone();
+                window.on_long_press(move |event: &LongPressEvent, phase, window, cx| {
+                    if phase.bubble() && press_hitbox.is_under_pointer(window) {
+                        ContextMenuSharedState::open(press_state.clone(), press_builder.clone(), event.position, window, cx);
+                        cx.stop_propagation();
+                    }
+                });
                 // When right mouse click, to build content menu, and show it at the mouse position.
                 window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
                     if phase.bubble()

@@ -25,6 +25,13 @@ impl AnnotationEditorTarget for PdfReaderView {
         self.close_annotation_editor(cx);
         self.focus_document(window, cx);
     }
+
+    fn delete_edited_annotation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.marks.selected_id().map(str::to_owned) {
+            self.delete_annotation(id, cx);
+            self.focus_document(window, cx);
+        }
+    }
 }
 
 impl AnnotationSidebarTarget for PdfReaderView {
@@ -66,7 +73,7 @@ impl PdfReaderView {
         self.pdf.update(cx, |pdf, cx| pdf.set_annotations(overlays, cx));
     }
 
-    /// Mirrors EPUB's context-menu action: create a highlight and select it so
+    /// Creates an annotation and selects it so
     /// its editor is immediately available for an optional note.
     pub(super) fn create_annotation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(selection) = self.pdf.read(cx).selection_snapshot() else { return };
@@ -152,21 +159,14 @@ impl PdfReaderView {
     pub(super) fn render_annotations_body(&self, theme: components::BrowserTheme, cx: &mut Context<Self>) -> gpui::AnyElement {
         let target = cx.entity();
         components::reader_state_panel(theme)
-            .children(crate::shell::state_panel::reader_state_rows(&target, &self.marks, "Select PDF text, then use Highlight or Note.", theme, |annotation: &Annotation| {
+            .children(crate::shell::state_panel::reader_state_rows(&target, &self.marks, "No notes yet. Select PDF text, then choose Annotation to add a note.", theme, |annotation: &Annotation| {
                 let page = annotation.anchor.pdf_anchor().map(|anchor| anchor.page_index as usize);
-                let ordinal = annotation.toc_ordinal.and_then(|ordinal| usize::try_from(ordinal).ok()).or_else(|| page.and_then(|page| self.toc.ordinal_at(page)));
-                if let Some((ordinal, title)) = ordinal.and_then(|ordinal| self.toc.title_at_ordinal(ordinal).map(|title| (ordinal, title))) {
-                    (format!("section:{ordinal}"), title.to_owned())
-                } else if let Some(page) = page {
-                    (format!("page:{page}"), format!("Page {}", page + 1))
-                } else {
-                    ("other".to_owned(), "Other annotations".to_owned())
-                }
+                if let Some(page) = page { (format!("page:{page}"), format!("Page {}", page + 1)) } else { ("other".to_owned(), "Other notes".to_owned()) }
             }))
             .into_any_element()
     }
 
-    pub(super) fn render_annotation_popup(&self, annotation: Annotation, geometry: annotation_editor::Geometry, cx: &mut Context<Self>) -> gpui::AnyElement {
-        annotation_editor::standard_editor("pdf-popup", &cx.entity(), &annotation, geometry, &self.annotation_note_input, components::browser_theme(cx))
+    pub(super) fn render_annotation_popup(&self, annotation: Annotation, geometry: annotation_editor::Geometry, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        annotation_editor::standard_editor("pdf-popup", &cx.entity(), &annotation, geometry, &self.annotation_note_input, components::browser_theme(cx), window, cx)
     }
 }

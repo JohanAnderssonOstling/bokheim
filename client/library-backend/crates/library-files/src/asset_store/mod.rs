@@ -4,16 +4,16 @@
 //! files for imports and downloads. Browser books have one hash-addressed
 //! object in OPFS; their folder and trash locations exist only in SQLite.
 
+use book_access::BoxedBookReader;
+use library_model::BlobKind;
 use library_model::RelativeBookPath;
+use std::fmt;
 use std::fs::File;
 use std::io::{ErrorKind, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use book_access::BoxedBookReader;
-use library_model::BlobKind;
-use std::fmt;
 pub(crate) use sync_common::ContentHash;
 
 mod import;
@@ -255,6 +255,7 @@ impl AssetStore {
         imp::write(&self.0, asset_name(kind, content_hash), bytes).await?;
         if kind == BlobKind::Thumbnail {
             imp::remove(&self.0, thumbnail_variant_name(content_hash, thumbnail::BROWSE_THUMBNAIL_WIDTH))?;
+            imp::remove(&self.0, thumbnail_variant_name(content_hash, thumbnail::THUMBNAIL_WIDTH))?;
         }
         Ok(())
     }
@@ -309,29 +310,33 @@ impl AssetStore {
         imp::write(&self.0, thumbnail_variant_name(content_hash, width), bytes).await
     }
 
-    /// Hold one exclusive lease across both variants, including blocking writes
+    /// Hold one exclusive lease across the master and both card variants, including blocking writes
     /// after cancellation, so an upload cannot read mixed generations.
-    pub async fn write_thumbnail_set(&self, hash: &ContentHash, bytes: &[u8], browse: &[u8]) -> Result<(), AssetStoreError> {
+    pub async fn write_thumbnail_set(&self, hash: &ContentHash, bytes: &[u8], browse: &[u8], card_high_density: &[u8]) -> Result<(), AssetStoreError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            imp::write_thumbnail_set(&self.0, hash, bytes, browse).await
+            imp::write_thumbnail_set(&self.0, hash, bytes, browse, card_high_density).await
         }
         #[cfg(target_arch = "wasm32")]
         {
             let _lease = self.try_exclusive_lease(hash)?.ok_or_else(|| AssetStoreError::operation("thumbnail is being updated"))?;
             self.write(BlobKind::Thumbnail, hash, bytes).await?;
-            self.write_thumbnail_variant(hash, thumbnail::BROWSE_THUMBNAIL_WIDTH, browse).await
+            self.write_thumbnail_variant(hash, thumbnail::BROWSE_THUMBNAIL_WIDTH, browse).await?;
+            self.write_thumbnail_variant(hash, thumbnail::THUMBNAIL_WIDTH, card_high_density).await
         }
     }
 
     pub fn thumbnail_set_exists(&self, content_hash: &ContentHash) -> Result<bool, AssetStoreError> {
-        Ok(self.exists(BlobKind::Thumbnail, content_hash)? && imp::exists(&self.0, thumbnail_variant_name(content_hash, thumbnail::BROWSE_THUMBNAIL_WIDTH))?)
+        Ok(self.exists(BlobKind::Thumbnail, content_hash)?
+            && imp::exists(&self.0, thumbnail_variant_name(content_hash, thumbnail::BROWSE_THUMBNAIL_WIDTH))?
+            && imp::exists(&self.0, thumbnail_variant_name(content_hash, thumbnail::THUMBNAIL_WIDTH))?)
     }
 
     pub fn remove(&self, kind: BlobKind, content_hash: &ContentHash) -> Result<bool, AssetStoreError> {
         let removed = imp::remove(&self.0, asset_name(kind, content_hash))?;
         if kind == BlobKind::Thumbnail {
             imp::remove(&self.0, thumbnail_variant_name(content_hash, thumbnail::BROWSE_THUMBNAIL_WIDTH))?;
+            imp::remove(&self.0, thumbnail_variant_name(content_hash, thumbnail::THUMBNAIL_WIDTH))?;
         }
         Ok(removed)
     }
@@ -437,6 +442,47 @@ impl VerifiedBook {
     #[cfg(target_arch = "wasm32")]
     pub async fn upload_file(&self) -> Result<web_sys::Blob, AssetStoreError> {
         self.reader.upload_file().await.map_err(AssetStoreError::operation)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::io::Read for VerifiedBook {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.reader.read(buffer)
+    }
+}
+#[cfg(not(target_arch = "wasm32"))]
+impl std::io::Seek for VerifiedBook {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.reader.seek(position)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl CopiedBook {
+    pub async fn verify_transfer(self, expected: ContentHash) -> Result<StagedBook, AssetStoreError> {
+        client_platform_runtime::executor::run_blocking(move || {
+            use std::io::Read;
+            let mut file = File::open(self.path())?;
+            let mut hasher = blake3::Hasher::new();
+            let mut size = 0u64;
+            let mut buffer = vec![0u8; 64 * 1024];
+            loop {
+                let count = file.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..count]);
+                size = size.checked_add(count as u64).ok_or_else(|| AssetStoreError::operation("book length overflow"))?;
+            }
+            let actual = ContentHash::from(hasher.finalize());
+            if actual != expected {
+                return Err(AssetStoreError::operation("transferred book failed content verification"));
+            }
+            Ok(self.into_staged(actual, size))
+        })
+        .await
+        .map_err(AssetStoreError::operation)?
     }
 }
 
@@ -618,7 +664,7 @@ fn asset_name(kind: BlobKind, content_hash: &ContentHash) -> String {
 }
 
 pub fn thumbnail_variant_name(content_hash: &ContentHash, width: u32) -> String {
-    format!("thumbnail/{content_hash}.{width}w")
+    format!("thumbnail/{content_hash}.{}", thumbnail::card_thumbnail_suffix(width))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -680,6 +726,26 @@ mod tests {
         writer.write_all(b"different book").await.unwrap();
         assert!(writer.verify().await.is_err());
         assert!(!library.path().join("book.epub").exists());
+    }
+
+    #[tokio::test]
+    async fn thumbnail_set_includes_both_versioned_card_densities_and_invalidates_them_together() {
+        let library = tempfile::tempdir().unwrap();
+        let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+        let hash = ContentHash::from(blake3::hash(b"card variants"));
+        store.write_thumbnail_set(&hash, b"original master", b"browse card", b"dense card").await.unwrap();
+        assert!(store.thumbnail_set_exists(&hash).unwrap());
+        assert_eq!(store.read_bytes(BlobKind::Thumbnail, &hash).await.unwrap().unwrap(), b"original master");
+        for (width, expected) in [(300, b"browse card".as_slice()), (600, b"dense card".as_slice())] {
+            let name = thumbnail_variant_name(&hash, width);
+            assert!(name.contains(&format!("card-v{}", thumbnail::CARD_THUMBNAIL_VERSION)));
+            assert_eq!(store.read_named(name).await.unwrap().unwrap(), expected);
+        }
+        store.write(BlobKind::Thumbnail, &hash, b"new original").await.unwrap();
+        assert!(!store.thumbnail_set_exists(&hash).unwrap());
+        for width in [300, 600] {
+            assert!(store.read_named(thumbnail_variant_name(&hash, width)).await.unwrap().is_none());
+        }
     }
 
     #[tokio::test]

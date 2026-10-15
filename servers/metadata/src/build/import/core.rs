@@ -3,12 +3,22 @@ use crate::{
     WorkRecord, BUILDER_SCHEMA_VERSION, IMPORT_CACHE_KIB, LCC_SCHEME, MAX_NOTATION_BYTES, SCHEMA_VERSION, UNIX_EPOCH,
 };
 use super::pipeline::read_open_library_resumable;
+use metadata_contract::{classification_consensus_notation, ClassificationScheme};
 
 pub fn import_snapshot(editions_path: &Path, works_path: &Path, authors_path: &Path, output_path: &Path, record_limit: Option<usize>) -> Result<(), MetadataError> {
     import_snapshot_inner(editions_path, works_path, authors_path, output_path, record_limit)
 }
 
 pub(crate) fn import_snapshot_inner(editions_path: &Path, works_path: &Path, authors_path: &Path, output_path: &Path, record_limit: Option<usize>) -> Result<(), MetadataError> {
+    import_snapshot_mode(editions_path, works_path, authors_path, output_path, record_limit, false)
+}
+
+/// Recover classified pre-ISBN editions in a separate immutable source file.
+pub fn import_subject_editions(editions_path: &Path, works_path: &Path, authors_path: &Path, output_path: &Path, record_limit: Option<usize>) -> Result<(), MetadataError> {
+    import_snapshot_mode(editions_path, works_path, authors_path, output_path, record_limit, true)
+}
+
+fn import_snapshot_mode(editions_path: &Path, works_path: &Path, authors_path: &Path, output_path: &Path, record_limit: Option<usize>, subjects_only: bool) -> Result<(), MetadataError> {
     if output_path.exists() {
         return Err(MetadataError(format!("output already exists: {}", output_path.display())));
     }
@@ -21,16 +31,23 @@ pub(crate) fn import_snapshot_inner(editions_path: &Path, works_path: &Path, aut
     configure_import(&connection)?;
     if resuming {
         validate_import_inputs(&connection, &building_path, editions_path, works_path, authors_path, record_limit)?;
+        let saved_mode: i64 = connection.query_row("SELECT value FROM metadata_metric WHERE name='subject_editions_only'", [], |r| r.get(0)).map_err(error)?;
+        if saved_mode != i64::from(subjects_only) {
+            return Err(MetadataError("unfinished snapshot uses a different edition selection mode".into()));
+        }
         println!("resuming metadata snapshot build {}", building_path.display());
     } else {
         let transaction = connection.transaction().map_err(error)?;
         create_schema(&transaction)?;
         register_import_inputs(&transaction, editions_path, works_path, authors_path, record_limit)?;
+        transaction.execute("INSERT INTO metadata_metric(name,value) VALUES('subject_editions_only',?1)", [i64::from(subjects_only)]).map_err(error)?;
         transaction.commit().map_err(error)?;
     }
     let result = (|| {
-        let edition_count = import_editions(&mut connection, editions_path, record_limit)?;
-        import_edition_identities(&mut connection, editions_path, record_limit)?;
+        let edition_count = if subjects_only { import_editions_mode(&mut connection, editions_path, record_limit, true)? } else { import_editions(&mut connection, editions_path, record_limit)? };
+        if !subjects_only {
+            import_edition_identities(&mut connection, editions_path, record_limit)?;
+        }
         connection.execute("CREATE INDEX IF NOT EXISTS edition_by_work ON edition(work_id)", ()).map_err(error)?;
         connection
             .execute(
@@ -43,7 +60,9 @@ pub(crate) fn import_snapshot_inner(editions_path: &Path, works_path: &Path, aut
             )
             .map_err(error)?;
         let work_count = import_works(&mut connection, works_path, record_limit)?;
-        import_work_titles(&mut connection, works_path, record_limit)?;
+        if !subjects_only {
+            import_work_titles(&mut connection, works_path, record_limit)?;
+        }
         connection.execute_batch("CREATE INDEX IF NOT EXISTS edition_author_by_author ON edition_author(author_id); CREATE INDEX IF NOT EXISTS work_author_by_author ON work_author(author_id);").map_err(error)?;
         let author_count = import_authors(&mut connection, authors_path, record_limit)?;
         // `edition_by_work` is also required by the work-title branch of the
@@ -144,6 +163,10 @@ pub(crate) fn create_schema(connection: &Connection) -> Result<(), MetadataError
     connection.execute_batch(CORE_SCHEMA).map_err(error)
 }
 pub(crate) fn import_editions(connection: &mut Connection, path: &Path, limit: Option<usize>) -> Result<usize, MetadataError> {
+    import_editions_mode(connection, path, limit, false)
+}
+
+fn import_editions_mode(connection: &mut Connection, path: &Path, limit: Option<usize>, subjects_only: bool) -> Result<usize, MetadataError> {
     let count = read_open_library_resumable::<EditionRecord>(connection, path, limit, "editions", |transaction, records| {
         let mut edition_insert = transaction.prepare_cached("INSERT INTO edition_stage(edition_id,work_id) VALUES(?1,?2)").map_err(error)?;
         let mut isbn_insert = transaction.prepare_cached("INSERT INTO edition_isbn_stage(isbn13,edition_id) VALUES(?1,?2)").map_err(error)?;
@@ -156,11 +179,14 @@ pub(crate) fn import_editions(connection: &mut Connection, path: &Path, limit: O
             let Some(edition_id) = open_library_id(&record.key, 'M') else { continue };
             let mut isbns = BTreeSet::new();
             isbns.extend(record.isbn_10.iter().chain(&record.isbn_13).filter_map(|isbn| crate::Isbn13::parse(isbn)));
+            if subjects_only && !isbns.is_empty() {
+                continue;
+            }
             let work_id = record.works.first().and_then(|work| open_library_id(&work.key, 'W'));
             if let Some(work_id) = work_id {
                 insert_classifications(&mut work_classification_insert, work_id, LCC_SCHEME, &record.lc_classifications)?;
             }
-            if isbns.is_empty() {
+            if isbns.is_empty() && !record.lc_classifications.iter().any(|notation| classification_consensus_notation(ClassificationScheme::LibraryOfCongress, notation).is_some()) {
                 continue;
             }
             edition_insert.execute(params![edition_id, work_id]).map_err(error)?;
@@ -192,7 +218,7 @@ pub(crate) fn import_editions(connection: &mut Connection, path: &Path, limit: O
     })?;
     materialize_editions(connection)?;
     let retained: i64 = connection.query_row("SELECT COUNT(*) FROM edition", (), |row| row.get(0)).map_err(error)?;
-    println!("read {count} edition records; retained {retained} with a valid ISBN");
+    println!("read {count} edition records; retained {retained} with a valid ISBN or numeric LCC");
     Ok(count)
 }
 
@@ -262,7 +288,7 @@ fn import_works(connection: &mut Connection, path: &Path, limit: Option<usize>) 
     })?;
     materialize_works(connection)?;
     let retained: i64 = connection.query_row("SELECT COUNT(DISTINCT work_id) FROM edition WHERE work_id IS NOT NULL", (), |row| row.get(0)).map_err(error)?;
-    println!("read {count} work records; retained {retained} referenced by an ISBN edition");
+    println!("read {count} work records; retained {retained} referenced by a retained edition");
     Ok(count)
 }
 
@@ -321,7 +347,7 @@ fn import_authors(connection: &mut Connection, path: &Path, limit: Option<usize>
     })?;
     materialize_authors(connection)?;
     let retained: i64 = connection.query_row("SELECT COUNT(*) FROM author", (), |row| row.get(0)).map_err(error)?;
-    println!("read {count} author records; retained {retained} referenced by an ISBN edition or work");
+    println!("read {count} author records; retained {retained} referenced by a retained edition or work");
     Ok(count)
 }
 

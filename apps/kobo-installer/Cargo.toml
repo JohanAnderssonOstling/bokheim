@@ -9,17 +9,27 @@ publish = false
 # release builds.
 [workspace]
 
+[features]
+default = ["gui"]
+gui = ["dep:gpui", "dep:gpui_platform", "dep:semver", "dep:ureq"]
+
+[[bin]]
+name = "bokheim-kobo-installer"
+path = "src/main.rs"
+required-features = ["gui"]
+
 [dependencies]
+client-platform-kobo = { path = "../../client/platforms/kobo" }
 flate2 = "1"
-gpui = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", rev = "68b0a5ba82860ac222c18acd9036b3838a43a08b" }
-gpui_platform = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", rev = "68b0a5ba82860ac222c18acd9036b3838a43a08b", features = ["wayland", "x11"] }
+gpui = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", rev = "68b0a5ba82860ac222c18acd9036b3838a43a08b", optional = true }
+gpui_platform = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", rev = "68b0a5ba82860ac222c18acd9036b3838a43a08b", features = ["wayland", "x11"], optional = true }
 hex = "0.4"
-semver = "1"
+semver = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tar = "0.4"
-ureq = { version = "2.12", default-features = false, features = ["tls"] }
+ureq = { version = "2.12", default-features = false, features = ["tls"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }

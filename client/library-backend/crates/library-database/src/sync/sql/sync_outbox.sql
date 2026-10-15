@@ -4,24 +4,8 @@
 -- with no database reference held, then commits acknowledgements back. One
 -- method call is one transaction; callers batch large id sets themselves.
 
--- name: sync_outbox_rows?
-SELECT state_kind, state_key, body, changed_at, replica_seq,
-state_subkey, winning_version
-FROM sync_outbox
-WHERE body IS NOT NULL
-ORDER BY replica_seq ASC;
-
 -- name: sync_outbox_watermark ->
 SELECT COALESCE(MAX(replica_seq), 0) FROM sync_outbox;
-
--- name: sync_outbox_rows_page?
--- param: after: i64
--- param: through: i64
-SELECT state_kind, state_key, body, changed_at, replica_seq,
-state_subkey, winning_version
-FROM sync_outbox
-WHERE body IS NOT NULL AND replica_seq > :after AND replica_seq <= :through
-ORDER BY replica_seq ASC;
 
 -- name: sync_pending_uploads?
 SELECT content_hash FROM book_transfer WHERE upload_id IS NOT NULL;
@@ -55,3 +39,6 @@ UPDATE sync_outbox SET body=:body,changed_at=:changed_at,winning_version=:winnin
 
 -- name: sync_pending_book_drafts ?
 SELECT content_hash FROM local_book_draft;
+
+-- name: outbox_reading_positions ?
+SELECT state_key FROM sync_outbox WHERE state_kind='reading_position';

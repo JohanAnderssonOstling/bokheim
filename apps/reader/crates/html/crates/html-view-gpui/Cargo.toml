@@ -7,12 +7,10 @@ publish = false
 [dependencies]
 async-channel = "2"
 gpui.workspace = true
+html-gpui.workspace = true
 html-view-core.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 kurbo.workspace = true
-peniko.workspace = true
-quick-xml = "0.38"
-smallvec = "1"
 web-time = "1"
 
 [dev-dependencies]

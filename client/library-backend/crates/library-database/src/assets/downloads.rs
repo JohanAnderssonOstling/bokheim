@@ -21,16 +21,24 @@ impl Database {
         Ok(flags)
     }
 
+    /// Checks eviction eligibility without changing local availability. Native
+    /// callers must run this before removing any files, then commit eviction.
+    pub fn check_local_book_eviction(&self, hash: &ContentHash) -> Result<bool, DatabaseError> {
+        if !self.is_book_downloaded(hash)? {
+            return Ok(false);
+        }
+        // Eviction keeps the entry but drops its bytes. Without a server copy
+        // those bytes are the only copy, so refusing keeps the entry recoverable.
+        if !self.remote_asset_hashes(BlobKind::Book)?.contains(hash) {
+            return Err(DatabaseError::message("this book is only stored on this device; upload it before removing the download"));
+        }
+        Ok(true)
+    }
+
     pub fn evict_local_book(&self, hash: &ContentHash) -> Result<bool, DatabaseError> {
         self.write(|transaction| {
-            if !self.is_book_downloaded(hash)? {
+            if !self.check_local_book_eviction(hash)? {
                 return Ok(false);
-            }
-            // Eviction keeps the entry but drops its bytes. Without a server copy
-            // those bytes are the only copy, so refusing is what keeps the entry
-            // recoverable.
-            if !self.remote_asset_hashes(BlobKind::Book)?.contains(hash) {
-                return Err(DatabaseError::message("this book is only stored on this device"));
             }
             transaction.shared_transfer_complete_download(hash)?;
             transaction.asset_clear_downloaded_placements(&(&hash))?;
@@ -84,6 +92,4 @@ impl Database {
             _ => DownloadState::NotDownloaded,
         })
     }
-
 }
-

@@ -38,7 +38,7 @@ pub(super) async fn delete_library(State(state): State<AppState>, user: AuthUser
 
 pub(super) async fn exchange_events(State(state): State<AppState>, user: AuthUser, headers: HeaderMap, body: Bytes) -> Result<Response, axum::http::StatusCode> {
     let started = Instant::now();
-    let request: SyncExchangeRequest = server_wire_http::decode_request(&headers, &body, wire::MAX_DECODED_REQUEST_BYTES)?;
+    let request: SyncExchangeRequest = server_wire_http::decode_request_byte_fields(&headers, &body, wire::MAX_DECODED_REQUEST_BYTES)?;
     tracing::debug!(target: "sync_performance", phase = "decode_exchange", elapsed_ms = started.elapsed().as_secs_f64() * 1000.0, library_id = %request.library_id, push_count = request.mutations.len(), cursor = ?request.cursor);
     let library_id = request.library_id.clone();
     let started = Instant::now();

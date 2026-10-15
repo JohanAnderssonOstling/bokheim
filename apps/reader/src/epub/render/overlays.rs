@@ -8,8 +8,8 @@ use ui_components as components;
 
 use crate::epub::{LoadState, ReaderView};
 use crate::invalidation::Component;
-use crate::shell::{annotation_editor, chrome};
 use crate::shell::annotation_editor::AnnotationEditorTarget;
+use crate::shell::{annotation_editor, chrome};
 
 impl AnnotationEditorTarget for ReaderView {
     fn save_annotation_changes(&mut self, style: Option<AnnotationStyle>, color: Option<u32>, cx: &mut Context<Self>) {
@@ -20,10 +20,17 @@ impl AnnotationEditorTarget for ReaderView {
         self.close_annotation_popup(cx);
         self.focus_document(window, cx);
     }
+
+    fn delete_edited_annotation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.marks.selected_id().map(str::to_owned) {
+            self.delete_annotation(id, cx);
+            self.focus_document(window, cx);
+        }
+    }
 }
 
 impl ReaderView {
-    pub(super) fn render_annotation_popup(&self, entity: &Entity<Self>, sidebar_visible: bool, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_annotation_popup(&self, entity: &Entity<Self>, sidebar_visible: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let annotation = self.marks.selected()?.clone();
         let sidebar_width = chrome::sidebar_width(sidebar_visible, window, cx);
         let viewport = window.viewport_size();
@@ -44,8 +51,16 @@ impl ReaderView {
             LoadState::Loading | LoadState::Error(_) => None,
         }
         .or_else(|| self.annotation_popup_anchor.map(annotation_editor::Passage::from_point));
-        let geometry = annotation_editor::geometry(passage, f32::from(viewport.width), f32::from(viewport.height), sidebar_width, components::reader_toolbar_size_px(window), column_count.max(1));
-        Some(annotation_editor::standard_editor("reader-annotation-popup", entity, &annotation, geometry, &self.annotation_note_input, components::browser_theme(cx)))
+        let mobile = components::uses_mobile_reader_controls(window);
+        #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+        let dock_height = if mobile && self.tts.dock_open { components::player_dock_height_px(window) } else { 0.0 };
+        #[cfg(not(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32"))))]
+        let dock_height = 0.0;
+        let mut insets = window.insets().effective();
+        insets.bottom = (insets.bottom - px(dock_height)).max(px(0.0));
+        let toolbar_height = if mobile { 0.0 } else { components::reader_toolbar_size_px(window) };
+        let geometry = annotation_editor::geometry(passage, f32::from(viewport.width), f32::from(viewport.height) - dock_height, sidebar_width, toolbar_height, column_count.max(1), insets);
+        Some(annotation_editor::standard_editor("reader-annotation-popup", entity, &annotation, geometry, &self.annotation_note_input, components::browser_theme(cx), window, cx))
     }
 
     pub(super) fn render_footnote(&self, cx: &mut Context<Self>) -> Option<AnyElement> {

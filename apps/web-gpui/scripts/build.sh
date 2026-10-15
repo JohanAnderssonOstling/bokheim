@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+command -v brotli >/dev/null 2>&1 || { echo "error: install the brotli command to build the web release bundle" >&2; exit 1; }
+
 app_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 workspace_dir="$(cd "$app_dir/../.." && pwd)"
 python3 "$workspace_dir/shared/pdfium/prepare.py" --target wasm32-unknown-unknown
@@ -31,6 +33,10 @@ bundle_dir="${output_dir}/pkg/.building"
 )
 rm -rf -- "$output_dir"
 mkdir -p "$bundle_dir"
+(
+    cd "$workspace_dir"
+    cargo run --release -p subject-projection --example export_bisac_reference -- "$bundle_dir"
+)
 install -d "$output_dir/assets/icons"
 cp -a "$workspace_dir/vendor/gpui-component/crates/assets/assets/icons/." "$output_dir/assets/icons/"
 if [[ -x "$local_bindgen" ]]; then
@@ -44,7 +50,7 @@ bind_module() {
     local module_name="$1"
     local module_binary="$2"
     "$wasm_bindgen" --target web --out-dir "$bundle_dir/$module_name" --out-name "$module_name" "$module_binary"
-    printf 'import initialize from "./%s/%s.js";\nimport { compressedWasm } from "./compressed_wasm.js";\nexport * from "./%s/%s.js";\nexport default async function init(options) {\n  if (options !== undefined) return initialize(options);\n  const response = await compressedWasm(new URL("./%s/%s_bg.wasm.gz", import.meta.url));\n  return initialize(response ? { module_or_path: response } : undefined);\n}\n' "$module_name" "$module_name" "$module_name" "$module_name" "$module_name" "$module_name" > "$bundle_dir/$module_name.js"
+    printf 'import initialize from "./%s/%s.js";\nimport { compressedWasm } from "./compressed_wasm.js";\nexport * from "./%s/%s.js";\nexport default async function init(options) {\n  if (options !== undefined) return initialize(options);\n  const response = await compressedWasm(new URL("./%s/%s_bg.wasm", import.meta.url));\n  return initialize(response ? { module_or_path: response } : undefined);\n}\n' "$module_name" "$module_name" "$module_name" "$module_name" "$module_name" "$module_name" > "$bundle_dir/$module_name.js"
 }
 bind_module web_gpui "$target_dir/wasm32-unknown-unknown/web-release/web_gpui.wasm"
 bind_module web_backend_worker "$target_dir/wasm32-unknown-unknown/web-release/web_backend_worker.wasm"
@@ -74,12 +80,6 @@ else
     echo "warning: wasm-opt is unavailable; shipping the size-optimized Rust output without Binaryen post-processing" >&2
 fi
 
-# A sidecar keeps the regular WASM path available for browsers without
-# DecompressionStream while avoiding a full-size download on supported ones.
-for wasm in "$bundle_dir"/*/*_bg.wasm; do
-    gzip -9 -c "$wasm" > "${wasm}.gz"
-done
-
 # Some optimizers can leave an empty output after an exhausted filesystem.
 # Reject incomplete artifacts before assigning an immutable bundle identity.
 python3 - "$bundle_dir" <<'PY_VALIDATE_WASM'
@@ -102,6 +102,10 @@ done
 
 cp "$app_dir/pdf_worker.js" "$bundle_dir/pdf_worker.js"
 python3 "$app_dir/scripts/package-pdfium.py" "$bundle_dir/pdfium"
+
+# HTTP Content-Encoding supports Brotli without a JavaScript decoder. Keep
+# gzip and identity variants for clients and hosts with different capabilities.
+python3 "$app_dir/scripts/compress-assets.py" "$bundle_dir"
 
 bundle_hash=$(
     cd "$bundle_dir"
@@ -127,3 +131,6 @@ sed -i "s|\./pkg/web_gpui\.js|./${asset_base}/web_gpui.js|" "$output_dir/index.h
 # Compatibility entry for older clients. Current clients connect directly to
 # the coordinator inside their immutable bundle.
 printf 'import "./%s/web_backend_worker_loader.js";\n' "$asset_base" > "$output_dir/web_backend_worker_loader.js"
+
+# These files refer to the final bundle identity, so compress them afterwards.
+python3 "$app_dir/scripts/compress-assets.py" --top-level "$output_dir"

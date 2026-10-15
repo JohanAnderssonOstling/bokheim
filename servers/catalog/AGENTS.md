@@ -1,0 +1,12 @@
+# Catalog curation
+
+- Reserve `manual:subject` and `manual:subject:exclude` for explicit assignments or individually reviewed corrections. Never copy automatic projections into manual controls to preserve existing navigation. Those projections must remain eligible for enrichment and edition support rules. When repairing such a pass, use its before/after audit to undo only the controls it introduced and preserve independent manual changes.
+- When the user requests clearing manual subjects for a selected enrichment rerun, remove both positive assignments and exclusions before building requests. Do not exempt those selected books based on provenance or a prior review. Preserve manual controls outside that selection.
+
+- For relevance reviews, history, academic commentary, classical works, and annotated teaching editions are not removal candidates solely because they are old, technical, lengthy, or aimed at specialists. Require a substantive reason under the user's requested criteria. Inquisition histories, Kant commentary, and Cicero editions were explicitly retained by the user; do not reflag them on those grounds.
+- When removing books with the same format, exact title, and exact displayed author, always keep the Public Domain Library (`publicdomainlibrary.org`) edition when one is available. Source preference takes precedence over language, navigation, cover, metadata completeness, popularity, and import order.
+- Preserve source provenance, make a database backup, and retain book files when removing duplicate catalog entries.
+- Use `tools/deduplicate-catalog.py` for repeatable duplicate selection and removal. Publish and install a new local snapshot after applying curation changes.
+- Entries in different formats must remain separate, even when their titles and authors are identical. Do not add title suffixes merely to distinguish formats; use the source's own title.
+- Reviewed title aliases in that tool also count as duplicates within the same format and author. Adam Smith's `The Wealth of Nations` and `An Inquiry into the Nature and Causes of the Wealth of Nations` are one such pair; keep explicitly named audiobook volumes separate.
+- Before removing relaxed title/author or ISBN candidates, compare source identifiers and actual contents. Preserve separate parts, extracts, essays versus novels, materially different revisions, and different languages unless the user explicitly requests their removal. A shared ISBN in enriched metadata is insufficient evidence by itself.

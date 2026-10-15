@@ -60,9 +60,8 @@ pub fn classifications(verified: &[String], records: impl Fn(&str) -> Vec<RichWo
     accepted
 }
 
-
 pub fn classification_record(classifications: Vec<Classification>) -> RichWorkMetadataMatch {
-    RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: Vec::new(), classifications, authors: Vec::new(), description: None, subjects: Vec::new() }
+    RichWorkMetadataMatch { open_library_work_id: None, exact_edition_ids: Vec::new(), classifications, authors: Vec::new(), description: None, popularity: None, subjects: Vec::new() }
 }
 
 /// Keep the supporting print ISBN in the persisted subject's provenance.

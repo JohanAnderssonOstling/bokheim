@@ -1,0 +1,247 @@
+{
+  "description": "Rename only Literature / By Language / Germanic to Nordic, preserving its concept identity, children, selectors, and historical paths.",
+  "concept_id": 5587,
+  "previous_label": "Germanic",
+  "label": "Nordic",
+  "previous_path": "Literature / By Language / Germanic",
+  "path": "Literature / By Language / Nordic",
+  "historical_path_aliases": [
+    {
+      "concept_id": 5587,
+      "path": "Literature / By Language / Germanic"
+    },
+    {
+      "concept_id": 3869,
+      "path": "Literature / By Language / Germanic / Denmark"
+    },
+    {
+      "concept_id": 3872,
+      "path": "Literature / By Language / Germanic / Denmark / Folk"
+    },
+    {
+      "concept_id": 3873,
+      "path": "Literature / By Language / Germanic / Denmark / Danish Children’s"
+    },
+    {
+      "concept_id": 3874,
+      "path": "Literature / By Language / Germanic / Denmark / Danish Literary Studies"
+    },
+    {
+      "concept_id": 7233,
+      "path": "Literature / By Language / Germanic / Denmark / Danish Literary Studies / History of Danish"
+    },
+    {
+      "concept_id": 8043,
+      "path": "Literature / By Language / Germanic / Denmark / Danish Literary Studies / Danish Literary Criticism"
+    },
+    {
+      "concept_id": 3875,
+      "path": "Literature / By Language / Germanic / Denmark / Provincial, local, foreign"
+    },
+    {
+      "concept_id": 7755,
+      "path": "Literature / By Language / Germanic / Denmark / Provincial, local, foreign / Provincial & Local"
+    },
+    {
+      "concept_id": 54877,
+      "path": "Literature / By Language / Germanic / Denmark / By Period"
+    },
+    {
+      "concept_id": 3871,
+      "path": "Literature / By Language / Germanic / Denmark / By Period / 19th century"
+    },
+    {
+      "concept_id": 3870,
+      "path": "Literature / By Language / Germanic / Denmark / By Period / 16th-18th centuries"
+    },
+    {
+      "concept_id": 3931,
+      "path": "Literature / By Language / Germanic / Faroese"
+    },
+    {
+      "concept_id": 4389,
+      "path": "Literature / By Language / Germanic / Modern Icelandic"
+    },
+    {
+      "concept_id": 4390,
+      "path": "Literature / By Language / Germanic / Modern Icelandic / 21st century"
+    },
+    {
+      "concept_id": 4391,
+      "path": "Literature / By Language / Germanic / Modern Icelandic / Folk"
+    },
+    {
+      "concept_id": 4392,
+      "path": "Literature / By Language / Germanic / Modern Icelandic / Icelandic Literary Studies"
+    },
+    {
+      "concept_id": 8060,
+      "path": "Literature / By Language / Germanic / Modern Icelandic / Icelandic Literary Studies / Icelandic Literary Criticism"
+    },
+    {
+      "concept_id": 9834,
+      "path": "Literature / By Language / Germanic / Modern Icelandic / Icelandic Literary Studies / Modern Icelandic Lit. History"
+    },
+    {
+      "concept_id": 4393,
+      "path": "Literature / By Language / Germanic / Modern Icelandic / Provincial, local, foreign"
+    },
+    {
+      "concept_id": 4394,
+      "path": "Literature / By Language / Germanic / Norway"
+    },
+    {
+      "concept_id": 4395,
+      "path": "Literature / By Language / Germanic / Norway / 19th century"
+    },
+    {
+      "concept_id": 4396,
+      "path": "Literature / By Language / Germanic / Norway / Folk"
+    },
+    {
+      "concept_id": 4397,
+      "path": "Literature / By Language / Germanic / Norway / Norwegian Kids’"
+    },
+    {
+      "concept_id": 4398,
+      "path": "Literature / By Language / Germanic / Norway / Landsmaal or New Norwegian"
+    },
+    {
+      "concept_id": 4399,
+      "path": "Literature / By Language / Germanic / Norway / Norwegian Literary Studies"
+    },
+    {
+      "concept_id": 9225,
+      "path": "Literature / By Language / Germanic / Norway / Norwegian Literary Studies / Norwegian Literary History"
+    },
+    {
+      "concept_id": 9586,
+      "path": "Literature / By Language / Germanic / Norway / Norwegian Literary Studies / Norwegian Literary Criticism"
+    },
+    {
+      "concept_id": 4400,
+      "path": "Literature / By Language / Germanic / Norway / Provincial, local, foreign"
+    },
+    {
+      "concept_id": 8668,
+      "path": "Literature / By Language / Germanic / Norway / Provincial, local, foreign / Provincial & Local"
+    },
+    {
+      "concept_id": 9510,
+      "path": "Literature / By Language / Germanic / Norway / Provincial, local, foreign / Norwegian Abroad"
+    },
+    {
+      "concept_id": 4402,
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian"
+    },
+    {
+      "concept_id": 4403,
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Norse Sagas & Histories"
+    },
+    {
+      "concept_id": 7583,
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Norse Sagas & Histories / Romance Sagas"
+    },
+    {
+      "concept_id": 8720,
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Norse Sagas & Histories / Mythical sagas"
+    },
+    {
+      "concept_id": 9615,
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Norse Sagas & Histories / Kings’ Sagas"
+    },
+    {
+      "concept_id": 10059,
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Norse Sagas & Histories / Icelandic Church & Bishops’ Sagas"
+    },
+    {
+      "concept_id": 4404,
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Old Norse Literary Studies"
+    },
+    {
+      "concept_id": 7255,
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Old Norse Literary Studies / Old Norse Literary Criticism"
+    },
+    {
+      "concept_id": 9972,
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Old Norse Literary Studies / Old Norse Literary History"
+    },
+    {
+      "concept_id": 4405,
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Prose"
+    },
+    {
+      "concept_id": 4406,
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Religious works"
+    },
+    {
+      "concept_id": 4407,
+      "path": "Literature / By Language / Germanic / Old Icelandic & Norwegian / Scientific & learned"
+    },
+    {
+      "concept_id": 4473,
+      "path": "Literature / By Language / Germanic / Sweden"
+    },
+    {
+      "concept_id": 4476,
+      "path": "Literature / By Language / Germanic / Sweden / Swedish Children’s"
+    },
+    {
+      "concept_id": 4477,
+      "path": "Literature / By Language / Germanic / Sweden / Swedish Literary Studies"
+    },
+    {
+      "concept_id": 6906,
+      "path": "Literature / By Language / Germanic / Sweden / Swedish Literary Studies / History of Swedish"
+    },
+    {
+      "concept_id": 7522,
+      "path": "Literature / By Language / Germanic / Sweden / Swedish Literary Studies / Swedish Lit. Scholars’ Lives"
+    },
+    {
+      "concept_id": 8951,
+      "path": "Literature / By Language / Germanic / Sweden / Swedish Literary Studies / Swedish Literary Criticism"
+    },
+    {
+      "concept_id": 4478,
+      "path": "Literature / By Language / Germanic / Sweden / Provincial, local, foreign"
+    },
+    {
+      "concept_id": 7112,
+      "path": "Literature / By Language / Germanic / Sweden / Provincial, local, foreign / Swedish Abroad"
+    },
+    {
+      "concept_id": 9123,
+      "path": "Literature / By Language / Germanic / Sweden / Provincial, local, foreign / Provincial & Local"
+    },
+    {
+      "concept_id": 54893,
+      "path": "Literature / By Language / Germanic / Sweden / By Period"
+    },
+    {
+      "concept_id": 52012,
+      "path": "Literature / By Language / Germanic / Sweden / By Period / Swedish, 1961–2000"
+    },
+    {
+      "concept_id": 52013,
+      "path": "Literature / By Language / Germanic / Sweden / By Period / Swedish, 1900–1960"
+    },
+    {
+      "concept_id": 4474,
+      "path": "Literature / By Language / Germanic / Sweden / By Period / 19th century"
+    },
+    {
+      "concept_id": 60177,
+      "path": "Literature / By Language / Germanic / Scandinavian Literary Studies"
+    }
+  ],
+  "child_concept_ids": [
+    3869,
+    3931,
+    4389,
+    4394,
+    4402,
+    4473,
+    60177
+  ]
+}

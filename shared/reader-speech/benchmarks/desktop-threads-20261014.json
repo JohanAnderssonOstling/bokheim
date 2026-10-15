@@ -1,0 +1,287 @@
+{
+  "date": "2026-10-14",
+  "platform": "Linux desktop",
+  "cpu": "AMD Ryzen 7 6800HS Creator Edition, 8 cores, 16 hardware threads",
+  "voice": "Alba en_GB medium, CPU provider, sherpa-onnx 1.13.8",
+  "configuration": {
+    "speed": 1.0,
+    "sentence_scale": 1.0,
+    "passage_gap": 0.0,
+    "noise_scale": 0.75,
+    "warmups_per_case": 2
+  },
+  "command": "target/debug/examples/alba_benchmark THREADS REPEATS",
+  "affinity_command": "taskset -c 0,2,4,6 target/debug/examples/alba_benchmark THREADS 8",
+  "build": "Cargo dev profile; synthesis runs in prebuilt native libraries; Rust debug information stripped for this example",
+  "measurement": {
+    "wall_ms": "Mean wall time per synthesized passage, excluding model load and two warmups",
+    "cpu_ms": "Mean process user plus system CPU time per passage from /proc/self/stat at CLK_TCK resolution",
+    "audio_ms": "Mean generated audio duration per passage",
+    "realtime_factor": "Wall time divided by generated audio duration",
+    "peak_rss_kib": "Whole process VmHWM through loading, warmups and synthesis; excludes reader UI and playback; not steady-state or model-only RAM"
+  },
+  "limitations": [
+    "Initial and repeat unrestricted runs overlapped background compilation and varied substantially.",
+    "Affinity comparison used the same four physical cores and no simultaneous builds from this task; other desktop activity was not controlled.",
+    "Native synthesis is stochastic, so generated audio duration varies.",
+    "No Android performance measurements were collected."
+  ],
+  "selected_default_threads": 2,
+  "runs": [
+    {
+      "run": "1",
+      "cpu_affinity": null,
+      "model_load_ms": 3979,
+      "peak_rss_kib": 699072,
+      "cases": [
+        {
+          "threads": 1,
+          "case": "short",
+          "repeats": 6,
+          "wall_ms": 679.65,
+          "cpu_ms": 560.0,
+          "audio_ms": 4632.38,
+          "realtime_factor": 0.1467
+        },
+        {
+          "threads": 1,
+          "case": "medium",
+          "repeats": 6,
+          "wall_ms": 1219.97,
+          "cpu_ms": 1208.33,
+          "audio_ms": 12987.69,
+          "realtime_factor": 0.0939
+        },
+        {
+          "threads": 1,
+          "case": "long",
+          "repeats": 6,
+          "wall_ms": 2044.46,
+          "cpu_ms": 2025.0,
+          "audio_ms": 20247.8,
+          "realtime_factor": 0.101
+        }
+      ]
+    },
+    {
+      "run": "2",
+      "cpu_affinity": null,
+      "model_load_ms": 1211,
+      "peak_rss_kib": 702904,
+      "cases": [
+        {
+          "threads": 2,
+          "case": "short",
+          "repeats": 6,
+          "wall_ms": 246.57,
+          "cpu_ms": 486.67,
+          "audio_ms": 4645.93,
+          "realtime_factor": 0.0531
+        },
+        {
+          "threads": 2,
+          "case": "medium",
+          "repeats": 6,
+          "wall_ms": 780.41,
+          "cpu_ms": 1510.0,
+          "audio_ms": 12981.89,
+          "realtime_factor": 0.0601
+        },
+        {
+          "threads": 2,
+          "case": "long",
+          "repeats": 6,
+          "wall_ms": 1307.93,
+          "cpu_ms": 2475.0,
+          "audio_ms": 20292.31,
+          "realtime_factor": 0.0645
+        }
+      ]
+    },
+    {
+      "run": "3",
+      "cpu_affinity": null,
+      "model_load_ms": 1743,
+      "peak_rss_kib": 752120,
+      "cases": [
+        {
+          "threads": 3,
+          "case": "short",
+          "repeats": 6,
+          "wall_ms": 524.2,
+          "cpu_ms": 1108.33,
+          "audio_ms": 4661.41,
+          "realtime_factor": 0.1125
+        },
+        {
+          "threads": 3,
+          "case": "medium",
+          "repeats": 6,
+          "wall_ms": 1016.97,
+          "cpu_ms": 2518.33,
+          "audio_ms": 12956.73,
+          "realtime_factor": 0.0785
+        },
+        {
+          "threads": 3,
+          "case": "long",
+          "repeats": 6,
+          "wall_ms": 1464.81,
+          "cpu_ms": 3501.67,
+          "audio_ms": 20286.5,
+          "realtime_factor": 0.0722
+        }
+      ]
+    },
+    {
+      "run": "4",
+      "cpu_affinity": null,
+      "model_load_ms": 1180,
+      "peak_rss_kib": 702144,
+      "cases": [
+        {
+          "threads": 4,
+          "case": "short",
+          "repeats": 6,
+          "wall_ms": 170.95,
+          "cpu_ms": 676.67,
+          "audio_ms": 4556.92,
+          "realtime_factor": 0.0375
+        },
+        {
+          "threads": 4,
+          "case": "medium",
+          "repeats": 6,
+          "wall_ms": 516.04,
+          "cpu_ms": 1976.67,
+          "audio_ms": 13084.44,
+          "realtime_factor": 0.0394
+        },
+        {
+          "threads": 4,
+          "case": "long",
+          "repeats": 6,
+          "wall_ms": 953.8,
+          "cpu_ms": 3415.0,
+          "audio_ms": 20332.94,
+          "realtime_factor": 0.0469
+        }
+      ]
+    },
+    {
+      "run": "4-repeat",
+      "cpu_affinity": null,
+      "model_load_ms": 4029,
+      "peak_rss_kib": 753896,
+      "cases": [
+        {
+          "threads": 4,
+          "case": "short",
+          "repeats": 8,
+          "wall_ms": 949.54,
+          "cpu_ms": 1547.5,
+          "audio_ms": 4554.01,
+          "realtime_factor": 0.2085
+        },
+        {
+          "threads": 4,
+          "case": "medium",
+          "repeats": 8,
+          "wall_ms": 2129.66,
+          "cpu_ms": 3818.75,
+          "audio_ms": 12871.11,
+          "realtime_factor": 0.1655
+        },
+        {
+          "threads": 4,
+          "case": "long",
+          "repeats": 8,
+          "wall_ms": 1407.97,
+          "cpu_ms": 4346.25,
+          "audio_ms": 20234.74,
+          "realtime_factor": 0.0696
+        }
+      ]
+    },
+    {
+      "run": "2-affinity",
+      "cpu_affinity": [
+        0,
+        2,
+        4,
+        6
+      ],
+      "model_load_ms": 1769,
+      "peak_rss_kib": 707708,
+      "cases": [
+        {
+          "threads": 2,
+          "case": "short",
+          "repeats": 8,
+          "wall_ms": 288.03,
+          "cpu_ms": 568.75,
+          "audio_ms": 4564.17,
+          "realtime_factor": 0.0631
+        },
+        {
+          "threads": 2,
+          "case": "medium",
+          "repeats": 8,
+          "wall_ms": 741.42,
+          "cpu_ms": 1448.75,
+          "audio_ms": 13045.26,
+          "realtime_factor": 0.0568
+        },
+        {
+          "threads": 2,
+          "case": "long",
+          "repeats": 8,
+          "wall_ms": 1286.83,
+          "cpu_ms": 2441.25,
+          "audio_ms": 20331.97,
+          "realtime_factor": 0.0633
+        }
+      ]
+    },
+    {
+      "run": "4-affinity",
+      "cpu_affinity": [
+        0,
+        2,
+        4,
+        6
+      ],
+      "model_load_ms": 1180,
+      "peak_rss_kib": 701864,
+      "cases": [
+        {
+          "threads": 4,
+          "case": "short",
+          "repeats": 8,
+          "wall_ms": 194.43,
+          "cpu_ms": 767.5,
+          "audio_ms": 4532.24,
+          "realtime_factor": 0.0429
+        },
+        {
+          "threads": 4,
+          "case": "medium",
+          "repeats": 8,
+          "wall_ms": 581.43,
+          "cpu_ms": 2190.0,
+          "audio_ms": 13081.54,
+          "realtime_factor": 0.0444
+        },
+        {
+          "threads": 4,
+          "case": "long",
+          "repeats": 8,
+          "wall_ms": 930.18,
+          "cpu_ms": 3298.75,
+          "audio_ms": 20191.2,
+          "realtime_factor": 0.0461
+        }
+      ]
+    }
+  ]
+}

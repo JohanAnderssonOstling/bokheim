@@ -13,7 +13,9 @@ pub use pdf_view_common::{
 use pdf_view_common::{PageRotation, PageTransform, TextCharacter, merge_line_rects};
 use pdfium_render::prelude::*;
 mod interaction_style;
+mod reading;
 pub use interaction_style::{ReaderInteractionStyle, RgbaColor};
+pub use reading::PdfReadingFragment;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -376,6 +378,16 @@ impl LocalDocumentSession {
         self.render_page_pixels(key.page_index(), Some(key.target_width()), key.trim_margins(), true).map(RenderedPdfBgraPage)
     }
 
+    fn page_analysis(&self, page: &PdfPage<'_>, page_index: usize) -> PdfResult<Arc<PageAnalysis>> {
+        let cached = self.analysis.borrow_mut().get(page_index);
+        if let Some(analysis) = cached {
+            return Ok(analysis);
+        }
+        let analysis = Arc::new(PageAnalysis { text: Arc::new(extract_text_layout(page, page_index)?), images: extract_image_bounds(page), trim_bounds: OnceLock::new() });
+        self.analysis.borrow_mut().insert(page_index, analysis.clone());
+        Ok(analysis)
+    }
+
     fn render_page_pixels(&self, page_index: usize, target_width: Option<u16>, trim_margins: bool, bgra: bool) -> PdfResult<RenderedPdfPage> {
         if let Some(source) = &self.page_source {
             source.prepare_page(page_index).map_err(PdfError::new)?;
@@ -383,14 +395,7 @@ impl LocalDocumentSession {
         let mut page = self.document.pages().get(page_index as i32).map_err(|_| PdfError::new(format!("PDF page {} does not exist", page_index + 1)))?;
         suppress_bokheim_annotation_rendering(&mut page);
         let width = target_width.unwrap_or(DEFAULT_RENDER_WIDTH).clamp(MIN_RENDER_WIDTH, MAX_RENDER_WIDTH) as i32;
-        let cached = self.analysis.borrow_mut().get(page_index);
-        let analysis = if let Some(analysis) = cached {
-            analysis
-        } else {
-            let analysis = Arc::new(PageAnalysis { text: Arc::new(extract_text_layout(&page, page_index)?), images: extract_image_bounds(&page), trim_bounds: OnceLock::new() });
-            self.analysis.borrow_mut().insert(page_index, analysis.clone());
-            analysis
-        };
+        let analysis = self.page_analysis(&page, page_index)?;
         // Match PDFium's target-width scaling, retaining full-page dimensions for
         // selection transforms while allocating only the retained crop.
         let pixel_width = width as u32;
@@ -449,7 +454,8 @@ impl LocalDocumentSession {
         let mut hits = Vec::new();
         search.iter(PdfSearchDirection::SearchForward).for_each(|segments| {
             segments.iter().for_each(|segment| {
-                hits.push(PdfSearchHit { page_index, bounds: normalized_pdf_bounds(segment.bounds(), page_width, page_height) });
+                let bounds = segment.bounds();
+                hits.push(PdfSearchHit { page_index, bounds: normalized_pdf_bounds(bounds, page_width, page_height), excerpt: search_excerpt(&text, bounds, page_width) });
             });
         });
         Ok(hits)
@@ -708,10 +714,20 @@ impl PdfPageTextLayout {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// The text a search result shows: the matched line with one line either side,
+/// read across the page's full width so a hit in a narrow column still gets
+/// its sentence, and folded onto one line.
+fn search_excerpt(text: &PdfPageText<'_>, bounds: PdfRect, page_width: f32) -> Arc<str> {
+    let line = bounds.height().value.max(1.0);
+    let area = PdfRect::new(PdfPoints::new(bounds.bottom().value - line), PdfPoints::new(0.0), PdfPoints::new(bounds.top().value + line), PdfPoints::new(page_width));
+    text.inside_rect(area).split_whitespace().collect::<Vec<_>>().join(" ").into()
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct PdfSearchHit {
     page_index: usize,
     bounds: NormalizedRect,
+    excerpt: Arc<str>,
 }
 
 impl PdfSearchHit {
@@ -721,6 +737,11 @@ impl PdfSearchHit {
 
     pub fn bounds(&self) -> NormalizedRect {
         self.bounds
+    }
+
+    /// The text around the match, for a results list.
+    pub fn excerpt(&self) -> &str {
+        &self.excerpt
     }
 }
 
@@ -1004,6 +1025,54 @@ mod tests {
             }
             document.save_to_file(&path).map_err(|error| PdfError::new(error.to_string()))
         })
+    }
+
+    #[test]
+    fn narration_and_rendering_reuse_the_same_page_analysis() -> PdfResult<()> {
+        let path = fixture_path("narration-analysis")?;
+        create_fixture_pdf(&path)?;
+        runtime::run(move || {
+            let document = LocalDocumentSession::open(&path)?;
+            let fragments = document.extract_reading_fragments(0)?;
+            assert_eq!(fragments[0].text, "First searchable page");
+            let first = document.analysis.borrow_mut().get(0).unwrap();
+            let rendered = document.render_page_pixels(0, Some(320), false, false)?;
+            assert!(Arc::ptr_eq(&first.text, &rendered.text_layout), "TTS-first extraction is also used by rendering");
+            document.render_page_pixels(1, Some(320), true, false)?;
+            let second = document.analysis.borrow_mut().get(1).unwrap();
+            // A sentinel cached layout proves narration uses cached geometry
+            // rather than re-extracting the PDF page's original text.
+            let text = "Cached narration";
+            let geometry = PageTextGeometry::new(text.chars().enumerate().map(|(index, ch)| TextCharacter::new(index, ch, NormalizedRect::new(0.1 + index as f32 * 0.015, 0.2, 0.015, 0.02))));
+            let cached = Arc::new(PageAnalysis { text: Arc::new(PdfPageTextLayout { page_index: 1, geometry }), images: second.images.clone(), trim_bounds: OnceLock::new() });
+            let mut cache = document.analysis.borrow_mut();
+            let entry = cache.pages.iter_mut().find(|(index, _)| *index == 1).unwrap();
+            entry.1 = cached.clone();
+            cache.byte_len = cache.pages.iter().map(|(_, analysis)| analysis.byte_len()).sum();
+            drop(cache);
+            assert_eq!(document.extract_reading_fragments(1)?[0].text, text);
+            assert!(Arc::ptr_eq(&document.analysis.borrow_mut().get(1).unwrap(), &cached));
+            assert_eq!(document.analysis.borrow().pages.len(), 2);
+            fs::remove_file(path).map_err(|error| PdfError::new(error.to_string()))?;
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn search_hits_keep_page_context_in_their_excerpts() -> PdfResult<()> {
+        let path = fixture_path("search-excerpts")?;
+        create_fixture_pdf(&path)?;
+        let bytes = fs::read(&path).map_err(|error| PdfError::new(error.to_string()))?;
+        let session = PdfDocumentSession::from_bytes("search-excerpts", bytes)?;
+        let hits = session.search("searchable")?;
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].page_index(), 0);
+        assert_eq!(hits[0].excerpt(), "First searchable page");
+        assert_eq!(hits[1].page_index(), 1);
+        assert_eq!(hits[1].excerpt(), "Second searchable page");
+        assert_eq!(hits[0].clone(), hits[0]);
+        fs::remove_file(path).map_err(|error| PdfError::new(error.to_string()))?;
+        Ok(())
     }
 
     #[test]

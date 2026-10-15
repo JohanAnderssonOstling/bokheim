@@ -4,6 +4,7 @@
 //! only the page knows what its kind does with it.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::prelude::*;
@@ -77,6 +78,9 @@ impl CardView {
             cx.subscribe(&navigator, |cards, _, loaded: &Loaded, cx| cards.install(loaded, cx)),
             // A feed lists its next page once the grid reaches its end.
             cx.observe(&paginator, |cards, paginator, cx| {
+                let flow = paginator.read(cx);
+                let range = flow.visible_child_range().map(|range| range.start..flow.adjacent_child_range(true).map_or(range.end, |next| next.end.max(range.end)));
+                cards.load_visible_page(range, cx);
                 if paginator.read(cx).on_last_page() {
                     cards.navigator.update(cx, |navigator, cx| navigator.load_more(cx));
                 }
@@ -107,6 +111,16 @@ impl CardView {
         cx.notify();
     }
 
+    fn load_visible_page(&self, range: Option<Range<usize>>, cx: &mut Context<Self>) {
+        let Some(range) = range else { return };
+        let navigator = self.navigator.read(cx);
+        if navigator.listing.page.is_none() {
+            return;
+        }
+        let compact = navigator.listing.compact_slot_count();
+        self.navigator.update(cx, |navigator, cx| navigator.load_page_range(range, compact, cx));
+    }
+
     /// Rebuilds the grid's row height for the current "cover text" setting.
     ///
     /// The cards themselves pick the change up on their own — see
@@ -122,27 +136,34 @@ impl CardView {
 
     fn groups(&mut self, cx: &mut Context<Self>) -> Vec<PaginatorGroup> {
         let navigator = self.navigator.read(cx);
+        let library_id = navigator.library_id();
         let (kind, sections, children, books, items) = (navigator.kind, navigator.listing.sections.clone(), navigator.listing.children.clone(), navigator.listing.books.clone(), navigator.listing.items.clone());
         // Only a folder listing can be dragged: its children are directories,
         // and its books sit in a folder a move can name as their source.
         let source = navigator.destination.location.folder();
+        let revision = navigator.listing.revision;
         let mut cards = HashMap::new();
         for section in &sections {
             let id = section.parent.id;
             let card = match self.section_cards.remove(&id) {
                 Some(card) => {
-                    card.update(cx, |card, cx| card.set_section(section, cx));
+                    card.update(cx, |card, cx| card.set_section(section, revision, cx));
                     card
                 }
                 None => {
                     let events = self.events.clone();
-                    cx.new(|cx| SectionCard::new(events, format!("{}-section-{id}", kind.list_prefix()), kind, section, cx))
+                    let navigator = self.navigator.clone();
+                    cx.new(|cx| SectionCard::new(events, library_id, format!("{}-section-{id}", kind.list_prefix()), kind, section, navigator, revision, cx))
                 }
             };
             cards.insert(id, card);
         }
         self.section_cards = cards;
-        super::layout::paginator_groups(self.events.clone(), children, kind, books, source, &self.section_cards, items, cx)
+        let navigator = self.navigator.read(cx);
+        let page = navigator.listing.page.clone();
+        let book_indices = navigator.listing.book_indices.clone();
+        let heading_rows = navigator.listing.heading_rows.clone();
+        super::layout::paginator_groups(self.events.clone(), library_id, children, kind, books, source, &self.section_cards, items, page.as_ref(), &book_indices, &heading_rows, cx)
     }
 
     pub(super) fn is_empty(&self, cx: &App) -> bool {

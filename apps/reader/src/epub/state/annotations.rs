@@ -32,8 +32,9 @@ impl ReaderView {
         );
     }
 
-    pub(in crate::epub) fn highlight_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(in crate::epub) fn create_annotation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Selection { cfi_range, text: exact_text }) = self.selection.take() else { return };
+        let toc_ordinal = self.toc.ordinal_for_cfi(&cfi_range).or_else(|| self.toc.ordinal_of_active()).map(|ordinal| ordinal as i64);
         self.annotation_note_input.update(cx, |input, cx| input.set_value(String::new(), window, cx));
         let now = crate::shell::marks::now_millis();
         let now = u64::try_from(now).expect("annotation timestamps must be nonnegative");
@@ -46,7 +47,7 @@ impl ReaderView {
             color: ui_components::READER_ANNOTATION_DEFAULT_COLOR,
             note: String::new(),
             created_at: now,
-            toc_ordinal: self.toc.ordinal_of_active().map(|ordinal| ordinal as i64),
+            toc_ordinal,
             progress: Some(book_model::layout_fraction_progress(self.progress.fraction)),
             modified_at: now,
             deleted: false,
@@ -57,12 +58,6 @@ impl ReaderView {
         self.marks.select(annotation_id);
         self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::UpsertAnnotation(overlay), cx));
         notify(cx, Component::ReaderShell, "annotation_created");
-    }
-
-    pub(in crate::epub) fn copy_selection_citation(&self, cx: &mut Context<Self>) {
-        let title = self.display_title();
-        let cfi = self.selection.as_ref().map(|selection| selection.cfi_range.clone()).or_else(|| self.current_cfi.clone());
-        self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::CopySelectionCitation { title, cfi }, cx));
     }
 
     pub(in crate::epub) fn select_annotation(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {

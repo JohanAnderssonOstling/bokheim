@@ -1,0 +1,7230 @@
+{
+  "description": "Literary traditions and studies belong exclusively to Literature; retain Youth and Comics routes.",
+  "baseline_sequence": 60015,
+  "edits": [
+    {
+      "id": 790,
+      "before_label": "Literature for children",
+      "after_label": "Children's Books on Music",
+      "before_parents": [
+        5945
+      ],
+      "after_parents": [
+        5945
+      ]
+    },
+    {
+      "id": 3217,
+      "before_label": "Biography as Literature",
+      "after_label": "Biography as Literature",
+      "before_parents": [
+        54973
+      ],
+      "after_parents": [
+        4369
+      ]
+    },
+    {
+      "id": 3242,
+      "before_label": "Literary Figures",
+      "after_label": "Literary Figures",
+      "before_parents": [
+        54967
+      ],
+      "after_parents": [
+        4370
+      ]
+    },
+    {
+      "id": 3761,
+      "before_label": "Indo-Aryan literature",
+      "after_label": "Indo-Aryan Literature",
+      "before_parents": [
+        3755
+      ],
+      "after_parents": [
+        60017
+      ]
+    },
+    {
+      "id": 3762,
+      "before_label": "Iranian Philology & Literature",
+      "after_label": "Iranian Languages & Philology",
+      "before_parents": [
+        3755
+      ],
+      "after_parents": [
+        3755
+      ]
+    },
+    {
+      "id": 3763,
+      "before_label": "Literature",
+      "after_label": "Persian Authors & Works",
+      "before_parents": [
+        3755
+      ],
+      "after_parents": [
+        60019
+      ]
+    },
+    {
+      "id": 3767,
+      "before_label": "Sanskrit",
+      "after_label": "Sanskrit Literature",
+      "before_parents": [
+        3760
+      ],
+      "after_parents": [
+        3761
+      ]
+    },
+    {
+      "id": 3798,
+      "before_label": "Oriental philology & literature",
+      "after_label": "Oriental Philology",
+      "before_parents": [
+        3703
+      ],
+      "after_parents": [
+        3703
+      ]
+    },
+    {
+      "id": 3799,
+      "before_label": "Arabic literature",
+      "after_label": "Arabic Authors & Works",
+      "before_parents": [
+        3798
+      ],
+      "after_parents": [
+        12872
+      ]
+    },
+    {
+      "id": 3809,
+      "before_label": "Literature",
+      "after_label": "Afro-Asiatic Literature",
+      "before_parents": [
+        3798
+      ],
+      "after_parents": [
+        54951
+      ]
+    },
+    {
+      "id": 3811,
+      "before_label": "Semitic Philology & Literature",
+      "after_label": "Semitic Philology",
+      "before_parents": [
+        3703
+      ],
+      "after_parents": [
+        3703
+      ]
+    },
+    {
+      "id": 3841,
+      "before_label": "Children's & Young Adult",
+      "after_label": "Children's & Young Adult Writing",
+      "before_parents": [
+        3837
+      ],
+      "after_parents": [
+        55253
+      ]
+    },
+    {
+      "id": 3843,
+      "before_label": "Fiction Writing",
+      "after_label": "Fiction Writing",
+      "before_parents": [
+        3837,
+        4383
+      ],
+      "after_parents": [
+        4383
+      ]
+    },
+    {
+      "id": 3844,
+      "before_label": "Nonfiction",
+      "after_label": "Nonfiction Writing",
+      "before_parents": [
+        3837
+      ],
+      "after_parents": [
+        55253
+      ]
+    },
+    {
+      "id": 3845,
+      "before_label": "Poetry",
+      "after_label": "Poetry Writing",
+      "before_parents": [
+        3837
+      ],
+      "after_parents": [
+        4382
+      ]
+    },
+    {
+      "id": 5065,
+      "before_label": "Folk literature",
+      "after_label": "Folk Literature",
+      "before_parents": [
+        5079
+      ],
+      "after_parents": [
+        4369
+      ]
+    },
+    {
+      "id": 5753,
+      "before_label": "Sacred Texts & Literature",
+      "after_label": "Buddhist Writings & Canon",
+      "before_parents": [
+        4553
+      ],
+      "after_parents": [
+        4553
+      ]
+    },
+    {
+      "id": 5982,
+      "before_label": "Literature",
+      "after_label": "Literary Bibliographies",
+      "before_parents": [
+        5969
+      ],
+      "after_parents": [
+        60020
+      ]
+    },
+    {
+      "id": 6049,
+      "before_label": "Erotica Bibliographies",
+      "after_label": "Erotica Bibliographies",
+      "before_parents": [
+        6046
+      ],
+      "after_parents": [
+        60020
+      ]
+    },
+    {
+      "id": 6050,
+      "before_label": "Fiction",
+      "after_label": "Fiction Bibliographies",
+      "before_parents": [
+        6046
+      ],
+      "after_parents": [
+        60020
+      ]
+    },
+    {
+      "id": 6057,
+      "before_label": "Poetry",
+      "after_label": "Poetry Bibliographies",
+      "before_parents": [
+        6046
+      ],
+      "after_parents": [
+        60020
+      ]
+    },
+    {
+      "id": 6317,
+      "before_label": "Literature",
+      "after_label": "Raeto-Romance Literature",
+      "before_parents": [
+        3826
+      ],
+      "after_parents": [
+        5586
+      ]
+    },
+    {
+      "id": 7173,
+      "before_label": "Children’s Literature Studies",
+      "after_label": "Children's Music Books: History & Criticism",
+      "before_parents": [
+        790
+      ],
+      "after_parents": [
+        790
+      ]
+    },
+    {
+      "id": 7407,
+      "before_label": "Kids’ Literature",
+      "after_label": "Children's Musician Biographies",
+      "before_parents": [
+        54965
+      ],
+      "after_parents": [
+        54965
+      ]
+    },
+    {
+      "id": 7610,
+      "before_label": "Literature",
+      "after_label": "Indigenous American Literature",
+      "before_parents": [
+        3728
+      ],
+      "after_parents": [
+        54951
+      ]
+    },
+    {
+      "id": 7752,
+      "before_label": "Literature",
+      "after_label": "Ancient Egyptian Literature",
+      "before_parents": [
+        3805
+      ],
+      "after_parents": [
+        3809
+      ]
+    },
+    {
+      "id": 7753,
+      "before_label": "Literature",
+      "after_label": "Caucasian Literature",
+      "before_parents": [
+        3757
+      ],
+      "after_parents": [
+        54951
+      ]
+    },
+    {
+      "id": 8244,
+      "before_label": "Literary Curiosities",
+      "after_label": "Literary Curiosities",
+      "before_parents": [
+        4720
+      ],
+      "after_parents": [
+        60020
+      ]
+    },
+    {
+      "id": 8384,
+      "before_label": "Technical literature",
+      "after_label": "Technical Documentation",
+      "before_parents": [
+        443
+      ],
+      "after_parents": [
+        443
+      ]
+    },
+    {
+      "id": 8434,
+      "before_label": "Literature",
+      "after_label": "Celtic Literature",
+      "before_parents": [
+        3795
+      ],
+      "after_parents": [
+        54951
+      ]
+    },
+    {
+      "id": 8607,
+      "before_label": "Literature",
+      "after_label": "Indo-Aryan Literary Surveys",
+      "before_parents": [
+        3760
+      ],
+      "after_parents": [
+        3761
+      ]
+    },
+    {
+      "id": 8718,
+      "before_label": "Regional African Literature",
+      "after_label": "Regional African Literature",
+      "before_parents": [
+        3711
+      ],
+      "after_parents": [
+        5591
+      ]
+    },
+    {
+      "id": 8903,
+      "before_label": "African Literary Studies",
+      "after_label": "African Literary Studies",
+      "before_parents": [
+        3711
+      ],
+      "after_parents": [
+        5591
+      ]
+    },
+    {
+      "id": 8968,
+      "before_label": "History of Persian literature",
+      "after_label": "Persian Literary History",
+      "before_parents": [
+        3762
+      ],
+      "after_parents": [
+        60019
+      ]
+    },
+    {
+      "id": 9378,
+      "before_label": "Semitic Literature Studies",
+      "after_label": "Semitic Literary Studies",
+      "before_parents": [
+        3811
+      ],
+      "after_parents": [
+        3809
+      ]
+    },
+    {
+      "id": 9419,
+      "before_label": "Music in Literature",
+      "after_label": "Poetry & Prose About Music",
+      "before_parents": [
+        783
+      ],
+      "after_parents": [
+        4280
+      ]
+    },
+    {
+      "id": 10022,
+      "before_label": "Literary authors & music",
+      "after_label": "Literary Authors & Music",
+      "before_parents": [
+        783
+      ],
+      "after_parents": [
+        8293
+      ]
+    },
+    {
+      "id": 10631,
+      "before_label": "Denial literature",
+      "after_label": "Holocaust Denial Writings",
+      "before_parents": [
+        3673
+      ],
+      "after_parents": [
+        3673
+      ]
+    },
+    {
+      "id": 10940,
+      "before_label": "German Success Literature",
+      "after_label": "German Conduct-of-Life Writings",
+      "before_parents": [
+        10980
+      ],
+      "after_parents": [
+        10980
+      ]
+    },
+    {
+      "id": 11184,
+      "before_label": "Literature",
+      "after_label": "Philosophy of Literature",
+      "before_parents": [
+        55005
+      ],
+      "after_parents": [
+        4415
+      ]
+    },
+    {
+      "id": 11480,
+      "before_label": "Early Christian Literature",
+      "after_label": "Early Christian Writings",
+      "before_parents": [
+        4583
+      ],
+      "after_parents": [
+        4583
+      ]
+    },
+    {
+      "id": 12377,
+      "before_label": "The Bible as Literature",
+      "after_label": "The Bible as Literature",
+      "before_parents": [
+        5731
+      ],
+      "after_parents": [
+        4369
+      ]
+    },
+    {
+      "id": 12484,
+      "before_label": "Islamic Literature",
+      "after_label": "Islamic Religious Writings",
+      "before_parents": [
+        4605
+      ],
+      "after_parents": [
+        4605
+      ]
+    },
+    {
+      "id": 12835,
+      "before_label": "Hindi & Hindustani Literature",
+      "after_label": "Hindi & Hindustani Literature",
+      "before_parents": [
+        3759
+      ],
+      "after_parents": [
+        3761
+      ]
+    },
+    {
+      "id": 12836,
+      "before_label": "Urdu Literature",
+      "after_label": "Urdu Literature",
+      "before_parents": [
+        3759
+      ],
+      "after_parents": [
+        3761
+      ]
+    },
+    {
+      "id": 12857,
+      "before_label": "Christ in Literature & Liturgy",
+      "after_label": "Christological Narratives & Liturgy",
+      "before_parents": [
+        11473
+      ],
+      "after_parents": [
+        11473
+      ]
+    },
+    {
+      "id": 12872,
+      "before_label": "Arabic Literature",
+      "after_label": "Arabic Literature",
+      "before_parents": [
+        3713
+      ],
+      "after_parents": [
+        3809
+      ]
+    },
+    {
+      "id": 13032,
+      "before_label": "Pre-Talmudic Literature",
+      "after_label": "Pre-Talmudic Texts",
+      "before_parents": [
+        5875
+      ],
+      "after_parents": [
+        5875
+      ]
+    },
+    {
+      "id": 13033,
+      "before_label": "Rabbinical Literature",
+      "after_label": "Rabbinical Writings",
+      "before_parents": [
+        5875
+      ],
+      "after_parents": [
+        5875
+      ]
+    },
+    {
+      "id": 13168,
+      "before_label": "Hebrew Literature",
+      "after_label": "Hebrew Literature",
+      "before_parents": [
+        3725
+      ],
+      "after_parents": [
+        3809
+      ]
+    },
+    {
+      "id": 13218,
+      "before_label": "Buddhist Literature",
+      "after_label": "Buddhist Writings & Reference",
+      "before_parents": [
+        5753
+      ],
+      "after_parents": [
+        5753
+      ]
+    },
+    {
+      "id": 13577,
+      "before_label": "Film & Literature",
+      "after_label": "Film & Literature",
+      "before_parents": [
+        55164
+      ],
+      "after_parents": [
+        8293
+      ]
+    },
+    {
+      "id": 53248,
+      "before_label": "Primary Literature, Language & Composition",
+      "after_label": "Primary Language & Composition",
+      "before_parents": [
+        6993
+      ],
+      "after_parents": [
+        6993
+      ]
+    },
+    {
+      "id": 9258,
+      "before_label": "General",
+      "after_label": "Finnish Literature",
+      "before_parents": [
+        4482
+      ],
+      "after_parents": [
+        60141
+      ]
+    },
+    {
+      "id": 6225,
+      "before_label": "General",
+      "after_label": "Hungarian Literature",
+      "before_parents": [
+        4483
+      ],
+      "after_parents": [
+        60141
+      ]
+    },
+    {
+      "id": 7311,
+      "before_label": "General",
+      "after_label": "Basque Literature",
+      "before_parents": [
+        4480
+      ],
+      "after_parents": [
+        54951
+      ]
+    },
+    {
+      "id": 4466,
+      "before_label": "Slavic & Baltic Lit. Studies",
+      "after_label": "Russian Literary Studies",
+      "before_parents": [
+        5589
+      ],
+      "after_parents": [
+        4216
+      ]
+    }
+  ],
+  "new_concepts": [
+    {
+      "id": 60016,
+      "label": "Middle Eastern Literary Studies",
+      "parents": [
+        54951
+      ]
+    },
+    {
+      "id": 60017,
+      "label": "Indo-Iranian Literature",
+      "parents": [
+        54951
+      ]
+    },
+    {
+      "id": 60018,
+      "label": "Iranian Literature",
+      "parents": [
+        60017
+      ]
+    },
+    {
+      "id": 60019,
+      "label": "Persian Literature",
+      "parents": [
+        60018
+      ]
+    },
+    {
+      "id": 60020,
+      "label": "Bibliography & Reference",
+      "parents": [
+        4369
+      ]
+    },
+    {
+      "id": 60021,
+      "label": "Hebrew Authors & Works",
+      "parents": [
+        13168
+      ]
+    },
+    {
+      "id": 60022,
+      "label": "Pacific & Austronesian Literature",
+      "parents": [
+        54951
+      ]
+    },
+    {
+      "id": 60023,
+      "label": "East & Southeast Asian Literature",
+      "parents": [
+        54951
+      ]
+    },
+    {
+      "id": 60024,
+      "label": "Austroasiatic Literature",
+      "parents": [
+        54951
+      ]
+    },
+    {
+      "id": 60025,
+      "label": "Dravidian Literature",
+      "parents": [
+        54951
+      ]
+    },
+    {
+      "id": 60026,
+      "label": "Turkic Literature",
+      "parents": [
+        54951
+      ]
+    },
+    {
+      "id": 60027,
+      "label": "Constructed & Contact-Language Literature",
+      "parents": [
+        54951
+      ]
+    },
+    {
+      "id": 60028,
+      "label": "Goidelic Literature",
+      "parents": [
+        8434
+      ]
+    },
+    {
+      "id": 60029,
+      "label": "Irish Literature",
+      "parents": [
+        8434
+      ]
+    },
+    {
+      "id": 60030,
+      "label": "Scottish Gaelic Literature",
+      "parents": [
+        8434
+      ]
+    },
+    {
+      "id": 60031,
+      "label": "Manx Literature",
+      "parents": [
+        8434
+      ]
+    },
+    {
+      "id": 60032,
+      "label": "Brittonic Literature",
+      "parents": [
+        8434
+      ]
+    },
+    {
+      "id": 60033,
+      "label": "Welsh Literature",
+      "parents": [
+        8434
+      ]
+    },
+    {
+      "id": 60034,
+      "label": "Cornish Literature",
+      "parents": [
+        8434
+      ]
+    },
+    {
+      "id": 60035,
+      "label": "Breton Literature",
+      "parents": [
+        8434
+      ]
+    },
+    {
+      "id": 60036,
+      "label": "Old Occitan Literature",
+      "parents": [
+        5586
+      ]
+    },
+    {
+      "id": 60037,
+      "label": "Modern Occitan Literature",
+      "parents": [
+        5586
+      ]
+    },
+    {
+      "id": 60038,
+      "label": "Catalan Literature",
+      "parents": [
+        5586
+      ]
+    },
+    {
+      "id": 60039,
+      "label": "Romance Literary Studies",
+      "parents": [
+        5586
+      ]
+    },
+    {
+      "id": 60040,
+      "label": "Romanian Literature",
+      "parents": [
+        5586
+      ]
+    },
+    {
+      "id": 60041,
+      "label": "Ladin Literature",
+      "parents": [
+        5586
+      ]
+    },
+    {
+      "id": 60042,
+      "label": "Friulian Literature",
+      "parents": [
+        5586
+      ]
+    },
+    {
+      "id": 60043,
+      "label": "Coptic Literature",
+      "parents": [
+        3809
+      ]
+    },
+    {
+      "id": 60044,
+      "label": "Berber Literary History",
+      "parents": [
+        3809
+      ]
+    },
+    {
+      "id": 60045,
+      "label": "Oromo Literature",
+      "parents": [
+        3809
+      ]
+    },
+    {
+      "id": 60046,
+      "label": "Akkadian Literature",
+      "parents": [
+        3809
+      ]
+    },
+    {
+      "id": 60047,
+      "label": "Sumerian Literature",
+      "parents": [
+        3809
+      ]
+    },
+    {
+      "id": 60048,
+      "label": "Yiddish Literature",
+      "parents": [
+        3809
+      ]
+    },
+    {
+      "id": 60049,
+      "label": "Syriac Literature",
+      "parents": [
+        3809
+      ]
+    },
+    {
+      "id": 60050,
+      "label": "Eastern Christian Literature",
+      "parents": [
+        3809
+      ]
+    },
+    {
+      "id": 60051,
+      "label": "Islamic Literary Traditions",
+      "parents": [
+        3809
+      ]
+    },
+    {
+      "id": 60052,
+      "label": "Geʽez Literature",
+      "parents": [
+        3809
+      ]
+    },
+    {
+      "id": 60053,
+      "label": "Amharic Literature",
+      "parents": [
+        3809
+      ]
+    },
+    {
+      "id": 60054,
+      "label": "Apabhramsha Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60055,
+      "label": "Avahattha Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60056,
+      "label": "Assamese Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60057,
+      "label": "Bengali Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60058,
+      "label": "Bihari Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60059,
+      "label": "Maithili Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60060,
+      "label": "Chakma Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60061,
+      "label": "Gujarati Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60062,
+      "label": "Awadhi Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60063,
+      "label": "Bagheli Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60064,
+      "label": "Bangaru Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60065,
+      "label": "Braj Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60066,
+      "label": "Bundeli Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60067,
+      "label": "Dakhini Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60068,
+      "label": "Hindustani Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60069,
+      "label": "Lambadi Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60070,
+      "label": "Lahnda Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60071,
+      "label": "Marathi Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60072,
+      "label": "Marwari Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60073,
+      "label": "Odia Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60074,
+      "label": "Punjabi Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60075,
+      "label": "Rajasthani Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60076,
+      "label": "Sindhi Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60077,
+      "label": "Sinhala Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60078,
+      "label": "Saraiki Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60079,
+      "label": "Pali Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60080,
+      "label": "Prakrit Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60081,
+      "label": "Modern Indo-Aryan Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60082,
+      "label": "Middle Persian Literature",
+      "parents": [
+        60018
+      ]
+    },
+    {
+      "id": 60083,
+      "label": "Pashto Literature",
+      "parents": [
+        60018
+      ]
+    },
+    {
+      "id": 60084,
+      "label": "Ossetic Literature",
+      "parents": [
+        60018
+      ]
+    },
+    {
+      "id": 60085,
+      "label": "Tajik Literature",
+      "parents": [
+        60018
+      ]
+    },
+    {
+      "id": 60086,
+      "label": "Kashmiri Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60087,
+      "label": "Indo-Iranian Literary Studies",
+      "parents": [
+        60017
+      ]
+    },
+    {
+      "id": 60088,
+      "label": "Armenian Literature",
+      "parents": [
+        54951
+      ]
+    },
+    {
+      "id": 60089,
+      "label": "Georgian Literature",
+      "parents": [
+        7753
+      ]
+    },
+    {
+      "id": 60090,
+      "label": "Thai Literature",
+      "parents": [
+        60023
+      ]
+    },
+    {
+      "id": 60091,
+      "label": "Lao Literature",
+      "parents": [
+        60023
+      ]
+    },
+    {
+      "id": 60092,
+      "label": "Mon-Khmer Literature",
+      "parents": [
+        60024
+      ]
+    },
+    {
+      "id": 60093,
+      "label": "Khmer Literature",
+      "parents": [
+        60024
+      ]
+    },
+    {
+      "id": 60094,
+      "label": "Vietnamese Literature",
+      "parents": [
+        60024
+      ]
+    },
+    {
+      "id": 60095,
+      "label": "Khasi Literature",
+      "parents": [
+        60024
+      ]
+    },
+    {
+      "id": 60096,
+      "label": "Mundari Literature",
+      "parents": [
+        60024
+      ]
+    },
+    {
+      "id": 60097,
+      "label": "Gondi Literature",
+      "parents": [
+        60025
+      ]
+    },
+    {
+      "id": 60098,
+      "label": "Kannada Literature",
+      "parents": [
+        60025
+      ]
+    },
+    {
+      "id": 60099,
+      "label": "Kodagu Literature",
+      "parents": [
+        60025
+      ]
+    },
+    {
+      "id": 60100,
+      "label": "Malayalam Literature",
+      "parents": [
+        60025
+      ]
+    },
+    {
+      "id": 60101,
+      "label": "Tamil Literature",
+      "parents": [
+        60025
+      ]
+    },
+    {
+      "id": 60102,
+      "label": "Telugu Literature",
+      "parents": [
+        60025
+      ]
+    },
+    {
+      "id": 60103,
+      "label": "Malay-Indonesian Literary Studies",
+      "parents": [
+        60022
+      ]
+    },
+    {
+      "id": 60104,
+      "label": "Indonesian Literature",
+      "parents": [
+        60022
+      ]
+    },
+    {
+      "id": 60105,
+      "label": "Malay Literature",
+      "parents": [
+        60022
+      ]
+    },
+    {
+      "id": 60106,
+      "label": "Old Javanese Literature",
+      "parents": [
+        60022
+      ]
+    },
+    {
+      "id": 60107,
+      "label": "Javanese Literature",
+      "parents": [
+        60022
+      ]
+    },
+    {
+      "id": 60108,
+      "label": "Malagasy Literature",
+      "parents": [
+        60022
+      ]
+    },
+    {
+      "id": 60109,
+      "label": "Mandailing Literature",
+      "parents": [
+        60022
+      ]
+    },
+    {
+      "id": 60110,
+      "label": "Philippine Literary Studies",
+      "parents": [
+        60022
+      ]
+    },
+    {
+      "id": 60111,
+      "label": "Tagalog Literature",
+      "parents": [
+        60022
+      ]
+    },
+    {
+      "id": 60112,
+      "label": "Waray Literature",
+      "parents": [
+        60022
+      ]
+    },
+    {
+      "id": 60113,
+      "label": "Melanesian Literature",
+      "parents": [
+        60022
+      ]
+    },
+    {
+      "id": 60114,
+      "label": "Polynesian Literature",
+      "parents": [
+        60022
+      ]
+    },
+    {
+      "id": 60115,
+      "label": "Papuan Literature",
+      "parents": [
+        60022
+      ]
+    },
+    {
+      "id": 60116,
+      "label": "Australian Indigenous Literature",
+      "parents": [
+        60022
+      ]
+    },
+    {
+      "id": 60117,
+      "label": "Bantu Literature",
+      "parents": [
+        5591
+      ]
+    },
+    {
+      "id": 60118,
+      "label": "Canadian Indigenous Literature",
+      "parents": [
+        7610
+      ]
+    },
+    {
+      "id": 60119,
+      "label": "Mesoamerican Literary Studies",
+      "parents": [
+        7610
+      ]
+    },
+    {
+      "id": 60120,
+      "label": "Nahuatl Literature",
+      "parents": [
+        7610
+      ]
+    },
+    {
+      "id": 60121,
+      "label": "Arctic Indigenous Literature",
+      "parents": [
+        54951
+      ]
+    },
+    {
+      "id": 60122,
+      "label": "Sardinian Literature",
+      "parents": [
+        5586
+      ]
+    },
+    {
+      "id": 60123,
+      "label": "Corsican Literature",
+      "parents": [
+        5586
+      ]
+    },
+    {
+      "id": 60124,
+      "label": "Somali Literature",
+      "parents": [
+        3809
+      ]
+    },
+    {
+      "id": 60125,
+      "label": "Bhojpuri Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60126,
+      "label": "Magahi Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60127,
+      "label": "Warli Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60128,
+      "label": "Ho Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60129,
+      "label": "Santali Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60130,
+      "label": "Kokborok Literature",
+      "parents": [
+        3761
+      ]
+    },
+    {
+      "id": 60131,
+      "label": "Tulu Literature",
+      "parents": [
+        60025
+      ]
+    },
+    {
+      "id": 60132,
+      "label": "Minangkabau Literature",
+      "parents": [
+        60022
+      ]
+    },
+    {
+      "id": 60133,
+      "label": "Cebuano Literature",
+      "parents": [
+        60022
+      ]
+    },
+    {
+      "id": 60134,
+      "label": "Hausa Literature",
+      "parents": [
+        5591
+      ]
+    },
+    {
+      "id": 60135,
+      "label": "Swahili Literature",
+      "parents": [
+        5591
+      ]
+    },
+    {
+      "id": 60136,
+      "label": "Creole Literature",
+      "parents": [
+        60027
+      ]
+    },
+    {
+      "id": 60137,
+      "label": "Esperanto Literature",
+      "parents": [
+        60027
+      ]
+    },
+    {
+      "id": 60138,
+      "label": "Teaching Literature in Primary School",
+      "parents": [
+        5869
+      ]
+    },
+    {
+      "id": 60139,
+      "label": "Hmong Literature",
+      "parents": [
+        60023
+      ]
+    },
+    {
+      "id": 60140,
+      "label": "Yao Literature",
+      "parents": [
+        60023
+      ]
+    },
+    {
+      "id": 60141,
+      "label": "Uralic Literature",
+      "parents": [
+        54951
+      ]
+    },
+    {
+      "id": 60142,
+      "label": "Multilingual Literature Studies",
+      "parents": [
+        4309
+      ]
+    },
+    {
+      "id": 60143,
+      "label": "Vulgar Latin Literature",
+      "parents": [
+        4279
+      ]
+    },
+    {
+      "id": 60144,
+      "label": "Medieval Latin Literary Studies",
+      "parents": [
+        4279
+      ]
+    },
+    {
+      "id": 60145,
+      "label": "Early Modern Latin Literary Studies",
+      "parents": [
+        4279
+      ]
+    },
+    {
+      "id": 60146,
+      "label": "Modern Latin Literary Studies",
+      "parents": [
+        4279
+      ]
+    },
+    {
+      "id": 60147,
+      "label": "Gothic Literature",
+      "parents": [
+        5587
+      ]
+    },
+    {
+      "id": 60148,
+      "label": "Germanic Literary Studies",
+      "parents": [
+        5587
+      ]
+    },
+    {
+      "id": 60149,
+      "label": "Old English Literary Studies",
+      "parents": [
+        5585
+      ]
+    },
+    {
+      "id": 60150,
+      "label": "Middle English Literary Studies",
+      "parents": [
+        5585
+      ]
+    },
+    {
+      "id": 60151,
+      "label": "Frisian Literature",
+      "parents": [
+        5587
+      ]
+    },
+    {
+      "id": 60152,
+      "label": "Old High German Literature",
+      "parents": [
+        5587
+      ]
+    },
+    {
+      "id": 60153,
+      "label": "Old Saxon Literature",
+      "parents": [
+        5587
+      ]
+    },
+    {
+      "id": 60154,
+      "label": "Slavic Literary Studies",
+      "parents": [
+        5589
+      ]
+    },
+    {
+      "id": 60155,
+      "label": "Sorbian Literature",
+      "parents": [
+        55189
+      ]
+    },
+    {
+      "id": 60156,
+      "label": "Middle Bulgarian Literature",
+      "parents": [
+        55188
+      ]
+    },
+    {
+      "id": 60157,
+      "label": "Baltic Literary Studies",
+      "parents": [
+        55187
+      ]
+    },
+    {
+      "id": 60158,
+      "label": "Albanian Literature",
+      "parents": [
+        5589
+      ]
+    },
+    {
+      "id": 60159,
+      "label": "Komi Literature",
+      "parents": [
+        60141
+      ]
+    },
+    {
+      "id": 60160,
+      "label": "Komi-Permyak Literature",
+      "parents": [
+        60141
+      ]
+    },
+    {
+      "id": 60161,
+      "label": "Udmurt Literature",
+      "parents": [
+        60141
+      ]
+    },
+    {
+      "id": 60162,
+      "label": "Mansi Literature",
+      "parents": [
+        60141
+      ]
+    },
+    {
+      "id": 60163,
+      "label": "Khanty Literature",
+      "parents": [
+        60141
+      ]
+    },
+    {
+      "id": 60164,
+      "label": "Karelian Literature",
+      "parents": [
+        60141
+      ]
+    },
+    {
+      "id": 60165,
+      "label": "Olonets Literature",
+      "parents": [
+        60141
+      ]
+    },
+    {
+      "id": 60166,
+      "label": "Ludic Literature",
+      "parents": [
+        60141
+      ]
+    },
+    {
+      "id": 60167,
+      "label": "Veps Literature",
+      "parents": [
+        60141
+      ]
+    },
+    {
+      "id": 60168,
+      "label": "Ingrian Literature",
+      "parents": [
+        60141
+      ]
+    },
+    {
+      "id": 60169,
+      "label": "Votic Literature",
+      "parents": [
+        60141
+      ]
+    },
+    {
+      "id": 60170,
+      "label": "Livonian Literature",
+      "parents": [
+        60141
+      ]
+    },
+    {
+      "id": 60171,
+      "label": "Estonian Literature",
+      "parents": [
+        60141
+      ]
+    },
+    {
+      "id": 60172,
+      "label": "Sami Literature",
+      "parents": [
+        60141
+      ]
+    },
+    {
+      "id": 60173,
+      "label": "Mordvin Literature",
+      "parents": [
+        60141
+      ]
+    },
+    {
+      "id": 60174,
+      "label": "Uralic Literary Studies",
+      "parents": [
+        60141
+      ]
+    },
+    {
+      "id": 60175,
+      "label": "Mari Literature",
+      "parents": [
+        60141
+      ]
+    },
+    {
+      "id": 60176,
+      "label": "Finnic Literary Studies",
+      "parents": [
+        60141
+      ]
+    },
+    {
+      "id": 60177,
+      "label": "Scandinavian Literary Studies",
+      "parents": [
+        55241
+      ]
+    }
+  ],
+  "remove_lcc_ranges": [
+    [
+      3809,
+      "PJ",
+      5050.0,
+      "[]",
+      "PJ",
+      5055.51,
+      "[]"
+    ],
+    [
+      8434,
+      "PB",
+      1195.2,
+      "[]",
+      "PB",
+      1200.0,
+      "[]"
+    ],
+    [
+      8434,
+      "PB",
+      1305.2,
+      "[]",
+      "PB",
+      1449.0,
+      "[]"
+    ],
+    [
+      8434,
+      "PB",
+      1604.2,
+      "[]",
+      "PB",
+      1709.0,
+      "[]"
+    ],
+    [
+      8434,
+      "PB",
+      1850.2,
+      "[]",
+      "PB",
+      1867.0,
+      "[]"
+    ],
+    [
+      3824,
+      "PC",
+      3899.2,
+      "[]",
+      "PC",
+      3976.0,
+      "[]"
+    ],
+    [
+      3827,
+      "PC",
+      800.0,
+      "[]",
+      "PC",
+      872.0,
+      "[]"
+    ],
+    [
+      3802,
+      "PJ",
+      2190.0,
+      "[]",
+      "PJ",
+      2199.0,
+      "[]"
+    ],
+    [
+      3801,
+      "PJ",
+      3601.0,
+      "[]",
+      "PJ",
+      3971.0,
+      "[]"
+    ],
+    [
+      3814,
+      "PJ",
+      4045.0,
+      "[]",
+      "PJ",
+      4091.0,
+      "[]"
+    ],
+    [
+      3815,
+      "PJ",
+      5601.0,
+      "[]",
+      "PJ",
+      5695.0,
+      "[]"
+    ],
+    [
+      3813,
+      "PJ",
+      601.0,
+      "[]",
+      "PJ",
+      621.0,
+      "[]"
+    ],
+    [
+      8607,
+      "PK",
+      1428.0,
+      "[]",
+      "PK",
+      1428.9,
+      "[]"
+    ],
+    [
+      3761,
+      "PK",
+      4501.0,
+      "[]",
+      "PK",
+      4681.0,
+      "[]"
+    ],
+    [
+      3761,
+      "PK",
+      4990.0,
+      "[]",
+      "PK",
+      5046.0,
+      "[]"
+    ],
+    [
+      3761,
+      "PK",
+      5401.0,
+      "[]",
+      "PK",
+      5471.0,
+      "[]"
+    ],
+    [
+      3737,
+      "PK",
+      6400.0,
+      "[]",
+      "PK",
+      6599.7,
+      "[]"
+    ],
+    [
+      3756,
+      "PK",
+      8501.0,
+      "[]",
+      "PK",
+      8832.0,
+      "[]"
+    ],
+    [
+      3753,
+      "PM",
+      8.0,
+      "[]",
+      "PM",
+      8.5,
+      "[]"
+    ],
+    [
+      3828,
+      "PC",
+      1983.5,
+      "[]",
+      "PC",
+      1984.0,
+      "[[\"Z\",\"5\"]]"
+    ],
+    [
+      3789,
+      "PL",
+      4070.0,
+      "[]",
+      "PL",
+      407495.0,
+      "[]"
+    ],
+    [
+      4481,
+      "PH",
+      91.0,
+      "[[\"A\",\"1\"]]",
+      "PH",
+      98.5,
+      "[]"
+    ]
+  ],
+  "add_lcc_ranges": [
+    [
+      60021,
+      "PJ",
+      5050.0,
+      "[]",
+      "PJ",
+      5055.51,
+      "[]"
+    ],
+    [
+      8434,
+      "PB",
+      1095.2,
+      "[]",
+      "PB",
+      1100.0,
+      "[]"
+    ],
+    [
+      60028,
+      "PB",
+      1195.2,
+      "[]",
+      "PB",
+      1200.0,
+      "[]"
+    ],
+    [
+      60029,
+      "PB",
+      1305.2,
+      "[]",
+      "PB",
+      1449.0,
+      "[]"
+    ],
+    [
+      60030,
+      "PB",
+      1604.2,
+      "[]",
+      "PB",
+      1709.0,
+      "[]"
+    ],
+    [
+      60031,
+      "PB",
+      1850.2,
+      "[]",
+      "PB",
+      1867.0,
+      "[]"
+    ],
+    [
+      60032,
+      "PB",
+      2055.2,
+      "[]",
+      "PB",
+      2060.0,
+      "[]"
+    ],
+    [
+      60033,
+      "PB",
+      2201.0,
+      "[]",
+      "PB",
+      2499.0,
+      "[]"
+    ],
+    [
+      60034,
+      "PB",
+      2550.2,
+      "[]",
+      "PB",
+      2621.0,
+      "[]"
+    ],
+    [
+      60035,
+      "PB",
+      2856.0,
+      "[]",
+      "PB",
+      2932.0,
+      "[]"
+    ],
+    [
+      60036,
+      "PC",
+      3300.0,
+      "[]",
+      "PC",
+      3366.0,
+      "[]"
+    ],
+    [
+      60037,
+      "PC",
+      3381.0,
+      "[]",
+      "PC",
+      3420.5,
+      "[]"
+    ],
+    [
+      60038,
+      "PC",
+      3899.2,
+      "[]",
+      "PC",
+      3976.0,
+      "[]"
+    ],
+    [
+      60039,
+      "PC",
+      400.2,
+      "[]",
+      "PC",
+      400.22,
+      "[]"
+    ],
+    [
+      60040,
+      "PC",
+      800.0,
+      "[]",
+      "PC",
+      872.0,
+      "[]"
+    ],
+    [
+      60041,
+      "PC",
+      945.5,
+      "[]",
+      "PC",
+      945.7,
+      "[]"
+    ],
+    [
+      60042,
+      "PC",
+      947.5,
+      "[]",
+      "PC",
+      947.9,
+      "[]"
+    ],
+    [
+      60043,
+      "PJ",
+      2190.0,
+      "[]",
+      "PJ",
+      2199.0,
+      "[]"
+    ],
+    [
+      60045,
+      "PJ",
+      2471.5,
+      "[]",
+      "PJ",
+      2471.9,
+      "[]"
+    ],
+    [
+      60016,
+      "PJ",
+      305.2,
+      "[]",
+      "PJ",
+      489.0,
+      "[]"
+    ],
+    [
+      60046,
+      "PJ",
+      3601.0,
+      "[]",
+      "PJ",
+      3971.0,
+      "[]"
+    ],
+    [
+      60047,
+      "PJ",
+      4045.0,
+      "[]",
+      "PJ",
+      4091.0,
+      "[]"
+    ],
+    [
+      13168,
+      "PJ",
+      5001.0,
+      "[]",
+      "PJ",
+      5060.0,
+      "[]"
+    ],
+    [
+      60048,
+      "PJ",
+      5120.0,
+      "[]",
+      "PJ",
+      5192.0,
+      "[]"
+    ],
+    [
+      60049,
+      "PJ",
+      5601.0,
+      "[]",
+      "PJ",
+      5695.0,
+      "[]"
+    ],
+    [
+      60050,
+      "PJ",
+      601.0,
+      "[]",
+      "PJ",
+      621.0,
+      "[]"
+    ],
+    [
+      12872,
+      "PJ",
+      7501.0,
+      "[]",
+      "PJ",
+      8518.0,
+      "[]"
+    ],
+    [
+      60051,
+      "PJ",
+      806.0,
+      "[]",
+      "PJ",
+      989.0,
+      "[]"
+    ],
+    [
+      60052,
+      "PJ",
+      9090.0,
+      "[]",
+      "PJ",
+      9101.0,
+      "[]"
+    ],
+    [
+      60053,
+      "PJ",
+      9260.0,
+      "[]",
+      "PJ",
+      9269.0,
+      "[]"
+    ],
+    [
+      60054,
+      "PK",
+      1428.0,
+      "[]",
+      "PK",
+      1428.9,
+      "[]"
+    ],
+    [
+      60055,
+      "PK",
+      1448.0,
+      "[]",
+      "PK",
+      1448.9,
+      "[]"
+    ],
+    [
+      60056,
+      "PK",
+      1560.0,
+      "[]",
+      "PK",
+      1569.0,
+      "[]"
+    ],
+    [
+      60057,
+      "PK",
+      1700.0,
+      "[]",
+      "PK",
+      1731.46,
+      "[]"
+    ],
+    [
+      60058,
+      "PK",
+      1808.0,
+      "[]",
+      "PK",
+      1808.9,
+      "[]"
+    ],
+    [
+      60059,
+      "PK",
+      1818.0,
+      "[]",
+      "PK",
+      1818.9,
+      "[]"
+    ],
+    [
+      60060,
+      "PK",
+      1833.5,
+      "[]",
+      "PK",
+      1833.9,
+      "[]"
+    ],
+    [
+      60061,
+      "PK",
+      1850.0,
+      "[]",
+      "PK",
+      1859.0,
+      "[]"
+    ],
+    [
+      60062,
+      "PK",
+      1947.0,
+      "[]",
+      "PK",
+      1947.9,
+      "[]"
+    ],
+    [
+      60063,
+      "PK",
+      1957.0,
+      "[]",
+      "PK",
+      1957.9,
+      "[]"
+    ],
+    [
+      60064,
+      "PK",
+      1960.5,
+      "[]",
+      "PK",
+      1960.9,
+      "[]"
+    ],
+    [
+      60065,
+      "PK",
+      1967.0,
+      "[]",
+      "PK",
+      1967.9,
+      "[]"
+    ],
+    [
+      60066,
+      "PK",
+      1968.5,
+      "[]",
+      "PK",
+      1968.9,
+      "[]"
+    ],
+    [
+      60067,
+      "PK",
+      1970.55,
+      "[]",
+      "PK",
+      1970.595,
+      "[]"
+    ],
+    [
+      3761,
+      "PK",
+      2030.0,
+      "[]",
+      "PK",
+      2212.0,
+      "[]"
+    ],
+    [
+      60069,
+      "PK",
+      2260.0,
+      "[]",
+      "PK",
+      2260.9,
+      "[]"
+    ],
+    [
+      60070,
+      "PK",
+      2270.0,
+      "[]",
+      "PK",
+      2270.9,
+      "[]"
+    ],
+    [
+      60071,
+      "PK",
+      2400.0,
+      "[]",
+      "PK",
+      2419.0,
+      "[]"
+    ],
+    [
+      60072,
+      "PK",
+      2470.0,
+      "[]",
+      "PK",
+      2479.0,
+      "[]"
+    ],
+    [
+      60073,
+      "PK",
+      2570.0,
+      "[]",
+      "PK",
+      2579.0,
+      "[]"
+    ],
+    [
+      60074,
+      "PK",
+      2650.0,
+      "[]",
+      "PK",
+      2659.0,
+      "[]"
+    ],
+    [
+      60075,
+      "PK",
+      2708.0,
+      "[]",
+      "PK",
+      2708.9,
+      "[]"
+    ],
+    [
+      60076,
+      "PK",
+      2788.0,
+      "[]",
+      "PK",
+      2788.9,
+      "[]"
+    ],
+    [
+      60077,
+      "PK",
+      2850.0,
+      "[]",
+      "PK",
+      2859.0,
+      "[]"
+    ],
+    [
+      60078,
+      "PK",
+      2892.5,
+      "[]",
+      "PK",
+      2892.9,
+      "[]"
+    ],
+    [
+      3767,
+      "PK",
+      3590.2,
+      "[]",
+      "PK",
+      4485.0,
+      "[]"
+    ],
+    [
+      60079,
+      "PK",
+      4501.0,
+      "[]",
+      "PK",
+      4681.0,
+      "[]"
+    ],
+    [
+      60080,
+      "PK",
+      4990.0,
+      "[]",
+      "PK",
+      5046.0,
+      "[]"
+    ],
+    [
+      60081,
+      "PK",
+      5401.0,
+      "[]",
+      "PK",
+      5471.0,
+      "[]"
+    ],
+    [
+      60082,
+      "PK",
+      6190.0,
+      "[]",
+      "PK",
+      6199.5,
+      "[]"
+    ],
+    [
+      60019,
+      "PK",
+      6400.0,
+      "[]",
+      "PK",
+      6599.7,
+      "[]"
+    ],
+    [
+      60083,
+      "PK",
+      6800.0,
+      "[]",
+      "PK",
+      6821.0,
+      "[]"
+    ],
+    [
+      60084,
+      "PK",
+      6958.0,
+      "[]",
+      "PK",
+      6958.9,
+      "[]"
+    ],
+    [
+      60085,
+      "PK",
+      6978.0,
+      "[]",
+      "PK",
+      6978.9,
+      "[]"
+    ],
+    [
+      60086,
+      "PK",
+      7031.0,
+      "[]",
+      "PK",
+      7037.0,
+      "[]"
+    ],
+    [
+      60087,
+      "PK",
+      80.0,
+      "[]",
+      "PK",
+      85.0,
+      "[]"
+    ],
+    [
+      60088,
+      "PK",
+      8501.0,
+      "[]",
+      "PK",
+      8832.0,
+      "[]"
+    ],
+    [
+      60089,
+      "PK",
+      9160.0,
+      "[]",
+      "PK",
+      9169.0,
+      "[]"
+    ],
+    [
+      60090,
+      "PL",
+      4200.0,
+      "[]",
+      "PL",
+      4209.0,
+      "[]"
+    ],
+    [
+      60091,
+      "PL",
+      4236.5,
+      "[]",
+      "PL",
+      4236.9,
+      "[]"
+    ],
+    [
+      60092,
+      "PL",
+      4308.0,
+      "[]",
+      "PL",
+      4308.9,
+      "[]"
+    ],
+    [
+      60093,
+      "PL",
+      4328.0,
+      "[]",
+      "PL",
+      4328.9,
+      "[]"
+    ],
+    [
+      60094,
+      "PL",
+      4378.0,
+      "[]",
+      "PL",
+      4378.9,
+      "[]"
+    ],
+    [
+      60095,
+      "PL",
+      4451.5,
+      "[]",
+      "PL",
+      4451.9,
+      "[]"
+    ],
+    [
+      60096,
+      "PL",
+      4559.5,
+      "[]",
+      "PL",
+      4559.9,
+      "[]"
+    ],
+    [
+      60097,
+      "PL",
+      4633.5,
+      "[]",
+      "PL",
+      4634.0,
+      "[]"
+    ],
+    [
+      60098,
+      "PL",
+      4650.0,
+      "[]",
+      "PL",
+      4659.0,
+      "[]"
+    ],
+    [
+      60099,
+      "PL",
+      4671.5,
+      "[]",
+      "PL",
+      4671.9,
+      "[]"
+    ],
+    [
+      60100,
+      "PL",
+      4718.0,
+      "[]",
+      "PL",
+      4718.9,
+      "[]"
+    ],
+    [
+      60101,
+      "PL",
+      4758.0,
+      "[]",
+      "PL",
+      4758.9,
+      "[]"
+    ],
+    [
+      60102,
+      "PL",
+      4780.0,
+      "[]",
+      "PL",
+      4780.9,
+      "[]"
+    ],
+    [
+      60103,
+      "PL",
+      5060.0,
+      "[]",
+      "PL",
+      5069.0,
+      "[]"
+    ],
+    [
+      60104,
+      "PL",
+      5080.0,
+      "[]",
+      "PL",
+      5089.0,
+      "[]"
+    ],
+    [
+      60105,
+      "PL",
+      5130.0,
+      "[]",
+      "PL",
+      5139.0,
+      "[]"
+    ],
+    [
+      60106,
+      "PL",
+      5158.0,
+      "[]",
+      "PL",
+      5158.9,
+      "[]"
+    ],
+    [
+      60107,
+      "PL",
+      5170.0,
+      "[]",
+      "PL",
+      5179.0,
+      "[]"
+    ],
+    [
+      60108,
+      "PL",
+      5378.0,
+      "[]",
+      "PL",
+      5378.9,
+      "[]"
+    ],
+    [
+      60109,
+      "PL",
+      5401.5,
+      "[]",
+      "PL",
+      5401.9,
+      "[]"
+    ],
+    [
+      60110,
+      "PL",
+      5530.0,
+      "[]",
+      "PL",
+      5547.0,
+      "[]"
+    ],
+    [
+      60111,
+      "PL",
+      6058.0,
+      "[]",
+      "PL",
+      6058.9,
+      "[]"
+    ],
+    [
+      60112,
+      "PL",
+      6110.5,
+      "[]",
+      "PL",
+      6110.9,
+      "[]"
+    ],
+    [
+      60113,
+      "PL",
+      6208.0,
+      "[]",
+      "PL",
+      6208.9,
+      "[]"
+    ],
+    [
+      60114,
+      "PL",
+      6408.0,
+      "[]",
+      "PL",
+      6408.9,
+      "[]"
+    ],
+    [
+      60115,
+      "PL",
+      6608.0,
+      "[]",
+      "PL",
+      6608.9,
+      "[]"
+    ],
+    [
+      60116,
+      "PL",
+      7008.0,
+      "[]",
+      "PL",
+      7008.9,
+      "[]"
+    ],
+    [
+      8903,
+      "PL",
+      8009.5,
+      "[]",
+      "PL",
+      8014.0,
+      "[]"
+    ],
+    [
+      60117,
+      "PL",
+      8025.5,
+      "[]",
+      "PL",
+      8025.6,
+      "[]"
+    ],
+    [
+      60118,
+      "PM",
+      238.0,
+      "[]",
+      "PM",
+      238.65,
+      "[]"
+    ],
+    [
+      60119,
+      "PM",
+      3051.0,
+      "[]",
+      "PM",
+      3098.0,
+      "[]"
+    ],
+    [
+      60120,
+      "PM",
+      4068.0,
+      "[]",
+      "PM",
+      4068.9,
+      "[]"
+    ],
+    [
+      60121,
+      "PM",
+      8.0,
+      "[]",
+      "PM",
+      8.5,
+      "[]"
+    ],
+    [
+      60122,
+      "PC",
+      1983.5,
+      "[]",
+      "PC",
+      1984.0,
+      "[[\"Z\",\"5\"]]"
+    ],
+    [
+      60123,
+      "PC",
+      1993.5,
+      "[]",
+      "PC",
+      1994.0,
+      "[[\"Z\",\"5\"]]"
+    ],
+    [
+      60124,
+      "PJ",
+      2533.5,
+      "[]",
+      "PJ",
+      2534.0,
+      "[[\"Z\",\"95\"]]"
+    ],
+    [
+      60125,
+      "PK",
+      1823.5,
+      "[]",
+      "PK",
+      1824.0,
+      "[[\"Z\",\"5\"]]"
+    ],
+    [
+      60126,
+      "PK",
+      1827.5,
+      "[]",
+      "PK",
+      1828.0,
+      "[[\"Z\",\"5\"]]"
+    ],
+    [
+      60127,
+      "PK",
+      2469.0,
+      "[[\"W\",\"345\"]]",
+      "PK",
+      2469.0,
+      "[[\"W\",\"3495\"]]"
+    ],
+    [
+      60128,
+      "PK",
+      2597.5,
+      "[]",
+      "PK",
+      2598.0,
+      "[[\"Z\",\"95\"]]"
+    ],
+    [
+      60129,
+      "PK",
+      2608.5,
+      "[]",
+      "PK",
+      2609.0,
+      "[[\"Z\",\"95\"]]"
+    ],
+    [
+      60130,
+      "PK",
+      2647.5,
+      "[]",
+      "PK",
+      2648.0,
+      "[[\"Z\",\"95\"]]"
+    ],
+    [
+      60131,
+      "PL",
+      4793.5,
+      "[]",
+      "PL",
+      4794.0,
+      "[[\"Z\",\"5\"]]"
+    ],
+    [
+      60132,
+      "PL",
+      5453.5,
+      "[]",
+      "PL",
+      5454.0,
+      "[[\"Z\",\"5\"]]"
+    ],
+    [
+      60133,
+      "PL",
+      5993.5,
+      "[]",
+      "PL",
+      5994.0,
+      "[[\"Z\",\"5\"]]"
+    ],
+    [
+      60134,
+      "PL",
+      8233.5,
+      "[]",
+      "PL",
+      8234.0,
+      "[[\"Z\",\"5\"]]"
+    ],
+    [
+      60135,
+      "PL",
+      8703.5,
+      "[]",
+      "PL",
+      8704.0,
+      "[[\"Z\",\"5\"]]"
+    ],
+    [
+      60136,
+      "PM",
+      7849.0,
+      "[[\"C\",\"375\"]]",
+      "PM",
+      7849.0,
+      "[[\"C\",\"379\"]]"
+    ],
+    [
+      60137,
+      "PM",
+      8284.5,
+      "[]",
+      "PM",
+      8285.0,
+      "[[\"Z\",\"\"]]"
+    ],
+    [
+      60138,
+      "LB",
+      1575.0,
+      "[]",
+      "LB",
+      1575.5,
+      "[]"
+    ],
+    [
+      3789,
+      "PL",
+      4070.0,
+      "[]",
+      "PL",
+      4074.95,
+      "[]"
+    ],
+    [
+      60139,
+      "PL",
+      4072.9,
+      "[[\"A\",\"\"]]",
+      "PL",
+      4072.9,
+      "[[\"Z\",\"\"]]"
+    ],
+    [
+      60140,
+      "PL",
+      4074.9,
+      "[[\"A\",\"\"]]",
+      "PL",
+      4074.9,
+      "[[\"Z\",\"\"]]"
+    ],
+    [
+      60143,
+      "PA",
+      2701.0,
+      "[]",
+      "PA",
+      2748.0,
+      "[]"
+    ],
+    [
+      60147,
+      "PD",
+      1194.0,
+      "[]",
+      "PD",
+      1197.0,
+      "[]"
+    ],
+    [
+      60148,
+      "PD",
+      787.2,
+      "[]",
+      "PD",
+      787.22,
+      "[]"
+    ],
+    [
+      60151,
+      "PF",
+      1501.0,
+      "[]",
+      "PF",
+      1541.0,
+      "[]"
+    ],
+    [
+      60152,
+      "PF",
+      3984.2,
+      "[]",
+      "PF",
+      3991.0,
+      "[]"
+    ],
+    [
+      60153,
+      "PF",
+      3997.0,
+      "[]",
+      "PF",
+      4010.0,
+      "[]"
+    ],
+    [
+      4216,
+      "PG",
+      2899.2,
+      "[]",
+      "PG",
+      3698.0,
+      "[]"
+    ],
+    [
+      60154,
+      "PG",
+      500.0,
+      "[]",
+      "PG",
+      585.2,
+      "[]"
+    ],
+    [
+      60155,
+      "PG",
+      5661.0,
+      "[]",
+      "PG",
+      5689.0,
+      "[]"
+    ],
+    [
+      60157,
+      "PG",
+      8101.0,
+      "[]",
+      "PG",
+      8108.0,
+      "[]"
+    ],
+    [
+      60158,
+      "PG",
+      9601.0,
+      "[]",
+      "PG",
+      9665.0,
+      "[]"
+    ],
+    [
+      60159,
+      "PH",
+      1058.0,
+      "[]",
+      "PH",
+      1059.0,
+      "[]"
+    ],
+    [
+      60160,
+      "PH",
+      1078.0,
+      "[]",
+      "PH",
+      1079.0,
+      "[]"
+    ],
+    [
+      60161,
+      "PH",
+      1108.0,
+      "[]",
+      "PH",
+      1109.0,
+      "[]"
+    ],
+    [
+      60162,
+      "PH",
+      1308.0,
+      "[]",
+      "PH",
+      1309.0,
+      "[]"
+    ],
+    [
+      60163,
+      "PH",
+      1408.0,
+      "[]",
+      "PH",
+      1409.0,
+      "[]"
+    ],
+    [
+      60164,
+      "PH",
+      508.0,
+      "[]",
+      "PH",
+      509.0,
+      "[]"
+    ],
+    [
+      60165,
+      "PH",
+      528.0,
+      "[]",
+      "PH",
+      529.0,
+      "[]"
+    ],
+    [
+      60166,
+      "PH",
+      538.0,
+      "[]",
+      "PH",
+      539.0,
+      "[]"
+    ],
+    [
+      60167,
+      "PH",
+      548.0,
+      "[]",
+      "PH",
+      549.0,
+      "[]"
+    ],
+    [
+      60168,
+      "PH",
+      558.0,
+      "[]",
+      "PH",
+      559.0,
+      "[]"
+    ],
+    [
+      60169,
+      "PH",
+      568.0,
+      "[]",
+      "PH",
+      569.0,
+      "[]"
+    ],
+    [
+      60170,
+      "PH",
+      588.0,
+      "[]",
+      "PH",
+      589.0,
+      "[]"
+    ],
+    [
+      60171,
+      "PH",
+      630.0,
+      "[]",
+      "PH",
+      671.0,
+      "[]"
+    ],
+    [
+      60172,
+      "PH",
+      731.0,
+      "[]",
+      "PH",
+      735.0,
+      "[]"
+    ],
+    [
+      60173,
+      "PH",
+      781.0,
+      "[]",
+      "PH",
+      785.0,
+      "[]"
+    ],
+    [
+      60174,
+      "PH",
+      81.0,
+      "[]",
+      "PH",
+      87.0,
+      "[]"
+    ],
+    [
+      60175,
+      "PH",
+      811.0,
+      "[]",
+      "PH",
+      836.0,
+      "[]"
+    ],
+    [
+      60176,
+      "PH",
+      98.0,
+      "[]",
+      "PH",
+      98.5,
+      "[]"
+    ],
+    [
+      60177,
+      "PT",
+      7001.0,
+      "[]",
+      "PT",
+      7099.0,
+      "[]"
+    ],
+    [
+      4481,
+      "PH",
+      91.0,
+      "[[\"A\",\"1\"]]",
+      "PH",
+      97,
+      "[]"
+    ],
+    [
+      4202,
+      "PQ",
+      4001.0,
+      "[]",
+      "PQ",
+      5999.0,
+      "[]"
+    ]
+  ],
+  "remove_lcc_selectors": [
+    [
+      3732,
+      "PA2915.2"
+    ]
+  ],
+  "add_lcc_selectors": [
+    [
+      60044,
+      "PJ2399"
+    ],
+    [
+      9378,
+      "PJ3097"
+    ],
+    [
+      60068,
+      "PK2000.2"
+    ],
+    [
+      60142,
+      "P115.25"
+    ],
+    [
+      60144,
+      "PA2899.22"
+    ],
+    [
+      60145,
+      "PA2906.2"
+    ],
+    [
+      60146,
+      "PA2915.2"
+    ],
+    [
+      60149,
+      "PE458.2"
+    ],
+    [
+      60150,
+      "PE693.2"
+    ],
+    [
+      4466,
+      "PG2827"
+    ],
+    [
+      60156,
+      "PG799.2"
+    ],
+    [
+      4481,
+      "PH91.A1-PH98.5"
+    ]
+  ],
+  "reviewed_scopes": [
+    {
+      "record_id": 221004,
+      "start": "PB1095.2",
+      "end": "PB1100",
+      "caption": "Celtic literature",
+      "context": [
+        "Modern languages. Celtic languages",
+        "Celtic (General)"
+      ],
+      "before_start": "3797",
+      "before_end": "3797",
+      "paths": [
+        "Language / Language Families / Indo-European / Modern languages"
+      ],
+      "destination_id": 8434,
+      "destination_label": "Celtic Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 221013,
+      "start": "PB1195.2",
+      "end": "PB1200",
+      "caption": "Literature",
+      "context": [
+        "Modern languages. Celtic languages",
+        "Goidelic. Gaelic. (Irish, Scottish Gaelic, and Manx)"
+      ],
+      "before_start": "8434",
+      "before_end": "8434",
+      "paths": [
+        "Language / Language Families / Indo-European / Celtic Languages / Literature"
+      ],
+      "destination_id": 60028,
+      "destination_label": "Goidelic Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 222262,
+      "start": "PB1305.2",
+      "end": "PB1449",
+      "caption": "Literature",
+      "context": [
+        "Modern languages. Celtic languages",
+        "Irish"
+      ],
+      "before_start": "8434",
+      "before_end": "8434",
+      "paths": [
+        "Language / Language Families / Indo-European / Celtic Languages / Literature"
+      ],
+      "destination_id": 60029,
+      "destination_label": "Irish Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 222505,
+      "start": "PB1604.2",
+      "end": "PB1709",
+      "caption": "Literature",
+      "context": [
+        "Modern languages. Celtic languages",
+        "Gaelic (Scottish Gaelic, Erse)"
+      ],
+      "before_start": "8434",
+      "before_end": "8434",
+      "paths": [
+        "Language / Language Families / Indo-European / Celtic Languages / Literature"
+      ],
+      "destination_id": 60030,
+      "destination_label": "Scottish Gaelic Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 222545,
+      "start": "PB1850.2",
+      "end": "PB1867",
+      "caption": "Literature",
+      "context": [
+        "Modern languages. Celtic languages",
+        "Manx"
+      ],
+      "before_start": "8434",
+      "before_end": "8434",
+      "paths": [
+        "Language / Language Families / Indo-European / Celtic Languages / Literature"
+      ],
+      "destination_id": 60031,
+      "destination_label": "Manx Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 222559,
+      "start": "PB2055.2",
+      "end": "PB2060",
+      "caption": "Literature",
+      "context": [
+        "Modern languages. Celtic languages",
+        "Britannic (Brytonic or Cymric) group (Welsh, Cornish, and Breton)"
+      ],
+      "before_start": "3797",
+      "before_end": "3797",
+      "paths": [
+        "Language / Language Families / Indo-European / Modern languages"
+      ],
+      "destination_id": 60032,
+      "destination_label": "Brittonic Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 222592,
+      "start": "PB2201",
+      "end": "PB2499",
+      "caption": "Literature",
+      "context": [
+        "Modern languages. Celtic languages",
+        "Welsh. Cymric"
+      ],
+      "before_start": "3796",
+      "before_end": "3796",
+      "paths": [
+        "Language / Language Families / Indo-European / Celtic Languages / Brittanic group"
+      ],
+      "destination_id": 60033,
+      "destination_label": "Welsh Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 222708,
+      "start": "PB2550.2",
+      "end": "PB2621",
+      "caption": "Literature",
+      "context": [
+        "Modern languages. Celtic languages",
+        "Cornish"
+      ],
+      "before_start": "3796",
+      "before_end": "3796",
+      "paths": [
+        "Language / Language Families / Indo-European / Celtic Languages / Brittanic group"
+      ],
+      "destination_id": 60034,
+      "destination_label": "Cornish Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 222709,
+      "start": "PB2856",
+      "end": "PB2932",
+      "caption": "Literature",
+      "context": [
+        "Modern languages. Celtic languages",
+        "Breton. Armorican"
+      ],
+      "before_start": "3796",
+      "before_end": "3796",
+      "paths": [
+        "Language / Language Families / Indo-European / Celtic Languages / Brittanic group"
+      ],
+      "destination_id": 60035,
+      "destination_label": "Breton Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 221556,
+      "start": "PC3300",
+      "end": "PC3366",
+      "caption": "Literature",
+      "context": [
+        "Romance philology and languages",
+        "Dialects of France",
+        "By region, province, etc.",
+        "Southern France (Langue d'oc)",
+        "Provençal (To 1500)"
+      ],
+      "before_start": "3825",
+      "before_end": "3825",
+      "paths": [
+        "Language / Language Families / Indo-European / Romance Languages / Dialects"
+      ],
+      "destination_id": 60036,
+      "destination_label": "Old Occitan Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 221675,
+      "start": "PC3381",
+      "end": "PC3420.5",
+      "caption": "Literature",
+      "context": [
+        "Romance philology and languages",
+        "Dialects of France",
+        "By region, province, etc.",
+        "Southern France (Langue d'oc)",
+        "Modern patois of South France. \"Langue des Félibres.\" Langue d'oc"
+      ],
+      "before_start": "3825",
+      "before_end": "3825",
+      "paths": [
+        "Language / Language Families / Indo-European / Romance Languages / Dialects"
+      ],
+      "destination_id": 60037,
+      "destination_label": "Modern Occitan Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 221828,
+      "start": "PC3899.2",
+      "end": "PC3976",
+      "caption": "Literature",
+      "context": [
+        "Romance philology and languages",
+        "Catalan"
+      ],
+      "before_start": "3824",
+      "before_end": "3824",
+      "paths": [
+        "Language / Language Families / Indo-European / Romance Languages / Catalan"
+      ],
+      "destination_id": 60038,
+      "destination_label": "Catalan Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 221072,
+      "start": "PC400.2",
+      "end": "PC400.22",
+      "caption": "Literature",
+      "context": [
+        "Romance philology and languages",
+        "General"
+      ],
+      "before_start": "52326",
+      "before_end": "52326",
+      "paths": [
+        "Language / Language Families / Indo-European / Romance Languages / Romance Philology & Reference"
+      ],
+      "destination_id": 60039,
+      "destination_label": "Romance Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 221107,
+      "start": "PC800",
+      "end": "PC872",
+      "caption": "Literature",
+      "context": [
+        "Romance philology and languages",
+        "Romanian"
+      ],
+      "before_start": "3827",
+      "before_end": "3827",
+      "paths": [
+        "Language / Language Families / Indo-European / Romance Languages / Romanian"
+      ],
+      "destination_id": 60040,
+      "destination_label": "Romanian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 744,
+      "start": "PC945.5",
+      "end": "PC945.7",
+      "caption": "Literature",
+      "context": [
+        "Romance philology and languages",
+        "Raeto-Romance",
+        "Language",
+        "Linguistic geography. Dialects",
+        "By region",
+        "Dolomite Region. Trentino-Alto Adige. Ladin in Italy"
+      ],
+      "before_start": "6419",
+      "before_end": "6419",
+      "paths": [
+        "Language / Language Families / Indo-European / Romance Languages / Raeto-Romance / Language"
+      ],
+      "destination_id": 60041,
+      "destination_label": "Ladin Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 21655,
+      "start": "PC947.5",
+      "end": "PC947.9",
+      "caption": "Literature",
+      "context": [
+        "Romance philology and languages",
+        "Raeto-Romance",
+        "Language",
+        "Linguistic geography. Dialects",
+        "By region",
+        "Friuli"
+      ],
+      "before_start": "6419",
+      "before_end": "6419",
+      "paths": [
+        "Language / Language Families / Indo-European / Romance Languages / Raeto-Romance / Language"
+      ],
+      "destination_id": 60042,
+      "destination_label": "Friulian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 221314,
+      "start": "PC950",
+      "end": "PC986",
+      "caption": "Literature",
+      "context": [
+        "Romance philology and languages",
+        "Raeto-Romance"
+      ],
+      "before_start": "6317",
+      "before_end": "6317",
+      "paths": [
+        "Language / Language Families / Indo-European / Romance Languages / Raeto-Romance / Literature"
+      ],
+      "destination_id": 6317,
+      "destination_label": "Raeto-Romance Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 296206,
+      "start": "PJ1481",
+      "end": "PJ1989",
+      "caption": "Literature",
+      "context": [
+        "Oriental philology and literature",
+        "Egyptology"
+      ],
+      "before_start": "7752",
+      "before_end": "7752",
+      "paths": [
+        "Language / Language Families / Afro-Asiatic / Oriental philology & literature / Egyptology / Literature"
+      ],
+      "destination_id": 7752,
+      "destination_label": "Ancient Egyptian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 296363,
+      "start": "PJ2190",
+      "end": "PJ2199",
+      "caption": "Literature",
+      "context": [
+        "Oriental philology and literature",
+        "Coptic"
+      ],
+      "before_start": "3802",
+      "before_end": "3802",
+      "paths": [
+        "Language / Language Families / Afro-Asiatic / Coptic"
+      ],
+      "destination_id": 60043,
+      "destination_label": "Coptic Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 296412,
+      "start": "PJ2399",
+      "end": "PJ2399",
+      "caption": "History of Berber literature",
+      "context": [
+        "Oriental philology and literature",
+        "Libyco-Berber languages. Berber languages",
+        "Berber languages"
+      ],
+      "before_start": "8898",
+      "before_end": "8898",
+      "paths": [
+        "Language / Language Families / Afro-Asiatic / Berber Language Family / Berber languages"
+      ],
+      "destination_id": 60044,
+      "destination_label": "Berber Literary History",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 434601,
+      "start": "PJ2471.5",
+      "end": "PJ2471.9",
+      "caption": "Literature",
+      "context": [
+        "Oriental philology and literature",
+        "Cushitic languages",
+        "Special",
+        "Eastern Cushitic",
+        "Oromo (Galla)"
+      ],
+      "before_start": "7219",
+      "before_end": "7219",
+      "paths": [
+        "Language / Language Families / Afro-Asiatic / Cushitic languages / Cushitic Language Topics"
+      ],
+      "destination_id": 60045,
+      "destination_label": "Oromo Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 295903,
+      "start": "PJ305.2",
+      "end": "PJ489",
+      "caption": "Literature",
+      "context": [
+        "Oriental philology and literature"
+      ],
+      "before_start": "3702",
+      "before_end": "3702",
+      "paths": [
+        "Language"
+      ],
+      "destination_id": 60016,
+      "destination_label": "Middle Eastern Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 296532,
+      "start": "PJ3097",
+      "end": "PJ3097",
+      "caption": "Semitic literature (History and criticism)",
+      "context": [
+        "Oriental philology and literature"
+      ],
+      "before_start": "3702",
+      "before_end": "3702",
+      "paths": [
+        "Language"
+      ],
+      "destination_id": 9378,
+      "destination_label": "Semitic Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 296639,
+      "start": "PJ3601",
+      "end": "PJ3971",
+      "caption": "Literature",
+      "context": [
+        "Oriental philology and literature",
+        "Assyriology. Akkadian"
+      ],
+      "before_start": "3801",
+      "before_end": "3801",
+      "paths": [
+        "Language / Language Families / Afro-Asiatic / Assyriology. Akkadian"
+      ],
+      "destination_id": 60046,
+      "destination_label": "Akkadian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 296762,
+      "start": "PJ4045",
+      "end": "PJ4091",
+      "caption": "Literature",
+      "context": [
+        "Oriental philology and literature",
+        "Sumerian"
+      ],
+      "before_start": "3814",
+      "before_end": "3814",
+      "paths": [
+        "Language / Language Families / Afro-Asiatic / Sumerian"
+      ],
+      "destination_id": 60047,
+      "destination_label": "Sumerian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 296942,
+      "start": "PJ5001",
+      "end": "PJ5060",
+      "caption": "Literature",
+      "context": [
+        "Oriental philology and literature",
+        "Hebrew"
+      ],
+      "before_start": "13168",
+      "before_end": "13168",
+      "paths": [
+        "Language / Language Families / Afro-Asiatic / Hebrew Language / Hebrew Literature"
+      ],
+      "destination_id": 13168,
+      "destination_label": "Hebrew Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 297422,
+      "start": "PJ5120",
+      "end": "PJ5192",
+      "caption": "Literature",
+      "context": [
+        "Oriental philology and literature",
+        "Hebrew",
+        "Other languages used by Jews",
+        "Special",
+        "Yiddish (Judeo-German)"
+      ],
+      "before_start": "3810",
+      "before_end": "3810",
+      "paths": [
+        "Language / Language Families / Afro-Asiatic / Other languages used by Jews"
+      ],
+      "destination_id": 60048,
+      "destination_label": "Yiddish Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 297800,
+      "start": "PJ5601",
+      "end": "PJ5695",
+      "caption": "Literature",
+      "context": [
+        "Oriental philology and literature",
+        "Syriac"
+      ],
+      "before_start": "3815",
+      "before_end": "3815",
+      "paths": [
+        "Language / Language Families / Afro-Asiatic / Syriac"
+      ],
+      "destination_id": 60049,
+      "destination_label": "Syriac Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 295985,
+      "start": "PJ601",
+      "end": "PJ621",
+      "caption": "Literature",
+      "context": [
+        "Oriental philology and literature",
+        "Special groups",
+        "Christian Oriental"
+      ],
+      "before_start": "3813",
+      "before_end": "3813",
+      "paths": [
+        "Language / Language Families / Afro-Asiatic / Oriental philology & literature / Special groups"
+      ],
+      "destination_id": 60050,
+      "destination_label": "Eastern Christian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 298313,
+      "start": "PJ7501",
+      "end": "PJ8518",
+      "caption": "Arabic literature",
+      "context": [
+        "Oriental philology and literature"
+      ],
+      "before_start": "12872",
+      "before_end": "3702",
+      "paths": [
+        "Language",
+        "Language / Language Families / Afro-Asiatic / Arabic Language / Arabic Literature"
+      ],
+      "destination_id": 12872,
+      "destination_label": "Arabic Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 296023,
+      "start": "PJ806",
+      "end": "PJ989",
+      "caption": "Literature",
+      "context": [
+        "Oriental philology and literature",
+        "Special groups",
+        "Islamic"
+      ],
+      "before_start": "9838",
+      "before_end": "9838",
+      "paths": [
+        "Language / Language Families / Afro-Asiatic / Oriental philology & literature / Special groups / Islamic"
+      ],
+      "destination_id": 60051,
+      "destination_label": "Islamic Literary Traditions",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 299235,
+      "start": "PJ9090",
+      "end": "PJ9101",
+      "caption": "Literature",
+      "context": [
+        "Oriental philology and literature",
+        "Ethiopian languages",
+        "Special",
+        "Ethiopic (Geez)"
+      ],
+      "before_start": "9207",
+      "before_end": "9207",
+      "paths": [
+        "Language / Language Families / Afro-Asiatic / Ethiopian languages / Ethiopian Language Topics"
+      ],
+      "destination_id": 60052,
+      "destination_label": "Geʽez Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 299256,
+      "start": "PJ9260",
+      "end": "PJ9269",
+      "caption": "Literature",
+      "context": [
+        "Oriental philology and literature",
+        "Ethiopian languages",
+        "Special",
+        "Amharic"
+      ],
+      "before_start": "9207",
+      "before_end": "9207",
+      "paths": [
+        "Language / Language Families / Afro-Asiatic / Ethiopian languages / Ethiopian Language Topics"
+      ],
+      "destination_id": 60053,
+      "destination_label": "Amharic Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 383031,
+      "start": "PK1428",
+      "end": "PK1428.9",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Apabhraṃśa"
+      ],
+      "before_start": "8607",
+      "before_end": "8607",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Indo-Aryan languages / Literature"
+      ],
+      "destination_id": 60054,
+      "destination_label": "Apabhramsha Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 382831,
+      "start": "PK1448",
+      "end": "PK1448.9",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Avahattha"
+      ],
+      "before_start": "3755",
+      "before_end": "3755",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages"
+      ],
+      "destination_id": 60055,
+      "destination_label": "Avahattha Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 383073,
+      "start": "PK1560",
+      "end": "PK1569",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Assamese"
+      ],
+      "before_start": "12817",
+      "before_end": "12817",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Particular languages & dialects / Assamese"
+      ],
+      "destination_id": 60056,
+      "destination_label": "Assamese Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 383087,
+      "start": "PK1700",
+      "end": "PK1731.46",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Bengali"
+      ],
+      "before_start": "12818",
+      "before_end": "12818",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Particular languages & dialects / Bengali"
+      ],
+      "destination_id": 60057,
+      "destination_label": "Bengali Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 30302,
+      "start": "PK180",
+      "end": "PK185",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Indo-Aryan (General)"
+      ],
+      "before_start": "8607",
+      "before_end": "8607",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Indo-Aryan languages / Literature"
+      ],
+      "destination_id": 8607,
+      "destination_label": "Indo-Aryan Literary Surveys",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 21634,
+      "start": "PK1808",
+      "end": "PK1808.9",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Bihari"
+      ],
+      "before_start": "12819",
+      "before_end": "12819",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Particular languages & dialects / Bihari"
+      ],
+      "destination_id": 60058,
+      "destination_label": "Bihari Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22151,
+      "start": "PK1818",
+      "end": "PK1818.9",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Bihari",
+        "Dialects",
+        "Maithili (Tirhutia)"
+      ],
+      "before_start": "12819",
+      "before_end": "12819",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Particular languages & dialects / Bihari"
+      ],
+      "destination_id": 60059,
+      "destination_label": "Maithili Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 21728,
+      "start": "PK1833.5",
+      "end": "PK1833.9",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Chakma"
+      ],
+      "before_start": "3765",
+      "before_end": "3765",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Indo-Aryan languages / Modern Indo-Aryan languages"
+      ],
+      "destination_id": 60060,
+      "destination_label": "Chakma Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 383896,
+      "start": "PK1850",
+      "end": "PK1859",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Gujarati"
+      ],
+      "before_start": "12820",
+      "before_end": "12820",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Particular languages & dialects / Gujarati"
+      ],
+      "destination_id": 60061,
+      "destination_label": "Gujarati Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 383909,
+      "start": "PK1947",
+      "end": "PK1947.9",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Hindi, Urdu, Hindustani languages",
+        "Hindi",
+        "Special dialects, Eastern",
+        "Awadhi (Baiswari and Eastern Hindi in general)"
+      ],
+      "before_start": "12832",
+      "before_end": "12832",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Hindi, Urdu & Hindustani / Hindi Language"
+      ],
+      "destination_id": 60062,
+      "destination_label": "Awadhi Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 383913,
+      "start": "PK1957",
+      "end": "PK1957.9",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Hindi, Urdu, Hindustani languages",
+        "Hindi",
+        "Special dialects, Eastern",
+        "Bagheli (Bāghēlkhandī)"
+      ],
+      "before_start": "12832",
+      "before_end": "12832",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Hindi, Urdu & Hindustani / Hindi Language"
+      ],
+      "destination_id": 60063,
+      "destination_label": "Bagheli Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 21729,
+      "start": "PK1960.5",
+      "end": "PK1960.9",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Hindi, Urdu, Hindustani languages",
+        "Hindi",
+        "Special dialects, Eastern",
+        "Bangaru"
+      ],
+      "before_start": "12832",
+      "before_end": "12832",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Hindi, Urdu & Hindustani / Hindi Language"
+      ],
+      "destination_id": 60064,
+      "destination_label": "Bangaru Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 383919,
+      "start": "PK1967",
+      "end": "PK1967.9",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Hindi, Urdu, Hindustani languages",
+        "Hindi",
+        "Special dialects, Western",
+        "Braj Bhākhā"
+      ],
+      "before_start": "12832",
+      "before_end": "12832",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Hindi, Urdu & Hindustani / Hindi Language"
+      ],
+      "destination_id": 60065,
+      "destination_label": "Braj Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 21727,
+      "start": "PK1968.5",
+      "end": "PK1968.9",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Hindi, Urdu, Hindustani languages",
+        "Hindi",
+        "Special dialects, Western",
+        "Bundeli"
+      ],
+      "before_start": "12832",
+      "before_end": "12832",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Hindi, Urdu & Hindustani / Hindi Language"
+      ],
+      "destination_id": 60066,
+      "destination_label": "Bundeli Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 21736,
+      "start": "PK1970.55",
+      "end": "PK1970.595",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Hindi, Urdu, Hindustani languages",
+        "Dakhini. Dakhini Hindustani. Dakhini Urdu"
+      ],
+      "before_start": "3765",
+      "before_end": "3765",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Indo-Aryan languages / Modern Indo-Aryan languages"
+      ],
+      "destination_id": 60067,
+      "destination_label": "Dakhini Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 383943,
+      "start": "PK2000.2",
+      "end": "PK2000.2",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Hindi, Urdu, Hindustani languages",
+        "Hindustani"
+      ],
+      "before_start": "3765",
+      "before_end": "3765",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Indo-Aryan languages / Modern Indo-Aryan languages"
+      ],
+      "destination_id": 60068,
+      "destination_label": "Hindustani Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 383907,
+      "start": "PK2030",
+      "end": "PK2212",
+      "caption": "Hindi, Urdu, Hindustani literatures",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z"
+      ],
+      "before_start": "12835",
+      "before_end": "12836",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Hindi, Urdu & Hindustani / Hindi & Hindustani Literature",
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Hindi, Urdu & Hindustani / Urdu Literature"
+      ],
+      "destination_id": 3761,
+      "destination_label": "Indo-Aryan Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 636365,
+      "start": "PK2260",
+      "end": "PK2260.9",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Lambadi"
+      ],
+      "before_start": "3765",
+      "before_end": "3765",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Indo-Aryan languages / Modern Indo-Aryan languages"
+      ],
+      "destination_id": 60069,
+      "destination_label": "Lambadi Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 384576,
+      "start": "PK2270",
+      "end": "PK2270.9",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Lahndā"
+      ],
+      "before_start": "12821",
+      "before_end": "12821",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Particular languages & dialects / Lahnda"
+      ],
+      "destination_id": 60070,
+      "destination_label": "Lahnda Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 384590,
+      "start": "PK2400",
+      "end": "PK2419",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Marathi"
+      ],
+      "before_start": "12822",
+      "before_end": "3765",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Indo-Aryan languages / Modern Indo-Aryan languages",
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Particular languages & dialects / Marathi"
+      ],
+      "destination_id": 60071,
+      "destination_label": "Marathi Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 384600,
+      "start": "PK2470",
+      "end": "PK2479",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Marwari (Dingal)"
+      ],
+      "before_start": "12823",
+      "before_end": "12823",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Particular languages & dialects / Marwari"
+      ],
+      "destination_id": 60072,
+      "destination_label": "Marwari Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 384606,
+      "start": "PK2570",
+      "end": "PK2579",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Oriya (Uriya)"
+      ],
+      "before_start": "12824",
+      "before_end": "12824",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Particular languages & dialects / Odia Oriya"
+      ],
+      "destination_id": 60073,
+      "destination_label": "Odia Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 384633,
+      "start": "PK2650",
+      "end": "PK2659",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Panjabi"
+      ],
+      "before_start": "12826",
+      "before_end": "12826",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Particular languages & dialects / Panjabi"
+      ],
+      "destination_id": 60074,
+      "destination_label": "Punjabi Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22233,
+      "start": "PK2708",
+      "end": "PK2708.9",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Rajasthani"
+      ],
+      "before_start": "12827",
+      "before_end": "12827",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Particular languages & dialects / Rajasthani"
+      ],
+      "destination_id": 60075,
+      "destination_label": "Rajasthani Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22263,
+      "start": "PK2788",
+      "end": "PK2788.9",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Sindhi"
+      ],
+      "before_start": "12828",
+      "before_end": "12828",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Particular languages & dialects / Sindhi"
+      ],
+      "destination_id": 60076,
+      "destination_label": "Sindhi Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 384676,
+      "start": "PK2850",
+      "end": "PK2859",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Sinhalese (Singhalese)"
+      ],
+      "before_start": "12829",
+      "before_end": "12829",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Particular languages & dialects / Sinhalese"
+      ],
+      "destination_id": 60077,
+      "destination_label": "Sinhala Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 21730,
+      "start": "PK2892.5",
+      "end": "PK2892.9",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Siraiki"
+      ],
+      "before_start": "12830",
+      "before_end": "12830",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Particular languages & dialects / Siraiki"
+      ],
+      "destination_id": 60078,
+      "destination_label": "Saraiki Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 382995,
+      "start": "PK2901",
+      "end": "PK2979",
+      "caption": "Indo-Aryan literature",
+      "context": [
+        "Indo-Iranian philology and literature"
+      ],
+      "before_start": "8154",
+      "before_end": "3761",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Indo-Aryan literature / Indo-Aryan Literary Studies",
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Indo-Aryan literature"
+      ],
+      "destination_id": 3761,
+      "destination_label": "Indo-Aryan Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 384787,
+      "start": "PK3590.2",
+      "end": "PK4485",
+      "caption": "Sanskrit (Post-Vedic) literature",
+      "context": [
+        "Indo-Iranian philology and literature"
+      ],
+      "before_start": "3755",
+      "before_end": "3767",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Indo-Aryan languages / Sanskrit",
+        "Language / Language Families / Indo-European / Indo-Iranian Languages"
+      ],
+      "destination_id": 3767,
+      "destination_label": "Sanskrit Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 383022,
+      "start": "PK4501",
+      "end": "PK4681",
+      "caption": "Pali literature",
+      "context": [
+        "Indo-Iranian philology and literature"
+      ],
+      "before_start": "8154",
+      "before_end": "3761",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Indo-Aryan literature / Indo-Aryan Literary Studies",
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Indo-Aryan literature"
+      ],
+      "destination_id": 60079,
+      "destination_label": "Pali Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 383028,
+      "start": "PK4990",
+      "end": "PK5046",
+      "caption": "Prakrit literature",
+      "context": [
+        "Indo-Iranian philology and literature"
+      ],
+      "before_start": "8154",
+      "before_end": "3761",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Indo-Aryan literature / Indo-Aryan Literary Studies",
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Indo-Aryan literature"
+      ],
+      "destination_id": 60080,
+      "destination_label": "Prakrit Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 385028,
+      "start": "PK5401",
+      "end": "PK5471",
+      "caption": "Modern Indo-Aryan literature",
+      "context": [
+        "Indo-Iranian philology and literature"
+      ],
+      "before_start": "8978",
+      "before_end": "7418",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Indo-Aryan literature / Indo-Aryan Literary History",
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Indo-Aryan literature / Translations Collected"
+      ],
+      "destination_id": 60081,
+      "destination_label": "Modern Indo-Aryan Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 385036,
+      "start": "PK6097",
+      "end": "PK6099",
+      "caption": "History of Persian literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Iranian philology and literature"
+      ],
+      "before_start": "8968",
+      "before_end": "8968",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Iranian Philology & Literature / History of Persian literature"
+      ],
+      "destination_id": 8968,
+      "destination_label": "Persian Literary History",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 385226,
+      "start": "PK6190",
+      "end": "PK6199.5",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Iranian philology and literature",
+        "Middle Iranian languages",
+        "Pahlavī (Middle Persian, 226-642 A.D.)"
+      ],
+      "before_start": "3764",
+      "before_end": "3764",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Middle Iranian languages"
+      ],
+      "destination_id": 60082,
+      "destination_label": "Middle Persian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 385244,
+      "start": "PK6400",
+      "end": "PK6599.7",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Iranian philology and literature",
+        "New Persian"
+      ],
+      "before_start": "3737",
+      "before_end": "3737",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Iranian Philology & Literature / Persian"
+      ],
+      "destination_id": 60019,
+      "destination_label": "Persian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 385482,
+      "start": "PK6800",
+      "end": "PK6821",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Iranian philology and literature",
+        "Afghan (Pashto, Pushto, Pushtu, etc.)"
+      ],
+      "before_start": "6831",
+      "before_end": "6831",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Iranian Philology & Literature / Pashto"
+      ],
+      "destination_id": 60083,
+      "destination_label": "Pashto Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22264,
+      "start": "PK6958",
+      "end": "PK6958.9",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Iranian philology and literature",
+        "Ossetic"
+      ],
+      "before_start": "7459",
+      "before_end": "7459",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Iranian Philology & Literature / Ossetic"
+      ],
+      "destination_id": 60084,
+      "destination_label": "Ossetic Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22265,
+      "start": "PK6978",
+      "end": "PK6978.9",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Iranian philology and literature",
+        "Tajik"
+      ],
+      "before_start": "8002",
+      "before_end": "8002",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Iranian Philology & Literature / Tajik"
+      ],
+      "destination_id": 60085,
+      "destination_label": "Tajik Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 385070,
+      "start": "PK7031",
+      "end": "PK7037",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Dardic (Pisacha) languages",
+        "Dard group",
+        "Kashmiri"
+      ],
+      "before_start": "9477",
+      "before_end": "9477",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages / Dardic Pisacha / Dard group"
+      ],
+      "destination_id": 60086,
+      "destination_label": "Kashmiri Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 382801,
+      "start": "PK80",
+      "end": "PK85",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Indo-Iranian (General)"
+      ],
+      "before_start": "3755",
+      "before_end": "3755",
+      "paths": [
+        "Language / Language Families / Indo-European / Indo-Iranian Languages"
+      ],
+      "destination_id": 60087,
+      "destination_label": "Indo-Iranian Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 385541,
+      "start": "PK8501",
+      "end": "PK8832",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Armenian language and literature"
+      ],
+      "before_start": "3756",
+      "before_end": "3756",
+      "paths": [
+        "Language / Language Families / Indo-European / Armenian"
+      ],
+      "destination_id": 60088,
+      "destination_label": "Armenian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 385116,
+      "start": "PK9030",
+      "end": "PK9040",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Caucasian languages"
+      ],
+      "before_start": "7753",
+      "before_end": "7753",
+      "paths": [
+        "Language / Language Families / Caucasian / Literature"
+      ],
+      "destination_id": 7753,
+      "destination_label": "Caucasian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 385157,
+      "start": "PK9160",
+      "end": "PK9169",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Caucasian languages",
+        "Particular languages",
+        "Georgian (Grusinian)"
+      ],
+      "before_start": "9231",
+      "before_end": "9231",
+      "paths": [
+        "Language / Language Families / Caucasian / Particular languages"
+      ],
+      "destination_id": 60089,
+      "destination_label": "Georgian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 385702,
+      "start": "PL201",
+      "end": "PL271",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Ural-Altaic languages",
+        "Turkic languages",
+        "Southwestern (Oghuz) group",
+        "Turkish (Osmanic or Ottoman)"
+      ],
+      "before_start": "4231",
+      "before_end": "4231",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Turkish Literature"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 391346,
+      "start": "PL2250",
+      "end": "PL3208",
+      "caption": "Chinese literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Chinese language and literature"
+      ],
+      "before_start": "12351",
+      "before_end": "7964",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Chinese / Chinese Literary Studies",
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Chinese Language / Chinese"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 440793,
+      "start": "PL3512",
+      "end": "PL3512.9",
+      "caption": "Malaysian literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania"
+      ],
+      "before_start": "4262",
+      "before_end": "4262",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 390391,
+      "start": "PL3515",
+      "end": "PL3515.9",
+      "caption": "Singapore literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania"
+      ],
+      "before_start": "4274",
+      "before_end": "4274",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Singapore"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 390421,
+      "start": "PL3701",
+      "end": "PL3748",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Sino-Tibetan languages",
+        "Tibeto-Burman languages",
+        "Tibeto-Himalayan languages",
+        "Tibetan (Bhōtiā, Tangutan, Bhotanta)"
+      ],
+      "before_start": "4277",
+      "before_end": "4277",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Tibeto-Himalayan languages"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 390438,
+      "start": "PL3970",
+      "end": "PL3988",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Sino-Tibetan languages",
+        "Tibeto-Burman languages",
+        "Assam and Burma",
+        "Assam Burmese dialects",
+        "Special languages and dialects",
+        "Burmese"
+      ],
+      "before_start": "4276",
+      "before_end": "4276",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Tibeto-Burman languages"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 385802,
+      "start": "PL410",
+      "end": "PL419",
+      "caption": "Mongolian literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Ural-Altaic languages",
+        "Mongolian languages",
+        "Mongolian language"
+      ],
+      "before_start": "9131",
+      "before_end": "9131",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Ural-Altaic languages / Mongolian languages"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 390233,
+      "start": "PL4200",
+      "end": "PL4209",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Tai languages",
+        "Thai. Siamese"
+      ],
+      "before_start": "3794",
+      "before_end": "3794",
+      "paths": [
+        "Language / Language Families / East & Southeast Asian / Tai-Kadai Languages"
+      ],
+      "destination_id": 60090,
+      "destination_label": "Thai Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 21763,
+      "start": "PL4236.5",
+      "end": "PL4236.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Tai languages",
+        "Lao"
+      ],
+      "before_start": "3794",
+      "before_end": "3794",
+      "paths": [
+        "Language / Language Families / East & Southeast Asian / Tai-Kadai Languages"
+      ],
+      "destination_id": 60091,
+      "destination_label": "Lao Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 385807,
+      "start": "PL428",
+      "end": "PL428.9",
+      "caption": "Buriat literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Ural-Altaic languages",
+        "Mongolian languages",
+        "Buriat language"
+      ],
+      "before_start": "9131",
+      "before_end": "9131",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Ural-Altaic languages / Mongolian languages"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 385808,
+      "start": "PL430",
+      "end": "PL430.9",
+      "caption": "Kalmyk literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Ural-Altaic languages",
+        "Mongolian languages",
+        "Kalmyk language"
+      ],
+      "before_start": "9131",
+      "before_end": "9131",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Ural-Altaic languages / Mongolian languages"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 33641,
+      "start": "PL4308",
+      "end": "PL4308.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Austroasiatic languages",
+        "Mon-Khmer (Mon-Anam) languages"
+      ],
+      "before_start": "3793",
+      "before_end": "3793",
+      "paths": [
+        "Language / Language Families / East & Southeast Asian / Austroasiatic languages / Mon-Khmer Mon-Anam languages"
+      ],
+      "destination_id": 60092,
+      "destination_label": "Mon-Khmer Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 646177,
+      "start": "PL4328",
+      "end": "PL4328.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Austroasiatic languages",
+        "Mon-Khmer (Mon-Anam) languages",
+        "Individual languages",
+        "Khmer (Cambodian)"
+      ],
+      "before_start": "3793",
+      "before_end": "3793",
+      "paths": [
+        "Language / Language Families / East & Southeast Asian / Austroasiatic languages / Mon-Khmer Mon-Anam languages"
+      ],
+      "destination_id": 60093,
+      "destination_label": "Khmer Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22266,
+      "start": "PL4378",
+      "end": "PL4378.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Austroasiatic languages",
+        "Mon-Khmer (Mon-Anam) languages",
+        "Individual languages",
+        "Vietnamese. Annamese"
+      ],
+      "before_start": "3793",
+      "before_end": "3793",
+      "paths": [
+        "Language / Language Families / East & Southeast Asian / Austroasiatic languages / Mon-Khmer Mon-Anam languages"
+      ],
+      "destination_id": 60094,
+      "destination_label": "Vietnamese Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 640659,
+      "start": "PL44.5",
+      "end": "PL44.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Ural-Altaic languages",
+        "Turkic languages",
+        "Northeastern (Siberian) group",
+        "Kyrgyz"
+      ],
+      "before_start": "6797",
+      "before_end": "6797",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Ural-Altaic languages / Turkic languages"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 21758,
+      "start": "PL4451.5",
+      "end": "PL4451.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Austroasiatic languages",
+        "Mon-Khmer (Mon-Anam) languages",
+        "Individual languages",
+        "Khasi"
+      ],
+      "before_start": "3793",
+      "before_end": "3793",
+      "paths": [
+        "Language / Language Families / East & Southeast Asian / Austroasiatic languages / Mon-Khmer Mon-Anam languages"
+      ],
+      "destination_id": 60095,
+      "destination_label": "Khasi Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 21765,
+      "start": "PL4559.5",
+      "end": "PL4559.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Austroasiatic languages",
+        "Munda languages (Kolarian languages)",
+        "Kherwārī languages",
+        "Muṇḍārī"
+      ],
+      "before_start": "9240",
+      "before_end": "9240",
+      "paths": [
+        "Language / Language Families / East & Southeast Asian / Austroasiatic languages / Munda Languages"
+      ],
+      "destination_id": 60096,
+      "destination_label": "Mundari Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 639227,
+      "start": "PL4633.5",
+      "end": "PL4634",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Dravidian languages",
+        "Gōṇḍī"
+      ],
+      "before_start": "3789",
+      "before_end": "3789",
+      "paths": [
+        "Language / Language Families / East & Southeast Asian / Miao-Yao languages"
+      ],
+      "destination_id": 60097,
+      "destination_label": "Gondi Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 390499,
+      "start": "PL4650",
+      "end": "PL4659",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Dravidian languages",
+        "Kannada. Kanarese (including Baḍaga dialect)"
+      ],
+      "before_start": "3789",
+      "before_end": "3789",
+      "paths": [
+        "Language / Language Families / East & Southeast Asian / Miao-Yao languages"
+      ],
+      "destination_id": 60098,
+      "destination_label": "Kannada Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 21766,
+      "start": "PL4671.5",
+      "end": "PL4671.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Dravidian languages",
+        "Koḍagu"
+      ],
+      "before_start": "3789",
+      "before_end": "3789",
+      "paths": [
+        "Language / Language Families / East & Southeast Asian / Miao-Yao languages"
+      ],
+      "destination_id": 60099,
+      "destination_label": "Kodagu Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22270,
+      "start": "PL4718",
+      "end": "PL4718.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Dravidian languages",
+        "Malayāḷam (Malabar)"
+      ],
+      "before_start": "8623",
+      "before_end": "8623",
+      "paths": [
+        "Language / Language Families / Dravidian / Malayāḷam Malabar"
+      ],
+      "destination_id": 60100,
+      "destination_label": "Malayalam Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22271,
+      "start": "PL4758",
+      "end": "PL4758.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Dravidian languages",
+        "Tamil (or Tamul)"
+      ],
+      "before_start": "7889",
+      "before_end": "7889",
+      "paths": [
+        "Language / Language Families / Dravidian / Tamil or Tamul"
+      ],
+      "destination_id": 60101,
+      "destination_label": "Tamil Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 390527,
+      "start": "PL4780",
+      "end": "PL4780.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Dravidian languages",
+        "Telugu (Gentoo)"
+      ],
+      "before_start": "7918",
+      "before_end": "7918",
+      "paths": [
+        "Language / Language Families / Dravidian / Telugu Gentoo"
+      ],
+      "destination_id": 60102,
+      "destination_label": "Telugu Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 390566,
+      "start": "PL5060",
+      "end": "PL5069",
+      "caption": "Malayan literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Languages of Oceania",
+        "Austronesian, Papuan, and Australian languages",
+        "Austronesian",
+        "Malayan (Indonesian) languages"
+      ],
+      "before_start": "6966",
+      "before_end": "6966",
+      "paths": [
+        "Language / Language Families / Pacific & Austronesian / Oceanian Language Families"
+      ],
+      "destination_id": 60103,
+      "destination_label": "Malay-Indonesian Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 390568,
+      "start": "PL5080",
+      "end": "PL5089",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Languages of Oceania",
+        "Austronesian, Papuan, and Australian languages",
+        "Austronesian",
+        "Malayan (Indonesian) languages",
+        "Special. By language or region",
+        "Indonesian"
+      ],
+      "before_start": "6966",
+      "before_end": "6966",
+      "paths": [
+        "Language / Language Families / Pacific & Austronesian / Oceanian Language Families"
+      ],
+      "destination_id": 60104,
+      "destination_label": "Indonesian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 390585,
+      "start": "PL5130",
+      "end": "PL5139",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Languages of Oceania",
+        "Austronesian, Papuan, and Australian languages",
+        "Austronesian",
+        "Malayan (Indonesian) languages",
+        "Special. By language or region",
+        "Malay"
+      ],
+      "before_start": "6966",
+      "before_end": "6966",
+      "paths": [
+        "Language / Language Families / Pacific & Austronesian / Oceanian Language Families"
+      ],
+      "destination_id": 60105,
+      "destination_label": "Malay Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22272,
+      "start": "PL5158",
+      "end": "PL5158.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Languages of Oceania",
+        "Austronesian, Papuan, and Australian languages",
+        "Austronesian",
+        "Malayan (Indonesian) languages",
+        "Special. By language or region",
+        "Javanese and Kawi",
+        "Kawi (Old Javanese)"
+      ],
+      "before_start": "6966",
+      "before_end": "6966",
+      "paths": [
+        "Language / Language Families / Pacific & Austronesian / Oceanian Language Families"
+      ],
+      "destination_id": 60106,
+      "destination_label": "Old Javanese Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 390600,
+      "start": "PL5170",
+      "end": "PL5179",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Languages of Oceania",
+        "Austronesian, Papuan, and Australian languages",
+        "Austronesian",
+        "Malayan (Indonesian) languages",
+        "Special. By language or region",
+        "Javanese and Kawi",
+        "Javanese"
+      ],
+      "before_start": "6966",
+      "before_end": "6966",
+      "paths": [
+        "Language / Language Families / Pacific & Austronesian / Oceanian Language Families"
+      ],
+      "destination_id": 60107,
+      "destination_label": "Javanese Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 21734,
+      "start": "PL53.5",
+      "end": "PL53.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Ural-Altaic languages",
+        "Turkic languages",
+        "Southeastern (Chagatai) group",
+        "Chagatai"
+      ],
+      "before_start": "6797",
+      "before_end": "6797",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Ural-Altaic languages / Turkic languages"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22267,
+      "start": "PL5378",
+      "end": "PL5378.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Languages of Oceania",
+        "Austronesian, Papuan, and Australian languages",
+        "Austronesian",
+        "Malayan (Indonesian) languages",
+        "Special. By language or region",
+        "Other (alphabetically)",
+        "Malagasy"
+      ],
+      "before_start": "6966",
+      "before_end": "6966",
+      "paths": [
+        "Language / Language Families / Pacific & Austronesian / Oceanian Language Families"
+      ],
+      "destination_id": 60108,
+      "destination_label": "Malagasy Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 21524,
+      "start": "PL54.25",
+      "end": "PL54.29",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Ural-Altaic languages",
+        "Turkic languages",
+        "Southeastern (Chagatai) group",
+        "Khorezmian Turkic"
+      ],
+      "before_start": "6797",
+      "before_end": "6797",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Ural-Altaic languages / Turkic languages"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 21737,
+      "start": "PL54.65",
+      "end": "PL54.695",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Ural-Altaic languages",
+        "Turkic languages",
+        "Southeastern (Chagatai) group",
+        "Uighur"
+      ],
+      "before_start": "6797",
+      "before_end": "6797",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Ural-Altaic languages / Turkic languages"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 21759,
+      "start": "PL5401.5",
+      "end": "PL5401.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Languages of Oceania",
+        "Austronesian, Papuan, and Australian languages",
+        "Austronesian",
+        "Malayan (Indonesian) languages",
+        "Special. By language or region",
+        "Other (alphabetically)",
+        "Mandailing"
+      ],
+      "before_start": "6966",
+      "before_end": "6966",
+      "paths": [
+        "Language / Language Families / Pacific & Austronesian / Oceanian Language Families"
+      ],
+      "destination_id": 60109,
+      "destination_label": "Mandailing Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 390629,
+      "start": "PL5530",
+      "end": "PL5547",
+      "caption": "Philippine literature (General)",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Languages of Oceania",
+        "Austronesian, Papuan, and Australian languages",
+        "Austronesian",
+        "Philippine languages"
+      ],
+      "before_start": "6966",
+      "before_end": "6966",
+      "paths": [
+        "Language / Language Families / Pacific & Austronesian / Oceanian Language Families"
+      ],
+      "destination_id": 60110,
+      "destination_label": "Philippine Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 21735,
+      "start": "PL56.5",
+      "end": "PL56.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Ural-Altaic languages",
+        "Turkic languages",
+        "Southeastern (Chagatai) group",
+        "Uzbek"
+      ],
+      "before_start": "6797",
+      "before_end": "6797",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Ural-Altaic languages / Turkic languages"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22269,
+      "start": "PL6058",
+      "end": "PL6058.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Languages of Oceania",
+        "Austronesian, Papuan, and Australian languages",
+        "Austronesian",
+        "Philippine languages",
+        "Special languages",
+        "Tagalog"
+      ],
+      "before_start": "6966",
+      "before_end": "6966",
+      "paths": [
+        "Language / Language Families / Pacific & Austronesian / Oceanian Language Families"
+      ],
+      "destination_id": 60111,
+      "destination_label": "Tagalog Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 649210,
+      "start": "PL6110.5",
+      "end": "PL6110.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Languages of Oceania",
+        "Austronesian, Papuan, and Australian languages",
+        "Austronesian",
+        "Philippine languages",
+        "Special languages",
+        "Waray"
+      ],
+      "before_start": "6966",
+      "before_end": "6966",
+      "paths": [
+        "Language / Language Families / Pacific & Austronesian / Oceanian Language Families"
+      ],
+      "destination_id": 60112,
+      "destination_label": "Waray Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 33648,
+      "start": "PL6208",
+      "end": "PL6208.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Languages of Oceania",
+        "Austronesian, Papuan, and Australian languages",
+        "Austronesian",
+        "Oceanic languages. Eastern Austronesian",
+        "Micronesian and Melanesian languages",
+        "Melanesian languages (General)"
+      ],
+      "before_start": "6966",
+      "before_end": "6966",
+      "paths": [
+        "Language / Language Families / Pacific & Austronesian / Oceanian Language Families"
+      ],
+      "destination_id": 60113,
+      "destination_label": "Melanesian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 33653,
+      "start": "PL6408",
+      "end": "PL6408.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Languages of Oceania",
+        "Austronesian, Papuan, and Australian languages",
+        "Austronesian",
+        "Oceanic languages. Eastern Austronesian",
+        "Polynesian languages"
+      ],
+      "before_start": "6966",
+      "before_end": "6966",
+      "paths": [
+        "Language / Language Families / Pacific & Austronesian / Oceanian Language Families"
+      ],
+      "destination_id": 60114,
+      "destination_label": "Polynesian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 33658,
+      "start": "PL6608",
+      "end": "PL6608.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Languages of Oceania",
+        "Austronesian, Papuan, and Australian languages",
+        "Papuan languages"
+      ],
+      "before_start": "6966",
+      "before_end": "6966",
+      "paths": [
+        "Language / Language Families / Pacific & Austronesian / Oceanian Language Families"
+      ],
+      "destination_id": 60115,
+      "destination_label": "Papuan Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 385690,
+      "start": "PL68.5",
+      "end": "PL68.9",
+      "caption": "Balkar literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Ural-Altaic languages",
+        "Turkic languages",
+        "Northwestern (Kipchak) group",
+        "Karachay-Balkar",
+        "Balkar"
+      ],
+      "before_start": "6797",
+      "before_end": "6797",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Ural-Altaic languages / Turkic languages"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 385858,
+      "start": "PL700",
+      "end": "PL889",
+      "caption": "Japanese literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Japanese language and literature"
+      ],
+      "before_start": "12532",
+      "before_end": "12542",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Japanese / Regional & Overseas",
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Japanese / Japanese Literary Studies"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 33665,
+      "start": "PL7008",
+      "end": "PL7008.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Languages of Oceania",
+        "Austronesian, Papuan, and Australian languages",
+        "Australian languages"
+      ],
+      "before_start": "6966",
+      "before_end": "6966",
+      "paths": [
+        "Language / Language Families / Pacific & Austronesian / Oceanian Language Families"
+      ],
+      "destination_id": 60116,
+      "destination_label": "Australian Indigenous Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 35823,
+      "start": "PL72.89",
+      "end": "PL72.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Ural-Altaic languages",
+        "Turkic languages",
+        "Northwestern (Kipchak) group",
+        "Bashkir"
+      ],
+      "before_start": "6797",
+      "before_end": "6797",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Ural-Altaic languages / Turkic languages"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 648036,
+      "start": "PL73.5",
+      "end": "PL73.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Ural-Altaic languages",
+        "Turkic languages",
+        "Northwestern (Kipchak) group",
+        "Tatar"
+      ],
+      "before_start": "6797",
+      "before_end": "6797",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Ural-Altaic languages / Turkic languages"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 648254,
+      "start": "PL76.9",
+      "end": "PL76.95",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Ural-Altaic languages",
+        "Turkic languages",
+        "Northwestern (Kipchak) group",
+        "Kazakh"
+      ],
+      "before_start": "6797",
+      "before_end": "6797",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Ural-Altaic languages / Turkic languages"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 390708,
+      "start": "PL8009.5",
+      "end": "PL8014",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "African Languages and Literature"
+      ],
+      "before_start": "8718",
+      "before_end": "3789",
+      "paths": [
+        "Language / Language Families / East & Southeast Asian / Miao-Yao languages",
+        "Language / Language Families / African / Regional African Literature"
+      ],
+      "destination_id": 8903,
+      "destination_label": "African Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 42040,
+      "start": "PL8025.5",
+      "end": "PL8025.6",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "African Languages and Literature",
+        "Special families of languages",
+        "Bantu"
+      ],
+      "before_start": "7909",
+      "before_end": "7909",
+      "paths": [
+        "Language / Language Families / African / Bantu"
+      ],
+      "destination_id": 60117,
+      "destination_label": "Bantu Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 21738,
+      "start": "PL95.5",
+      "end": "PL95.9",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Ural-Altaic languages",
+        "Turkic languages",
+        "Southwestern (Oghuz) group",
+        "Oghuz"
+      ],
+      "before_start": "6797",
+      "before_end": "6797",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Ural-Altaic languages / Turkic languages"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 390958,
+      "start": "PL950",
+      "end": "PL998",
+      "caption": "Korean literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Korean language and literature"
+      ],
+      "before_start": "4270",
+      "before_end": "12642",
+      "paths": [
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Korean / Regional & Overseas",
+        "Literature / By Region / East Asian & Pacific / Asian, African & Oceanian / Korean language"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 294434,
+      "start": "PM151",
+      "end": "PM198",
+      "caption": "Literature",
+      "context": [
+        "Hyperborean, Indian, and artificial languages",
+        "Indian languages"
+      ],
+      "before_start": "7610",
+      "before_end": "7610",
+      "paths": [
+        "Language / Language Families / Americas’ Indigenous / Literature"
+      ],
+      "destination_id": 7610,
+      "destination_label": "Indigenous American Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 42111,
+      "start": "PM238",
+      "end": "PM238.65",
+      "caption": "Literature",
+      "context": [
+        "Hyperborean, Indian, and artificial languages",
+        "Indian languages",
+        "Languages north of Mexico",
+        "Languages of Canada"
+      ],
+      "before_start": "7949",
+      "before_end": "7949",
+      "paths": [
+        "Language / Language Families / Americas’ Indigenous / Languages north of Mexico"
+      ],
+      "destination_id": 60118,
+      "destination_label": "Canadian Indigenous Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 294802,
+      "start": "PM3051",
+      "end": "PM3098",
+      "caption": "Literature",
+      "context": [
+        "Hyperborean, Indian, and artificial languages",
+        "Indian languages",
+        "Languages of Mexico and Central America"
+      ],
+      "before_start": "8503",
+      "before_end": "8503",
+      "paths": [
+        "Language / Language Families / Americas’ Indigenous / Mexican & Central American Lang."
+      ],
+      "destination_id": 60119,
+      "destination_label": "Mesoamerican Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22150,
+      "start": "PM4068",
+      "end": "PM4068.9",
+      "caption": "Literature",
+      "context": [
+        "Hyperborean, Indian, and artificial languages",
+        "Indian languages",
+        "Languages of Mexico and Central America",
+        "Special languages and groups of languages",
+        "Nahuatlan languages",
+        "Nahuatl (Aztec; Mexican)"
+      ],
+      "before_start": "8503",
+      "before_end": "8503",
+      "paths": [
+        "Language / Language Families / Americas’ Indigenous / Mexican & Central American Lang."
+      ],
+      "destination_id": 60120,
+      "destination_label": "Nahuatl Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 42085,
+      "start": "PM8",
+      "end": "PM8.5",
+      "caption": "Literature",
+      "context": [
+        "Hyperborean, Indian, and artificial languages",
+        "Hyperborean languages of Arctic Asia and America"
+      ],
+      "before_start": "3753",
+      "before_end": "3753",
+      "paths": [
+        "Language / Language Families / Arctic"
+      ],
+      "destination_id": 60121,
+      "destination_label": "Arctic Indigenous Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 21948,
+      "start": "PC1983.5",
+      "end": "PC1984.Z5",
+      "caption": "Literature",
+      "context": [
+        "Romance philology and languages",
+        "Sardinian"
+      ],
+      "destination_id": 60122,
+      "destination_label": "Sardinian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 647608,
+      "start": "PC1993.5",
+      "end": "PC1994.Z5",
+      "caption": "Literature",
+      "context": [
+        "Romance philology and languages",
+        "Corsican"
+      ],
+      "destination_id": 60123,
+      "destination_label": "Corsican Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 21954,
+      "start": "PJ2533.5",
+      "end": "PJ2534.Z95",
+      "caption": "Literature",
+      "context": [
+        "Oriental philology and literature",
+        "Cushitic languages",
+        "Special",
+        "Eastern Cushitic",
+        "Somali group",
+        "Somali"
+      ],
+      "destination_id": 60124,
+      "destination_label": "Somali Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 644158,
+      "start": "PK1823.5",
+      "end": "PK1824.Z5",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Bihari",
+        "Dialects",
+        "Magahi"
+      ],
+      "destination_id": 60125,
+      "destination_label": "Bhojpuri Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22025,
+      "start": "PK1827.5",
+      "end": "PK1828.Z5",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Bihari",
+        "Dialects",
+        "Bhojpuri"
+      ],
+      "destination_id": 60126,
+      "destination_label": "Magahi Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 631613,
+      "start": "PK2469.W345",
+      "end": "PK2469.W3495",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Marwari (Dingal)",
+        "Language",
+        "Dialects. Provincialisms, etc.",
+        "Wagdi"
+      ],
+      "destination_id": 60127,
+      "destination_label": "Warli Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22027,
+      "start": "PK2597.5",
+      "end": "PK2598.Z95",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Pahari",
+        "Eastern Pahari (Nepali, Parbate, Parbatiya, Gorkhali, Khas-kura)"
+      ],
+      "destination_id": 60128,
+      "destination_label": "Ho Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22054,
+      "start": "PK2608.5",
+      "end": "PK2609.Z95",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Pahari",
+        "Western Pahari (Himachali)"
+      ],
+      "destination_id": 60129,
+      "destination_label": "Santali Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22026,
+      "start": "PK2647.5",
+      "end": "PK2648.Z95",
+      "caption": "Literature",
+      "context": [
+        "Indo-Iranian philology and literature",
+        "Modern Indo-Aryan languages",
+        "Particular languages and dialects, A-Z",
+        "Panjabi",
+        "Language",
+        "Dogri language"
+      ],
+      "destination_id": 60130,
+      "destination_label": "Kokborok Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22058,
+      "start": "PL313.5",
+      "end": "PL314.Z5",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Ural-Altaic languages",
+        "Turkic languages",
+        "Southwestern (Oghuz) group",
+        "Azerbaijani"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22059,
+      "start": "PL333.5",
+      "end": "PL334.Z5",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Ural-Altaic languages",
+        "Turkic languages",
+        "Southwestern (Oghuz) group",
+        "Turkmen"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22064,
+      "start": "PL4793.5",
+      "end": "PL4794.Z5",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Dravidian languages",
+        "Tulu"
+      ],
+      "destination_id": 60131,
+      "destination_label": "Tulu Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22060,
+      "start": "PL5453.5",
+      "end": "PL5454.Z5",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Languages of Oceania",
+        "Austronesian, Papuan, and Australian languages",
+        "Austronesian",
+        "Malayan (Indonesian) languages",
+        "Special. By language or region",
+        "Other (alphabetically)",
+        "Sundanese"
+      ],
+      "destination_id": 60132,
+      "destination_label": "Minangkabau Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22061,
+      "start": "PL5993.5",
+      "end": "PL5994.Z5",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "Languages of Oceania",
+        "Austronesian, Papuan, and Australian languages",
+        "Austronesian",
+        "Philippine languages",
+        "Special languages",
+        "Pampanga"
+      ],
+      "destination_id": 60133,
+      "destination_label": "Cebuano Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22062,
+      "start": "PL8233.5",
+      "end": "PL8234.Z5",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "African languages and literature",
+        "Special languages (alphabetically)",
+        "Hausa"
+      ],
+      "destination_id": 60134,
+      "destination_label": "Hausa Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 22063,
+      "start": "PL8703.5",
+      "end": "PL8704.Z5",
+      "caption": "Literature",
+      "context": [
+        "Languages of Eastern Asia, Africa, Oceania",
+        "African languages and literature",
+        "Special languages (alphabetically)",
+        "Swahili"
+      ],
+      "destination_id": 60135,
+      "destination_label": "Swahili Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 634016,
+      "start": "PM7849.C375",
+      "end": "PM7849.C379",
+      "caption": "Literature",
+      "context": [
+        "Hyperborean, Indian, and artificial languages",
+        "Mixed languages",
+        "Creole languages",
+        "Portuguese",
+        "Local. By dialect name or place, A-Z",
+        "Cabo Verde"
+      ],
+      "destination_id": 60136,
+      "destination_label": "Creole Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 295714,
+      "start": "PM8284.5",
+      "end": "PM8285.Z",
+      "caption": "Literature",
+      "context": [
+        "Hyperborean, Indian, and artificial languages",
+        "Artificial languages. Universal languages",
+        "Special languages (alphabetically)",
+        "Esperanto",
+        "Esperanto texts"
+      ],
+      "destination_id": 60137,
+      "destination_label": "Esperanto Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 128479,
+      "start": "LB1575",
+      "end": "LB1575.5",
+      "caption": "Literature",
+      "destination_id": 60138,
+      "destination_label": "Teaching Literature in Primary School",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 662926,
+      "start": "PL4072.9.A",
+      "end": "PL4072.9.Z",
+      "caption": "Individual authors or works, A-Z",
+      "destination_id": 60139,
+      "destination_label": "Hmong Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 674674,
+      "start": "PL4074.9.A",
+      "end": "PL4074.9.Z",
+      "caption": "Individual authors or works, A-Z",
+      "destination_id": 60140,
+      "destination_label": "Yao Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 10977,
+      "start": "P115.25",
+      "end": "P115.25",
+      "caption": "Multilingualism and literature",
+      "context": [
+        "Philology. Linguistics",
+        "Language. Linguistic theory. Comparative grammar",
+        "Philosophy, origin, etc. of language",
+        "Bilingualism. Multilingualism"
+      ],
+      "destination_id": 60142,
+      "destination_label": "Multilingual Literature Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 178186,
+      "start": "PA2701",
+      "end": "PA2748",
+      "caption": "Literature",
+      "context": [
+        "Latin philology and language",
+        "Vulgar Latin"
+      ],
+      "destination_id": 60143,
+      "destination_label": "Vulgar Latin Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 178201,
+      "start": "PA2899.22",
+      "end": "PA2899.22",
+      "caption": "Literature",
+      "context": [
+        "Latin philology and language",
+        "Medieval Latin (to ca. 1350 or 1500)"
+      ],
+      "destination_id": 60144,
+      "destination_label": "Medieval Latin Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 178205,
+      "start": "PA2906.2",
+      "end": "PA2906.2",
+      "caption": "Literature",
+      "context": [
+        "Latin philology and language",
+        "Modern Latin (ca. 1350 or 1550 to ...)"
+      ],
+      "destination_id": 60145,
+      "destination_label": "Early Modern Latin Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 178208,
+      "start": "PA2915.2",
+      "end": "PA2915.2",
+      "caption": "Literature",
+      "context": [
+        "Latin philology and language",
+        "Modern Latin (19th century- )"
+      ],
+      "destination_id": 60146,
+      "destination_label": "Modern Latin Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 175137,
+      "start": "PA3000",
+      "end": "PA3049",
+      "caption": "Classical literature",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 176396,
+      "start": "PA3050",
+      "end": "PA4505",
+      "caption": "Greek literature",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 172496,
+      "start": "PA5000",
+      "end": "PA5660",
+      "caption": "Byzantine and modern Greek literature",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 181753,
+      "start": "PA6000",
+      "end": "PA6971",
+      "caption": "Roman literature",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 182760,
+      "start": "PA8001",
+      "end": "PA8595",
+      "caption": "Medieval and modern Latin literature",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 222829,
+      "start": "PD1194",
+      "end": "PD1197",
+      "caption": "Literature",
+      "context": [
+        "Germanic philology and languages",
+        "Old Germanic dialects",
+        "Old Germanic dialects",
+        "Gothic"
+      ],
+      "destination_id": 60147,
+      "destination_label": "Gothic Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 222815,
+      "start": "PD787.2",
+      "end": "PD787.22",
+      "caption": "Literature",
+      "context": [
+        "Germanic philology and languages",
+        "General"
+      ],
+      "destination_id": 60148,
+      "destination_label": "Germanic Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 37613,
+      "start": "PE458.2",
+      "end": "PE458.2",
+      "caption": "Anglo-Saxon literature",
+      "context": [
+        "English philology and language",
+        "Anglo-Saxon. Old English"
+      ],
+      "destination_id": 60149,
+      "destination_label": "Old English Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 37614,
+      "start": "PE693.2",
+      "end": "PE693.2",
+      "caption": "Literature",
+      "context": [
+        "English philology and language",
+        "Middle English"
+      ],
+      "destination_id": 60150,
+      "destination_label": "Middle English Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 224349,
+      "start": "PF1501",
+      "end": "PF1541",
+      "caption": "Literature",
+      "context": [
+        "West Germanic philology and languages",
+        "Friesian language"
+      ],
+      "destination_id": 60151,
+      "destination_label": "Frisian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 224460,
+      "start": "PF3984.2",
+      "end": "PF3991",
+      "caption": "Literature",
+      "context": [
+        "West Germanic philology and languages",
+        "German",
+        "Old High German"
+      ],
+      "destination_id": 60152,
+      "destination_label": "Old High German Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 224515,
+      "start": "PF3997",
+      "end": "PF4010",
+      "caption": "Literature",
+      "context": [
+        "West Germanic philology and languages",
+        "German",
+        "Old Saxon"
+      ],
+      "destination_id": 60153,
+      "destination_label": "Old Saxon Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 224888,
+      "start": "PG1000",
+      "end": "PG1146",
+      "caption": "Literature",
+      "context": [
+        "Slavic. Baltic. Albanian",
+        "Bulgarian"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 224889,
+      "start": "PG1180",
+      "end": "PG1199",
+      "caption": "Literature",
+      "context": [
+        "Slavic. Baltic. Albanian",
+        "Macedonian"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 224890,
+      "start": "PG1400",
+      "end": "PG1749",
+      "caption": "Serbo-Croatian literature",
+      "context": [
+        "Slavic. Baltic. Albanian"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 224891,
+      "start": "PG1900",
+      "end": "PG1962",
+      "caption": "Literature",
+      "context": [
+        "Slavic. Baltic. Albanian",
+        "Slovenian"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 435589,
+      "start": "PG2827",
+      "end": "PG2827",
+      "caption": "Russian literature",
+      "context": [
+        "Slavic. Baltic. Albanian",
+        "Russian"
+      ],
+      "destination_id": 4466,
+      "destination_label": "Russian Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 244839,
+      "start": "PG2834.17",
+      "end": "PG2847",
+      "caption": "Literature",
+      "context": [
+        "Slavic. Baltic. Albanian",
+        "Belarusian"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 392501,
+      "start": "PG2899.2",
+      "end": "PG3698",
+      "caption": "Russian literature",
+      "context": [
+        "Slavic. Baltic. Albanian"
+      ],
+      "destination_id": 4216,
+      "destination_label": "Russia",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 237442,
+      "start": "PG3900",
+      "end": "PG3987",
+      "caption": "Literature",
+      "context": [
+        "Slavic. Baltic. Albanian",
+        "Ukrainian"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 224820,
+      "start": "PG500",
+      "end": "PG585.2",
+      "caption": "Slavic literature (General)",
+      "context": [
+        "Slavic. Baltic. Albanian"
+      ],
+      "destination_id": 60154,
+      "destination_label": "Slavic Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 237421,
+      "start": "PG5000",
+      "end": "PG5146",
+      "caption": "Czech literature",
+      "context": [
+        "Slavic. Baltic. Albanian",
+        "Czech"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 237440,
+      "start": "PG5400",
+      "end": "PG5546",
+      "caption": "Literature",
+      "context": [
+        "Slavic. Baltic. Albanian",
+        "Slovak"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 238017,
+      "start": "PG5661",
+      "end": "PG5689",
+      "caption": "Literature",
+      "context": [
+        "Slavic. Baltic. Albanian",
+        "Sorbian (Wendic)"
+      ],
+      "destination_id": 60155,
+      "destination_label": "Sorbian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 224942,
+      "start": "PG700.12",
+      "end": "PG716",
+      "caption": "Literature",
+      "context": [
+        "Slavic. Baltic. Albanian",
+        "Church Slavic"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 237478,
+      "start": "PG7001",
+      "end": "PG7446",
+      "caption": "Literature",
+      "context": [
+        "Slavic. Baltic. Albanian",
+        "Polish"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 225031,
+      "start": "PG799.2",
+      "end": "PG799.2",
+      "caption": "Literature",
+      "context": [
+        "Slavic. Baltic. Albanian",
+        "Bulgarian Church Slavic (Middle Bulgarian)"
+      ],
+      "destination_id": 60156,
+      "destination_label": "Middle Bulgarian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 238639,
+      "start": "PG8101",
+      "end": "PG8108",
+      "caption": "Baltic literature (General)",
+      "context": [
+        "Slavic. Baltic. Albanian",
+        "Baltic philology and languages"
+      ],
+      "destination_id": 60157,
+      "destination_label": "Baltic Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 237428,
+      "start": "PG8700",
+      "end": "PG8772",
+      "caption": "Literature",
+      "context": [
+        "Slavic. Baltic. Albanian",
+        "Baltic philology and languages",
+        "Lithuanian"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 238666,
+      "start": "PG8998",
+      "end": "PG9146",
+      "caption": "Literature",
+      "context": [
+        "Slavic. Baltic. Albanian",
+        "Baltic philology and languages",
+        "Latvian"
+      ],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 238790,
+      "start": "PG9601",
+      "end": "PG9665",
+      "caption": "Literature",
+      "context": [
+        "Slavic. Baltic. Albanian",
+        "Albanian philology and languages"
+      ],
+      "destination_id": 60158,
+      "destination_label": "Albanian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 239326,
+      "start": "PH1058",
+      "end": "PH1059",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Other Finnic languages and dialects",
+        "Permic",
+        "Komi"
+      ],
+      "destination_id": 60159,
+      "destination_label": "Komi Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 239342,
+      "start": "PH1078",
+      "end": "PH1079",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Other Finnic languages and dialects",
+        "Permic",
+        "Komi-Permyak"
+      ],
+      "destination_id": 60160,
+      "destination_label": "Komi-Permyak Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 239358,
+      "start": "PH1108",
+      "end": "PH1109",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Other Finnic languages and dialects",
+        "Permic",
+        "Udmurt"
+      ],
+      "destination_id": 60161,
+      "destination_label": "Udmurt Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 239375,
+      "start": "PH1308",
+      "end": "PH1309",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Ugric languages",
+        "Ob-Ugric",
+        "Mansi"
+      ],
+      "destination_id": 60162,
+      "destination_label": "Mansi Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 239395,
+      "start": "PH1408",
+      "end": "PH1409",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Ugric languages",
+        "Ob-Ugric",
+        "Khanty"
+      ],
+      "destination_id": 60163,
+      "destination_label": "Khanty Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 238920,
+      "start": "PH300",
+      "end": "PH405",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Finnish"
+      ],
+      "destination_id": 9258,
+      "destination_label": "Finnish Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 238927,
+      "start": "PH3001",
+      "end": "PH3445",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Hungarian"
+      ],
+      "destination_id": 6225,
+      "destination_label": "Hungarian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 239099,
+      "start": "PH508",
+      "end": "PH509",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Other Finnic languages and dialects",
+        "Karelian"
+      ],
+      "destination_id": 60164,
+      "destination_label": "Karelian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 239116,
+      "start": "PH528",
+      "end": "PH529",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Other Finnic languages and dialects",
+        "Olonets"
+      ],
+      "destination_id": 60165,
+      "destination_label": "Olonets Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 238929,
+      "start": "PH5280",
+      "end": "PH5490",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Basque"
+      ],
+      "destination_id": 7311,
+      "destination_label": "Basque Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 239134,
+      "start": "PH538",
+      "end": "PH539",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Other Finnic languages and dialects",
+        "Ludic"
+      ],
+      "destination_id": 60166,
+      "destination_label": "Ludic Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 239151,
+      "start": "PH548",
+      "end": "PH549",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Other Finnic languages and dialects",
+        "Veps"
+      ],
+      "destination_id": 60167,
+      "destination_label": "Veps Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 239167,
+      "start": "PH558",
+      "end": "PH559",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Other Finnic languages and dialects",
+        "Ingrian"
+      ],
+      "destination_id": 60168,
+      "destination_label": "Ingrian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 239181,
+      "start": "PH568",
+      "end": "PH569",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Other Finnic languages and dialects",
+        "Votic"
+      ],
+      "destination_id": 60169,
+      "destination_label": "Votic Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 239197,
+      "start": "PH588",
+      "end": "PH589",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Other Finnic languages and dialects",
+        "Livonian"
+      ],
+      "destination_id": 60170,
+      "destination_label": "Livonian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 239210,
+      "start": "PH630",
+      "end": "PH671",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Other Finnic languages and dialects",
+        "Estonian"
+      ],
+      "destination_id": 60171,
+      "destination_label": "Estonian Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 239261,
+      "start": "PH731",
+      "end": "PH735",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Other Finnic languages and dialects",
+        "Sami"
+      ],
+      "destination_id": 60172,
+      "destination_label": "Sami Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 239277,
+      "start": "PH781",
+      "end": "PH785",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Other Finnic languages and dialects",
+        "Mordvin"
+      ],
+      "destination_id": 60173,
+      "destination_label": "Mordvin Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 238939,
+      "start": "PH81",
+      "end": "PH87",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Uralic. Finno-Ugric"
+      ],
+      "destination_id": 60174,
+      "destination_label": "Uralic Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 239296,
+      "start": "PH811",
+      "end": "PH836",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Other Finnic languages and dialects",
+        "Mari"
+      ],
+      "destination_id": 60175,
+      "destination_label": "Mari Literature",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 238985,
+      "start": "PH98",
+      "end": "PH98.5",
+      "caption": "Literature",
+      "context": [
+        "Uralic. Basque",
+        "Finnic. Baltic-Finnic"
+      ],
+      "destination_id": 60176,
+      "destination_label": "Finnic Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 70454,
+      "start": "PN1",
+      "end": "PN6790",
+      "caption": "Literature (General)",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 260089,
+      "start": "PQ1",
+      "end": "PQ3999",
+      "caption": "French literature",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 323069,
+      "start": "PQ4001",
+      "end": "PQ5999",
+      "caption": "Italian literature",
+      "context": [],
+      "expected_root": 3846,
+      "destination_id": 4202,
+      "destination_label": "Italian Literature"
+    },
+    {
+      "record_id": 325388,
+      "start": "PQ6001",
+      "end": "PQ8929",
+      "caption": "Spanish literature",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 323278,
+      "start": "PQ9000",
+      "end": "PQ9999",
+      "caption": "Portuguese literature",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 194721,
+      "start": "PR1",
+      "end": "PR9680",
+      "caption": "English literature",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 200162,
+      "start": "PS1",
+      "end": "PS3626",
+      "caption": "American literature",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 673739,
+      "start": "PS8001",
+      "end": "PS8649",
+      "caption": "Canadian literature",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 410262,
+      "start": "PT1",
+      "end": "PT4897",
+      "caption": "German literature",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 415310,
+      "start": "PT5001",
+      "end": "PT5980",
+      "caption": "Dutch literature",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 413966,
+      "start": "PT6000",
+      "end": "PT6467.36",
+      "caption": "Flemish literature since 1830",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 632989,
+      "start": "PT6500",
+      "end": "PT6593.36",
+      "caption": "Afrikaans literature",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 414236,
+      "start": "PT7001",
+      "end": "PT7099",
+      "caption": "Scandinavian literature",
+      "context": [],
+      "destination_id": 60177,
+      "destination_label": "Scandinavian Literary Studies",
+      "expected_root": 3846
+    },
+    {
+      "record_id": 414321,
+      "start": "PT7101",
+      "end": "PT7338",
+      "caption": "Old Norse literature: Old Icelandic and old Norwegian",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 416083,
+      "start": "PT7351",
+      "end": "PT7550",
+      "caption": "Modern Icelandic literature",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 416869,
+      "start": "PT7581",
+      "end": "PT7599",
+      "caption": "Faroese literature",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 416894,
+      "start": "PT7601",
+      "end": "PT8260",
+      "caption": "Danish literature",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 417359,
+      "start": "PT8301",
+      "end": "PT9155",
+      "caption": "Norwegian literature",
+      "context": [],
+      "expected_root": 3846
+    },
+    {
+      "record_id": 414926,
+      "start": "PT9201",
+      "end": "PT9999",
+      "caption": "Swedish literature",
+      "context": [],
+      "expected_root": 3846
+    }
+  ],
+  "protected_roots": [
+    1092,
+    601,
+    8463,
+    6748
+  ],
+  "moved_literary_concepts": [
+    3217,
+    3242,
+    3761,
+    3763,
+    3767,
+    3799,
+    3809,
+    3841,
+    3843,
+    3844,
+    3845,
+    5065,
+    5982,
+    6049,
+    6050,
+    6057,
+    6317,
+    7610,
+    7752,
+    7753,
+    8244,
+    8434,
+    8607,
+    8718,
+    8903,
+    8968,
+    9378,
+    9419,
+    10022,
+    11184,
+    12377,
+    12835,
+    12836,
+    12872,
+    13168,
+    13577,
+    9258,
+    6225,
+    7311,
+    4466
+  ],
+  "reference_database": "lcc-mdsconnect-2016.sqlite3",
+  "reference_correction": {
+    "record_id": 390453,
+    "before": "PL4070..PL407495",
+    "after": "PL4070..PL4074.95"
+  },
+  "remove_bisac_selectors": [
+    [
+      4482,
+      "FIC100000"
+    ],
+    [
+      4483,
+      "FIC104000"
+    ]
+  ],
+  "add_bisac_selectors": [
+    [
+      9258,
+      "FIC100000"
+    ],
+    [
+      6225,
+      "FIC104000"
+    ]
+  ]
+}

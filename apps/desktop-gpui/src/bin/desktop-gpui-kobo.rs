@@ -1,13 +1,21 @@
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use app::host::LIBRARY_MANIFEST_FILENAME;
+use app::host::{LIBRARY_MANIFEST_FILENAME, LibraryMaintenancePermit, defer_library_maintenance};
 use app::{AppDataLocation, host::BackendLaunch};
 use gpui::Application;
-use gpui_kobo::{KoboExperienceMode, KoboPlatform, KoboPlatformOptions, PageButtonBehavior};
+use gpui_kobo::{KoboExperienceMode, KoboPlatform, KoboPlatformOptions, KoboPowerOptions, PageButtonBehavior};
 
-fn suspend_device() -> Result<(), String> {
-    kobo_device::suspend().map_err(|error| error.to_string())
+#[path = "../kobo_power.rs"]
+mod kobo_power;
+
+static LIBRARY_MAINTENANCE: Mutex<Option<LibraryMaintenancePermit>> = Mutex::new(None);
+
+fn release_library_maintenance() {
+    let permit = LIBRARY_MAINTENANCE.lock().expect("library maintenance guard poisoned").take();
+    drop(permit);
+    println!("KOBO_LIBRARY_MAINTENANCE phase=released_after_first_frame");
 }
 
 #[cfg(target_arch = "arm")]
@@ -95,7 +103,13 @@ fn main() {
     println!("KOBO_APP_STARTUP phase=libraries_ready elapsed_ms={}", startup_started.elapsed().as_millis());
     app::init_logging();
     #[cfg(target_arch = "arm")]
-    log_bluetooth_diagnostics();
+    if std::env::var("BOKHEIM_KOBO_BLUETOOTH_DIAGNOSTICS").as_deref() == Ok("1") {
+        // bluetoothctl can wait indefinitely for firmware services. Optional
+        // diagnostics must never hold up the first reader frame.
+        if let Err(error) = std::thread::Builder::new().name("kobo-diagnostics".into()).spawn(log_bluetooth_diagnostics) {
+            eprintln!("Could not start Kobo Bluetooth diagnostics: {error}");
+        }
+    }
 
     let platform = KoboPlatform::new(KoboPlatformOptions {
         display: !no_display,
@@ -107,9 +121,21 @@ fn main() {
         // scrolling is handled independently of focus and works for both
         // browse lists and reader content.
         page_buttons: PageButtonBehavior::Scroll,
-        power_button_handler: Some(suspend_device),
+        power_button_handler: Some(kobo_power::suspend_kernel),
         power_button_opens_menu: true,
+        power: KoboPowerOptions {
+            prepare_sleep: Some(kobo_power::prepare_sleep),
+            finish_sleep: Some(kobo_power::finish_sleep),
+            poll: Some(kobo_power::poll),
+            power_off: Some(kobo_power::power_off),
+            prepare_delay: Duration::from_secs(3),
+            settle_delay: Duration::from_secs(15),
+            wake_confirmation_timeout: Duration::from_secs(15),
+            idle_timeout: Some(Duration::from_secs(30 * 60)),
+            sleep_cover: true,
+        },
         wake_ui_ready_handler: Some(kobo_device::wifi::resume_after_ui),
+        startup_frame_ready_handler: Some(release_library_maintenance),
         show_exit_button: false,
         experience_mode: KoboExperienceMode::LibraryFast,
         monochrome_threshold: 160,
@@ -118,6 +144,8 @@ fn main() {
     .expect("failed to initialize Kobo GPUI platform");
     println!("KOBO_APP_STARTUP phase=platform_ready elapsed_ms={}", startup_started.elapsed().as_millis());
     gpui_kobo::begin_application_startup_profile(startup_started).expect("failed to start Kobo application startup profile");
+
+    *LIBRARY_MAINTENANCE.lock().expect("library maintenance guard poisoned") = Some(defer_library_maintenance());
 
     Application::new_inaccessible(platform.clone()).with_assets(ui_components::Assets).run(move |cx| {
         cx.set_reduce_motion(true);

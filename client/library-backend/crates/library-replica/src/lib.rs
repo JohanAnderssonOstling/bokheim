@@ -3,28 +3,30 @@
 //! The sync service depends only on `sync-common` and never links this crate.
 
 pub use book_model::BookDetails;
-use book_model::{Annotation, BookRecord, BookTocDocument, BookTocEntry};
+use book_model::{Annotation, BookRecord, BookTocDocument};
 use pdf_view_common::PdfReaderMetadata;
 use std::sync::OnceLock;
 pub mod filenames;
 mod folder_management;
 mod folder_names;
 pub use folder_names::project_folder_name;
+mod enrichment;
 mod library_state;
+pub use enrichment::EnrichmentResult;
 
 pub use folder_management::{file_name_candidates, folder_name_candidates, numbered_file_name, numbered_folder_name, unique_file_name, unique_folder_name};
-pub use library_state::{BookFacts, BookLifecycleState, DirectoryLifecycleState, ReadingPositionState, portable_name_key};
+pub use library_state::{portable_name_key, BookFacts, BookLifecycleState, DirectoryLifecycleState, ReadingPositionState};
 
 use serde::{Deserialize, Serialize};
 
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use sync_common::ContentHash;
 pub use sync_common::VersionKey;
 use sync_common::{ConflictRank, DirId, FileName, OpaqueStateEntry, Publication, ReplicaId, ReplicaSeq, StateAddress, StatePayload, UnixMillis, Versioned};
 
 mod directory_projection;
 pub(crate) mod serde_enum;
-pub use directory_projection::{DirectoryIntent, DirectoryProjection, project_directories};
+pub use directory_projection::{project_directories, DirectoryIntent, DirectoryProjection};
 
 /// The complete, immutable facts admitted when a file is added to a library.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -36,14 +38,6 @@ pub struct BookAddition {
     pub recording: Option<metadata_contract::audible::LookupRequest>,
     /// Absent only in a device-local draft. Every publication has a definitive answer.
     pub enrichment: Option<EnrichmentResult>,
-}
-
-/// A definitive enrichment answer. Failures are device-local retry work.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum EnrichmentResult {
-    Found { record: BookRecord, toc: Option<Vec<BookTocEntry>>, cover_id: Option<String> },
-    NoMatch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -68,11 +62,13 @@ pub fn coalesce_mutations_for_push(publications: Vec<StatePublication>) -> Vec<S
     let mut entries = HashMap::<StateAddress, StatePublication>::new();
     for publication in publications {
         let address = publication.state.value.address();
-        match entries.get(&address) {
-            Some(current) if current.state.version >= publication.state.version => {}
-            _ => {
-                entries.insert(address, publication);
+        match entries.entry(address) {
+            Entry::Occupied(mut current) => {
+                if current.get().state.version < publication.state.version {
+                    current.insert(publication);
+                }
             }
+            Entry::Vacant(entry) => { entry.insert(publication); }
         }
     }
     let mut reduced = entries.into_values().collect::<Vec<_>>();
@@ -82,8 +78,7 @@ pub fn coalesce_mutations_for_push(publications: Vec<StatePublication>) -> Vec<S
 
 pub fn prepare_push(mut publications: Vec<StatePublication>) -> Result<sync_common::PushBatcher, Box<dyn std::error::Error>> {
     publications.sort_by_key(|publication| !matches!(publication.state.value, LibraryStateEntry::BookLifecycle { .. }));
-    let encoded = publications.iter().map(sync_common::transport::representation::<_, sync_common::OpaquePublication>).collect::<Result<Vec<_>, _>>()?;
-    Ok(sync_common::PushBatcher::new(encoded)?)
+    Ok(sync_common::PushBatcher::try_from_publications(publications.into_iter().map(|publication| sync_common::transport::representation(&publication)))?)
 }
 
 impl LibraryStateEntry {
@@ -210,7 +205,7 @@ impl StatePayload for LibraryStateEntry {
             if !Self::recognizes_kind(&entry.address.kind) {
                 return Err(WireError::Decode("unknown state kind".into()));
             }
-            let value: Self = sync_common::transport::decode(&entry.bytes, sync_common::transport::MAX_DECODED_REQUEST_BYTES)?;
+            let value: Self = sync_common::transport::decode_state(&entry.bytes, sync_common::transport::MAX_DECODED_REQUEST_BYTES)?;
             value.validate()?;
             if value.address() != entry.address || value.book() != entry.book {
                 return Err(WireError::Decode("state envelope does not match its value".to_owned()));
@@ -259,6 +254,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn coalescing_keeps_winning_versions_and_first_equal_candidate() {
+        let make = |name: &str, time, sequence| LibraryStateEntry::DirectoryName { dir_id: DirId::from_u128(1), name: name.into() }.publication(ReplicaId::from_u128(1), time, ReplicaSeq::new(sequence).unwrap());
+        let newest = make("winning", 3, 1);
+        let stale = make("stale retry", 2, 2);
+        let mut equal = make("equal candidate", 3, 1);
+        equal.publisher_seq = ReplicaSeq::new(99).unwrap();
+        let other = LibraryStateEntry::DirectoryName { dir_id: DirId::from_u128(2), name: "other".into() }.publication(ReplicaId::from_u128(1), 1, ReplicaSeq::new(3).unwrap());
+        assert_eq!(coalesce_mutations_for_push(vec![newest.clone(), stale, equal, other.clone()]), vec![newest, other]);
+    }
+
+    #[test]
+    fn streamed_preparation_preserves_lifecycle_and_publication_order() {
+        let publish = |state: LibraryStateEntry, sequence| state.publication(ReplicaId::from_u128(1), 1, ReplicaSeq::new(sequence).unwrap());
+        let directory = |id| LibraryStateEntry::DirectoryName { dir_id: DirId::from_u128(id), name: "directory".into() };
+        let lifecycle = |hash| LibraryStateEntry::BookLifecycle { content_hash: ContentHash::from_bytes([hash; 32]), value: BookLifecycleState::Present };
+        let input = vec![publish(directory(1), 1), publish(lifecycle(1), 2), publish(directory(2), 3), publish(lifecycle(2), 4)];
+        let expected: Vec<sync_common::OpaquePublication> = [1, 3, 0, 2].into_iter().map(|index| sync_common::transport::representation(&input[index]).unwrap()).collect();
+        let mut batcher = prepare_push(input).unwrap();
+        assert_eq!(batcher.next_batch(), expected);
+        assert!(batcher.is_empty());
+    }
+
+    #[test]
+    #[ignore = "release benchmark of typed outbox preparation; run in a separate process"]
+    fn outbox_preparation_performance() {
+        use std::time::Instant;
+        let publications = (1..=1_000).map(|sequence| {
+            LibraryStateEntry::BookAdd {
+                content_hash: ContentHash::from_bytes([sequence as u8; 32]),
+                value: BookAddition {
+                    facts: BookFacts { added_at: 1, format: book_model::BookFormat::Epub },
+                    record: BookRecord { metadata: Default::default(), description: "x".repeat(64 * 1024) },
+                    navigation: None, pdf: None, recording: None, enrichment: Some(EnrichmentResult::NoMatch),
+                },
+            }.publication(ReplicaId::from_u128(1), 1, ReplicaSeq::new(sequence).unwrap())
+        }).collect();
+        let started = Instant::now();
+        let mut batcher = prepare_push(publications).unwrap();
+        let prepared_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let mut drained = 0;
+        while !batcher.is_empty() { drained += batcher.next_batch().len(); }
+        assert_eq!(drained, 1_000);
+        println!("PREPARE cells={drained} payload_bytes={} elapsed_ms={prepared_ms:.3}", 1_000 * 64 * 1024);
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            if let Some(line) = status.lines().find(|line| line.starts_with("VmHWM:")) { println!("PREPARE {line}"); }
+        }
+    }
+
+    #[test]
+    fn history_upgrade_preserves_relay_values_written_with_protocol_28() {
+        let publication = LibraryStateEntry::DirectoryName { dir_id: DirId::from_u128(1), name: "Retained".into() }.publication(ReplicaId::from_u128(2), 3, ReplicaSeq::new(4).unwrap());
+        let mut stored: Versioned<OpaqueStateEntry> = sync_common::transport::representation(&publication.state).unwrap();
+        stored.value.bytes[1] = 28;
+        let decoded = sync_common::state_encoding::decode_known::<LibraryStateEntry>(&stored).unwrap().unwrap();
+        assert_eq!(decoded, publication.state);
+    }
+
+    #[test]
     fn only_completed_additions_can_be_encoded_for_publication() {
         assert!(!LibraryStateEntry::recognizes_kind("enrichment"));
         let mut addition = BookAddition {
@@ -275,5 +328,8 @@ mod tests {
         addition.enrichment = Some(EnrichmentResult::NoMatch);
         let complete = publish(addition);
         assert!(sync_common::transport::representation::<_, sync_common::OpaquePublication>(&complete).is_ok());
+        let encoded = sync_common::transport::encode(&complete).unwrap();
+        let decoded: StatePublication = sync_common::transport::decode_byte_fields(&encoded, sync_common::transport::MAX_DECODED_REQUEST_BYTES).unwrap();
+        assert_eq!(decoded, complete);
     }
 }

@@ -7,6 +7,7 @@ pub mod filesystem;
 #[cfg(target_arch = "wasm32")]
 pub mod hashing;
 pub use asset_store::{AssetStore, AssetStoreError};
+pub use book_access::BoxedBookReader;
 
 impl From<AssetStoreError> for client_runtime::BackendError {
     fn from(error: AssetStoreError) -> Self {

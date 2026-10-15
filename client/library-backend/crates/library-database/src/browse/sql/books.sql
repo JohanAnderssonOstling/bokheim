@@ -18,10 +18,12 @@ WHERE book.deleted_at IS NULL
 -- param: file_types: i32
 -- param: languages: &str
 -- param: normalized_query: &str
+-- param: load_popularity: i32
 SELECT book.row_id,
        COALESCE((SELECT downloaded FROM library_book_presence WHERE book_row_id=book.row_id),0),
        instr(book.search_title,:normalized_query)>0 OR instr(book.search_author,:normalized_query)>0,
-       book.read_progress
+       book.read_progress,
+       CASE WHEN :load_popularity=1 THEN book.popularity_rating_count END
 FROM json_each(:book_ids) selected
 JOIN book ON book.row_id=selected.value
 WHERE book.deleted_at IS NULL
@@ -37,4 +39,7 @@ WHERE book.deleted_at IS NULL
 SELECT book.row_id
 FROM json_each(:book_ids) selected
 JOIN book ON book.row_id=selected.value
-ORDER BY CASE WHEN :book_sort=1 THEN book.read_at END DESC,book.search_title,book.title,book.content_hash;
+ORDER BY CASE WHEN :book_sort=1 THEN book.read_at END DESC,
+         CASE WHEN :book_sort=2 THEN book.popularity_rating_count IS NULL END,
+         CASE WHEN :book_sort=2 THEN book.popularity_rating_count END DESC,
+         book.search_title,book.title,book.content_hash;

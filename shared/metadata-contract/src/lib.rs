@@ -3,6 +3,9 @@ pub use wikidata::*;
 pub mod audible;
 pub mod authority_subjects;
 pub mod books;
+pub mod catalog;
+pub mod popularity;
+pub use popularity::{unique_work_popularity, WorkPopularity};
 pub mod matching;
 pub mod subject_consensus;
 pub mod year_consensus;
@@ -58,7 +61,35 @@ pub struct EditionIdentityResult {
     pub candidates_truncated: bool,
     #[serde(default)]
     pub authority_subjects: Option<AuthoritySubjectMatch>,
+    /// Computed from the complete candidate set before display truncation or
+    /// edition ranking. An empty result means the sibling fallback abstained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sibling_subjects: Option<SiblingSubjectConsensus>,
 }
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct SiblingSubjectConsensus {
+    pub classified_editions: usize,
+    pub classifications: Vec<Classification>,
+    #[serde(default)]
+    pub subjects: Vec<SiblingSubjectSupport>,
+    /// No subject reached the threshold; only the highest support ties remain.
+    #[serde(default)]
+    pub used_highest_support_fallback: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SiblingSubjectSupport {
+    pub path: String,
+    pub supporting_editions: usize,
+    /// Each edition splits one vote across its distinct deepest subjects.
+    /// The denominator is all directly classified compatible editions.
+    #[serde(default)]
+    pub support_fraction: f64,
+    pub evidence: Vec<ClassificationEvidence>,
+}
+
+pub const SIBLING_SUBJECT_CONSENSUS_METHOD: &str = "verified_sibling_subject_consensus:";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -71,6 +102,8 @@ pub enum EditionIdentityStatus {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EditionIdentityMatch {
+    /// Empty when this classified edition has no ISBN. Edition/work IDs still
+    /// identify its evidence; callers must not attach an empty ISBN.
     pub canonical_isbn13: String,
     pub open_library_edition_id: String,
     pub open_library_work_id: Option<String>,
@@ -125,6 +158,8 @@ pub struct RichWorkMetadataMatch {
     pub description: Option<String>,
     #[serde(default)]
     pub subjects: Vec<SubjectHeading>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub popularity: Option<WorkPopularity>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -140,6 +175,8 @@ pub struct SubjectHeading {
 /// ambiguous ISBN can contribute consensus evidence without being mistaken
 /// for a unique edition identity.
 pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWorkMetadataMatch>, similarity_keys: impl Fn(ClassificationScheme, &str) -> Vec<String>) -> RichWorkMetadataMatch {
+    let matches = matches.into_iter().collect::<Vec<_>>();
+    let popularity = unique_work_popularity(matches.iter().copied());
     let mut work_ids = BTreeSet::new();
     let mut edition_ids = BTreeSet::new();
     let mut classifications = Vec::new();
@@ -180,6 +217,7 @@ pub fn merge_rich_work_matches<'a>(matches: impl IntoIterator<Item = &'a RichWor
         // description when all available Open Library evidence agrees.
         description: (descriptions.len() == 1).then(|| descriptions.into_iter().next().expect("one description exists")),
         subjects: subjects.into_iter().collect(),
+        popularity,
     }
 }
 
@@ -255,7 +293,7 @@ pub struct Classification {
     pub source: ClassificationSource,
 }
 
-/// Provenance for a classification recovered across duplicate work records.
+/// Provenance for classification evidence.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct ClassificationEvidence {
     pub method: String,
@@ -398,6 +436,8 @@ where
 /// distant taxonomy neighborhoods from a sufficiently large evidence set.
 /// Exact-edition classifications are always retained. Unmapped values are
 /// retained conservatively.
+/// LCC selections are made from edition-record support by the metadata builder;
+/// call-number counts here cannot distinguish sparse evidence from an outlier.
 pub fn filter_classification_outliers(classifications: impl IntoIterator<Item = Classification>, similarity_keys: impl Fn(ClassificationScheme, &str) -> Vec<String>) -> Vec<Classification> {
     let mut evidence = BTreeMap::<(ClassificationScheme, String), BTreeSet<ClassificationEvidence>>::new();
     let mut unique = BTreeMap::<(ClassificationScheme, String), ClassificationSource>::new();
@@ -426,7 +466,7 @@ pub fn filter_classification_outliers(classifications: impl IntoIterator<Item = 
     unique
         .into_iter()
         .filter_map(|((scheme, notation), source)| {
-            let keep = if source == ClassificationSource::ExactEdition {
+            let keep = if source == ClassificationSource::ExactEdition || scheme == ClassificationScheme::LibraryOfCongress {
                 true
             } else {
                 let keys = classification_keys.get(&(scheme, notation.clone())).map(Vec::as_slice).unwrap_or_default();
@@ -435,4 +475,18 @@ pub fn filter_classification_outliers(classifications: impl IntoIterator<Item = 
             keep.then(|| Classification { evidence: evidence.remove(&(scheme, notation.clone())).unwrap_or_default().into_iter().collect(), scheme, notation, source })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod classification_merge_tests {
+    use super::*;
+
+    #[test]
+    fn lcc_merges_preserve_secondary_evidence_and_deduplicate_variants() {
+        let codes = (3370..3380).map(|number| format!("B{number}")).chain(["BC135".into(), "BC135".into()]);
+        let classifications = codes.map(|notation| Classification { evidence: Vec::new(), scheme: ClassificationScheme::LibraryOfCongress, notation, source: ClassificationSource::Work });
+        let merged = filter_classification_outliers(classifications, |_, notation| vec![if notation.starts_with("BC") { "Logic".into() } else { "Author".into() }]);
+        assert_eq!(merged.len(), 11);
+        assert_eq!(merged.iter().filter(|code| code.notation == "BC135").count(), 1);
+    }
 }

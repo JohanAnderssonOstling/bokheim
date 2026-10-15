@@ -20,6 +20,10 @@ mod pending;
 mod reading;
 mod resources;
 #[cfg(not(target_arch = "wasm32"))]
+mod torrents;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod transfer;
+#[cfg(not(target_arch = "wasm32"))]
 pub use book_access::remote_file::AudioStreamControl;
 pub use book_access::remote_file::RemoteFile;
 pub(crate) mod book;

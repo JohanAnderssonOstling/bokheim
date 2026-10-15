@@ -1,0 +1,158 @@
+{
+  "description": "Flatten the uncoded adult Speculative grouping; preserve child identities, descendants, selectors, and historical saved paths.",
+  "removed_concept_id": 55022,
+  "parent_concept_id": 5583,
+  "child_concept_ids": [
+    3986,
+    4026,
+    4108,
+    4128,
+    4144
+  ],
+  "historical_path_aliases": [
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Dystopian",
+      "concept_id": 3970
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Folklore-Inspired Fiction",
+      "concept_id": 3982
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy",
+      "concept_id": 3986
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Action & Adventure",
+      "concept_id": 3987
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Arthurian",
+      "concept_id": 3988
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Collections & Anthologies",
+      "concept_id": 3989
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Contemporary Fantasy",
+      "concept_id": 3990
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Dark Fantasy",
+      "concept_id": 3991
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Dragons & Mythical Creatures",
+      "concept_id": 3992
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Epic",
+      "concept_id": 3993
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Gaslamp",
+      "concept_id": 3994
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Historical Fantasy",
+      "concept_id": 3995
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Humorous",
+      "concept_id": 3996
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Military Fantasy",
+      "concept_id": 3997
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Paranormal",
+      "concept_id": 3998
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Romance",
+      "concept_id": 3999
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Urban",
+      "concept_id": 4000
+    },
+    {
+      "path": "Literature / Genres / Speculative / LitRPG",
+      "concept_id": 4026
+    },
+    {
+      "path": "Literature / Genres / Speculative / Fantasy / Magical Realism",
+      "concept_id": 4028
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction",
+      "concept_id": 4108
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Action & Adventure",
+      "concept_id": 4109
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Alien Contact",
+      "concept_id": 4110
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Apocalyptic & Post-Apocalyptic",
+      "concept_id": 4111
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Collections & Anthologies",
+      "concept_id": 4112
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Crime & Mystery",
+      "concept_id": 4113
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Cyberpunk",
+      "concept_id": 4114
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Genetic Engineering",
+      "concept_id": 4115
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Hard Science Fiction",
+      "concept_id": 4116
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Humorous",
+      "concept_id": 4117
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Military Science Fiction",
+      "concept_id": 4118
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Space Exploration",
+      "concept_id": 4119
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Space Opera",
+      "concept_id": 4120
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Steampunk",
+      "concept_id": 4121
+    },
+    {
+      "path": "Literature / Genres / Speculative / Science Fiction / Time Travel",
+      "concept_id": 4122
+    },
+    {
+      "path": "Literature / Genres / Speculative / Superheroes",
+      "concept_id": 4128
+    },
+    {
+      "path": "Literature / Genres / Speculative / Visionary & Metaphysical",
+      "concept_id": 4144
+    }
+  ]
+}

@@ -49,8 +49,12 @@ class AndroidPackageTests(unittest.TestCase):
             apk = Path(directory) / 'app.apk'
             header = b'\x7fELF\x02\x01' + bytes(12) + (183).to_bytes(2, 'little')
             with zipfile.ZipFile(apk, 'w') as archive:
-                for name in ('libdesktop_gpui.so', 'libpdfium.so'):
+                for name in ('libdesktop_gpui.so', 'libpdfium.so', 'libsherpa-onnx-c-api.so', 'libonnxruntime.so'):
                     archive.writestr('lib/arm64-v8a/' + name, header)
+                archive.writestr('assets/taxonomy.sqlite3', b'SQLite format 3\0')
+                archive.writestr('assets/taxonomy.digest', b'0' * 64)
+                for name in ('en_GB-alba-medium.onnx', 'tokens.txt', 'voice.sha256', 'VOICE-LICENSE.txt', 'espeak-ng-data/en_dict'):
+                    archive.writestr('assets/tts/alba/' + name, b'voice')
             metadata = dict(application='1.2.3', schema=1, taxonomy_formats=[1], update_trust={'keys': {'key': 'ab' * 32}})
             good = "package: name='se.bokheim.reader.gpui' versionCode='1002003' versionName='1.2.3'\nnative-code: 'arm64-v8a'\n"
             for signer, badging, accepted in [('ab' * 32, good, True), ('cd' * 32, good, False),
@@ -67,6 +71,11 @@ class AndroidPackageTests(unittest.TestCase):
                             with self.assertRaises(ValueError):
                                 package.verify(apk, '1.2.3', 'ab' * 32, metadata, 'apksigner', 'aapt')
                         self.assertTrue(all(call.args[0][0] in ('apksigner', 'aapt') for call in tools.call_args_list))
+            with zipfile.ZipFile(apk, 'a') as archive:
+                archive.writestr('assets/tts/george/model.onnx', b'stale-george')
+            with patch.object(package.subprocess, 'check_output', side_effect=[f'Signer #1 certificate SHA-256 digest: {"ab" * 32}\n', good]):
+                with self.assertRaisesRegex(ValueError, 'George speech assets must not be bundled'):
+                    package.verify(apk, '1.2.3', 'ab' * 32, metadata, 'apksigner', 'aapt')
 
 
 if __name__ == '__main__':

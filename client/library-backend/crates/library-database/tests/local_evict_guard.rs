@@ -19,7 +19,10 @@ fn import() -> ImportCommit {
         inspection: Some(book_inspection::InspectedBook {
             pdf: None,
             audiobook: None,
-            metadata: book_model::BookRecord { metadata: book_model::BookDetails { title: "Original".into(), subtitle: None, contributors: vec![book_model::Contributor::new("Original Author", book_model::MarcRelatorCode(*b"aut")).unwrap()], book: Default::default() }, description: String::new() },
+            metadata: book_model::BookRecord {
+                metadata: book_model::BookDetails { title: "Original".into(), subtitle: None, contributors: vec![book_model::Contributor::new("Original Author", book_model::MarcRelatorCode(*b"aut")).unwrap()], book: Default::default() },
+                description: String::new(),
+            },
             toc: vec![book_model::BookTocEntry { title: "Chapter".into(), target: "ch1".into(), children: vec![] }],
         }),
         published: library_model::PublishedStagedBook { name: "book.epub".into(), relative_path: "/book.epub".into(), published: false, fingerprint: None },

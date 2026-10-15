@@ -242,6 +242,9 @@ impl<S: Store> Coordinator<S> {
             if plan.phase == Phase::Quarantined {
                 return UpdateView::Hidden;
             }
+            if plan.phase == Phase::Preparing && !client_platform_runtime::transfers::allowed() {
+                return UpdateView::WaitingForConnection;
+            }
             match plan.waiting {
                 Some(WaitReason::Connection) => return UpdateView::WaitingForConnection,
                 Some(WaitReason::Space { additional_bytes }) => return UpdateView::NeedsSpace { additional_bytes },

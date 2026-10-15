@@ -1,0 +1,680 @@
+[
+  {
+    "raw": "World War, 1914-1918 -- Regimental histories -- Australia",
+    "concept_id": 3694,
+    "destination": "History / Military / Military Campaigns / World Wars / World War I",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "World War, 1914-1918 -- Personal narratives, Australian",
+    "concept_id": 3694,
+    "destination": "History / Military / Military Campaigns / World Wars / World War I",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "World War, 1914-1918 -- Personal narratives, French",
+    "concept_id": 3694,
+    "destination": "History / Military / Military Campaigns / World Wars / World War I",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "India -- History -- British occupation, 1765-1947",
+    "concept_id": 3496,
+    "destination": "History / By Region / Asian / South / Indian",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "American fiction -- 19th century",
+    "concept_id": 4153,
+    "destination": "Literature / By Language / English / U.S. / By Period / 19th Century",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "Hebrew literature -- Translations into English",
+    "concept_id": 13168,
+    "destination": "Literature / By Language / Hebrew",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "Sagas",
+    "concept_id": 4106,
+    "destination": "Literature / Genres / Sagas",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "Old Norse literature -- Translations into English",
+    "concept_id": 4402,
+    "destination": "Literature / By Language / Nordic / Old Icelandic & Norwegian",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "Speeches, addresses, etc., American",
+    "concept_id": 4307,
+    "destination": "Literature / Genres / Literary Collections / Speeches",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "Egypt -- History -- To 332 B.C.",
+    "concept_id": 3481,
+    "destination": "History / By Region / African / North / Egyptian / By Period / Ancient Egypt",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "Church history -- Primitive and early church, ca. 30-600",
+    "concept_id": 4588,
+    "destination": "Religion / Religious Traditions / Christianity / Christian History",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "Turkey -- History",
+    "concept_id": 3551,
+    "destination": "History / By Region / European / Balkan Peninsula / Turkish",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "Naval battles",
+    "concept_id": 3652,
+    "destination": "History / Military / Forces, Domains & Operations / Naval",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "Criminal psychology",
+    "concept_id": 5402,
+    "destination": "Psychology / Applied / Clinical & Counseling Practice / Forensic",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "History, Modern",
+    "concept_id": 3666,
+    "destination": "History / Eras / Modern",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "History, Modern -- 19th century",
+    "concept_id": 3670,
+    "destination": "History / Eras / Modern / 19th Century",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "Russian drama -- Translations into English",
+    "concept_id": 3896,
+    "destination": "Literature / Genres / Drama / Russian & Former Soviet Union",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "Huns",
+    "concept_id": 10617,
+    "destination": "History / By Region / European / By Period / Medieval / Migrations / Huns. Attila",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "Jews -- Antiquities",
+    "concept_id": 3630,
+    "destination": "History / Groups of people / Jewish",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "History, Ancient -- Chronology",
+    "concept_id": 3685,
+    "destination": "History / Sources & Methods / Auxiliary Sciences / Chronology & Calendars",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "Catholic Church -- Doctrines -- Early works to 1800",
+    "concept_id": 4584,
+    "destination": "Religion / Religious Traditions / Christianity / Christian Denominations / Catholic",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "Theology, Doctrinal -- Early works to 1800",
+    "concept_id": 11638,
+    "destination": "Religion / Studies / Sacred Texts & Theology / Religious Doctrine",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "Bible. N.T. Epistles of Paul",
+    "concept_id": 12566,
+    "destination": "Religion / Bible / Old & New Testaments / New Testament / Epistles / Pauline Epistles",
+    "scope": "exact_heading"
+  },
+  {
+    "raw": "Bible. N.T.",
+    "concept_id": 12373,
+    "destination": "Religion / Bible / Old & New Testaments / New Testament",
+    "scope": "exact_heading"
+  },
+  {
+    "scope": "final_form",
+    "raw": "biography",
+    "concept_id": 3212,
+    "destination": "Biography"
+  },
+  {
+    "scope": "topic_component",
+    "raw": "history",
+    "concept_id": 3319,
+    "destination": "History"
+  },
+  {
+    "scope": "topic_component",
+    "raw": "historiography",
+    "concept_id": 13687,
+    "destination": "History / Sources & Methods / Historiography"
+  },
+  {
+    "scope": "final_form",
+    "raw": "poetry",
+    "concept_id": 4416,
+    "destination": "Literature / Genres / Poetry"
+  },
+  {
+    "scope": "final_form",
+    "raw": "humor",
+    "concept_id": 691,
+    "destination": "Literature / Genres / Humorous Writing / Humor"
+  },
+  {
+    "scope": "final_form",
+    "raw": "letters",
+    "concept_id": 4303,
+    "destination": "Literature / Genres / Literary Collections / Letters"
+  },
+  {
+    "scope": "final_form",
+    "raw": "correspondence",
+    "concept_id": 4303,
+    "destination": "Literature / Genres / Literary Collections / Letters"
+  },
+  {
+    "scope": "final_form",
+    "raw": "essays",
+    "concept_id": 4291,
+    "destination": "Literature / Genres / Literary Collections / Literary Essays"
+  },
+  {
+    "scope": "final_form",
+    "raw": "interviews",
+    "concept_id": 4301,
+    "destination": "Literature / Genres / Literary Collections / Interviews"
+  },
+  {
+    "scope": "final_form",
+    "raw": "speeches",
+    "concept_id": 4307,
+    "destination": "Literature / Genres / Literary Collections / Speeches"
+  },
+  {
+    "scope": "final_form",
+    "raw": "bibliography",
+    "concept_id": 4678,
+    "destination": "Reference / Bibliographic Tools"
+  },
+  {
+    "scope": "final_form",
+    "raw": "description and travel",
+    "concept_id": 2426,
+    "destination": "Geography & Travel / Travel"
+  },
+  {
+    "scope": "topic_component",
+    "raw": "politics and government",
+    "concept_id": 5326,
+    "destination": "Politics & Government"
+  },
+  {
+    "scope": "topic_component",
+    "raw": "political science",
+    "concept_id": 5326,
+    "destination": "Politics & Government"
+  },
+  {
+    "scope": "topic_component",
+    "raw": "natural history",
+    "concept_id": 4879,
+    "destination": "Science & Nature / Life Sciences / Natural World / Natural History"
+  },
+  {
+    "scope": "final_form",
+    "raw": "juvenile fiction",
+    "concept_id": 1093,
+    "destination": "Youth / Juvenile Fiction"
+  },
+  {
+    "scope": "final_form",
+    "raw": "fiction",
+    "concept_id": 3846,
+    "destination": "Literature"
+  },
+  {
+    "scope": "final_form",
+    "raw": "drama",
+    "concept_id": 3876,
+    "destination": "Literature / Genres / Drama"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Gastronomy",
+    "concept_id": 9389,
+    "destination": "Home & Hobbies / Home economics / Nutrition & Food Supply / Gastronomy"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "thriller",
+    "concept_id": 4129,
+    "destination": "Literature / Genres / Mystery & Thrillers / Thrillers"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Short stories, German",
+    "concept_id": 4124,
+    "destination": "Literature / Genres / Short Stories"
+  },
+  {
+    "scope": "primary_component",
+    "raw": "Wilderness areas",
+    "concept_id": 5012,
+    "destination": "Science & Nature / Life Sciences / Natural World / Ecosystems & Habitats / Wilderness"
+  },
+  {
+    "scope": "topic_subdivision",
+    "raw": "Social life and customs",
+    "concept_id": 5068,
+    "destination": "Social Sciences / Anthropology / Customs & Culture"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Science fiction",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4108,
+    "destination": "Literature / Genres / Science Fiction"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Detective and mystery stories",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4034,
+    "destination": "Literature / Genres / Mystery & Thrillers / Mystery & Detective"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Short stories",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4124,
+    "destination": "Literature / Genres / Short Stories"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Humorous stories",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4016,
+    "destination": "Literature / Genres / Humorous Writing / Humorous Fiction"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Adventure stories",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 3934,
+    "destination": "Literature / Genres / Adventure"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Mystery and detective stories",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4034,
+    "destination": "Literature / Genres / Mystery & Thrillers / Mystery & Detective"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Western stories",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4146,
+    "destination": "Literature / Genres / Places / Westerns"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Horror tales",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4015,
+    "destination": "Literature / Genres / Horror"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Love stories",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 55024,
+    "destination": "Literature / Genres / Relationships"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Horror tales, American",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4015,
+    "destination": "Literature / Genres / Horror"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Science fiction, American",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4108,
+    "destination": "Literature / Genres / Science Fiction"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Sea stories",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4123,
+    "destination": "Literature / Genres / Places / Sea Stories"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "War stories",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4145,
+    "destination": "Literature / Genres / War"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Bildungsromans",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 3965,
+    "destination": "Literature / Genres / Identity / Coming-of-Age Fiction"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Humorous stories, English",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4016,
+    "destination": "Literature / Genres / Humorous Writing / Humorous Fiction"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Computing & information technology",
+    "required_sources": [
+      "catalog:unglue.it"
+    ],
+    "concept_id": 36,
+    "destination": "Applied Sciences & Technology / Computing"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Detective and mystery stories, English",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4034,
+    "destination": "Literature / Genres / Mystery & Thrillers / Mystery & Detective"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Historical fiction",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4006,
+    "destination": "Literature / Genres / History / Historical Fiction"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Society & culture: general",
+    "required_sources": [
+      "catalog:unglue.it"
+    ],
+    "concept_id": 5055,
+    "destination": "Social Sciences"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Society & Social Sciences",
+    "required_sources": [
+      "catalog:unglue.it"
+    ],
+    "concept_id": 5055,
+    "destination": "Social Sciences"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Software engineering",
+    "required_sources": [
+      "catalog:unglue.it"
+    ],
+    "concept_id": 168,
+    "destination": "Applied Sciences & Technology / Computing / Systems & Software / Software Engineering"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Airplanes",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 10057,
+    "destination": "Applied Sciences & Technology / Transportation / Air & Space Transport / Vehicle & Aerospace Engineering / Aeronautical Engineering / Aircraft"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Bible",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4551,
+    "destination": "Religion / Bible"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Buddhism",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4553,
+    "destination": "Religion / Religious Traditions / Buddhism"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Computer programming / software development",
+    "required_sources": [
+      "catalog:unglue.it"
+    ],
+    "concept_id": 152,
+    "destination": "Applied Sciences & Technology / Computing / Systems & Software / Programming"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Copyright Law",
+    "required_sources": [
+      "catalog:unglue.it"
+    ],
+    "concept_id": 5292,
+    "destination": "Social Sciences / Law / Civil & Private Law / Intellectual Property"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Detective and mystery stories, American",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4034,
+    "destination": "Literature / Genres / Mystery & Thrillers / Mystery & Detective"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Domestic fiction",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 55024,
+    "destination": "Literature / Genres / Relationships"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Essays",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4291,
+    "destination": "Literature / Genres / Literary Collections / Literary Essays"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Folklore -- Italy",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 5079,
+    "destination": "Social Sciences / Anthropology / Folklore & Mythology"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Geology",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4904,
+    "destination": "Science & Nature / Physical Sciences / Earth & Environment / Earth sciences / Geology"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Ghost stories, American",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4015,
+    "destination": "Literature / Genres / Horror"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Humorous stories, American",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4016,
+    "destination": "Literature / Genres / Humorous Writing / Humorous Fiction"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Intellectual property law",
+    "required_sources": [
+      "catalog:unglue.it"
+    ],
+    "concept_id": 5292,
+    "destination": "Social Sciences / Law / Civil & Private Law / Intellectual Property"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Mystery fiction",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4034,
+    "destination": "Literature / Genres / Mystery & Thrillers / Mystery & Detective"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Natural history",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4879,
+    "destination": "Science & Nature / Life Sciences / Natural World / Natural History"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Religious fiction",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4057,
+    "destination": "Literature / Genres / Religious Fiction"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Short stories, American",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4124,
+    "destination": "Literature / Genres / Short Stories"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Short stories, English",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4124,
+    "destination": "Literature / Genres / Short Stories"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Taoism",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4624,
+    "destination": "Religion / Religious Traditions / East Asian / Taoism"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Cookery (Cheese)",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 3028,
+    "destination": "Home & Hobbies / Cooking / Specific Ingredients / Animal Foods / Dairy"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Detective and mystery stories, English -- Translations into Dutch",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4034,
+    "destination": "Literature / Genres / Mystery & Thrillers / Mystery & Detective"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "Fantasy fiction",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 3986,
+    "destination": "Literature / Genres / Fantasy"
+  },
+  {
+    "scope": "exact_heading",
+    "raw": "French fiction -- Translations into English",
+    "required_sources": [
+      "dc:subject"
+    ],
+    "concept_id": 4184,
+    "destination": "Literature / By Language / French"
+  }
+]

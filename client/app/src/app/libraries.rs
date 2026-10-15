@@ -1,4 +1,5 @@
 use super::core::*;
+use crate::host::startup_profile::StartupProfile;
 use library_backend::library::handle::{LibraryActorCommand, LibraryControl};
 use library_backend::library::{LibraryOpenConfig, LibraryRuntimeSpec};
 use std::sync::Arc;
@@ -14,9 +15,11 @@ impl AppBackend {
     /// from starting.
     pub(super) fn open_registered_libraries(&self) -> Result<(), BackendError> {
         for entry in self.state.registry.entries().map_err(BackendError::operation)? {
+            let mut profile = StartupProfile::for_library("library_open", entry.library_id());
             if let Err(error) = self.open_registered_library(entry.library_id()) {
                 log::warn!("Could not open library {} during startup: {error}", entry.library_id());
             }
+            profile.mark("open");
         }
         // Work state lives in each library database. Once all sessions have
         // been opened, ask every available one to resume its durable queue.
@@ -177,18 +180,24 @@ impl AppBackend {
     /// Explicit eager open.  This is called only during startup and creation;
     /// ordinary lookups never open a library as a side effect.
     pub(super) fn open_registered_library(&self, library_id: &LibraryId) -> Result<(), BackendError> {
+        let mut profile = StartupProfile::for_library("library_dispatch", library_id);
         let library_id = *library_id;
-        self.with_storage(move |this| {
+        let result = self.with_storage(move |this| {
+            profile.mark("storage_queue_wait");
             let entry = this.library_entry(&library_id)?;
             let (spec, reset_token) = this.library_runtime_spec(entry.storage_locator(), library_id)?;
+            profile.mark("registry_and_spec");
             if this.state.library_directory.open(spec, &this.state.executor)? {
+                profile.mark("directory_open");
                 if let Some(token) = reset_token {
                     let reset_key = format!("cloud-storage-reset:{library_id}");
                     this.state.registry.clear_value_if_current(&reset_key, &token).map_err(BackendError::operation)?;
                 }
             }
+            profile.mark("registry_finalize");
             Ok(())
-        })
+        });
+        result
     }
 
     pub(crate) fn set_library_asset_storage(&self, id: LibraryId, enabled: bool) -> Result<(), BackendError> {
@@ -224,6 +233,7 @@ impl AppBackend {
                     database_locator: self.state.registry.library_database_locator(&library_id, library_path),
                     default_sync_server_url: crate::api_server_url(),
                     metadata_server_url: crate::METADATA_SERVER_ORIGIN.to_owned(),
+                    google_books_api_key: super::google_books_api_key(),
                     asset_storage_enabled: cloud_enabled,
                     reset_cloud_presence: reset_token.is_some(),
                 },

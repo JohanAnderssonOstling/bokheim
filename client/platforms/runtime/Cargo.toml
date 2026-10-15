@@ -7,10 +7,23 @@ edition = "2021"
 
 [dependencies]
 futures-util = "0.3"
+log = "0.4"
+web-time = "1"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "net"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = ["Win32_Networking_NetworkListManager", "Win32_System_Com"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+dispatch2 = "0.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 futures-channel = "0.3"
@@ -18,4 +31,3 @@ wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["WorkerGlobalScope"] }
-

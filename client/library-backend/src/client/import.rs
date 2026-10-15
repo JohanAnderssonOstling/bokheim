@@ -20,6 +20,11 @@ impl LibraryClient {
         self.request(LibraryCommand::Pending(PendingCommand::AddCatalogBook { parent_id, content_hash })).await
     }
 
+    /// Downloads an external catalog audiobook from its source and imports it under `parent_id`.
+    pub async fn add_external_catalog_audiobook(&self, parent_id: DirId, entry: library_model::CardKey) -> Result<crate::ContentHash, String> {
+        self.request(LibraryCommand::Pending(PendingCommand::AddExternalCatalogAudiobook { parent_id, entry })).await
+    }
+
     /// Imports a file downloaded elsewhere, such as from an OPDS feed.
     pub async fn import_downloaded_book(&self, parent_id: DirId, file_name: String, bytes: Vec<u8>) -> Result<crate::ContentHash, String> {
         self.request(LibraryCommand::Pending(PendingCommand::ImportDownloadedBook { parent_id, file_name, bytes: serde_bytes::ByteBuf::from(bytes) })).await

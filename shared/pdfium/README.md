@@ -59,6 +59,14 @@ Applications never use that build-machine directory at runtime (unit tests do).
   requires glibc and dynamic loading. Other server targets remain independent.
 - Android: Gradle prepares before Rust compilation and stages the shared library
   in the APK's ABI directory. The Android linker resolves it from the app package.
+- Kobo: `apps/desktop-gpui/scripts/package-kobo.sh` builds ARMv7 GNU/Linux and
+  packages PDFium with a private glibc runtime. The executable uses the loader
+  at `/mnt/onboard/.adds/bokheim/runtime/ld-linux-armhf.so.3`. Its ELF RPATH
+  selects the private libraries, including PDFium's dependencies; the launcher
+  clears inherited `LD_LIBRARY_PATH` so firmware subprocesses use system libc.
+  FBInk is rebuilt with the same
+  glibc toolchain. Firmware libraries are not replaced. The previous static
+  musl build cannot dynamically load the ARM glibc PDFium library.
 - Web: build and browser-test scripts prepare before compiling WASM and stage
   PDFium's JS/WASM files in the immutable bundle. The dedicated worker binds the
   separately instantiated PDFium module to the shared Rust PDF engine.

@@ -2,28 +2,30 @@
 //! chrome around them. Every kind has the cards; the trees also have a graph,
 //! and folders the commands that go with real directories.
 
-use crate::NewWindowTarget;
 use crate::services::notify_error;
+use crate::{BrowsePageSession, NewWindowTarget};
 use std::rc::Rc;
 
+use app::host::startup_profile::StartupProfile;
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, DismissEvent, Entity, FocusHandle, Focusable as _, IntoElement, KeyDownEvent, Pixels, Point, Render, SharedString, Subscription, Window, div, px, rems};
+use gpui::{AnyElement, App, Context, DismissEvent, Entity, FocusHandle, Focusable as _, IntoElement, KeyDownEvent, Pixels, Point, Render, SharedString, Subscription, Task, Window, div, px, rems};
 use gpui_component::IconName;
 use gpui_component::breadcrumb::BreadcrumbItem;
 use gpui_component::menu::PopupMenu;
 use library_model::BrowseLocation;
-use sync_common::{DirId, ROOT_DIR_ID};
+use sync_common::{ContentHash, DirId, ROOT_DIR_ID};
 use ui_components as components;
 
 use super::cards::{CardEvent, CardEvents, CardView};
-use super::controls::{BrowseOptionsEvent, browse_options_control, browse_options_sheet};
+use super::controls::{BrowseControls, BrowseOptionsEvent, BrowseOptionsSelection, browse_language_control, browse_options_control, browse_options_sheet};
 use super::detail::{BookDetailPage, CloseBookDetail};
+use super::drag_drop::{FolderDrop, folder_drop_target, import_drop_target};
+use super::feed_actions::{FeedActions, FeedsChanged};
 use super::folder_actions::{FolderActions, FolderActionsEvent, FolderPlacement, FolderTargets};
 use super::graph::{BrowseGraph, GraphTap};
-use super::drag_drop::{FolderDrop, file_drop_target, folder_drop_target};
-use super::feed_actions::{FeedActions, FeedsChanged};
 use super::listing::{BrowseCrumb, BrowseDestination, BrowseItem, BrowseKind, BrowseListing, can_download};
-use super::navigator::BrowseNavigator;
+use super::navigator::{BrowseNavigator, Loaded};
+use super::profile::Stage;
 use super::search::{BrowseSearch, SearchChanged};
 use crate::library::pages::with_retry_banner;
 use crate::library::services::{LibraryContext, LibraryScanChanged};
@@ -79,6 +81,11 @@ pub(crate) struct BrowsePage {
     browse_options_sheet_open: bool,
     _subscriptions: Vec<Subscription>,
     split_close_enabled: bool,
+    /// Keep the requested trail while its asynchronous listing is still loading.
+    session_path: Vec<BrowseCrumb>,
+    restoring_detail: Option<ContentHash>,
+    restore_task: Option<Task<()>>,
+    profile_render_pending: Option<Stage>,
 }
 
 impl gpui::EventEmitter<BrowseSplitRequest> for BrowsePage {}
@@ -88,11 +95,11 @@ impl BrowsePage {
     pub(crate) fn new(kind: BrowseKind, ui: LibraryContext, cx: &mut Context<Self>) -> Self {
         let folder_actions = matches!(kind, BrowseKind::Folder | BrowseKind::Books).then(|| cx.new(|_| FolderActions::new(ui.clone())));
         // OPDS feeds are native only; the browser lists none.
-        let feed_actions = (kind == BrowseKind::Catalog && cfg!(not(target_arch = "wasm32"))).then(|| cx.new(|_| FeedActions::new(ui.clone())));
+        let feed_actions = (kind == BrowseKind::Catalog && cfg!(not(target_arch = "wasm32"))).then(|| cx.new(|cx| FeedActions::new(ui.clone(), cx)));
         // Weak, because the page holds the cards that hold this.
         let page = cx.weak_entity();
-        let book_events: BookCardEvents = Rc::new(move |event, window, cx| {
-            let _ = page.update(cx, |page, cx| page.handle_book_event(event, window, cx));
+        let book_events: BookCardEvents = Rc::new(move |event, _, cx| {
+            let _ = page.update(cx, |page, cx| page.handle_book_event(event, cx));
         });
         let listing = BrowseListing::new(ui.clone(), kind, book_events, kind == BrowseKind::Folder);
         let navigator = cx.new(|cx| BrowseNavigator::new(ui.clone(), kind, listing, cx));
@@ -106,6 +113,13 @@ impl BrowsePage {
         let updates = ui.updates();
         let mut subscriptions = vec![
             cx.observe(&navigator, |_, _, cx| cx.notify()),
+            cx.subscribe(&navigator, |page, navigator, _: &Loaded, cx| {
+                page.session_path = navigator.read(cx).destination.path.clone();
+                StartupProfile::new("browse").mark("listing_installed");
+                if log::log_enabled!(target: "browse_profile", log::Level::Debug) || StartupProfile::enabled() {
+                    if let Some(previous) = page.profile_render_pending.replace(Stage::deferred("listing installation to rendered frame")) { previous.cancel(); }
+                }
+            }),
             cx.subscribe(&search, |page, _, SearchChanged(query): &SearchChanged, cx| page.navigator.update(cx, |navigator, cx| navigator.search(query.clone(), cx))),
             // Only repaints: the empty listing reads whether a scan is running.
             cx.subscribe(&updates, |_, _, _: &LibraryScanChanged, cx| cx.notify()),
@@ -141,6 +155,10 @@ impl BrowsePage {
             browse_options_sheet_open: false,
             _subscriptions: subscriptions,
             split_close_enabled: false,
+            session_path: Vec::new(),
+            restoring_detail: None,
+            restore_task: None,
+            profile_render_pending: None,
         }
     }
 
@@ -166,7 +184,7 @@ impl BrowsePage {
         }
     }
 
-    fn handle_book_event(&mut self, event: BookCardEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_book_event(&mut self, event: BookCardEvent, cx: &mut Context<Self>) {
         let one_book = |book, source| FolderTargets { folders: Vec::new(), folder_parents: Default::default(), books: vec![book], source: Some(source) };
         match (event, self.folder_actions.clone()) {
             (BookCardEvent::OpenDetail(book, cover), _) => self.show_book_detail(book, cover, cx),
@@ -175,7 +193,7 @@ impl BrowsePage {
                 BookPlacement::Copy => actions.open_copy_targets(one_book(book, source), cx),
                 BookPlacement::Move => actions.open_move_targets(one_book(book, source), cx),
             }),
-            (BookCardEvent::Remove(book, source, description), Some(actions)) => actions.update(cx, |actions, cx| actions.remove_books_from_folder(one_book(book, source), description, window, cx)),
+            (BookCardEvent::Remove(book, source), Some(actions)) => actions.update(cx, |actions, cx| actions.remove_books_from_folder(one_book(book, source), cx)),
             // Cards offer the folder commands only on a page that has them.
             (_, None) => {}
         }
@@ -210,7 +228,13 @@ impl BrowsePage {
     /// Every entry point uses the same resolved rows, placements and availability.
     fn open_items_menu(&mut self, items: Vec<BrowseItem>, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.navigator.read(cx).destination.location.folder().is_none() && !items.is_empty() && items.iter().all(|item| matches!(item, BrowseItem::Book(_))) {
-            let books = items.iter().filter_map(|item| match item { BrowseItem::Book(book) => Some(book.clone()), _ => None }).collect::<Vec<_>>();
+            let books = items
+                .iter()
+                .filter_map(|item| match item {
+                    BrowseItem::Book(book) => Some(book.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
             BookCardView::open_items_menu(&books, position, window, cx);
             return true;
         }
@@ -218,6 +242,13 @@ impl BrowsePage {
             [item] => item.child(),
             _ => None,
         };
+        // A store's chip can only be removed: it opens no page to split or
+        // put in a window.
+        let remove_store = self.feed_actions.clone().zip(single_chip.and_then(|chip| match chip.id {
+            BrowseLocation::Store(id) => Some((id, chip.name.clone())),
+            _ => None,
+        }));
+        let single_chip = single_chip.filter(|_| remove_store.is_none());
         let split_target = single_chip.filter(|_| crate::split_panes_available(window)).map(|chip| chip.id);
         let download_targets: Vec<BrowseLocation> = items.iter().filter_map(BrowseItem::child).filter(|chip| can_download(chip)).map(|chip| chip.id).collect();
         let targets = self.navigator.read(cx).destination.location.folder().and_then(|source| FolderTargets::from_items(&items, source, cx));
@@ -244,7 +275,7 @@ impl BrowsePage {
             BrowseLocation::Opds { source, page: None } => Some((source, chip.name.clone())),
             _ => None,
         }));
-        if window_targets.is_empty() && split_target.is_none() && download_targets.is_empty() && folder_commands.is_none() && remove_feed.is_none() {
+        if window_targets.is_empty() && split_target.is_none() && download_targets.is_empty() && folder_commands.is_none() && remove_feed.is_none() && remove_store.is_none() {
             return false;
         }
         let page = cx.entity();
@@ -279,6 +310,11 @@ impl BrowsePage {
             if let Some((actions, (source, name))) = remove_feed.clone() {
                 menu = menu.item(components::menu_item_with_icon("Remove feed", components::navigation_icon(components::NavigationIcon::Trash2), move |_, window, cx| {
                     actions.update(cx, |actions, cx| actions.remove(source, name.clone(), window, cx))
+                }));
+            }
+            if let Some((actions, (id, name))) = remove_store.clone() {
+                menu = menu.item(components::menu_item_with_icon("Remove store", components::navigation_icon(components::NavigationIcon::Trash2), move |_, window, cx| {
+                    actions.update(cx, |actions, cx| actions.remove_store(id, name.clone(), window, cx))
                 }));
             }
             match folder_commands.clone() {
@@ -328,13 +364,21 @@ impl BrowsePage {
     /// Both internal items and external files ask whether to move or copy.
     fn drop_onto_folder(&mut self, destination: DirId, contents: FolderDrop, window: &mut Window, cx: &mut Context<Self>) {
         if let FolderDrop::Items(targets) = &contents
-            && (!targets.accepts(destination) || self.folder_actions.is_none())
+            && (!targets.accepts(*self.ui.backend().id(), destination) || self.folder_actions.is_none())
         {
             return;
         }
         let actions = self.folder_actions.clone();
         let page = cx.entity();
-        let name = self.navigator.read(cx).listing.children.iter().find(|chip| chip.id == BrowseLocation::Folder(destination)).map(|chip| chip.name.clone()).unwrap_or_else(|| if destination == ROOT_DIR_ID { "library root" } else { "this folder" }.to_owned());
+        let name = self
+            .navigator
+            .read(cx)
+            .listing
+            .children
+            .iter()
+            .find(|chip| chip.id == BrowseLocation::Folder(destination))
+            .map(|chip| chip.name.clone())
+            .unwrap_or_else(|| if destination == ROOT_DIR_ID { "library root" } else { "this folder" }.to_owned());
         self.show_menu(window.mouse_position(), window, cx, move |menu| {
             let (contents, actions, page, name) = (contents.clone(), actions.clone(), page.clone(), name.clone());
             let destination_name = SharedString::from(name.clone());
@@ -342,7 +386,14 @@ impl BrowsePage {
                 FolderDrop::Files(paths) => page.update(cx, |page, cx| page.import_dropped_paths(destination, paths.clone(), placement, cx)),
                 FolderDrop::Items(targets) => {
                     if let Some(actions) = &actions {
-                        actions.update(cx, |actions, cx| actions.place_targets(placement, targets.clone(), destination, Some(destination_name.clone()), cx));
+                        actions.update(cx, |actions, cx| {
+                            if targets.library_id == *actions.library_id() {
+                                actions.place_targets(placement, targets.targets.clone(), destination, Some(destination_name.clone()), cx);
+                            } else {
+                                #[cfg(not(target_arch = "wasm32"))]
+                                actions.transfer_targets(targets.library_id, placement, targets.targets.clone(), destination, Some(destination_name.clone()), cx);
+                            }
+                        });
                     }
                 }
             })
@@ -359,7 +410,16 @@ impl BrowsePage {
     }
 
     pub(super) fn select_option(&mut self, event: BrowseOptionsEvent, cx: &mut Context<Self>) {
+        // Authors are not a tree: the catalog by author has no graph to show.
+        if matches!(event, BrowseOptionsEvent::ShowByAuthor(true)) {
+            self.set_view(BrowseView::Cards, cx);
+        }
         self.navigator.update(cx, |navigator, cx| navigator.select_option(event, cx));
+    }
+
+    pub(super) fn options_state(&self, cx: &App) -> (BrowseControls, BrowseOptionsSelection) {
+        let navigator = self.navigator.read(cx);
+        (navigator.listing.controls.clone(), navigator.selection.clone())
     }
 
     /// Hides the search box and hands the keyboard back to the listing.
@@ -397,7 +457,9 @@ impl BrowsePage {
         if self.close_book_detail(cx) {
             return true;
         }
-        let mut path = self.navigator.read(cx).destination.path.clone();
+        // The last installed listing can still belong to the previous page
+        // while navigation loads. Back follows the requested trail instead.
+        let mut path = self.session_path.clone();
         if path.pop().is_none() {
             return false;
         }
@@ -406,8 +468,7 @@ impl BrowsePage {
     }
 
     fn selection_keys_enabled(&self, cx: &App) -> bool {
-        matches!(self.navigator.read(cx).kind, BrowseKind::Folder | BrowseKind::Books)
-            && self.menu_keys_enabled(cx)
+        matches!(self.navigator.read(cx).kind, BrowseKind::Folder | BrowseKind::Books) && self.menu_keys_enabled(cx)
     }
 
     fn menu_keys_enabled(&self, cx: &App) -> bool {
@@ -473,7 +534,7 @@ impl BrowsePage {
     /// that this library performed, whichever page performed it.
     fn on_undo(&mut self, _: &UndoLibraryAction, _window: &mut Window, cx: &mut Context<Self>) {
         let ui = self.ui.clone();
-        let Some(entry) = ui.undo().take() else {
+        let Some(entry) = ui.take_undo(cx) else {
             cx.propagate();
             return;
         };
@@ -495,7 +556,7 @@ impl BrowsePage {
     }
 
     /// Dismiss the active surface before changing the view beneath it.
-    fn dismiss(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn dismiss(&mut self, cx: &mut Context<Self>) -> bool {
         if self.dismiss_menu(cx) {
             return true;
         }
@@ -536,6 +597,13 @@ impl BrowsePage {
     }
 
     fn open_child(&mut self, child_id: BrowseLocation, window: &mut Window, cx: &mut Context<Self>) {
+        // A store is not browsed here: it opens its own window.
+        if let BrowseLocation::Store(id) = child_id {
+            if let Some(actions) = &self.feed_actions {
+                actions.update(cx, |actions, cx| actions.open_store(id, window, cx));
+            }
+            return;
+        }
         let navigator = self.navigator.read(cx);
         let Some(path) = navigator.child_path(child_id) else {
             log::warn!("ignored missing {} child {child_id}", navigator.kind.list_prefix());
@@ -551,8 +619,9 @@ impl BrowsePage {
 
     pub(crate) fn open_path(&mut self, path: Vec<BrowseCrumb>, cx: &mut Context<Self>) {
         self.close_book_detail(cx);
+        self.session_path = path.clone();
         let navigator = self.navigator.read(cx);
-        if BrowseDestination::from_path(navigator.kind, path.clone()).location != navigator.destination.location
+        if BrowseDestination::from_path(navigator.root(), path.clone()).location != navigator.destination.location
             && let Some(actions) = &self.folder_actions
         {
             actions.update(cx, |actions, cx| actions.cancel_move_selection(cx));
@@ -601,27 +670,40 @@ impl BrowsePage {
     fn breadcrumb_drop_target(&self, item: BreadcrumbItem, destination: DirId, name: SharedString, theme: components::BrowserTheme, cx: &App) -> BreadcrumbItem {
         let events = self.card_events.clone();
         let files_only = self.navigator.read(cx).kind == BrowseKind::Books;
-        item.with_interaction(move |item| {
-            if files_only { file_drop_target(item, destination, "library root".into(), events.clone()) } else { folder_drop_target(item, destination, name.clone(), true, events.clone(), theme) }
-        })
+        let library_id = *self.ui.backend().id();
+        item.with_interaction(
+            move |item| if files_only { import_drop_target(item, library_id, destination, "library root".into(), events.clone()) } else { folder_drop_target(item, library_id, destination, name.clone(), true, events.clone(), theme) },
+        )
     }
 
     fn navigation_heading(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         if components::uses_mobile_navigation(window) {
             let navigator = self.navigator.read(cx);
-            let title = if self.view == BrowseView::Graph { String::new() } else { navigator.destination.path.last().map(|crumb| crumb.label.clone()).unwrap_or_else(|| navigator.kind.root_label().to_string()) };
-            // Home is the root of the mobile tab bar: there is nothing to go back
-            // to from its shelves.
-            let at_home = navigator.kind == BrowseKind::Home && navigator.destination.path.is_empty();
-            let back = (!at_home && !components::has_native_back_button()).then(|| components::mobile_back_button(components::browser_theme(cx)).on_click(|_, window, cx| window.dispatch_action(Box::new(DismissSettings), cx)));
-            components::mobile_navigation_heading(title, back)
+            let theme = components::browser_theme(cx);
+            if self.view == BrowseView::Graph {
+                return components::mobile_navigation_heading("", crate::navigation::mobile_back(true, theme), theme);
+            }
+            // At a page's root the heading names the page; anywhere deeper, the
+            // title is the place itself.
+            let Some(crumb) = navigator.destination.path.last() else {
+                let route = match navigator.kind {
+                    BrowseKind::Home => crate::LibraryRoute::Home,
+                    BrowseKind::Books => crate::LibraryRoute::Books,
+                    BrowseKind::Folder => crate::LibraryRoute::Folders,
+                    BrowseKind::Subject => crate::LibraryRoute::Subjects,
+                    BrowseKind::Author => crate::LibraryRoute::Authors,
+                    BrowseKind::Catalog => crate::LibraryRoute::Catalog,
+                };
+                return crate::navigation::library_root_heading(route, theme);
+            };
+            components::mobile_navigation_heading(crumb.label.clone(), crate::navigation::mobile_back(true, theme), theme)
         } else {
             components::browser_topbar_left().when(self.view == BrowseView::Cards, |heading| heading.child(self.breadcrumb(cx)))
         }
     }
 
     fn trash_button(&self, cx: &App) -> Option<AnyElement> {
-        (self.folder_actions.is_some() || self.navigator.read(cx).kind == BrowseKind::Books).then(|| {
+        (self.navigator.read(cx).kind == BrowseKind::Folder).then(|| {
             components::outlined_icon_button("open-browse-trash", "Trash", components::navigation_icon(components::NavigationIcon::Trash2), components::browser_theme(cx))
                 .debug_selector(|| "open-browse-trash".into())
                 .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::OpenTrash), cx))
@@ -639,17 +721,18 @@ impl BrowsePage {
         let search_button_label = if search_open { "Hide search" } else { "Search books or authors" };
         let navigator = self.navigator.read(cx);
         let (browse_controls, selection, folder, all_books) = (navigator.listing.controls.clone(), navigator.selection.clone(), navigator.destination.location.folder(), navigator.kind == BrowseKind::Books);
+        let show_split = !matches!(navigator.kind, BrowseKind::Home | BrowseKind::Books);
         let catalog_root = navigator.destination.path.is_empty();
         let add_feed = self.feed_actions.clone().filter(|_| catalog_root && !compact_graph).map(|actions| FeedActions::render_trigger(actions, cx));
+        let open_browser = self.feed_actions.clone().and_then(|actions| FeedActions::render_store_trigger(actions, cx));
         let searching = !selection.search.is_empty();
         let compact = components::WindowWidthClass::for_window(window).is_compact();
-        let view_toggle = self.graph.is_some().then(|| {
+        let view_toggle = (self.graph.is_some() && !selection.by_author).then(|| {
             let (label, icon) = if graph_shown.is_some() { ("Show as cards", IconName::LayoutDashboard) } else { ("Show as graph", IconName::Network) };
             components::outlined_icon_button("toggle-browse-view", label, icon, theme).on_click(cx.listener(|page, _, _, cx| page.toggle_view(cx)))
         });
         let graph_layout_switch = graph_shown.as_ref().map(|graph| graph.update(cx, |graph, cx| graph.layout_control(cx)));
-        // In the graph the controls float at the bottom, so their menus open upward.
-        let menu_anchor = if graph_shown.is_some() { gpui::Anchor::BottomRight } else { gpui::Anchor::TopRight };
+        let menu_anchor = gpui::Anchor::TopRight;
         let controls = components::browser_topbar_right()
             .when(inline_search_field.is_some(), |controls| controls.flex_1())
             .children(inline_search_field.map(|field| div().flex_1().min_w(rems(8.0)).child(field)))
@@ -663,12 +746,11 @@ impl BrowsePage {
             .children(view_toggle)
             .children(graph_layout_switch)
             .when(!compact_graph, |controls| controls.children(self.folder_actions.as_ref().zip(folder).map(|(actions, parent)| FolderActions::render_trigger(actions.clone(), parent, menu_anchor, cx))))
-            .when(all_books, |controls| {
-                controls.child(components::outlined_icon_button("all-books-add", "Add book", IconName::Plus, theme).on_click(cx.listener(|page, _, _, cx| page.ui.choose_and_import_book(ROOT_DIR_ID, cx))))
-            })
+            .when(all_books, |controls| controls.child(components::outlined_icon_button("all-books-add", "Add book", IconName::Plus, theme).on_click(cx.listener(|page, _, _, cx| page.ui.choose_and_import_book(ROOT_DIR_ID, cx)))))
             .children(add_feed)
+            .children(open_browser)
             .children(self.trash_button(cx))
-            .when(!compact_graph && crate::split_panes_available(window), |controls| {
+            .when(show_split && !compact_graph && crate::split_panes_available(window), |controls| {
                 controls.child(
                     components::outlined_icon_button("split-browse-page", "Open split pane", IconName::PanelLeft, theme)
                         .debug_selector(|| "split-browse-button".into())
@@ -678,11 +760,12 @@ impl BrowsePage {
             .when(!compact_graph && self.split_close_enabled && crate::split_panes_available(window), |controls| {
                 controls.child(components::outlined_icon_button("close-split-pane", "Close split pane", IconName::Close, theme).on_click(cx.listener(|_, _, _, cx| cx.emit(BrowseSplitClose))))
             })
+            .children(browse_language_control(cx.entity(), &browse_controls, &selection, compact, menu_anchor, theme))
             .child(browse_options_control(cx.entity(), browse_controls, selection, compact, menu_anchor, theme));
         if graph_shown.is_some() {
             div().h(gpui::rems(components::TOPBAR_HEIGHT_REM)).flex_none().flex().items_center().p(px(4.0)).rounded(px(8.0)).bg(theme.page_bg).border_1().border_color(theme.rule).child(controls).into_any_element()
         } else {
-            components::browser_topbar(theme).child(self.navigation_heading(window, cx)).child(controls).into_any_element()
+            components::topbar(theme).child(self.navigation_heading(window, cx)).child(controls).into_any_element()
         }
     }
 
@@ -706,9 +789,41 @@ impl BrowsePage {
     }
 
     pub(crate) fn request_split_child(&mut self, child_id: BrowseLocation, side: BrowseSplitSide, cx: &mut Context<Self>) {
+        if matches!(child_id, BrowseLocation::Store(_)) {
+            return;
+        }
         if let Some(path) = self.navigator.read(cx).child_path(child_id) {
             cx.emit(BrowseSplitRequest { path, side });
         }
+    }
+
+    pub(crate) fn saved_session(&self, cx: &App) -> BrowsePageSession {
+        BrowsePageSession { path: self.session_path.iter().map(|crumb| (crumb.location, crumb.label.clone())).collect(), detail: self.shown_book_detail(cx).map(|locator| locator.content_hash()).or(self.restoring_detail) }
+    }
+
+    pub(crate) fn restore_session(&mut self, saved: BrowsePageSession, cx: &mut Context<Self>) {
+        self.open_path(saved.path.into_iter().map(|(location, label)| BrowseCrumb { location, label }).collect(), cx);
+        if let Some(hash) = saved.detail {
+            self.restoring_detail = Some(hash);
+            let library = self.ui.backend().clone();
+            self.restore_task = Some(cx.spawn(async move |page, cx| {
+                let result = library.book_detail(hash).await;
+                let _ = page.update(cx, |page, cx| {
+                    if page.restoring_detail != Some(hash) {
+                        return;
+                    }
+                    page.restoring_detail = None;
+                    if let Ok(detail) = result {
+                        page.show_book_detail(detail.book, None, cx);
+                    }
+                    cx.notify();
+                });
+            }));
+        }
+    }
+
+    pub(crate) fn shown_book_detail(&self, cx: &App) -> Option<library_model::BookLocator> {
+        self.detail.as_ref().and_then(|(detail, _)| detail.read(cx).locator())
     }
 
     /// Shows a book's page over the grid, unless it is already showing.
@@ -716,6 +831,8 @@ impl BrowsePage {
         if self.detail.as_ref().is_some_and(|(detail, _)| detail.read(cx).key() == book.key()) {
             return;
         }
+        self.restoring_detail = None;
+        self.restore_task = None;
         let detail = BookDetailPage::create(book, cover, self.ui.clone(), cx);
         let subscription = cx.subscribe(&detail, |page, _, _: &CloseBookDetail, cx| {
             page.close_book_detail(cx);
@@ -736,10 +853,11 @@ impl BrowsePage {
     /// Closes the book's page, back to the grid underneath. Returns whether one
     /// was open.
     pub(crate) fn close_book_detail(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.detail.take().is_none() {
+        self.restore_task = None;
+        let restoring = self.restoring_detail.take().is_some();
+        if self.detail.take().is_none() && !restoring {
             return false;
         }
-        self.ui.notify_book_detail_closed(cx);
         self.restore_focus = true;
         cx.notify();
         true
@@ -781,9 +899,9 @@ impl BrowsePage {
             // Not outlined: it holds every other target, and the one under
             // the pointer is the one to show.
             let name = navigator.destination.path.last().map_or_else(|| navigator.kind.root_label(), |crumb| crumb.label.clone().into());
-            body = folder_drop_target(body, destination, name, false, self.card_events.clone(), theme);
+            body = folder_drop_target(body, *self.ui.backend().id(), destination, name, false, self.card_events.clone(), theme);
         } else if navigator.kind == BrowseKind::Books {
-            body = file_drop_target(body, ROOT_DIR_ID, "library root".into(), self.card_events.clone());
+            body = import_drop_target(body, *self.ui.backend().id(), ROOT_DIR_ID, "library root".into(), self.card_events.clone());
         }
         let sign_in = sign_in.map(|(actions, source, name)| FeedActions::render_sign_in(actions, source, name, cx));
         let body = body
@@ -797,8 +915,8 @@ impl BrowsePage {
     }
 
     fn render_shell(&self, topbar: AnyElement, body: AnyElement, options_sheet: Option<AnyElement>, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
-        let folder_overlay = self.folder_actions.as_ref().and_then(|actions| FolderActions::render_overlay(actions.clone(), cx));
-        let feed_overlay = self.feed_actions.as_ref().and_then(|actions| FeedActions::render_overlay(actions.clone(), cx));
+        let folder_overlay = self.folder_actions.as_ref().and_then(|actions| FolderActions::render_overlay(actions.clone(), window, cx));
+        let feed_overlay = self.feed_actions.as_ref().and_then(|actions| FeedActions::render_overlay(actions.clone(), window, cx));
         let chip_menu = self.chip_menu.as_ref().map(|active| mobile_context_menu::render(active.menu.clone(), active.position, window));
         components::full_size_column()
             .track_focus(&self.focus)
@@ -827,16 +945,24 @@ impl BrowsePage {
 
 impl Render for BrowsePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.detail.is_none() {
+            self.navigator.update(cx, |navigator, cx| navigator.refresh_if_needed(cx));
+        }
+        if let Some(stage) = self.profile_render_pending.take() {
+            window.on_next_frame(move |_, _| {
+                stage.finish("rendered");
+                StartupProfile::new("browse").mark("listing_frame_callback");
+            });
+        }
         if std::mem::take(&mut self.restore_focus) {
             self.focus.focus(window, cx);
         }
         if let Some(detail) = self.detail.as_ref().map(|(detail, _)| detail.clone()) {
-            let theme = components::browser_theme(cx);
-            let close = components::outlined_icon_button("close-book-detail", "Close", IconName::Close, theme).on_click(cx.listener(|page, _, _, cx| {
-                page.close_book_detail(cx);
-            }));
-            let body = div().relative().size_full().child(detail).child(div().absolute().top(px(12.0)).right(px(12.0)).child(close)).into_any_element();
-            self.render_shell(div().h(px(0.0)).flex_none().into_any_element(), body, None, window, cx)
+            // The book's page carries its own Back, named for where it goes,
+            // over the cover; it needs no bar above it.
+            let topbar = div().h(px(0.0)).flex_none().into_any_element();
+            let body = div().size_full().child(detail).into_any_element();
+            self.render_shell(topbar, body, None, window, cx)
         } else {
             let topbar = if self.shown_graph().is_some() { div().h(px(0.0)).flex_none().into_any_element() } else { self.render_topbar(window, cx) };
             let body = self.render_body(window, cx);
@@ -849,5 +975,53 @@ impl Render for BrowsePage {
 impl gpui::Focusable for BrowsePage {
     fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
         self.focus.clone()
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32"), not(feature = "kobo")))]
+mod tests {
+    use super::*;
+    use crate::navigation::LibrarySession;
+    use gpui::{TestAppContext, VisualTestContext};
+    use gpui_component::Root;
+    use std::fs;
+
+    #[gpui::test]
+    async fn open_folder_updates_after_a_directory_import(cx: &mut TestAppContext) {
+        let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (_directory, _session, library) = LibrarySession::test_context(cx).await;
+        let updates = library.updates();
+        cx.condition(&updates, |updates, _| !updates.loading() && !updates.scanning()).await;
+        let external = tempfile::tempdir().unwrap();
+        let epub = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../client/library-backend/crates/book-inspection/tests/fixtures/back-matter-evidence.epub"));
+        let shelf_source = external.path().join("Shelf");
+        fs::create_dir(&shelf_source).unwrap();
+        fs::write(shelf_source.join("existing.epub"), epub).unwrap();
+        assert!(library.backend().import_paths(ROOT_DIR_ID, vec![shelf_source], false).await.unwrap().is_empty());
+        let page = cx.new(|cx| BrowsePage::new(BrowseKind::Folder, library.clone(), cx));
+        let navigator = page.read_with(cx, |page, _| page.navigator.clone());
+        let window = cx.add_window(|window, cx| Root::new(page.clone(), window, cx));
+        cx.condition(&navigator, |navigator, _| navigator.listing.revision > 0).await;
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let shelf = visual.read_entity(&navigator, |navigator, _| navigator.listing.children.iter().find(|row| row.name == "Shelf").unwrap().id.folder().unwrap());
+
+        let source = external.path().join("Imported book");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("book.epub"), epub).unwrap();
+        assert!(library.backend().import_paths(shelf, vec![source], false).await.unwrap().is_empty());
+        visual.run_until_parked();
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        visual.condition(&navigator, |navigator, _| navigator.listing.sections.iter().any(|section| section.children.iter().any(|row| row.name == "Imported book"))).await;
+        let imported = visual.read_entity(&navigator, |navigator, _| navigator.listing.sections.iter().flat_map(|section| &section.children).find(|row| row.name == "Imported book").unwrap().id);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let selector = format!("browse-section-subject-{imported}").leak();
+        assert!(visual.debug_bounds(selector).is_some(), "the existing section must paint its imported child");
     }
 }

@@ -6,6 +6,12 @@
 -- param: subkey: &SqlParam<'_>
 SELECT body,publication FROM sync_book_record WHERE state_kind=:state_kind AND content_hash=:content_hash AND :subkey='';
 
+-- name: records_publication_version ->
+-- param: state_kind: &SqlParam<'_>
+-- param: content_hash: &SqlParam<'_>
+-- param: subkey: &SqlParam<'_>
+SELECT publication FROM sync_book_record WHERE state_kind=:state_kind AND content_hash=:content_hash AND :subkey='';
+
 -- name: records_contains ->
 -- param: state_kind: &SqlParam<'_>
 -- param: content_hash: &SqlParam<'_>

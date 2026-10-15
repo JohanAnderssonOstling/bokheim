@@ -1,10 +1,9 @@
+use crate::build::batch::{load_work_codes_cached, WorkEvidenceCache};
 use crate::build::openlibrary::authority_edition_id;
 use crate::{
-    error, open_library_id, AuthorIdentifier, AuthorMetadata, AuthorSource, BTreeMap, BTreeSet, Classification, ClassificationScheme, ClassificationSource, Connection, IsbnClassificationResult,
-    LookupStatus, MetadataError, RichIsbnMetadataResult, WorkClassificationMatch, LCC_SCHEME,
+    error, open_library_id, AuthorIdentifier, AuthorMetadata, AuthorSource, BTreeMap, BTreeSet, Classification, ClassificationScheme, ClassificationSource, Connection, IsbnClassificationResult, LookupStatus, MetadataError,
+    RichIsbnMetadataResult, WorkClassificationMatch, LCC_SCHEME,
 };
-
-const MAX_DIRECT_WORK_CLASSIFICATIONS_WITHOUT_CONSENSUS: usize = 12;
 
 pub(crate) fn lookup_one(connection: &Connection, requested_isbn: String) -> Result<IsbnClassificationResult, MetadataError> {
     let Some(isbn13) = crate::Isbn13::parse(&requested_isbn) else {
@@ -27,34 +26,14 @@ pub(crate) fn lookup_one(connection: &Connection, requested_isbn: String) -> Res
         }
         if let Some(work_id) = work_id {
             let exact_schemes = classifications.keys().map(|(scheme, _)| *scheme).collect::<BTreeSet<_>>();
-            let mut imported_work_classifications = BTreeMap::new();
-            collect_classifications(connection, "work_classification", "work_id", work_id, ClassificationSource::Work, &mut imported_work_classifications)?;
-            // Open Library's work record is the authority signal that makes
-            // its edition-level union useful. Without it, require independent
-            // sibling consensus so one noisy edition cannot classify a work.
-            if !imported_work_classifications.is_empty() && imported_work_classifications.len() <= MAX_DIRECT_WORK_CLASSIFICATIONS_WITHOUT_CONSENSUS {
-                let work_schemes = imported_work_classifications.keys().map(|(scheme, _)| *scheme).collect::<BTreeSet<_>>();
-                for (classification, source) in imported_work_classifications {
-                    if !exact_schemes.contains(&classification.0) {
-                        classifications.entry(classification).or_insert(source);
-                    }
-                }
-                let mut sibling_classifications = BTreeMap::new();
-                collect_classifications(connection, "edition_work_classification", "work_id", work_id, ClassificationSource::Work, &mut sibling_classifications)?;
-                for (classification, source) in sibling_classifications {
-                    if !exact_schemes.contains(&classification.0) && !work_schemes.contains(&classification.0) {
-                        classifications.entry(classification).or_insert(source);
-                    }
-                }
-            }
-            for classification in collect_sibling_edition_consensus(connection, work_id)? {
-                if !exact_schemes.contains(&classification.scheme) && !classifications.keys().any(|(scheme, _)| *scheme == classification.scheme) {
-                    classifications.entry((classification.scheme, classification.notation)).or_insert(ClassificationSource::Work);
+            if !exact_schemes.contains(&ClassificationScheme::LibraryOfCongress) {
+                let mut work_codes = load_work_codes_cached(connection, &BTreeSet::from([work_id]), &mut WorkEvidenceCache::default())?;
+                for classification in work_codes.remove(&work_id).unwrap_or_default() {
+                    classifications.insert(classification, ClassificationSource::Work);
                 }
             }
         }
-        let classifications =
-            metadata_contract::filter_classification_outliers(classifications.into_iter().map(|((scheme, notation), source)| Classification { evidence: Vec::new(), scheme, notation, source }), classification_similarity_keys);
+        let classifications = classifications.into_iter().map(|((scheme, notation), source)| Classification { evidence: Vec::new(), scheme, notation, source }).collect();
         matches.push(WorkClassificationMatch {
             open_library_work_id: work_id.map(|work_id| format!("OL{work_id}W")),
             exact_edition_ids: edition_ids.into_iter().map(crate::build::openlibrary::authority_edition_key).collect(),
@@ -260,35 +239,6 @@ fn collect_classifications(connection: &Connection, table: &str, id_column: &str
         classifications.entry((scheme, notation)).and_modify(|existing| *existing = (*existing).min(source)).or_insert(source);
     }
     Ok(())
-}
-
-fn collect_sibling_edition_consensus(connection: &Connection, work_id: i64) -> Result<Vec<Classification>, MetadataError> {
-    let mut statement = connection
-        .prepare_cached(
-            "SELECT edition_classification.edition_id,edition_classification.scheme,edition_classification.notation
-             FROM edition_classification
-             JOIN edition ON edition.edition_id=edition_classification.edition_id
-             WHERE edition.work_id=?1
-             ORDER BY edition_classification.edition_id,edition_classification.scheme,edition_classification.notation",
-        )
-        .map_err(error)?;
-    let rows = statement.query_map([work_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))).map_err(error)?;
-    let mut support = BTreeMap::<(ClassificationScheme, String), BTreeSet<i64>>::new();
-    let mut classified_editions = BTreeSet::new();
-    for row in rows {
-        let (edition_id, scheme, notation) = row.map_err(error)?;
-        let scheme = match scheme {
-            LCC_SCHEME => ClassificationScheme::LibraryOfCongress,
-            _ => continue,
-        };
-        let Some(notation) = metadata_contract::classification_consensus_notation(scheme, &notation) else { continue };
-        classified_editions.insert(edition_id);
-        support.entry((scheme, notation)).or_default().insert(edition_id);
-    }
-    Ok(support
-        .into_iter()
-        .filter_map(|((scheme, notation), editions)| (classified_editions.len() == 1 || editions.len() >= 2).then_some(Classification { evidence: Vec::new(), scheme, notation, source: ClassificationSource::Work }))
-        .collect())
 }
 
 pub(crate) fn classification_similarity_keys(scheme: ClassificationScheme, notation: &str) -> Vec<String> {

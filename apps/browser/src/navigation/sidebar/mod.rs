@@ -7,7 +7,7 @@ mod switcher_overlay;
 
 use gpui::prelude::*;
 use gpui::{Context, Edges, Entity, FocusHandle, Pixels, SharedString};
-use gpui_component::{Icon, IconName};
+use gpui_component::Icon;
 use ui_components as components;
 
 use super::{GlobalRoute, Libraries, LibraryRoute, Navigate, Route};
@@ -25,7 +25,6 @@ pub(crate) const RAIL_ROUTES: [Route; 7] = [
     Route::Global(GlobalRoute::Settings),
 ];
 
-const PRIMARY_ROUTES: [Route; 7] = RAIL_ROUTES;
 
 /// Where the keyboard is inside the open library switcher.
 ///
@@ -48,11 +47,11 @@ pub(crate) struct Sidebar {
     pub(super) switcher_focus: FocusHandle,
 }
 
-fn route_definition(route: Route) -> (&'static str, Icon) {
+pub(super) fn route_definition(route: Route) -> (&'static str, Icon) {
     use components::NavigationIcon;
     let (label, icon) = match route {
         Route::Library(LibraryRoute::Home) => ("Home", NavigationIcon::House),
-        Route::Library(LibraryRoute::Books) => ("All books", NavigationIcon::BookOpen),
+        Route::Library(LibraryRoute::Books) => ("Books", NavigationIcon::BookOpen),
         Route::Library(LibraryRoute::Authors) => ("Authors", NavigationIcon::User),
         Route::Library(LibraryRoute::Folders) => ("Folders", NavigationIcon::Folder),
         Route::Library(LibraryRoute::Subjects) => ("Subjects", NavigationIcon::Tags),
@@ -69,22 +68,35 @@ impl Sidebar {
     }
 
     /// Draws the rail or the bottom bar, whichever the window width calls for.
-    pub(super) fn render_navigation(&self, emitter: Entity<Self>, route: Route, compact: bool, safe_area: Edges<Pixels>, cx: &gpui::App) -> gpui::AnyElement {
-        if compact { self.render_bottom_navigation(emitter, route, safe_area, cx) } else { self.render_sidebar(emitter, route, cx) }
+    /// `library_view` is the Library tab's view: the one last shown, which the
+    /// tab returns to.
+    pub(super) fn render_navigation(&self, emitter: Entity<Self>, route: Route, library_view: LibraryRoute, compact: bool, safe_area: Edges<Pixels>, cx: &gpui::App) -> gpui::AnyElement {
+        if compact { self.render_bottom_navigation(emitter, route, library_view, safe_area, cx) } else { self.render_sidebar(emitter, route, cx) }
     }
 
-    fn render_bottom_navigation(&self, emitter: Entity<Self>, route: Route, safe_area: Edges<Pixels>, cx: &gpui::App) -> gpui::AnyElement {
+    /// The compact tab bar: the rail's destinations. On a phone the library's
+    /// browse views share one Library tab instead, switched from the menu in
+    /// their heading (`library_view_heading`).
+    fn render_bottom_navigation(&self, emitter: Entity<Self>, route: Route, library_view: LibraryRoute, safe_area: Edges<Pixels>, cx: &gpui::App) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
+        let in_library_view = matches!(route, Route::Library(view) if super::LIBRARY_VIEWS.contains(&view));
+        let tabs = if components::TOUCH_UI {
+            vec![Route::Library(LibraryRoute::Home), Route::Library(library_view), Route::Library(LibraryRoute::Catalog), Route::Global(GlobalRoute::Settings)]
+        } else {
+            RAIL_ROUTES.to_vec()
+        };
         let mut navigation = components::bottom_navigation(theme);
-        for target in PRIMARY_ROUTES {
+        for target in tabs {
             let (id, icon) = route_definition(target);
+            let library_tab = components::TOUCH_UI && target == Route::Library(library_view);
+            let (id, label, selected) = if library_tab { ("library", "Library", in_library_view) } else { (id, id, route == target) };
             let select = emitter.clone();
-            navigation = navigation.child(components::bottom_navigation_item(format!("bottom-{id}"), icon, id, route == target, theme).on_click(move |_, window, cx| {
+            navigation = navigation.child(components::bottom_navigation_item(format!("bottom-{id}"), icon, label, selected, theme).on_click(move |_, window, cx| {
                 select.update(cx, |navigation, cx| (navigation.navigate)(target, window, cx));
             }));
         }
         let library_name = self.active_library_name(cx);
-        let navigation = navigation.child(components::bottom_navigation_item("bottom-libraries", IconName::BookOpen, library_name, false, theme).on_click(move |_, window, cx| {
+        let navigation = navigation.child(components::bottom_navigation_item("bottom-libraries", components::navigation_icon(components::NavigationIcon::Books), library_name, false, theme).on_click(move |_, window, cx| {
             emitter.update(cx, |navigation, cx| navigation.open_library_switcher(window, cx));
         }));
         gpui::div().w_full().flex_none().flex().flex_col().pl(safe_area.left).pr(safe_area.right).bg(theme.page_bg).child(navigation).child(gpui::div().w_full().h(safe_area.bottom).flex_none()).into_any_element()
@@ -92,8 +104,7 @@ impl Sidebar {
 
     fn render_sidebar(&self, emitter: Entity<Self>, route: Route, cx: &gpui::App) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
-        // The destinations carry the rail's edge, not the rail: the switcher
-        // spans the topbar's height, so the edge starts on the topbar baseline.
+        // The switcher and destinations share the same square tile geometry.
         let mut destinations = components::nav_rail_destinations(theme);
         for target in RAIL_ROUTES {
             let (id, icon) = route_definition(target);

@@ -32,8 +32,8 @@ Browser transport mechanisms live in `client/platforms/web/src/transport`:
 The platform also owns `host` (tab election, generation-scoped worker ownership),
 `cpu` (bounded opaque CPU requests), and `transfer` (shared transfer ports).
 Application worker entry points, coordinator wiring, worker roles, and bundle URLs
-live in `apps/web-backend-worker`. Its `connection.rs` is shared by the web UI and
-worker probes so both use the shipping deployment configuration.
+live in `apps/web-backend-worker`; the deployment configuration that names them
+lives in `apps/web-gpui/src/backend_connection.rs`.
 
 Backend `web` contains browser-facing adapters for application commands,
 import capabilities, book readers, and sync services. Application policy stays

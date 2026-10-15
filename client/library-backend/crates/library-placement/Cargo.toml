@@ -12,3 +12,9 @@ library-model = { path = "../../../library-model" }
 library-replica = { path = "../library-replica" }
 library-runtime = { path = "../library-runtime" }
 sync-common = { path = "../../../../shared/sync-common" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+blake3.workspace = true
+book-model = { path = "../../../../shared/book-model" }
+book-inspection = { path = "../book-inspection" }
+tempfile = "3"

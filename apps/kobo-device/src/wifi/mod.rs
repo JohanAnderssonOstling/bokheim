@@ -85,7 +85,11 @@ fn worker() -> Result<&'static mpsc::Sender<Job>> {
                             }
                             Ok(Job::PrepareSleep { reply, deadline }) => {
                                 let result =
-                                    if Instant::now() >= deadline { Err("Wi-Fi sleep preparation expired before it could start".into()) } else { controller.prepare_sleep_with(|controller| controller.power_before(false, deadline)) };
+                                    if Instant::now() >= deadline { Err("Wi-Fi sleep preparation expired before it could start".into()) } else {
+                                        controller.prepare_sleep_with(|controller| {
+                                            controller.power_before(false, deadline)
+                                        })
+                                    };
                                 // Rendezvous with the caller: an expired request cannot leave
                                 // a late sleep guard holding the radio off after UI recovery.
                                 if reply.send(result).is_err() {
@@ -250,8 +254,11 @@ impl Controller {
     fn prepare_sleep_with(&mut self, power_off: impl FnOnce(&mut Self) -> Result<()>) -> Result<()> {
         self.restore_after_ui = self.snapshot.phase != Phase::Off || self.control().is_ok();
         self.sleeping = true;
-        if let Err(error) = power_off(self) {
-            self.restore_after_ui = false;
+        let result = if self.snapshot.power_available || self.restore_after_ui { power_off(self) } else { Ok(()) };
+        if let Err(error) = result {
+            // The helper may already have stopped supplicant/DHCP before a
+            // module unload fails. Preserve the previous enabled state so the
+            // recovered UI can restore networking even though sleep aborted.
             self.sleeping = false;
             self.snapshot.error = Some(error.clone());
             return Err(error);

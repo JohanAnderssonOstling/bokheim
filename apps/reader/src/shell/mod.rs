@@ -5,6 +5,7 @@
 //! lands in one reader instead of three.
 
 pub(crate) mod annotation_editor;
+pub(crate) mod annotation_tree;
 #[cfg(feature = "kobo")]
 pub(crate) mod brightness;
 pub(crate) mod chrome;
@@ -15,7 +16,9 @@ pub(crate) mod marks;
 pub(crate) mod page;
 pub(crate) mod persistence;
 pub(crate) mod search;
-pub(crate) mod state_panel;
 pub(crate) mod settings_navigation;
+pub(crate) mod state_panel;
 pub(crate) mod theme_picker;
 pub(crate) mod toolbar;
+#[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+pub(crate) mod tts;

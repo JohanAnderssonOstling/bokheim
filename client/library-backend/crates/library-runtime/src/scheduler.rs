@@ -1,6 +1,5 @@
 //! Wake scheduling for one library's durable workers.
 
-use std::future::Future;
 use std::time::Duration;
 use sync_common::ContentHash;
 
@@ -45,10 +44,9 @@ impl SyncScheduler {
     }
 }
 
-pub async fn run_timed<C, F>(mut cycle: C, requests: async_channel::Receiver<SyncRequest>, retry: Duration, debounce: Duration)
+pub async fn run_timed<C>(mut cycle: C, requests: async_channel::Receiver<SyncRequest>, retry: Duration, debounce: Duration)
 where
-    C: FnMut(CycleInput) -> F,
-    F: Future<Output = Result<(), ()>>,
+    C: AsyncFnMut(CycleInput) -> Result<(), ()>,
 {
     let started = web_time::Instant::now();
     let now = || started.elapsed().as_secs_f64() * 1000.0;
@@ -56,6 +54,9 @@ where
     let mut pending: Vec<ContentHash> = Vec::new();
     loop {
         while let Ok(request) = requests.try_recv() {
+            if matches!(request, SyncRequest::Stop) {
+                return;
+            }
             apply(&mut timing, now(), request, &mut pending);
         }
         let Some(remote) = timing.start(now()) else {
@@ -145,5 +146,47 @@ impl BackgroundTiming {
         if remote && !changed {
             self.next_remote = if ok { f64::INFINITY } else { now + self.retry };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_buffered_stop_prevents_starting_another_cycle() {
+        let (scheduler, requests) = SyncScheduler::new();
+        scheduler.wake();
+        scheduler.stop();
+        drop(scheduler);
+        run_timed(async |_| panic!("a stopped worker must not start another cycle"), requests, Duration::from_secs(30), Duration::ZERO).await;
+    }
+
+    #[tokio::test]
+    async fn cycles_borrow_owned_state_across_awaits_and_wakes_do_not_reenter_it() {
+        let (scheduler, requests) = SyncScheduler::new();
+        let (completed, results) = async_channel::unbounded();
+        let mut passes = 0;
+        scheduler.wake();
+        let running = run_timed(
+            async |_| {
+                passes += 1;
+                let count = &mut passes;
+                tokio::task::yield_now().await;
+                completed.send(*count).await.unwrap();
+                Ok(())
+            },
+            requests,
+            Duration::from_secs(30),
+            Duration::ZERO,
+        );
+        let exercise = async {
+            assert_eq!(results.recv().await.unwrap(), 1);
+            scheduler.wake();
+            assert_eq!(results.recv().await.unwrap(), 2);
+            scheduler.stop();
+        };
+        tokio::join!(running, exercise);
+        assert_eq!(passes, 2);
     }
 }

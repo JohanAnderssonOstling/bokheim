@@ -1,6 +1,6 @@
 [package]
 name = "desktop-gpui"
-version = "0.1.0"
+version = "0.1.9"
 edition = "2024"
 
 [lib]
@@ -11,6 +11,7 @@ path = "src/lib.rs"
 default = ["desktop"]
 desktop = [
     "reader-ui/native-audio",
+    "reader-ui/native-tts",
     "dep:gpui_platform",
     "dep:image",
     "dep:update-client",
@@ -25,7 +26,7 @@ flatpak = ["desktop", "reader-ui/packaged-pdfium", "application-shell/packaged-p
 # to turn a page on a touchscreen reader.
 kobo = ["mobile", "dep:gpui_kobo", "dep:kobo-device", "browser-ui/kobo", "reader-ui/kobo", "application-shell/kobo"]
 mobile = ["browser-ui/mobile", "reader-ui/mobile", "application-shell/mobile", "ui-components/mobile"]
-android = ["mobile", "dep:audiobook-player", "dep:gpui_android", "dep:gpui_platform", "dep:update-client", "dep:linux-update-host"]
+android = ["mobile", "reader-ui/native-tts", "dep:reader-speech", "dep:audiobook-player", "dep:gpui_android", "dep:gpui_platform", "dep:update-client", "dep:linux-update-host"]
 
 [[bin]]
 name = "desktop-gpui"
@@ -59,8 +60,18 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["net", "rt", "time"] }
 tempfile = "3"
+url = "2"
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+reqwest_client = { path = "../../../GPUI-Fork/crates/reqwest_client" }
 
 [target.'cfg(target_os = "android")'.dependencies]
+subject-projection = { path = "../../shared/subject-projection" }
+rustls-platform-verifier = "0.7.1"
+reader-speech = { path = "../../shared/reader-speech", optional = true }
 audiobook-player = { path = "../audiobook-player", default-features = false, optional = true }
 anyhow = "1"
 jni = "0.22.4"

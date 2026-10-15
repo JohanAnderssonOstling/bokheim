@@ -1,0 +1,48 @@
+{
+  "migration_table_changes": {
+    "lcc_range": {
+      "removed": 0,
+      "added": 10
+    }
+  },
+  "migration_replay_idempotent": true,
+  "classification_probes_compared": 71528,
+  "changed_classification_probes": 7596,
+  "lost_classification_matches": 0,
+  "changed_probes_outside_literature": 0,
+  "restored_catalog_code_values": 1957,
+  "remaining_catalog_code_values_for_metadata_review": 19,
+  "restored_reference_probes": 5616,
+  "reviewed_literary_scopes": 228,
+  "unresolved_reviewed_scope_probes": 0,
+  "reviewed_historical_path_aliases": 64,
+  "recovered_saved_manual_path_uses": 371,
+  "source_heading_routes_refreshed": 4,
+  "unit_tests_passed": 36,
+  "integration_tests_passed": 13,
+  "matcher_version": 147,
+  "publication": {
+    "release_id": 248,
+    "previous_release_id": 247,
+    "snapshot_sha256": "b1473ebb98843f35593a293f1afe85068aa00de1fed23c753812d72dfe206717",
+    "snapshot_bytes": 10821632,
+    "books": 5520,
+    "changed_book_assignments": 805,
+    "language_only_before": 62,
+    "language_only_after": 1,
+    "formerly_language_only_now_with_other_assignments": 61,
+    "became_unassigned": 0,
+    "non_classification_table_differences": {},
+    "taxonomy_revision": "1:ad646d13-11df-52db-9fe9-50b6c091866e:147",
+    "integrity_check": "ok",
+    "foreign_key_violations": 0
+  },
+  "installation": {
+    "release_id": 248,
+    "installed": "/home/johan/.local/share/bokheim/catalog.sqlite3",
+    "published": "/home/johan/.local/share/bokheim/catalog/published/releases/248",
+    "backup": "/home/johan/.local/share/bokheim/catalog/audits/literature-code-coverage-20261015/installed-before-247.sqlite3",
+    "installed_at": "2026-10-14T22:28:00.980139+00:00",
+    "snapshot_sha256": "b1473ebb98843f35593a293f1afe85068aa00de1fed23c753812d72dfe206717"
+  }
+}

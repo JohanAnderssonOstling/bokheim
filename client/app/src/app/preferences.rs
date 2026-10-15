@@ -1,5 +1,6 @@
 //! Device and synchronized application preferences.
 
+use client_platform_runtime::transfers;
 pub use app_preferences::*;
 use std::io;
 
@@ -35,9 +36,21 @@ impl AppState {
 
     pub fn apply_browsing_preference_patch(&self, patch: BrowsingPreferencePatch) -> io::Result<BrowsingPreferences> {
         let mut preferences = self.load_browsing_preferences()?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let previous_metered = preferences.allow_metered_transfers();
+        #[cfg(not(target_arch = "wasm32"))]
+        let transfer_setting = matches!(patch, BrowsingPreferencePatch::AllowMeteredTransfers(_));
         patch.apply(&mut preferences).map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         let bytes = serde_json::to_vec_pretty(&preferences).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        self.registry.write_value(BROWSING_PREFERENCES_FILE, &bytes).map_err(|error| io::Error::other(error.to_string()))?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if transfer_setting { transfers::save_allow_metered(preferences.allow_metered_transfers())?; }
+        if let Err(error) = self.registry.write_value(BROWSING_PREFERENCES_FILE, &bytes) {
+            #[cfg(not(target_arch = "wasm32"))]
+            if transfer_setting { let _ = transfers::save_allow_metered(previous_metered); }
+            return Err(io::Error::other(error.to_string()));
+        }
+        #[cfg(target_arch = "wasm32")]
+        transfers::POLICY.set_allow_metered(preferences.allow_metered_transfers());
         Ok(preferences)
     }
 

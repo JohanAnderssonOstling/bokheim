@@ -5,10 +5,12 @@
 
 use gpui::{Context, EventEmitter, SharedString, Task};
 use library_backend::{DownloadState, LibraryBrowseData};
-use library_model::BrowseLocation;
+use library_model::{BrowseLocation, BrowsePageRequest, LibraryBrowseQuery};
+use std::ops::Range;
 
 use super::controls::{BrowseOptionsEvent, BrowseOptionsSelection};
 use super::listing::{BrowseCrumb, BrowseDestination, BrowseItem, BrowseKind, BrowseListing, chip_id};
+use super::profile::Stage;
 use crate::library::services::{LibraryContentsChanged, LibraryContext, LibraryDownloadChanged};
 
 /// A listing was installed.
@@ -30,24 +32,74 @@ pub(super) struct BrowseNavigator {
     request: Option<Task<()>>,
     /// A feed's next page being fetched, to append. A load drops it.
     more: Option<Task<()>>,
+    /// Infer and save an initial selection only when no preference is stored.
+    catalog_languages_pending: bool,
+    page_failed: bool,
+    loaded_query: Option<LibraryBrowseQuery>,
+    refresh_pending: bool,
     _subscriptions: Vec<gpui::Subscription>,
 }
 
 impl EventEmitter<Loaded> for BrowseNavigator {}
 
 impl BrowseNavigator {
+    pub(super) fn library_id(&self) -> uuid::Uuid {
+        *self.ui.backend().id()
+    }
+
+    pub(super) fn context(&self) -> LibraryContext {
+        self.ui.clone()
+    }
+
+    /// A displayed section belongs to the installed response, even while a
+    /// different filter or sort is still being loaded in the background.
+    pub(super) fn section_query(&self, location: BrowseLocation) -> Option<LibraryBrowseQuery> {
+        self.loaded_query.clone().map(|mut query| {
+            query.location = location;
+            query
+        })
+    }
+
+    pub(super) fn result_query(&self) -> Option<(LibraryBrowseQuery, String)> {
+        Some((self.loaded_query.clone()?, self.listing.page.as_ref()?.result_revision.clone()?))
+    }
+
     pub(super) fn new(ui: LibraryContext, kind: BrowseKind, listing: BrowseListing, cx: &mut Context<Self>) -> Self {
-        let selection = BrowseOptionsSelection::for_controls(&listing.controls);
+        let mut selection = BrowseOptionsSelection::for_controls(&listing.controls);
+        // The catalog opens grouped as it was last left.
+        selection.by_author = kind == BrowseKind::Catalog && crate::stores::current_catalog_grouping(cx) == app_preferences::CatalogGrouping::Author;
+        let stored_languages = crate::stores::current_catalog_languages(cx);
+        let catalog_languages_pending = kind == BrowseKind::Catalog && stored_languages.is_none();
+        if kind == BrowseKind::Catalog {
+            if let Some(languages) = stored_languages {
+                selection.languages = languages;
+            }
+        }
         let updates = ui.updates();
         let subscriptions = vec![
-            cx.subscribe(&updates, |navigator, _, _: &LibraryContentsChanged, cx| navigator.refresh(cx)),
+            cx.subscribe(&updates, |navigator, _, _: &LibraryContentsChanged, cx| navigator.invalidate(cx)),
             cx.subscribe(&updates, |navigator, _, event: &LibraryDownloadChanged, cx| {
                 if matches!(event.status.state, DownloadState::Downloaded | DownloadState::NotDownloaded) {
-                    navigator.refresh(cx);
+                    navigator.invalidate(cx);
                 }
             }),
         ];
-        let mut navigator = Self { ui, kind, destination: BrowseDestination::from_path(kind, Vec::new()), listing, selection, error: None, request: None, more: None, _subscriptions: subscriptions };
+        let root = if selection.by_author { BrowseLocation::CatalogAuthor(None) } else { kind.root_location() };
+        let mut navigator = Self {
+            ui,
+            kind,
+            destination: BrowseDestination::from_path(root, Vec::new()),
+            listing,
+            selection,
+            error: None,
+            request: None,
+            more: None,
+            catalog_languages_pending,
+            loaded_query: None,
+            refresh_pending: false,
+            page_failed: false,
+            _subscriptions: subscriptions,
+        };
         navigator.reload(cx);
         navigator
     }
@@ -67,8 +119,30 @@ impl BrowseNavigator {
         }
     }
 
+    /// Hidden cached pages retain one invalidation instead of issuing queries
+    /// for every scan batch or completed download. The displayed page consumes
+    /// it from render, after any request already in flight has finished.
+    fn invalidate(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.destination.location, BrowseLocation::Opds { .. }) && !self.refresh_pending {
+            self.refresh_pending = true;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn refresh_if_needed(&mut self, cx: &mut Context<Self>) {
+        if self.refresh_pending && self.request.is_none() && self.more.is_none() {
+            self.refresh(cx);
+        }
+    }
+
     pub(super) fn open_path(&mut self, path: Vec<BrowseCrumb>, cx: &mut Context<Self>) {
-        self.load(BrowseDestination::from_path(self.kind, path), false, cx);
+        self.load(BrowseDestination::from_path(self.root(), path), false, cx);
+    }
+
+    /// Where the page's empty path leads: the catalog shown by author has
+    /// its author index there instead of its subjects.
+    pub(super) fn root(&self) -> BrowseLocation {
+        if self.selection.by_author { BrowseLocation::CatalogAuthor(None) } else { self.kind.root_location() }
     }
 
     /// Searches for `query`, or drops the search for an empty one.
@@ -87,8 +161,24 @@ impl BrowseNavigator {
             self.open_path(path, cx);
             return;
         }
-        if self.selection.apply(event, &self.listing.controls) {
-            self.reload(cx);
+        if self.selection.apply(event.clone(), &self.listing.controls) {
+            if self.kind == BrowseKind::Catalog {
+                match &event {
+                    BrowseOptionsEvent::ToggleLanguage(_) => {
+                        self.catalog_languages_pending = false;
+                        crate::stores::save_catalog_languages(Some(self.selection.languages.clone()), cx);
+                    }
+                    _ => {}
+                }
+            }
+            // A grouping is another root, not a filter of this page, and the
+            // catalog opens with it next time.
+            if let BrowseOptionsEvent::ShowByAuthor(by_author) = event {
+                crate::stores::save_catalog_grouping(if by_author { app_preferences::CatalogGrouping::Author } else { app_preferences::CatalogGrouping::Subject }, cx);
+                self.open_path(Vec::new(), cx);
+            } else {
+                self.reload(cx);
+            }
         }
     }
 
@@ -124,6 +214,48 @@ impl BrowseNavigator {
         }));
     }
 
+    /// Load visible outer panels or direct covers using the installed query.
+    pub(super) fn load_page_range(&mut self, range: Range<usize>, compact: usize, cx: &mut Context<Self>) {
+        if self.more.is_some() || self.request.is_some() || self.page_failed {
+            return;
+        }
+        let Some(page) = self.listing.missing_page(range, compact) else { return };
+        let Some(query) = self.loaded_query.clone() else { return };
+        let revision = self.listing.revision;
+        let ui = self.ui.clone();
+        let result_revision = self.listing.page.as_ref().and_then(|page| page.result_revision.clone());
+        self.more = Some(cx.spawn(async move |navigator, cx| {
+            let request_stage = Stage::new("outer page request including transport");
+            let result = match result_revision {
+                Some(revision) => ui.backend().browse_result_page(query, revision, page).await,
+                None => ui.backend().browse_page(query, page).await.map(Some),
+            };
+            drop(request_stage);
+            let _ = navigator.update(cx, |navigator, cx| {
+                let _stage = Stage::new("outer page UI merge");
+                if navigator.listing.revision != revision {
+                    return;
+                }
+                navigator.more = None;
+                match result {
+                    Ok(Some(data)) => {
+                        if navigator.listing.append_page(data, cx) {
+                            cx.emit(Loaded { left: None, refresh: true });
+                        } else {
+                            navigator.refresh(cx);
+                        }
+                    }
+                    Ok(None) => navigator.refresh(cx),
+                    Err(error) => {
+                        navigator.page_failed = true;
+                        navigator.error = Some(error.into());
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+
     /// The trail to the child `child_id`: under the current path, through its
     /// group where the group is a real folder. The backend supplies the full
     /// displayed breadcrumb trail after the destination loads.
@@ -142,6 +274,7 @@ impl BrowseNavigator {
     /// Starts a load in place of any still running; the installed frame
     /// remains painted.
     fn load(&mut self, destination: BrowseDestination, refresh: bool, cx: &mut Context<Self>) {
+        self.refresh_pending = false;
         let location = destination.location;
         let query = self.selection.backend_query(location, true);
         #[cfg(target_os = "android")]
@@ -153,26 +286,61 @@ impl BrowseNavigator {
         // the same query against the same database.
         let ui = self.ui.clone();
         let searched = !query.search.is_empty();
+        let infer_languages = self.catalog_languages_pending && matches!(location, BrowseLocation::Catalog(_) | BrowseLocation::CatalogAuthor(_));
+        let system_languages = if infer_languages { sys_locale::get_locales().collect::<Vec<_>>() } else { Vec::new() };
         self.error = None;
         // A next page belongs to the listing this load replaces.
         self.more = None;
+        self.page_failed = false;
         self.request = Some(cx.spawn(async move |navigator, cx| {
-            let result = fetch(&ui, query).await;
-            let _ = navigator.update(cx, |navigator, cx| navigator.finish_request(destination, refresh, searched, result, cx));
+            let request_stage = Stage::new("initial browse request including transport");
+            let result = fetch(&ui, query.clone()).await;
+            drop(request_stage);
+            let library_languages = if infer_languages && result.is_ok() {
+                ui.backend().library_language_counts().await.unwrap_or_else(|error| {
+                    log::warn!("could not infer catalog languages from the library: {error}");
+                    Vec::new()
+                })
+            } else {
+                Vec::new()
+            };
+            let _ = navigator.update(cx, |navigator, cx| {
+                if infer_languages && navigator.catalog_languages_pending {
+                    if let Ok(data) = &result {
+                        // Another window may already have saved a choice while
+                        // this request was in flight. Keep that choice too.
+                        let stored = crate::stores::current_catalog_languages(cx);
+                        let needs_save = stored.is_none();
+                        navigator.selection.languages = super::languages::initial_selection(stored, &system_languages, &library_languages, &data.language_counts);
+                        navigator.catalog_languages_pending = false;
+                        if needs_save {
+                            crate::stores::save_catalog_languages(Some(navigator.selection.languages.clone()), cx);
+                        }
+                        navigator.load(destination, refresh, cx);
+                        return;
+                    }
+                }
+                navigator.finish_request(destination, refresh, searched, query, result, cx);
+            });
         }));
     }
 
-    fn finish_request(&mut self, mut destination: BrowseDestination, refresh: bool, searched: bool, result: Result<LibraryBrowseData, String>, cx: &mut Context<Self>) {
+    fn finish_request(&mut self, mut destination: BrowseDestination, refresh: bool, searched: bool, query: LibraryBrowseQuery, result: Result<LibraryBrowseData, String>, cx: &mut Context<Self>) {
+        self.request = None;
         match result {
             Ok(data) => {
                 let left = (self.destination.location != destination.location).then_some(self.destination.location);
-                let path = self.listing.install(data, searched, cx);
+                let path = {
+                    let _stage = Stage::new("initial browse UI installation");
+                    self.listing.install(data, searched, cx)
+                };
                 // A feed page knows nothing of how it was reached; its trail is
                 // the chips followed to it.
                 if !matches!(destination.location, BrowseLocation::Opds { .. }) {
                     destination.path = path;
                 }
                 self.destination = destination;
+                self.loaded_query = Some(query);
                 self.error = None;
                 #[cfg(target_os = "android")]
                 log::info!("Browse loaded: location={} children={} books={}", self.destination.location, self.listing.children.len(), self.listing.books.len());
@@ -189,13 +357,13 @@ impl BrowseNavigator {
 
 /// A page from where it lives: a feed page from the feed, through the app,
 /// and anything else from the library. The catalog's root also lists the
-/// account's OPDS feeds, each as a chip with its own section.
-async fn fetch(ui: &LibraryContext, query: library_model::LibraryBrowseQuery) -> Result<LibraryBrowseData, String> {
+/// account's OPDS feeds, each as a chip without a section.
+async fn fetch(ui: &LibraryContext, query: LibraryBrowseQuery) -> Result<LibraryBrowseData, String> {
     if matches!(query.location, BrowseLocation::Opds { .. }) {
         return ui.app().browse_opds(query).await;
     }
-    let feeds_listed = query.location == BrowseLocation::Catalog(library_model::ROOT_SUBJECT_ROUTE_ID) && query.search.is_empty();
-    let mut data = ui.backend().browse(query).await?;
+    let feeds_listed = matches!(query.location, BrowseLocation::Catalog(library_model::ROOT_SUBJECT_ROUTE_ID) | BrowseLocation::CatalogAuthor(None)) && query.search.is_empty();
+    let mut data = ui.backend().browse_page(query, BrowsePageRequest::default()).await?;
     if feeds_listed {
         // Without its feeds the catalog still lists; the failure is logged.
         let feeds = ui.app().opds_feeds().await.unwrap_or_else(|error| {
@@ -203,10 +371,67 @@ async fn fetch(ui: &LibraryContext, query: library_model::LibraryBrowseQuery) ->
             Vec::new()
         });
         for feed in feeds {
-            let chip = library_model::BrowseRow { id: BrowseLocation::Opds { source: feed.id, page: None }, name: feed.name, path: None, book_count: 0, downloaded_book_count: 0 };
-            data.sections.push(library_model::BrowseSection { parent: chip.clone(), children: Vec::new(), books: Vec::new() });
-            data.contents.children.push(chip);
+            data.contents.children.push(library_model::BrowseRow { id: BrowseLocation::Opds { source: feed.id, page: None }, name: feed.name, path: None, book_count: 0, downloaded_book_count: 0 });
+        }
+        let stores = ui.app().stores().await.unwrap_or_else(|error| {
+            log::warn!("could not list stores: {error}");
+            Vec::new()
+        });
+        for store in stores {
+            data.contents.children.push(library_model::BrowseRow { id: BrowseLocation::Store(store.id), name: store.name, path: None, book_count: 0, downloaded_book_count: 0 });
         }
     }
     Ok(data)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32"), not(feature = "kobo")))]
+mod tests {
+    use super::*;
+    use crate::navigation::LibrarySession;
+    use gpui::{AppContext, TestAppContext};
+    use std::{cell::Cell, rc::Rc};
+
+    #[gpui::test]
+    async fn hidden_pages_defer_and_coalesce_refreshes_without_losing_inflight_changes(cx: &mut TestAppContext) {
+        let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (_directory, _session, library) = LibrarySession::test_context(cx).await;
+        let updates = library.updates();
+        cx.condition(&updates, |updates, _| !updates.loading() && !updates.scanning()).await;
+        let listing = BrowseListing::new(library.clone(), BrowseKind::Books, Rc::new(|_, _, _| {}), false);
+        let navigator = cx.new(|cx| BrowseNavigator::new(library, BrowseKind::Books, listing, cx));
+        cx.condition(&navigator, |navigator, _| navigator.request.is_none()).await;
+        let loads = Rc::new(Cell::new(0));
+        let completed = loads.clone();
+        let _subscription = cx.update(|cx| cx.subscribe(&navigator, move |_, _: &Loaded, _| completed.set(completed.get() + 1)));
+
+        for _ in 0..10 {
+            updates.update(cx, |_, cx| cx.emit(LibraryContentsChanged));
+        }
+        cx.run_until_parked();
+        cx.read_entity(&navigator, |navigator, _| {
+            assert!(navigator.refresh_pending);
+            assert!(navigator.request.is_none(), "hidden pages must not issue background browse requests");
+        });
+        assert_eq!(loads.get(), 0);
+
+        // Rendering the page consumes the whole burst as a single refresh.
+        navigator.update(cx, |navigator, cx| navigator.refresh_if_needed(cx));
+        cx.condition(&navigator, |navigator, _| navigator.request.is_none()).await;
+        assert_eq!(loads.get(), 1);
+
+        updates.update(cx, |_, cx| cx.emit(LibraryContentsChanged));
+        navigator.update(cx, |navigator, cx| navigator.refresh_if_needed(cx));
+        // A later change must survive the response of the request already sent.
+        updates.update(cx, |_, cx| cx.emit(LibraryContentsChanged));
+        navigator.update(cx, |navigator, cx| {
+            assert!(navigator.request.is_some());
+            navigator.refresh_if_needed(cx);
+            assert!(navigator.refresh_pending);
+        });
+        cx.condition(&navigator, |navigator, _| navigator.request.is_none()).await;
+        assert_eq!(loads.get(), 2);
+        navigator.update(cx, |navigator, cx| navigator.refresh_if_needed(cx));
+        cx.condition(&navigator, |navigator, _| navigator.request.is_none()).await;
+        assert_eq!(loads.get(), 3);
+    }
 }

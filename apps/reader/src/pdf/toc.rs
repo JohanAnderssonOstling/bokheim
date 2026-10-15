@@ -35,6 +35,27 @@ impl PdfTocState {
         self.entries = entries;
     }
 
+    fn chapter_pages(&self) -> Vec<usize> {
+        fn visit(entries: &[BookTocEntry], result: &mut Vec<usize>) {
+            for entry in entries {
+                if let Some(page) = pdf_toc_page(&entry.target) {
+                    result.push(page);
+                } else {
+                    visit(&entry.children, result);
+                }
+            }
+        }
+        let mut pages = Vec::new();
+        visit(&self.entries, &mut pages);
+        pages.sort_unstable();
+        pages.dedup();
+        pages
+    }
+
+    pub(crate) fn chapter_at(&self, page: usize) -> usize {
+        self.chapter_pages().into_iter().rev().find(|start| *start <= page).unwrap_or(0)
+    }
+
     /// Changes the active outline entry and reports whether it moved.
     pub(crate) fn set_active(&mut self, active_id: Option<String>) -> bool {
         if self.active_id == active_id {
@@ -74,10 +95,6 @@ impl PdfTocState {
 
     pub(crate) fn active_id(&self) -> Option<&str> {
         self.active_id.as_deref()
-    }
-
-    pub(crate) fn title_at_ordinal(&self, ordinal: usize) -> Option<&str> {
-        Some(self.entry(&toc_id(ordinal))?.title.as_str())
     }
 
     fn entry(&self, id: &str) -> Option<&BookTocEntry> {
@@ -131,4 +148,21 @@ fn tree_items(entries: &[BookTocEntry], next: &mut usize) -> Vec<TreeItem> {
             TreeItem::new(id, entry.title.clone()).children(tree_items(&entry.children, next))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tts_tests {
+    use super::*;
+
+    #[test]
+    fn sleep_chapters_group_outline_subsections() {
+        let mut toc = PdfTocState::default();
+        toc.replace_entries(vec![
+            BookTocEntry { title: "One".into(), target: "pdf-page:0".into(), children: vec![BookTocEntry { title: "Section".into(), target: "pdf-page:3".into(), children: vec![] }] },
+            BookTocEntry { title: "Two".into(), target: "pdf-page:10".into(), children: vec![] },
+        ]);
+        assert_eq!(toc.chapter_at(8), 0);
+        assert_eq!(toc.chapter_at(12), 10);
+        assert_eq!(PdfTocState::default().chapter_at(3), 0);
+    }
 }

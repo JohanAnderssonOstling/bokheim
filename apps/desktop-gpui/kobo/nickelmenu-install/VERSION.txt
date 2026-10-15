@@ -1,0 +1,4 @@
+NickelMenu v0.6.0-bokheim.1
+Based on https://github.com/pgaskin/NickelMenu/commit/15a95f7e6aa32b053094b062a4157245aecb4cba
+Bokheim direct-launch extension: ../nickelmenu-direct/
+KoboRoot.tgz SHA256: c65077192df4c0857b0ff3704d708053355b311ce2497721c6d29ab5526199d2

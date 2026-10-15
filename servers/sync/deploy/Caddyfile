@@ -48,7 +48,9 @@
 	handle /.well-known/assetlinks.json {
 		root * /usr/local/share/bokheim-web/current
 		header Content-Type application/json
-		file_server
+		file_server {
+			precompressed br gzip
+		}
 	}
 
 	handle /api/* {
@@ -58,7 +60,9 @@
 	handle {
 		root * /usr/local/share/bokheim-web/current
 		try_files {path} /index.html
-		file_server
+		file_server {
+			precompressed br gzip
+		}
 	}
 }
 
@@ -97,7 +101,7 @@
 	respond 404
 }
 
-{$BOKHEIM_CATALOG_DOMAIN:catalog.bokheim.se} {
+{$BOKHEIM_CATALOG_DOMAIN:catalogs.bokheim.se} {
 	header {
 		Strict-Transport-Security "max-age=31536000"
 		X-Content-Type-Options "nosniff"
@@ -105,8 +109,14 @@
 		-Server
 	}
 
-	# The snapshot compresses well; books and covers are already compressed.
-	encode zstd gzip
+	# SQLite is excluded by encode's default content-type filter. Match the
+	# snapshot path explicitly and compress successful full downloads.
+	@catalog_snapshot path /releases/*/catalog.sqlite3
+	encode @catalog_snapshot zstd gzip {
+		match {
+			status 200
+		}
+	}
 
 	# Snapshots, books and covers are named by release or content hash, so
 	# every URL is immutable. Downloads need no account.
@@ -114,7 +124,10 @@
 	handle @files {
 		root * /srv/bokheim-updates/public/catalog
 		header Cache-Control "public, max-age=31536000, immutable"
-		file_server
+		file_server {
+			# Publication supplies stronger compression once per release.
+			precompressed zstd gzip
+		}
 	}
 
 	respond 404

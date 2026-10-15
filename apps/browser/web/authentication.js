@@ -1,5 +1,20 @@
 // Keep credential fields in the ordinary DOM, with stable form/field identities.
 // No credential values are mirrored into application state or browser storage.
+const registeredFonts = new Set();
+
+export function registerAuthenticationFont(family, weight, style, data) {
+    const key = `${family}:${weight}:${style}`;
+    if (registeredFonts.has(key)) return;
+    const face = new FontFace(family, data, { weight: String(weight), style });
+    document.fonts.add(face);
+    registeredFonts.add(key);
+    face.load().catch(() => {
+        registeredFonts.delete(key);
+        document.fonts.delete(face);
+        console.warn('Could not load sign-in form font');
+    });
+}
+
 export function openAuthentication(themeJson, minimum, submit) {
     const theme = JSON.parse(themeJson);
     const previousFocus = document.activeElement;
@@ -9,7 +24,7 @@ export function openAuthentication(themeJson, minimum, submit) {
     for (const [name, value] of Object.entries(theme)) dialog.style.setProperty(`--auth-${name}`, value);
     const style = document.createElement('style');
     style.textContent = `
-        #bokheim-authentication { box-sizing:border-box; width:min(440px,calc(100% - 32px)); max-height:calc(100dvh - 32px); overflow:auto; margin:auto; padding:24px; border:1px solid var(--auth-border); border-radius:0; background:var(--auth-background); color:var(--auth-text); font:16px/1.5 "Libertinus Serif",Georgia,serif; }
+        #bokheim-authentication { box-sizing:border-box; width:min(440px,calc(100% - 32px)); max-height:calc(100dvh - 32px); overflow:auto; margin:auto; padding:24px; border:1px solid var(--auth-border); border-radius:0; background:var(--auth-background); color:var(--auth-text); font:var(--auth-font-size)/1.5 var(--auth-font-family); }
         #bokheim-authentication::backdrop { background:rgb(0 0 0 / 40%); }
         #bokheim-authentication * { box-sizing:border-box; }
         #bokheim-authentication h2 { margin:0 0 20px; font-size:24px; line-height:1.3; padding-right:44px; }

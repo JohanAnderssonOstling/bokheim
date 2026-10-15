@@ -52,12 +52,13 @@ fn direct_descendants_and_directory_counts_follow_mutations() {
             3 => db.connection.fixtures_reparent_nested_folder(),
             4 => db.connection.fixtures_trash_target_folder(),
             _ => db.connection.fixtures_restore_folders_and_change_formats(),
-        }.unwrap();
+        }
+        .unwrap();
         let ids = query_rows(|callback| db.connection.fixtures_read_dir_id(callback), |r| r.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
         for id in ids {
             for folder in db.browse_contents(&query(&id, ""), false).unwrap().children {
                 let library_model::BrowseLocation::Folder(folder_id) = folder.id else { panic!("folder browse returned a subject") };
-                let expected = db.connection.fixtures_read_subtree_subtree_id_d(&(folder_id.to_string()), |r| Ok((r.get::<_, i64>(0)?,r.get::<_, i64>(1)?))).unwrap();
+                let expected = db.connection.fixtures_read_subtree_subtree_id_d(&(folder_id.to_string()), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))).unwrap();
                 assert_eq!((folder.book_count as i64, folder.downloaded_book_count as i64), expected, "{mutation}: {}", folder.id);
             }
         }

@@ -113,6 +113,10 @@ DETACH curated; ATTACH ':' || 'memory' || ':' AS curated;
 -- param: arg_1: &SqlParam<'_>
 INSERT INTO book(row_id,content_hash,title,search_title,format) VALUES(:arg_1,unhex(printf('%064x',:arg_1)),printf('Book %d',:arg_1),printf('book %d',:arg_1),1);
 
+-- name: fixtures_popularity_other_subject &
+INSERT INTO curated.concept VALUES(5,'A other');
+INSERT INTO curated.unified_concept_route VALUES(5,5,0);
+
 -- name: fixtures_insert_book_dir !
 -- param: arg_1: &SqlParam<'_>
 -- param: arg_2: &SqlParam<'_>
@@ -408,12 +412,6 @@ DELETE FROM book WHERE content_hash=:arg_1;
 -- name: fixtures_read_book_subject_code ?
 SELECT code FROM book_subject WHERE code IS NOT NULL;
 
--- name: fixtures_read_author_identity_stable_id ->
-SELECT stable_id FROM author_identity;
-
--- name: fixtures_read_book_contributor_a_stable_id ->
-SELECT a.stable_id FROM book_contributor c JOIN author_identity a ON a.id=c.author_identity_id;
-
 -- name: fixtures_read_book_language ->
 SELECT COUNT(*) FROM book_language;
 
@@ -506,6 +504,10 @@ SELECT concept_id FROM curated.unified_concept_paths ORDER BY concept_id LIMIT 1
 -- param: book_id: i64
 SELECT concept_id FROM book_unified_concept WHERE book_row_id=:book_id;
 
+-- name: fixtures_subject_projection_concepts ?
+-- param: book_id: i64
+SELECT concept_id FROM book_unified_concept WHERE book_row_id=:book_id ORDER BY concept_id;
+
 -- name: fixtures_track_subject_projection_writes &
 CREATE TEMP TRIGGER track_subject_projection_writes AFTER INSERT ON book_subject
 BEGIN INSERT INTO transaction_probe(value) VALUES(1); END;
@@ -532,3 +534,19 @@ DROP TRIGGER guard_book_metadata;
 DROP TRIGGER guard_subjects;
 DROP TRIGGER guard_annotations;
 DROP TRIGGER guard_placements;
+-- name: fixtures_revert_history_to_schema_37 &
+ALTER TABLE sync_metadata DROP COLUMN pull_generation;
+
+-- name: fixtures_has_popularity_projection ->
+SELECT EXISTS(SELECT 1 FROM pragma_table_info('book') WHERE name='popularity_rating_count');
+
+-- name: fixtures_remove_popularity_projection !
+-- Only constructs an older schema in isolated in-memory migration tests.
+ALTER TABLE book DROP COLUMN popularity_rating_count;
+
+-- name: fixtures_fail_pull_generation_commit &
+CREATE TRIGGER fail_pull_generation BEFORE UPDATE OF pull_generation ON sync_metadata
+BEGIN SELECT RAISE(ABORT, 'injected cursor failure'); END;
+
+-- name: fixtures_allow_pull_generation_commit !
+DROP TRIGGER fail_pull_generation;

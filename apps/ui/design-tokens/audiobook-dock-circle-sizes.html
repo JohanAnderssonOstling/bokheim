@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bokheim · Desktop dock circle sizes</title>
+  <style>
+    @font-face { font-family: Garamond; src: url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf'); }
+    @font-face { font-family: Raleway; src: url('../../desktop-gpui/assets/fonts/Raleway-Regular.ttf'); }
+    @font-face { font-family: Bodoni; src: url('../../desktop-gpui/assets/fonts/BodoniModa-Regular.ttf'); }
+    :root { font-size: 16px; --canvas: #eae5dc; --paper: #f6f2eb; --ink: #22201d; --muted: #6b675f; --rule: #c5bdac; --accent: #466853; --accent-ink: #fffdfa; }
+    [data-theme="dark"] { color-scheme: dark; --canvas: #1c1a16; --paper: #11100d; --ink: #efe6d0; --muted: #a69c86; --rule: #4e4334; --accent: #d3b271; --accent-ink: #11100d; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--canvas); color: var(--ink); }
+    main { padding: 32px; max-width: 1440px; margin: auto; }
+    .study-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 32px; font: 13px/1.5 Raleway, sans-serif; }
+    h1 { margin: 0 0 6px; font-size: 20px; font-weight: normal; }
+    .study-header p { margin: 0; color: var(--muted); }
+    .theme { padding: 8px 12px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font: inherit; cursor: pointer; }
+    article { margin-bottom: 32px; }
+    .variant-label { display: flex; align-items: baseline; justify-content: space-between; padding: 0 0 12px; font: 13px/1.5 Raleway, sans-serif; }
+    .variant-label h2 { margin: 0; font-size: 16px; font-weight: normal; }
+    .variant-label span { color: var(--muted); }
+    .window { border: 1px solid var(--rule); background: var(--paper); }
+    .context { height: 50px; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; font: 12px/1 Raleway, sans-serif; color: var(--muted); }
+    .wordmark { font: 21px/1 Bodoni, serif; color: var(--ink); }
+    .dock { height: calc(5rem + 1px); position: relative; border-top: 1px solid var(--rule); display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: .5rem; padding-right: .5rem; align-items: center; font: 1rem/1.25 Garamond, serif; }
+    .track { position: absolute; z-index: 1; left: 0; right: 0; top: 0; height: 3px; background: var(--rule); }
+    .track::before { content: ''; display: block; width: 36%; height: 100%; background: var(--accent); }
+    .leading { min-width: 0; height: 5rem; display: flex; gap: .5rem; align-items: center; }
+    .cover { width: 5rem; height: 5rem; flex: none; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 5px; background: #354d3d; color: #eee2c7; text-align: center; padding: 7px; }
+    .cover-title { font: 14px/1.05 Garamond, serif; }
+    .cover-author { font: 7px/1.2 Raleway, sans-serif; letter-spacing: .5px; text-transform: uppercase; }
+    .book { min-width: 0; }
+    .book-title, .chapter, .chapter-time { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .book-title { margin-bottom: 3px; }
+    .chapter, .chapter-time, .remaining { font-size: .75rem; color: var(--muted); line-height: 1.25; }
+    .chapter-time { margin-top: 3px; font-variant-numeric: tabular-nums; }
+    .transport { display: flex; align-items: center; gap: .25rem; }
+    button { padding: 0; border: 0; background: transparent; color: inherit; display: inline-flex; align-items: center; justify-content: center; flex: none; cursor: pointer; }
+    button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .transport button { width: 2.5rem; height: 2.5rem; }
+    .icon { display: block; width: 1.25rem; height: 1.25rem; background: currentColor; mask: var(--icon) center / contain no-repeat; -webkit-mask: var(--icon) center / contain no-repeat; }
+    .transport .play { width: var(--play-size); height: var(--play-size); border-radius: 50%; background: var(--accent); color: var(--accent-ink); }
+    .play .icon { width: 2rem; height: 2rem; }
+    .tools { min-width: 0; justify-self: end; display: flex; align-items: flex-end; flex-direction: column; gap: .25rem; }
+    .tool-row { display: flex; align-items: center; gap: .5rem; }
+    .tool-row button { width: 2rem; height: 2rem; }
+    .tool-row .icon { width: 1rem; height: 1rem; }
+    .tool-row .speed { width: auto; padding: 0 .5rem; font: .875rem/1 Garamond, serif; }
+    .note { margin: 0; color: var(--muted); font: 12px/1.5 Raleway, sans-serif; }
+    @media (max-width: 900px) { main { min-width: 900px; padding: 24px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header class="study-header">
+      <div><h1>Desktop audiobook dock</h1><p>Two play-circle sizes · 16 px UI font · Identical dock height and icons</p></div>
+      <button class="theme" type="button" onclick="document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'">Light / dark</button>
+    </header>
+    <div id="variants"></div>
+    <p class="note">Both docks: 5 rem + 1 px border (81 px). Play icon: 2 rem (32 px). Only the circle diameter changes.</p>
+  </main>
+  <script>
+    // Embed the existing app glyphs so masks also render in local-file previews.
+    const icons = {"phosphor-light/caret-left": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiBmaWxsPSJjdXJyZW50Q29sb3IiPjxwYXRoIGQ9Ik0xNjQuMjQsMjAzLjc2YTYsNiwwLDEsMS04LjQ4LDguNDhsLTgwLTgwYTYsNiwwLDAsMSwwLTguNDhsODAtODBhNiw2LDAsMCwxLDguNDgsOC40OEw4OC40OSwxMjhaIi8+PC9zdmc+", "phosphor-light/caret-right": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiBmaWxsPSJjdXJyZW50Q29sb3IiPjxwYXRoIGQ9Ik0xODAuMjQsMTMyLjI0bC04MCw4MGE2LDYsMCwwLDEtOC40OC04LjQ4TDE2Ny41MSwxMjgsOTEuNzYsNTIuMjRhNiw2LDAsMCwxLDguNDgtOC40OGw4MCw4MEE2LDYsMCwwLDEsMTgwLjI0LDEzMi4yNFoiLz48L3N2Zz4=", "phosphor-light/alarm": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSIxMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48Y2lyY2xlIGN4PSIxMjgiIGN5PSIxMzYiIHI9IjgwIi8+PHBhdGggZD0iTTEyOCA5NnY0MGwyOCAxNk0zMiA1NmwyNC0yNE0yMDAgMzJsMjQgMjRNNzIgMjAybC0xNiAyMk0xODQgMjAybDE2IDIyIi8+PC9zdmc+Cg==", "phosphor-light/x": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiBmaWxsPSJjdXJyZW50Q29sb3IiPjxwYXRoIGQ9Ik0yMDQuMjQsMTk1Ljc2YTYsNiwwLDEsMS04LjQ4LDguNDhMMTI4LDEzNi40OSw2MC4yNCwyMDQuMjRhNiw2LDAsMCwxLTguNDgtOC40OEwxMTkuNTEsMTI4LDUxLjc2LDYwLjI0YTYsNiwwLDAsMSw4LjQ4LTguNDhMMTI4LDExOS41MWw2Ny43Ni02Ny43NWE2LDYsMCwwLDEsOC40OCw4LjQ4TDEzNi40OSwxMjhaIi8+PC9zdmc+", "icon/skip-back-15": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJjdXJyZW50Q29sb3IiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTMgMTIuNWE5IDkgMCAxIDAgMi42NC02LjM2IiBzdHJva2Utd2lkdGg9IjEuMTI1Ii8+PHBhdGggZD0iTTMuMiAyLjh2NGg0IiBzdHJva2Utd2lkdGg9IjEuMTI1Ii8+PHBhdGggZD0iTTguNyAxMC40IDEwLjEgOS41djYiIHN0cm9rZS13aWR0aD0iMSIvPjxwYXRoIGQ9Ik0xNS4zIDkuNWgtM2wtLjMgMi43Yy42LS40IDEuMy0uNSAxLjktLjQgMSAuMiAxLjYgMSAxLjYgMiAwIDEuMS0uOCAxLjktMiAxLjktLjYgMC0xLjItLjItMS42LS42IiBzdHJva2Utd2lkdGg9IjEiLz48L3N2Zz4K", "icon/skip-forward-30": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJjdXJyZW50Q29sb3IiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTIxIDEyLjVhOSA5IDAgMSAxLTIuNjQtNi4zNiIgc3Ryb2tlLXdpZHRoPSIxLjEyNSIvPjxwYXRoIGQ9Ik0yMC44IDIuOHY0aC00IiBzdHJva2Utd2lkdGg9IjEuMTI1Ii8+PHBhdGggZD0iTTguNCAxMGMuNC0uNCAxLS42IDEuNi0uNS45LjEgMS41LjcgMS41IDEuNCAwIC44LS43IDEuNC0xLjYgMS40LjkgMCAxLjguNiAxLjggMS42IDAgMS0uOCAxLjctMS45IDEuNy0uNiAwLTEuMi0uMi0xLjYtLjYiIHN0cm9rZS13aWR0aD0iMSIvPjxlbGxpcHNlIGN4PSIxNC43IiBjeT0iMTIuNSIgcng9IjEuNiIgcnk9IjMiIHN0cm9rZS13aWR0aD0iMSIvPjwvc3ZnPgo=", "icon/play-fill": "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiBmaWxsPSJjdXJyZW50Q29sb3IiPjxwYXRoIGQ9Ik0yNDAsMTI4YTE1Ljc0LDE1Ljc0LDAsMCwxLTcuNiwxMy41MUw4OC4zMiwyMjkuNjVhMTYsMTYsMCwwLDEtMTYuMi4zQTE1Ljg2LDE1Ljg2LDAsMCwxLDY0LDIxNi4xM1YzOS44N2ExNS44NiwxNS44NiwwLDAsMSw4LjEyLTEzLjgyLDE2LDE2LDAsMCwxLDE2LjIuM0wyMzIuNCwxMTQuNDlBMTUuNzQsMTUuNzQsMCwwLDEsMjQwLDEyOFoiLz48L3N2Zz4K"};
+    const icon = (path) => `<span class="icon" style="--icon:url('data:image/svg+xml;base64,${icons[path]}')" aria-hidden="true"></span>`;
+    const cover = '<div class="cover" aria-hidden="true"><span class="cover-title">Pride and<br>Prejudice</span><span class="cover-author">Jane Austen</span></div>';
+    document.querySelector('#variants').innerHTML = [3, 3.5].map(size => `
+      <article id="variant-${String(size).replace('.', '-')}">
+        <div class="variant-label"><h2>${size} rem circle</h2><span>${size * 16} px diameter · ${40 - size * 8} px space above and below</span></div>
+        <div class="window">
+          <div class="context"><span class="wordmark">bokheim</span><span>My library · Audiobooks</span></div>
+          <div class="dock" style="--play-size:${size}rem">
+            <div class="track" aria-hidden="true"></div>
+            <div class="leading">${cover}<div class="book"><div class="book-title">Pride and Prejudice</div><div class="chapter">Chapter 10</div><div class="chapter-time">12 min / 34 min</div></div></div>
+            <div class="transport" role="group" aria-label="Playback controls">
+              <button aria-label="Previous chapter">${icon('phosphor-light/caret-left')}</button>
+              <button aria-label="Back 15 seconds">${icon('icon/skip-back-15')}</button>
+              <button class="play" aria-label="Play">${icon('icon/play-fill')}</button>
+              <button aria-label="Forward 30 seconds">${icon('icon/skip-forward-30')}</button>
+              <button aria-label="Next chapter">${icon('phosphor-light/caret-right')}</button>
+            </div>
+            <div class="tools"><span class="remaining">7 h 36 min left</span><div class="tool-row"><button aria-label="Sleep timer">${icon('phosphor-light/alarm')}</button><button class="speed" aria-label="Playback speed">1×</button><button aria-label="Close player">${icon('phosphor-light/x')}</button></div></div>
+          </div>
+        </div>
+      </article>`).join('');
+  </script>
+</body>
+</html>

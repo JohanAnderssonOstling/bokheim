@@ -1,8 +1,8 @@
 //! The graph's typographic labels, for callers that draw nodes as text.
 //!
-//! The root, the path and the selection are Bodoni Moda capitals, spaced with
-//! hair spaces because gpui has no letter-spacing (Bodoni's hair space is
-//! 0.1 em). Every other label is in Libertinus small caps. Subtree counts follow
+//! The root, the path and the selection use the theme's display face in capitals,
+//! spaced with hair spaces because gpui has no letter-spacing. Every other
+//! label uses the selected interface face's small caps. Subtree counts follow
 //! the name, raised, except on e-ink, where that size would not survive
 //! dithering and the count sits on the baseline.
 //!
@@ -10,12 +10,12 @@
 //! the drawing cannot disagree.
 
 use gpui::prelude::FluentBuilder;
-use gpui::{AvailableSpace, Div, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement, Pixels, Size, Stateful, Styled, div, px, rems, size};
+use gpui::{AvailableSpace, Div, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement, Pixels, SharedString, Size, Stateful, Styled, div, px, rems, size};
+use gpui_component::Theme;
 
 use super::layout::NodeRole;
-use crate::{BrowserTheme, DISPLAY_FONT_FAMILY, browser_theme};
+use crate::{BrowserTheme, browser_theme};
 
-const TEXT_FAMILY: &str = "Libertinus Serif";
 const HAIR_SPACE: &str = "\u{200A}";
 const LINE_HEIGHT: f32 = 1.12;
 const E_INK: bool = cfg!(feature = "kobo");
@@ -30,24 +30,24 @@ const PAD_X: f32 = 10.0;
 const PAD_Y: f32 = 8.0;
 
 /// A label for `name` in `role`, filling the box the graph gives it.
-pub fn graph_label(id: impl Into<ElementId>, role: NodeRole, name: &str, count: Option<usize>, compact: bool, theme: BrowserTheme) -> Stateful<Div> {
+pub fn graph_label(id: impl Into<ElementId>, role: NodeRole, name: &str, count: Option<usize>, compact: bool, theme: BrowserTheme, font_family: SharedString) -> Stateful<Div> {
     let color = match role {
         NodeRole::Selection => theme.text_accent,
         NodeRole::Context => theme.text_muted,
         NodeRole::Root | NodeRole::Path | NodeRole::Fan => theme.text,
     };
     let accent = theme.text_accent;
-    div().id(id).size_full().flex().items_center().justify_center().cursor_pointer().text_color(color).hover(move |style| style.text_color(accent)).child(label_body(role, name, count, compact, theme))
+    div().id(id).size_full().flex().items_center().justify_center().cursor_pointer().text_color(color).hover(move |style| style.text_color(accent)).child(label_body(role, name, count, compact, theme, font_family))
 }
 
 /// The box [`graph_label`] needs for the same label.
 pub fn graph_label_size(role: NodeRole, name: &str, count: Option<usize>, compact: bool, window: &mut gpui::Window, cx: &mut gpui::App) -> Size<Pixels> {
     let theme = browser_theme(cx);
-    let mut body = label_body(role, name, count, compact, theme).into_any_element();
+    let mut body = label_body(role, name, count, compact, theme, Theme::global(cx).font_family.clone()).into_any_element();
     body.layout_as_root(size(AvailableSpace::MaxContent, AvailableSpace::MaxContent), window, cx)
 }
 
-fn label_body(role: NodeRole, name: &str, count: Option<usize>, compact: bool, theme: BrowserTheme) -> Div {
+fn label_body(role: NodeRole, name: &str, count: Option<usize>, compact: bool, theme: BrowserTheme, font_family: SharedString) -> Div {
     let text_size = label_rems(role, compact);
     let display = matches!(role, NodeRole::Root | NodeRole::Path | NodeRole::Selection);
     let shown = if display { name.to_uppercase().chars().map(String::from).collect::<Vec<_>>().join(HAIR_SPACE) } else { name.to_owned() };
@@ -56,8 +56,8 @@ fn label_body(role: NodeRole, name: &str, count: Option<usize>, compact: bool, t
         .text_center()
         .line_clamp(MAX_LINES)
         .text_ellipsis()
-        .when(display, |text| text.font_family(DISPLAY_FONT_FAMILY).when(role == NodeRole::Selection, |text| text.font_weight(FontWeight::SEMIBOLD)))
-        .when(!display, |text| text.font_family(TEXT_FAMILY).font_features(crate::small_caps()))
+        .when(display, |text| text.font_family(theme.display_font_family()).when(role == NodeRole::Selection, |text| text.font_weight(FontWeight::SEMIBOLD)))
+        .when(!display, |text| text.font_family(font_family.clone()).font_features(crate::small_caps()))
         .child(shown);
     div()
         .px(px(PAD_X))
@@ -67,7 +67,7 @@ fn label_body(role: NodeRole, name: &str, count: Option<usize>, compact: bool, t
         .text_size(rems(text_size))
         .line_height(rems(text_size * LINE_HEIGHT))
         .child(text)
-        .children(count.map(|count| div().flex_none().pl(px(COUNT_GAP)).font_family(TEXT_FAMILY).text_size(rems(text_size * COUNT_SCALE)).line_height(rems(text_size * COUNT_SCALE)).text_color(theme.text_muted).child(count.to_string())))
+        .children(count.map(|count| div().flex_none().pl(px(COUNT_GAP)).font_family(font_family).text_size(rems(text_size * COUNT_SCALE)).line_height(rems(text_size * COUNT_SCALE)).text_color(theme.text_muted).child(count.to_string())))
 }
 
 /// Label sizes in rems, for phones and e-readers or for larger windows.

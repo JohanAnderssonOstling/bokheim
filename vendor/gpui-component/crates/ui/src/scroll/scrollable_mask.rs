@@ -186,7 +186,7 @@ impl Element for ScrollableMask {
                     }
 
                     let mut offset = scroll_handle.offset();
-                    let mut delta = event.delta.pixel_delta(line_height);
+                    let mut delta = event.delta.pixel_delta_for_viewport(line_height, bounds.size);
 
                     // Limit for only one way scrolling at same time.
                     // When use MacBook touchpad we may get both x and y delta,

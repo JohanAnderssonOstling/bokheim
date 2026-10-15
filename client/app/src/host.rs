@@ -1,11 +1,21 @@
 //! Integration API for launchers, browser workers, and runtime probes.
 //! Views use the clients and result types at the crate root instead.
 
+pub use client_platform_runtime::startup_profile;
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use crate::api::BackendLaunch;
 #[cfg(target_arch = "wasm32")]
 pub use crate::runtime::BackendWorkerHost;
-pub use crate::runtime::{AppWorkerClientMessage, AppWorkerRequest, AppWorkerStartupMessage, WorkerCommand, WorkerDispatchResult, WorkerPayload, WorkerSubscription, decode_worker_message, encode_worker_message};
+pub use crate::runtime::{decode_worker_message, encode_worker_message, AppWorkerClientMessage, AppWorkerRequest, AppWorkerStartupMessage, WorkerCommand, WorkerDispatchResult, WorkerPayload, WorkerSubscription};
+#[cfg(target_os = "android")]
+pub use library_opds::browser::android as android_browser;
+#[cfg(not(target_arch = "wasm32"))]
+pub use library_opds::browser::configure as configure_opds_browser;
+#[cfg(not(target_arch = "wasm32"))]
+pub use library_opds::browser::BrowserFeedback;
+#[cfg(not(target_arch = "wasm32"))]
+pub use library_opds::browser::address as browser_address;
 #[cfg(not(target_arch = "wasm32"))]
 pub use library_registry::LIBRARY_MANIFEST_FILENAME;
 
@@ -17,17 +27,19 @@ pub mod web {
 
 /// CPU worker requests and execution.
 pub mod cpu {
-    pub use cpu_host::{BookTask, CpuRequest, CpuResponse, ThumbnailBytes, execute, execute_book_with_mobi};
+    #[cfg(target_arch = "wasm32")]
+    pub use crate::runtime::bisac::install as initialize_bisac_reference;
+    pub use cpu_host::{execute, execute_book_with_mobi, BookTask, CpuRequest, CpuResponse, ThumbnailBytes};
 }
-
-#[cfg(target_arch = "wasm32")]
-pub use crate::runtime::coordinator_lifecycle;
 
 /// Mounted Kobo discovery.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod kobo {
-    pub use client_platform_kobo::{KoboDevice, detect_kobo_devices};
+    pub use client_platform_kobo::{detect_kobo_devices, KoboDevice};
 }
 
 /// Gate background side effects during a host-owned update startup trial.
 pub use client_platform_runtime::executor::defer_background_work;
+#[cfg(not(target_arch = "wasm32"))]
+pub use client_platform_runtime::executor::{defer_library_maintenance, LibraryMaintenancePermit};
+pub use client_platform_runtime::transfers;

@@ -1,6 +1,6 @@
 //! Recompute all assignments from stored evidence, including previously unmatched books.
-use crate::query_methods::query_rows;
 use crate::SqlParam;
+use crate::query_methods::query_rows;
 use crate::sync::apply::{project_book, write_subject_projection};
 use crate::{Database, DatabaseError};
 use book_model::{BookMetadata, BookSubject};
@@ -84,4 +84,3 @@ mod tests {
 include_sqlite_sql::include_sql!("src/sql/taxonomy.sql");
 #[cfg(test)]
 use crate::sql_fixtures::FixturesSql;
-

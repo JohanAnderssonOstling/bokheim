@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bokheim · Audiobook detail player</title>
+  <style>
+    @font-face { font-family: Raleway; src: url('../../desktop-gpui/assets/fonts/Raleway-Regular.ttf'); }
+    @font-face { font-family: Raleway; src: url('../../desktop-gpui/assets/fonts/Raleway-Bold.ttf'); font-weight: 700; }
+    @font-face { font-family: Garamond; src: url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf'); }
+    @font-face { font-family: Bodoni; src: url('../../desktop-gpui/assets/fonts/BodoniModa-Regular.ttf'); }
+    :root { font-size: 16px; color-scheme: light; --canvas: #eae5dc; --paper: #f6f2eb; --ink: #22201d; --muted: #6b675f; --rule: #c5bdac; --accent: #466853; --accent-ink: #fffdfa; --wash: #d9e8de; --hover: #46685312; }
+    [data-theme="dark"] { color-scheme: dark; --canvas: #1c1a16; --paper: #11100d; --ink: #efe6d0; --muted: #a69c86; --rule: #4e4334; --accent: #d3b271; --accent-ink: #11100d; --wash: #3c3423; --hover: #d3b27114; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--canvas); color: var(--ink); font: 1rem/1.5 Raleway, sans-serif; }
+    button, input, select { font: inherit; color: inherit; }
+    button, select, input[type="range"] { cursor: pointer; }
+    button { border: 0; background: transparent; }
+    button:hover { background: var(--hover); }
+    button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+    button:disabled { opacity: .35; cursor: default; }
+    [hidden] { display: none !important; }
+    .study { max-width: 1600px; margin: auto; padding: 28px 32px 32px; }
+    .study-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 22px; font-size: 13px; }
+    .study-label { display: flex; align-items: center; gap: 12px; }
+    .study-label strong { font-size: 15px; font-weight: 700; }
+    .study-label span { color: var(--muted); border-left: 1px solid var(--rule); padding-left: 12px; }
+    .study-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; }
+    .font-control { display: flex; align-items: center; gap: 10px; }
+    .font-control input { width: 112px; accent-color: var(--accent); }
+    .font-control output { min-width: 32px; font-variant-numeric: tabular-nums; }
+    .study-tools select, .theme-button { padding: 7px 10px; border: 1px solid var(--rule); background: var(--paper); }
+    .app { border: 1px solid var(--rule); background: var(--paper); min-height: 49rem; }
+    .app-header { min-height: 4rem; padding: .75rem 1.5rem; display: flex; align-items: center; gap: 1rem; border-bottom: 1px solid var(--rule); }
+    .wordmark { font: 1.65rem/1 Bodoni, Georgia, serif; letter-spacing: -.04em; }
+    .header-rule { width: 1px; height: 1.25rem; background: var(--rule); margin-inline: .25rem; }
+    .library-label { color: var(--muted); font-size: .875rem; }
+    .app-header .format { margin-left: auto; color: var(--muted); font-size: .75rem; display: flex; align-items: center; gap: .5rem; }
+    .app-body { display: flex; min-width: 0; }
+    .rail { width: 4.25rem; flex: none; display: flex; flex-direction: column; align-items: center; gap: 1rem; padding: 1.5rem .5rem; border-right: 1px solid var(--rule); }
+    .rail .selected { color: var(--accent); background: var(--wash); }
+    .rail .settings { margin-top: auto; }
+    .workspace { flex: 1; min-width: 0; container: workspace / inline-size; }
+    .detail { padding: 1.5rem 2rem 2.5rem; display: grid; grid-template-columns: 22.5rem minmax(13rem, 1fr) minmax(14rem, 1fr); gap: 2.75rem; align-items: start; }
+    .player-column { min-width: 0; }
+    .back { display: inline-flex; align-items: center; gap: .5rem; height: 2.5rem; margin: -.5rem 0 1rem -.5rem; padding-inline: .5rem; font-size: .875rem; }
+    .cover { position: relative; container-type: inline-size; aspect-ratio: 1; width: min(100%, 20rem); margin-inline: auto; overflow: hidden; background: #183e33; color: #e9dfb8; }
+    .cover::after { content: ''; position: absolute; inset: 3.33cqw; border: 1px solid #e9dfb854; pointer-events: none; }
+    .cover-type { position: absolute; top: 7.5cqw; left: 5cqw; right: 5cqw; z-index: 1; text-align: center; }
+    .cover-type small { display: block; font-size: 2.8125cqw; letter-spacing: .22em; margin-bottom: 3.5cqw; }
+    .cover-type strong { display: block; font: 11.25cqw/.98 Bodoni, Georgia, serif; letter-spacing: -.025em; }
+    .cover-type em { display: block; margin-top: 3cqw; font: 4.375cqw Garamond, Georgia, serif; }
+    .cover-art { position: absolute; inset: 0; width: 100%; height: 100%; }
+    .metadata { text-align: center; margin-top: 1.25rem; }
+    h1 { font: 1.75rem/1.2 Bodoni, Georgia, serif; margin: 0; }
+    .author { margin: .4rem 0 0; font-size: 1rem; }
+    .narrator { color: var(--muted); margin: .35rem 0 0; font-size: .75rem; }
+    .player { margin-top: 2rem; }
+    .chapter-name { font-size: 1.0625rem; margin: 0 0 .625rem; overflow-wrap: anywhere; }
+    .scrub { --progress: 36%; appearance: none; -webkit-appearance: none; display: block; width: 100%; height: 1.5rem; margin: 0; background: transparent; accent-color: var(--accent); }
+    .scrub::-webkit-slider-runnable-track { height: 3px; background: linear-gradient(to right, var(--accent) 0 var(--progress), var(--rule) var(--progress) 100%); }
+    .scrub::-moz-range-track { height: 3px; background: var(--rule); }
+    .scrub::-moz-range-progress { height: 3px; background: var(--accent); }
+    .scrub::-webkit-slider-thumb { appearance: none; -webkit-appearance: none; width: .625rem; height: .625rem; margin-top: calc(1.5px - .3125rem); border: 0; border-radius: 50%; background: var(--accent); }
+    .scrub::-moz-range-thumb { width: .625rem; height: .625rem; border: 0; border-radius: 50%; background: var(--accent); }
+    .times { display: flex; justify-content: space-between; color: var(--muted); font-size: .75rem; font-variant-numeric: tabular-nums; }
+    .transport { display: flex; align-items: center; justify-content: space-evenly; gap: 0; margin-top: 1.5rem; }
+    .icon { display: inline-block; width: 1.25rem; height: 1.25rem; background: currentColor; mask: var(--icon) center / contain no-repeat; -webkit-mask: var(--icon) center / contain no-repeat; flex: none; }
+    .icon-button { display: inline-flex; align-items: center; justify-content: center; width: 2.5rem; height: 2.5rem; padding: 0; flex: none; }
+    .skip { width: 3.5rem; height: 3.5rem; }
+    .skip .icon { width: 2rem; height: 2rem; }
+    .play { width: clamp(48px, 4rem, 80px); height: clamp(48px, 4rem, 80px); border-radius: 50%; background: var(--accent); color: var(--accent-ink); }
+    .play:hover { background: var(--accent); filter: brightness(1.1); }
+    .play .icon { width: 1.875rem; height: 1.875rem; }
+    .secondary { display: flex; align-items: center; justify-content: space-evenly; gap: 0; margin-top: 1.25rem; }
+    .chapter-navigation, .options { display: contents; }
+    .option { position: relative; min-width: 0; }
+    .tool { width: auto; min-height: 3rem; padding: .5rem .25rem; display: flex; flex-direction: row; align-items: center; justify-content: center; gap: .5rem; }
+    .tool .icon { width: 1.375rem; height: 1.375rem; }
+    .timer-value { font-size: .875rem; font-variant-numeric: tabular-nums; }
+    .speed-value { font-size: 1.125rem; line-height: 1.375rem; font-variant-numeric: tabular-nums; }
+    .tool[data-active="true"] { color: var(--accent); }
+    .tool[aria-expanded="true"] { background: var(--wash); }
+    .menu { position: absolute; z-index: 3; right: 0; bottom: calc(100% + .5rem); background: var(--paper); border: 1px solid var(--rule); min-width: 11rem; max-width: calc(100vw - 2rem); padding: .375rem; box-shadow: 0 .5rem 1.5rem #0002; }
+    .menu-heading { color: var(--muted); font-size: .6875rem; padding: .5rem .625rem .625rem; border-bottom: 1px solid var(--rule); margin-bottom: .25rem; }
+    .menu button { display: flex; align-items: center; justify-content: space-between; gap: 1rem; width: 100%; text-align: left; padding: .625rem; font-size: .875rem; }
+    .menu button[aria-checked="true"] { background: var(--wash); color: var(--accent); }
+    .menu button[aria-checked="true"]::after { content: '✓'; }
+    .book-status { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--rule); }
+    .book-summary { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .375rem .75rem; color: var(--muted); font-size: .6875rem; font-variant-numeric: tabular-nums; }
+    .book-summary p { margin: 0; }
+    .completion { color: var(--accent); }
+    .current-chapter { font-size: .6875rem; color: var(--muted); padding: .375rem .5rem; margin-right: -.5rem; }
+    .section-column { min-width: 0; padding-top: 3.5rem; }
+    .section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem; margin-bottom: 1.25rem; }
+    h2 { font: 1.375rem/1.2 Bodoni, Georgia, serif; margin: 0; }
+    .section-heading span { font-size: .75rem; color: var(--muted); }
+    .chapters { list-style: none; padding: 0; margin: 0; max-height: 43rem; overflow-y: auto; scrollbar-width: thin; }
+    .chapters li { border-top: 1px solid var(--rule); }
+    .chapter-button { border-left: 2px solid transparent; display: grid; grid-template-columns: 1.5rem 1fr auto; align-items: baseline; width: 100%; text-align: left; padding: 1rem .625rem; column-gap: .5rem; font-size: .875rem; line-height: 1.5; }
+    .chapter-number, .duration { font-size: .75rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .chapter-button[aria-current="true"] { border-left-color: var(--accent); color: var(--accent); background: var(--wash); }
+    .chapter-button[aria-current="true"] .chapter-number { color: var(--accent); }
+    .chapter-button .listening { display: block; font-size: .6875rem; margin-top: .375rem; }
+    .description p { font: 1.125rem/1.65 Garamond, Georgia, serif; margin: 0 0 1rem; }
+    .book-facts { border-top: 1px solid var(--rule); padding-top: 1rem; margin-top: 1.5rem; }
+    .book-facts div { display: flex; justify-content: space-between; gap: 1rem; font-size: .75rem; padding: .375rem 0; }
+    .book-facts dt { color: var(--muted); }
+    .book-facts dd { margin: 0; text-align: right; }
+    .study-footer { margin: 18px 0 0; color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
+    .study-footer p { margin: 0; }
+    .app[data-view="player"] .rail, .app[data-view="player"] .section-column { display: none; }
+    .app[data-view="player"] .detail { display: block; }
+    .app[data-view="player"] .player-column { max-width: 22.5rem; margin: auto; }
+    @container workspace (max-width: 68rem) {
+      .detail { grid-template-columns: 22.5rem minmax(12rem, 1fr); gap: 2rem; }
+      .description { grid-column: 1 / -1; padding-top: 0; border-top: 1px solid var(--rule); padding-block-start: 1.5rem; }
+    }
+    @container workspace (max-width: 45rem) {
+      .detail { grid-template-columns: minmax(0, 1fr); padding: 1.5rem; }
+      .player-column { width: 100%; max-width: 22.5rem; margin-inline: auto; }
+      .section-column { padding-top: 1.5rem; border-top: 1px solid var(--rule); }
+    }
+    @container workspace (max-width: 22rem) {
+      .detail { padding-inline: .5rem; }
+      .skip { width: 2.75rem; height: 2.75rem; }
+      .app-header .format { font-size: .625rem; }
+    }
+    @media (max-width: 650px) {
+      .study { padding: 16px 10px; }
+      .study-label span { display: none; }
+      .study-tools { gap: 12px; }
+      .rail { display: none; }
+      .app-header { padding: .75rem 1rem; }
+      .library-label, .header-rule { display: none; }
+      .app-header .format { display: none; }
+      .menu { position: fixed; left: 1rem; right: 1rem; bottom: 1rem; min-width: 0; max-width: none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="study">
+    <header class="study-header">
+      <div class="study-label"><strong>Audiobook detail</strong><span>Refined player study</span></div>
+      <div class="study-tools" aria-label="Mockup settings">
+        <label class="font-control" for="font-size">UI size <input id="font-size" type="range" min="12" max="32" value="16"><output for="font-size" id="font-output">16 px</output></label>
+        <select id="view" aria-label="Preview view"><option value="page">Full detail page</option><option value="player">Player only</option></select>
+        <button class="theme-button" id="theme" aria-pressed="false">Dark mode</button>
+      </div>
+    </header>
+    <section class="app" id="app" data-view="page" aria-label="Book detail mockup">
+      <header class="app-header">
+        <span class="wordmark">bokheim</span><span class="header-rule"></span><span class="library-label">My library</span>
+        <span class="format"><span class="icon" style="--icon:url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiBmaWxsPSJjdXJyZW50Q29sb3IiPjxwYXRoIGQ9Ik0yMDAuNDcsNTYuMDdBMTAxLjM3LDEwMS4zNywwLDAsMCwxMjguNzcsMjZIMTI4QTEwMiwxMDIsMCwwLDAsMjYsMTI4djU2YTIyLDIyLDAsMCwwLDIyLDIySDY0YTIyLDIyLDAsMCwwLDIyLTIyVjE0NGEyMiwyMiwwLDAsMC0yMi0yMkgzOC4yQTkwLjEyLDkwLjEyLDAsMCwxLDE5Miw2NC41Miw4OS40MSw4OS40MSwwLDAsMSwyMTcuODEsMTIySDE5MmEyMiwyMiwwLDAsMC0yMiwyMnY0MGEyMiwyMiwwLDAsMCwyMiwyMmgxNmEyMiwyMiwwLDAsMCwyMi0yMlYxMjhBMTAxLjQ0LDEwMS40NCwwLDAsMCwyMDAuNDcsNTYuMDdaTTY0LDEzNGExMCwxMCwwLDAsMSwxMCwxMHY0MGExMCwxMCwwLDAsMS0xMCwxMEg0OGExMCwxMCwwLDAsMS0xMC0xMFYxMzRabTE1NCw1MGExMCwxMCwwLDAsMS0xMCwxMEgxOTJhMTAsMTAsMCwwLDEtMTAtMTBWMTQ0YTEwLDEwLDAsMCwxLDEwLTEwaDI2WiIvPjwvc3ZnPg==')"></span>Audiobook</span>
+      </header>
+      <div class="app-body">
+        <aside class="rail" aria-label="Library navigation preview">
+          <span class="icon-button selected" aria-label="Books"><span class="icon" style="--icon:url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiBmaWxsPSJjdXJyZW50Q29sb3IiPjxwYXRoIGQ9Ik0xMDQsMzRINTZBMTQsMTQsMCwwLDAsNDIsNDhWMjA4YTE0LDE0LDAsMCwwLDE0LDE0aDQ4YTE0LDE0LDAsMCwwLDE0LTE0VjQ4QTE0LDE0LDAsMCwwLDEwNCwzNFpNNTQsNzhoNTJWMTc4SDU0Wm0yLTMyaDQ4YTIsMiwwLDAsMSwyLDJWNjZINTRWNDhBMiwyLDAsMCwxLDU2LDQ2Wm00OCwxNjRINTZhMiwyLDAsMCwxLTItMlYxOTBoNTJ2MThBMiwyLDAsMCwxLDEwNCwyMTBabTEyNS43LTE1TDE5Ni41MSwzNy4xNmExNCwxNCwwLDAsMC0xNi42My0xMC44NUwxMzMuMDcsMzYuMzdBMTQuMDksMTQuMDksMCwwLDAsMTIyLjMsNTNsMzMuMTksMTU3LjgxYTE0LDE0LDAsMCwwLDYuMSw4LjksMTMuODUsMTMuODUsMCwwLDAsNy41NywyLjI2LDEzLjU1LDEzLjU1LDAsMCwwLDMtLjMybDQ2LjgxLTEwLjA1QTE0LjA5LDE0LjA5LDAsMCwwLDIyOS43LDE5NVptLTgyLjgxLTgzLjMyLDUwLjczLTEwLjksMTQuMTIsNjcuMTZMMTYxLDE3OC44MVptLTYuNjMtMzEuNTZMMTkxLDY5LjE5LDE5NS4xNSw4OWwtNTAuNzMsMTAuOVptLTQuNjYtMzIsNDYuOC0xMC4wNWEyLjE4LDIuMTgsMCwwLDEsLjQyLDAsMS44OSwxLjg5LDAsMCwxLDEuMDUuMzIsMiwyLDAsMCwxLC44OSwxLjMxbDMuNzUsMTcuODJMMTM3Ljc5LDY4LjM0bC0zLjc0LTE3Ljc4QTIuMDcsMi4wNywwLDAsMSwxMzUuNiw0OC4xWm04MC44MSwxNTEuOEwxNjkuNiwyMTBhMS45MiwxLjkyLDAsMCwxLTEuNDctLjI3LDIsMiwwLDAsMS0uODktMS4zMWwtMy43NS0xNy44Miw1MC43Mi0xMC45TDIxOCwxOTcuNDNBMi4wNywyLjA3LDAsMCwxLDIxNi40MSwxOTkuOVoiLz48L3N2Zz4=')"></span></span>
+          <span class="icon-button" aria-label="Search"><span class="icon" style="--icon:url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiBmaWxsPSJjdXJyZW50Q29sb3IiPjxwYXRoIGQ9Ik0yMjguMjQsMjE5Ljc2bC01MS4zOC01MS4zOGE4Ni4xNSw4Ni4xNSwwLDEsMC04LjQ4LDguNDhsNTEuMzgsNTEuMzhhNiw2LDAsMCwwLDguNDgtOC40OFpNMzgsMTEyYTc0LDc0LDAsMSwxLDc0LDc0QTc0LjA5LDc0LjA5LDAsMCwxLDM4LDExMloiLz48L3N2Zz4=')"></span></span>
+          <span class="icon-button" aria-label="Folders"><span class="icon" style="--icon:url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiBmaWxsPSJjdXJyZW50Q29sb3IiPjxwYXRoIGQ9Ik0yMTYsNzRIMTMwLjQ5bC0yNy45LTI3LjlhMTMuOTQsMTMuOTQsMCwwLDAtOS45LTQuMUg0MEExNCwxNCwwLDAsMCwyNiw1NlYyMDAuNjJBMTMuMzksMTMuMzksMCwwLDAsMzkuMzgsMjE0SDIxNi44OUExMy4xMiwxMy4xMiwwLDAsMCwyMzAsMjAwLjg5Vjg4QTE0LDE0LDAsMCwwLDIxNiw3NFpNNDAsNTRIOTIuNjlhMiwyLDAsMCwxLDEuNDEuNTlMMTEzLjUxLDc0SDM4VjU2QTIsMiwwLDAsMSw0MCw1NFpNMjE4LDIwMC44OWExLjExLDEuMTEsMCwwLDEtMS4xMSwxLjExSDM5LjM4QTEuNCwxLjQsMCwwLDEsMzgsMjAwLjYyVjg2SDIxNmEyLDIsMCwwLDEsMiwyWiIvPjwvc3ZnPg==')"></span></span>
+          <span class="icon-button settings" aria-label="Settings"><span class="icon" style="--icon:url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiBmaWxsPSJjdXJyZW50Q29sb3IiPjxwYXRoIGQ9Ik0xMjgsODJhNDYsNDYsMCwxLDAsNDYsNDZBNDYuMDYsNDYuMDYsMCwwLDAsMTI4LDgyWm0wLDgwYTM0LDM0LDAsMSwxLDM0LTM0QTM0LDM0LDAsMCwxLDEyOCwxNjJaTTIxNCwxMzAuODRjLjA2LTEuODkuMDYtMy43OSwwLTUuNjhMMjI5LjMzLDEwNmE2LDYsMCwwLDAsMS4xMS01LjI5QTEwNS4zNCwxMDUuMzQsMCwwLDAsMjE5Ljc2LDc0LjlhNiw2LDAsMCwwLTQuNTMtM2wtMjQuNDUtMi43MXEtMS45My0yLjA3LTQtNGwtMi43Mi0yNC40NmE2LDYsMCwwLDAtMy00LjUzLDEwNS42NSwxMDUuNjUsMCwwLDAtMjUuNzctMTAuNjZBNiw2LDAsMCwwLDE1MCwyNi42OGwtMTkuMiwxNS4zN2MtMS44OS0uMDYtMy43OS0uMDYtNS42OCwwTDEwNiwyNi42N2E2LDYsMCwwLDAtNS4yOS0xLjExQTEwNS4zNCwxMDUuMzQsMCwwLDAsNzQuOSwzNi4yNGE2LDYsMCwwLDAtMyw0LjUzTDY5LjIzLDY1LjIycS0yLjA3LDEuOTQtNCw0TDQwLjc2LDcyYTYsNiwwLDAsMC00LjUzLDMsMTA1LjY1LDEwNS42NSwwLDAsMC0xMC42NiwyNS43N0E2LDYsMCwwLDAsMjYuNjgsMTA2bDE1LjM3LDE5LjJjLS4wNiwxLjg5LS4wNiwzLjc5LDAsNS42OEwyNi42NywxNTAuMDVhNiw2LDAsMCwwLTEuMTEsNS4yOUExMDUuMzQsMTA1LjM0LDAsMCwwLDM2LjI0LDE4MS4xYTYsNiwwLDAsMCw0LjUzLDNsMjQuNDUsMi43MXExLjk0LDIuMDcsNCw0TDcyLDIxNS4yNGE2LDYsMCwwLDAsMyw0LjUzLDEwNS42NSwxMDUuNjUsMCwwLDAsMjUuNzcsMTAuNjYsNiw2LDAsMCwwLDUuMjktMS4xMUwxMjUuMTYsMjE0YzEuODkuMDYsMy43OS4wNiw1LjY4LDBsMTkuMjEsMTUuMzhhNiw2LDAsMCwwLDMuNzUsMS4zMSw2LjIsNi4yLDAsMCwwLDEuNTQtLjIsMTA1LjM0LDEwNS4zNCwwLDAsMCwyNS43Ni0xMC42OCw2LDYsMCwwLDAsMy00LjUzbDIuNzEtMjQuNDVxMi4wNy0xLjkzLDQtNGwyNC40Ni0yLjcyYTYsNiwwLDAsMCw0LjUzLTMsMTA1LjQ5LDEwNS40OSwwLDAsMCwxMC42Ni0yNS43Nyw2LDYsMCwwLDAtMS4xMS01LjI5Wm0tMy4xLDQxLjYzLTIzLjY0LDIuNjNhNiw2LDAsMCwwLTMuODIsMiw3NS4xNCw3NS4xNCwwLDAsMS02LjMxLDYuMzEsNiw2LDAsMCwwLTIsMy44MmwtMi42MywyMy42M0E5NC4yOCw5NC4yOCwwLDAsMSwxNTUuMTQsMjE4bC0xOC41Ny0xNC44NmE2LDYsMCwwLDAtMy43NS0xLjMxaC0uMzZhNzguMDcsNzguMDcsMCwwLDEtOC45MiwwLDYsNiwwLDAsMC00LjExLDEuM0wxMDAuODcsMjE4YTk0LjEzLDk0LjEzLDAsMCwxLTE3LjM0LTcuMTdMODAuOSwxODcuMjFhNiw2LDAsMCwwLTItMy44Miw3NS4xNCw3NS4xNCwwLDAsMS02LjMxLTYuMzEsNiw2LDAsMCwwLTMuODItMmwtMjMuNjMtMi42M0E5NC4yOCw5NC4yOCwwLDAsMSwzOCwxNTUuMTRsMTQuODYtMTguNTdhNiw2LDAsMCwwLDEuMy00LjExLDc4LjA3LDc4LjA3LDAsMCwxLDAtOC45Miw2LDYsMCwwLDAtMS4zLTQuMTFMMzgsMTAwLjg3YTk0LjEzLDk0LjEzLDAsMCwxLDcuMTctMTcuMzRMNjguNzksODAuOWE2LDYsMCwwLDAsMy44Mi0yLDc1LjE0LDc1LjE0LDAsMCwxLDYuMzEtNi4zMSw2LDYsMCwwLDAsMi0zLjgybDIuNjMtMjMuNjNBOTQuMjgsOTQuMjgsMCwwLDEsMTAwLjg2LDM4bDE4LjU3LDE0Ljg2YTYsNiwwLDAsMCw0LjExLDEuMyw3OC4wNyw3OC4wNywwLDAsMSw4LjkyLDAsNiw2LDAsMCwwLDQuMTEtMS4zTDE1NS4xMywzOGE5NC4xMyw5NC4xMywwLDAsMSwxNy4zNCw3LjE3bDIuNjMsMjMuNjRhNiw2LDAsMCwwLDIsMy44Miw3NS4xNCw3NS4xNCwwLDAsMSw2LjMxLDYuMzEsNiw2LDAsMCwwLDMuODIsMmwyMy42MywyLjYzQTk0LjI4LDk0LjI4LDAsMCwxLDIxOCwxMDAuODZsLTE0Ljg2LDE4LjU3YTYsNiwwLDAsMC0xLjMsNC4xMSw3OC4wNyw3OC4wNywwLDAsMSwwLDguOTIsNiw2LDAsMCwwLDEuMyw0LjExTDIxOCwxNTUuMTNBOTQuMTMsOTQuMTMsMCwwLDEsMjEwLjg1LDE3Mi40N1oiLz48L3N2Zz4=')"></span></span>
+        </aside>
+        <div class="workspace">
+          <div class="detail">
+            <section class="player-column" aria-label="Audiobook player">
+              <span class="back"><span class="icon" style="--icon:url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiBmaWxsPSJjdXJyZW50Q29sb3IiPjxwYXRoIGQ9Ik0yMjIsMTI4YTYsNiwwLDAsMS02LDZINTQuNDlsNjEuNzUsNjEuNzZhNiw2LDAsMSwxLTguNDgsOC40OGwtNzItNzJhNiw2LDAsMCwxLDAtOC40OGw3Mi03MmE2LDYsMCwwLDEsOC40OCw4LjQ4TDU0LjQ5LDEyMkgyMTZBNiw2LDAsMCwxLDIyMiwxMjhaIi8+PC9zdmc+')"></span>Library</span>
+              <div class="cover" role="img" aria-label="The Secret Garden cover, with gold botanical illustrations on deep green">
+                <div class="cover-type"><small>FRANCES HODGSON BURNETT</small><strong>The Secret<br>Garden</strong><em>An unabridged audiobook</em></div>
+                <svg class="cover-art" viewBox="0 0 360 360" aria-hidden="true">
+                  <defs>
+                    <g id="leaf"><path d="M0 0 Q-26-25-10-45 Q12-29 0 0Z" fill="#879a70"/><path d="M0 0 -10-45" stroke="#d2c897" stroke-width=".7"/></g>
+                    <g id="branch"><path d="M0 0 Q-24-70 5-140" fill="none" stroke="#c2ba86" stroke-width="1.3"/><use href="#leaf" transform="translate(-4 -18) rotate(-52) scale(.7)"/><use href="#leaf" transform="translate(-8 -43) rotate(55) scale(.7)"/><use href="#leaf" transform="translate(-8 -63) rotate(-45) scale(.65)"/><use href="#leaf" transform="translate(-5 -86) rotate(64) scale(.55)"/><use href="#leaf" transform="translate(0 -108) rotate(-20) scale(.5)"/></g>
+                  </defs>
+                  <circle cx="180" cy="250" r="60" fill="none" stroke="#d5c997" stroke-width=".8"/>
+                  <path d="M145 311v-61a35 35 0 0 1 70 0v61M151 311v-61a29 29 0 0 1 58 0v61M180 221v90M151 269h58M151 290h58" fill="none" stroke="#d5c997" stroke-width="1.1"/>
+                  <use href="#branch" transform="translate(63 333) rotate(-9)"/><use href="#branch" transform="translate(104 352) rotate(-36) scale(1.05)"/>
+                  <use href="#branch" transform="translate(300 333) rotate(9) scale(-1 1)"/><use href="#branch" transform="translate(260 353) rotate(36) scale(-1.05 1.05)"/>
+                  <path d="M34 327Q180 298 326 327" fill="none" stroke="#c2ba86" stroke-width="1"/>
+                  <circle cx="179" cy="183" r="2.5" fill="#e9dfb8"/>
+                </svg>
+              </div>
+              <div class="metadata"><h1>The Secret Garden</h1><p class="author">Frances Hodgson Burnett</p><p class="narrator">Narrated by Karen Savage · <span id="book-duration">10 hr 18 min</span></p></div>
+              <div class="player" id="player">
+                <p class="chapter-name" id="chapter-name">Martha</p>
+                <input class="scrub" id="scrub" type="range" min="0" max="2364" value="851" aria-label="Chapter playback position">
+                <div class="times"><span id="elapsed">14:11</span><span id="remaining">−25:13</span></div>
+                <div class="transport" aria-label="Playback controls">
+                  <button class="icon-button skip" id="back" aria-label="Back 15 seconds" title="Back 15 seconds"><span class="icon" style="--icon:url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJjdXJyZW50Q29sb3IiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTMgMTIuNWE5IDkgMCAxIDAgMi42NC02LjM2IiBzdHJva2Utd2lkdGg9IjEuMTI1Ii8+PHBhdGggZD0iTTMuMiAyLjh2NGg0IiBzdHJva2Utd2lkdGg9IjEuMTI1Ii8+PHBhdGggZD0iTTguNyAxMC40IDEwLjEgOS41djYiIHN0cm9rZS13aWR0aD0iMSIvPjxwYXRoIGQ9Ik0xNS4zIDkuNWgtM2wtLjMgMi43Yy42LS40IDEuMy0uNSAxLjktLjQgMSAuMiAxLjYgMSAxLjYgMiAwIDEuMS0uOCAxLjktMiAxLjktLjYgMC0xLjItLjItMS42LS42IiBzdHJva2Utd2lkdGg9IjEiLz48L3N2Zz4K')"></span></button>
+                  <button class="icon-button play" id="play" aria-label="Play" aria-pressed="false" title="Play"><span class="icon" id="play-icon" style="--icon:url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiBmaWxsPSJjdXJyZW50Q29sb3IiPjxwYXRoIGQ9Ik0yNDAsMTI4YTE1Ljc0LDE1Ljc0LDAsMCwxLTcuNiwxMy41MUw4OC4zMiwyMjkuNjVhMTYsMTYsMCwwLDEtMTYuMi4zQTE1Ljg2LDE1Ljg2LDAsMCwxLDY0LDIxNi4xM1YzOS44N2ExNS44NiwxNS44NiwwLDAsMSw4LjEyLTEzLjgyLDE2LDE2LDAsMCwxLDE2LjIuM0wyMzIuNCwxMTQuNDlBMTUuNzQsMTUuNzQsMCwwLDEsMjQwLDEyOFoiLz48L3N2Zz4K')"></span></button>
+                  <button class="icon-button skip" id="forward" aria-label="Forward 30 seconds" title="Forward 30 seconds"><span class="icon" style="--icon:url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJjdXJyZW50Q29sb3IiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCI+PHBhdGggZD0iTTIxIDEyLjVhOSA5IDAgMSAxLTIuNjQtNi4zNiIgc3Ryb2tlLXdpZHRoPSIxLjEyNSIvPjxwYXRoIGQ9Ik0yMC44IDIuOHY0aC00IiBzdHJva2Utd2lkdGg9IjEuMTI1Ii8+PHBhdGggZD0iTTguNCAxMGMuNC0uNCAxLS42IDEuNi0uNS45LjEgMS41LjcgMS41IDEuNCAwIC44LS43IDEuNC0xLjYgMS40LjkgMCAxLjguNiAxLjggMS42IDAgMS0uOCAxLjctMS45IDEuNy0uNiAwLTEuMi0uMi0xLjYtLjYiIHN0cm9rZS13aWR0aD0iMSIvPjxlbGxpcHNlIGN4PSIxNC43IiBjeT0iMTIuNSIgcng9IjEuNiIgcnk9IjMiIHN0cm9rZS13aWR0aD0iMSIvPjwvc3ZnPgo=')"></span></button>
+                </div>
+                <div class="secondary" aria-label="Chapter and playback options">
+                    <div class="option"><button class="tool" id="speed" aria-label="Playback speed" aria-haspopup="menu" aria-controls="speed-menu" aria-expanded="false" title="Playback speed"><span class="speed-value" id="speed-value">1×</span></button><div class="menu" id="speed-menu" role="menu" aria-label="Playback speed" hidden></div></div>
+                  <div class="chapter-navigation">
+                    <button class="tool" id="previous" aria-label="Previous chapter" title="Previous chapter"><span class="icon" style="--icon:url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiBmaWxsPSJjdXJyZW50Q29sb3IiPjxwYXRoIGQ9Ik0xNjQuMjQsMjAzLjc2YTYsNiwwLDEsMS04LjQ4LDguNDhsLTgwLTgwYTYsNiwwLDAsMSwwLTguNDhsODAtODBhNiw2LDAsMCwxLDguNDgsOC40OEw4OC40OSwxMjhaIi8+PC9zdmc+')"></span></button>
+                    <button class="tool" id="next" aria-label="Next chapter" title="Next chapter"><span class="icon" style="--icon:url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiBmaWxsPSJjdXJyZW50Q29sb3IiPjxwYXRoIGQ9Ik0xODAuMjQsMTMyLjI0bC04MCw4MGE2LDYsMCwwLDEtOC40OC04LjQ4TDE2Ny41MSwxMjgsOTEuNzYsNTIuMjRhNiw2LDAsMCwxLDguNDgtOC40OGw4MCw4MEE2LDYsMCwwLDEsMTgwLjI0LDEzMi4yNFoiLz48L3N2Zz4=')"></span></button>
+                  </div>
+                  <div class="options">
+                    <div class="option"><button class="tool" id="sleep" aria-label="Sleep timer" title="Sleep timer" aria-haspopup="menu" aria-controls="sleep-menu" aria-expanded="false"><span class="icon" id="sleep-icon" style="--icon:url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiBmaWxsPSJub25lIiBzdHJva2U9ImN1cnJlbnRDb2xvciIgc3Ryb2tlLXdpZHRoPSIxMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48Y2lyY2xlIGN4PSIxMjgiIGN5PSIxMzYiIHI9IjgwIi8+PHBhdGggZD0iTTEyOCA5NnY0MGwyOCAxNk0zMiA1NmwyNC0yNE0yMDAgMzJsMjQgMjRNNzIgMjAybC0xNiAyMk0xODQgMjAybDE2IDIyIi8+PC9zdmc+Cg==')"></span><span class="timer-value" id="sleep-value" hidden></span></button><div class="menu" id="sleep-menu" role="menu" aria-label="Sleep timer" hidden></div></div>
+                  </div>
+                </div>
+                <div class="book-status"><div class="book-summary"><span class="completion" id="book-completion">14% complete</span><p id="book-remaining">8 hr 55 min left</p></div></div>
+              </div>
+            </section>
+            <section class="section-column" id="contents" aria-labelledby="contents-title"><div class="section-heading"><h2 id="contents-title">Contents <span>27</span></h2><button class="current-chapter" id="jump-current">Current chapter ↗</button></div><ol class="chapters" id="chapters"></ol></section>
+            <section class="section-column description" aria-labelledby="about-title">
+              <div class="section-heading"><h2 id="about-title">About this book</h2></div>
+              <p>When Mary Lennox arrives at her uncle’s house on the Yorkshire moors, she finds a place full of secrets: a hundred rooms, a crying voice in the night, and a garden locked away for ten years.</p>
+              <p>With a robin for a guide and an unexpected friendship, Mary begins to discover what can grow when something forgotten is given a little care.</p>
+              <p>A story of friendship, belonging, and the quiet work of coming back to life.</p>
+              <dl class="book-facts"><div><dt>Published</dt><dd>1911</dd></div><div><dt>Language</dt><dd>English</dd></div><div><dt>Edition</dt><dd>Unabridged</dd></div><div><dt>Format</dt><dd>M4B · 27 chapters</dd></div></dl>
+            </section>
+          </div>
+        </div>
+      </div>
+    </section>
+    <footer class="study-footer"><p>Primary playback above · chapter navigation and options below</p><p>Interactive mockup · simulated playback, no audio</p></footer>
+  </main>
+  <script>
+    const $ = id => document.getElementById(id);
+    const playbackIcons = {'play': 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiBmaWxsPSJjdXJyZW50Q29sb3IiPjxwYXRoIGQ9Ik0yNDAsMTI4YTE1Ljc0LDE1Ljc0LDAsMCwxLTcuNiwxMy41MUw4OC4zMiwyMjkuNjVhMTYsMTYsMCwwLDEtMTYuMi4zQTE1Ljg2LDE1Ljg2LDAsMCwxLDY0LDIxNi4xM1YzOS44N2ExNS44NiwxNS44NiwwLDAsMSw4LjEyLTEzLjgyLDE2LDE2LDAsMCwxLDE2LjIuM0wyMzIuNCwxMTQuNDlBMTUuNzQsMTUuNzQsMCwwLDEsMjQwLDEyOFoiLz48L3N2Zz4K', 'pause': 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2IiBmaWxsPSJjdXJyZW50Q29sb3IiPjxwYXRoIGQ9Ik0yMTYsNDhWMjA4YTE2LDE2LDAsMCwxLTE2LDE2SDE2MGExNiwxNiwwLDAsMS0xNi0xNlY0OGExNiwxNiwwLDAsMSwxNi0xNmg0MEExNiwxNiwwLDAsMSwyMTYsNDhaTTk2LDMySDU2QTE2LDE2LDAsMCwwLDQwLDQ4VjIwOGExNiwxNiwwLDAsMCwxNiwxNkg5NmExNiwxNiwwLDAsMCwxNi0xNlY0OEExNiwxNiwwLDAsMCw5NiwzMloiLz48L3N2Zz4K'};
+    const chapters = [
+      ['There Is No One Left', 1218], ['Mistress Mary Quite Contrary', 1641], ['Across the Moor', 1320], ['Martha', 2364],
+      ['The Cry in the Corridor', 1094], ['“There Was Some One Crying—There Was!”', 1495], ['The Key of the Garden', 1127],
+      ['The Robin Who Showed the Way', 1340], ['The Strangest House Any One Ever Lived In', 1499], ['Dickon', 1858],
+      ['The Nest of the Missel Thrush', 1528], ['“Might I Have a Bit of Earth?”', 1366], ['“I Am Colin”', 1602],
+      ['A Young Rajah', 1398], ['Nest Building', 1247], ['“I Won’t!” Said Mary', 1026], ['A Tantrum', 1270],
+      ['“Tha’ Munnot Waste No Time”', 1263], ['“It Has Come!”', 1055], ['“I Shall Live Forever—and Ever—and Ever!”', 1308],
+      ['Ben Weatherstaff', 1256], ['When the Sun Went Down', 1035], ['Magic', 1587], ['“Let Them Laugh”', 1239],
+      ['The Curtain', 980], ['“It’s Mother!”', 1224], ['In the Garden', 1743]
+    ];
+    let chapter = 3, position = 851, playing = false, rate = 1, sleep = 'Off', sleepRemaining = 0;
+    const totalMinutes = Math.floor(chapters.reduce((sum, item) => sum + item[1], 0) / 60);
+    $('book-duration').textContent = `${Math.floor(totalMinutes / 60)} hr ${totalMinutes % 60} min`;
+    const formatTime = seconds => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
+    function update() {
+      const duration = chapters[chapter][1];
+      $('chapter-name').textContent = chapters[chapter][0];
+      $('sleep-icon').hidden = sleep !== 'Off';
+      $('sleep-value').hidden = sleep === 'Off';
+      $('sleep-value').textContent = sleep === 'End of chapter' ? 'End' : formatTime(sleepRemaining);
+      $('sleep').dataset.active = String(sleep !== 'Off');
+      $('sleep').setAttribute('aria-label', sleep === 'Off' ? 'Sleep timer' : `Sleep timer: ${sleep}`);
+      $('scrub').max = duration;
+      $('scrub').value = position;
+      $('scrub').style.setProperty('--progress', `${position / duration * 100}%`);
+      $('scrub').setAttribute('aria-valuetext', `${formatTime(position)} of ${formatTime(duration)}`);
+      $('elapsed').textContent = formatTime(position);
+      $('remaining').textContent = `−${formatTime(duration - position)}`;
+      const left = duration - position + chapters.slice(chapter + 1).reduce((sum, item) => sum + item[1], 0);
+      const listeningLeft = Math.ceil(left / rate / 60);
+      $('book-remaining').textContent = `${Math.floor(listeningLeft / 60)} hr ${listeningLeft % 60} min left`;
+      const total = chapters.reduce((sum, item) => sum + item[1], 0);
+      $('book-completion').textContent = `${Math.round((total - left) / total * 100)}% complete`;
+      $('previous').disabled = chapter === 0;
+      $('next').disabled = chapter === chapters.length - 1;
+      document.querySelectorAll('.chapter-button').forEach((button, index) => {
+        button.setAttribute('aria-current', String(index === chapter));
+        button.querySelector('.listening').hidden = index !== chapter;
+        button.querySelector('.listening').textContent = playing ? 'Listening now' : 'Paused here';
+      });
+    }
+    function setPlaying(value) {
+      playing = value;
+      $('play').setAttribute('aria-pressed', String(value));
+      $('play').setAttribute('aria-label', value ? 'Pause' : 'Play');
+      $('play').title = value ? 'Pause' : 'Play';
+      $('play-icon').style.setProperty('--icon', `url('${playbackIcons[value ? 'pause' : 'play']}')`);
+      update();
+    }
+    function selectChapter(index) { chapter = index; position = 0; update(); }
+    chapters.forEach(([title, duration], index) => {
+      const li = document.createElement('li');
+      const button = document.createElement('button');
+      button.className = 'chapter-button';
+      const number = document.createElement('span'); number.className = 'chapter-number'; number.textContent = String(index + 1).padStart(2, '0');
+      const name = document.createElement('span'); name.textContent = title;
+      const listening = document.createElement('span'); listening.className = 'listening'; listening.textContent = 'Paused here'; name.append(listening);
+      const time = document.createElement('span'); time.className = 'duration'; time.textContent = formatTime(duration);
+      button.append(number, name, time);
+      button.addEventListener('click', () => selectChapter(index));
+      li.append(button); $('chapters').append(li);
+    });
+    $('jump-current').addEventListener('click', () => {
+      const target = document.querySelector('.chapter-button[aria-current="true"]');
+      const list = $('chapters');
+      list.scrollTo({ top: target.offsetTop - list.offsetTop - list.clientHeight / 2 + target.clientHeight / 2, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+      target.focus({ preventScroll: true });
+    });
+    $('play').addEventListener('click', () => setPlaying(!playing));
+    $('back').addEventListener('click', () => { position = Math.max(0, position - 15); update(); });
+    $('forward').addEventListener('click', () => { position = Math.min(chapters[chapter][1], position + 30); update(); });
+    $('previous').addEventListener('click', () => selectChapter(Math.max(0, chapter - 1)));
+    $('next').addEventListener('click', () => selectChapter(Math.min(chapters.length - 1, chapter + 1)));
+    $('scrub').addEventListener('input', event => { position = Number(event.target.value); update(); });
+    function closeMenus() {
+      for (const id of ['speed', 'sleep']) { $(`${id}-menu`).hidden = true; $(id).setAttribute('aria-expanded', 'false'); }
+    }
+    function makeMenu(id, values, label, selected, change) {
+      const heading = document.createElement('div'); heading.className = 'menu-heading'; heading.textContent = id === 'speed' ? 'Playback speed' : 'Stop playing after'; heading.setAttribute('role', 'presentation'); $(`${id}-menu`).append(heading);
+      values.forEach(value => {
+        const button = document.createElement('button'); button.setAttribute('role', 'menuitemradio');
+        button.textContent = label(value); button.dataset.value = String(value);
+        button.setAttribute('aria-checked', String(value === selected));
+        button.addEventListener('click', () => {
+          change(value);
+          $(`${id}-menu`).querySelectorAll('[role="menuitemradio"]').forEach(item => item.setAttribute('aria-checked', String(item === button)));
+          closeMenus(); $(id).focus();
+        });
+        $(`${id}-menu`).append(button);
+      });
+      $(id).addEventListener('click', () => {
+        const open = $(`${id}-menu`).hidden; closeMenus();
+        if (open) { $(`${id}-menu`).hidden = false; $(id).setAttribute('aria-expanded', 'true'); $(`${id}-menu`).querySelector('[aria-checked="true"]').focus(); }
+      });
+    }
+    makeMenu('speed', [.75, 1, 1.25, 1.5, 1.75, 2], value => `${value}×`, 1, value => { rate = value; $('speed-value').textContent = `${value}×`; $('speed').dataset.active = String(value !== 1); update(); });
+    makeMenu('sleep', ['Off', '15 min', '30 min', 'End of chapter'], value => value, 'Off', value => {
+      sleep = value; sleepRemaining = value === '15 min' ? 900 : value === '30 min' ? 1800 : 0;
+      update();
+    });
+    document.addEventListener('click', event => { if (!event.target.closest('.option')) closeMenus(); });
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape') { const active = document.querySelector('.option > button[aria-expanded="true"]'); closeMenus(); active?.focus(); }
+      if (!event.target.closest('button, input, select, a, [role="menu"]')) {
+        if (event.code === 'Space') { event.preventDefault(); setPlaying(!playing); }
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); position = Math.max(0, Math.min(chapters[chapter][1], position + (event.key === 'ArrowLeft' ? -15 : 30))); update(); }
+      }
+      if (!event.target.closest('[role="menu"]') || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const items = Array.from(event.target.closest('[role="menu"]').querySelectorAll('[role="menuitemradio"]')), index = items.indexOf(document.activeElement);
+      items[event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length].focus();
+    });
+    $('font-size').addEventListener('input', event => { document.documentElement.style.fontSize = `${event.target.value}px`; $('font-output').textContent = `${event.target.value} px`; });
+    $('view').addEventListener('change', event => { $('app').dataset.view = event.target.value; });
+    $('theme').addEventListener('click', () => {
+      const dark = document.documentElement.dataset.theme !== 'dark'; document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+      $('theme').setAttribute('aria-pressed', String(dark)); $('theme').textContent = dark ? 'Light mode' : 'Dark mode';
+    });
+    setInterval(() => {
+      if (!playing) return;
+      position += rate;
+      if (sleepRemaining > 0) {
+        sleepRemaining--;
+        if (!sleepRemaining) { setPlaying(false); $('sleep').dataset.active = 'false'; sleep = 'Off'; document.querySelectorAll('#sleep-menu [role="menuitemradio"]').forEach(button => button.setAttribute('aria-checked', String(button.dataset.value === 'Off'))); }
+      }
+      if (position >= chapters[chapter][1]) {
+        const stop = sleep === 'End of chapter';
+        if (chapter < chapters.length - 1) selectChapter(chapter + 1);
+        else { position = chapters[chapter][1]; setPlaying(false); }
+        if (stop) { setPlaying(false); sleep = 'Off'; $('sleep').dataset.active = 'false'; document.querySelectorAll('#sleep-menu [role="menuitemradio"]').forEach(button => button.setAttribute('aria-checked', String(button.dataset.value === 'Off'))); }
+      }
+      update();
+    }, 1000);
+    update();
+  </script>
+</body>
+</html>

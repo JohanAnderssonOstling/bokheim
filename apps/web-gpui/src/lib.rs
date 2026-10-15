@@ -1,12 +1,11 @@
 #![cfg(target_family = "wasm")]
 
-use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::OnceCell;
 use std::rc::Rc;
 
 use app::AppClient;
 use application_shell::ApplicationRoot;
-use browser_ui::{AppServices, AppStartup};
+use browser_ui::{AppServices, AppStartup, NavigationSession};
 use gpui::{App, AppContext, Bounds, SharedString, WindowBounds, WindowOptions, px, size};
 use gpui_component::Root;
 use wasm_bindgen::{JsCast, JsValue, closure::Closure};
@@ -15,7 +14,7 @@ use wasm_bindgen_futures::JsFuture;
 mod browser_back;
 
 thread_local! {
-    static APPLICATION: RefCell<Option<gpui::ApplicationHandle>> = const { RefCell::new(None) };
+    static APPLICATION: OnceCell<gpui::ApplicationHandle> = const { OnceCell::new() };
 }
 
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
@@ -43,7 +42,7 @@ pub fn start() {
             open_bokheim(backend, startup, preferences, cx);
             notify_startup("__BOKHEIM_STARTUP_READY__", "");
         });
-        APPLICATION.with(|application| *application.borrow_mut() = Some(handle));
+        APPLICATION.with(|application| assert!(application.set(handle).is_ok(), "web application already initialized"));
     });
 }
 
@@ -94,9 +93,7 @@ async fn browser_delay(milliseconds: i32) {
 }
 
 fn open_bokheim(backend: AppClient, startup: AppStartup, reader_preferences: reader_ui::ReaderPreferences, cx: &mut App) {
-    if let Err(error) =
-        cx.text_system().add_fonts(vec![Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/LibertinusSerif-Regular.otf")), Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/LibertinusSerif-Bold.otf")), Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/LibertinusSerif-Italic.otf")), Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/BodoniModa-Regular.ttf")), Cow::Borrowed(include_bytes!("../../desktop-gpui/assets/fonts/BodoniModa-SemiBold.ttf"))])
-    {
+    if let Err(error) = ui_components::register_fonts(cx) {
         log::warn!("failed to install Bokheim fonts: {error}");
     }
 
@@ -104,11 +101,8 @@ fn open_bokheim(backend: AppClient, startup: AppStartup, reader_preferences: rea
     ui_components::init_page_scrolling(cx);
     browser_ui::bind_keys(cx);
     reader_ui::bind_keys(cx);
-    let saved_reader_preferences = Rc::new(RefCell::new(reader_preferences.clone()));
     let reader_preferences_backend = backend.clone();
-    let save_reader_settings: reader_ui::SaveReaderSettings = Rc::new(move |preferences, cx| {
-        let patches = saved_reader_preferences.borrow().synchronized_patches(&preferences);
-        *saved_reader_preferences.borrow_mut() = preferences;
+    let save_reader_settings: reader_ui::SaveReaderSettings = Rc::new(move |_, patches, cx| {
         if !patches.is_empty() {
             let backend = reader_preferences_backend.clone();
             cx.spawn(async move |_cx| {
@@ -128,7 +122,7 @@ fn open_bokheim(backend: AppClient, startup: AppStartup, reader_preferences: rea
     cx.open_window(
         WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), titlebar: Some(gpui::TitlebarOptions { title: Some(SharedString::from("Bokheim")), ..Default::default() }), focus: true, ..Default::default() },
         move |window, cx| {
-            let application = cx.new(|cx| ApplicationRoot::new(services, application_backend, "Bokheim", None, window, cx));
+            let application = cx.new(|cx| ApplicationRoot::new(services, browser_ui::WindowSession { initial: load_navigation_session(), save: Rc::new(save_navigation_session) }, application_backend, "Bokheim", None, window, cx));
             browser_back::install(window, cx);
             cx.new(|cx| Root::new(application, window, cx))
         },
@@ -138,5 +132,31 @@ fn open_bokheim(backend: AppClient, startup: AppStartup, reader_preferences: rea
 }
 
 #[cfg(target_arch = "wasm32")]
-#[path = "../../web-backend-worker/connection.rs"]
 mod backend_connection;
+
+const NAVIGATION_STORAGE_KEY: &str = "bokheim.navigation.v1";
+
+fn load_navigation_session() -> NavigationSession {
+    let load = || -> Result<Option<NavigationSession>, String> {
+        let storage = web_sys::window().ok_or("browser window is unavailable")?.local_storage().map_err(|error| format!("{error:?}"))?.ok_or("local storage is unavailable")?;
+        storage.get_item(NAVIGATION_STORAGE_KEY).map_err(|error| format!("{error:?}"))?.map(|value| serde_json::from_str(&value).map_err(|error| error.to_string())).transpose()
+    };
+    match load() {
+        Ok(session) => session.unwrap_or_default(),
+        Err(error) => {
+            log::warn!("could not restore navigation: {error}");
+            NavigationSession::default()
+        }
+    }
+}
+
+fn save_navigation_session(session: NavigationSession, _: &mut App) {
+    let save = || -> Result<(), String> {
+        let storage = web_sys::window().ok_or("browser window is unavailable")?.local_storage().map_err(|error| format!("{error:?}"))?.ok_or("local storage is unavailable")?;
+        let value = serde_json::to_string(&session).map_err(|error| error.to_string())?;
+        storage.set_item(NAVIGATION_STORAGE_KEY, &value).map_err(|error| format!("{error:?}"))
+    };
+    if let Err(error) = save() {
+        log::warn!("could not save navigation: {error}");
+    }
+}

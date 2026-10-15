@@ -1,0 +1,26 @@
+{
+  "variant": "int8",
+  "threads": 4,
+  "speaker": "bm_george",
+  "speaker_id": 26,
+  "model_bytes": 114203756,
+  "load_seconds": 1.6340697020059451,
+  "opening_sentence_seconds": 6.195755931999884,
+  "first_full_passage_seconds": 40.22137901300448,
+  "warm_generation_seconds": [
+    46.712787930999184,
+    39.62826640700223,
+    38.994404696000856
+  ],
+  "median_seconds": 39.62826640700223,
+  "median_cpu_seconds": 116.27752115599998,
+  "audio_seconds": 38.300291666666666,
+  "times_realtime": 0.966489204279173,
+  "peak_process_ram_mib": 708.02734375,
+  "sample_rate": 24000,
+  "file": "george-int8-4threads.wav",
+  "peak_amplitude": 0.5249663591384888,
+  "rms": 0.076269505243684,
+  "peak_rss_measurement_valid": false,
+  "memory_metric": "historical resource.getrusage(RUSAGE_SELF).ru_maxrss; may include pre-exec launcher RSS"
+}

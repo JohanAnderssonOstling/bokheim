@@ -1,6 +1,6 @@
 //! Per-request cancellation over a dedicated reply port.
-use super::{byte_reply, field, object, BytesFuture, Port};
-use std::rc::Rc;
+use super::{BytesFuture, Port, byte_reply, field};
+use async_channel::bounded;
 use wasm_bindgen::{JsCast, JsValue};
 
 /// A queued source owns its endpoint until transfer succeeds.
@@ -27,25 +27,20 @@ impl Drop for Source {
 
 /// Cancellation drops the operation future, which releases queued domain work.
 pub fn serve(port: web_sys::MessagePort, response: BytesFuture) {
-    let (cancel, cancelled) = futures_channel::oneshot::channel::<()>();
-    let cancel = Rc::new(std::cell::RefCell::new(Some(cancel)));
+    let (cancel, cancelled) = bounded::<()>(1);
     let malformed = cancel.clone();
     let owner = Port::listen(
         port,
         move |_message| {
             // The dedicated caller-to-server channel only carries cancellation.
-            if let Some(cancel) = cancel.borrow_mut().take() {
-                let _ = cancel.send(());
-            }
+            cancel.close();
         },
         move || {
-            if let Some(cancel) = malformed.borrow_mut().take() {
-                let _ = cancel.send(());
-            }
+            malformed.close();
         },
     );
     wasm_bindgen_futures::spawn_local(async move {
-        if let Some(result) = client_platform_runtime::pending::until_cancelled(response, cancelled).await {
+        if let Some(result) = client_platform_runtime::pending::until_cancelled(response, cancelled.recv()).await {
             let (message, transfer) = byte_reply(&[], result);
             let _ = owner.raw.post_message_with_transferable(&message, &transfer);
         }

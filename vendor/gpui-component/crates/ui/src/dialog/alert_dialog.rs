@@ -220,7 +220,6 @@ impl AlertDialog {
         self.base = self.base.overlay_closable(overlay_closable);
         self
     }
-
     /// Set the close button of the alert dialog, defaults to `false`.
     pub fn close_button(mut self, close_button: bool) -> Self {
         self.base = self.base.close_button(close_button);

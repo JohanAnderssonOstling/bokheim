@@ -7,10 +7,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::library::widgets::{BookCardInteraction, BookCardPresentation, Paginator, PaginatorAxis, PaginatorGroup, PaginatorPosition, graph_cover_policy};
+use crate::library::widgets::{BookCardPresentation, Paginator, PaginatorAxis, PaginatorGroup, PaginatorPosition, graph_cover_policy};
 use gpui::prelude::*;
 use gpui::{Context, div};
-use gpui_component::IconName;
+use gpui_component::{IconName, Theme};
 use std::time::{Duration, Instant};
 
 use gpui::{AnyElement, App, Bounds, Entity, FocusHandle, IntoElement, Pixels, Point, SharedString, Size, Subscription, Window, point, px, size};
@@ -66,6 +66,7 @@ struct GraphKey {
     path: Vec<BrowseCrumb>,
     compact: bool,
     rem_size: Pixels,
+    font_family: SharedString,
     kind: GraphLayoutKind,
 }
 
@@ -84,7 +85,7 @@ struct GraphMotion {
     target_camera: CanvasCamera,
     selected_key: String,
     anchor: Point<Pixels>,
-    departing: GraphLayout,
+    departing: Arc<GraphLayout>,
     /// The entries the departing layout's nodes index.
     departing_entries: Arc<Vec<GraphEntry>>,
     ghost_opacity: f32,
@@ -112,6 +113,7 @@ pub(super) struct BrowseGraph {
     placed_for: Option<BrowseLocation>,
     motion: Option<GraphMotion>,
     _loaded: Subscription,
+    _covers_subscription: Subscription,
 }
 
 impl gpui::EventEmitter<GraphTap> for BrowseGraph {}
@@ -120,9 +122,17 @@ impl BrowseGraph {
     pub(super) fn new(navigator: Entity<BrowseNavigator>, layout_kind: GraphLayoutKind, cx: &mut Context<Self>) -> Self {
         let covers_id = format!("{}-graph-covers", navigator.read(cx).kind.list_prefix());
         let loaded = cx.subscribe(&navigator, |graph, _, loaded: &Loaded, cx| graph.install(loaded, cx));
+        let covers = cx.new(|_| Paginator::new(covers_id, []).flow_axis(PaginatorAxis::Vertical));
+        let covers_subscription = cx.observe(&covers, |graph, covers, cx| {
+            let flow = covers.read(cx);
+            let Some(range) = flow.visible_child_range() else { return };
+            let range = range.start..flow.adjacent_child_range(true).map_or(range.end, |next| next.end.max(range.end));
+            let sections = graph.navigator.read(cx).listing.page.as_ref().map_or(0, |page| page.heading_count());
+            graph.navigator.update(cx, |navigator, cx| navigator.load_page_range(range.start + sections..range.end + sections, 0, cx));
+        });
         Self {
             navigator,
-            covers: cx.new(|_| Paginator::new(covers_id, []).flow_axis(PaginatorAxis::Vertical)),
+            covers,
             covers_focus: cx.focus_handle(),
             covers_focus_subscription: None,
             cover_positions: HashMap::new(),
@@ -138,6 +148,7 @@ impl BrowseGraph {
             placed_for: None,
             motion: None,
             _loaded: loaded,
+            _covers_subscription: covers_subscription,
         }
     }
 
@@ -152,9 +163,14 @@ impl BrowseGraph {
         let mut children: HashMap<_, _> = navigator.listing.ancestors.iter().cloned().collect();
         children.insert(location, navigator.listing.children.to_vec());
         let books = navigator.listing.books.clone();
-        let groups = if books.is_empty() { Vec::new() } else { vec![PaginatorGroup::new(graph_cover_policy(), books.iter().cloned().map(|book| super::layout::book_child(book, BookCardPresentation::GraphCover, |_, _, _| BookCardInteraction::default(), None, cx)))] };
-        self.children = children;
-        self.target = None;
+        let page = navigator.listing.page.clone();
+        let book_indices = navigator.listing.book_indices.clone();
+        let covers = super::layout::direct_book_children(books, page.as_ref(), &book_indices, BookCardPresentation::GraphCover, None, cx);
+        let groups = if covers.is_empty() { Vec::new() } else { vec![PaginatorGroup::new(graph_cover_policy(), covers)] };
+        if self.children != children {
+            self.children = children;
+            self.target = None;
+        }
         let restored = loaded.left.and_then(|_| self.cover_positions.get(&location).cloned());
         let refresh = loaded.refresh;
         self.covers.update(cx, |covers, cx| {
@@ -205,21 +221,21 @@ impl BrowseGraph {
         true
     }
 
-    pub(super) fn render_panel(
-        &mut self, root_book_count: usize, controls: AnyElement, search_field: Option<gpui::Div>, window: &mut Window, cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub(super) fn render_panel(&mut self, root_book_count: usize, controls: AnyElement, search_field: Option<gpui::Div>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = components::browser_theme(cx);
         let navigator = self.navigator.read(cx);
-        let (kind, path, has_books) = (navigator.kind, navigator.destination.path.clone(), !navigator.listing.books.is_empty());
+        let (kind, path, has_books) = (navigator.kind, navigator.destination.path.clone(), navigator.listing.page.as_ref().map_or(!navigator.listing.books.is_empty(), |page| page.book_total > 0));
         let graph = self.render(kind, root_book_count, &path, window, cx);
         let compact = components::WindowWidthClass::for_window(window).is_compact();
         if self.covers_focus_subscription.is_none() {
             self.covers_focus_subscription = Some(cx.on_focus_in(&self.covers_focus.clone(), window, |graph, _, cx| {
-                if graph.set_sheet_expanded(true) { cx.notify(); }
+                if graph.set_sheet_expanded(true) {
+                    cx.notify();
+                }
             }));
         }
         let covers = div().id("graph-covers-focus").track_focus(&self.covers_focus).size_full().child(self.covers.clone()).into_any_element();
-        let graph_area = div().relative().flex_1().min_h_0().min_w_0().child(graph).child(div().absolute().right(px(8.0)).bottom(px(8.0)).child(controls));
+        let graph_area = div().relative().flex_1().min_h_0().min_w_0().child(graph).child(div().absolute().right(px(8.0)).top(px(8.0)).child(controls));
         // The grid holds the selection's own books, so with none it is
         // not drawn at all rather than drawn empty. An open search keeps
         // it: the field lives there, and a query with no matches yet
@@ -437,7 +453,8 @@ impl BrowseGraph {
         let (root, root_label) = (kind.root_location(), kind.root_label());
         let compact = components::WindowWidthClass::for_window(window).is_compact();
         let params = if compact { LayoutParams::compact() } else { LayoutParams::desktop() };
-        let key = GraphKey { root, root_label: root_label.to_string(), root_book_count, path: path.to_vec(), compact, rem_size: window.rem_size(), kind: self.layout_kind };
+        let font_family = Theme::global(cx).font_family.clone();
+        let key = GraphKey { root, root_label: root_label.to_string(), root_book_count, path: path.to_vec(), compact, rem_size: window.rem_size(), font_family: font_family.clone(), kind: self.layout_kind };
         let target_changed = !self.target.as_ref().is_some_and(|target| target.key == key);
         if target_changed {
             self.target = None;
@@ -478,27 +495,31 @@ impl BrowseGraph {
         let graph = cx.weak_entity();
         // A tap browses the node, unless the press that ended on it was a pan;
         // a fading node only shows.
-        let node = |placed: &components::PlacedNode, departing: bool| {
-            let entries = if departing { &ghost.expect("a departing node belongs to the motion").departing_entries } else { &drawn.entries };
+        let entries = Arc::clone(&drawn.entries);
+        let departing_entries = ghost.map(|motion| Arc::clone(&motion.departing_entries));
+        let canvas = self.canvas.clone();
+        let node = move |placed: &components::PlacedNode, departing: bool| {
+            let entries = if departing { departing_entries.as_ref().expect("a departing node belongs to the motion") } else { &entries };
             let entry = &entries[placed.node];
-            let label = components::graph_label(SharedString::from(format!("graph-node-{}", entry.key)), placed.role, &entry.name, entry.count(), compact, theme);
+            let label = components::graph_label(SharedString::from(format!("graph-node-{}", entry.key)), placed.role, &entry.name, entry.count(), compact, theme, font_family.clone());
             if departing {
                 return label.into_any_element();
             }
-            let (graph, canvas, index) = (graph.clone(), self.canvas.clone(), placed.node);
-            label.on_click(move |_, _, cx| {
-                if canvas.read(cx).panned() {
-                    return;
-                }
-                let _ = graph.update(cx, |graph, cx| {
-                    if let Some(tap) = graph.activate(index) {
-                        cx.emit(tap);
+            let (graph, canvas, index) = (graph.clone(), canvas.clone(), placed.node);
+            label
+                .on_click(move |_, _, cx| {
+                    if canvas.read(cx).panned() {
+                        return;
                     }
-                });
-            })
-            .into_any_element()
+                    let _ = graph.update(cx, |graph, cx| {
+                        if let Some(tap) = graph.activate(index) {
+                            cx.emit(tap);
+                        }
+                    });
+                })
+                .into_any_element()
         };
-        components::graph_canvas(&self.canvas, &drawn.layout, ghost.map(|motion| (&motion.departing, motion.ghost_opacity)), node, cx).into_any_element()
+        components::graph_canvas(&self.canvas, Arc::clone(&drawn.layout), ghost.map(|motion| (Arc::clone(&motion.departing), motion.ghost_opacity)), node, cx).into_any_element()
     }
 
     /// Centres a newly selected node, or frames the initial selection.
@@ -536,7 +557,19 @@ impl BrowseGraph {
                 let mut departing = GraphLayout::clone(&drawn.layout);
                 departing.retain_nodes(|placed| !visible.contains(drawn.entries[placed.node].key.as_str()));
                 Arc::make_mut(&mut departing.edges).retain(|edge| !visible.contains(drawn.entries[edge.to].key.as_str()));
-                self.motion = Some(GraphMotion { started: Instant::now(), from, appearing, from_camera, last_camera: from_camera, target_camera: camera, selected_key: selected_key.clone(), anchor, departing, departing_entries: Arc::clone(&drawn.entries), ghost_opacity: 1.0 });
+                self.motion = Some(GraphMotion {
+                    started: Instant::now(),
+                    from,
+                    appearing,
+                    from_camera,
+                    last_camera: from_camera,
+                    target_camera: camera,
+                    selected_key: selected_key.clone(),
+                    anchor,
+                    departing: Arc::new(departing),
+                    departing_entries: Arc::clone(&drawn.entries),
+                    ghost_opacity: 1.0,
+                });
             } else {
                 self.motion = None;
                 self.canvas.update(cx, |canvas, _| canvas.camera = camera);

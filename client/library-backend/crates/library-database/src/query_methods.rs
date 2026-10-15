@@ -11,9 +11,7 @@ macro_rules! impl_sql {
     };
 }
 
-pub(crate) fn first_column<T: rusqlite::types::FromSql>(
-    query: impl FnOnce(&mut dyn FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<()>) -> rusqlite::Result<()>,
-) -> rusqlite::Result<Option<T>> {
+pub(crate) fn first_column<T: rusqlite::types::FromSql>(query: impl FnOnce(&mut dyn FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<()>) -> rusqlite::Result<()>) -> rusqlite::Result<Option<T>> {
     let mut value = None;
     query(&mut |row| {
         value = Some(row.get(0)?);
@@ -24,8 +22,7 @@ pub(crate) fn first_column<T: rusqlite::types::FromSql>(
 
 /// Map the rows returned by an include_sql-generated query.
 pub(crate) fn query_rows<T>(
-    query: impl FnOnce(&mut dyn FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<()>) -> rusqlite::Result<()>,
-    mut map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    query: impl FnOnce(&mut dyn FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<()>) -> rusqlite::Result<()>, mut map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
 ) -> rusqlite::Result<std::vec::IntoIter<rusqlite::Result<T>>> {
     let mut rows = Vec::new();
     query(&mut |row| {

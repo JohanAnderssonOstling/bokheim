@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Annotation editor · Before and after</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --canvas: #eae5dc;
+      --paper: #f6f2eb;
+      --ink: #22201d;
+      --muted: #6b675f;
+      --rule: #c5bdac;
+      --accent: #466853;
+      --wash: #d9e8de;
+      --hover: #eae6df;
+      --shadow: 0 8px 28px #22201d16;
+    }
+    [data-theme="dark"] {
+      color-scheme: dark;
+      --canvas: #1c1a16;
+      --paper: #11100d;
+      --ink: #efe6d0;
+      --muted: #a69c86;
+      --rule: #4e4334;
+      --accent: #d3b271;
+      --wash: #3c3423;
+      --hover: #201d15;
+      --shadow: 0 8px 28px #0005;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--canvas);
+      color: var(--ink);
+      font: 14px/1.5 system-ui, sans-serif;
+    }
+    button, textarea { font: inherit; }
+    button { cursor: pointer; }
+    main { max-width: 1120px; margin: 0 auto; padding: 64px 40px 40px; }
+    .eyebrow { margin: 0 0 12px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; }
+    h1 { margin: 0; font: 500 clamp(30px, 4vw, 44px)/1.12 Georgia, serif; letter-spacing: -.035em; }
+    .intro { max-width: 620px; margin: 16px 0 28px; color: var(--muted); font-size: 15px; }
+    .controls { display: flex; align-items: center; flex-wrap: wrap; gap: 24px; padding: 16px 0; border-top: 1px solid var(--rule); }
+    .themes { display: flex; gap: 4px; }
+    .themes button { padding: 5px 12px; border: 1px solid transparent; background: transparent; color: var(--muted); }
+    .themes button[aria-pressed="true"] { color: var(--ink); background: var(--paper); border-color: var(--rule); }
+    .grayscale-control { display: flex; align-items: center; gap: 8px; color: var(--muted); cursor: pointer; }
+    input[type="checkbox"] { accent-color: var(--accent); }
+    .selection-status { margin-left: auto; color: var(--muted); }
+    .selection-status strong { color: var(--ink); font-weight: 500; }
+    .comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 18px; }
+    .version-heading { display: flex; align-items: baseline; gap: 12px; margin-bottom: 16px; }
+    .version-heading span { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+    h2 { margin: 0; font-size: 18px; font-weight: 500; }
+    .stage { min-height: 290px; display: grid; place-items: center; padding: 32px 20px; border: 1px solid var(--rule); background: var(--paper); }
+    .grayscale .stage { filter: grayscale(1); }
+    .editor {
+      width: 360px;
+      max-width: 100%;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      border: 1px solid var(--rule);
+      background: var(--paper);
+      box-shadow: var(--shadow);
+      font-family: "Libertinus Serif", Georgia, serif;
+    }
+    .note-row { width: 100%; padding: 4px; border: 1px solid var(--rule); }
+    textarea { width: 100%; min-height: 48px; padding: 4px; display: block; resize: vertical; border: 0; background: transparent; color: var(--ink); font-size: 14px; line-height: 1.4; }
+    textarea:focus { outline: none; }
+    .note-row:focus-within { border-color: var(--accent); }
+    .styles { width: 100%; display: flex; gap: 8px; }
+    .styles button { flex: 1 1 auto; min-width: 0; height: 32px; padding: 0 6px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-size: 14px; }
+    .styles button[aria-pressed="true"] { background: var(--wash); }
+    .styles button:hover { background: var(--hover); }
+    .palette { width: 100%; display: flex; align-items: center; justify-content: space-between; }
+    .swatch { width: 32px; height: 32px; min-width: 20px; flex: 0 1 32px; display: flex; align-items: center; justify-content: center; padding: 0; background: transparent; cursor: pointer; color: var(--ink); }
+    .dot { display: flex; align-items: center; justify-content: center; flex: none; border-radius: 50%; background: var(--color); }
+    .before .swatch { border: 0; }
+    .before .dot { width: 16px; height: 16px; border: 1px solid var(--rule); }
+    .before .swatch.selected { background: var(--wash); }
+    .before .swatch:not(.selected):hover { background: var(--hover); }
+    .after .swatch { border: 1px solid transparent; }
+    .after .dot { width: 24px; max-width: 100%; height: 24px; border: 1px solid #0004; }
+    .after .swatch.selected { border-color: var(--ink); background: var(--wash); }
+    .after .swatch:hover { border-color: var(--muted); background: var(--hover); }
+    .after .swatch:focus-visible { outline: none; border-color: var(--accent); background: var(--wash); box-shadow: 0 0 0 1px var(--accent); }
+    .check { color: #000d; font: bold 16px/1 system-ui, sans-serif; }
+    .check[hidden] { display: none; }
+    button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .caption { margin: 16px 0 0; color: var(--muted); font-size: 13px; }
+    .keyboard-hint { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+    kbd { font: inherit; color: var(--ink); }
+    footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 12px; }
+    @media (max-width: 880px) {
+      main { padding: 36px 20px; }
+      .comparison { grid-template-columns: 1fr; }
+      .selection-status { margin-left: 0; }
+      .stage { min-height: 260px; }
+    }
+    @media (max-width: 420px) {
+      main { padding: 28px 12px; }
+      .stage { padding: 24px 8px; }
+      .editor { padding: 12px; }
+      .styles { gap: 4px; }
+      .styles button { font-size: 12px; padding: 0 4px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">EPUB reader · Interface comparison</p>
+      <h1>Annotation color picker</h1>
+      <p class="intro">Compare the previous and updated editor. Click a color to see the same selection in both versions.</p>
+    </header>
+    <div class="controls" aria-label="Preview settings">
+      <div class="themes" role="group" aria-label="Appearance">
+        <button type="button" data-theme-choice="light" aria-pressed="true">Light</button>
+        <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
+      </div>
+      <label class="grayscale-control"><input id="grayscale" type="checkbox"> Grayscale</label>
+      <div class="selection-status" aria-live="polite">Current color: <strong id="current-color">Yellow</strong></div>
+    </div>
+    <div class="comparison">
+      <section aria-labelledby="before-heading">
+        <div class="version-heading"><span>01</span><h2 id="before-heading">Before</h2></div>
+        <div class="stage">
+          <div class="editor before" aria-label="Previous annotation editor">
+            <div class="note-row"><textarea aria-label="Note in previous editor" rows="2" placeholder="Add a note">An idea worth coming back to.</textarea></div>
+            <div class="styles" role="group" aria-label="Previous annotation style"></div>
+            <div class="palette" role="group" aria-label="Previous color picker"></div>
+          </div>
+        </div>
+        <p class="caption">16 px color samples. A subtle background indicates the selected color.</p>
+        <p class="keyboard-hint">Color choices respond to mouse clicks.</p>
+      </section>
+      <section aria-labelledby="after-heading">
+        <div class="version-heading"><span>02</span><h2 id="after-heading">After</h2></div>
+        <div class="stage">
+          <div class="editor after" aria-label="Updated annotation editor">
+            <div class="note-row"><textarea aria-label="Note in updated editor" rows="2" placeholder="Add a note">An idea worth coming back to.</textarea></div>
+            <div class="styles" role="group" aria-label="Updated annotation style"></div>
+            <div class="palette" role="radiogroup" aria-label="Annotation color"></div>
+          </div>
+        </div>
+        <p class="caption">24 px color samples. A checkmark and outline identify the selected color, with hover and focus feedback.</p>
+        <p class="keyboard-hint">Tab to the selected color. Use <kbd>← →</kbd>, <kbd>Home</kbd> or <kbd>End</kbd> to change it.</p>
+      </section>
+    </div>
+    <footer>Interactive HTML preview using the reader’s eight annotation colors and warm theme. Note, style and color rows share the same width.</footer>
+  </main>
+  <script>
+    const colors = [
+      ['Yellow', '#f6c945'], ['Orange', '#fb923c'], ['Red', '#f87171'],
+      ['Pink', '#f472b6'], ['Purple', '#c084fc'], ['Blue', '#60a5fa'],
+      ['Teal', '#2dd4bf'], ['Green', '#4ade80']
+    ];
+    const styles = ['Highlight', 'Underline', 'Squiggly', 'Strike'];
+    let selectedColor = 0;
+    let selectedStyle = 'Highlight';
+
+    function updateColor(index) {
+      selectedColor = index;
+      document.getElementById('current-color').textContent = colors[index][0];
+      document.querySelectorAll('.swatch').forEach(swatch => {
+        const selected = Number(swatch.dataset.index) === index;
+        const name = colors[Number(swatch.dataset.index)][0];
+        swatch.classList.toggle('selected', selected);
+        swatch.title = name + (selected && swatch.closest('.after') ? ' (selected)' : '');
+        if (swatch.closest('.after')) {
+          swatch.setAttribute('aria-checked', String(selected));
+          swatch.tabIndex = selected ? 0 : -1;
+          swatch.querySelector('.check').hidden = !selected;
+        }
+      });
+    }
+
+    document.querySelectorAll('.editor').forEach(editor => {
+      const updated = editor.classList.contains('after');
+      const palette = editor.querySelector('.palette');
+      colors.forEach(([name, color], index) => {
+        const swatch = document.createElement(updated ? 'button' : 'span');
+        swatch.className = 'swatch';
+        swatch.dataset.index = index;
+        swatch.style.setProperty('--color', color);
+        swatch.title = name;
+        if (updated) {
+          swatch.type = 'button';
+          swatch.setAttribute('role', 'radio');
+          swatch.setAttribute('aria-label', name);
+        }
+        const dot = document.createElement('span');
+        dot.className = 'dot';
+        dot.setAttribute('aria-hidden', 'true');
+        if (updated) {
+          const check = document.createElement('span');
+          check.className = 'check';
+          check.textContent = '✓';
+          dot.append(check);
+        }
+        swatch.append(dot);
+        swatch.addEventListener('click', () => updateColor(index));
+        if (updated) swatch.addEventListener('keydown', event => {
+          if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+          let next;
+          switch (event.key) {
+            case 'ArrowLeft': case 'ArrowUp': next = (index + colors.length - 1) % colors.length; break;
+            case 'ArrowRight': case 'ArrowDown': next = (index + 1) % colors.length; break;
+            case 'Home': next = 0; break;
+            case 'End': next = colors.length - 1; break;
+            default: return;
+          }
+          event.preventDefault();
+          updateColor(next);
+          palette.children[next].focus();
+        });
+        palette.append(swatch);
+      });
+      styles.forEach(style => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = style;
+        button.dataset.style = style;
+        button.setAttribute('aria-pressed', String(style === selectedStyle));
+        button.addEventListener('click', () => {
+          selectedStyle = style;
+          document.querySelectorAll('[data-style]').forEach(item => item.setAttribute('aria-pressed', String(item.dataset.style === style)));
+        });
+        editor.querySelector('.styles').append(button);
+      });
+    });
+
+    document.querySelectorAll('textarea').forEach(input => input.addEventListener('input', () => {
+      document.querySelectorAll('textarea').forEach(other => { if (other !== input) other.value = input.value; });
+    }));
+    document.querySelectorAll('[data-theme-choice]').forEach(button => button.addEventListener('click', () => {
+      document.documentElement.dataset.theme = button.dataset.themeChoice;
+      document.querySelectorAll('[data-theme-choice]').forEach(item => item.setAttribute('aria-pressed', String(item === button)));
+    }));
+    document.getElementById('grayscale').addEventListener('change', event => document.body.classList.toggle('grayscale', event.target.checked));
+    updateColor(selectedColor);
+  </script>
+</body>
+</html>

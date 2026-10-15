@@ -1,0 +1,1145 @@
+[
+  {
+    "path": "Literature / By Language / Armenian Literature",
+    "uses": 1,
+    "concept_ids": [
+      60088
+    ],
+    "source_snapshots": [
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Classical / Greek",
+    "uses": 2,
+    "concept_ids": [
+      4253
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Classical / Greek / Ancient Greek Authors / Translations",
+    "uses": 4,
+    "concept_ids": [
+      9456
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Classical / Greek / Translations / Greek in English",
+    "uses": 1,
+    "concept_ids": [
+      9646
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Classical / Greek / Translations / Greek in Italian",
+    "uses": 1,
+    "concept_ids": [
+      6624
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Classical / Latin & Italic / Roman",
+    "uses": 4,
+    "concept_ids": [
+      4455
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Constructed & Contact-Language Literature / Esperanto Literature",
+    "uses": 1,
+    "concept_ids": [
+      60137
+    ],
+    "source_snapshots": [
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / English / English Forms / English Literary Collections",
+    "uses": 1,
+    "concept_ids": [
+      3919
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / English / English Forms / English Literary Collections / Drama",
+    "uses": 2,
+    "concept_ids": [
+      9057
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / English / English Forms / English Literary Collections / Prose",
+    "uses": 3,
+    "concept_ids": [
+      9089
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / English / English Periods / Anglo-Norman Period",
+    "uses": 1,
+    "concept_ids": [
+      3917
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / English / English Periods / By Period / 17th & 18th Century",
+    "uses": 1,
+    "concept_ids": [
+      3912
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / English / English Periods / By Period / 19th C., 1770–1890",
+    "uses": 29,
+    "concept_ids": [
+      3915
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / English / English Periods / By Period / 21st Century / Anonymous English Works, 2001–",
+    "uses": 1,
+    "concept_ids": [
+      7253
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / English / English Periods / By Period / English Renaissance, 1500–1640 / The drama",
+    "uses": 5,
+    "concept_ids": [
+      7324
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / English / English Periods / Modern English",
+    "uses": 1,
+    "concept_ids": [
+      3925
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / English / English Periods / Old English Literary History / Old English Authors & Works",
+    "uses": 1,
+    "concept_ids": [
+      13708
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / English / Regional English Literature / Anglophone Australian Lit. / 20th century, A–Z",
+    "uses": 5,
+    "concept_ids": [
+      11927
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / English / Regional English Literature / Anglophone Australian Lit. / Through 1900, A–Z",
+    "uses": 1,
+    "concept_ids": [
+      11926
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / English / Regional English Literature / Anglophone Canadian",
+    "uses": 3,
+    "concept_ids": [
+      3867
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / English / Regional English Literature / Anglophone Canadian / 20th century, A–Z",
+    "uses": 1,
+    "concept_ids": [
+      11915
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / English / Regional English Literature / Anglophone Canadian / 21st century, A–Z",
+    "uses": 1,
+    "concept_ids": [
+      11916
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / English / Regional English Literature / Anglophone Indian / 20th century, A–Z",
+    "uses": 1,
+    "concept_ids": [
+      11935
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / English / Regional English Literature / Anglophone Irish",
+    "uses": 2,
+    "concept_ids": [
+      8836
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / English / Regional English Literature / Australian, New Zealand & Pacific",
+    "uses": 1,
+    "concept_ids": [
+      11909
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Germanic / German",
+    "uses": 9,
+    "concept_ids": [
+      4244
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Germanic / German / By Period / 1700–1860",
+    "uses": 1,
+    "concept_ids": [
+      4245
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Germanic / German / Collections",
+    "uses": 1,
+    "concept_ids": [
+      12701
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Indo-Iranian Literature / Indo-Aryan Literature / Bengali Literature",
+    "uses": 2,
+    "concept_ids": [
+      60057
+    ],
+    "source_snapshots": [
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Indo-Iranian Literature / Indo-Aryan Literature / Hindi & Hindustani Literature",
+    "uses": 1,
+    "concept_ids": [
+      12835
+    ],
+    "source_snapshots": [
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Indo-Iranian Literature / Iranian Literature / Persian Literature / Persian Authors & Works",
+    "uses": 1,
+    "concept_ids": [
+      3763
+    ],
+    "source_snapshots": [
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Romance / French Literature",
+    "uses": 3,
+    "concept_ids": [
+      4184
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Romance / French Literature / French Literary Studies / History of French",
+    "uses": 3,
+    "concept_ids": [
+      7795
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Romance / French Literature / French Literary Studies / History of French / French Prose Studies",
+    "uses": 2,
+    "concept_ids": [
+      52019
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Romance / French Literature / Modern / 18th century",
+    "uses": 1,
+    "concept_ids": [
+      7338
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Romance / French Literature / Modern / 19th century",
+    "uses": 42,
+    "concept_ids": [
+      8258
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Romance / French Literature / Modern / French, 1900–1960",
+    "uses": 13,
+    "concept_ids": [
+      6271
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Romance / French Literature / Modern / French, 1961–2000",
+    "uses": 1,
+    "concept_ids": [
+      6508
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Romance / French Literature / Regional French / French Abroad / French Canadian",
+    "uses": 2,
+    "concept_ids": [
+      12697
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Romance / Italian Literature",
+    "uses": 3,
+    "concept_ids": [
+      4202
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Romance / Italian Literature / By Period / Italian, 1400–1700",
+    "uses": 1,
+    "concept_ids": [
+      12707
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Romance / Modern Occitan Literature",
+    "uses": 1,
+    "concept_ids": [
+      60037
+    ],
+    "source_snapshots": [
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Romance / Spanish-Language Literature / By Period / 1700–1868",
+    "uses": 1,
+    "concept_ids": [
+      12714
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Romance / Spanish-Language Literature / By Period / Spanish, 1868–1960",
+    "uses": 1,
+    "concept_ids": [
+      12715
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Romance / Spanish-Language Literature / Regional Spanish / Asian Spanish",
+    "uses": 1,
+    "concept_ids": [
+      11947
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Romance / Spanish-Language Literature / Regional Spanish / Colombian Spanish / Through 1960, A–Z",
+    "uses": 1,
+    "concept_ids": [
+      11969
+    ],
+    "source_snapshots": [
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Slavic & Eurasian / East Slavic / Russia",
+    "uses": 1,
+    "concept_ids": [
+      4216
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Slavic & Eurasian / East Slavic / Russia / By Period / Russian, 1800–1870",
+    "uses": 5,
+    "concept_ids": [
+      12492
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Slavic & Eurasian / East Slavic / Russia / By Period / Russian, 1870–1917",
+    "uses": 2,
+    "concept_ids": [
+      12493
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Slavic & Eurasian / East Slavic / Russia / Russian Literary Studies",
+    "uses": 2,
+    "concept_ids": [
+      4466
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Slavic & Eurasian / West Slavic / Czech",
+    "uses": 2,
+    "concept_ids": [
+      6417
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Slavic & Eurasian / West Slavic / Polish",
+    "uses": 5,
+    "concept_ids": [
+      12525
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Language / Uralic Literature / Finnish Literature",
+    "uses": 1,
+    "concept_ids": [
+      9258
+    ],
+    "source_snapshots": [
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Region / American & Caribbean / Canadian",
+    "uses": 3,
+    "concept_ids": [
+      3867
+    ],
+    "source_snapshots": [],
+    "review_note": "Only Canadian literature subject in the current Literature subtree; same source Canadian literature scope PS8001-PS8649."
+  },
+  {
+    "path": "Literature / By Region / American & Caribbean / U.S. / American poetry in English",
+    "uses": 1,
+    "concept_ids": [
+      3864
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Region / American & Caribbean / U.S. / By Period / 19th Century",
+    "uses": 57,
+    "concept_ids": [
+      4153
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Region / American & Caribbean / U.S. / By Period / 21st Century",
+    "uses": 2,
+    "concept_ids": [
+      4155
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1900–1960",
+    "uses": 113,
+    "concept_ids": [
+      12718
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Region / American & Caribbean / U.S. / By Period / American, 1961–2000",
+    "uses": 4,
+    "concept_ids": [
+      12719
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Region / East Asian & Pacific / Indian / By Period / 20th Century",
+    "uses": 1,
+    "concept_ids": [
+      4196
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Region / Nordic / Denmark / By Period / 19th century",
+    "uses": 1,
+    "concept_ids": [
+      3871
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Region / Nordic / Norway",
+    "uses": 2,
+    "concept_ids": [
+      4394
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Region / Nordic / Sweden / By Period / 19th century",
+    "uses": 2,
+    "concept_ids": [
+      4474
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  },
+  {
+    "path": "Literature / By Region / Nordic / Sweden / Swedish Literary Studies / Swedish Literary Criticism",
+    "uses": 2,
+    "concept_ids": [
+      8951
+    ],
+    "source_snapshots": [
+      "/tmp/unified-taxonomy.pre-language-region-merge.sqlite3",
+      "/home/johan/.cache/bokheim-taxonomy-curation/literature-20261014/taxonomy-before.sqlite3",
+      "target/release/build/subject-projection-c86a248124e9bdb1/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-d78fcf5757e69f73/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-ecd60cea57c31140/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-dc4795e09d2ef3ed/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-94d0f51625d1be9e/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-abed531ebad74083/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-2347dd2138abeea2/out/unified-taxonomy-client-v2.sqlite3",
+      "target/release/build/subject-projection-671843f9f199e032/out/unified-taxonomy-client-v2.sqlite3"
+    ]
+  }
+]

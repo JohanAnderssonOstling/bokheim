@@ -313,7 +313,7 @@ fn profile_file(provider: Arc<dyn ResourceProvider>, uri: &str, stylesheet_cache
 fn profile_warm_file(provider: Arc<dyn ResourceProvider>, uri: &str, totals: &mut WarmTotals) -> Result<(), String> {
     let html = provider.read_string(uri).map_err(|error| error.to_string())?;
     let inputs = PipelineInputs {
-        source: html,
+        source: html.into(),
         markup_syntax: html::pipeline::MarkupSyntax::from_uri(uri),
         user_styles: Vec::new(),
         reader_overrides: Default::default(),

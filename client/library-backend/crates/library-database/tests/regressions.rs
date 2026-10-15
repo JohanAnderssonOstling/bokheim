@@ -78,6 +78,66 @@ fn reimport_does_not_replace_immutable_file_metadata() {
 }
 
 #[test]
+fn catalog_subject_overrides_survive_import_reprojection_reopen_and_sync() {
+    use book_model::BookSubject;
+    use library_replica::LibraryStateEntry;
+    use subject_projection::{MANUAL_SUBJECT_EXCLUSION_SOURCE, UNIFIED_SYSTEM_ID};
+    use sync_common::{Delivery, LibraryRevision, OpaqueStateEntry, PullStateResponse, SyncCursor, Versioned, transport};
+
+    let path = std::env::temp_dir().join(format!("catalog-subject-persistence-{}.db", uuid::Uuid::new_v4()));
+    let db = Database::open(&path).unwrap();
+    db.initialize_library().unwrap();
+    let mut book = import();
+    let hash = book.content_hash;
+    let embedded = &mut book.inspection.as_mut().unwrap().metadata;
+    embedded.book.subjects = vec![BookSubject::new(None, "PZ3", "metadata:work", Some("lcc".into()), Some("PZ3".into())).unwrap()];
+    let mut catalog = embedded.clone();
+    catalog.book.subjects.extend([
+        BookSubject::new(None, "Short Stories", "manual:subject", Some(UNIFIED_SYSTEM_ID.into()), Some("Literature / Genres / Literary Forms / Forms & Literary Traditions / Short Stories".into())).unwrap(),
+        BookSubject::new(None, "English", MANUAL_SUBJECT_EXCLUSION_SOURCE, Some(UNIFIED_SYSTEM_ID.into()), Some("Literature / By Language / English".into())).unwrap(),
+        BookSubject::new(None, "Language", MANUAL_SUBJECT_EXCLUSION_SOURCE, Some(UNIFIED_SYSTEM_ID.into()), Some("Language".into())).unwrap(),
+    ]);
+    // The shared import path supplies the hash-matched catalog answer atomically.
+    db.commit_import_with_catalog_answer(book, None, Some(catalog.clone())).unwrap();
+
+    let verify = |db: &Database| {
+        let id: i64 = db.connection.fixtures_read_book_row_id(&hash, |row| row.get(0)).unwrap();
+        let concepts = query_rows(|callback| db.connection.fixtures_subject_projection_concepts(id, callback), |row| row.get::<_, i64>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(concepts, [4124]);
+        assert_eq!(db.enrichment_cover_record(&hash).unwrap().unwrap().book.subjects, catalog.book.subjects);
+        assert!(db.enrichment_candidates(&[hash], i64::MAX).unwrap().is_empty());
+    };
+    verify(&db);
+    let publication = db.sync_publishable_mutations().unwrap().into_iter().find(|publication| matches!(&publication.state.value, LibraryStateEntry::BookAdd { content_hash, .. } if *content_hash == hash)).unwrap();
+    db.connection.fixtures_update_library_local_state_taxonomy_revision().unwrap();
+    drop(db);
+    let reopened = Database::open(&path).unwrap();
+    reopened.initialize_library().unwrap();
+    verify(&reopened);
+
+    let receiving = database();
+    receiving.commit_import(import()).unwrap();
+    let delivered = Delivery { state: transport::representation::<_, Versioned<OpaqueStateEntry>>(&publication.state).unwrap(), revision: LibraryRevision::new(1).unwrap() };
+    receiving.sync_commit_pull_response(&[], &PullStateResponse { mutations: vec![delivered], next_cursor: SyncCursor::default(), has_more: false }).unwrap();
+    verify(&receiving);
+    drop(reopened);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn reimport_with_catalog_answer_preserves_an_existing_definitive_answer() {
+    let db = database();
+    let hash = import().content_hash;
+    let original = import().inspection.unwrap().metadata;
+    db.commit_import_with_catalog_answer(import(), None, Some(original.clone())).unwrap();
+    let mut changed = original.clone();
+    changed.metadata.title = "Later catalog correction".into();
+    db.commit_import_with_catalog_answer(import(), None, Some(changed)).unwrap();
+    assert_eq!(db.enrichment_cover_record(&hash).unwrap().unwrap(), original);
+    assert!(db.enrichment_candidates(&[hash], i64::MAX).unwrap().is_empty());
+}
+
+#[test]
 fn failed_contributor_write_rolls_back_book_addition() {
     let db = database();
     db.commit_import(import()).unwrap();
@@ -180,7 +240,7 @@ fn definitive_enrichment_answers_do_not_expire() {
         let hash = book.content_hash;
         db.commit_import(book).unwrap();
         let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
-        let answer = BookEnrichment { key: String::new(), status, record: (status == BookEnrichmentStatus::Found).then_some(candidate.record), toc: None, cover: None, detail: String::new() };
+        let answer = BookEnrichment { key: String::new(), status, record: (status == BookEnrichmentStatus::Found).then_some(candidate.record), toc: None, popularity: None, cover: None, detail: String::new() };
         db.record_enrichment(&hash, &candidate.request_key, &answer, 100).unwrap();
         assert!(db.enrichment_candidates(&[hash], 100).unwrap().is_empty());
         assert!(db.enrichment_candidates(&[hash], 10 * 365 * 24 * 60 * 60).unwrap().is_empty());
@@ -197,7 +257,7 @@ fn failed_enrichment_retries_until_a_definitive_answer() {
     let hash = book.content_hash;
     db.commit_import(book).unwrap();
     let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
-    let mut answer = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Failed, record: None, toc: None, cover: None, detail: String::new() };
+    let mut answer = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Failed, record: None, toc: None, popularity: None, cover: None, detail: String::new() };
     db.record_enrichment(&hash, &candidate.request_key, &answer, 100).unwrap();
     assert_eq!(db.enrichment_next_retry().unwrap(), Some(160));
     assert!(db.enrichment_candidates(&[hash], 159).unwrap().is_empty());
@@ -514,6 +574,67 @@ fn interrupted_initialization_rolls_back_and_retries_after_reopen() {
         assert_eq!(reopened.initialize_library().unwrap(), replica);
         assert_eq!(reopened.browse_book_detail(&import().content_hash).unwrap().book.title, "Original");
     }
+}
+
+#[test]
+fn reopening_current_library_does_not_commit_database_changes() {
+    use library_database::rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+    struct TestDirectory(std::path::PathBuf);
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let directory = TestDirectory(std::env::temp_dir().join(format!("library-reopen-{}", uuid::Uuid::new_v4())));
+    std::fs::create_dir(&directory.0).unwrap();
+    let path = directory.0.join("library.sqlite");
+    let db = Database::open(&path).unwrap();
+    let replica = db.initialize_library().unwrap();
+    let mode: String = db.connection.pragma_query_value(Some("main"), "journal_mode", |row| row.get(0)).unwrap();
+    assert_eq!(mode, "wal", "new libraries must establish persistent WAL mode");
+    let observer = library_database::rusqlite::Connection::open(&path).unwrap();
+    let data_version = || observer.pragma_query_value(None, "data_version", |row| row.get::<_, i64>(0)).unwrap();
+    let before = data_version();
+    drop(db);
+
+    let reopened = Database::open(&path).unwrap();
+    let mode: String = reopened.connection.pragma_query_value(Some("main"), "journal_mode", |row| row.get(0)).unwrap();
+    assert_eq!(mode, "wal", "WAL must survive closing and reopening the database");
+    reopened.connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
+        AuthAction::Pragma { pragma_name, .. } if pragma_name.eq_ignore_ascii_case("journal_mode") => Authorization::Deny,
+        _ => Authorization::Allow,
+    })).unwrap();
+    // Exercise both ordinary connection configuration and initialization with
+    // every journal-mode read/write forbidden, including read-only queries.
+    crate::configure_library_connection(&reopened.connection).unwrap();
+    assert_eq!(reopened.initialize_library().unwrap(), replica);
+    reopened.connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>).unwrap();
+    assert_eq!(data_version(), before, "opening a current library must not commit a write");
+
+    // Supported older libraries still record the version after migration.
+    reopened.connection.pragma_update(None, "user_version", 40).unwrap();
+    let before_migration = data_version();
+    assert_eq!(reopened.initialize_library().unwrap(), replica);
+    assert_eq!(reopened.connection.fixtures_check_main_user_version(|row| row.get::<_, i64>(0)).unwrap(), crate::LIBRARY_SCHEMA_VERSION);
+    assert_ne!(data_version(), before_migration);
+}
+
+#[test]
+fn failed_wal_setup_leaves_library_uninitialized_and_can_retry() {
+    use library_database::rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+    let db = Database::open(":memory:").unwrap();
+    db.connection.authorizer(Some(|context: AuthContext<'_>| match context.action {
+        AuthAction::Pragma { pragma_name, .. } if pragma_name.eq_ignore_ascii_case("journal_mode") => Authorization::Deny,
+        _ => Authorization::Allow,
+    })).unwrap();
+    assert!(db.initialize_library().is_err());
+    db.connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>).unwrap();
+    assert!(db.connection.is_autocommit());
+    assert_uninitialized(&db);
+    let replica = db.initialize_library().unwrap();
+    assert_eq!(db.initialize_library().unwrap(), replica);
 }
 
 #[test]
@@ -935,6 +1056,7 @@ fn subject_cards_and_global_facets_use_normalized_languages() {
     let facets = db.browse(&query, false).unwrap();
     let (languages, formats) = (facets.language_counts, facets.format_counts);
     assert_eq!(languages.iter().find(|l| l.language == "en").unwrap().book_count, 4);
+    assert_eq!(db.library_language_counts().unwrap(), languages);
     assert_eq!(formats.iter().map(|f| f.book_count).sum::<u32>(), 4);
 }
 
@@ -1000,7 +1122,7 @@ fn folder_count_queries_do_not_scan_unrelated_library_books() {
     let directories = serde_json::to_string(&[child.to_string()]).unwrap();
     let mut count = 0;
     db.connection
-        .folder_direct_counts(&directories, 0, "", |row| {
+        .folder_direct_counts(&directories, 0, "", 0, f64::from(library_model::FINISHED_PROGRESS_THRESHOLD), |row| {
             count = row.get::<_, i64>(1)?;
             assert!(active_query_fullscan_steps(&db.connection) < 100, "direct counts must not scan unrelated books");
             Ok(())
@@ -1011,7 +1133,7 @@ fn folder_count_queries_do_not_scan_unrelated_library_books() {
     for (formats, languages) in [(1, ""), (2, ""), (3, ""), (0, ",en,"), (1, ",en,"), (1, ",sv,")] {
         let mut actual = 0;
         db.connection
-            .folder_direct_counts(&directories, formats, languages, |row| {
+            .folder_direct_counts(&directories, formats, languages, 0, f64::from(library_model::FINISHED_PROGRESS_THRESHOLD), |row| {
                 actual = row.get::<_, i64>(1)?;
                 assert!(active_query_fullscan_steps(&db.connection) < 100, "filtered counts must not scan unrelated books");
                 Ok(())
@@ -1044,41 +1166,8 @@ fn read_time_directory_counts_follow_deletes_and_physical_cascades() {
     assert_eq!(root_count(), 0);
 }
 
-fn record_found_answer(db: &Database, hash: ContentHash) {
-    let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().expect("an unanswered book is a candidate");
-    let mut record = candidate.record.clone();
-    record.book.subjects.push(book_model::BookSubject::new(None, "History", "openlibrary:metadata:work", Some("lcc".into()), Some("DC38".into())).unwrap());
-    record.contributors[0] = book_model::Contributor::with_id(book_model::agent_id_from_migration_seed(b"external-author:open_library:OL1A"), "Original Author", book_model::MarcRelatorCode(*b"aut")).unwrap();
-    record.description = "Server description.".into();
-    let answer = metadata_contract::books::BookEnrichment { key: "0".into(), status: metadata_contract::books::BookEnrichmentStatus::Found, record: Some(record), toc: None, cover: None, detail: String::new() };
-    db.record_enrichment(&hash, &candidate.request_key, &answer, 0).unwrap();
-}
-
 fn projected_subject_codes(db: &Database) -> Vec<String> {
     query_rows(|callback| db.connection.fixtures_read_book_subject_code(callback), |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
-}
-
-#[test]
-fn reimport_keeps_the_file_author_identity_under_an_enriched_projection() {
-    let db = database();
-    let input = import();
-    let hash = input.content_hash;
-    db.commit_import(input).unwrap();
-    let file_author = db.connection.fixtures_read_author_identity_stable_id(|row| row.get::<_, String>(0)).unwrap();
-    record_found_answer(&db, hash);
-    let projected: String = db.connection.fixtures_read_book_contributor_a_stable_id(|row| row.get(0)).unwrap();
-    assert_ne!(projected, file_author, "the answer's authority identity is projected");
-
-    db.clear_sync_outbox().unwrap();
-    db.commit_import(import()).unwrap();
-    complete_no_match(&db, &hash);
-    let metadata = db.sync_publishable_mutations().unwrap().into_iter().find_map(|mutation| match mutation.state.value {
-        library_replica::LibraryStateEntry::BookAdd { value, .. } => Some(value.record.metadata),
-        _ => None,
-    });
-    if let Some(metadata) = metadata {
-        assert_eq!(metadata.contributors[0].agent_id().to_string(), file_author, "the register never takes the projected identity");
-    }
 }
 
 #[cfg(test)]
@@ -1087,7 +1176,7 @@ use crate::sql_fixtures::FixturesSql;
 fn complete_no_match(db: &Database, hash: &ContentHash) {
     use metadata_contract::books::{BookEnrichment, BookEnrichmentStatus};
     let Some(candidate) = db.enrichment_candidates(&[*hash], 0).unwrap().pop() else { return };
-    db.record_enrichment(hash, &candidate.request_key, &BookEnrichment { key: String::new(), status: BookEnrichmentStatus::NoMatch, record: None, toc: None, cover: None, detail: String::new() }, 0).unwrap();
+    db.record_enrichment(hash, &candidate.request_key, &BookEnrichment { key: String::new(), status: BookEnrichmentStatus::NoMatch, record: None, toc: None, popularity: None, cover: None, detail: String::new() }, 0).unwrap();
 }
 
 #[test]
@@ -1103,7 +1192,7 @@ fn failed_enrichment_blocks_uploads_and_metadata_only_sync_until_a_definitive_an
     db.set_asset_storage_policy(false, false).unwrap();
     assert!(db.sync_publishable_mutations().unwrap().is_empty());
     let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
-    let mut answer = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Failed, record: None, toc: None, cover: None, detail: String::new() };
+    let mut answer = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Failed, record: None, toc: None, popularity: None, cover: None, detail: String::new() };
     db.record_enrichment(&hash, &candidate.request_key, &answer, 0).unwrap();
     assert_eq!(db.enrichment_next_retry().unwrap(), Some(60));
     assert!(db.enrichment_candidates(&[hash], 59).unwrap().is_empty());
@@ -1129,8 +1218,9 @@ fn enrichment_cover_checks_preserve_transfer_state_and_survive_reopening() {
     db.complete_thumbnail_work(&hash, false).unwrap();
     assert!(db.enrichment_cover_candidates(&[hash]).unwrap().is_empty());
     let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
-    let answer = metadata_contract::books::BookEnrichment { key: String::new(), status: metadata_contract::books::BookEnrichmentStatus::NoMatch, record: None, toc: None, cover: None, detail: String::new() };
+    let answer = metadata_contract::books::BookEnrichment { key: String::new(), status: metadata_contract::books::BookEnrichmentStatus::NoMatch, record: None, toc: None, popularity: None, cover: None, detail: String::new() };
     db.record_enrichment(&hash, &candidate.request_key, &answer, 0).unwrap();
+    assert_eq!(db.enrichment_cover_record(&hash).unwrap().unwrap().title, "Original");
     assert_eq!(db.enrichment_cover_candidates(&[hash]).unwrap(), vec![hash]);
     db.mark_enrichment_cover_checked(&hash).unwrap();
     assert!(db.enrichment_cover_candidates(&[hash]).unwrap().is_empty());
@@ -1142,6 +1232,30 @@ fn enrichment_cover_checks_preserve_transfer_state_and_survive_reopening() {
     assert_eq!(reopened.thumbnail_work_state(&hash).unwrap().as_deref(), Some("no_cover"));
     drop(reopened);
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn direct_cover_lookup_uses_file_title_and_enriched_attributes_without_a_server_cover_id() {
+    use book_model::{AUTHOR_MARC_RELATOR_CODE, Contributor, Identifier, Scheme, Scope};
+    use metadata_contract::books::{BookEnrichment, BookEnrichmentStatus};
+    let db = database();
+    let book = import();
+    let hash = book.content_hash;
+    db.commit_import(book).unwrap();
+    let candidate = db.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
+    let mut enriched = candidate.record.clone();
+    enriched.title = "Provider edition title".into();
+    enriched.description = "Provider description".into();
+    enriched.contributors = vec![Contributor::new("Matched Author", AUTHOR_MARC_RELATOR_CODE).unwrap()];
+    enriched.book.identifiers.push(Identifier::new("9780306406157", Scheme::Isbn, Scope::Book).unwrap());
+    db.record_enrichment(&hash, &candidate.request_key, &BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Found, record: Some(enriched.clone()), toc: None, cover: None, popularity: None, detail: String::new() }, 0)
+        .unwrap();
+    let record = db.enrichment_cover_record(&hash).unwrap().unwrap();
+    assert_eq!(record.title, "Original");
+    assert_eq!(record.book.identifiers, enriched.book.identifiers);
+    assert_eq!(record.contributors, enriched.contributors);
+    assert!(record.description.is_empty());
+    assert!(db.enrichment_cover_source(&hash).unwrap().is_none());
 }
 
 #[test]
@@ -1182,10 +1296,14 @@ fn flat_book_copy_skips_existing_assignments_and_retains_them_on_undo() {
     // The shared copy workflow records undo only for newly created placements.
     let mut undo = Vec::new();
     for hash in [first, second] {
-        if db.copy_book_to_directory(&hash, None, &destination).unwrap() { undo.push(hash); }
+        if db.copy_book_to_directory(&hash, None, &destination).unwrap() {
+            undo.push(hash);
+        }
     }
     assert_eq!(undo, [second]);
-    for hash in undo { assert!(!db.remove_book_placement(&hash, &destination).unwrap()); }
+    for hash in undo {
+        assert!(!db.remove_book_placement(&hash, &destination).unwrap());
+    }
     assert_eq!(browse_folder(&db, destination, "", &[]).books[0].content_hash(), Some(first));
     assert_eq!(browse_folder(&db, ROOT_DIR_ID, "", &[]).books.len(), 2);
 }

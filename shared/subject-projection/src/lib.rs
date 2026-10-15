@@ -2,60 +2,33 @@
 //! editable SQLite taxonomy graph.
 
 mod bisac;
+mod bisac_database;
 mod ddc;
 mod lcc_recovery;
 mod pruning;
 mod runtime;
+mod source_headings;
 mod taxonomy_sqlite;
-use subject_taxonomy::{compact_whitespace, lcc, range_storage, runtime_index, taxonomy_reader};
+use subject_taxonomy::bisac_reference::{normalize_path, normalize_term, split_path};
+use subject_taxonomy::{compact_whitespace, lcc, runtime_index, taxonomy_reader};
 pub mod installed;
 
 pub use book_model::BookSubject;
 pub use lcc_recovery::{LccMatchAssignment, LccMatchEvidence, LccMatchMethod, LccMatchReport};
 pub use pruning::redundant_lcc_exact_selectors;
+pub use source_headings::{reviewed_source_heading_path, reviewed_source_heading_subject};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub use bisac::{bisac_code_for_path, bisac_subject_system, match_bisac_subjects, match_bisac_subjects_with_minimum_adjacent, SubjectAssignment, SubjectNode, SubjectSystem};
+pub use bisac::{bisac_code_for_path, match_bisac_subjects, match_bisac_subjects_with_minimum_adjacent, SubjectAssignment};
+pub use bisac_database::{install_bisac_reference, open_bisac_reference, BISAC_REFERENCE_DIGEST, BISAC_REFERENCE_GZIP_DIGEST};
 pub use lcc::{canonical_lcc_notation, lcc_subject_path};
+#[cfg(not(target_arch = "wasm32"))]
+pub mod bundled;
 pub use runtime::{
-    install_unified_taxonomy_concepts, install_unified_taxonomy_overlay, lcc_subject_sort_orders, loaded_unified_taxonomy_revision_id, unified_concept_definitions, unified_concept_id, unified_has_exact_source_code,
-    unified_lcc_has_numeric_coverage, unified_lcc_match_report, unified_subject_paths, unified_subject_similarity_keys, unified_subject_sort_order, unified_taxonomy_revision_id, unified_taxonomy_routes,
-    UnifiedConceptDefinition, UnifiedConceptRoute, UnifiedTaxonomy, BUNDLED_UNIFIED_TAXONOMY_REVISION_ID,
+    install_unified_taxonomy_concepts, lcc_subject_sort_orders, loaded_unified_taxonomy_revision_id, most_specific_concept_ids, unified_concept_id, unified_has_exact_source_code, unified_lcc_has_numeric_coverage, unified_lcc_match_report, unified_subject_paths,
+    unified_subject_similarity_keys, unified_subject_sort_order, unified_taxonomy_revision_id, unified_taxonomy_routes, UnifiedConceptDefinition, UnifiedConceptRoute, UnifiedTaxonomy, BUNDLED_UNIFIED_TAXONOMY_REVISION_ID,
 };
-#[cfg(not(target_arch = "wasm32"))]
-pub use runtime::DEFAULT_UNIFIED_TAXONOMY_SQLITE;
-pub use taxonomy_sqlite::{
-    has_unified_taxonomy_overlay, has_unified_taxonomy_overlay_in, is_unified_taxonomy_client_seed, is_unified_taxonomy_client_seed_in, merge_unified_taxonomy_connection, merge_unified_taxonomy_sqlite,
-    merge_unified_taxonomy_sqlite_with_resolutions, published_taxonomy_release_id, read_resolved_unified_taxonomy_codes, read_resolved_unified_taxonomy_codes_in, read_unified_taxonomy_connection, read_unified_taxonomy_sqlite,
-    unified_taxonomy_server_release_id, unified_taxonomy_server_release_id_in,
-};
-#[cfg(not(target_arch = "wasm32"))]
-pub use taxonomy_sqlite::reset_unified_taxonomy_connection;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UnifiedCodeResolution {
-    system_id: String,
-    code: String,
-    matched_concept_ids: Vec<i64>,
-}
-
-impl UnifiedCodeResolution {
-    pub fn new(system_id: String, code: String, matched_concept_ids: Vec<i64>) -> Self {
-        Self { system_id, code, matched_concept_ids }
-    }
-
-    pub fn system_id(&self) -> &str {
-        &self.system_id
-    }
-
-    pub fn code(&self) -> &str {
-        &self.code
-    }
-
-    pub fn matched_concept_ids(&self) -> &[i64] {
-        &self.matched_concept_ids
-    }
-}
+pub use taxonomy_sqlite::{read_unified_taxonomy_connection, read_unified_taxonomy_sqlite};
 
 pub const BISAC_SYSTEM_ID: &str = "bisac";
 pub const BISAC_VERSION: &str = "2021";
@@ -63,13 +36,30 @@ pub const DDC_SYSTEM_ID: &str = "ddc";
 pub const DDC_MATCHER_VERSION: i64 = 1;
 pub use runtime_index::{LCC_SYSTEM_ID, ROOT_SUBJECT_PATH, UNIFIED_VERSION};
 pub const UNIFIED_SYSTEM_ID: &str = "unified";
-pub const UNIFIED_MATCHER_VERSION: i64 = 136;
+pub const UNIFIED_MATCHER_VERSION: i64 = 149;
+pub const EDITION_SUBTREE_CONSENSUS_SOURCE: &str = "metadata:edition-subtree-consensus";
+pub const MANUAL_SUBJECT_EXCLUSION_SOURCE: &str = "manual:subject:exclude";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectedSubjectCode {
     pub system_id: String,
     pub code: String,
     pub evidence_positions: Vec<usize>,
+    /// Explicitly excluded navigation concepts; original classification evidence remains intact.
+    pub excluded_concept_ids: Vec<i64>,
+}
+
+/// A supported number must add a topic beyond the subclass's fallback routes.
+/// Some broad numeric ranges still resolve only to the same parent as the
+/// letters alone, so numeric syntax by itself does not establish specificity.
+pub fn is_specific_lcc_code(code: &str) -> bool {
+    let Some(canonical) = canonical_lcc_notation(code) else { return false };
+    if !unified_lcc_has_numeric_coverage(&canonical) {
+        return false;
+    }
+    let letters = canonical.chars().take_while(char::is_ascii_alphabetic).collect::<String>();
+    let broad = unified_subject_paths(LCC_SYSTEM_ID, &letters);
+    unified_subject_paths(LCC_SYSTEM_ID, &canonical).iter().any(|path| !broad.contains(path))
 }
 
 impl ProjectedSubjectCode {
@@ -85,27 +75,38 @@ impl ProjectedSubjectCode {
 }
 
 pub fn project_subject_codes(subjects: &[BookSubject]) -> Vec<ProjectedSubjectCode> {
+    let excluded = subjects
+        .iter()
+        .filter(|subject| subject.source() == MANUAL_SUBJECT_EXCLUSION_SOURCE && subject.authority() == Some(UNIFIED_SYSTEM_ID))
+        .filter_map(|subject| subject.code().and_then(unified_concept_id))
+        .collect::<BTreeSet<_>>();
     let mut projected = BTreeMap::<(String, String), BTreeSet<usize>>::new();
     for assignment in match_bisac_subjects(subjects) {
         let Some(code) = bisac_code_for_path(assignment.node_path()) else { continue };
+        let paths = unified_subject_paths(BISAC_SYSTEM_ID, &code);
+        if !paths.is_empty() && paths.iter().all(|path| path == "Literature / Genres") {
+            if unified_concept_id(source_headings::GENERAL_FICTION_PATH) == Some(source_headings::GENERAL_FICTION_CONCEPT_ID) {
+                projected.entry((UNIFIED_SYSTEM_ID.to_owned(), source_headings::GENERAL_FICTION_PATH.to_owned())).or_default().extend(assignment.evidence_positions());
+            }
+            continue;
+        }
         projected.entry((BISAC_SYSTEM_ID.to_owned(), code.to_owned())).or_default().extend(assignment.evidence_positions());
     }
-    let declared_lcc = subjects.iter().any(|subject| subject.authority().and_then(canonical_subject_system) == Some(LCC_SYSTEM_ID));
-    // DDC is a fallback classification. Once the record has an explicit LCC
-    // or a resolved BISAC classification, projecting DDC as well creates
-    // unrelated subject branches from secondary metadata (for example a
-    // mathematics DDC code on a history title). Keep the strongest source
-    // only for unified navigation; raw subjects remain unchanged.
+    let preferred_lcc = has_usable_lcc_classification(subjects);
+    // DDC is fallback evidence after usable LCC and resolved BISAC. Raw
+    // classifications remain in the record when another scheme takes priority.
     let has_bisac = projected.keys().any(|(system, _)| system == BISAC_SYSTEM_ID);
-    let ddc = if !declared_lcc && !has_bisac { {
-            subjects
-                .iter()
-                .enumerate()
-                .filter_map(|(position, subject)| {
-                    (subject.authority().and_then(canonical_subject_system)? == DDC_SYSTEM_ID).then(|| ddc::canonical_ddc_notation(subject.code().unwrap_or_else(|| subject.name()))).flatten().map(|code| (position, code))
-                })
-                .collect::<Vec<_>>()
-        } } else { Default::default() };
+    let ddc = if !preferred_lcc && !has_bisac {
+        subjects
+            .iter()
+            .enumerate()
+            .filter_map(|(position, subject)| {
+                (subject.authority().and_then(canonical_subject_system)? == DDC_SYSTEM_ID).then(|| ddc::canonical_ddc_notation(subject.code().unwrap_or_else(|| subject.name()))).flatten().map(|code| (position, code))
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Default::default()
+    };
     let maximum_ddc_specificity = ddc.iter().map(|(_, code)| ddc::specificity(code)).max();
     for (position, code) in ddc {
         if Some(ddc::specificity(&code)) == maximum_ddc_specificity {
@@ -113,7 +114,11 @@ pub fn project_subject_codes(subjects: &[BookSubject]) -> Vec<ProjectedSubjectCo
         }
     }
     for (position, subject) in subjects.iter().enumerate() {
-        if subject.authority() == Some(UNIFIED_SYSTEM_ID) && subject.source() == "manual:subject" {
+        if let Some(path) = (!preferred_lcc).then(|| reviewed_source_heading_path(subject)).flatten() {
+            projected.entry((UNIFIED_SYSTEM_ID.to_owned(), path.to_owned())).or_default().insert(position);
+            continue;
+        }
+        if subject.authority() == Some(UNIFIED_SYSTEM_ID) && matches!(subject.source(), "manual:subject" | EDITION_SUBTREE_CONSENSUS_SOURCE) {
             if let Some(path) = subject.code().filter(|path| !path.trim().is_empty()) {
                 projected.entry((UNIFIED_SYSTEM_ID.to_owned(), path.to_owned())).or_default().insert(position);
             }
@@ -123,7 +128,55 @@ pub fn project_subject_codes(subjects: &[BookSubject]) -> Vec<ProjectedSubjectCo
             projected.entry((LCC_SYSTEM_ID.to_owned(), code)).or_default().insert(position);
         }
     }
-    projected.into_iter().map(|((system_id, code), evidence)| ProjectedSubjectCode { system_id, code, evidence_positions: evidence.into_iter().collect() }).collect()
+    let concepts = projected
+        .keys()
+        .map(|key| {
+            let ids = unified_subject_paths(&key.0, &key.1).iter().filter_map(|path| unified_concept_id(path)).collect::<BTreeSet<_>>();
+            (key.clone(), ids)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let retained = most_specific_concept_ids(concepts.values().flatten().copied().filter(|id| !excluded.contains(id)));
+    projected.retain(|key, _| concepts[key].is_empty() || !concepts[key].is_disjoint(&retained));
+    projected.into_iter().map(|((system_id, code), evidence)| ProjectedSubjectCode { system_id, code, evidence_positions: evidence.into_iter().collect(), excluded_concept_ids: excluded.iter().copied().collect() }).collect()
+}
+
+/// Resolve a book's assignments once, retaining source-code indexes for evidence.
+/// Only real taxonomy ancestry shadows an assignment; sharing an LCC prefix or
+/// being deeper in a different branch is not enough.
+pub fn project_subject_concepts(codes: &[ProjectedSubjectCode]) -> Vec<(usize, i64)> {
+    let mut concepts = codes
+        .iter()
+        .enumerate()
+        .flat_map(|(index, code)| {
+            unified_subject_paths(code.system_id(), code.code())
+                .into_iter()
+                .map(move |path| (index, unified_concept_id(&path).expect("projected subject exists in the taxonomy")))
+                .filter(|(_, id)| !code.excluded_concept_ids.contains(id))
+        })
+        .collect::<Vec<_>>();
+    let retained = most_specific_concept_ids(concepts.iter().map(|(_, concept)| *concept));
+    concepts.retain(|(_, concept)| retained.contains(concept));
+    concepts
+}
+
+/// An explicit or complete embedded LCC classification takes priority over
+/// raw heading inference. LCSH subject identifiers are not classifications.
+pub fn has_lcc_classification(subjects: &[BookSubject]) -> bool {
+    subjects.iter().any(|subject| subject_lcc_code(subject).is_some())
+}
+
+/// LCC takes precedence over automatic fallback schemes and heading inference only when
+/// it resolves to navigation. Sibling consensus is also LCC evidence, although
+/// its supported subtree is stored as a unified path rather than a raw code.
+pub fn has_usable_lcc_classification(subjects: &[BookSubject]) -> bool {
+    subjects.iter().any(|subject| {
+        if subject.authority().is_some_and(|authority| authority.eq_ignore_ascii_case(UNIFIED_SYSTEM_ID))
+            && subject.source() == EDITION_SUBTREE_CONSENSUS_SOURCE
+        {
+            return subject.code().is_some_and(|path| path != ROOT_SUBJECT_PATH && unified_concept_id(path).is_some());
+        }
+        subject_lcc_code(subject).is_some_and(|code| unified_subject_paths(LCC_SYSTEM_ID, &code).iter().any(|path| path != ROOT_SUBJECT_PATH))
+    })
 }
 
 /// Infer only complete classification values in otherwise uncontrolled embedded
@@ -150,7 +203,6 @@ fn subject_lcc_code(subject: &BookSubject) -> Option<String> {
     Some(canonical)
 }
 
-
 pub(crate) fn canonical_subject_system(authority: &str) -> Option<&'static str> {
     let authority = authority.trim().to_ascii_lowercase();
     if authority.is_empty() {
@@ -172,19 +224,54 @@ pub(crate) fn canonical_subject_system(authority: &str) -> Option<&'static str> 
     }
 }
 
-fn split_path(value: &str) -> Vec<String> {
-    value.replace("::", "/").replace("--", "/").replace(['>', '|', '›', '→'], "/").split('/').map(compact_whitespace).filter(|component| !component.is_empty()).collect()
-}
-fn normalize_path(value: &str) -> String {
-    split_path(value).iter().map(|component| normalize_term(component)).collect::<Vec<_>>().join("/")
-}
-fn normalize_term(value: &str) -> String {
-    compact_whitespace(value).to_lowercase()
-}
-
 #[cfg(test)]
 mod tests {
 
+    #[test]
+    fn explicit_exclusions_filter_individual_routes_and_preserve_source_evidence() {
+        let subjects = [
+            BookSubject::new(None, "PR6003", "metadata:work", Some("lcc".into()), Some("PR6003".into())).unwrap(),
+            BookSubject::new(None, "P", "metadata:work", Some("lcc".into()), Some("P".into())).unwrap(),
+            BookSubject::new(None, "English", MANUAL_SUBJECT_EXCLUSION_SOURCE, Some("unified".into()), Some("Literature / By Language / English".into())).unwrap(),
+            BookSubject::new(None, "Satire", "manual:subject", Some("unified".into()), Some("Literature / Genres / Humorous Writing / Humorous Fiction / Satire".into())).unwrap(),
+        ];
+        let codes = project_subject_codes(&subjects);
+        let ids = project_subject_concepts(&codes).into_iter().map(|(_, id)| id).collect::<BTreeSet<_>>();
+        assert!(!ids.contains(&5585));
+        assert!(ids.contains(&4179), "Excluding a broad subject preserves the independently matched English period");
+        assert!(ids.contains(&3702), "The independent language classification remains");
+        assert!(ids.contains(&4107));
+        assert_eq!(subjects[0].code(), Some("PR6003"));
+        assert!(codes.iter().any(|code| code.code == "PR6003" && code.evidence_positions == [0]));
+        assert!(codes.iter().any(|code| code.code == "P" && code.evidence_positions == [1]));
+        let mut all_subjects = subjects.to_vec();
+        all_subjects.push(BookSubject::new(None, "Language", MANUAL_SUBJECT_EXCLUSION_SOURCE, Some("unified".into()), Some("Language".into())).unwrap());
+        let codes = project_subject_codes(&all_subjects);
+        assert_eq!(project_subject_concepts(&codes).into_iter().map(|(_, id)| id).collect::<BTreeSet<_>>(), BTreeSet::from([4107, 4179]), "Control labels must not infer unrelated BISAC topics or remove the specific literary period");
+    }
+
+    #[test]
+    fn most_specific_navigation_preserves_evidence_and_independent_branches() {
+        let subjects = [
+            BookSubject::new(None, "PZ3", "catalog:gutenberg.org", Some("lcc".into()), Some("PZ3".into())).unwrap(),
+            BookSubject::new(None, "PR4550", "metadata:verified", Some("lcc".into()), Some("PR4550".into())).unwrap(),
+            BookSubject::new(None, "DA", "catalog:gutenberg.org", Some("lcc".into()), Some("DA".into())).unwrap(),
+        ];
+        let codes = project_subject_codes(&subjects);
+        assert!(!codes.iter().any(|code| code.code == "PZ3"));
+        let concepts = project_subject_concepts(&codes);
+        assert!(!concepts.iter().any(|(_, id)| *id == 5585), "English is an ancestor of the retained period");
+        assert!(concepts.iter().any(|(i, id)| *id == 3915 && codes[*i].evidence_positions == [1]));
+        assert!(concepts.iter().any(|(i, _)| codes[*i].code == "DA"));
+        assert_eq!(subjects[0].code(), Some("PZ3"));
+        // A shared source prefix must not suppress a different taxonomy branch.
+        let computing =
+            [BookSubject::new(None, "QA", "catalog:gutenberg.org", Some("lcc".into()), Some("QA".into())).unwrap(), BookSubject::new(None, "QA76.73.R87", "metadata:verified", Some("lcc".into()), Some("QA76.73.R87".into())).unwrap()];
+        let codes = project_subject_codes(&computing);
+        let concepts = project_subject_concepts(&codes);
+        assert!(concepts.iter().any(|(i, _)| codes[*i].code == "QA"));
+        assert!(concepts.iter().any(|(i, _)| codes[*i].code == "QA76.73.R87"));
+    }
 
     #[test]
     fn embedded_lcc_detection_rejects_identifiers_prose_and_other_authorities() {
@@ -223,8 +310,5 @@ mod tests {
         assert_eq!(taxonomy.matching_concept_ids("lcc", "HD'69'C6'1999"), vec![2]);
     }
 
-
     use super::*;
-
-
 }

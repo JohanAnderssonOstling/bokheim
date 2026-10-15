@@ -1,16 +1,23 @@
 use super::AppClient;
 use crate::runtime::AppCommand;
 use library_backend::LibraryBrowseData;
-use library_model::{CardKey, LibraryBrowseQuery, OpdsCredentials, OpdsSource, OpdsSourceId};
+use library_model::{AddOpdsFeedResult, CardKey, LibraryBrowseQuery, OpdsCredentials, OpdsSource, OpdsSourceId, Store, StoreId};
+use sync_common::LibraryId;
 
 /// The account's OPDS feeds. None in the browser.
 impl AppClient {
+    /// Release the backend's retained catalog/feed cover JPEGs before reading.
+    pub async fn evict_cover_caches(&self) -> Result<(), String> {
+        self.request(AppCommand::EvictCoverCaches).await
+    }
+
     pub async fn opds_feeds(&self) -> Result<Vec<OpdsSource>, String> {
         self.request(AppCommand::OpdsFeeds).await
     }
 
     /// Adds the feed at `url`, named by its own title unless `name` is given.
-    pub async fn add_opds_feed(&self, url: String, name: Option<String>, credentials: Option<OpdsCredentials>) -> Result<(), String> {
+    /// An anonymous feed that requires authentication asks for credentials first.
+    pub async fn add_opds_feed(&self, url: String, name: Option<String>, credentials: Option<OpdsCredentials>) -> Result<AddOpdsFeedResult, String> {
         self.request(AppCommand::AddOpdsFeed { url, name, credentials }).await
     }
 
@@ -29,7 +36,12 @@ impl AppClient {
 
     /// A listed feed book's cover, as a JPEG `width` pixels wide.
     pub async fn opds_cover(&self, source: OpdsSourceId, entry: CardKey, width: u32) -> Result<Option<Vec<u8>>, String> {
-        let bytes: Option<serde_bytes::ByteBuf> = self.request(AppCommand::OpdsCover { source, entry, width }).await?;
+        let bytes: Option<serde_bytes::ByteBuf> = self.request(AppCommand::OpdsCover { source, entry, width, card: false }).await?;
+        Ok(bytes.map(serde_bytes::ByteBuf::into_vec))
+    }
+
+    pub async fn opds_card_cover(&self, source: OpdsSourceId, entry: CardKey, width: u32) -> Result<Option<Vec<u8>>, String> {
+        let bytes: Option<serde_bytes::ByteBuf> = self.request(AppCommand::OpdsCover { source, entry, width, card: true }).await?;
         Ok(bytes.map(serde_bytes::ByteBuf::into_vec))
     }
 
@@ -42,5 +54,44 @@ impl AppClient {
     pub async fn download_opds_book(&self, source: OpdsSourceId, entry: CardKey) -> Result<(String, Vec<u8>), String> {
         let (file_name, bytes): (String, serde_bytes::ByteBuf) = self.request(AppCommand::DownloadOpdsBook { source, entry }).await?;
         Ok((file_name, bytes.into_vec()))
+    }
+
+    /// Opens the store page that sells a listed feed book; what is bought
+    /// there goes into `library_id`'s root.
+    pub async fn buy_opds_book(&self, entry: CardKey, library_id: LibraryId) -> Result<(), String> {
+        self.request(AppCommand::BuyOpdsBook { entry, library_id }).await
+    }
+}
+
+/// The stores added on this device. None in the browser.
+impl AppClient {
+    /// Whether a store window can open here: the system has the webview it
+    /// needs, such as WebKitGTK on Linux or WebView2 on Windows.
+    pub async fn stores_available(&self) -> Result<bool, String> {
+        self.request(AppCommand::StoresAvailable).await
+    }
+
+    pub async fn stores(&self) -> Result<Vec<Store>, String> {
+        self.request(AppCommand::Stores).await
+    }
+
+    /// Adds the store at `url`, named by its host unless `name` is given.
+    pub async fn add_store(&self, url: String, name: Option<String>) -> Result<(), String> {
+        self.request(AppCommand::AddStore { url, name }).await
+    }
+
+    pub async fn remove_store(&self, id: StoreId) -> Result<(), String> {
+        self.request(AppCommand::RemoveStore { id }).await
+    }
+
+    /// Opens the store's window; what is bought there goes into
+    /// `library_id`'s root.
+    pub async fn open_store(&self, id: StoreId, library_id: LibraryId) -> Result<(), String> {
+        self.request(AppCommand::OpenStore { id, library_id }).await
+    }
+
+    /// Opens a browser with its address bar ready to type into.
+    pub async fn open_browser(&self, library_id: LibraryId) -> Result<(), String> {
+        self.request(AppCommand::OpenBrowser { library_id }).await
     }
 }

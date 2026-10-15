@@ -3,12 +3,52 @@ use super::task::{owned_local_task, owned_task, BackendTask};
 use super::{BackendExecutorError, BackendFuture, BackendOutput, BackendSend, BackendTimeout};
 use std::future::Future;
 use std::sync::Arc;
+use tokio::sync::watch;
 
 // Startup trials may inspect local state, but background sync/import must not
 // publish side effects before the host commits the new generation.
-static STARTUP_GATE: Mutex<Option<tokio::sync::watch::Receiver<bool>>> = Mutex::new(None);
+static STARTUP_GATE: Mutex<Option<watch::Receiver<bool>>> = Mutex::new(None);
 
-pub struct StartupPermit(tokio::sync::watch::Sender<bool>);
+// Foreground library commands remain available while the initial UI is built.
+// Only scan/sync/import maintenance waits for the host's first presented frame.
+static LIBRARY_MAINTENANCE_GATE: Mutex<Option<watch::Receiver<bool>>> = Mutex::new(None);
+
+/// Releases startup maintenance when the host drops the guard.
+pub struct LibraryMaintenancePermit(watch::Sender<bool>);
+
+impl Drop for LibraryMaintenancePermit {
+    fn drop(&mut self) {
+        *LIBRARY_MAINTENANCE_GATE.lock().expect("library maintenance gate poisoned") = None;
+        self.0.send_replace(true);
+    }
+}
+
+/// Hold library maintenance until this guard is dropped. This does not gate
+/// the library actor's command loop or the update trial's side-effect barrier.
+pub fn defer_library_maintenance() -> LibraryMaintenancePermit {
+    let (sender, receiver) = watch::channel(false);
+    let mut gate = LIBRARY_MAINTENANCE_GATE.lock().expect("library maintenance gate poisoned");
+    assert!(gate.is_none(), "library maintenance is already deferred");
+    *gate = Some(receiver);
+    LibraryMaintenancePermit(sender)
+}
+
+/// Waits only in a library maintenance future, leaving foreground commands live.
+pub async fn library_maintenance_ready() {
+    let receiver = LIBRARY_MAINTENANCE_GATE.lock().expect("library maintenance gate poisoned").clone();
+    if let Some(mut receiver) = receiver {
+        loop {
+            if *receiver.borrow_and_update() {
+                break;
+            }
+            if receiver.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
+pub struct StartupPermit(watch::Sender<bool>);
 impl StartupPermit {
     pub fn release(self) {
         *STARTUP_GATE.lock().expect("startup gate poisoned") = None;
@@ -16,7 +56,7 @@ impl StartupPermit {
     }
 }
 pub fn defer_background_work() -> StartupPermit {
-    let (sender, receiver) = tokio::sync::watch::channel(false);
+    let (sender, receiver) = watch::channel(false);
     let mut gate = STARTUP_GATE.lock().expect("startup gate poisoned");
     assert!(gate.is_none(), "startup work is already deferred");
     *gate = Some(receiver);

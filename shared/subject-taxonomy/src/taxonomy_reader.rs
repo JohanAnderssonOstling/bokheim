@@ -1,4 +1,4 @@
-//! Read taxonomy definitions identically during artifact compilation and overlay loading.
+//! Read taxonomy definitions identically during artifact compilation and snapshot loading.
 use crate::runtime_index::UnifiedConceptDefinition;
 use rusqlite::Connection;
 use std::collections::BTreeMap;

@@ -2,6 +2,7 @@ use super::LibraryClient;
 use crate::library::{LibraryCommand, PendingCommand, ReadyCommand};
 use crate::ThumbnailResolution;
 use crate::{ContentHash, DownloadState, ResolvedBook};
+use library_model::CardKey;
 
 impl LibraryClient {
     pub async fn book_format(&self, content_hash: ContentHash) -> Result<Option<book_model::BookFormat>, String> {
@@ -10,6 +11,10 @@ impl LibraryClient {
 
     pub async fn thumbnail(&self, content_hash: ContentHash, resolution: ThumbnailResolution) -> Result<Option<Vec<u8>>, String> {
         let bytes: Option<serde_bytes::ByteBuf> = self.request(LibraryCommand::Pending(PendingCommand::Thumbnail { content_hash, resolution })).await?;
+        Ok(bytes.map(serde_bytes::ByteBuf::into_vec))
+    }
+    pub async fn external_catalog_cover(&self, entry: CardKey, resolution: ThumbnailResolution) -> Result<Option<Vec<u8>>, String> {
+        let bytes: Option<serde_bytes::ByteBuf> = self.request(LibraryCommand::Pending(PendingCommand::ExternalCatalogCover { entry, resolution })).await?;
         Ok(bytes.map(serde_bytes::ByteBuf::into_vec))
     }
     pub async fn download_state(&self, content_hash: ContentHash) -> Result<DownloadState, String> {

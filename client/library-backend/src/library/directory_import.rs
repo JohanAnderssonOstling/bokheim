@@ -1,24 +1,26 @@
 //! The import activity bracket around `library_import`: begins and ends
 //! the import announcement and holds back contents notifications meanwhile.
 
-use super::LibrarySession;
+use super::{LibrarySession, events::LibraryEvent};
 
 /// An import's lifetime stays with its backend job, including in-flight writes.
 pub(crate) struct DirectoryImportActivity<'a> {
-    pub(crate) library: &'a LibrarySession,
-    pub(crate) id: uuid::Uuid,
+    library: &'a LibrarySession,
+    id: uuid::Uuid,
 }
 
 impl Drop for DirectoryImportActivity<'_> {
     fn drop(&mut self) {
-        self.library.finish_directory_import(self.id);
+        self.library.directory_imports.set(self.library.directory_imports.get() - 1);
+        self.library.events.emit(LibraryEvent::DirectoryImportFinished { id: self.id, scanning: self.library.filesystem_scanning.get() });
     }
 }
 
 impl LibrarySession {
     pub(crate) fn directory_import_activity(&self) -> DirectoryImportActivity<'_> {
         let id = uuid::Uuid::new_v4();
-        self.begin_directory_import(id);
+        self.directory_imports.set(self.directory_imports.get() + 1);
+        self.events.emit(LibraryEvent::DirectoryImportStarted { id });
         DirectoryImportActivity { library: self, id }
     }
 }

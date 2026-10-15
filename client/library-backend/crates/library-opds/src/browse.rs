@@ -1,5 +1,6 @@
 //! A feed page as browse chips and cards: its navigation links are chips,
-//! its publications cards, and its next page and facets locations of their own.
+//! its publications cards, and its next page and facets locations of their
+//! own.
 use crate::{fetch, pages, publications, Feed, NavigationLink, Publication, PDF};
 use library_model::{BookCardRow, BookSource, BrowseContents, BrowseLocation, BrowseRow, CardKey, FeedFacet, FeedFacetGroup, FeedPage, LibraryFileTypeFilter, OpdsCredentials, OpdsSource, OpdsSourceId};
 use url::Url;
@@ -7,6 +8,10 @@ use url::Url;
 /// The page `page` of `source` (its root when `None`), or the results for
 /// `search` from that page when it is not empty. A feed that refuses this
 /// device is an empty page asking to sign in, not a failure.
+///
+/// Only this page is fetched: the pages its links lead to are fetched when
+/// opened. Feeds such as Project Gutenberg's link every listed book to a
+/// page of its own, and fetching those alongside held the page back.
 pub async fn browse(source: &OpdsSource, credentials: Option<&OpdsCredentials>, page: Option<u32>, search: &str) -> Result<(BrowseContents, FeedPage), String> {
     let root = root(&source.url)?;
     let url = match page {
@@ -41,15 +46,16 @@ async fn fetch_page(url: &Url, search: &str, access: &fetch::Access<'_>) -> Resu
 
 /// The title of the feed at `url`, fetching its root once; this also checks
 /// that it is a feed at all, and that `credentials` let this device in.
-pub async fn feed_title(url: &str, credentials: Option<&OpdsCredentials>) -> Result<String, String> {
+/// Returns `None` when an anonymous request needs credentials.
+pub async fn feed_title(url: &str, credentials: Option<&OpdsCredentials>) -> Result<Option<String>, String> {
     let url = root(url)?;
     let feed = match fetch::feed(&url, &fetch::Access::new(&url, credentials)).await {
         Ok(feed) => feed,
         Err(fetch::Failure::SignIn) if credentials.is_some() => return Err("the feed refused this username and password".into()),
-        Err(fetch::Failure::SignIn) => return Err("this feed needs a username and password".into()),
+        Err(fetch::Failure::SignIn) => return Ok(None),
         Err(fetch::Failure::Other(error)) => return Err(error),
     };
-    Ok(if feed.title.is_empty() { url.host_str().unwrap_or("OPDS feed").to_owned() } else { feed.title })
+    Ok(Some(if feed.title.is_empty() { url.host_str().unwrap_or("OPDS feed").to_owned() } else { feed.title }))
 }
 
 fn root(url: &str) -> Result<Url, String> {
@@ -57,13 +63,7 @@ fn root(url: &str) -> Result<Url, String> {
 }
 
 fn chip(source: OpdsSourceId, link: &NavigationLink) -> BrowseRow {
-    BrowseRow {
-        id: BrowseLocation::Opds { source, page: Some(pages::id(source, &link.href)) },
-        name: link.title.clone(),
-        path: None,
-        book_count: link.count.map_or(0, |count| count as usize),
-        downloaded_book_count: 0,
-    }
+    BrowseRow { id: BrowseLocation::Opds { source, page: Some(pages::id(source, &link.href)) }, name: link.title.clone(), path: None, book_count: link.count.map_or(0, |count| count as usize), downloaded_book_count: 0 }
 }
 
 /// A publication's card; adding it or drawing its cover finds it again by
@@ -71,8 +71,13 @@ fn chip(source: OpdsSourceId, link: &NavigationLink) -> BrowseRow {
 fn card(source: OpdsSourceId, publication: &Publication) -> BookCardRow {
     let entry = entry_key(source, publication);
     publications::remember(entry, publication);
+    // A sold book is offered only where its store's window can open.
+    #[cfg(not(target_arch = "wasm32"))]
+    let buyable = publication.buy.is_some() && crate::browser::stores_available();
+    #[cfg(target_arch = "wasm32")]
+    let buyable = false;
     BookCardRow {
-        source: BookSource::Opds { source, entry, downloadable: publication.download.is_some() },
+        source: BookSource::Opds { source, entry, downloadable: publication.download.is_some(), buyable },
         title: publication.title.clone(),
         subtitle: publication.subtitle.clone(),
         author: publication.authors.join(", "),

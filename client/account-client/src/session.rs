@@ -1,29 +1,26 @@
 use crate::Url;
-use serde::{Deserialize, Serialize};
-use std::fmt::Formatter;
-use std::io::Error;
+use reqwest::StatusCode;
+use serde::{Deserialize, Deserializer, Serialize};
+use std::fmt::{self, Formatter};
 use sync_common::transport::WireError;
 use url::ParseError;
+use web_time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug)]
 pub enum AuthError {
     Http(reqwest::Error),
     Wire(WireError),
     Url(ParseError),
-    Io(Error),
     InvalidData(String),
-    Binding(String),
 }
 
-impl std::fmt::Display for AuthError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for AuthError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Http(error) => error.fmt(formatter),
             Self::Wire(error) => error.fmt(formatter),
             Self::Url(error) => error.fmt(formatter),
-            Self::Io(error) => write!(formatter, "io error: {error}"),
             Self::InvalidData(message) => write!(formatter, "invalid authentication data: {message}"),
-            Self::Binding(message) => message.fmt(formatter),
         }
     }
 }
@@ -34,25 +31,24 @@ impl std::error::Error for AuthError {
             Self::Http(error) => Some(error),
             Self::Wire(error) => Some(error),
             Self::Url(error) => Some(error),
-            Self::Io(error) => Some(error),
-            Self::InvalidData(_) | Self::Binding(_) => None,
+            Self::InvalidData(_) => None,
         }
     }
 }
 
 impl AuthError {
     pub fn is_not_found(&self) -> bool {
-        matches!(self, Self::Http(error) if error.status() == Some(reqwest::StatusCode::NOT_FOUND))
+        matches!(self, Self::Http(error) if error.status() == Some(StatusCode::NOT_FOUND))
     }
 
     pub fn is_unauthorized(&self) -> bool {
-        matches!(self, Self::Http(error) if error.status() == Some(reqwest::StatusCode::UNAUTHORIZED))
+        matches!(self, Self::Http(error) if error.status() == Some(StatusCode::UNAUTHORIZED))
     }
 
     /// The server refused the request as made (400 or 409): sending it again
     /// cannot succeed.
     pub fn is_rejected(&self) -> bool {
-        matches!(self, Self::Http(error) if matches!(error.status(), Some(reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::CONFLICT)))
+        matches!(self, Self::Http(error) if matches!(error.status(), Some(StatusCode::BAD_REQUEST | StatusCode::CONFLICT)))
     }
 }
 
@@ -74,13 +70,8 @@ impl From<ParseError> for AuthError {
     }
 }
 
-impl From<Error> for AuthError {
-    fn from(error: Error) -> Self {
-        Self::Io(error)
-    }
-}
-
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
+#[serde(rename = "StoredSession")]
 pub struct Session {
     server_url: Url,
     user_id: String,
@@ -91,7 +82,7 @@ pub struct Session {
     refresh_expires_at: Option<i64>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct StoredSession {
     server_url: Url,
     user_id: String,
@@ -105,8 +96,8 @@ struct StoredSession {
     refresh_expires_at: Option<i64>,
 }
 
-impl std::fmt::Debug for Session {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Session {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Session")
             .field("server_url", &self.server_url)
@@ -120,23 +111,8 @@ impl std::fmt::Debug for Session {
     }
 }
 
-impl Serialize for Session {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        StoredSession {
-            server_url: self.server_url.clone(),
-            user_id: self.user_id.clone(),
-            email: self.email.clone(),
-            token: self.token.clone(),
-            expires_at: self.expires_at,
-            refresh_token: self.refresh_token.clone(),
-            refresh_expires_at: self.refresh_expires_at,
-        }
-        .serialize(serializer)
-    }
-}
-
 impl<'de> Deserialize<'de> for Session {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let stored = StoredSession::deserialize(deserializer)?;
         Self::try_new_with_tokens(stored.server_url, stored.user_id, stored.email, stored.token, stored.expires_at, stored.refresh_token, stored.refresh_expires_at).map_err(serde::de::Error::custom)
     }
@@ -167,13 +143,14 @@ fn validate_token(value: &str) -> Result<(), AuthError> {
     Ok(())
 }
 
+fn expiry_within(expires_at: Option<i64>, seconds: i64) -> bool {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs() as i64).unwrap_or(i64::MAX);
+    expires_at.is_some_and(|expires_at| expires_at <= now.saturating_add(seconds.max(0)))
+}
+
 impl Session {
     pub fn try_new(server_url: Url, user_id: String, email: String, token: String) -> Result<Self, AuthError> {
-        Self::try_new_with_expiry(server_url, user_id, email, token, None)
-    }
-
-    pub fn try_new_with_expiry(server_url: Url, user_id: String, email: String, token: String, expires_at: Option<i64>) -> Result<Self, AuthError> {
-        Self::try_new_with_tokens(server_url, user_id, email, token, expires_at, None, None)
+        Self::try_new_with_tokens(server_url, user_id, email, token, None, None, None)
     }
 
     pub fn try_new_with_tokens(server_url: Url, user_id: String, email: String, token: String, expires_at: Option<i64>, refresh_token: Option<String>, refresh_expires_at: Option<i64>) -> Result<Self, AuthError> {
@@ -225,17 +202,11 @@ impl Session {
     }
 
     pub fn expires_within(&self, seconds: i64) -> bool {
-        let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|duration| duration.as_secs() as i64).unwrap_or(i64::MAX);
-        self.expires_at.is_some_and(|expires_at| expires_at <= now.saturating_add(seconds.max(0)))
+        expiry_within(self.expires_at, seconds)
     }
 
     pub fn refresh_expires_within(&self, seconds: i64) -> bool {
-        let now = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|duration| duration.as_secs() as i64).unwrap_or(i64::MAX);
-        self.refresh_expires_at.is_some_and(|expires_at| expires_at <= now.saturating_add(seconds.max(0)))
-    }
-
-    pub fn with_server_url(&self, server_url: Url) -> Result<Self, AuthError> {
-        Self::try_new_with_tokens(server_url, self.user_id.clone(), self.email.clone(), self.token.clone(), self.expires_at, self.refresh_token.clone(), self.refresh_expires_at)
+        expiry_within(self.refresh_expires_at, seconds)
     }
 }
 

@@ -1,6 +1,7 @@
 use core::panic::Location;
 use std::cell::Cell;
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,13 +12,13 @@ use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, DispatchPhase, Element, ElementId, Entity, EventEmitter, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, ImageFormat, InspectorElementId, IntoElement, KeyContext,
     KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, Render, ScrollDelta, ScrollWheelEvent, Style, Window, relative,
 };
-use html_view_core::{BlockingJob, BlockingJobSpawner, DisplayCacheKey, InteractionPalette, PointerDownOptions, RendererCommand, RendererEvent, RendererHost, RendererSession, SelectionMode, TocEntry};
+use html_view_core::{BlockingJob, BlockingJobSpawner, DisplayCacheKey, InteractionPalette, PointerDownOptions, ReadingFragment, ReadingTarget, RendererCommand, RendererEvent, RendererHost, RendererSession, SelectionMode, TocEntry};
 use image::RgbaImage;
 use kurbo::{Point, Size};
 
-use crate::paint::{GpuiCommandPainter, ImageCache, PaintCommand, paint_commands};
-use crate::text::{GlyphStore, GpuiTextCache, TextShapeCacheStats};
 use gpui::AppContext;
+use html_gpui::TextShapeCacheStats;
+use html_gpui::backend::{GlyphStore, GpuiCommandPainter, GpuiTextCache, ImageCache, PaintCommand, paint_commands};
 
 /// A window point in the note's own coordinates, which is where its geometry
 /// and therefore its hit testing live.
@@ -96,10 +97,10 @@ impl Element for HtmlNoteElement {
         NotePrepaint { hitbox, overlay }
     }
 
-    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut Self::RequestLayoutState, prepaint: &mut Self::PrepaintState, window: &mut Window, _cx: &mut App) {
+    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut Self::RequestLayoutState, prepaint: &mut Self::PrepaintState, window: &mut Window, cx: &mut App) {
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            paint_commands(self.prepared.commands.as_ref(), &self.prepared.glyph_store, bounds, window);
-            paint_commands(prepaint.overlay.as_ref(), &self.prepared.glyph_store, bounds, window);
+            paint_commands(self.prepared.commands.as_ref(), &self.prepared.glyph_store, bounds, window, cx);
+            paint_commands(prepaint.overlay.as_ref(), &self.prepared.glyph_store, bounds, window, cx);
         });
 
         // Selecting in a note is the page's interaction applied to a second
@@ -400,13 +401,13 @@ impl Element for HtmlDocumentElement {
         HtmlDocumentPrepaint { hitbox, paint }
     }
 
-    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut Self::RequestLayoutState, prepaint: &mut Self::PrepaintState, window: &mut Window, _cx: &mut App) {
+    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut Self::RequestLayoutState, prepaint: &mut Self::PrepaintState, window: &mut Window, cx: &mut App) {
         window.paint_quad(gpui::fill(bounds, gpui::white()));
         let paint = &prepaint.paint;
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            paint_commands(paint.base_before_overlay.as_ref(), &paint.glyph_store, bounds, window);
-            paint_commands(paint.overlay.as_ref(), &paint.glyph_store, bounds, window);
-            paint_commands(paint.base_after_overlay.as_ref(), &paint.glyph_store, bounds, window);
+            paint_commands(paint.base_before_overlay.as_ref(), &paint.glyph_store, bounds, window, cx);
+            paint_commands(paint.overlay.as_ref(), &paint.glyph_store, bounds, window, cx);
+            paint_commands(paint.base_after_overlay.as_ref(), &paint.glyph_store, bounds, window, cx);
         });
 
         if self.link_hovered {
@@ -549,6 +550,33 @@ impl HtmlView {
         self.renderer.apply(command);
     }
 
+    pub fn current_cfi(&self) -> Option<String> {
+        self.renderer.current_cfi()
+    }
+    pub fn reading_document(&self) -> Option<usize> {
+        self.renderer.reading_document()
+    }
+    pub fn reading_items(&self) -> Option<(usize, usize, u32, Vec<ReadingTarget>)> {
+        self.renderer.reading_items()
+    }
+    pub fn reading_chunk(&self, target: &ReadingTarget, glyph_start: u32, max_chars: usize, select: impl FnOnce(&str) -> Option<Range<usize>>) -> Option<(ReadingFragment, Option<u32>)> {
+        self.renderer.document().render_view().addressing().reading_chunk(target, glyph_start, max_chars, select)
+    }
+    pub fn reading_target_cfi(&self, target: &ReadingTarget) -> Option<String> {
+        self.renderer.reading_target_cfi(target)
+    }
+
+    pub fn navigation_revision(&self) -> u64 {
+        self.renderer.navigation_revision()
+    }
+    pub fn advance_reading_document(&mut self, _cx: &mut Context<Self>) {
+        self.renderer.advance_reading_document();
+    }
+
+    pub fn follow_reading_target(&mut self, target: ReadingTarget, _cx: &mut Context<Self>) {
+        self.renderer.follow_reading_target(target);
+    }
+
     /// Reflows to the width supplied by the containing GPUI layout without
     /// replacing the reader's preferred column width.
     pub fn set_available_width(&mut self, width: f64, _cx: &mut Context<Self>) {
@@ -653,6 +681,44 @@ impl HtmlView {
         self.renderer.selection_contains_point(self.layout_point(position))
     }
 
+    pub fn select_word_at(&mut self, position: GpuiPoint<Pixels>, cx: &mut Context<Self>) -> bool {
+        let selected = self.renderer.select_word_at(self.layout_point(position));
+        if selected {
+            cx.notify();
+        }
+        selected
+    }
+
+    pub fn begin_selection_handle(&mut self, start: bool) -> bool {
+        self.renderer.begin_selection_handle(start)
+    }
+
+    pub fn update_touch_selection(&mut self, position: GpuiPoint<Pixels>, cx: &mut Context<Self>) {
+        if self.renderer.update_touch_selection(self.layout_point(position)) {
+            cx.notify();
+        }
+    }
+
+    pub fn end_touch_selection(&mut self) {
+        self.renderer.end_touch_selection();
+    }
+
+    pub fn clear_text_selection(&mut self, cx: &mut Context<Self>) {
+        self.renderer.clear_text_selection();
+        cx.notify();
+    }
+
+    pub fn selected_passage(&self) -> Option<(String, String)> {
+        self.renderer.selected_passage()
+    }
+
+    pub fn selection_endpoints(&self) -> (Option<GpuiPoint<Pixels>>, Option<GpuiPoint<Pixels>>) {
+        let origin = self.document_origin.get();
+        let convert = |point: Point| GpuiPoint::new(origin.x + gpui::px(point.x as f32), origin.y + gpui::px(point.y as f32));
+        let (start, end) = self.renderer.selection_endpoints();
+        (start.map(convert), end.map(convert))
+    }
+
     pub fn table_at(&self, position: GpuiPoint<Pixels>) -> bool {
         self.renderer.table_at(self.layout_point(position))
     }
@@ -663,6 +729,14 @@ impl HtmlView {
 
     pub fn copy_image_at(&self, position: GpuiPoint<Pixels>) -> bool {
         self.renderer.copy_image_at(self.layout_point(position))
+    }
+
+    pub fn equation_at(&self, position: GpuiPoint<Pixels>) -> bool {
+        self.renderer.equation_at(self.layout_point(position))
+    }
+
+    pub fn copy_equation_latex_at(&self, position: GpuiPoint<Pixels>) -> bool {
+        self.renderer.copy_equation_latex_at(self.layout_point(position))
     }
 
     pub fn table_selection_at(&self, position: GpuiPoint<Pixels>) -> bool {
@@ -785,7 +859,7 @@ impl HtmlView {
         let scene = self.renderer.note_scene()?;
         let glyph_store = self.renderer.glyph_shaper().store();
         let run_store = self.renderer.glyph_shaper().run_store();
-        let mut painter = GpuiCommandPainter::new(&mut self.images, glyph_store, run_store, Vec::new());
+        let mut painter = GpuiCommandPainter::new(&mut self.images, glyph_store, run_store, Vec::new()).image_theme(self.renderer.image_theme());
         scene.paint(&mut painter);
         let commands = painter.into_commands();
         println!("HTML_NOTE_PREPARED commands={} height={:.1}", commands.len(), scene.content_height());
@@ -818,6 +892,7 @@ impl HtmlView {
     fn compose_viewport_display_list(&mut self, viewport: Size) -> PreparedPaint {
         let total_started = Instant::now();
         let renderer_started = Instant::now();
+        let image_theme = self.renderer.image_theme();
         let frame = self.renderer.prepare_viewport(viewport);
         let renderer_us = renderer_started.elapsed().as_micros();
         let cache_started = Instant::now();
@@ -836,9 +911,9 @@ impl HtmlView {
         let base_before_buffer = if base.is_none() { take_command_buffer(&mut self.command_buffers, &mut self.paint_cache_stats) } else { Default::default() };
         let overlay_buffer = if overlay.is_none() { take_command_buffer(&mut self.command_buffers, &mut self.paint_cache_stats) } else { Default::default() };
         let base_after_buffer = if base.is_none() { take_command_buffer(&mut self.command_buffers, &mut self.paint_cache_stats) } else { Default::default() };
-        let mut base_before_painter = GpuiCommandPainter::new(&mut self.images, glyph_store.clone(), run_store.clone(), base_before_buffer);
+        let mut base_before_painter = GpuiCommandPainter::new(&mut self.images, glyph_store.clone(), run_store.clone(), base_before_buffer).image_theme(image_theme);
         let mut overlay_painter = GpuiCommandPainter::commands_only(glyph_store.clone(), run_store.clone(), overlay_buffer);
-        let mut base_after_painter = GpuiCommandPainter::commands_only(glyph_store.clone(), run_store, base_after_buffer);
+        let mut base_after_painter = GpuiCommandPainter::commands_only(glyph_store.clone(), run_store, base_after_buffer).image_theme(image_theme);
         let layer_started = Instant::now();
         match (base.is_none(), overlay.is_none()) {
             (true, true) => frame.paint_all_layers(&mut base_before_painter, &mut overlay_painter, &mut base_after_painter),
@@ -974,10 +1049,17 @@ impl HtmlView {
         Self::stop_event(cx);
     }
 
-    fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_scroll(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // The embedding reader owns page gestures. Consuming their live
+        // pixels here would navigate a line for every move and prevent the
+        // parent from tracking or completing the page turn.
+        if window.is_page_scroll_swipe() || matches!(event.delta, ScrollDelta::Pages(_)) {
+            return;
+        }
         let y = match event.delta {
             ScrollDelta::Pixels(delta) => f32::from(delta.y),
             ScrollDelta::Lines(delta) => delta.y,
+            ScrollDelta::Pages(delta) => delta.y * self.layout_geometry.map_or_else(|| f32::from(window.viewport_size().height), |geometry| geometry.viewport_height as f32),
         };
         if !self.renderer.scroll_vertical(y as f64) {
             return;

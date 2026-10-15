@@ -18,4 +18,3 @@ include_sql!("src/assets/sql/transfers.sql");
 include_sql!("src/assets/sql/activity.sql");
 
 include_sql!("src/assets/sql/schema/asset_views.sql");
-

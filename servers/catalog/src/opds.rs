@@ -22,10 +22,7 @@ pub fn entries(xml: &str, base: &Url) -> Result<Vec<Entry>, String> {
     let mut entries = Vec::new();
     for entry in document.root_element().children().filter(|node| atom(node, "entry")) {
         let link = |rel: &str, kind: Option<&str>| {
-            entry
-                .children()
-                .filter(|node| atom(node, "link") && node.attribute("rel") == Some(rel) && kind.is_none_or(|kind| node.attribute("type") == Some(kind)))
-                .find_map(|node| base.join(node.attribute("href")?).ok())
+            entry.children().filter(|node| atom(node, "link") && node.attribute("rel") == Some(rel) && kind.is_none_or(|kind| node.attribute("type") == Some(kind))).find_map(|node| base.join(node.attribute("href")?).ok())
         };
         let categories = |scheme: &str| entry.children().filter(|node| atom(node, "category") && node.attribute("scheme").is_some_and(|value| value.ends_with(scheme))).filter_map(|node| node.attribute("term")).map(str::to_owned).collect();
         entries.push(Entry {

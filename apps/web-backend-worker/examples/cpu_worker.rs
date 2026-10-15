@@ -1,8 +1,8 @@
 //! Dedicated WASM entry point: deliberately does not initialize the backend.
 #![cfg(target_arch = "wasm32")]
 
-use wasm_bindgen::prelude::*;
 use library_backend::library::web_reader::{connect, Reader};
+use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(module = "/pdfium.js")]
 extern "C" {
@@ -32,7 +32,9 @@ fn execute_with_source(bytes: &[u8], source: JsValue) -> Result<Vec<u8>, JsValue
 }
 
 #[wasm_bindgen(js_name = startCpuWorker)]
-pub fn start() -> Result<(), JsValue> {
+pub async fn start() -> Result<(), JsValue> {
+    client_platform_web::sqlite::initialize_reference_storage().await.map_err(|error| JsValue::from_str(&error))?;
+    app::host::cpu::initialize_bisac_reference().await.map_err(|error| JsValue::from_str(&error))?;
     let scope = client_platform_web::transport::scope::Scope::current();
     let worker = scope.clone();
     scope.receive(move |input| {

@@ -45,7 +45,7 @@ impl LibrarySummary {
 }
 
 /// A page whose state belongs to one library session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum LibraryRoute {
     Home,
     Books,
@@ -57,13 +57,13 @@ pub enum LibraryRoute {
 }
 
 /// A page shared across library selections.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum GlobalRoute {
     Settings,
 }
 
 /// The currently displayed browser destination.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Route {
     Library(LibraryRoute),
     Global(GlobalRoute),

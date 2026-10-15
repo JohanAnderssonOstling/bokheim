@@ -86,8 +86,15 @@ where
         let builder = self.builder.clone();
         let menu_state =
             window.use_keyed_state(self.id.clone(), cx, |_, _| DropdownMenuState::default());
+        let closing_state = menu_state.clone();
 
         Popover::new(SharedString::from(format!("popover:{}", self.id)))
+            .on_open_change(move |open, _, cx| {
+                if !*open {
+                    let menu = closing_state.update(cx, |state, _| state.menu.take());
+                    if let Some(menu) = menu { menu.update(cx, |menu, _| menu.deactivate()); }
+                }
+            })
             .appearance(false)
             .overlay_closable(false)
             .trigger(self.trigger)

@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bokheim · Pause control</title>
+  <style>
+    @font-face { font-family: Garamond; src: url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf'); }
+    @font-face { font-family: Garamond; src: url('../../desktop-gpui/assets/fonts/NV_Garamond-Italic.ttf'); font-style: italic; }
+    @font-face { font-family: Raleway; src: url('../../desktop-gpui/assets/fonts/Raleway-Regular.ttf'); }
+    @font-face { font-family: Bodoni; src: url('../../desktop-gpui/assets/fonts/BodoniModa-Regular.ttf'); }
+    :root { color-scheme: light; --canvas: #eae5dc; --paper: #f6f2eb; --ink: #22201d; --muted: #6b675f; --rule: #c5bdac; --border: #8c7f64; --accent: #466853; --accent-ink: #fffdfa; --wash: #d9e8de; --hover: #22201d09; --shadow: #22201d24; }
+    [data-theme="dark"] { color-scheme: dark; --canvas: #1c1a16; --paper: #11100d; --ink: #efe6d0; --muted: #a69c86; --rule: #4e4334; --border: #786644; --accent: #d3b271; --accent-ink: #11100d; --wash: #3c3423; --hover: #d3b27114; --shadow: #0008; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--canvas); color: var(--ink); font: 14px/1.5 Raleway, sans-serif; }
+    button, select { font: inherit; color: inherit; cursor: pointer; }
+    button { border: 1px solid var(--border); background: transparent; padding: 7px 12px; }
+    button:hover { background: var(--hover); }
+    button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    button[aria-pressed="true"] { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+    [hidden] { display: none !important; }
+    main { max-width: 1264px; padding: 24px 32px; margin: auto; }
+    .eyebrow { color: var(--muted); font-size: 11px; letter-spacing: .15em; text-transform: uppercase; margin: 0 0 8px; }
+    h1 { margin: 0; font: 40px/1.15 Bodoni, Garamond, serif; }
+    .intro { color: var(--muted); margin: 12px 0 24px; }
+    .study-controls { display: flex; align-items: center; gap: 24px; padding: 16px 0; border-top: 1px solid var(--rule); }
+    .segmented { display: flex; }
+    .segmented button + button { border-left: 0; }
+    .theme-control { display: flex; align-items: center; gap: 8px; }
+    select { background: var(--paper); border: 1px solid var(--border); padding: 7px 8px; }
+    .reader { position: relative; height: 664px; border: 1px solid var(--border); background: var(--paper); display: flex; flex-direction: column; font: 17px/1.4 Garamond, Georgia, serif; container: reader / inline-size; }
+    .reader.mobile { width: 390px; max-width: 100%; height: 650px; margin-inline: auto; }
+    .reader button, .reader select { font: inherit; }
+    .toolbar { height: 56px; flex: none; display: flex; gap: 16px; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--rule); }
+    .book-title { flex: 1; text-align: center; font-size: 18px; }
+    .icon { display: inline-block; width: 20px; height: 20px; background: currentColor; mask: var(--icon) center / contain no-repeat; -webkit-mask: var(--icon) center / contain no-repeat; flex: none; }
+    .pause-icon { display: block; width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; stroke-width: 12; stroke-linecap: round; stroke-linejoin: round; }
+    .icon-button { width: 32px; height: 32px; padding: 5px; display: inline-flex; align-items: center; justify-content: center; }
+    .bare { border-color: transparent; }
+    .workarea { display: flex; flex: 1; min-height: 0; }
+    .rail { width: 56px; flex: none; border-right: 1px solid var(--rule); display: flex; align-items: center; flex-direction: column; gap: 16px; padding: 16px 0; }
+    .rail .settings-trigger { margin-top: auto; }
+    .pages { flex: 1; min-width: 0; display: grid; grid-template-columns: 1fr 1fr; column-gap: 64px; padding: 36px 64px 24px; overflow: hidden; }
+    .page { position: relative; min-width: 0; }
+    .running-title { margin: 0 0 28px; color: var(--muted); text-align: center; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
+    .chapter { margin: 0 0 22px; text-align: center; font: 25px/1.2 Bodoni, serif; }
+    .book-copy { margin: 0 0 14px; font-size: 19px; line-height: 1.62; }
+    .dropcap::first-letter { float: left; font-size: 56px; line-height: .9; padding-right: 6px; padding-top: 7px; }
+    mark { background: var(--wash); color: inherit; }
+    .folio { position: absolute; bottom: 0; width: 100%; text-align: center; color: var(--muted); font-size: 13px; }
+    .dock { flex: none; position: relative; height: 64px; border-top: 1px solid var(--rule); display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px; padding: 0 8px; }
+    .progress { position: absolute; left: 0; right: 0; top: -2px; height: 3px; background: var(--rule); }
+    .progress span { display: block; width: 34%; height: 100%; background: var(--accent); }
+    .transport { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+    .transport-label { font-size: 12px; color: var(--muted); }
+    .transport-buttons, .tools { display: flex; align-items: center; gap: 4px; }
+    .tools { justify-content: flex-end; }
+    .dock-speed { min-width: 42px; }
+    .dock-option { position: relative; }
+    .dock-option > button { height: 32px; padding: 4px 8px; white-space: nowrap; }
+    .dock-option > button[aria-expanded="true"] { background: var(--wash); border-color: var(--border); }
+    .choice-menu { position: absolute; z-index: 2; bottom: 44px; right: 0; min-width: 160px; padding: 4px; border: 1px solid var(--border); background: var(--paper); box-shadow: 0 14px 34px var(--shadow); }
+    .choice-menu button { display: flex; align-items: center; justify-content: space-between; gap: 24px; width: 100%; padding: 7px 8px; text-align: left; border: 0; }
+    .choice-menu .check { visibility: hidden; }
+    .choice-menu button[aria-checked="true"] .check { visibility: visible; }
+    .choice-menu button[aria-checked="true"] { background: var(--wash); }
+    .menu-label { padding: 6px 8px 8px; color: var(--muted); font-size: 13px; border-bottom: 1px solid var(--rule); margin-bottom: 4px; }
+    .caption { color: var(--muted); margin: 16px 0 0; font-size: 13px; }
+    .study-footer { display: flex; justify-content: space-between; gap: 24px; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 12px; }
+    @container reader (max-width: 800px) { .pages { grid-template-columns: 1fr; padding: 28px 32px; } .page:last-child { display: none; } .rail { width: 44px; } }
+    @container reader (max-width: 560px) { .toolbar { gap: 8px; padding: 0 8px; } .book-title { font-size: 16px; } .book-title span { display: none; } .rail { display: none; } .book-copy { font-size: 18px; } .pages { padding: 28px 24px; } .dock { grid-template-columns: 1fr auto 1fr; } .transport-buttons { gap: 2px; } .transport-buttons > .bare { display: none; } .tools { gap: 2px; } .tools .sleep, .tools .close-dock { display: none; } .dock-option > button { padding-inline: 4px; } }
+    @media (max-width: 800px) { main { padding: 24px 16px; } .reader { height: 680px; } .pages { grid-template-columns: 1fr; padding: 28px 32px; } .page:last-child { display: none; } .rail { width: 44px; } }
+    @media (max-width: 560px) { main { padding: 24px 12px; } h1 { font-size: 34px; } .reader { height: 650px; } .toolbar { gap: 8px; padding: 0 8px; } .book-title { font-size: 16px; } .rail { display: none; } .book-copy { font-size: 18px; } .pages { padding: 28px 24px; } .dock { grid-template-columns: 1fr auto 1fr; } .transport-buttons { gap: 2px; } .transport-buttons > .bare { display: none; } .tools { gap: 2px; } .tools .sleep, .tools .close-dock { display: none; } .dock-option > button { padding-inline: 4px; } .study-footer { flex-direction: column; gap: 4px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="reader" aria-label="Reader mockup">
+      <div class="workarea">
+        <nav class="rail" aria-label="Reader tools">
+          <button class="icon-button bare" aria-label="Contents"><span class="icon" style="--icon: url('assets/phosphor-light/list.svg')"></span></button>
+          <button class="icon-button bare" aria-label="Search"><span class="icon" style="--icon: url('assets/phosphor-light/magnifying-glass.svg')"></span></button>
+          <button class="icon-button bare settings-trigger" aria-label="Reader settings"><span class="icon" style="--icon: url('assets/phosphor-light/sliders-horizontal.svg')"></span></button>
+        </nav>
+        <div class="pages">
+          <article class="page">
+            <p class="running-title">The Wind in the Willows</p>
+            <h3 class="chapter">I. The River Bank</h3>
+            <p class="book-copy dropcap">The Mole had been working very hard all the morning, spring-cleaning his little home. First with brooms, then with dusters; then on ladders and steps and chairs, with a brush and a pail of whitewash.</p>
+            <p class="book-copy"><mark>Spring was moving in the air above and in the earth below and around him, penetrating even his dark and lowly little house with its spirit of divine discontent and longing.</mark></p>
+            <p class="book-copy">It was small wonder, then, that he suddenly flung down his brush on the floor, said “Bother!” and “O blow!” and also “Hang spring-cleaning!” and bolted out of the house.</p>
+            <div class="folio">7</div>
+          </article>
+          <article class="page">
+            <p class="running-title">The River Bank</p>
+            <p class="book-copy">Something up above was calling him imperiously, and he made for the steep little tunnel which answered in his case to the gravelled carriage-drive owned by animals whose residences are nearer to the sun and air.</p>
+            <p class="book-copy">So he scraped and scratched and scrabbled and scrooged and then he scrooged again and scrabbled and scratched and scraped, working busily with his little paws and muttering to himself, “Up we go! Up we go!”</p>
+            <p class="book-copy">At last, pop! his snout came out into the sunlight, and he found himself rolling in the warm grass of a great meadow.</p>
+            <div class="folio">8</div>
+          </article>
+        </div>
+      </div>
+      <footer class="dock">
+        <div class="progress"><span></span></div>
+        <div></div>
+        <div class="transport">
+          <span class="transport-label" id="reading-status">Reading</span>
+          <div class="transport-buttons">
+            <button class="icon-button bare" aria-label="Previous page"><span class="icon" style="--icon: url('assets/phosphor-light/caret-left.svg')"></span></button>
+            <button class="icon-button" aria-label="Previous passage"><span class="icon" style="--icon: url('assets/phosphor-light/arrow-counter-clockwise.svg')"></span></button>
+            <button class="icon-button" id="play" aria-label="Pause" aria-pressed="true"><span class="icon" style="--icon: url('assets/phosphor-light/pause.svg')"></span></button>
+            <button class="icon-button" aria-label="Next passage"><span class="icon" style="--icon: url('assets/phosphor-light/arrow-clockwise.svg')"></span></button>
+            <button class="icon-button bare" aria-label="Next page"><span class="icon" style="--icon: url('assets/phosphor-light/caret-right.svg')"></span></button>
+          </div>
+        </div>
+        <div class="tools">
+          <button class="icon-button bare sleep" aria-label="Sleep timer"><span class="icon" style="--icon: url('assets/phosphor-light/alarm.svg')"></span></button>
+          <div class="dock-option">
+            <button class="dock-speed bare" id="dock-speed" aria-label="Reading speed" aria-haspopup="menu" aria-expanded="false" aria-controls="speed-menu">1×</button>
+            <div class="choice-menu" id="speed-menu" role="menu" aria-label="Reading speed" hidden></div>
+          </div>
+          <div class="dock-option">
+            <button class="icon-button bare" id="pauses-button" aria-label="Sentence pauses: Natural" aria-haspopup="menu" aria-expanded="false" aria-controls="pauses-menu" title="Sentence pauses: Natural"><svg class="pause-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" aria-hidden="true"><path d="M48 40v128M88 40v128" stroke-width="16"/><circle cx="172" cy="168" r="56"/><path d="M172 136v32l20 12"/></svg></button>
+            <div class="choice-menu" id="pauses-menu" role="menu" aria-label="Sentence pauses" hidden>
+              <div class="menu-label">Sentence pauses</div>
+              <button data-pause="short" data-scale="0.5" role="menuitemradio" aria-checked="false">Short<span class="check" aria-hidden="true">✓</span></button>
+              <button data-pause="natural" data-scale="1.0" role="menuitemradio" aria-checked="true">Natural<span class="check" aria-hidden="true">✓</span></button>
+              <button data-pause="longer" data-scale="1.5" role="menuitemradio" aria-checked="false">Longer<span class="check" aria-hidden="true">✓</span></button>
+            </div>
+          </div>
+          <button class="icon-button bare close-dock" aria-label="Close narration" id="close-dock"><span class="icon" style="--icon: url('assets/phosphor-light/x.svg')"></span></button>
+        </div>
+      </footer>
+    </section>
+    <p class="caption" id="caption">Click the sentence pauses icon beside speed to choose Short, Natural, or Longer pauses. Natural is the default; your choice is remembered across books.</p>
+    <footer class="study-footer"><span>Existing speed control + one pause control.</span><span>Bokheim · Interface mockup</span></footer>
+  </main>
+  <script>
+    const root = document.documentElement;
+    const speeds = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+    const state = { speed: 1, pauses: 'natural' };
+    const speedButton = document.querySelector('#dock-speed');
+    const pausesButton = document.querySelector('#pauses-button');
+    const speedMenu = document.querySelector('#speed-menu');
+    const pausesMenu = document.querySelector('#pauses-menu');
+    try {
+      const saved = JSON.parse(localStorage.getItem('bokheim-voice-mockup') || 'null');
+      if (saved && speeds.includes(saved.speed)) state.speed = saved.speed;
+      if (saved && ['short', 'natural', 'longer'].includes(saved.pauses)) state.pauses = saved.pauses;
+    } catch {}
+    for (const speed of speeds) {
+      const button = document.createElement('button');
+      button.dataset.speed = speed;
+      button.setAttribute('role', 'menuitemradio');
+      button.innerHTML = speed + '×<span class="check" aria-hidden="true">✓</span>';
+      speedMenu.append(button);
+    }
+    function sync(save = true) {
+      document.querySelectorAll('[data-speed]').forEach(button => button.setAttribute('aria-checked', Number(button.dataset.speed) === state.speed));
+      document.querySelectorAll('[data-pause]').forEach(button => button.setAttribute('aria-checked', button.dataset.pause === state.pauses));
+      speedButton.textContent = state.speed + '×';
+      speedButton.setAttribute('aria-label', 'Reading speed: ' + state.speed + ' times');
+      pausesButton.title = 'Sentence pauses: ' + state.pauses[0].toUpperCase() + state.pauses.slice(1);
+      pausesButton.setAttribute('aria-label', pausesButton.title);
+      if (save) { try { localStorage.setItem('bokheim-voice-mockup', JSON.stringify(state)); } catch {} }
+    }
+    function closeMenus() {
+      for (const [button, menu] of [[speedButton, speedMenu], [pausesButton, pausesMenu]]) {
+        menu.hidden = true;
+        button.setAttribute('aria-expanded', 'false');
+      }
+    }
+    function toggleMenu(button, menu) {
+      const open = menu.hidden;
+      closeMenus();
+      menu.hidden = !open;
+      button.setAttribute('aria-expanded', String(open));
+      if (open) menu.querySelector('[aria-checked="true"]').focus();
+    }
+    speedButton.addEventListener('click', () => toggleMenu(speedButton, speedMenu));
+    pausesButton.addEventListener('click', () => toggleMenu(pausesButton, pausesMenu));
+    document.querySelectorAll('[data-speed]').forEach(button => button.addEventListener('click', () => {
+      state.speed = Number(button.dataset.speed); sync(); closeMenus(); speedButton.focus();
+    }));
+    document.querySelectorAll('[data-pause]').forEach(button => button.addEventListener('click', () => {
+      state.pauses = button.dataset.pause; sync(); closeMenus(); pausesButton.focus();
+    }));
+    let playing = true;
+    function setPlaying(value) {
+      playing = value;
+      const button = document.querySelector('#play');
+      button.setAttribute('aria-pressed', String(playing));
+      button.setAttribute('aria-label', playing ? 'Pause' : 'Start reading');
+      button.firstElementChild.style.setProperty('--icon', `url('assets/phosphor-light/${playing ? 'pause' : 'play'}.svg')`);
+      document.querySelector('#reading-status').textContent = playing ? 'Reading' : 'Paused';
+    }
+    document.querySelector('#play').addEventListener('click', () => setPlaying(!playing));
+    document.querySelector('#close-dock').addEventListener('click', () => { closeMenus(); setPlaying(false); document.querySelector('#reading-status').textContent = 'Start reading'; });
+    function setLayout(layout) {
+      document.querySelector('.reader').classList.toggle('mobile', layout === 'mobile');
+      document.querySelectorAll('[data-layout]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.layout === layout)));
+    }
+    document.querySelectorAll('[data-layout]').forEach(button => button.addEventListener('click', () => setLayout(button.dataset.layout)));
+    document.addEventListener('click', event => { if (!event.target.closest('.dock-option')) closeMenus(); });
+    document.addEventListener('keydown', event => {
+      const menu = !pausesMenu.hidden ? pausesMenu : !speedMenu.hidden ? speedMenu : null;
+      if (!menu) return;
+      if (event.key === 'Escape') {
+        const button = menu === pausesMenu ? pausesButton : speedButton;
+        closeMenus(); button.focus();
+      } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+        event.preventDefault();
+        const choices = [...menu.querySelectorAll('button')];
+        const current = choices.indexOf(document.activeElement);
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? choices.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : -1) + choices.length) % choices.length;
+        choices[next].focus();
+      } else if (event.key === 'Tab') closeMenus();
+    });
+    sync(false);
+    const parameters = new URLSearchParams(location.search);
+    if (parameters.get('layout') === 'mobile') setLayout('mobile');
+    if (parameters.get('pauses') === 'open') toggleMenu(pausesButton, pausesMenu);
+  </script>
+</body>
+</html>

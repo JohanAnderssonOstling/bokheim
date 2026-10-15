@@ -12,6 +12,7 @@ content-address = { path = "../content-address" }
 protobuf-wire = { path = "../protobuf-wire" }
 wire = { path = "../wire" }
 serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
 uuid = { version = "1", features = ["v5", "serde"] }
 
 [dev-dependencies]

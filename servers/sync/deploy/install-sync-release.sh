@@ -54,7 +54,9 @@ trap cleanup EXIT
 cp -a -- /usr/local/bin/sync-server "${rollback}/sync-server"
 cp -a -- /etc/systemd/system/bokheim-sync.service "${rollback}/bokheim-sync.service"
 
-# Refuse activation until the initial schema has been provisioned separately.
+# Upgrade the separately provisioned database without recreating it, then
+# refuse activation unless its schema matches the candidate release.
+runuser -u bokheim -- env DATABASE_URL="${database_url}" "${incoming}/sync-server" upgrade
 runuser -u bokheim -- env DATABASE_URL="${database_url}" "${incoming}/sync-server" verify-schema
 
 activation_started=true

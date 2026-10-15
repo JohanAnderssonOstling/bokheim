@@ -1,0 +1,10 @@
+phase,elapsed_seconds,rss_kib,anonymous_rss_kib,peak_rss_kib
+before_load,0.00,23512,632,23512
+after_load,0.88,111944,84176,111944
+native_audio_retained,10.41,696684,668280,696684
+native_and_rust_pcm_retained,10.41,696684,668280,696684
+rust_pcm_retained,10.41,696684,668280,696684
+audio_released,10.41,696684,668280,696684
+idle_before_unload,70.41,696556,668280,696556
+after_voice_unload,70.48,128908,100336,696120
+five_seconds_after_unload,75.48,128908,100336,696120

@@ -13,6 +13,9 @@ members = [
     "shared/content-address",
     "shared/pdf-view-common",
     "shared/pdf-reader-core",
+    "shared/gpui-image-eviction",
+    "shared/html-gpui",
+    "shared/reader-speech",
     "shared/book-model",
     "shared/audiobook-archive",
     "client/library-backend/crates/audiobook-folder",
@@ -32,6 +35,7 @@ members = [
     "client/update-host",
     "shared/sync-common",
     "apps/desktop-gpui",
+    "apps/opds-webview",
     "apps/web-gpui",
     "apps/web-backend-worker",
     "apps/kobo-device",
@@ -53,19 +57,20 @@ strip = true
 
 [workspace.dependencies]
 blake3 = "1"
-html = { package = "html-engine", git = "https://github.com/JohanAnderssonOstling/HtmlEngine" }
-html-view-core = { git = "https://github.com/JohanAnderssonOstling/HtmlViewCore" }
+html = { package = "html-engine", git = "https://github.com/JohanAnderssonOstling/HtmlEngine", rev = "b57416f7c0774851e08ff988fdd42e6ed634cc37" }
+html-view-core = { git = "https://github.com/JohanAnderssonOstling/HtmlViewCore", rev = "d33fe55fb431b7af8107a8aca3cef4250e3a25a9" }
+html-gpui = { path = "shared/html-gpui" }
 kurbo = "0.11.3"
 peniko = "0.2.0"
 lightningcss = { version = "1.0.0-alpha.72", features = ["substitute_variables"] }
 parcel_selectors = "0.28.2"
 scraper = "0.27"
 unicode-normalization = "0.1"
-gpui = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", rev = "cb2f5b981889d421153d5804526929e32c0788fd", version = "=0.2.2", default-features = false, features = ["font-kit", "wayland", "x11", "windows-manifest"] }
-gpui_platform = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", rev = "cb2f5b981889d421153d5804526929e32c0788fd", features = ["wayland", "x11"] }
-gpui_android = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", rev = "cb2f5b981889d421153d5804526929e32c0788fd" }
-gpui_kobo = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", rev = "cb2f5b981889d421153d5804526929e32c0788fd" }
-gpui_wgpu = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", rev = "cb2f5b981889d421153d5804526929e32c0788fd" }
+gpui = { path = "../GPUI-Fork/crates/gpui", version = "=0.2.2", default-features = false, features = ["font-kit", "wayland", "x11", "windows-manifest"] }
+gpui_platform = { path = "../GPUI-Fork/crates/gpui_platform", features = ["wayland", "x11"] }
+gpui_android = { path = "../GPUI-Fork/crates/gpui_android" }
+gpui_kobo = { path = "../GPUI-Fork/crates/gpui_kobo" }
+gpui_wgpu = { path = "../GPUI-Fork/crates/gpui_wgpu" }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "88f102d13654fe25aa2fede076274b6b751a3704" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "88f102d13654fe25aa2fede076274b6b751a3704" }
 pdfium-render = { version = "0.9.3", default-features = false }
@@ -80,22 +85,25 @@ reqwest = { version = "0.12.28", default-features = false, features = ["charset"
 mobi = { path = "vendor/mobi" }
 async_zip = { path = "vendor/async_zip" }
 zip = { path = "vendor/zip" }
-gpui = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", rev = "cb2f5b981889d421153d5804526929e32c0788fd", version = "=0.2.2" }
+gpui = { path = "../GPUI-Fork/crates/gpui", version = "=0.2.2" }
 pdfium-render = { path = "vendor/pdfium-render" }
+sherpa-onnx-sys = { path = "vendor/sherpa-onnx-sys" }
 
 [patch."https://github.com/zed-industries/zed"]
-gpui = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", rev = "cb2f5b981889d421153d5804526929e32c0788fd", version = "=0.2.2" }
-gpui_macros = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", rev = "cb2f5b981889d421153d5804526929e32c0788fd" }
-gpui_platform = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", rev = "cb2f5b981889d421153d5804526929e32c0788fd" }
+gpui = { path = "../GPUI-Fork/crates/gpui", version = "=0.2.2" }
+gpui_macros = { path = "../GPUI-Fork/crates/gpui_macros" }
+gpui_platform = { path = "../GPUI-Fork/crates/gpui_platform" }
+
+# Keep vendored components on the same GPUI source as the application.
+[patch."https://github.com/JohanAnderssonOstling/GPUI-Fork"]
+gpui = { path = "../GPUI-Fork/crates/gpui", version = "=0.2.2" }
+gpui_macros = { path = "../GPUI-Fork/crates/gpui_macros" }
+gpui_platform = { path = "../GPUI-Fork/crates/gpui_platform" }
 
 # See vendor/gpui-component/LOCAL-PATCHES.md.
 [patch."https://github.com/longbridge/gpui-component"]
 gpui-component = { path = "vendor/gpui-component/crates/ui" }
 gpui-component-assets = { path = "vendor/gpui-component/crates/assets" }
-
-# Local engine changes for separate image loading.
-[patch."https://github.com/JohanAnderssonOstling/HtmlEngine"]
-html-engine = { path = "../HtmlEngine/crates/html" }
 
 [patch."https://github.com/JohanAnderssonOstling/HtmlViewCore"]
 html-view-core = { path = "../HtmlViewCore/crates/html-view-core" }

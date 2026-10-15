@@ -1,0 +1,278 @@
+{
+  "description": "Flatten the uncoded Form and Topic groupings directly into Humor in both its Arts & Media and Literature routes; preserve all children, descendants and classification selectors.",
+  "stages": [
+    {
+      "removed_concept_id": 692,
+      "removed_label": "Form",
+      "parent_concept_id": 691,
+      "child_concept_ids": [
+        693,
+        694,
+        695,
+        696,
+        697,
+        698,
+        699,
+        700,
+        701
+      ]
+    },
+    {
+      "removed_concept_id": 702,
+      "removed_label": "Topic",
+      "parent_concept_id": 691,
+      "child_concept_ids": [
+        703,
+        704,
+        705,
+        706,
+        707,
+        708,
+        709,
+        710,
+        711,
+        712,
+        713,
+        714,
+        715,
+        716,
+        717,
+        718
+      ]
+    }
+  ],
+  "historical_path_aliases": [
+    {
+      "path": "Arts & Media / Humor / Form",
+      "concept_id": 691
+    },
+    {
+      "path": "Arts & Media / Humor / Form / Anecdotes & Quotations",
+      "concept_id": 693
+    },
+    {
+      "path": "Arts & Media / Humor / Form / Comic Strips & Cartoons",
+      "concept_id": 694
+    },
+    {
+      "path": "Arts & Media / Humor / Form / Humorous Essays",
+      "concept_id": 695
+    },
+    {
+      "path": "Arts & Media / Humor / Form / Jokes & Riddles",
+      "concept_id": 696
+    },
+    {
+      "path": "Arts & Media / Humor / Form / Limericks & Verse",
+      "concept_id": 697
+    },
+    {
+      "path": "Arts & Media / Humor / Form / Parodies",
+      "concept_id": 698
+    },
+    {
+      "path": "Arts & Media / Humor / Form / Pictorial",
+      "concept_id": 699
+    },
+    {
+      "path": "Arts & Media / Humor / Form / Puns & Wordplay",
+      "concept_id": 700
+    },
+    {
+      "path": "Arts & Media / Humor / Form / Trivia",
+      "concept_id": 701
+    },
+    {
+      "path": "Arts & Media / Humor / Topic",
+      "concept_id": 691
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Adult",
+      "concept_id": 703
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Animals",
+      "concept_id": 704
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Business & Professional",
+      "concept_id": 705
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Celebrity & Popular Culture",
+      "concept_id": 706
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Cultural, Ethnic & Regional",
+      "concept_id": 707
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Historical Humor",
+      "concept_id": 708
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Internet & Social Media",
+      "concept_id": 709
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / LGBTQ+",
+      "concept_id": 710
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Language",
+      "concept_id": 711
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Marriage & Family",
+      "concept_id": 712
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Gender Humor",
+      "concept_id": 713
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Gender Humor / Humor about Men",
+      "concept_id": 53185
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Gender Humor / Humor about Women",
+      "concept_id": 53186
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Politics",
+      "concept_id": 714
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Religion",
+      "concept_id": 715
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / School & Education",
+      "concept_id": 716
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Sports",
+      "concept_id": 717
+    },
+    {
+      "path": "Arts & Media / Humor / Topic / Travel",
+      "concept_id": 718
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form",
+      "concept_id": 691
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form / Anecdotes & Quotations",
+      "concept_id": 693
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form / Comic Strips & Cartoons",
+      "concept_id": 694
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form / Humorous Essays",
+      "concept_id": 695
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form / Jokes & Riddles",
+      "concept_id": 696
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form / Limericks & Verse",
+      "concept_id": 697
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form / Parodies",
+      "concept_id": 698
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form / Pictorial",
+      "concept_id": 699
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form / Puns & Wordplay",
+      "concept_id": 700
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Form / Trivia",
+      "concept_id": 701
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic",
+      "concept_id": 691
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Adult",
+      "concept_id": 703
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Animals",
+      "concept_id": 704
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Business & Professional",
+      "concept_id": 705
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Celebrity & Popular Culture",
+      "concept_id": 706
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Cultural, Ethnic & Regional",
+      "concept_id": 707
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Historical Humor",
+      "concept_id": 708
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Internet & Social Media",
+      "concept_id": 709
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / LGBTQ+",
+      "concept_id": 710
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Language",
+      "concept_id": 711
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Marriage & Family",
+      "concept_id": 712
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Gender Humor",
+      "concept_id": 713
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Gender Humor / Humor about Men",
+      "concept_id": 53185
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Gender Humor / Humor about Women",
+      "concept_id": 53186
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Politics",
+      "concept_id": 714
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Religion",
+      "concept_id": 715
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / School & Education",
+      "concept_id": 716
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Sports",
+      "concept_id": 717
+    },
+    {
+      "path": "Literature / Genres / Humorous Writing / Humor / Topic / Travel",
+      "concept_id": 718
+    }
+  ]
+}

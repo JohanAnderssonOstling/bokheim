@@ -1,7 +1,7 @@
 //! Decode database rows without masking malformed values.
 
-use std::io::{Error, ErrorKind};
 pub(crate) use library_model::BookCardRow;
+use std::io::{Error, ErrorKind};
 pub(crate) use sync_common::ContentHash;
 
 pub fn invalid_text_column(column: usize, message: impl Into<String>) -> rusqlite::Error {

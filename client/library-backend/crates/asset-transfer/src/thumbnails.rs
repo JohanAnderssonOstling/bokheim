@@ -2,7 +2,7 @@
 use crate::deadline::transfer_deadline;
 use crate::policy::SMALL_REQUEST_TIMEOUT;
 use crate::TransferError;
-use cpu_host::{CpuHost, resize};
+use cpu_host::{CpuHost, cover, resize};
 use library_database::Database;
 use library_files::AssetStore;
 use library_model::BlobKind;
@@ -93,8 +93,8 @@ impl ThumbnailTransfers {
                 }
                 if let Some(bytes) = self.assets.read_bytes(BlobKind::Thumbnail, thumbnail_hash).await? {
                     if bytes.len() <= MAX_THUMBNAIL_BYTES && bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-                        if let Ok(browse) = resize(&*self.cpu, bytes, thumbnail::BROWSE_THUMBNAIL_WIDTH).await {
-                            self.assets.write_thumbnail_variant(thumbnail_hash, thumbnail::BROWSE_THUMBNAIL_WIDTH, &browse).await?;
+                        if let Ok(versions) = cover(&*self.cpu, bytes).await {
+                            self.assets.write_thumbnail_set(thumbnail_hash, &versions.high_density, &versions.browse, &versions.card_high_density).await?;
                             ready.push(*thumbnail_hash);
                             continue;
                         }
@@ -120,7 +120,10 @@ impl ThumbnailTransfers {
                 if thumbnail.browse_bytes.len() > MAX_THUMBNAIL_BYTES || !thumbnail.browse_bytes.starts_with(&[0xff, 0xd8, 0xff]) {
                     return Err(TransferError::retryable("thumbnail batch returned invalid browse bytes"));
                 }
-                self.assets.write_thumbnail_set(&thumbnail.content_hash, &thumbnail.bytes, &thumbnail.browse_bytes).await?;
+                // Derive current card geometry from the unmodified master,
+                // including when another client uploaded an older browse JPEG.
+                let versions = cover(&*self.cpu, thumbnail.bytes).await.map_err(TransferError::retryable)?;
+                self.assets.write_thumbnail_set(&thumbnail.content_hash, &versions.high_density, &versions.browse, &versions.card_high_density).await?;
                 self.check_transfer_account(&credentials)?;
                 received.push(thumbnail.content_hash);
                 ready.push(thumbnail.content_hash);

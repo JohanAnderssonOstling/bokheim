@@ -1,44 +1,43 @@
-use std::path::Path;
-use crate::{CONTENT_INSET, DISPLAY_FONT_FAMILY, NAVIGATION_MODAL_ROW_HEIGHT_REM, NAV_RAIL_ICON_SIZE_REM, NAV_RAIL_LABEL_SIZE, TOPBAR_HEIGHT_REM};
+use crate::{CONTENT_INSET, NAV_RAIL_ICON_SIZE_REM, NAV_RAIL_LABEL_SIZE, NAVIGATION_MODAL_ROW_HEIGHT_REM, TOPBAR_HEIGHT_REM};
 use std::cell::Cell;
+use std::path::Path;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{Bounds, Div, ElementId, FocusHandle, FontWeight, Pixels, ScrollHandle, SharedString, div, px};
+use gpui::{Bounds, Div, ElementId, Entity, FocusHandle, Focusable, FontWeight, MouseButton, ObjectFit, Pixels, ScrollHandle, SharedString, StyledImage, div, img, px, rems};
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::input::InputState;
 use gpui_component::{Icon, IconName};
 
 use crate::{
-    BrowserTheme, RADIUS_MD, RADIUS_SM, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_SIZE_REM, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, TAB_UNDERLINE_HEIGHT, TEXT_MD, TEXT_SM, TEXT_XS, THEME_PICKER_WIDTH_REM,
-    TITLE_MD, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT_REM, TOPBAR_ACTION_HORIZONTAL_PADDING,
+    BrowserTheme, RADIUS_MD, RADIUS_SM, SETTINGS_CONTROL_SIZE_REM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, TAB_UNDERLINE_HEIGHT, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS,
+    THEME_PICKER_WIDTH_REM, TITLE_MD, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT_REM, TOPBAR_ACTION_HORIZONTAL_PADDING,
 };
 
+/// A navigation destination, in the sidebar rail and the bottom bar alike: its
+/// glyph (`NAV_RAIL_ICON_SIZE_REM` tall) over its name. The whole tile is the
+/// button, and the current one takes the solid accent. The caller sizes the
+/// tile and sets the label's text, which the label inherits.
 // Button installs its own hover style during render. Setting a Div hover
 // override here would cause GPUI to panic when these navigation controls render.
+pub(crate) fn navigation_tile(id: impl Into<ElementId>, glyph: impl IntoElement, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
+    crate::base_button(id).ghost().min_w_0().p_0().rounded(px(RADIUS_MD)).text_color(theme.text).when(selected, |button| button.primary().bg(theme.accent).text_color(theme.accent_text)).child(
+        div()
+            .size_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(SPACE_XXS))
+            .child(div().flex_none().child(glyph))
+            .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().child(label.into())),
+    )
+}
+
+/// A rail destination: a square tile with a name in its original case.
 pub fn nav_rail_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
-    let label = label.into();
-    crate::base_button(id)
-        .ghost()
-        .w_full()
-        .h(gpui::rems(crate::NAV_RAIL_SIZE_REM))
-        .flex_none()
-        .p_0()
-        .px(px(SPACE_XS))
-        .rounded(px(RADIUS_MD))
-        .text_color(theme.text)
-        .when(selected, |button| button.primary().bg(theme.accent).text_color(theme.accent_text))
-        .child(
-            div()
-                .size_full()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(SPACE_XXS))
-                .child(Icon::new(icon).size(gpui::rems(NAV_RAIL_ICON_SIZE_REM)))
-                .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().text_size(gpui::rems(NAV_RAIL_LABEL_SIZE)).font_features(crate::small_caps()).child(label)),
-        )
+    navigation_tile(id, Icon::new(icon).size(gpui::rems(NAV_RAIL_ICON_SIZE_REM)), label, selected, theme).w_full().h(gpui::rems(crate::NAV_RAIL_SIZE_REM)).flex_none().px(px(SPACE_XS)).text_size(gpui::rems(NAV_RAIL_LABEL_SIZE))
 }
 
 /// A full-width bar along the bottom of the window, ruled off from the page
@@ -52,23 +51,13 @@ pub fn bottom_navigation(theme: BrowserTheme) -> Div {
 }
 
 pub fn bottom_navigation_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
-    let label = label.into();
-    crate::base_button(id).ghost().h_full().flex_1().min_w_0().p_0().rounded(px(0.0)).text_color(theme.text_muted).when(selected, |button| button.primary().bg(theme.accent).text_color(theme.accent_text)).tooltip(label.clone()).child(
-        div()
-            .size_full()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(SPACE_XXS))
-            .child(Icon::new(icon).size(gpui::rems(NAV_RAIL_ICON_SIZE_REM)))
-            .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().text_size(gpui::rems(TEXT_XS)).child(label)),
-    )
+    bottom_navigation_tile(id, Icon::new(icon).size(gpui::rems(NAV_RAIL_ICON_SIZE_REM)), label, selected, theme)
 }
 
-pub fn more_navigation_overlay() -> Div {
-    crate::absolute_full_size().flex().items_end().justify_center()
+/// A bottom bar cell: the navigation tile, sharing the bar's width with the
+/// others and as tall as the bar.
+pub(crate) fn bottom_navigation_tile(id: impl Into<ElementId>, glyph: impl IntoElement, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
+    navigation_tile(id, glyph, label, selected, theme).h_full().flex_1().text_size(gpui::rems(TEXT_XS))
 }
 
 /// A modal list sized from its fixed-height header and rows.
@@ -87,48 +76,32 @@ pub fn navigation_modal_list(item_count: usize, rem_size: Pixels, theme: Browser
     crate::modal_surface(theme).w(gpui::rems(crate::NAVIGATION_MODAL_WIDTH_REM)).max_w_full().h(px(height)).max_h_full().overflow_y_scrollbar()
 }
 
-pub fn more_navigation_header(theme: BrowserTheme) -> Div {
-    div().w_full().h(gpui::rems(NAVIGATION_MODAL_ROW_HEIGHT_REM)).flex_none().flex().items_center().px(px(SPACE_SM)).text_size(gpui::rems(TEXT_MD)).text_color(theme.text).child("More")
-}
-
-pub fn more_navigation_item(id: impl Into<ElementId>, icon: impl Into<Icon>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
-    let label = label.into();
-    crate::base_button(id)
-        .ghost()
-        .w_full()
-        .h(gpui::rems(NAVIGATION_MODAL_ROW_HEIGHT_REM))
-        .flex_none()
-        .px(px(SPACE_SM))
-        .justify_start()
-        .rounded(px(RADIUS_MD))
-        .text_color(theme.text)
-        .when(selected, |button| button.primary().bg(theme.accent).text_color(theme.accent_text))
-        .tooltip(label.clone())
-        .child(div().size_full().min_w_0().flex().items_center().gap(px(SPACE_SM)).child(Icon::new(icon)).child(div().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().child(label)))
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NavigationIcon {
     House,
     BookOpen,
+    Books,
     Folder,
     Tags,
     User,
     Trash2,
     Building2,
     Settings,
+    Storefront,
 }
 
 pub fn navigation_icon(icon: NavigationIcon) -> Icon {
     let path = match icon {
         NavigationIcon::House => "icons/navigation/house.svg",
         NavigationIcon::BookOpen => "icons/navigation/book-open.svg",
+        NavigationIcon::Books => "icons/navigation/books.svg",
         NavigationIcon::Folder => "icons/navigation/folder.svg",
         NavigationIcon::Tags => "icons/navigation/tags.svg",
         NavigationIcon::User => "icons/navigation/user.svg",
         NavigationIcon::Trash2 => "icons/navigation/trash-2.svg",
         NavigationIcon::Building2 => "icons/navigation/building-2.svg",
         NavigationIcon::Settings => "icons/navigation/settings.svg",
+        NavigationIcon::Storefront => "icons/storefront.svg",
     };
     Icon::empty().path(path)
 }
@@ -148,6 +121,60 @@ pub fn browser_search_control(state: &gpui::Entity<gpui_component::input::InputS
         .child(div().w_full().min_w_0().h(gpui::rems(TOPBAR_ACTION_HEIGHT_REM)).flex_1().child(gpui::Styled::h(gpui_component::input::Input::new(state).cleanable(true), gpui::rems(TOPBAR_ACTION_HEIGHT_REM))))
 }
 
+/// Keep the URL editor mounted for keyboard focus, covering it with a centered
+/// site identity until the user activates the field.
+pub fn browser_address_control(state: &Entity<InputState>, active: bool, name: impl Into<SharedString>, favicon: Option<&str>, theme: BrowserTheme) -> Div {
+    let state = state.clone();
+    browser_search_control(&state).relative().when(!active, move |control| {
+        let fallback = move || Icon::new(IconName::Globe).size(rems(TEXT_SM)).text_color(theme.text_muted).into_any_element();
+        let glyph = div()
+            .flex_none()
+            .size(rems(TEXT_SM))
+            .when_some(favicon, |glyph, url| glyph.child(img(url.to_owned()).size_full().object_fit(ObjectFit::Contain).with_fallback(fallback).with_loading(fallback)))
+            .when(favicon.is_none(), |glyph| glyph.child(fallback()));
+        control.child(
+            div()
+                .id("browser-site-identity")
+                .debug_selector(|| "browser-site-identity".into())
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .min_w_0()
+                .overflow_hidden()
+                .px(px(SPACE_SM))
+                .border_1()
+                .border_color(theme.border)
+                .rounded(px(RADIUS_SM))
+                .bg(theme.page_bg)
+                .text_color(theme.text)
+                .text_size(rems(TEXT_SM))
+                .cursor_text()
+                .occlude()
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    window.prevent_default();
+                    state.update(cx, |state, cx| {
+                        state.focus_handle(cx).focus(window, cx);
+                        state.set_selected_range(0..state.value().len(), cx);
+                    });
+                })
+                .child(
+                    div()
+                        .debug_selector(|| "browser-site-identity-content".into())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(SPACE_XS))
+                        .min_w_0()
+                        .max_w_full()
+                        .child(glyph)
+                        .child(div().debug_selector(|| "browser-site-name".into()).min_w_0().text_ellipsis().whitespace_nowrap().child(name.into())),
+                ),
+        )
+    })
+}
+
 /// The rail and the page, side by side.
 ///
 /// `items_stretch` is load-bearing: row children that declare no height of
@@ -165,16 +192,23 @@ pub fn library_section_content() -> Div {
 
 pub fn library_switcher_group(theme: BrowserTheme) -> Div {
     let _ = theme;
-    div().relative().w_full().h(gpui::rems(TOPBAR_HEIGHT_REM)).flex_none().flex().items_center().gap(px(SPACE_SM))
+    // Reserve the tile's full height so it stays above Home and inside the rail.
+    div().relative().w_full().h(gpui::rems(crate::NAV_RAIL_SIZE_REM)).flex_none().flex().items_center().gap(px(SPACE_SM))
 }
 
-/// The topbar carries neither fill nor underline. Its old `bg(theme.page_bg)`
-/// was a no-op — `surface` and `page_bg` are the same colour — and the
-/// underline that replaced it was marking a boundary the breadcrumb and the
-/// actions already make obvious. See [`crate::nav_rail_destinations`].
-pub fn browser_topbar(theme: BrowserTheme) -> Div {
-    let _ = theme;
-    div().w_full().h(gpui::rems(TOPBAR_HEIGHT_REM)).flex_none().flex().flex_row().items_center().gap(px(SPACE_MD))
+/// The bar along the top of a page — the library's pages, the phone reader,
+/// the phone's audiobook player — one height everywhere. The page colour is
+/// what lets it lie over content that scrolls or pages under it. In the library
+/// it carries no underline: the breadcrumb and the actions already mark the
+/// boundary. See [`crate::nav_rail_destinations`].
+pub fn topbar(theme: BrowserTheme) -> Div {
+    div().w_full().min_w_0().h(gpui::rems(TOPBAR_HEIGHT_REM)).flex_none().flex().flex_row().items_center().gap(px(SPACE_MD)).bg(theme.page_bg)
+}
+
+/// A topbar ruled off from the book under it, with its controls at the window's
+/// edges: the phone reader's.
+pub fn ruled_topbar(theme: BrowserTheme) -> Div {
+    topbar(theme).px(px(SPACE_XS)).border_b_1().border_color(theme.rule)
 }
 
 pub fn browser_topbar_left() -> Div {
@@ -188,12 +222,33 @@ pub fn mobile_back_button(theme: BrowserTheme) -> Button {
 /// Shared navigation heading for browsing, book loading, and reading. `back`
 /// is `None` on native mobile, where the OS back button/gesture already does
 /// the same thing — see `has_native_back_button`.
-pub fn mobile_navigation_heading(title: impl Into<SharedString>, back: Option<Button>) -> Div {
-    div().flex_1().min_w_0().flex().items_center().gap(px(SPACE_SM)).pl(px(CONTENT_INSET)).children(back).child(div().flex_1().min_w_0().truncate().font_family(DISPLAY_FONT_FAMILY).text_size(gpui::rems(TEXT_MD)).child(title.into()))
+pub fn mobile_navigation_heading(title: impl Into<SharedString>, back: Option<Button>, theme: BrowserTheme) -> Div {
+    div().flex_1().min_w_0().flex().items_center().gap(px(SPACE_SM)).pl(px(CONTENT_INSET)).children(back).child(div().flex_1().min_w_0().truncate().font_family(theme.display_font_family()).text_size(gpui::rems(TEXT_MD)).child(title.into()))
+}
+
+/// A navigation heading whose title opens a menu, made by
+/// `mobile_navigation_menu_title`.
+pub fn mobile_navigation_menu_heading(title: impl IntoElement, back: Option<Button>) -> Div {
+    div().flex_1().min_w_0().flex().items_center().gap(px(SPACE_SM)).pl(px(CONTENT_INSET)).children(back).child(div().flex_1().min_w_0().flex().child(title))
+}
+
+/// A heading title that opens a menu: the title as it always reads, with a
+/// chevron saying it can be changed. Pulled left by its own padding so the
+/// text lines up with the plain titles of other pages.
+pub fn mobile_navigation_menu_title(id: impl Into<ElementId>, title: impl Into<SharedString>, theme: BrowserTheme) -> Button {
+    crate::base_button(id).ghost().min_w_0().h(gpui::rems(TOPBAR_ACTION_HEIGHT_REM)).px(px(SPACE_XS)).ml(px(-SPACE_XS)).text_color(theme.text).child(
+        div()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(SPACE_XS))
+            .child(div().min_w_0().truncate().font_family(theme.display_font_family()).text_size(gpui::rems(TEXT_MD)).child(title.into()))
+            .child(Icon::new(IconName::ChevronDown).flex_none().text_color(theme.text_muted)),
+    )
 }
 
 pub fn mobile_navigation_bar(title: impl Into<SharedString>, back: Option<Button>, theme: BrowserTheme) -> Div {
-    browser_topbar(theme).bg(theme.page_bg).child(mobile_navigation_heading(title, back))
+    topbar(theme).child(mobile_navigation_heading(title, back, theme))
 }
 
 /// The actions end where the covers do.
@@ -243,7 +298,7 @@ fn browser_actionable_empty_parts(title: SharedString, description: Option<Share
         .justify_center()
         .gap(px(SPACE_SM))
         .text_center()
-        .child(div().font_family(DISPLAY_FONT_FAMILY).text_size(gpui::rems(TITLE_MD)).child(title))
+        .child(div().font_family(theme.display_font_family()).text_size(gpui::rems(TITLE_MD)).child(title))
         .children(description.map(|description| div().text_size(gpui::rems(TEXT_SM)).text_color(theme.text_muted).child(description)))
         .child(div().mt(px(SPACE_XS)).child(actions))
 }
@@ -321,29 +376,7 @@ pub fn browser_panel_row(theme: BrowserTheme) -> Div {
 }
 
 pub fn library_switcher_trigger(label: impl Into<SharedString>, theme: BrowserTheme) -> Button {
-    let label = label.into();
-    crate::base_button("library-switcher-trigger")
-        .ghost()
-        .w_full()
-        .h(gpui::rems(TOPBAR_HEIGHT_REM))
-        .flex_none()
-        .p_0()
-        .overflow_hidden()
-        .text_size(gpui::rems(NAV_RAIL_LABEL_SIZE))
-        .font_weight(FontWeight::NORMAL)
-        .text_color(theme.text_accent)
-        .child(
-            div()
-                .size_full()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(SPACE_XXS))
-                .child(navigation_icon(NavigationIcon::BookOpen).size(gpui::rems(NAV_RAIL_ICON_SIZE_REM)))
-                .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().font_features(crate::small_caps()).child(label)),
-        )
+    nav_rail_item("library-switcher-trigger", navigation_icon(NavigationIcon::Books), label, false, theme).font_weight(FontWeight::NORMAL).text_color(theme.text_accent)
 }
 
 pub fn library_switcher_panel() -> Div {
@@ -369,14 +402,14 @@ pub fn library_switcher_add_button(cursor: bool, theme: BrowserTheme) -> Button 
 /// `selected` is the library actually in use, so it carries the solid accent —
 /// the same weight nav uses for "where you are now". `cursor` is only the
 /// keyboard's transient position, so it takes `accent_wash` instead, the same
-/// tier `contents_row` uses for its own cursor — outranked by `selected`,
-/// since a wash over the solid accent would be invisible anyway.
+/// tier `contents_row` uses for its own cursor. On the library in use, where a
+/// wash would be invisible, the cursor steps the accent to `accent_hover`.
 pub fn library_switcher_item(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool, cursor: bool, theme: BrowserTheme) -> Button {
     let label = label.into();
     crate::base_button(id)
         .ghost()
         .when(cursor && !selected, |button| button.bg(theme.accent_wash))
-        .when(selected, |button| button.bg(theme.accent).text_color(theme.accent_text))
+        .when(selected, |button| button.bg(if cursor { theme.accent_hover } else { theme.accent }).text_color(theme.accent_text))
         .flex_1()
         .min_w_0()
         .h(gpui::rems(NAVIGATION_MODAL_ROW_HEIGHT_REM))
@@ -399,12 +432,18 @@ pub fn topbar_action_button(id: impl Into<ElementId>, label: impl Into<SharedStr
     crate::outlined_button(id, theme)
         .label(label)
         .icon(icon)
-        .text_color(theme.text_accent)
+        .text_color(theme.text)
         .text_size(gpui::rems(TEXT_SM))
         .font_weight(crate::TOPBAR_ACTION_LABEL_WEIGHT)
         .h(gpui::rems(TOPBAR_ACTION_HEIGHT_REM))
         .px(px(TOPBAR_ACTION_HORIZONTAL_PADDING))
         .rounded(px(RADIUS_MD))
+}
+
+/// A topbar action that destroys something for good, told apart from the
+/// actions beside it by its colour.
+pub fn topbar_danger_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, theme: BrowserTheme) -> Button {
+    topbar_action_button(id, label, icon, theme).text_color(theme.danger)
 }
 
 /// Base surface for a clickable row or card.
@@ -432,17 +471,20 @@ pub fn browser_settings_section(focus: &FocusHandle, bounds: Rc<Cell<Bounds<Pixe
     div().w_full().relative().track_focus(focus).child(crate::measured_bounds(bounds)).child(child)
 }
 
-/// The column the groups stack in, with the same air below the last group as
-/// above the first, so a page scrolled to its end does not stop on a border.
+/// The column the sections stack in, with the same air below the last section
+/// as above the first, and an inset from the edges of narrow windows.
+///
+/// Sections are open — a heading and its rows, no box — so the space between
+/// them is what separates one from the next, and it is wider than the space
+/// inside one.
 pub fn browser_settings_content() -> Div {
-    div().w_full().max_w(px(580.0)).flex().flex_col().gap(px(SPACE_MD)).py(px(SPACE_MD))
+    div().w_full().max_w(px(640.0)).flex().flex_col().gap(px(SPACE_XL)).px(px(SPACE_MD)).py(px(SPACE_LG))
 }
 
 pub fn browser_settings_row(title: impl Into<SharedString>, description: impl Into<SharedString>, control: impl IntoElement, theme: BrowserTheme) -> Div {
     div()
         .w_full()
         .min_h(px(76.0))
-        .px(px(16.0))
         .py(px(12.0))
         .flex()
         .items_center()
@@ -454,31 +496,34 @@ pub fn browser_settings_row(title: impl Into<SharedString>, description: impl In
 }
 
 pub fn browser_settings_sections() -> Div {
-    div().w_full().flex().flex_col().gap(px(SPACE_MD))
+    div().w_full().flex().flex_col().gap(px(SPACE_XL))
 }
 
-/// A block of settings, drawn as a bordered region.
+/// A block of settings: a heading and the rows under it, with no box.
 ///
-/// The interface has one surface, so a region is its edge — there is no second
-/// fill to lift a group off the page. Groups were previously separated by
-/// whitespace alone, which worked while a `GroupBox` fill stood behind them and
-/// stopped working the moment that fill became the page colour.
-///
-/// One edge, around the outside. The rows inside are separated by their own
-/// padding rather than by dividers: the border is what says "these belong
-/// together", and a hairline between every row says it a second time.
-pub fn browser_settings_group(theme: BrowserTheme) -> Div {
-    div().w_full().flex().flex_col().overflow_hidden().rounded(px(RADIUS_SM)).border_1().border_color(theme.rule)
+/// Each group used to be a bordered region in a narrow column, which in a
+/// wide window was a strip of boxes, and a box around one row was mostly
+/// border. Now the heading names the section and every row opens with a rule,
+/// so the first rule doubles as the heading's underline.
+pub fn browser_settings_group() -> Div {
+    div().w_full().flex().flex_col()
 }
 
-/// A titled block. The title is a header on the group rather than a floating
-/// label above it, so it is inside the region it names.
-///
-/// Its header is the same bar a group with actions has, empty on the right:
-/// the title was once a bare line in the group's corner, flush against the
-/// border while every row under it and the account's title were inset.
+/// A titled block, its heading flush with the rows under it.
 pub fn browser_settings_fieldset(title: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    browser_settings_group(theme).child(browser_settings_header(title, theme))
+    browser_settings_group().child(browser_settings_header(title, theme))
+}
+
+/// A group's content that is not a setting row — who is signed in, a form, a
+/// message — spaced below its heading without an underline.
+pub fn browser_settings_block(_theme: BrowserTheme) -> Div {
+    div().w_full().py(px(SPACE_SM)).flex().flex_col().gap(px(SPACE_SM))
+}
+
+/// Something the page needs you to act on, set apart from the settings by a
+/// tint rather than drawn as one more group of them.
+pub fn browser_settings_banner(theme: BrowserTheme) -> Div {
+    div().w_full().bg(theme.accent_wash).border_l(px(3.0)).border_color(theme.accent)
 }
 
 /// A titled block whose header carries a control of its own, on the right.
@@ -488,16 +533,15 @@ pub fn browser_settings_fieldset(title: impl Into<SharedString>, theme: BrowserT
 /// setting inside the group, it is what the group is about, so it sits in the
 /// header beside the name instead of becoming the first row.
 pub fn browser_settings_fieldset_with_actions(title: impl Into<SharedString>, actions: impl IntoElement, theme: BrowserTheme) -> Div {
-    browser_settings_group(theme).child(browser_settings_header(title, theme).child(div().flex_none().flex().flex_row().items_center().gap(px(SPACE_SM)).child(actions)))
+    browser_settings_group().child(browser_settings_header(title, theme).child(div().flex_none().flex().flex_row().items_center().gap(px(SPACE_SM)).child(actions)))
 }
 
-/// A group's header bar: inset like the rows under it, so the title starts on
-/// their line, and at least as tall as a header button, so a group whose header
-/// has none is exactly as tall as one whose header does.
+/// A group's header bar: on the rows' line, and at least as tall as a header
+/// button, so a group whose header has none is exactly as tall as one whose
+/// header does.
 fn browser_settings_header(title: impl Into<SharedString>, theme: BrowserTheme) -> Div {
     div()
         .w_full()
-        .px(px(SPACE_MD))
         .py(px(SPACE_SM))
         .flex()
         .flex_row()
@@ -527,9 +571,12 @@ pub fn browser_settings_header_button(id: impl Into<ElementId>, label: impl Into
         .text_size(gpui::rems(TEXT_XS))
 }
 
-/// The name a settings group is read by.
+/// The name a settings group is read by: a section heading in the display
+/// face, as on the book detail page. It was muted small caps, quieter than the
+/// controls under it, so the eye reached the controls before it knew which
+/// section it was in.
 fn browser_settings_legend(title: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().w_full().text_size(gpui::rems(TEXT_MD)).text_color(theme.text_muted).font_weight(FontWeight::SEMIBOLD).font_features(crate::small_caps()).child(title.into())
+    div().w_full().font_family(theme.display_font_family()).text_size(gpui::rems(TEXT_LG)).text_color(theme.text).child(title.into())
 }
 
 /// What went wrong, said inside the group it went wrong in.
@@ -538,27 +585,18 @@ fn browser_settings_legend(title: impl Into<SharedString>, theme: BrowserTheme) 
 /// of the page reported a theme that would not save from below the library
 /// list, where nobody flipping a theme is looking.
 pub fn browser_settings_group_error(text: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().w_full().px(px(SPACE_MD)).py(px(SPACE_SM)).border_t_1().border_color(theme.danger).flex().flex_row().gap(px(SPACE_SM)).text_size(gpui::rems(TEXT_XS)).text_color(theme.danger).child(text.into())
+    div().w_full().py(px(SPACE_SM)).border_t_1().border_color(theme.danger).flex().flex_row().gap(px(SPACE_SM)).text_size(gpui::rems(TEXT_XS)).text_color(theme.danger).child(text.into())
 }
 
-/// The segmented control a choice row carries.
-///
-/// The fill is what shows through the one-pixel gaps between segments, so it is
-/// the separator rather than a background: `rule`, the quiet tier, like every
-/// other divider in the interface. It was `border`, which is the tier reserved
-/// for a control's own edge — three and a half to one against the surface,
-/// drawn between every pair of segments.
-///
-/// It matters more than a separator normally would, because it is also what an
-/// unselected segment falls back to if it does not paint its own surface.
+/// Shared choice styling, sized to align with the application theme picker.
 pub fn browser_settings_button_group(theme: BrowserTheme) -> Div {
-    div().w(gpui::rems(THEME_PICKER_WIDTH_REM)).max_w_full().flex().flex_row().gap(px(SETTINGS_CONTROL_GAP)).overflow_hidden().rounded(px(RADIUS_SM)).border_1().border_color(theme.border).bg(theme.rule)
+    crate::settings_choice_button_group(theme).w(gpui::rems(THEME_PICKER_WIDTH_REM)).max_w_full()
 }
 
 /// One setting: its name on the left, its control on the right.
 ///
-/// No divider of its own — the group's border is the only edge, and rows are
-/// told apart by their padding.
+/// Rows have a leading separator; callers remove it from the first row so
+/// section headings remain unruled.
 ///
 /// The row wraps rather than squashing. Several of the controls it carries are
 /// bounded — a choice group is up to the theme picker's width, and a stepper
@@ -571,8 +609,9 @@ pub fn browser_settings_button_group(theme: BrowserTheme) -> Div {
 pub fn browser_settings_compact_row(title: impl Into<SharedString>, choices: impl IntoElement, theme: BrowserTheme) -> Div {
     div()
         .w_full()
-        .px(px(SPACE_MD))
         .py(px(SPACE_SM))
+        .border_t_1()
+        .border_color(theme.rule)
         .flex()
         .flex_row()
         .flex_wrap()
@@ -584,25 +623,7 @@ pub fn browser_settings_compact_row(title: impl Into<SharedString>, choices: imp
 }
 
 pub fn browser_settings_choice_button(id: impl Into<ElementId>, label: impl Into<SharedString>, checked: bool, theme: BrowserTheme) -> Button {
-    // Button installs its own hover style during render; use the variant's
-    // hover treatment to avoid registering the style twice.
-    // `ghost` paints its own background from the variant, so the explicit
-    // `bg` below is what actually decides an unselected segment's colour: the
-    // surface, the same as the row it sits on.
-    crate::base_button(id)
-        .label(label)
-        .ghost()
-        .when(checked, |button| button.bg(theme.accent).text_color(theme.accent_text))
-        .when(!checked, |button| button.bg(theme.page_bg))
-        .flex_1()
-        .min_w_0()
-        .h(gpui::rems(SETTINGS_CONTROL_SIZE_REM))
-        .px(px(SPACE_SM))
-        .rounded(px(0.0))
-        .border_0()
-        .bg(if checked { theme.accent } else { theme.page_bg })
-        .text_color(if checked { theme.accent_text } else { theme.text })
-        .text_size(gpui::rems(TEXT_XS))
+    crate::settings_choice_button(id, label, checked, theme)
 }
 
 /// The control for a setting whose value *is* a path: the path is the button's
@@ -630,4 +651,61 @@ pub fn library_path_label(path: &Path) -> String {
         }
     }
     path.display().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{AppContext, Context, Modifiers, Render, ScrollDelta, ScrollWheelEvent, TestAppContext, Window, point};
+    use gpui_component::Root;
+
+    struct RailHarness {
+        rem_size: Pixels,
+    }
+
+    impl Render for RailHarness {
+        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            window.set_rem_size(self.rem_size);
+            let theme = BrowserTheme::default();
+            let switcher = library_switcher_group(theme).debug_selector(|| "test-switcher-group".into()).child(library_switcher_trigger("Library", theme).debug_selector(|| "test-switcher-button".into()));
+            let mut destinations = crate::nav_rail_destinations(theme);
+            for (index, label) in ["Home", "Books", "Folders", "Subjects", "Authors", "Catalog", "Settings"].into_iter().enumerate() {
+                destinations = destinations.child(nav_rail_item(("test-rail", index), IconName::BookOpen, label, index == 0, theme).debug_selector(move || format!("test-rail-{index}")));
+            }
+            div().w(rems(crate::NAV_RAIL_SIZE_REM)).h(px(240.0)).flex().debug_selector(|| "test-rail-viewport".into()).child(crate::sidebar(theme).child(switcher).child(destinations))
+        }
+    }
+
+    #[gpui::test]
+    fn switcher_does_not_overlap_home_and_short_rails_scroll_to_settings(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        for rem_size in [16.0, 24.0] {
+            let (_, visual) = cx.add_window_view(|window, cx| {
+                let content = cx.new(|_| RailHarness { rem_size: px(rem_size) });
+                Root::new(content, window, cx)
+            });
+            visual.run_until_parked();
+            visual.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let viewport = visual.debug_bounds("test-rail-viewport").unwrap();
+            let group = visual.debug_bounds("test-switcher-group").unwrap();
+            let switcher = visual.debug_bounds("test-switcher-button").unwrap();
+            let home = visual.debug_bounds("test-rail-0").unwrap();
+            assert_eq!(switcher.size.height, px(crate::NAV_RAIL_SIZE_REM * rem_size));
+            assert_eq!(group.size.height, switcher.size.height);
+            assert!(switcher.top() >= viewport.top());
+            assert!(home.top() >= switcher.bottom());
+            visual.simulate_event(ScrollWheelEvent { position: viewport.center(), delta: ScrollDelta::Pixels(point(px(0.0), px(-10_000.0))), modifiers: Modifiers::default(), ..Default::default() });
+            visual.run_until_parked();
+            visual.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let settings = visual.debug_bounds("test-rail-6").unwrap();
+            assert!(settings.top() >= viewport.top());
+            assert!(settings.bottom() <= viewport.bottom());
+            assert!(settings.left() >= viewport.left());
+            assert!(settings.right() <= viewport.right());
+        }
+    }
 }

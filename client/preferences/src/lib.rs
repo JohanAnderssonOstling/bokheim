@@ -82,29 +82,80 @@ impl ApplicationTheme {
     }
 }
 
-/// The interface is set in one family, and it is a serif.
-///
-/// The app is a library: hierarchy is carried by size, colour and space rather
-/// than by weight, and the type scale in `ui-components` is calibrated to this
-/// face's x-height.
-pub const INTERFACE_FONT_FAMILY: &str = "Libertinus Serif";
+/// The interface face, independent of the book's reading font.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiFontFamily {
+    #[default]
+    Serif,
+    SansSerif,
+}
+
+impl UiFontFamily {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Serif => "Serif",
+            Self::SansSerif => "Sans serif",
+        }
+    }
+
+    pub const fn family_name(self) -> &'static str {
+        match self {
+            Self::Serif => "NV Garamond",
+            Self::SansSerif => "Raleway",
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrowsingPreferences {
+    #[serde(default)]
+    allow_metered_transfers: bool,
     theme: ApplicationTheme,
     #[serde(default)]
     appearance_override: Option<ResolvedAppearance>,
     ui_font_size_px: UiFontSize,
+    #[serde(default)]
+    ui_font_family: UiFontFamily,
     cover_text: CoverText,
+    /// Draw every book with its generated cover and never load cover art.
+    /// Offered on Kobo, where decoding and holding cover images is the
+    /// costliest part of a library page.
+    #[serde(default)]
+    generated_covers_only: bool,
+    #[serde(default)]
+    catalog_grouping: CatalogGrouping,
+    /// None needs an initial default; Some(empty) explicitly shows any language.
+    #[serde(default)]
+    catalog_languages: Option<Vec<String>>,
+    /// Kobo keyboard layout codes in switching order; the first is current.
+    #[serde(default = "default_keyboard_layouts")]
+    keyboard_layouts: Vec<String>,
+}
+
+fn default_keyboard_layouts() -> Vec<String> {
+    vec!["SV".into(), "EN".into()]
 }
 
 impl Default for BrowsingPreferences {
     fn default() -> Self {
-        Self { theme: ApplicationTheme::default(), appearance_override: None, ui_font_size_px: UiFontSize(UI_FONT_SIZE_DEFAULT), cover_text: CoverText::Always }
+        Self {
+            allow_metered_transfers: false,
+            theme: ApplicationTheme::default(),
+            appearance_override: None,
+            ui_font_size_px: UiFontSize(UI_FONT_SIZE_DEFAULT),
+            ui_font_family: UiFontFamily::default(),
+            cover_text: CoverText::Always,
+            generated_covers_only: false,
+            catalog_grouping: CatalogGrouping::default(),
+            catalog_languages: None,
+            keyboard_layouts: default_keyboard_layouts(),
+        }
     }
 }
 
 impl BrowsingPreferences {
+    pub fn allow_metered_transfers(&self) -> bool { self.allow_metered_transfers }
     pub fn theme(&self) -> ApplicationTheme {
         self.theme
     }
@@ -116,8 +167,45 @@ impl BrowsingPreferences {
     pub fn ui_font_size_px(&self) -> u8 {
         self.ui_font_size_px.get()
     }
+    pub fn ui_font_family(&self) -> UiFontFamily {
+        self.ui_font_family
+    }
     pub fn cover_text(&self) -> CoverText {
         self.cover_text
+    }
+
+    pub fn generated_covers_only(&self) -> bool {
+        self.generated_covers_only
+    }
+
+    pub fn catalog_grouping(&self) -> CatalogGrouping {
+        self.catalog_grouping
+    }
+
+    pub fn catalog_languages(&self) -> Option<&[String]> {
+        self.catalog_languages.as_deref()
+    }
+
+    pub fn keyboard_layouts(&self) -> &[String] {
+        &self.keyboard_layouts
+    }
+}
+
+/// How the catalog page groups its books: by subject or by author.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogGrouping {
+    #[default]
+    Subject,
+    Author,
+}
+
+impl CatalogGrouping {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Subject => "Subject",
+            Self::Author => "Author",
+        }
     }
 }
 
@@ -155,22 +243,34 @@ impl CoverText {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "preference", content = "value", rename_all = "snake_case")]
 pub enum BrowsingPreferencePatch {
+    AllowMeteredTransfers(bool),
     Theme(ApplicationTheme),
     Palette(ApplicationTheme, ResolvedAppearance),
     UiFontSizePx(u8),
+    UiFontFamily(UiFontFamily),
     CoverText(CoverText),
+    GeneratedCoversOnly(bool),
+    CatalogGrouping(CatalogGrouping),
+    CatalogLanguages(Option<Vec<String>>),
+    KeyboardLayouts(Vec<String>),
 }
 
 impl BrowsingPreferencePatch {
     pub fn apply(self, preferences: &mut BrowsingPreferences) -> Result<(), PreferenceValueError> {
         match self {
+            Self::AllowMeteredTransfers(value) => preferences.allow_metered_transfers = value,
             Self::Theme(value) => preferences.theme = value,
             Self::Palette(theme, appearance) => {
                 preferences.theme = theme;
                 preferences.appearance_override = Some(appearance);
             }
             Self::UiFontSizePx(value) => preferences.ui_font_size_px = UiFontSize::new(value)?,
+            Self::UiFontFamily(value) => preferences.ui_font_family = value,
             Self::CoverText(value) => preferences.cover_text = value,
+            Self::GeneratedCoversOnly(value) => preferences.generated_covers_only = value,
+            Self::CatalogGrouping(value) => preferences.catalog_grouping = value,
+            Self::CatalogLanguages(value) => preferences.catalog_languages = value,
+            Self::KeyboardLayouts(value) => preferences.keyboard_layouts = value,
         }
         Ok(())
     }
@@ -208,6 +308,7 @@ pub enum ReaderFontFamily {
     #[default]
     Publisher,
     Serif,
+    SansSerif,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,7 +342,7 @@ pub struct ReaderPreferences {
     horizontal_margin_px: ReaderSpacing,
     #[serde(default = "default_reader_margin")]
     vertical_margin_px: ReaderSpacing,
-    #[serde(default = "default_reader_spacing")]
+    #[serde(default = "default_column_gap")]
     min_column_gap_px: ReaderSpacing,
     /// Which end of the PDF layout is held fixed; the rest is derived.
     pdf_zoom_mode: PdfZoomMode,
@@ -348,8 +449,11 @@ const fn default_reader_margin() -> ReaderSpacing {
     ReaderSpacing(DEFAULT_READER_MARGIN_PX)
 }
 
-const fn default_reader_spacing() -> ReaderSpacing {
-    ReaderSpacing(0.0)
+/// Default minimum space between columns of ebook text.
+pub const DEFAULT_COLUMN_GAP_PX: f32 = 32.0;
+
+const fn default_column_gap() -> ReaderSpacing {
+    ReaderSpacing(DEFAULT_COLUMN_GAP_PX)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -418,7 +522,7 @@ impl Default for ReaderPreferences {
             max_column_count: ColumnCount(2),
             horizontal_margin_px: default_reader_margin(),
             vertical_margin_px: default_reader_margin(),
-            min_column_gap_px: default_reader_spacing(),
+            min_column_gap_px: default_column_gap(),
             pdf_zoom_mode: PdfZoomMode::FitWidth,
             pdf_page_count: PdfPageCount(1),
             pdf_zoom: PdfZoom(1.0),
@@ -641,7 +745,54 @@ impl ReaderPreferencePatch {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_READER_MARGIN_PX, ReaderPreferences};
+    use super::{BrowsingPreferencePatch, BrowsingPreferences, CoverText, ReaderPreferences, UiFontFamily, DEFAULT_READER_MARGIN_PX};
+
+    #[test]
+    fn metered_transfer_preference_defaults_off_and_round_trips() {
+        let mut legacy = serde_json::to_value(BrowsingPreferences::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("allow_metered_transfers");
+        let mut preferences: BrowsingPreferences = serde_json::from_value(legacy).unwrap();
+        assert!(!preferences.allow_metered_transfers());
+        BrowsingPreferencePatch::AllowMeteredTransfers(true).apply(&mut preferences).unwrap();
+        let restored: BrowsingPreferences = serde_json::from_slice(&serde_json::to_vec(&preferences).unwrap()).unwrap();
+        assert!(restored.allow_metered_transfers());
+        assert_eq!(restored, preferences);
+    }
+
+    #[test]
+    fn ui_font_preferences_preserve_legacy_settings_and_serialized_changes() {
+        let mut preferences = BrowsingPreferences::default();
+        BrowsingPreferencePatch::UiFontSizePx(22).apply(&mut preferences).unwrap();
+        BrowsingPreferencePatch::CoverText(CoverText::CoverOnly).apply(&mut preferences).unwrap();
+        let mut legacy = serde_json::to_value(&preferences).unwrap();
+        legacy.as_object_mut().unwrap().remove("ui_font_family");
+        let mut restored: BrowsingPreferences = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored, preferences);
+        assert_eq!(restored.ui_font_family(), UiFontFamily::Serif);
+
+        let change: BrowsingPreferencePatch = serde_json::from_str(r#"{"preference":"ui_font_family","value":"sans_serif"}"#).unwrap();
+        change.apply(&mut restored).unwrap();
+        let saved = serde_json::to_value(&restored).unwrap();
+        assert_eq!(saved["ui_font_family"], "sans_serif");
+        let reloaded: BrowsingPreferences = serde_json::from_value(saved).unwrap();
+        assert_eq!(reloaded, restored);
+        assert_eq!(reloaded.ui_font_family(), UiFontFamily::SansSerif);
+        assert_eq!(reloaded.ui_font_size_px(), 22);
+        assert_eq!(reloaded.cover_text(), CoverText::CoverOnly);
+    }
+
+    #[test]
+    fn catalog_language_preferences_preserve_unset_any_and_saved_choices() {
+        let mut preferences = BrowsingPreferences::default();
+        let mut legacy = serde_json::to_value(&preferences).unwrap();
+        legacy.as_object_mut().unwrap().remove("catalog_languages");
+        assert!(serde_json::from_value::<BrowsingPreferences>(legacy).unwrap().catalog_languages().is_none());
+        for languages in [Some(vec!["en".into(), "sv".into()]), Some(vec![]), None] {
+            BrowsingPreferencePatch::CatalogLanguages(languages.clone()).apply(&mut preferences).unwrap();
+            let restored: BrowsingPreferences = serde_json::from_value(serde_json::to_value(&preferences).unwrap()).unwrap();
+            assert_eq!(restored.catalog_languages(), languages.as_deref());
+        }
+    }
 
     #[test]
     fn legacy_preferences_default_missing_margins_but_preserve_explicit_zero() {

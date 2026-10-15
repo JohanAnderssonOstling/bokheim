@@ -2,11 +2,12 @@
 //! the books with them.
 
 use library_backend::LibraryBrowseData;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{App, Entity, SharedString};
-use library_model::{BrowseLocation, BrowseRow, CardKey};
+use library_model::{BrowseBookSort, BrowseChipSort, BrowseLocation, BrowsePageRequest, BrowsePageState, BrowseRow, CardKey};
 use sync_common::{DirId, ROOT_DIR_ID};
 use ui_components as components;
 
@@ -30,6 +31,8 @@ pub(crate) enum BrowseKind {
 
 impl BrowseKind {
     pub(super) fn root_location(self) -> BrowseLocation {
+        // The catalog shown by author starts at `CatalogAuthor(None)`
+        // instead; the navigator decides which.
         match self {
             Self::Home => BrowseLocation::Home(None),
             Self::Books => BrowseLocation::Books,
@@ -43,7 +46,7 @@ impl BrowseKind {
     pub(super) fn root_label(self) -> SharedString {
         match self {
             Self::Home => "Home".into(),
-            Self::Books => "All books".into(),
+            Self::Books => "Books".into(),
             Self::Folder => "Folders".into(),
             Self::Subject => "Subjects".into(),
             Self::Author => "Authors".into(),
@@ -80,7 +83,8 @@ impl BrowseKind {
             Self::Folder => components::NavigationIcon::Folder,
             Self::Subject => components::NavigationIcon::Tags,
             Self::Author => components::NavigationIcon::User,
-            Self::Catalog => components::NavigationIcon::Tags,
+            // The catalog's own icon, on its subjects and feeds alike.
+            Self::Catalog => components::NavigationIcon::Building2,
         }
     }
 }
@@ -98,6 +102,7 @@ pub(crate) struct BrowseSection {
     pub(crate) parent: BrowseRow,
     pub(crate) children: Vec<BrowseRow>,
     pub(crate) books: Vec<Entity<BookCardView>>,
+    pub(crate) book_count: Option<usize>,
 }
 
 /// Resolved display items carry their placement and card, not layout indices.
@@ -117,7 +122,7 @@ impl BrowseItem {
     pub(super) fn id(&self, cx: &App) -> SharedString {
         match self {
             Self::Child { row, .. } => chip_id(row.id),
-            Self::Book(book) => book_id(book.read(cx).key()),
+            Self::Book(book) => book_id(book.read(cx).key(), book.read(cx).source_directory()),
         }
     }
 }
@@ -126,8 +131,11 @@ pub(super) fn chip_id(id: BrowseLocation) -> SharedString {
     format!("chip:{id}").into()
 }
 
-pub(super) fn book_id(key: CardKey) -> SharedString {
-    format!("book:{key}").into()
+pub(super) fn book_id(key: CardKey, directory: Option<DirId>) -> SharedString {
+    match directory {
+        Some(directory) => format!("book:{key}:placement:{directory}").into(),
+        None => format!("book:{key}").into(),
+    }
 }
 pub(super) type BrowseItems = Rc<HashMap<SharedString, BrowseItem>>;
 
@@ -145,8 +153,10 @@ pub(super) struct BrowseDestination {
 }
 
 impl BrowseDestination {
-    pub(super) fn from_path(kind: BrowseKind, path: Vec<BrowseCrumb>) -> Self {
-        let location = path.last().map_or_else(|| kind.root_location(), |crumb| crumb.location);
+    /// `root` is where an empty path leads: the kind's root, or for the
+    /// catalog shown by author, its author index.
+    pub(super) fn from_path(root: BrowseLocation, path: Vec<BrowseCrumb>) -> Self {
+        let location = path.last().map_or(root, |crumb| crumb.location);
         Self { location, path }
     }
 }
@@ -155,7 +165,13 @@ impl BrowseDestination {
 /// streams books it does not hold instead of downloading them, and catalog
 /// and feed books are added to the library, not downloaded.
 pub(super) fn can_download(child: &BrowseRow) -> bool {
-    cfg!(not(target_arch = "wasm32")) && !matches!(child.id, BrowseLocation::Catalog(_) | BrowseLocation::Opds { .. }) && child.downloaded_book_count < child.book_count
+    cfg!(not(target_arch = "wasm32")) && !matches!(child.id, BrowseLocation::Catalog(_) | BrowseLocation::CatalogAuthor(_) | BrowseLocation::Opds { .. } | BrowseLocation::Store(_)) && child.downloaded_book_count < child.book_count
+}
+
+/// The count a chip or card row shows. A feed gives a link's count only
+/// sometimes, and one it does not give arrives as 0; a feed itself has none.
+pub(super) fn shown_count(child: &BrowseRow) -> Option<usize> {
+    (!matches!(child.id, BrowseLocation::Opds { .. } | BrowseLocation::Store(_)) || child.book_count > 0).then_some(child.book_count)
 }
 
 /// Whether a chip carries the download mark: only when it is partly on this
@@ -169,7 +185,8 @@ pub(super) fn shows_download_mark(child: &BrowseRow) -> bool {
 
 /// The listing a page has installed: one location's children, sections and
 /// books, and the controls its facets allow. Book cards outlive a reload, so a
-/// book still in the listing keeps its entity and its decoded cover.
+/// book still in the listing keeps its entity and can reuse a decoded cover
+/// while it remains in the shared cover cache.
 pub(super) struct BrowseListing {
     ui: LibraryContext,
     kind: BrowseKind,
@@ -188,6 +205,10 @@ pub(super) struct BrowseListing {
     /// How the book cards reach the page.
     book_events: BookCardEvents,
     folder_commands: bool,
+    pub(super) revision: u64,
+    pub(super) page: Option<BrowsePageState>,
+    pub(super) heading_rows: BTreeMap<usize, BrowseRow>,
+    pub(super) book_indices: BTreeMap<usize, Entity<BookCardView>>,
 }
 
 impl BrowseListing {
@@ -207,6 +228,10 @@ impl BrowseListing {
             sign_in: false,
             book_events,
             folder_commands,
+            revision: 0,
+            page: None,
+            heading_rows: BTreeMap::new(),
+            book_indices: BTreeMap::new(),
         }
     }
 
@@ -215,15 +240,18 @@ impl BrowseListing {
         if kind == BrowseKind::Books {
             controls.collection_sorts.clear();
         }
-        // Catalog books have no reading history to sort by.
+        // Catalog books have no reading history to sort by. The catalog can
+        // be shown by subject or by author.
         if kind == BrowseKind::Catalog {
-            controls.book_sorts.clear();
+            controls.book_sorts.retain(|sort| *sort != BrowseBookSort::RecentlyRead);
+            controls.hide_finished = false;
+            controls.groupings = true;
         }
-        // Home's shelves and their books keep the order that makes them what
-        // they are: most recent first.
+        // Home keeps activity order by default; sorting changes presentation,
+        // while its shelves still select books by their original activity rules.
         if kind == BrowseKind::Home {
-            controls.collection_sorts.clear();
-            controls.book_sorts.clear();
+            controls.collection_sorts = vec![BrowseChipSort::DefaultOrder, BrowseChipSort::Alphabetical, BrowseChipSort::BookCount, BrowseChipSort::Popularity];
+            controls.book_sorts = vec![BrowseBookSort::DefaultOrder, BrowseBookSort::Alphabetical, BrowseBookSort::Popularity];
         }
         controls
     }
@@ -232,13 +260,27 @@ impl BrowseListing {
     /// it, where it knows one.
     /// `searched` says whether `data` answers a search.
     pub(super) fn install(&mut self, data: LibraryBrowseData, searched: bool, cx: &mut App) -> Vec<BrowseCrumb> {
-        let LibraryBrowseData { contents, sections, path, ancestors, language_counts, format_counts, feed } = data;
+        self.revision = self.revision.wrapping_add(1);
+        let LibraryBrowseData { contents, sections, path, ancestors, language_counts, format_counts, feed, page } = data;
         self.ancestors = ancestors;
         // A search lists its matches flat; the sections are the unsearched
         // listing's, and the page lays its children out as cards only if any.
-        // A feed page has no sections: its children are its navigation links.
+        // A feed page has no sections: its navigation links are chips, as
+        // only the page itself is fetched. The catalog root's feeds and
+        // stores have no section either, and stay chips beside the sections;
+        // a child the sections leave out is otherwise not listed.
         let sections = if searched { Vec::new() } else { sections };
-        let children = if searched || feed.is_some() { contents.children } else { sections.iter().map(|section| section.parent.clone()).collect() };
+        self.page = page;
+        self.heading_rows = self.page.as_ref().filter(|page| page.headings.is_some()).map(|page| (page.section_offset..).zip(contents.children.iter().filter(|row| is_author_heading(row.id)).cloned()).collect()).unwrap_or_default();
+        let children = if searched || feed.is_some() || self.page.as_ref().is_some_and(|page| page.headings.is_some()) {
+            contents.children
+        } else if let Some(page) = &self.page {
+            let section_ids: HashSet<_> = page.section_ids.iter().copied().collect();
+            contents.children.into_iter().filter(|child| section_ids.contains(&child.id) || matches!(child.id, BrowseLocation::Opds { .. } | BrowseLocation::Store(_))).collect()
+        } else {
+            let feeds = contents.children.into_iter().filter(|child| matches!(child.id, BrowseLocation::Opds { page: None, .. } | BrowseLocation::Store(_)));
+            sections.iter().map(|section| section.parent.clone()).chain(feeds).collect()
+        };
         let books = contents.books;
         (self.controls, self.next, self.sign_in) = match feed {
             Some(feed) => (BrowseControls::feed(feed.facets), feed.next, feed.sign_in),
@@ -249,19 +291,22 @@ impl BrowseListing {
         // grid or in a section card — so a refresh keeps every decoded cover
         // rather than drawing each book blank until its cover loads again. A
         // library change reloads the listing, and during a scan that is often.
-        let mut previous: HashMap<CardKey, Vec<Entity<BookCardView>>> = HashMap::new();
+        // Pixel ownership stays in the bounded shared cache, not these cards.
+        let mut previous: HashMap<(CardKey, Option<DirId>), Vec<Entity<BookCardView>>> = HashMap::new();
         for card in self.books.iter().chain(self.sections.iter().flat_map(|section| section.books.iter())) {
-            previous.entry(card.read(cx).key()).or_default().push(card.clone());
+            previous.entry((card.read(cx).key(), card.read(cx).source_directory())).or_default().push(card.clone());
         }
-        let mut card_for = |book: library_model::BookCardRow, cx: &mut App| match previous.get_mut(&book.key()).and_then(Vec::pop) {
+        let mut card_for = |book: library_model::BookCardRow, cx: &mut App| match previous.get_mut(&(book.key(), book.source_directory)).and_then(Vec::pop) {
             Some(card) => {
-                card.update(cx, |card, _| card.replace_row(book));
+                card.update(cx, |card, cx| card.replace_row(book, cx));
                 card
             }
             None => BookCardView::create_in_grid(book, self.ui.clone(), self.book_events.clone(), self.folder_commands, self.kind == BrowseKind::Books, cx),
         };
-        let sections = sections.into_iter().map(|section| BrowseSection { parent: section.parent, children: section.children, books: section.books.into_iter().map(|book| card_for(book, cx)).collect() }).collect();
-        let books = Rc::new(books.into_iter().map(|book| card_for(book, cx)).collect());
+        let sections =
+            sections.into_iter().map(|section| BrowseSection { parent: section.parent, children: section.children, books: section.books.into_iter().map(|book| card_for(book, cx)).collect(), book_count: section.book_count }).collect();
+        let books: Rc<Vec<_>> = Rc::new(books.into_iter().map(|book| card_for(book, cx)).collect());
+        self.book_indices = self.page.as_ref().map(|page| (page.book_offset..).zip(books.iter().cloned()).collect()).unwrap_or_default();
         self.sections = sections;
         self.books = books;
         let direct = self.children.iter().cloned().map(|row| BrowseItem::Child { row, parent: None });
@@ -285,7 +330,7 @@ impl BrowseListing {
         }
         let mut books = (*self.books).clone();
         for book in data.contents.books {
-            let id = book_id(book.key());
+            let id = book_id(book.key(), book.source_directory);
             if items.contains_key(&id) {
                 continue;
             }
@@ -298,11 +343,176 @@ impl BrowseListing {
         self.items = Rc::new(items);
     }
 
+    /// Merge a window without changing the listing revision or existing card
+    /// entities. Section arrows retain the pages they have already fetched.
+    pub(super) fn append_page(&mut self, data: LibraryBrowseData, cx: &mut App) -> bool {
+        let Some(page) = data.page else { return false };
+        let Some(current) = &self.page else { return false };
+        if !compatible_pages(current, &page) {
+            return false;
+        }
+        if page.headings.is_some() {
+            self.heading_rows.extend((page.section_offset..).zip(data.contents.children.into_iter().filter(|row| is_author_heading(row.id))));
+            let extras = self.children.iter().filter(|row| !is_author_heading(row.id)).cloned();
+            self.children = Rc::new(self.heading_rows.values().cloned().chain(extras).collect());
+            for row in self.heading_rows.values() {
+                let item = BrowseItem::Child { row: row.clone(), parent: None };
+                Rc::make_mut(&mut self.items).insert(item.id(cx), item);
+            }
+        }
+        for section in data.sections {
+            if self.sections.iter().any(|found| found.parent.id == section.parent.id) {
+                continue;
+            }
+            let books = self.section_book_cards(section.books, cx);
+            for child in &section.children {
+                let item = BrowseItem::Child { row: child.clone(), parent: section.parent.id.folder() };
+                Rc::make_mut(&mut self.items).insert(item.id(cx), item);
+            }
+            self.sections.push(BrowseSection { parent: section.parent, children: section.children, books, book_count: section.book_count });
+        }
+        for (index, row) in (page.book_offset..).zip(data.contents.books) {
+            if self.book_indices.contains_key(&index) {
+                continue;
+            }
+            let book = BookCardView::create_in_grid(row, self.ui.clone(), self.book_events.clone(), self.folder_commands, self.kind == BrowseKind::Books, cx);
+            let item = BrowseItem::Book(book.clone());
+            Rc::make_mut(&mut self.items).insert(item.id(cx), item);
+            self.book_indices.insert(index, book);
+        }
+        self.books = Rc::new(self.book_indices.values().cloned().collect());
+        true
+    }
+
+    pub(super) fn missing_page(&self, slots: Range<usize>, compact: usize) -> Option<BrowsePageRequest> {
+        let page = self.page.as_ref()?;
+        page_request_for_slots(
+            slots,
+            compact,
+            page.heading_count(),
+            page.book_total,
+            |index| if page.headings.is_some() { self.heading_rows.contains_key(&index) } else { self.sections.iter().any(|section| section.parent.id == page.section_ids[index]) },
+            |index| self.book_indices.contains_key(&index),
+        )
+    }
+
+    pub(super) fn compact_slot_count(&self) -> usize {
+        match &self.page {
+            Some(page) if page.headings.is_some() => self.children.iter().filter(|row| !is_author_heading(row.id)).count(),
+            Some(page) => self.children.len().saturating_sub(page.section_ids.len()),
+            None => self.children.len(),
+        }
+    }
+
     pub(super) fn item(&self, id: &SharedString) -> Option<&BrowseItem> {
         self.items.get(id)
     }
 
+    pub(super) fn section_book_cards(&self, books: Vec<library_model::BookCardRow>, cx: &mut App) -> Vec<Entity<BookCardView>> {
+        books.into_iter().map(|book| BookCardView::create_in_grid(book, self.ui.clone(), self.book_events.clone(), self.folder_commands, false, cx)).collect()
+    }
+
     pub(super) fn child(&self, id: BrowseLocation) -> Option<&BrowseRow> {
         self.items.get(&chip_id(id))?.child()
+    }
+}
+
+pub(super) fn is_author_heading(location: BrowseLocation) -> bool {
+    matches!(location, BrowseLocation::Author(Some(_)) | BrowseLocation::CatalogAuthor(Some(_)))
+}
+
+fn compatible_pages(current: &BrowsePageState, next: &BrowsePageState) -> bool {
+    current.result_revision == next.result_revision
+        && current.book_total == next.book_total
+        && match (&current.headings, &next.headings) {
+            (Some(current), Some(next)) => current == next,
+            (None, None) => current.section_ids == next.section_ids,
+            _ => false,
+        }
+}
+
+fn page_request_for_slots(slots: Range<usize>, compact: usize, sections: usize, books: usize, section_loaded: impl Fn(usize) -> bool, book_loaded: impl Fn(usize) -> bool) -> Option<BrowsePageRequest> {
+    let mut section_range = slots.start.saturating_sub(compact).min(sections)..slots.end.saturating_sub(compact).min(sections);
+    let section = section_range.find(|index| !section_loaded(*index));
+    let books_start = compact + sections;
+    let mut book_range = slots.start.saturating_sub(books_start).min(books)..slots.end.saturating_sub(books_start).min(books);
+    let book = book_range.find(|index| !book_loaded(*index));
+    if section.is_none() && book.is_none() {
+        return None;
+    }
+    Some(BrowsePageRequest { section_offset: section.unwrap_or(0), section_limit: if section.is_some() { 24 } else { 0 }, book_offset: book.unwrap_or(0), book_limit: if book.is_some() { 48 } else { 0 } })
+}
+
+#[cfg(test)]
+mod paging_tests {
+    #[test]
+    fn folder_placements_have_distinct_selection_and_cursor_ids() {
+        let key = CardKey([1; 32]);
+        let first = book_id(key, Some(DirId::from_u128(1)));
+        let second = book_id(key, Some(DirId::from_u128(2)));
+        let unplaced = book_id(key, None);
+        assert_ne!(first, second, "two placements of one book must remain independently selectable");
+        assert_ne!(first, unplaced);
+        assert_ne!(second, unplaced);
+    }
+
+    use super::{book_id, compatible_pages, page_request_for_slots};
+    use library_model::{BrowseHeadingState, BrowseLocation, BrowsePageState, CardKey};
+    use sync_common::DirId;
+
+    #[test]
+    fn matching_counts_do_not_allow_pages_from_a_different_result_revision() {
+        let first = BrowsePageState { section_ids: Vec::new(), section_offset: 0, book_offset: 0, book_total: 50, headings: None, result_revision: Some("old".into()) };
+        let mut next = first.clone();
+        next.book_offset = 24;
+        assert!(compatible_pages(&first, &next));
+        next.result_revision = Some("new".into());
+        assert!(!compatible_pages(&first, &next));
+    }
+
+    #[test]
+    fn heading_windows_share_a_revision_and_reject_reordered_or_changed_indexes() {
+        let mut first = BrowsePageState {
+            section_ids: vec![BrowseLocation::Author(Some(uuid::Uuid::from_u128(1)))],
+            section_offset: 0,
+            book_offset: 0,
+            book_total: 0,
+            result_revision: None,
+            headings: Some(BrowseHeadingState { total: 37, revision: "one".into(), cards: true }),
+        };
+        let mut next = first.clone();
+        next.section_offset = 24;
+        next.section_ids = vec![BrowseLocation::Author(Some(uuid::Uuid::from_u128(25)))];
+        assert!(compatible_pages(&first, &next));
+        next.headings.as_mut().unwrap().revision = "two".into();
+        assert!(!compatible_pages(&first, &next));
+        next.headings.as_mut().unwrap().revision = "one".into();
+        next.headings.as_mut().unwrap().total = 38;
+        assert!(!compatible_pages(&first, &next));
+        first.headings = None;
+        assert!(!compatible_pages(&first, &next));
+    }
+
+    #[test]
+    fn outer_pages_skip_compact_chips_and_keep_section_and_book_ranges_independent() {
+        assert!(page_request_for_slots(0..2, 2, 25, 100, |_| false, |_| false).is_none());
+        let panels = page_request_for_slots(24..27, 2, 25, 100, |index| index < 24, |_| false).unwrap();
+        assert_eq!((panels.section_offset, panels.section_limit, panels.book_limit), (24, 24, 0));
+        let mixed = page_request_for_slots(26..30, 2, 25, 100, |index| index < 24, |_| false).unwrap();
+        assert_eq!((mixed.section_offset, mixed.book_offset), (24, 0));
+        assert_eq!((mixed.section_limit, mixed.book_limit), (24, 48));
+        let covers = page_request_for_slots(77..81, 2, 25, 100, |_| true, |index| index < 48).unwrap();
+        assert_eq!((covers.book_offset, covers.book_limit, covers.section_limit), (50, 48, 0));
+    }
+
+    #[test]
+    fn cached_backward_pages_and_empty_or_past_end_ranges_need_no_request() {
+        assert!(page_request_for_slots(2..8, 2, 25, 100, |_| true, |_| false).is_none());
+        assert!(page_request_for_slots(27..31, 2, 25, 100, |_| true, |index| index < 48).is_none());
+        assert!(page_request_for_slots(0..50, 0, 0, 0, |_| false, |_| false).is_none());
+        assert!(page_request_for_slots(200..220, 2, 25, 100, |_| false, |_| false).is_none());
+        let distant = page_request_for_slots(4020..4024, 0, 4707, 0, |index| index < 24, |_| false).unwrap();
+        assert_eq!(distant.section_offset, 4020);
+        assert_eq!(distant.book_limit, 0);
     }
 }

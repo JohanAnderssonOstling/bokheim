@@ -42,6 +42,11 @@ impl MetadataService {
                 return Err(MetadataError("invalid cover ISBN".into()));
             }
             let id = format!("isbn-{isbn}");
+            // Cache hits do not participate in external-download pacing. Check
+            // again under the lock to coalesce concurrent misses as before.
+            if self.cached_cover(&id)?.is_some() {
+                return Ok(Some(metadata_contract::books::CoverSource { id }));
+            }
             let mut last = OPEN_LIBRARY.lock().await;
             if self.cached_cover(&id)?.is_some() {
                 return Ok(Some(metadata_contract::books::CoverSource { id }));
@@ -70,5 +75,24 @@ impl MetadataService {
             return self.save_cover(&id, bytes);
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build::tests::snapshot_from;
+
+    #[tokio::test]
+    async fn cached_artwork_does_not_wait_for_another_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = snapshot_from(dir.path(), &[], &[], &[]);
+        let answers = dir.path().join("answers.sqlite");
+        crate::build_answers(&input, None, None, None, &answers).unwrap();
+        let service = MetadataService::open(&answers, &dir.path().join("demand.sqlite")).unwrap();
+        service.save_cover("isbn-9780306406157", b"retained cover".to_vec()).unwrap();
+        let _download = OPEN_LIBRARY.lock().await;
+        let cover = tokio::time::timeout(Duration::from_secs(1), service.resolve_isbn_cover_at(&["9780306406157".into()], "http://127.0.0.1:1")).await.unwrap().unwrap().unwrap();
+        assert_eq!(cover.id, "isbn-9780306406157");
     }
 }

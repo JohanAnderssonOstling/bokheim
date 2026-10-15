@@ -5,14 +5,14 @@
 //! themselves stay with each reader, because an EPUB annotation and a PDF
 //! annotation genuinely offer different actions.
 
-use std::cell::Cell;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, ClickEvent, Context, IntoElement, Window, div, px};
-use ui_components::WindowWidthClass;
+use std::cell::Cell;
 
+use super::layout::{clamp_reader_sidebar_width, reader_split};
+use super::state_panel::{SidebarTab, adjacent_sidebar_tab};
 use crate::invalidation::Component;
 use crate::settings::ReaderSettings;
-use super::layout::{clamp_reader_sidebar_width, reader_split};
 
 /// Smallest divider drag worth persisting, in pixels. Resize events arrive on
 /// every mouse move; sub-pixel jitter must not write to disk.
@@ -39,8 +39,8 @@ pub(crate) struct ChromeState {
 }
 
 impl ChromeState {
-    pub(crate) fn new(component: Component) -> Self {
-        Self { hidden: false, suppress_next_pointer_reveal: false, system_bars_visible: Cell::new(None), component }
+    pub(crate) fn from_preferences(component: Component, cx: &App) -> Self {
+        Self { hidden: ReaderSettings::preferences(cx).chrome_hidden, suppress_next_pointer_reveal: false, system_bars_visible: Cell::new(None), component }
     }
 
     pub(crate) fn is_visible(&self) -> bool {
@@ -61,6 +61,21 @@ impl ChromeState {
 
     pub(crate) fn show<C: 'static>(&mut self, cx: &mut Context<C>) {
         self.set_hidden(false, cx);
+    }
+
+    /// Moving through the book uncovers the text on phones, where the bars
+    /// sit over the page.
+    pub(crate) fn hide_for_motion<C: 'static>(&mut self, window: &Window, cx: &mut Context<C>) {
+        if ui_components::uses_mobile_reader_controls(window) {
+            self.hide(cx);
+        }
+    }
+
+    /// The tab a sidebar-cycling key selects: the neighbour while the panel is
+    /// showing, otherwise the current tab so the first press only reveals it.
+    pub(crate) fn cycled_sidebar_tab(&self, sidebar_visible: bool, active: SidebarTab, contents_available: bool, direction: i32, window: &Window) -> SidebarTab {
+        let visible = self.is_visible() && (!ui_components::uses_mobile_reader_controls(window) || sidebar_visible);
+        if visible { adjacent_sidebar_tab(active, contents_available, direction) } else { active }
     }
 
     /// Reveals from the desktop left-edge hover strip. A close action replaces
@@ -92,19 +107,23 @@ impl ChromeState {
             return;
         }
         self.hidden = hidden;
+        ReaderSettings::update(cx, |preferences| preferences.chrome_hidden = hidden);
         crate::invalidation::notify(cx, self.component, if hidden { "chrome_hidden" } else { "chrome_shown" });
     }
 }
 
 /// Builds the platform-specific interaction layer over a reading surface.
 ///
-/// Kobo uses left/right page zones and a central sidebar toggle. Other touch
-/// readers handle unclaimed document taps in their document container, so
+/// Touch readers handle unclaimed document taps in their document container, so
 /// links and images receive them first. Pointer-driven readers reveal the
-/// sidebar from the left edge.
+/// sidebar from the left edge. The legacy Kobo zones only apply without touch
+/// controls; they must not cover the mobile bars or consume document taps.
 pub(crate) fn surface_interactions<C: 'static>(
     reader_id: &'static str, chrome_visible: bool, sidebar_visible: bool, touch_input: bool, cx: &mut Context<C>, on_action: impl Fn(&mut C, SurfaceAction, &mut Window, &mut Context<C>) + Clone + 'static,
 ) -> Vec<AnyElement> {
+    if touch_input {
+        return Vec::new();
+    }
     if cfg!(feature = "kobo") {
         if sidebar_visible {
             return Vec::new();
@@ -146,9 +165,6 @@ pub(crate) fn surface_interactions<C: 'static>(
                 .into_any_element(),
         ];
     }
-    if touch_input {
-        return Vec::new();
-    }
     if chrome_visible {
         return Vec::new();
     }
@@ -178,21 +194,43 @@ pub(crate) fn is_page_tap(event: &ClickEvent) -> bool {
 /// screen it was never dragged on. Contents is a place the reader goes to and
 /// comes back from, so it gets the screen while it is open.
 ///
-/// The sidebar itself now carries its own header (back, title, search), so
-/// there is no separate toolbar row above the overlay to leave room for. On a
-/// mobile-navigation window the bottom bar (`shell::page`'s mobile branch)
-/// stays visible beneath the overlay instead, so the sheet leaves room below
-/// it rather than above.
-pub(crate) fn with_sidebar(sidebar: AnyElement, document: AnyElement, window: &Window, cx: &mut App) -> AnyElement {
+/// The sidebar carries its own header, so there is no toolbar row above the
+/// overlay to leave room for. On a mobile-navigation window the bottom bar
+/// (`shell::page`'s mobile branch) stays visible beneath the sheet, so the
+/// sheet leaves room below it. A `partial` sheet — Settings on a phone — stops
+/// part way up, so the page shows above it while its look is being changed.
+///
+/// On desktop the remembered width is the panel's; the rail beside it is added
+/// on top, so dragging the divider never squeezes the rail.
+pub(crate) fn with_sidebar(sidebar: AnyElement, document: AnyElement, partial: bool, window: &Window, cx: &mut App) -> AnyElement {
     if sidebar_overlays_document(window) {
-        let mobile = ui_components::uses_mobile_navigation(window);
-        let safe_area = window.insets().safe_area;
-        let top = if mobile { safe_area.top } else { px(0.) };
-        let bottom = if mobile { safe_area.bottom + px(ui_components::READER_BOTTOM_BAR_HEIGHT) } else { px(0.) };
-        return div().relative().size_full().min_h_0().min_w_0().overflow_hidden().child(document).child(div().absolute().left_0().right_0().top(top).bottom(bottom).child(sidebar)).into_any_element();
+        return div().relative().size_full().min_h_0().min_w_0().overflow_hidden().child(document).child(sidebar_sheet(sidebar, partial, window)).into_any_element();
     }
     let width = ReaderSettings::preferences(cx).toc_width.min(f32::from(window.viewport_size().width));
-    reader_split(sidebar, document, width).into_any_element()
+    reader_split(sidebar, document, width, rail_width(window)).into_any_element()
+}
+
+/// The sheet overlays the whole reader page, including space reserved for a
+/// hidden dock. Keeping it outside the document column also preserves the
+/// document's height while a sheet is opened and closed.
+pub(crate) fn sidebar_sheet(sidebar: AnyElement, partial: bool, window: &Window) -> AnyElement {
+    let mobile = ui_components::uses_mobile_reader_controls(window);
+    let safe_area = window.insets().safe_area;
+    let top = match (mobile, partial) {
+        (true, true) => safe_area.top + window.viewport_size().height * PARTIAL_SHEET_GAP,
+        (true, false) => safe_area.top,
+        (false, _) => px(0.0),
+    };
+    let bottom = if mobile { safe_area.bottom + gpui::rems(ui_components::BOTTOM_NAV_HEIGHT_REM).to_pixels(window.rem_size()) } else { px(0.0) };
+    div().absolute().left_0().right_0().top(top).bottom(bottom).child(sidebar).into_any_element()
+}
+
+/// How much of a phone screen a partial sheet leaves showing above it.
+const PARTIAL_SHEET_GAP: f32 = 0.35;
+
+/// The rail is part of the desktop sidebar; phones have bars instead.
+fn rail_width(window: &Window) -> f32 {
+    if ui_components::uses_mobile_reader_controls(window) { 0.0 } else { ui_components::READER_RAIL_WIDTH }
 }
 
 /// Persists a new sidebar width, ignoring drags too small to matter.
@@ -216,9 +254,49 @@ pub(crate) fn sidebar_width(visible: bool, window: &Window, cx: &App) -> f32 {
     if !visible || sidebar_overlays_document(window) {
         return 0.0;
     }
-    clamp_reader_sidebar_width(ReaderSettings::preferences(cx).toc_width.min(f32::from(window.viewport_size().width)))
+    clamp_reader_sidebar_width(ReaderSettings::preferences(cx).toc_width.min(f32::from(window.viewport_size().width))) + rail_width(window)
 }
 
 pub(crate) fn sidebar_overlays_document(window: &Window) -> bool {
-    cfg!(feature = "kobo") || WindowWidthClass::for_window(window).is_compact()
+    cfg!(feature = "kobo") || ui_components::uses_mobile_reader_controls(window)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
+    use gpui::TestAppContext;
+
+    use crate::settings::ReaderPreferences;
+
+    use super::*;
+
+    #[gpui::test]
+    fn touch_controls_leave_document_taps_and_bars_uncovered(cx: &mut TestAppContext) {
+        cx.new(|cx| {
+            for visible in [false, true] {
+                let overlays = surface_interactions("test-reader", visible, false, true, cx, |_: &mut (), _, _, _| {});
+                assert!(overlays.is_empty(), "touch readers must receive taps in their document and controls");
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn reader_reopens_with_saved_chrome_visibility(cx: &mut TestAppContext) {
+        let saved = Rc::new(RefCell::new(ReaderPreferences::default()));
+        let save_target = saved.clone();
+        cx.update(|cx| {
+            cx.set_global(ReaderSettings { preferences: saved.borrow().clone(), save: Rc::new(move |preferences, _, _| *save_target.borrow_mut() = preferences) });
+        });
+        let chrome = cx.new(|cx| ChromeState::from_preferences(Component::ReaderShell, cx));
+        chrome.update(cx, |chrome, cx| chrome.hide(cx));
+        assert!(saved.borrow().chrome_hidden);
+        let reopened = cx.new(|cx| ChromeState::from_preferences(Component::PdfShell, cx));
+        reopened.update(cx, |chrome, cx| {
+            assert!(!chrome.is_visible());
+            assert!(chrome.show_from_pointer(cx));
+        });
+        assert!(!saved.borrow().chrome_hidden);
+        cx.update(|cx| assert!(ChromeState::from_preferences(Component::ReaderShell, cx).is_visible()));
+    }
 }

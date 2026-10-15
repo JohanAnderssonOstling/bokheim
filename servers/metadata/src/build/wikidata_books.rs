@@ -290,6 +290,7 @@ pub(crate) fn enrich(c: &Connection, core: &Connection, results: &mut [RichIsbnM
                     classifications: direct_codes(book, isbn),
                     authors: book.authors.iter().enumerate().map(|(i, a)| wd_author(a, i)).collect(),
                     description: book.description.clone(),
+                    popularity: None,
                     subjects: Vec::new(),
                 });
             }

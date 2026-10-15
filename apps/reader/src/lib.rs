@@ -17,7 +17,7 @@ pub use app_preferences::{ReaderFontFamily, ReaderTextAlignment};
 pub use audiobook_player::{ActiveAudiobook, AudiobookDock, DockAction, PlaybackSession};
 pub use settings::{ReaderPreferences, SaveReaderSettings};
 pub use windows::AudiobookOpened;
-pub use windows::{CloseRequested, ReaderView, configure};
+pub use windows::{BookOpenFailed, CloseRequested, ReaderView, configure};
 
 fn save_audiobook_speed(speed: f64, cx: &mut gpui::App) {
     settings::ReaderSettings::update(cx, |preferences| preferences.audiobook_speed = speed);

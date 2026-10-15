@@ -1,6 +1,7 @@
 //! LCC call numbers and the compiled unified-taxonomy matcher. Shared by
 //! `subject-projection` and the build script that bundles its taxonomy.
 
+pub mod bisac_reference;
 pub mod lcc;
 pub mod range_storage;
 pub mod runtime_index;

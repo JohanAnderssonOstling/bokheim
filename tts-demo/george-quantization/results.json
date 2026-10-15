@@ -1,0 +1,159 @@
+{
+  "date": "2026-10-15",
+  "platform": "Linux-7.2.7-arch1-1-x86_64-with-glibc2.44",
+  "cpu": "AMD Ryzen 7 6800HS Creator Edition",
+  "sherpa_onnx": "1.13.8",
+  "onnxruntime_quantizer": "1.31.0",
+  "method": "onnxruntime.quantization.quantize_dynamic; MatMul/Gemm only; per_channel=True; weight_type=QInt8",
+  "upstream_recipe": "https://github.com/k2-fsa/sherpa-onnx/blob/master/scripts/kokoro/v1.0/dynamic_quantization.py",
+  "limitations": [
+    "Python host driving the native sherpa-onnx core, not the reader application",
+    "Timing depends on background load; other Rust builds and desktop activity ran during this experiment",
+    "Perceptual voice quality requires listening to the samples",
+    "Superseded memory measurement: ru_maxrss can retain pre-exec launcher RSS. Use rust-*.json /proc measurements for clean process memory; historical values preserved for provenance."
+  ],
+  "model_sha256": {
+    "fp32": "b40f62b166ac8164b0627ef48a0b358eda0985e272fb03ef5252e7206305da11",
+    "int8": "d9defc1977ea3db0d5fd849b6aabcf5bf5f1442db333e2963368ecf8c80e7817",
+    "int8-matmul": "04e74d75ecafc093bcf9d0cafd45b8a3880ffb37c3743fcd19c27e9a5f208967"
+  },
+  "repeats": 3,
+  "passage": "On 14 October, Dr. Andersson opened the old library at half past eight. \u201cAre we ready?\u201d she asked. The temperature was 12.5 degrees, but sunlight warmed the room. A reader paused beside the window, considered the unfamiliar name on the cover, and began again. Some sentences were short. Others unfolded slowly, with a quiet interruption in the middle, before arriving at their final thought. Outside, the rain had stopped. \u201cTake your time,\u201d she said. \u201cThere is another chapter tomorrow.\u201d He turned the page and continued reading, listening to the rhythm of the words and the silence between them.",
+  "results": [
+    {
+      "variant": "fp32",
+      "threads": 2,
+      "speaker": "bm_george",
+      "speaker_id": 26,
+      "model_bytes": 325560556,
+      "load_seconds": 4.539533558003313,
+      "opening_sentence_seconds": 5.585582078005245,
+      "first_full_passage_seconds": 20.02022804599983,
+      "warm_generation_seconds": [
+        33.752607618000184,
+        38.927976134000346,
+        25.32702220500505
+      ],
+      "median_seconds": 33.752607618000184,
+      "median_cpu_seconds": 55.494248791,
+      "audio_seconds": 38.052458333333334,
+      "times_realtime": 1.1273931414128742,
+      "peak_process_ram_mib": 740.74609375,
+      "sample_rate": 24000,
+      "file": "george-fp32-2threads.wav",
+      "peak_amplitude": 0.5724962949752808,
+      "rms": 0.07739799146358896,
+      "peak_rss_measurement_valid": false,
+      "memory_metric": "historical resource.getrusage(RUSAGE_SELF).ru_maxrss; may include pre-exec launcher RSS"
+    },
+    {
+      "variant": "int8",
+      "threads": 2,
+      "speaker": "bm_george",
+      "speaker_id": 26,
+      "model_bytes": 114203756,
+      "load_seconds": 1.9064608979970217,
+      "opening_sentence_seconds": 7.282616125994537,
+      "first_full_passage_seconds": 66.24621633099741,
+      "warm_generation_seconds": [
+        47.11374500599777,
+        52.412718618994404,
+        48.62005683100142
+      ],
+      "median_seconds": 48.62005683100142,
+      "median_cpu_seconds": 81.53138163200003,
+      "audio_seconds": 38.303583333333336,
+      "times_realtime": 0.7878144500421473,
+      "peak_process_ram_mib": 697.6328125,
+      "sample_rate": 24000,
+      "file": "george-int8-2threads.wav",
+      "peak_amplitude": 0.51982182264328,
+      "rms": 0.07629700699610904,
+      "peak_rss_measurement_valid": false,
+      "memory_metric": "historical resource.getrusage(RUSAGE_SELF).ru_maxrss; may include pre-exec launcher RSS"
+    },
+    {
+      "variant": "fp32",
+      "threads": 4,
+      "speaker": "bm_george",
+      "speaker_id": 26,
+      "model_bytes": 325560556,
+      "load_seconds": 1.7459452580005745,
+      "opening_sentence_seconds": 2.1294267600023886,
+      "first_full_passage_seconds": 14.003395147999981,
+      "warm_generation_seconds": [
+        13.804747437003243,
+        13.971543979998387,
+        13.737953638999898
+      ],
+      "median_seconds": 13.804747437003243,
+      "median_cpu_seconds": 54.116351003000005,
+      "audio_seconds": 38.064375,
+      "times_realtime": 2.7573394713451616,
+      "peak_process_ram_mib": 738.76171875,
+      "sample_rate": 24000,
+      "file": "george-fp32-4threads.wav",
+      "peak_amplitude": 0.577824592590332,
+      "rms": 0.07739207923355908,
+      "peak_rss_measurement_valid": false,
+      "memory_metric": "historical resource.getrusage(RUSAGE_SELF).ru_maxrss; may include pre-exec launcher RSS"
+    },
+    {
+      "variant": "int8",
+      "threads": 4,
+      "speaker": "bm_george",
+      "speaker_id": 26,
+      "model_bytes": 114203756,
+      "load_seconds": 1.6340697020059451,
+      "opening_sentence_seconds": 6.195755931999884,
+      "first_full_passage_seconds": 40.22137901300448,
+      "warm_generation_seconds": [
+        46.712787930999184,
+        39.62826640700223,
+        38.994404696000856
+      ],
+      "median_seconds": 39.62826640700223,
+      "median_cpu_seconds": 116.27752115599998,
+      "audio_seconds": 38.300291666666666,
+      "times_realtime": 0.966489204279173,
+      "peak_process_ram_mib": 708.02734375,
+      "sample_rate": 24000,
+      "file": "george-int8-4threads.wav",
+      "peak_amplitude": 0.5249663591384888,
+      "rms": 0.076269505243684,
+      "peak_rss_measurement_valid": false,
+      "memory_metric": "historical resource.getrusage(RUSAGE_SELF).ru_maxrss; may include pre-exec launcher RSS"
+    },
+    {
+      "variant": "int8-matmul",
+      "threads": 4,
+      "speaker": "bm_george",
+      "speaker_id": 26,
+      "model_bytes": 311185663,
+      "load_seconds": 1.7330044749978697,
+      "opening_sentence_seconds": 2.204670494997117,
+      "first_full_passage_seconds": 13.145842436002567,
+      "warm_generation_seconds": [
+        13.848495389000163,
+        12.648039569998218,
+        12.36822455899528
+      ],
+      "median_seconds": 12.648039569998218,
+      "median_cpu_seconds": 49.836935483000005,
+      "audio_seconds": 36.88008333333333,
+      "times_realtime": 2.9158734940088844,
+      "peak_process_ram_mib": 888.6171875,
+      "sample_rate": 24000,
+      "file": "george-int8-matmul-4threads.wav",
+      "peak_amplitude": 0.5177735090255737,
+      "rms": 0.075490186735106,
+      "peak_rss_measurement_valid": false,
+      "memory_metric": "historical resource.getrusage(RUSAGE_SELF).ru_maxrss; may include pre-exec launcher RSS"
+    }
+  ],
+  "methods": {
+    "int8": "onnxruntime.quantization.quantize_dynamic; weight_type=QUInt8; upstream Kokoro v1.0 recipe",
+    "int8-matmul": "onnxruntime.quantization.quantize_dynamic; MatMul/Gemm only; per_channel=True; weight_type=QInt8"
+  },
+  "memory_measurement_correction": "Superseded memory measurement: ru_maxrss can retain pre-exec launcher RSS. Use rust-*.json /proc measurements for clean process memory; historical values preserved for provenance."
+}

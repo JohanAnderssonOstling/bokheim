@@ -1,0 +1,83 @@
+{
+  "date": "2026-10-14",
+  "cpu": "AMD Ryzen 7 6800HS Creator Edition, Linux desktop",
+  "procedure": "Compile identical allocation-counting harnesses against snapshots of speech_text before and after this change, reusing the same segment-parser and segment-rules libraries. Warm each case 20 times, then normalize 1000 times.",
+  "build": "Normalization harness and speech_text compiled with rustc -C opt-level=3; reused Cargo dev-profile parser dependencies.",
+  "measurement": {
+    "allocation_calls": "Mean Rust global allocator alloc, alloc_zeroed and realloc calls per normalization, including the parser",
+    "allocated_bytes": "Mean cumulative bytes requested from those allocator calls per normalization; not retained or peak memory",
+    "wall_us": "Mean elapsed wall microseconds per normalization including allocator instrumentation"
+  },
+  "limitations": [
+    "Timings were not isolated from other desktop activity and varied; they do not establish a CPU speedup.",
+    "Rust allocator counters exclude native inference."
+  ],
+  "cases": {
+    "plain": "The reader opened the book beside the window.",
+    "long_plain": "The evening light settled over the quiet garden as the last visitors made their way home, leaving the familiar sounds of birds and distant traffic behind them while a gentle breeze moved through the trees and carried the scent of fresh rain across the path, reminding everyone that even an ordinary day can hold a moment of unexpected peace before the next chapter of their lives begins.",
+    "pronunciation": "Jan. 3, 2024 and 3 Sept. 2025. Dr. Smith paid €15 for 5 kg.",
+    "protected": "Visit https://example.com/Jan. or email a.b@example.com."
+  },
+  "runs": {
+    "before": [
+      {
+        "case": "plain",
+        "repeats": 1000,
+        "wall_us": 5645.64,
+        "allocation_calls": 1173,
+        "allocated_bytes": 15223
+      },
+      {
+        "case": "long_plain",
+        "repeats": 1000,
+        "wall_us": 21189.95,
+        "allocation_calls": 8972,
+        "allocated_bytes": 175719
+      },
+      {
+        "case": "pronunciation",
+        "repeats": 1000,
+        "wall_us": 16642.49,
+        "allocation_calls": 7564,
+        "allocated_bytes": 144034
+      },
+      {
+        "case": "protected",
+        "repeats": 1000,
+        "wall_us": 1941.52,
+        "allocation_calls": 897,
+        "allocated_bytes": 19349
+      }
+    ],
+    "after": [
+      {
+        "case": "plain",
+        "repeats": 1000,
+        "wall_us": 1962.97,
+        "allocation_calls": 1152,
+        "allocated_bytes": 13386
+      },
+      {
+        "case": "long_plain",
+        "repeats": 1000,
+        "wall_us": 17432.15,
+        "allocation_calls": 8876,
+        "allocated_bytes": 140829
+      },
+      {
+        "case": "pronunciation",
+        "repeats": 1000,
+        "wall_us": 18761.8,
+        "allocation_calls": 7524,
+        "allocated_bytes": 136645
+      },
+      {
+        "case": "protected",
+        "repeats": 1000,
+        "wall_us": 2395.74,
+        "allocation_calls": 873,
+        "allocated_bytes": 17490
+      }
+    ]
+  }
+}

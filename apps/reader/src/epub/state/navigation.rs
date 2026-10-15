@@ -11,33 +11,58 @@ use crate::invalidation::Component;
 impl ReaderView {
     pub(super) fn load_database_toc(&self, cx: &mut Context<Self>) {
         let library = self.library.clone();
+        let book = self.book.clone();
         let content_hash = self.locator.content_hash();
-        cx.spawn(async move |this, cx| match library.book_detail(content_hash).await {
-            Ok(detail) => {
-                let _ = this.update(cx, |this, cx| {
-                    let renderer = match &this.load_state {
-                        LoadState::Ready(renderer) => renderer.clone(),
-                        LoadState::Loading | LoadState::Error(_) => return,
-                    };
-                    let toc = if detail.toc.is_empty() { to_content_entries(this.book.toc()) } else { to_epub_entries(&detail.toc) };
-                    let resolutions = {
-                        let renderer = renderer.read(cx);
-                        crate::epub::toc::TocState::resolve(&toc, |href| renderer.resolve_href(href))
-                    };
-                    let anchors = crate::epub::toc::TocState::anchor_strings_by_doc(&resolutions, this.book.document_uris().len());
-                    this.set_toc(toc, resolutions, cx);
-                    renderer.update(cx, |renderer, cx| renderer.set_toc_anchor_strings_by_doc(anchors, cx));
-                });
-            }
-            Err(error) => log::warn!("could not load EPUB table of contents from library database: {error}"),
+        cx.spawn(async move |this, cx| {
+            let entries = match library.book_detail(content_hash).await {
+                Ok(detail) if !detail.toc.is_empty() => to_epub_entries(&detail.toc),
+                Ok(_) => to_content_entries(book.toc()),
+                Err(error) => {
+                    log::warn!("could not load EPUB table of contents from library database: {error}");
+                    to_content_entries(book.toc())
+                }
+            };
+            let (entries, resolutions, positions) = cx
+                .background_executor()
+                .spawn(async move {
+                    let resolutions = crate::epub::toc::TocState::resolve(&entries, |href| crate::epub::toc::TocState::resolve_publication_href(href, book.document_uris(), book.provider.as_ref()));
+                    let positions = crate::epub::toc::TocState::source_positions(&resolutions, book.document_uris(), book.provider.as_ref());
+                    (entries, resolutions, positions)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let renderer = match &this.load_state {
+                    LoadState::Ready(renderer) => renderer.clone(),
+                    LoadState::Loading | LoadState::Error(_) => return,
+                };
+                let anchors = crate::epub::toc::TocState::anchor_strings_by_doc(&resolutions, this.book.document_uris().len());
+                this.set_toc(entries, resolutions, positions, cx);
+                renderer.update(cx, |renderer, cx| renderer.set_toc_anchor_strings_by_doc(anchors, cx));
+            });
         })
         .detach();
     }
 
-    pub(super) fn set_toc(&mut self, entries: Vec<TocEntry>, resolutions: Vec<crate::epub::toc::ResolvedTocEntry>, cx: &mut Context<Self>) {
+    pub(super) fn set_toc(&mut self, entries: Vec<TocEntry>, resolutions: Vec<crate::epub::toc::ResolvedTocEntry>, positions: crate::epub::toc::SourcePositions, cx: &mut Context<Self>) {
         let tree_items = Self::toc_tree_items(&entries);
         self.toc_tree.update(cx, |tree, cx| tree.set_items(tree_items, cx));
         self.toc.set(entries, resolutions);
+        self.toc.install_source_positions(positions, self.book.document_uris().len());
+        self.search.rebuild_rows(&self.toc);
+        self.sync_toc_position(cx);
+        self.record_current_reading_position();
+        crate::invalidation::notify(cx, Component::ReaderShell, "toc_loaded");
+    }
+
+    pub(super) fn sync_toc_position(&self, cx: &mut Context<Self>) {
+        let next = self.toc.active_link();
+        self.toc_tree.update(cx, |tree, cx| {
+            let selected = next.map(|link| TreeItem::new(link.clone(), link));
+            tree.set_selected_item(selected.as_ref(), cx);
+            if let Some(selected) = selected {
+                tree.reveal_item(&selected.id, gpui::ScrollStrategy::Center, cx);
+            }
+        });
     }
 
     fn toc_tree_items(entries: &[TocEntry]) -> Vec<TreeItem> {
@@ -71,22 +96,16 @@ impl ReaderView {
         }
     }
 
-    pub(in crate::epub) fn navigate_to(&self, href: String, cx: &mut Context<Self>) {
+    pub(in crate::epub) fn navigate_to(&mut self, href: String, cx: &mut Context<Self>) {
         self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::NavigateToHref(href), cx));
+        #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+        self.tts_navigation_changed(cx);
     }
 
     pub(in crate::epub) fn navigate_from_footnote(&mut self, cx: &mut Context<Self>) {
         let Some((preview, _)) = self.footnote.take() else { return };
         self.navigate_to(preview.href, cx);
         crate::invalidation::notify(cx, Component::ReaderShell, "footnote_navigated");
-    }
-
-    pub(in crate::epub) fn display_title(&self) -> String {
-        let chapter = self.toc.active_title().or_else(|| (self.title != self.book_title).then(|| self.title.clone()));
-        match chapter {
-            Some(chapter) => format!("{} • {chapter}", self.book_title),
-            None => self.book_title.clone(),
-        }
     }
 
     pub(in crate::epub) fn spine_title(&self) -> String {

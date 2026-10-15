@@ -42,6 +42,113 @@ requires a new patch version. Existing version-code-1 installs can update only
 when signed with the same certificate. Changing from a local debug certificate
 to the production certificate does not create an install-compatible update.
 
+Failed book opens return to the previous library page with a dismissible error
+notification. Failed reader restoration clears the saved book so the next launch
+does not repeat the failure. Native Back cancels both the opening overlay and the
+reader's loading screen; the loading screen also keeps an on-screen Back button.
+
+## Book downloads in the app
+
+The library's globe button and bookstore links open a GPUI browser surface inside
+Bokheim. Its address/search field, back, forward, reload, close, progress, and
+download feedback use the app's GPUI components, theme, and fonts. Only the webpage
+is an Android WebView, positioned inside the rectangle measured by GPUI. The page
+resizes with the window, safe areas, and keyboard. Store cookies and website
+storage are shared between browser sessions.
+HTTP and HTTPS stores are supported; unsupported URL schemes stay out of the browser.
+The app's `bokheim_network_security_config.xml` permits HTTP and explicitly replaces
+the network security configuration contributed by `rustls-platform-verifier`.
+Android ignores `usesCleartextTraffic` when a network security configuration is present.
+Magnet links and downloaded `.torrent` files start a Rust torrent transfer for
+the selected library. All payload files download with the standard networking
+settings. Completed content is moved into the library and found by the normal
+scanner; the same files are then used for seeding.
+
+Settings → Transfers controls metered connections for all file transfers,
+including downloads, uploads, torrents, and updates. Allowing metered transfers
+is off by default. Android's connectivity service supplies the connection cost;
+waiting work resumes automatically when allowed. Browser HTTP requests restart
+after an interruption, while torrents reuse their downloaded pieces. Automatic
+suspension preserves the user's seeding preference.
+
+Torrent metadata, resume information, and book-to-torrent associations are kept
+in the device's library database. Closing the browser leaves transfers running
+while Bokheim is open, and reopening the app resumes saved transfers. Whole-folder
+moves through Bokheim update the seeding location. A book's detail page offers
+Stop/Keep seeding and Remove torrent; removing a torrent keeps its downloaded files.
+
+Book downloads reuse the browser's cookies and user agent, follow HTTP redirects,
+and stream into the selected library's hidden staging folder. Completed EPUB, PDF,
+MOBI, AZW/AZW3, and M4B files enter the existing library placement/import flow.
+Closing the browser lets pending downloads finish before the staging folder is
+removed. Completed books are explicitly imported into the selected library on
+both Android and desktop; completion notifications wait for the import result.
+Failed or incomplete transfers never enter the library. Blob URLs and
+downloads that require replaying a POST body are not supported by this adapter.
+
+Download links that open a new window share the visible page's download handling,
+cookies, and progress notifications.
+
+Android and desktop use the same GPUI download notifications for HTTP and torrents.
+On Android, the toast's × button cancels an active HTTP or torrent download and
+removes its partial files. Completed and failed toasts simply dismiss.
+Each transfer has its own progress bar, waiting state, completion, and error feedback.
+A downloaded `.torrent` file hands its notification to the payload transfer;
+completed torrents report whether seeding continues. Browser torrent progress
+updates once per second. HTTP transfers keep updating after the browser closes;
+active torrents appear again when it reopens. Android reserves space below the
+native webpage while notifications are visible.
+
+The mobile toolbar contains the address field and Close. Android's Back button
+goes back through webpage history, then returns to the library. Pull down from
+the top of a webpage and release to refresh; normal scrolling, sideways gestures
+and pinch zoom do not trigger refresh. Page loading uses the GPUI progress bar.
+
+Android Back buttons and gestures send a dedicated JNI request to the app's
+state-based navigation handler; they never enter keyboard dispatch. The handler
+dismisses one visible layer at a time: component menus/popovers and dialogs/sheets,
+the embedded webpage browser, book loading, expanded audio controls, reader panels,
+and library navigation. Dialog cancellation vetoes are honored. The library
+switcher closes before its underlying page, and browsing follows the requested
+breadcrumb trail even while a destination is loading. Browse roots return to
+Home; only Home with nothing left to dismiss explicitly permits Android to exit.
+Missing or stale keyboard focus cannot select a different navigation target.
+Escape keeps its separate keyboard shortcuts.
+
+GPUI touch surfaces deliver a stationary 500 ms hold as an explicit
+`LongPressEvent` while the finger is still down. Reader and library context
+actions bind `on_long_press` or `capture_long_press`. Moving past the touch slop,
+adding a second finger, or cancelling the contact prevents a pending hold;
+releasing a recognized hold does not produce a mouse click or page swipe.
+
+In an EPUB, hold a word to select it, then drag either handle to adjust the
+passage. Annotate opens its annotation editor, which stays above the keyboard
+while entering a note. Back or a tap outside the selection dismisses it
+before leaving the book. Handle drags claim raw touch input and never page or
+open a link; word boundaries and EPUB locations come from the shared renderer.
+
+The address field suggests previously typed sites and searches using the same
+history format and matching as desktop. Tap a suggestion or select it with the
+arrow keys and Enter. Suggestions reserve space above the native webpage and
+are dismissed by Back or by returning focus to the page. History persists when
+the browser reopens; redirects and clicked links do not fill the suggestion list.
+
+Embedded challenge frames can load `about:srcdoc`, and browser windows accept
+third-party cookies for sign-in and verification widgets. Cookies are flushed
+after a page finishes loading as well as when the browser closes. The WebView's
+default user agent is retained throughout the session.
+
+Run the browser and download checks with:
+
+```sh
+gradle testReleaseUnitTest --tests se.bokheim.reader.gpui.BookBrowserTest -x buildRustRelease
+cargo test -p library-opds --lib
+cargo test -p desktop-gpui --lib --no-default-features --features mobile,reader-ui/native-audio book_browser
+```
+
+On a device, check a signed-in store, an EPUB/PDF download, redirect handling,
+browser Back/close, and the downloaded book appearing in the selected library.
+
 ## Direct APK updates
 
 `ApkInstaller` provides the OS handoff boundary. Before the explicit Install
@@ -74,6 +181,91 @@ Android owns code installation: this data rollback does not silently downgrade a
 badly behaving APK. Such code needs a corrected newer signed APK.
 
 See Android's [versioning rules](https://developer.android.com/studio/publish/versioning).
+
+## Read aloud
+
+The first audiobook or read-aloud start while the app is visible offers an optional
+battery optimization exemption. Continue opens Android's confirmation dialog;
+Not now or cancellation allows playback and suppresses further automatic prompts.
+Already-exempt apps skip the prompt. If the confirmation activity is unavailable,
+Bokheim opens the system battery optimization list. Users can change the exemption
+later in Android's battery settings. The exemption helps network access and CPU
+wake locks during Doze; it does not remove every power restriction.
+
+The bundled taxonomy is a standalone `taxonomy.sqlite3` APK asset, rather than
+bytes embedded in the native library. Before opening library databases, the
+native startup worker extracts it into `no_backup/bundled-taxonomy/<digest>/`.
+Completed copies are reused, and revision directories preserve existing readers
+across application updates. Reusing a completed copy skips extraction locking
+and directory creation. Native startup only registers its path; it does not read
+or hash the database. SQLite attaches the file read-only with a 512 KiB
+page-cache target per connection. Downloaded taxonomy updates take precedence.
+The isolated update migration service prepares the same resource before use.
+
+Android enables the shared offline EPUB/PDF narration controls. The release and
+debug APKs bundle Piper Alba, together with checksum-verified
+ARM64 Sherpa-ONNX runtime libraries. Sherpa and ONNX Runtime load on the synthesis
+worker when narration is first requested; they are packaged in the APK without
+being startup link dependencies. The voice bundle retains only the English
+eSpeak dictionary and English language definitions, together with shared
+phoneme/voice resources.
+Gradle prepares these with `shared/reader-speech/prepare_android.py`;
+the first build requires downloading the runtime and voice unless they are cached.
+The voice bundle is extracted from APK assets into private storage
+excluded from Android backups by a background worker on first launch. A completed
+copy is reused until that voice's bundled checksum changes. Extraction never blocks the
+UI thread; a read-aloud request waits on the speech worker if the copy is still
+running. Interrupted or failed copies are retried on the next launch or speech
+request. The EPUB and PDF narration docks use Alba without a voice selector,
+including when older preferences selected George. The model is loaded into the
+synthesis engine when read-aloud starts. Alba uses two inference threads;
+Android schedules those threads across the available cores. Later loads reuse the
+extracted files and avoid RAM-backed model staging.
+Playback uses Android's AAudio output through the shared narration player.
+`SpeechService` registers this player with Android's media session and shows
+notification/lock-screen controls with the book title. Play/pause, Previous passage,
+Next passage, headset controls, and Stop act on the same Rust speech queue
+and update the reader dock. Previous/next selects a paragraph or reading block;
+pause/resume retains the exact PCM position and queued audio. EPUB narration
+indexes readable items without pagination and loads their text on demand. Speech
+starts with a short chunk of up to 120 characters, followed by sentence chunks
+of up to 400 characters. The synthesis worker targets 25 seconds of queued audio
+and requests upcoming text before inference, keeping at most three prepared
+text chunks ahead. Playback begins with the first ready chunk. Navigation and
+speed or pause-length changes discard queued work; setting changes restart
+the current passage and preserve pause state. A foreground media service holds a CPU wake lock
+during playback/preparation; pause, stop, focus loss, and headphone disconnection
+release or pause the appropriate resources. Closing narration or the reader
+removes the media session and notification. Notification intents cannot start
+a new book or supply file paths.
+The TTS navigation button opens narration when closed; tapping it again stops
+playback, releases the session and voice model, and closes the dock. The dock's
+play/pause button pauses or resumes while keeping the session available.
+During a narration session, including pauses, the hardware volume buttons adjust
+media volume instead of turning pages. Page-turn capture returns when narration
+stops or the reader closes.
+The synthesis worker refills audio from consumption notifications instead of periodic
+polling. Stop releases the output device and keeps the voice warm for 60 seconds;
+continued inactivity unloads the voice, and the next start reloads it. Natural completion
+lets the final device buffers drain before closing output. Pause retains the voice,
+source and queued PCM for exact resumption, while suspending the device stream.
+Backends without hardware pause park the output callback until resume or shutdown.
+Playback owns its PCM allocation directly and generates passage-gap silence without
+allocating zero-filled audio buffers.
+Media-session and notification state updates are signaled by Rust playback changes;
+the service does not poll the native speech state periodically.
+The current voice supports English books; other declared languages remain unavailable.
+
+Validate the service lifecycle with:
+
+```sh
+gradle testReleaseUnitTest --tests se.bokheim.reader.gpui.SpeechServiceTest -x buildRustRelease
+cargo test --release -p reader-speech --lib
+```
+
+On a device, verify the notification and lock-screen player during EPUB/PDF
+narration, play/pause/skip controls, continued playback with the screen locked,
+audio interruptions/headphone disconnection, and removal after Stop/closing.
 
 ## Audiobooks
 
@@ -172,3 +364,91 @@ under `lib/arm64-v8a/` in the APK. Python 3.11 or newer is required.
 The Android feature enables PDF reading, search, selection, and cover extraction.
 License notices are included in the shared reader. No PDFium source compilation
 or runtime extraction is required. See `shared/pdfium/README.md` for offline setup.
+
+## Startup timings
+
+An optimized build can log startup stages without enabling dependency debug logs:
+
+```sh
+adb shell am start -W -n se.bokheim.reader.gpui/.MainActivity \
+  --ez bokheim.startup_profile true
+```
+
+For repeated measurements, unlock a connected device and run:
+
+```sh
+python3 apps/desktop-gpui/scripts/benchmark-startup-android.py --serial DEVICE_SERIAL
+```
+
+The runner preserves app data, force-stops the process before each launch, and
+records the first launch separately from five measured launches. Raw logcat,
+Android launch timings, and stage medians/ranges go to
+`target/startup-benchmark/android/results/`. It temporarily keeps the screen on
+while charging and restores that setting on exit.
+
+Native relative timings start after the initial JNI context/intent lookup.
+Launch-to-log timings include earlier Android startup and use a measured device
+clock offset. Frame callbacks measure GPUI rendering, not panel presentation.
+Filesystem caches stay warm; these measurements do not simulate a device reboot.
+
+Library traces include a library ID, resource construction, connection policy,
+schema initialization, transaction commit, and actor startup. The runner saves
+every event and per-library breakdowns in `runs.json`; `.sum_ms` metrics total a
+stage across all libraries. Nested scopes overlap and must not be added together.
+For a diagnostic comparison, pass `--defer-background --output ANOTHER_DIRECTORY`.
+This holds backend asynchronous tasks, including library actors, until the first
+GPUI frame; it does not measure when restored reader content becomes usable.
+
+The same launch extra enables GPUI fork timings: `gpui_android_platform` records
+text-system and system-font setup, `gpui_window_open` separates window creation,
+the application root and its initial draw, and `gpui_renderer_*`,
+`gpui_adapter_*` and `gpui_pipelines` break down GPU setup and pipeline creation.
+GPUI's `since_start_ms` uses its own profiling origin; compare stage durations
+across the GPUI and application profiles, not their relative timestamps.
+
+Bokheim uses its bundled fonts and skips Android system-font loading by default.
+System-font aliases resolve to bundled Raleway, registered before the first
+window opens. This also omits Android's emoji and symbol fallback fonts, so
+characters absent from the bundled fonts may render as missing glyphs.
+To enable Android fonts for comparison, pass `--android-system-fonts` to the
+benchmark runner, or add `--ez bokheim.android_system_fonts true` to a
+force-stopped launch (`adb shell am start -S ...`).
+The GPUI fork retains its default system-font loading; applications can opt out
+with `AndroidPlatform::new_with_options` and `AndroidPlatformOptions`.
+
+Android graphics initialization tries Vulkan before creating an OpenGL instance,
+and retries with OpenGL if Vulkan initialization fails. The actual window surface
+is validated instead of configuring a temporary 64×64 surface. Intermediate-path
+pipelines unused by Android and the unimplemented surface pipeline are omitted.
+
+GPU pipeline caching is enabled by default in private app storage under
+`files/gpui-pipeline-cache`. Cache names include GPU/driver identity and shader
+content; corrupt files are ignored and replaced atomically in the background.
+Unchanged cache data is not rewritten. The first uncached launch still compiles
+pipelines; subsequent launches can reuse them.
+
+Use `--no-gpu-cache` with the benchmark runner to compare the same APK without
+cache reuse, or `--force-opengl` to exercise OpenGL. These map to the cold-launch
+extras `bokheim.gpu_pipeline_cache=false` and `bokheim.force_opengl=true`.
+The Android OpenGL fallback uses grayscale text: Adreno GLES advertises
+dual-source blending but can drop subpixel glyph draws. Vulkan retains subpixel
+rendering on supported hardware.
+
+## Input and swipe timings
+
+Opt in for one launch with the `bokheim.input_profile` intent extra:
+
+```sh
+adb shell am force-stop se.bokheim.reader.gpui
+adb shell am start -n se.bokheim.reader.gpui/.MainActivity --ez bokheim.input_profile true
+adb logcat -s gpui | rg 'stage=(platform|frame)'
+```
+
+Swipe and tap the same surface several times. `event_age_ms` measures Android's
+queue delay before Rust receives the event. Frame lines report synchronous
+`dispatch_ms`, waiting for the next frame (`queue_ms`), view construction/layout
+and prepaint (`layout_ms`), painting and frame completion, and renderer submission.
+`first_input_to_submit_ms` includes the oldest coalesced input; the `latest` value
+shows the age of the position actually drawn. These stop at renderer submission;
+they do not measure display scanout. Tracing is off by default; force-stop and
+launch normally to disable it after profiling. Desktop hosts can enable the same frame tracing with `RUST_LOG=input_frame=debug`.

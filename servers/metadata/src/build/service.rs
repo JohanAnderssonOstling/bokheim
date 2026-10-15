@@ -11,7 +11,15 @@ fn classification_to_metadata(classification: crate::IsbnClassificationResult) -
     let matches = classification
         .matches
         .into_iter()
-        .map(|matched| RichWorkMetadataMatch { open_library_work_id: matched.open_library_work_id, exact_edition_ids: matched.exact_edition_ids, classifications: matched.classifications, authors: Vec::new(), description: None, subjects: Vec::new() })
+        .map(|matched| RichWorkMetadataMatch {
+            open_library_work_id: matched.open_library_work_id,
+            exact_edition_ids: matched.exact_edition_ids,
+            classifications: matched.classifications,
+            authors: Vec::new(),
+            description: None,
+            popularity: None,
+            subjects: Vec::new(),
+        })
         .collect();
     RichIsbnMetadataResult { requested_isbn: classification.requested_isbn, canonical_isbn13: classification.canonical_isbn13, status: classification.status, matches }
 }
@@ -64,26 +72,50 @@ impl Resolver {
         for requested_isbn in isbns {
             results.push(lookup_one(&connection, requested_isbn)?);
         }
-        if results.iter().any(|r| r.matches.len() == 1 && !r.matches[0].classifications.iter().any(|c| c.scheme == metadata_contract::ClassificationScheme::LibraryOfCongress)) {
-            let identity = query_connection(&self.state.pool)?;
-            for result in &mut results {
-                crate::build::duplicate_work::recover(&identity, result)?;
-            }
-        }
         Ok(results)
     }
 
     pub(crate) fn enrich_rich(&self, isbns: Vec<String>) -> Result<Vec<RichIsbnMetadataResult>, MetadataError> {
-        let mut metadata = self.lookup_metadata(isbns)?;
+        self.attach_fields(self.lookup_metadata(isbns)?)
+    }
+
+    pub(crate) fn enrich_build_batch_cached(&self, isbns: Vec<String>, cache: &mut crate::build::batch::WorkEvidenceCache) -> Result<Vec<RichIsbnMetadataResult>, MetadataError> {
+        let results = {
+            let connection = self.connection()?;
+            crate::build::batch::lookup_many_cached(&connection, isbns, cache)?
+        };
+        self.attach_fields_cached(results.into_iter().map(classification_to_metadata).collect(), cache)
+    }
+
+    fn attach_fields(&self, metadata: Vec<RichIsbnMetadataResult>) -> Result<Vec<RichIsbnMetadataResult>, MetadataError> {
+        self.attach_fields_cached(metadata, &mut crate::build::batch::WorkEvidenceCache::default())
+    }
+
+    fn attach_fields_cached(&self, mut metadata: Vec<RichIsbnMetadataResult>, cache: &mut crate::build::batch::WorkEvidenceCache) -> Result<Vec<RichIsbnMetadataResult>, MetadataError> {
         let connection = query_connection(&self.state.pool)?;
         attach_authors(&connection, &mut metadata)?;
         let work_ids = metadata.iter().flat_map(|result| &result.matches).filter_map(|matched| matched.open_library_work_id.as_deref().and_then(|value| open_library_id(value, 'W'))).collect::<BTreeSet<_>>();
-        let supplements = self.load_work_supplements(&connection, &work_ids)?;
+        let cached = cache.supplements.load(
+            &work_ids,
+            |missing| {
+                let mut loaded = self.load_work_supplements(&connection, missing)?;
+                Ok(missing.iter().map(|id| (*id, (loaded.descriptions.remove(id), loaded.bisac.remove(id).unwrap_or_default()))).collect())
+            },
+            |(description, codes)| description.as_ref().map_or(0, String::len) + codes.iter().map(|code| code.notation.len() + 128).sum::<usize>(),
+        )?;
+        let mut supplements = WorkSupplements { descriptions: BTreeMap::new(), bisac: BTreeMap::new() };
+        for (id, (description, codes)) in cached {
+            if let Some(description) = description {
+                supplements.descriptions.insert(id, description);
+            }
+            if !codes.is_empty() {
+                supplements.bisac.insert(id, codes);
+            }
+        }
         attach_rich_fields(&connection, &mut metadata, &supplements.descriptions, &supplements.bisac)?;
-        crate::build::loc_dump::enrich(&connection, &mut metadata)?;
+        crate::build::loc_dump::enrich_many(&connection, &mut metadata)?;
         Ok(metadata)
     }
-
 
     pub(crate) fn connection(&self) -> Result<QueryConnection, MetadataError> {
         query_connection(&self.state.pool)

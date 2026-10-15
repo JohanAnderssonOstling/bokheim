@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- The book browser supports arbitrary HTTP stores and download redirects.
+         Own this policy so dependency manifests cannot disable that support. -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

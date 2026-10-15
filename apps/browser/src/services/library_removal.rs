@@ -1,6 +1,11 @@
 //! Optional application-owned preparation before removing a configured library.
 use gpui::{App, Global};
-use std::{cell::RefCell, collections::HashSet, future::Future, pin::Pin, rc::Rc};
+use std::{
+    collections::HashMap,
+    future::Future,
+    pin::Pin,
+    rc::{Rc, Weak},
+};
 use sync_common::LibraryId;
 
 pub type LibraryRemovalPreparation = Pin<Box<dyn Future<Output = Result<(), String>>>>;
@@ -14,34 +19,43 @@ pub struct LibraryRemovalHook(pub Rc<dyn LibraryRemovalService>);
 impl Global for LibraryRemovalHook {}
 
 #[derive(Default)]
-struct RemovingLibraries(Rc<RefCell<HashSet<LibraryId>>>);
+struct RemovingLibraries(HashMap<LibraryId, Weak<RemovalLease>>);
+
+struct RemovalLease;
+
+impl RemovingLibraries {
+    fn contains(&self, library: LibraryId) -> bool {
+        self.0.get(&library).is_some_and(|lease| lease.strong_count() > 0)
+    }
+
+    fn begin(&mut self, library: LibraryId) -> Result<LibraryRemovalGuard, String> {
+        self.0.retain(|_, lease| lease.strong_count() > 0);
+        if self.contains(library) {
+            return Err("Library removal is already in progress".into());
+        }
+        let lease = Rc::new(RemovalLease);
+        self.0.insert(library, Rc::downgrade(&lease));
+        Ok(LibraryRemovalGuard { _lease: lease })
+    }
+}
 impl Global for RemovingLibraries {}
 
 /// Held through preparation AND backend deletion, including cancellation.
 pub(crate) struct LibraryRemovalGuard {
-    library: LibraryId,
-    removing: Rc<RefCell<HashSet<LibraryId>>>,
-}
-
-impl Drop for LibraryRemovalGuard {
-    fn drop(&mut self) {
-        self.removing.borrow_mut().remove(&self.library);
-    }
+    // The task owns activity. Dropping it expires the registry's weak reference,
+    // including cancellation, without borrowing the app or mutating shared state.
+    _lease: Rc<RemovalLease>,
 }
 
 pub fn library_is_being_removed(library: LibraryId, cx: &App) -> bool {
-    cx.try_global::<RemovingLibraries>().is_some_and(|state| state.0.borrow().contains(&library))
+    cx.try_global::<RemovingLibraries>().is_some_and(|state| state.contains(library))
 }
 
 pub(crate) fn begin_library_removal(library: LibraryId, cx: &mut App) -> Result<LibraryRemovalGuard, String> {
     if cx.try_global::<RemovingLibraries>().is_none() {
         cx.set_global(RemovingLibraries::default());
     }
-    let removing = cx.global::<RemovingLibraries>().0.clone();
-    if !removing.borrow_mut().insert(library) {
-        return Err("Library removal is already in progress".into());
-    }
-    Ok(LibraryRemovalGuard { library, removing })
+    cx.global_mut::<RemovingLibraries>().begin(library)
 }
 
 pub(crate) fn prepare_library_removal(library: LibraryId, cx: &mut App) -> LibraryRemovalPreparation {
@@ -55,4 +69,43 @@ pub(crate) fn prepare_library_removal(library: LibraryId, cx: &mut App) -> Libra
 pub(crate) async fn prepared_removal<T>(preparation: LibraryRemovalPreparation, remove: impl Future<Output = Result<T, String>>) -> Result<T, String> {
     preparation.await?;
     remove.await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lease_blocks_duplicates_until_the_task_drops_it() {
+        let mut registry = RemovingLibraries::default();
+        let library = LibraryId::from_u128(1);
+        let guard = registry.begin(library).unwrap();
+        assert!(registry.contains(library));
+        assert!(registry.begin(library).is_err());
+        drop(guard);
+        assert!(!registry.contains(library));
+        assert!(registry.begin(library).is_ok());
+    }
+
+    #[test]
+    fn cancelling_a_pending_task_expires_only_its_lease() {
+        use futures_util::FutureExt;
+        let mut registry = RemovingLibraries::default();
+        let first = LibraryId::from_u128(1);
+        let second = LibraryId::from_u128(2);
+        let guard = registry.begin(first).unwrap();
+        let other = registry.begin(second).unwrap();
+        let task = async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        };
+        assert!(task.now_or_never().is_none());
+        assert!(!registry.contains(first));
+        assert!(registry.contains(second));
+        let replacement = registry.begin(first).unwrap();
+        assert_eq!(registry.0.len(), 2);
+        drop((other, replacement));
+        assert!(!registry.contains(first));
+        assert!(!registry.contains(second));
+    }
 }

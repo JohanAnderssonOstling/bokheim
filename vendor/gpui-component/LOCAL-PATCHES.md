@@ -11,6 +11,8 @@ Only the UI, assets, and macros crates are included; workspace members are narro
 - Scrollbars bypass timer-driven fading under reduced motion, including per-widget auto-hide overrides.
 - `Button`'s `Ghost` variant reads the themed `button_hover`/`button_active` tokens for its hover and pressed fills, the same tokens `Default` already reads, instead of deriving an untheme-able tint from `secondary`. Every other variant already honored a theme's hover colors; `Ghost` silently didn't.
 - Context menus share an `OpenContextMenu` action bound to Ctrl+Enter, Shift+F10, and the Menu key. Generic menus and input clipboard menus reuse their right-click implementations and restore focus after dismissal; keyboard input menus keep the text selection.
+- Popup menus can keep multi-select filter choices open after selection; Escape and outside clicks still dismiss them. Ordinary action menus retain their default dismissal behavior.
+- Dialog backdrops retain their window dimensions when rendered from a narrow pane. Centered surfaces participate in flex layout; explicit top offsets use absolute positioning. The shared dialog layer paints at deferred priority 4, above the library switcher and its menus, so confirmations and update prompts remain visible and receive clicks.
 
 Kobo forces reduced motion through its GPUI platform capability. Other platforms retain the existing policy.
 
@@ -32,3 +34,13 @@ GPUI's broad `image-formats` default is disabled in both workspace dependency de
 The rich-text HTML parser uses `html5ever` 0.39 and the matching `markup5ever_rcdom` 0.39 adapter, sharing the parser generation already used by the reader. HTML text views and embedded HTML in Markdown remain supported; no renderer code changes were required.
 
 - Custom popup rows can report keyboard selection and handle Left/Right before submenu navigation, allowing split-action rows to remain keyboard accessible. Context-menu wrappers accept a separate keyboard builder for selection-based actions. Linux client title bars expose their window menu through the shared context-menu action.
+
+- Trees use GPUI’s variable-height list so wrapped TOC titles retain the same vertical padding as single-line entries. Visible-entry rebuilds invalidate measured heights and retain the scroll position; keyboard navigation and the scrollbar use the same list state.
+
+- Notifications can keep their close button visible for touch use. Browser toasts opt in, and their notification type can be cleared immediately when the browser closes without removing unrelated application notifications.
+- Notification widths are capped to the viewport minus both horizontal margins, and their text can shrink and wrap inside that width so right-anchored toasts stay on-screen on phones.
+- The component root exposes explicit state-based dismissal for active menus, popovers, dialogs, and sheets. The app calls it from its native Back handler without keyboard dispatch. Cancellation remains window-local and honors dialog vetoes; deferred modal cancellation verifies that the same overlay is still active. Android Back has no component key bindings; Escape retains normal keyboard dismissal.
+
+- Context menus listen for GPUI's explicit long-press event as well as desktop right-click. Reader capture handlers can consume the hold before the generic menu opens.
+
+- Text inputs preview mobile page swipes live and settle from the gesture’s original offset, so release does not add the drag distance a second time. Cancelled swipes restore that offset and stay within the input.

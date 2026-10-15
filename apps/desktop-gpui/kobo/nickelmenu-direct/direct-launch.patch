@@ -1,0 +1,22 @@
+diff --git a/src/nickelmenu.cc b/src/nickelmenu.cc
+index 59bf3f9..8f54a8d 100644
+--- a/src/nickelmenu.cc
++++ b/src/nickelmenu.cc
+@@ -180,6 +180,7 @@ typedef char *(*nm_argtransform_t)(void *data, const char *arg);
+ // nm_menu_item_do runs a nm_menu_item_t and must be called from the thread of a
+ // signal handler. argtransform and argtransform_data are optional.
+ static void nm_menu_item_do(nm_menu_item_t *it, nm_argtransform_t argtransform, void *argtransform_data);
++#include "direct-launch.h"
+ 
+ // _nm_menu_inject handles the QMenu::aboutToShow signal and injects menu items.
+ static void _nm_menu_inject(void *nmc, QMenu *menu, nm_menu_location_t loc, int at);
+@@ -404,6 +405,9 @@ extern "C" __attribute__((visibility("default"))) void _nm_menu_hook2(MainNavVie
+             return;
+         }
+ 
++        if (nm_try_direct_launch(items, items_n))
++            return;
++
+         NickelTouchMenu *menu = reinterpret_cast<NickelTouchMenu*>(calloc(1, 512)); // about 3x larger than the largest menu I've seen in 15505 (most inherit from NickelTouchMenu) to be on the safe side
+         if (!menu) {
+             NM_LOG("failed to allocate memory for menu");

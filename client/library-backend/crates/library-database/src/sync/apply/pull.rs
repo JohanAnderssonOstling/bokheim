@@ -1,21 +1,17 @@
 //! Applying a pull page: preparation is pure; all database decisions share one transaction.
 
-use crate::query_methods::query_rows;
-use sync_common::StateKey;
-use crate::transactions::WriteOutcome::Commit;
 use super::*;
 use crate::projection::project_dirty;
-
-fn read_cursor(conn: &rusqlite::Connection) -> Result<sync_common::SyncCursor, DatabaseError> {
-    Ok(sync_common::SyncCursor { lifecycle_revision: parse_revision(read_cursor_revision(conn, PullCursorKey::Lifecycle)?)?, field_revision: parse_revision(read_cursor_revision(conn, PullCursorKey::Field)?)? })
-}
+use crate::query_methods::query_rows;
+use crate::transactions::WriteOutcome::Commit;
+use sync_common::StateKey;
 
 impl Database {
     /// Acknowledges sent mutations and applies a page atomically. Wire decoding,
     /// batch planning and input-only serialization run before reserving the writer.
     /// Returns whether the page carried remote changes, including stale changes.
     pub fn sync_commit_pull_response(&self, ids: &[ReplicaSeq], page: &PullStateResponse) -> Result<bool, DatabaseError> {
-        if page.mutations.is_empty() && ids.is_empty() && read_cursor(&self.connection)? == page.next_cursor {
+        if page.mutations.is_empty() && ids.is_empty() && read_pull_cursor(&self.connection)? == page.next_cursor {
             return Ok(false);
         }
         let mut changes = Vec::with_capacity(page.mutations.len());
@@ -35,8 +31,7 @@ impl Database {
                 // An acknowledgement confirms a publication even if its field
                 // is on a later pull page. Capture only still-matching queue
                 // generations: old acknowledgements cannot confirm new edits.
-                let cells = query_rows(|callback| tx.pull_acknowledged_addresses(&(&payload), callback), |r| Ok((r.get::<_, String>(0)?, r.get::<_, StateKey>(1)?, r.get::<_, String>(2)?)))?
-                    .collect::<Result<Vec<_>, _>>()?;
+                let cells = query_rows(|callback| tx.pull_acknowledged_addresses(&(&payload), callback), |r| Ok((r.get::<_, String>(0)?, r.get::<_, StateKey>(1)?, r.get::<_, String>(2)?)))?.collect::<Result<Vec<_>, _>>()?;
                 for cell in cells {
                     if let Some(version) = publication_version(tx, &cell.0, &cell.1, &cell.2)? {
                         acknowledged_fields.push((cell, version));
@@ -44,7 +39,7 @@ impl Database {
                 }
                 tx.outbox_delete_for_ids(&payload).map_err(DatabaseError::operation)?;
             }
-            if page.mutations.is_empty() && read_cursor(tx)? == page.next_cursor {
+            if page.mutations.is_empty() && read_pull_cursor(tx)? == page.next_cursor {
                 return Ok(Commit(false));
             }
             {
@@ -105,21 +100,19 @@ impl Database {
                         }
                         for cell in registers::book_fields(tx, &hash)? {
                             let current = publication_version(tx, &cell.kind, &cell.entity_key, &cell.entity_subkey)?;
-                            if confirmed.get(&(cell.kind.clone(), cell.entity_key.clone(), cell.entity_subkey.clone())).is_some_and(|seen| {
-                                if records::is_record(&cell.kind) { Some(seen) == current.as_ref() }
-                                else { Some(seen) >= current.as_ref() }
-                            }) {
+                            if confirmed
+                                .get(&(cell.kind.clone(), cell.entity_key.clone(), cell.entity_subkey.clone()))
+                                .is_some_and(|seen| if records::is_record(&cell.kind) { Some(seen) == current.as_ref() } else { Some(seen) >= current.as_ref() })
+                            {
                                 continue;
                             }
                             registers::recover(tx, &cell)?;
                         }
                     }
                 };
-                write_cursor_revision(tx, PullCursorKey::Lifecycle, page.next_cursor.lifecycle_revision)?;
-                write_cursor_revision(tx, PullCursorKey::Field, page.next_cursor.field_revision)?;
+                write_pull_cursor(tx, &page.next_cursor)?;
             }
             Ok(Commit(!page.mutations.is_empty()))
         })
     }
 }
-

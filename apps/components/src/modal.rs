@@ -7,8 +7,25 @@ use crate::{BrowserTheme, RADIUS_MD, SPACE_MD, SPACE_SM, SPACE_XXS, TEXT_MD, TEX
 
 /// The shared full-window layer for a centered modal. The caller supplies the
 /// scrim and surface so it can retain its own identity and dismissal behavior.
+///
+/// On its own it fills its parent, so callers pin it to the window with
+/// [`anchor_to_window`].
 pub fn modal_overlay() -> Div {
     crate::absolute_full_size().flex().items_center().justify_center().p(px(crate::SPACE_MD))
+}
+
+/// Pins a modal layer to the window's origin at the window's size, so the
+/// popup it centers is centered in the window wherever in the tree it is
+/// rendered. Left to fill its parent, a dialog opened from one pane of a split
+/// browse view, or from the sidebar, centered on that pane and dimmed only it.
+///
+/// On Kobo the layer ends above the virtual keyboard, as the application
+/// content does, so a dialog's text field is never under the keys.
+pub fn anchor_to_window(overlay: Div, window: &gpui::Window) -> gpui::Anchored {
+    let viewport = window.viewport_size();
+    #[cfg(feature = "kobo")]
+    let viewport = gpui::size(viewport.width, viewport.height - gpui_kobo::keyboard_height(window));
+    gpui::anchored().position(gpui::point(px(0.0), px(0.0))).child(overlay.w(viewport.width).h(viewport.height))
 }
 
 /// A modal's pointer-blocking backdrop.
@@ -19,6 +36,39 @@ pub fn modal_scrim(id: impl Into<ElementId>, theme: BrowserTheme) -> Stateful<Di
 /// The common elevated surface for dialogs, editors, and other modal content.
 pub fn modal_surface(theme: BrowserTheme) -> Div {
     div().relative().min_h_0().min_w_0().occlude().rounded(px(RADIUS_MD)).border_1().border_color(theme.rule).bg(theme.page_bg).shadow(crate::overlay_shadow(theme))
+}
+
+/// The widest a confirmation dialog grows.
+const CONFIRMATION_DIALOG_MAX_WIDTH: f32 = 448.0;
+
+/// A confirmation, sized the same wherever one is asked: up to
+/// [`CONFIRMATION_DIALOG_MAX_WIDTH`], and never closer to the window's edges
+/// than a modal's gutter.
+///
+/// It is gpui-component's in-window dialog rather than the platform's: that
+/// one is drawn by the system in the system's colours, while this one is
+/// dressed from the palette like every other widget, scrim included.
+pub fn confirmation_dialog(dialog: gpui_component::dialog::AlertDialog, window: &gpui::Window) -> gpui_component::dialog::AlertDialog {
+    dialog.width(px((f32::from(window.viewport_size().width) - 2.0 * SPACE_MD).clamp(1.0, CONFIRMATION_DIALOG_MAX_WIDTH)))
+}
+
+/// A confirmation that is a single line: the question, then its two answers.
+///
+/// Passed to the dialog as its footer, with nothing above it. The dialog's own
+/// minimum height and the gap it keeps between a header and a footer would
+/// otherwise leave an empty band over the row, so both are cleared.
+pub fn confirmation_dialog_row(dialog: gpui_component::dialog::AlertDialog, question: impl Into<SharedString>, cancel: gpui_component::button::Button, confirm: gpui_component::button::Button, theme: BrowserTheme) -> gpui_component::dialog::AlertDialog {
+    dialog.min_h_0().gap_0().footer(
+        div()
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(SPACE_SM))
+            .child(div().flex_1().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_size(rems(TEXT_MD)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(question.into()))
+            .child(cancel)
+            .child(confirm),
+    )
 }
 
 /// The shared full-window layer for a bottom sheet: like `modal_overlay`, but
@@ -50,6 +100,18 @@ pub fn bottom_sheet_header(title: impl Into<SharedString>, theme: BrowserTheme) 
         .border_b_1()
         .border_color(theme.rule)
         .child(div().text_size(rems(TEXT_MD)).font_weight(FontWeight::SEMIBOLD).text_color(theme.text).child(title.into()))
+}
+
+/// A bottom sheet's close button, for the end of `bottom_sheet_header`: the
+/// muted glyph, centred in a touch target on a phone.
+pub fn bottom_sheet_close_button(id: impl Into<ElementId>, theme: BrowserTheme) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .cursor_pointer()
+        .text_color(theme.text_muted)
+        .when(crate::TOUCH_UI, |button| button.size(rems(crate::TOUCH_TARGET_REM)).flex().items_center().justify_center())
+        .child(Icon::new(IconName::Close).size(px(16.0)))
 }
 
 /// A small muted heading over a group of sheet rows.

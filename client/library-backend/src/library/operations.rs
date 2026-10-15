@@ -13,19 +13,21 @@ impl LibrarySession {
     }
 
     pub(crate) async fn thumbnail(&self, content_hash: ContentHash, resolution: ThumbnailResolution) -> Result<Option<Vec<u8>>, BackendError> {
-        let bytes = match resolution {
-            ThumbnailResolution::Browse => self.assets.read_named(library_files::asset_store::thumbnail_variant_name(&content_hash, resolution.width())).await.map_err(BackendError::operation)?,
-            ThumbnailResolution::HighDensity => self.assets.read_bytes(BlobKind::Thumbnail, &content_hash).await.map_err(BackendError::operation)?,
-        };
-        if bytes.is_some() {
-            return Ok(bytes);
+        if matches!(resolution, ThumbnailResolution::Browse | ThumbnailResolution::CardHighDensity) {
+            if let Some(bytes) = self.assets.read_named(library_files::asset_store::thumbnail_variant_name(&content_hash, resolution.width())).await.map_err(BackendError::operation)? {
+                return Ok(Some(bytes));
+            }
         }
-        if self.assets.book_exists(&content_hash, &self.db.book_paths(&content_hash)?).map_err(BackendError::operation)? && self.db.thumbnail_book_format(content_hash).map_err(BackendError::operation)?.is_some() {
-            self.db.request_missing_thumbnail(&content_hash).map_err(BackendError::operation)?;
-            return Ok(None);
+        // Existing libraries may only have the hash-addressed master. Load it
+        // directly rather than hiding the cover until a card variant is rebuilt.
+        if let Some(bytes) = self.assets.read_bytes(BlobKind::Thumbnail, &content_hash).await.map_err(BackendError::operation)? {
+            return Ok(Some(bytes));
         }
-        // A book the library does not hold may be in the catalog.
-        Ok(library_catalog::cover(content_hash, matches!(resolution, ThumbnailResolution::HighDensity)).await)
+        // The origin also addresses cover images directly by hash.
+        Ok(match resolution {
+            ThumbnailResolution::HighDensity => library_catalog::cover(content_hash, true).await,
+            ThumbnailResolution::Browse | ThumbnailResolution::CardHighDensity => library_catalog::card_cover(library_model::CardKey(*content_hash.as_bytes()), resolution.width(), &*self.cpu).await,
+        })
     }
 
     /// Evicts downloaded book files without deleting the library book,

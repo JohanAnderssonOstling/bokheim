@@ -160,7 +160,7 @@ pub fn popover_with_height(panel: Entity<BrightnessControls>, document_focus: Op
         .top(gpui::px(components::reader_toolbar_size_px(window) + 4.0))
         .p_0()
         .when_some(document_focus, |popover, focus| popover.track_focus(focus))
-        .trigger(components::reader_control_button_icon("reader-brightness-button", "Brightness", IconName::Sun, theme))
+        .trigger(components::outlined_icon_button("reader-brightness-button", "Brightness", IconName::Sun, theme))
         .on_open_change(move |open, window, cx: &mut App| {
             if *open {
                 refresh.update(cx, |panel, cx| panel.refresh(window, cx));

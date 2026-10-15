@@ -28,6 +28,8 @@ actions!(dialog, [CancelDialog, ConfirmDialog]);
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("escape", CancelDialog, Some(CONTEXT)),
+        #[cfg(not(target_os = "android"))]
+        KeyBinding::new("back", CancelDialog, Some(CONTEXT)),
         KeyBinding::new("enter", ConfirmDialog, Some(CONTEXT)),
     ]);
 }
@@ -175,6 +177,7 @@ pub(crate) struct DialogProps {
     width: Pixels,
     max_width: Option<Pixels>,
     margin_top: Option<Pixels>,
+    centered: bool,
     close_button: bool,
 
     overlay: bool,
@@ -187,6 +190,7 @@ impl Default for DialogProps {
     fn default() -> Self {
         Self {
             margin_top: None,
+            centered: true,
             width: px(448.),
             max_width: None,
             overlay: true,
@@ -227,6 +231,13 @@ pub(crate) fn overlay_color(overlay: bool, cx: &App) -> Hsla {
 }
 
 impl Dialog {
+    pub(crate) fn cancel_from_back(&self, window: &mut Window, cx: &mut App) {
+        if self.props.keyboard && (self.button_props.on_cancel)(&ClickEvent::default(), window, cx) {
+            window.close_dialog(cx);
+            (self.button_props.on_close)(&ClickEvent::default(), window, cx);
+        }
+    }
+
     /// Create a new dialog.
     pub fn new(cx: &mut App) -> Self {
         Self {
@@ -334,9 +345,12 @@ impl Dialog {
         self
     }
 
-    /// Set the top offset of the dialog, defaults to None, will use the 1/10 of the viewport height.
+    /// Set the top offset of the dialog. By default the dialog is centered in
+    /// the window, vertically as well as horizontally, whatever its height;
+    /// setting an offset pins its top there instead.
     pub fn margin_top(mut self, margin_top: impl Into<Pixels>) -> Self {
         self.props.margin_top = Some(margin_top.into());
+        self.props.centered = false;
         self
     }
 
@@ -466,7 +480,10 @@ impl RenderOnce for Dialog {
             size: view_size,
         };
         let offset_top = px(layer_ix as f32 * 16.);
-        let y = self.props.margin_top.unwrap_or(view_size.height / 10.) + offset_top;
+        let centered = self.props.centered;
+        // Centered, the parent does the placing and `y` is only the offset that
+        // staggers stacked dialogs.
+        let y = if centered { offset_top } else { self.props.margin_top.unwrap_or(view_size.height / 10.) + offset_top };
         let x = bounds.center().x - self.props.width / 2.;
 
         let base_size = window.text_style().font_size;
@@ -496,8 +513,12 @@ impl RenderOnce for Dialog {
                 div()
                     .id("dialog")
                     .occlude()
+                    // Anchored is a flex container. Keep the window-sized
+                    // backdrop from shrinking to the caller's pane width.
+                    .flex_none()
                     .w(view_size.width)
                     .h(view_size.height)
+                    .when(centered, |this| this.flex().items_center().justify_center())
                     .when(self.props.overlay_visible, |this| {
                         this.bg(overlay_color(self.props.overlay, cx))
                     })
@@ -573,10 +594,10 @@ impl RenderOnce for Dialog {
                                 })
                             })
                             // There style is high priority, can't be overridden.
-                            .absolute()
                             .occlude()
-                            .relative()
-                            .left(x)
+                            .when(centered, |this| this.relative().flex_none())
+                            .when(!centered, |this| this.absolute())
+                            .left(if centered { px(0.) } else { x })
                             .top(y)
                             .w(self.props.width)
                             .when_some(self.props.max_width, |this, w| this.max_w(w))
@@ -667,7 +688,10 @@ impl RenderOnce for Dialog {
                                         inset: false,
                                     },
                                 ];
-                                this.top(y * delta).shadow(shadow)
+                                // A centered dialog settles the last few pixels
+                                // into place rather than dropping from the top.
+                                let top = if centered { y - px(16.) * (1. - delta) } else { y * delta };
+                                this.top(top).shadow(shadow)
                             })
                             .selection_scope(SelectionScope::Dialog(layer_ix)),
                     )

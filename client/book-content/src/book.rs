@@ -160,6 +160,14 @@ pub struct ReadingBook {
 }
 
 impl ReadingBook {
+    /// Language codes declared by the container; an empty list means unspecified.
+    pub fn languages(&self) -> Vec<String> {
+        match &self.source {
+            ResourceSource::Epub(epub) => epub.languages(),
+            ResourceSource::Mobi(mobi) => mobi.languages(),
+        }
+    }
+
     pub fn document_uris(&self) -> &[String] {
         self.resources.documents()
     }
@@ -179,6 +187,32 @@ impl ReadingBook {
                 }
                 Err(error) => Err(error),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod language_tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+
+    #[test]
+    fn reading_languages_come_from_epub_package_metadata() {
+        for languages in [vec![], vec!["en-GB"], vec!["sv"], vec!["fr", "en-US"]] {
+            let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            let metadata = languages.iter().map(|language| format!("<dc:language>{language}</dc:language>")).collect::<String>();
+            let package = format!("<package xmlns:dc='http://purl.org/dc/elements/1.1/'><metadata>{metadata}</metadata><manifest><item id='chapter' href='chapter.xhtml' media-type='application/xhtml+xml'/></manifest><spine><itemref idref='chapter'/></spine></package>");
+            for (name, text) in [
+                ("META-INF/container.xml", "<container><rootfiles><rootfile full-path='content.opf'/></rootfiles></container>"),
+                ("content.opf", package.as_str()),
+                ("chapter.xhtml", "<html><body><p>A chapter.</p></body></html>"),
+            ] {
+                archive.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+                archive.write_all(text.as_bytes()).unwrap();
+            }
+            let book = Book::open_reader(BookFormat::Epub, archive.finish().unwrap()).unwrap();
+            let reading = block_on(book.prepare_reading()).unwrap();
+            assert_eq!(reading.languages(), languages);
         }
     }
 }

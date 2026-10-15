@@ -55,6 +55,11 @@ impl KoboDeviceBar {
                             bar.power_menu_open = !bar.power_menu_open;
                             cx.notify();
                         }
+                        if let Some(message) = gpui_kobo::take_power_message() {
+                            bar.power_error = Some(message);
+                            bar.power_menu_open = true;
+                            cx.notify();
+                        }
                     })
                     .is_err()
                 {
@@ -130,7 +135,7 @@ impl Render for KoboDeviceBar {
                     ),
             )
             .child(gpui::div().flex_1())
-            .child(reader_ui::brightness_popover(self.brightness.clone(), None, theme).top(popup_top).trigger(device_button("kobo-brightness-button", "Brightness", gpui_component::IconName::Sun)))
+            .child(reader_ui::brightness_popover(self.brightness.clone(), None, theme, window).top(popup_top).trigger(device_button("kobo-brightness-button", "Brightness", gpui_component::IconName::Sun)))
             .child(device_button("kobo-auto-rotate-button", rotate_label, Icon::empty().path(rotate_icon)).on_click(cx.listener(move |bar, _, _, cx| {
                 bar.auto_rotate = !bar.auto_rotate;
                 rotate_services.save_kobo_auto_rotate(bar.auto_rotate, cx);
@@ -425,7 +430,8 @@ impl Render for WifiPanel {
                     .ghost()
                     .w_full()
                     .justify_start()
-                    .child(gpui::div().w_full().truncate().text_align(gpui::TextAlign::Left).when(row.connected, |label| label.font_weight(gpui::FontWeight::BOLD)).child(row.name.clone()))
+                    .when(row.connected, |button| button.icon(Icon::empty().path("icons/check.svg")))
+                    .child(gpui::div().flex_1().min_w_0().truncate().text_align(gpui::TextAlign::Left).when(row.connected, |label| label.font_weight(gpui::FontWeight::BOLD)).child(row.name.clone()))
                     .disabled(disabled)
                     .on_click(cx.listener(move |panel, _, window, cx| {
                         panel.password.update(cx, |input, cx| input.set_value("", window, cx));

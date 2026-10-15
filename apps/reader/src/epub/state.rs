@@ -18,7 +18,7 @@ use library_model::BookLocator;
 use crate::epub::toc::TocState;
 use crate::epub::{LoadState, ProgressState, ReaderView, SearchState};
 use crate::invalidation::Component;
-use crate::settings::{ReaderSettings, library_interaction_palette, library_paint_palette, library_theme_adaptation};
+use crate::settings::{ReaderSettings, library_interaction_palette, library_link_foreground, library_paint_palette, library_theme_adaptation};
 use crate::shell::marks::MarkSession;
 use crate::shell::persistence::ReadingPositionWriter;
 use crate::shell::search::SearchBarTarget;
@@ -36,7 +36,7 @@ pub(crate) fn renderer_initial_config(cx: &App) -> RendererInitialConfig {
         column_width,
         scale: preferences.scale,
         max_column_count: Some(if cfg!(any(feature = "kobo", target_os = "android")) { 1 } else { preferences.max_column_count }),
-        style_overrides: preferences.style_overrides(Some(library_theme_adaptation(cx))),
+        style_overrides: preferences.style_overrides(Some(library_theme_adaptation(cx)), library_link_foreground(cx)),
         paint_palette: library_paint_palette(cx),
         interaction_palette: library_interaction_palette(cx),
         ..Default::default()
@@ -48,7 +48,12 @@ impl ReaderView {
         locator: BookLocator, title: String, _app: app::AppClient, library: Rc<LibraryClient>, book: Arc<crate::book::NativeBook>, preparation: html_view_core::RendererPreparation, close_reader: crate::CloseReader, window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let search_input = cx.new(|cx| InputState::new(window, cx));
+        let search_input = cx.new(|cx| {
+            let input = InputState::new(window, cx);
+            #[cfg(feature = "kobo")]
+            let input = input.placeholder("Search current chapter");
+            input
+        });
         let search_subscription = cx.subscribe_in(&search_input, window, |this, input, event: &InputEvent, _window, cx| match event {
             InputEvent::Change => {
                 let query = input.read(cx).value().to_string();
@@ -66,6 +71,13 @@ impl ReaderView {
         let reading_positions = ReadingPositionWriter::new(cx, locator.content_hash(), library.clone());
         let marks = MarkSession::new(cx, library.clone());
 
+        #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+        let tts = crate::shell::tts::Narration::for_languages(&book.languages())
+            .with_title(title.clone())
+            .with_rate(ReaderSettings::preferences(cx).audiobook_speed)
+            .with_pauses(ReaderSettings::preferences(cx).narration_pauses)
+            .with_voice(ReaderSettings::preferences(cx).narration_voice);
+
         let mut reader = Self {
             #[cfg(feature = "kobo")]
             brightness: cx.new(|cx| crate::shell::brightness::BrightnessControls::new(_app.clone(), window, cx)),
@@ -75,21 +87,34 @@ impl ReaderView {
             title,
             load_state: LoadState::Loading,
             applied_palette: None,
+            last_column_viewport_plan: None,
             desired_column_count: if cfg!(feature = "kobo") { 1 } else { u8::MAX },
             toc: TocState::default(),
             toc_tree,
+            annotation_tree: Default::default(),
             sidebar: SidebarState::from_preferences(cx),
-            chrome: crate::shell::chrome::ChromeState::new(Component::ReaderShell),
+            chrome: crate::shell::chrome::ChromeState::from_preferences(Component::ReaderShell, cx),
             wheel_delta: 0.0,
             wheel_debounce: None,
-            touch_swipe_active: false,
+            touch_swipe: None,
+            swipe_preview: ui_components::SwipePreview::default(),
+            touch_swipe_from_edge: false,
             search_input,
             search: SearchState::default(),
             book,
-            current_cfi: None,
+            reading_position: None,
+            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            tts,
+            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            tts_fragments: Vec::new(),
+            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            tts_doc: 0,
+            #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
+            tts_navigation_revision: 0,
             progress: ProgressState::default(),
             marks,
             selection: None,
+            touch_selection: Default::default(),
             annotation_note_input,
             annotation_popup_anchor: None,
             footnote: None,
@@ -97,6 +122,7 @@ impl ReaderView {
             context_sheet: None,
             focus,
             sidebar_focus: cx.focus_handle().tab_index(0).tab_stop(true),
+            rail_focus: cx.focus_handle().tab_stop(true),
             settings_navigation: Default::default(),
             renderer_subscription: None,
             document_tap_subscription: None,
@@ -113,6 +139,10 @@ impl ReaderView {
             Ok(renderer) => renderer,
             Err(error) => {
                 log::error!("could not initialize EPUB renderer: {error}");
+                let failure = error.clone();
+                // The parent installs its failure subscription after this
+                // constructor returns, before deferred events are delivered.
+                cx.defer_in(window, move |_, _, cx| cx.emit(crate::BookOpenFailed(failure)));
                 self.load_state = LoadState::Error(error);
                 cx.notify();
                 return;

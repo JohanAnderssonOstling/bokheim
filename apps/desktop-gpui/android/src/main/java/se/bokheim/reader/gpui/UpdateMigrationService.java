@@ -24,7 +24,7 @@ public final class UpdateMigrationService extends Service {
     private static final int PID = IBinder.FIRST_CALL_TRANSACTION;
     private static final int PREPARE = PID + 1;
     private final AtomicBoolean started = new AtomicBoolean();
-    private static native void nativePrepare(String job);
+    private static native void nativePrepare(String job, String taxonomy);
 
     private final Binder binder = new Binder() {
         @Override protected boolean onTransact(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
@@ -39,7 +39,7 @@ public final class UpdateMigrationService extends Service {
                         throw new IllegalArgumentException("Invalid private migration job");
                     }
                     System.loadLibrary("desktop_gpui");
-                    nativePrepare(job.getPath());
+                    nativePrepare(job.getPath(), TaxonomyAssets.prepare(getApplicationContext()).getAbsolutePath());
                 } catch (Throwable error) {
                     android.util.Log.e("Bokheim", "Update migration helper failed", error);
                 } finally {

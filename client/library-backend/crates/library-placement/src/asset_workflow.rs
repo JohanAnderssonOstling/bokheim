@@ -3,17 +3,21 @@
 //! `library-files` owns concrete storage operations; this module owns the
 //! SQLite state transitions that decide which operations are required.
 use client_runtime::BackendError;
-use sync_common::ContentHash;
 use library_database::Database;
-use library_files::asset_store::{CopiedBook, ImportOptions, PublishedStagedBook, StagedBook};
 use library_files::AssetStore;
+use library_files::asset_store::{CopiedBook, ImportOptions, PublishedStagedBook, StagedBook};
 #[cfg(target_arch = "wasm32")]
 use library_model::BlobKind;
+use sync_common::ContentHash;
 use sync_common::DirId;
 
 pub fn evict_local_book(assets: &AssetStore, database: &Database, hash: &ContentHash) -> Result<(), BackendError> {
+    // Refuse eviction before touching the files that an unfinished upload needs.
+    if !database.check_local_book_eviction(hash)? {
+        return Ok(());
+    }
     #[cfg(not(target_arch = "wasm32"))]
-    if database.is_book_downloaded(hash)? {
+    {
         let paths = database.book_paths(hash)?;
         assets.evict_book_files(&paths, hash)?;
     }

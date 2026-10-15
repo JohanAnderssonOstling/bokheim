@@ -3,13 +3,16 @@
 use crate::matching::NormalizedTitle;
 use crate::{
     Classification, ClassificationEvidence, ClassificationScheme, ClassificationSource, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus,
-    matching::{author_credits, author_names_compatible, matching_author_count, title_qualifiers, title_substring_keys},
+    matching::{author_credits, author_names_compatible_with_title, matching_author_count, matching_edition_author_count, title_qualifiers, title_substring_keys},
 };
 use std::collections::BTreeSet;
 pub const METHOD: &str = "verified_matching_edition_classifications";
 
 fn title_key(title: &str) -> String {
     let mut key = NormalizedTitle::new(title).full;
+    if let Some(rest) = key.strip_prefix("the ") {
+        key = rest.to_owned();
+    }
     // This known series label is not a volume, revision, or adaptation qualifier.
     for suffix in [" very short introductions", " a very short introduction"] {
         if let Some(base) = key.strip_suffix(suffix) {
@@ -19,9 +22,10 @@ fn title_key(title: &str) -> String {
     key
 }
 
-// Lookup can find an edition by a whole-word fragment of the local title.
-// Keep qualifier evidence: a subtitle must not conceal a different volume or adaptation.
-fn titles_compatible(local: &str, remote: &str) -> bool {
+/// Existing classification title matching, shared by sibling consensus.
+/// Lookup can find an edition by a whole-word fragment of the local title.
+/// Keep qualifier evidence: a subtitle must not conceal a different volume or adaptation.
+pub fn titles_compatible(local: &str, remote: &str) -> bool {
     let local_title = NormalizedTitle::new(local);
     let remote_title = NormalizedTitle::new(remote);
     if local_title.qualifiers != remote_title.qualifiers {
@@ -39,20 +43,20 @@ fn titles_compatible(local: &str, remote: &str) -> bool {
         return false;
     }
     let edition_markers = |text: &str| text.split_whitespace().filter(|word| matches!(*word, "edition" | "ed" | "revised" | "revision" | "translation" | "translated" | "unabridged")).map(str::to_owned).collect::<BTreeSet<_>>();
-    edition_markers(&local) == edition_markers(&remote) && title_substring_keys(&local, 64).iter().any(|(key, _)| key == &remote)
+    // A long subtitle can push even the complete main title beyond the
+    // bounded fragment list. Check it explicitly, keeping the same qualifier
+    // and edition-marker guards used for other shortened titles.
+    edition_markers(&local) == edition_markers(&remote)
+        && (title_key(&local_title.main) == remote || title_substring_keys(&local, 64).iter().any(|(key, _)| key == &remote))
 }
 
 pub fn classifications(query: &EditionIdentityQuery, result: &EditionIdentityResult) -> Vec<Classification> {
     let mut ranked = result.clone();
-    let best = ranked.candidates.iter().map(|c| matching_author_count(&query.authors, &c.authors)).max().unwrap_or(0);
+    let best = ranked.candidates.iter().map(|c| matching_edition_author_count(query, c)).max().unwrap_or(0);
     if best > 0 {
-        ranked.candidates.retain(|c| matching_author_count(&query.authors, &c.authors) == best);
+        ranked.candidates.retain(|c| matching_edition_author_count(query, c) == best);
     }
     let result = &ranked;
-    let year_codes = crate::year_consensus::classifications(query, result);
-    if !year_codes.is_empty() {
-        return year_codes;
-    }
     if result.status != EditionIdentityStatus::Ambiguous || result.query_id != query.query_id || result.candidates_truncated || result.candidates.len() < 2 {
         return Vec::new();
     }
@@ -66,18 +70,22 @@ pub fn classifications(query: &EditionIdentityQuery, result: &EditionIdentityRes
         if !titles_compatible(&query.title, &candidate.full_title()) || candidate.authors.is_empty() {
             return Vec::new();
         }
-        if matching_author_count(&local_authors, &candidate.authors) == 0 {
+        if matching_edition_author_count(query, candidate) == 0 {
             return Vec::new();
         }
         // An initial must not merge explicitly different full names across editions.
         for (i, local) in local_authors.iter().enumerate() {
-            for remote in author_credits(&candidate.authors).into_iter().filter(|remote| author_names_compatible(local, remote)) {
-                if credited_names[i].iter().any(|previous| !author_names_compatible(previous, &remote)) {
+            for remote in author_credits(&candidate.authors).into_iter().filter(|remote| author_names_compatible_with_title(local, remote, &query.title, &candidate.full_title())) {
+                if credited_names[i].iter().any(|previous| !author_names_compatible_with_title(previous, &remote, &query.title, &candidate.full_title())) {
                     return Vec::new();
                 }
                 credited_names[i].push(remote);
             }
         }
+    }
+    let year_codes = crate::year_consensus::classifications(query, result);
+    if !year_codes.is_empty() {
+        return year_codes;
     }
     candidate_classifications(result.candidates.iter(), METHOD)
 }
@@ -135,24 +143,31 @@ pub fn resolved_classifications(query: &EditionIdentityQuery, result: &EditionId
         exact.retain(|candidate| surname_matches(surname, &candidate.authors));
     }
     let unique_title = exact.len() == 1;
-    let best = exact.iter().map(|candidate| matching_author_count(&local, &candidate.authors)).max().unwrap_or(0);
+    let best = exact.iter().map(|candidate| matching_edition_author_count(query, candidate)).max().unwrap_or(0);
     let matches = exact
         .into_iter()
         .filter(|candidate| {
             if local.is_empty() {
                 return unique_title;
             }
-            best > 0 && matching_author_count(&local, &candidate.authors) == best
+            best > 0 && matching_edition_author_count(query, candidate) == best
         })
         .collect::<Vec<_>>();
     if matches.is_empty() || (local.is_empty() && matches.len() != 1) {
         return vec![];
     }
     for author in &local {
-        let names = matches.iter().flat_map(|candidate| author_credits(&candidate.authors)).filter(|remote| author_names_compatible(author, remote)).collect::<Vec<_>>();
-        if names.iter().enumerate().any(|(i, name)| names[..i].iter().any(|other| !author_names_compatible(name, other))) {
+        let names = matches.iter().flat_map(|candidate| author_credits(&candidate.authors)).filter(|remote| author_names_compatible_with_title(author, remote, &query.title, &query.title)).collect::<Vec<_>>();
+        if names.iter().enumerate().any(|(i, name)| names[..i].iter().any(|other| !author_names_compatible_with_title(name, other, &query.title, &query.title))) {
             return vec![];
         }
+    }
+    if matches.len() == 1 && matching_author_count(&query.authors, &matches[0].authors) == 0 {
+        // A single shortened-name donor needs its own classification. A
+        // work-only inherited code may belong to an adaptation of that work.
+        let mut direct = (*matches[0]).clone();
+        direct.classifications.retain(|code| code.source == ClassificationSource::ExactEdition);
+        return candidate_classifications(std::iter::once(&direct), "verified_short_credit_edition_classification");
     }
     candidate_classifications(
         matches,
@@ -214,7 +229,7 @@ mod tests {
                 ],
             })
             .collect();
-        (query, EditionIdentityResult { authority_subjects: None, query_id: "art".into(), status: EditionIdentityStatus::Ambiguous, matched: None, candidates, candidates_truncated: false })
+        (query, EditionIdentityResult { authority_subjects: None, sibling_subjects: None, query_id: "art".into(), status: EditionIdentityStatus::Ambiguous, matched: None, candidates, candidates_truncated: false })
     }
     #[test]
     fn duplicate_exact_titles_with_different_subjects_still_need_evidence() {

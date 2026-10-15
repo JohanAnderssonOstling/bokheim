@@ -1,12 +1,15 @@
 //! Folder browsing: hierarchy, contents, facets, paths.
 
-use crate::browse::{invalid_integer_column, parse_uuid_column, BrowseRow, FoldersSql};
+use crate::browse::{BrowseRow, FoldersSql, invalid_integer_column, parse_uuid_column};
 use crate::{Database, DatabaseError};
-use library_model::BrowseLocation;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use library_model::{BrowseChipSort, BrowseLocation};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use sync_common::{DirId, ROOT_DIR_ID};
 
 impl Database {
+    #[cfg(test)]
     pub(super) fn browse_folder(&self, directory_id: DirId, query: &library_model::LibraryBrowseQuery, downloaded_only: bool) -> Result<super::LibraryBrowseData, DatabaseError> {
         let options = super::BrowseOptions::from_query(query, downloaded_only);
         self.with_browse_snapshot(|| {
@@ -29,7 +32,7 @@ impl Database {
                         let key = id.to_string();
                         let contents = self.folder_contents(std::slice::from_ref(&key), counts, options)?;
                         let wrapper = !with_books.contains(&key) && !contents.children.is_empty();
-                        let section = library_model::BrowseSection { parent: parent.clone(), children: contents.children, books: contents.books };
+                        let section = library_model::BrowseSection { parent: parent.clone(), children: contents.children, books: contents.books, book_count: None };
                         if wrapper {
                             wrappers.push(section);
                         } else {
@@ -37,6 +40,10 @@ impl Database {
                         }
                     }
                     plain.extend(wrappers);
+                    if options.chip_sort == BrowseChipSort::Popularity {
+                        let positions: HashMap<_, _> = parents.iter().enumerate().map(|(index, row)| (row.id, index)).collect();
+                        plain.sort_by_key(|section| positions[&section.parent.id]);
+                    }
                     plain
                 }
             } else {
@@ -45,10 +52,11 @@ impl Database {
             let (language_counts, format_counts) = self.library_facets(&options)?;
             let path = self.browse_directory_path(&directory_id)?;
             let ancestors = self.folder_ancestors(&path, &options)?;
-            Ok(super::LibraryBrowseData { contents, sections, path, ancestors, language_counts, format_counts, feed: None })
+            Ok(super::LibraryBrowseData { contents, sections, path, ancestors, language_counts, format_counts, feed: None, page: None })
         })
     }
 
+    #[cfg(test)]
     fn folder_contents(&self, scope: &[String], counts: &FolderCounts, options: &super::BrowseOptions) -> Result<library_model::BrowseContents, DatabaseError> {
         let children = self.folder_children(scope, counts, options)?;
         let books = {
@@ -58,9 +66,9 @@ impl Database {
                 Ok(())
             })?;
             let matching = self.matching_books(&placements.keys().copied().collect(), options)?;
-            let selected = if options.search.is_empty() { matching.books } else { matching.text_matches };
+            let selected = if options.search.is_empty() { &matching.books } else { &matching.text_matches };
             let (mut ids, mut sources) = (Vec::new(), Vec::new());
-            for book in self.ordered_books(&selected, options)? {
+            for book in self.ordered_books(selected, options)? {
                 let mut directories = placements.remove(&book).unwrap_or_default();
                 directories.sort();
                 for directory in directories {
@@ -77,6 +85,7 @@ impl Database {
         Ok(library_model::BrowseContents { children, books })
     }
 
+    #[cfg(test)]
     pub(super) fn browse_folder_contents(&self, folder_id: DirId, query: &library_model::LibraryBrowseQuery, downloaded_only: bool) -> Result<library_model::BrowseContents, DatabaseError> {
         let options = super::BrowseOptions::from_query(query, downloaded_only);
         self.with_browse_snapshot(|| {
@@ -88,7 +97,7 @@ impl Database {
     /// The children of the root and of each folder on `path` above the last.
     /// Their counts need the whole library's tree, not only the subtree below
     /// the page's folder, so it is counted once from the root.
-    fn folder_ancestors(&self, path: &[library_model::BrowsePathSegment], options: &super::BrowseOptions) -> Result<Vec<(BrowseLocation, Vec<BrowseRow>)>, DatabaseError> {
+    pub(super) fn folder_ancestors(&self, path: &[library_model::BrowsePathSegment], options: &super::BrowseOptions) -> Result<Vec<(BrowseLocation, Vec<BrowseRow>)>, DatabaseError> {
         let Some((_, above)) = path.split_last() else { return Ok(Vec::new()) };
         let options = super::BrowseOptions { search: String::new(), ..options.clone() };
         let tree = self.folder_tree(&ROOT_DIR_ID.to_string(), &options)?;
@@ -106,7 +115,7 @@ impl Database {
 
     /// Children of every folder in `scope`: the direct children normally, and
     /// every folder below when a search widened the scope to the subtree.
-    fn folder_children(&self, scope: &[String], counts: &FolderCounts, options: &super::BrowseOptions) -> Result<Vec<BrowseRow>, DatabaseError> {
+    pub(super) fn folder_children(&self, scope: &[String], counts: &FolderCounts, options: &super::BrowseOptions) -> Result<Vec<BrowseRow>, DatabaseError> {
         let mut folders = Vec::new();
         let mut parents = Vec::new();
         self.connection.folder_children(&json(scope)?, |row| {
@@ -130,27 +139,23 @@ impl Database {
         {
             let folders: &mut Vec<BrowseRow> = &mut folders;
             for folder in folders.iter_mut() {
-                let (total, downloaded) = match folder.id {
+                let count = match folder.id {
                     BrowseLocation::Folder(id) => counts.get(&id.to_string()).copied().unwrap_or_default(),
-                    BrowseLocation::Subject(_) | BrowseLocation::Author(_) | BrowseLocation::Home(_) | BrowseLocation::Books | BrowseLocation::Catalog(_) | BrowseLocation::Opds { .. } => (0, 0),
+                    _ => FolderCount::default(),
                 };
-                folder.book_count = if options.downloaded_only { downloaded } else { total };
-                folder.downloaded_book_count = downloaded;
+                folder.book_count = if options.downloaded_only { count.downloaded } else { count.total };
+                folder.downloaded_book_count = count.downloaded;
             }
-            let unfiltered = options.search.is_empty() && options.file_types == 0 && options.languages.is_empty() && !options.downloaded_only;
+            let unfiltered = options.search.is_empty() && options.file_types == 0 && options.languages.is_empty() && !options.downloaded_only && !options.hide_finished;
             folders.retain(|folder| unfiltered || folder.book_count > 0);
-            // Use the same normalized alphabetical tie-breaker as other browse pages.
-            folders.sort_by_cached_key(|folder| (book_model::normalize_search_text(&folder.name), folder.name.clone(), folder.id));
-            if options.chip_sort == library_model::BrowseChipSort::BookCount {
-                folders.sort_by_key(|folder| std::cmp::Reverse(folder.book_count));
-            }
+            super::popularity::sort_rows(folders, options.chip_sort, |row| row.id.folder().and_then(|id| counts.get(&id.to_string()).and_then(|count| count.popularity)));
         };
         Ok(folders)
     }
 
     /// Walk the live folders below `root` one level per query, then count
     /// them all in one query and add each folder's subtree up from the leaves.
-    fn folder_tree(&self, root: &str, options: &super::BrowseOptions) -> Result<FolderTree, DatabaseError> {
+    pub(super) fn folder_tree(&self, root: &str, options: &super::BrowseOptions) -> Result<FolderTree, DatabaseError> {
         let mut folders = vec![root.to_owned()];
         let mut seen = HashSet::from([root.to_owned()]);
         let mut children = HashMap::<String, Vec<String>>::new();
@@ -170,41 +175,65 @@ impl Database {
             level.end = folders.len();
         }
         let mut counts = FolderCounts::new();
-        self.connection.folder_direct_counts(&json(&folders)?, options.file_types, &options.languages, |row| {
-            counts.insert(row.get(0)?, (count_column(row, 1)?, count_column(row, 2)?));
+        self.connection.folder_direct_counts(&json(&folders)?, options.file_types, &options.languages, i32::from(options.hide_finished), f64::from(library_model::FINISHED_PROGRESS_THRESHOLD), |row| {
+            counts.insert(row.get(0)?, FolderCount { total: count_column(row, 1)?, downloaded: count_column(row, 2)?, popularity: None });
             Ok(())
         })?;
         // Children follow their parents in `folders`, so going in reverse
         // completes every subtree before its parent adds it.
         for folder in folders.iter().rev() {
             let below = children.get(folder).into_iter().flatten().map(|child| counts.get(child).copied().unwrap_or_default());
-            let (total, downloaded) = below.fold((0, 0), |(total, downloaded), (child_total, child_downloaded)| (total + child_total, downloaded + child_downloaded));
+            let (total, downloaded) = below.fold((0, 0), |(total, downloaded), child| (total + child.total, downloaded + child.downloaded));
             let entry = counts.entry(folder.clone()).or_default();
-            (entry.0, entry.1) = (entry.0 + total, entry.1 + downloaded);
+            (entry.total, entry.downloaded) = (entry.total + total, entry.downloaded + downloaded);
+        }
+        if options.chip_sort == BrowseChipSort::Popularity {
+            let mut members = HashMap::<String, BTreeSet<i64>>::new();
+            self.connection.folder_placements(&json(&folders)?, |row| {
+                if options.downloaded_only && !row.get::<_, bool>(2)? {
+                    return Ok(());
+                }
+                members.entry(row.get(1)?).or_default().insert(row.get(0)?);
+                Ok(())
+            })?;
+            let candidates = members.values().flat_map(|ids| ids.iter().copied()).collect();
+            let matching = self.matching_books(&candidates, options)?;
+            for folder in folders.iter().rev() {
+                let mut ids = members.remove(folder).unwrap_or_default();
+                for child in children.get(folder).into_iter().flatten() {
+                    if let Some(below) = members.get(child) {
+                        ids.extend(below);
+                    }
+                }
+                counts.entry(folder.clone()).or_default().popularity = super::popularity::sum(&ids, &matching);
+                members.insert(folder.clone(), ids);
+            }
         }
         Ok(FolderTree { folders, counts })
     }
 }
 
 /// Books in each folder and everything below it: (all, downloaded).
-type FolderCounts = HashMap<String, (usize, usize)>;
+#[derive(Clone, Copy, Default)]
+pub(super) struct FolderCount {
+    total: usize,
+    downloaded: usize,
+    popularity: Option<f64>,
+}
+pub(super) type FolderCounts = HashMap<String, FolderCount>;
 
 /// Every live folder from a page's folder down, and their book counts.
-struct FolderTree {
+pub(super) struct FolderTree {
     /// The page's folder first, every folder before its children.
-    folders: Vec<String>,
-    counts: FolderCounts,
+    pub(super) folders: Vec<String>,
+    pub(super) counts: FolderCounts,
 }
 
 impl FolderTree {
     /// Where the page looks for chips and books: its own folder, or every
     /// folder below it when searching.
-    fn scope(&self, options: &super::BrowseOptions) -> &[String] {
-        if options.search.is_empty() {
-            &self.folders[..1]
-        } else {
-            &self.folders
-        }
+    pub(super) fn scope(&self, options: &super::BrowseOptions) -> &[String] {
+        if options.search.is_empty() { &self.folders[..1] } else { &self.folders }
     }
 }
 

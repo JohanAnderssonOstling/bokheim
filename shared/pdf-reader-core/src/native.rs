@@ -175,6 +175,11 @@ impl PdfDocumentSession {
         .await
     }
 
+    /// Extracts text on the owning PDFium worker without rasterizing the page.
+    pub async fn reading_fragments(&self, page_index: usize) -> PdfResult<Vec<PdfReadingFragment>> {
+        request(self.work(move |document| document.extract_reading_fragments(page_index))).await
+    }
+
     pub fn character_index_near_point(&self, page_index: usize, point: (f32, f32), tolerance: (f32, f32)) -> PdfResult<Option<usize>> {
         run(self.work(move |document| document.character_index_near_point(page_index, point, tolerance)))
     }

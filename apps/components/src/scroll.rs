@@ -22,7 +22,7 @@ struct PageScrollRegistry {
 
 impl Global for PageScrollRegistry {}
 
-/// Installs the fallback that routes unhandled left/right keys to the most
+/// Installs the fallback that routes unhandled paging keys to the most
 /// recently rendered vertical scroll surface. Reader key bindings run first,
 /// so their page-turn semantics remain authoritative.
 pub fn init_page_scrolling(cx: &mut App) {
@@ -49,7 +49,7 @@ pub fn init_page_scrolling(cx: &mut App) {
 }
 
 /// Registers an externally managed vertical scroll handle for application-wide
-/// left/right paging.
+/// viewport paging.
 pub fn register_page_scroll_handle(id: impl Into<ElementId>, handle: ScrollHandle, cx: &mut App) {
     if !cx.has_global::<PageScrollRegistry>() {
         return;
@@ -248,8 +248,8 @@ fn page_with_arrow_keys(scroll_handle: ScrollHandle) -> impl Fn(&gpui::KeyDownEv
 
 fn page_direction(key: &str) -> Option<f32> {
     match key {
-        "left" => Some(1.0),
-        "right" => Some(-1.0),
+        "left" | "pageup" => Some(1.0),
+        "right" | "pagedown" => Some(-1.0),
         _ => None,
     }
 }
@@ -260,10 +260,7 @@ fn page_scroll(scroll_handle: &ScrollHandle, direction: f32, window: &mut Window
         return;
     }
 
-    let old_offset = scroll_handle.offset();
-    scroll_handle.set_offset(gpui::point(old_offset.x, old_offset.y + bounds.size.height * direction));
-    if scroll_handle.offset() != old_offset {
-        window.refresh();
+    if scroll_handle.scroll_by_page(point(0.0, direction), window, cx) {
         cx.stop_propagation();
     }
 }
@@ -287,5 +284,246 @@ fn outer_layout_style<E: Styled>(element: &mut E) -> StyleRefinement {
         flex_basis: style.flex_basis,
         align_self: style.align_self,
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Context, Render, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, px};
+
+    struct PagingSurface {
+        height: Pixels,
+        handle: ScrollHandle,
+        wrapped: bool,
+        mobile_paging: bool,
+    }
+
+    impl Render for PagingSurface {
+        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            window.set_page_scroll_on_swipe(self.mobile_paging);
+            let content = div().w_full().h(px(2400.0)).flex_none();
+            let surface = if self.wrapped {
+                div().child(content).overflow_y_scrollbar_with_handle(&self.handle).into_any_element()
+            } else {
+                div().id("native-scroll").size_full().track_scroll(&self.handle).overflow_y_scroll().child(content).into_any_element()
+            };
+            div().w(px(280.0)).h(self.height).child(surface)
+        }
+    }
+
+    #[gpui::test]
+    fn page_requests_use_each_surfaces_viewport_and_preserve_pixel_scrolling(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        cx.update(gpui_component::init);
+        for wrapped in [false, true] {
+            for height in [160.0, 480.0] {
+                let handle = ScrollHandle::default();
+                let (_, visual) = cx.add_window_view(|_, _| PagingSurface { height: px(height), handle: handle.clone(), wrapped, mobile_paging: false });
+                visual.run_until_parked();
+                let bounds = handle.bounds();
+                assert_eq!(bounds.size.height, px(height));
+                let scroll = |delta| ScrollWheelEvent { position: bounds.center(), delta, touch_phase: TouchPhase::Ended, ..Default::default() };
+                visual.simulate_event(scroll(ScrollDelta::Pages(point(0.0, -1.0))));
+                visual.run_until_parked();
+                assert_eq!(handle.offset().y, px(-height));
+                assert_eq!(bounds.top() - handle.offset().y, bounds.bottom());
+                visual.simulate_event(scroll(ScrollDelta::Pixels(point(px(0.0), px(-37.0)))));
+                visual.run_until_parked();
+                assert_eq!(handle.offset().y, px(-height - 37.0));
+                visual.simulate_event(scroll(ScrollDelta::Pages(point(0.0, 1.0))));
+                visual.run_until_parked();
+                assert!((f32::from(handle.offset().y) + 37.0).abs() < 0.01);
+                visual.simulate_event(scroll(ScrollDelta::Pages(point(0.0, -100.0))));
+                visual.run_until_parked();
+                assert_eq!(handle.offset().y, -handle.max_offset().y);
+                visual.simulate_event(scroll(ScrollDelta::Pages(point(0.0, 100.0))));
+                visual.run_until_parked();
+                assert_eq!(handle.offset().y, Pixels::ZERO);
+            }
+        }
+    }
+    #[gpui::test]
+    fn mobile_swipes_track_the_finger_then_settle_once_and_cancel_cleanly(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        cx.update(gpui_component::init);
+        for wrapped in [false, true] {
+            let handle = ScrollHandle::default();
+            let (_, visual) = cx.add_window_view(|_, _| PagingSurface { height: px(240.0), handle: handle.clone(), wrapped, mobile_paging: true });
+            visual.run_until_parked();
+            let bounds = handle.bounds();
+            let scroll = |dy, phase| ScrollWheelEvent { position: bounds.center(), delta: ScrollDelta::Pixels(point(px(0.0), px(dy))), touch_phase: phase, ..Default::default() };
+            visual.simulate_event(scroll(-20.0, TouchPhase::Started));
+            visual.simulate_event(scroll(-140.0, TouchPhase::Moved));
+            visual.run_until_parked();
+            assert_eq!(handle.offset().y, px(-160.0), "movement must be visible before release");
+            visual.simulate_event(ScrollWheelEvent { position: point(px(400.0), px(500.0)), ..scroll(0.0, TouchPhase::Ended) });
+            visual.run_until_parked();
+            assert_eq!(handle.offset().y, -bounds.size.height);
+            assert_eq!(bounds.top() - handle.offset().y, bounds.bottom());
+            visual.simulate_event(scroll(20.0, TouchPhase::Started));
+            visual.simulate_event(scroll(140.0, TouchPhase::Moved));
+            visual.simulate_event(scroll(0.0, TouchPhase::Ended));
+            visual.run_until_parked();
+            assert_eq!(handle.offset().y, Pixels::ZERO);
+            visual.simulate_event(scroll(-160.0, TouchPhase::Started));
+            visual.simulate_event(scroll(0.0, TouchPhase::Cancelled));
+            visual.simulate_event(scroll(0.0, TouchPhase::Ended));
+            visual.run_until_parked();
+            assert_eq!(handle.offset().y, Pixels::ZERO);
+            visual.simulate_event(scroll(-10.0, TouchPhase::Started));
+            visual.simulate_event(scroll(0.0, TouchPhase::Ended));
+            visual.run_until_parked();
+            assert_eq!(handle.offset().y, Pixels::ZERO);
+            visual.simulate_event(scroll(-37.0, TouchPhase::Moved));
+            visual.run_until_parked();
+            assert_eq!(handle.offset().y, px(-37.0));
+        }
+    }
+
+    #[gpui::test]
+    fn mobile_system_edge_swipes_do_not_scroll_content(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        cx.update(gpui_component::init);
+        let handle = ScrollHandle::default();
+        let (_, visual) = cx.add_window_view(|window, _| PagingSurface { height: window.viewport_size().height, handle: handle.clone(), wrapped: false, mobile_paging: true });
+        visual.run_until_parked();
+        let bounds = handle.bounds();
+        let scroll = |phase| ScrollWheelEvent { position: point(bounds.center().x, bounds.bottom() - px(1.0)), delta: ScrollDelta::Pixels(point(px(0.0), px(-160.0))), touch_phase: phase, ..Default::default() };
+        visual.simulate_event(scroll(TouchPhase::Started));
+        visual.simulate_event(scroll(TouchPhase::Ended));
+        visual.run_until_parked();
+        assert_eq!(handle.offset().y, Pixels::ZERO);
+    }
+
+    #[gpui::test]
+    fn page_keys_move_the_shared_scroll_surface_without_focus(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        cx.update(gpui_component::init);
+        cx.update(init_page_scrolling);
+        let handle = ScrollHandle::default();
+        let (_, visual) = cx.add_window_view(|_, _| PagingSurface { height: px(240.0), handle: handle.clone(), wrapped: true, mobile_paging: true });
+        visual.run_until_parked();
+        visual.simulate_keystrokes("pagedown");
+        visual.run_until_parked();
+        assert_eq!(handle.offset().y, -handle.bounds().size.height);
+        visual.simulate_keystrokes("pageup");
+        visual.run_until_parked();
+        assert_eq!(handle.offset().y, Pixels::ZERO);
+    }
+
+    struct InputPagingSurface {
+        input: gpui::Entity<gpui_component::input::InputState>,
+    }
+
+    impl Render for InputPagingSurface {
+        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            window.set_page_scroll_on_swipe(true);
+            div().w(px(280.0)).h(px(160.0)).child(gpui_component::input::Input::new(&self.input).size_full())
+        }
+    }
+
+    #[gpui::test]
+    fn input_swipes_preview_without_adding_drag_distance_to_the_release(cx: &mut TestAppContext) {
+        use gpui::AppContext;
+        use gpui_component::input::InputState;
+
+        cx.update(gpui_component::init);
+        let (surface, visual) = cx.add_window_view(|window, cx| InputPagingSurface { input: cx.new(|cx| InputState::new(window, cx).multi_line(true).default_value("line\n".repeat(100))) });
+        visual.run_until_parked();
+        let input = visual.update(|_, cx| surface.read(cx).input.clone());
+        let position = point(px(30.0), px(30.0));
+        visual.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pages(point(0.0, -1.0)), touch_phase: TouchPhase::Ended, ..Default::default() });
+        visual.run_until_parked();
+        let one_page = visual.update(|_, cx| input.read(cx).scroll_offset());
+        assert!(one_page.y < px(-120.0), "the input must have a scrollable viewport");
+        visual.update(|_, cx| input.update(cx, |input, cx| input.set_scroll_offset(gpui::Point::default(), cx)));
+        visual.run_until_parked();
+        let scroll = |dy, touch_phase| ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(dy))), touch_phase, ..Default::default() };
+        visual.simulate_event(scroll(-20.0, TouchPhase::Started));
+        visual.simulate_event(scroll(-100.0, TouchPhase::Moved));
+        visual.run_until_parked();
+        assert_eq!(visual.update(|_, cx| input.read(cx).scroll_offset().y), px(-120.0));
+        visual.simulate_event(scroll(0.0, TouchPhase::Ended));
+        visual.run_until_parked();
+        assert_eq!(visual.update(|_, cx| input.read(cx).scroll_offset()), one_page);
+        visual.simulate_event(scroll(40.0, TouchPhase::Started));
+        visual.simulate_event(scroll(0.0, TouchPhase::Cancelled));
+        visual.run_until_parked();
+        assert_eq!(visual.update(|_, cx| input.read(cx).scroll_offset()), one_page);
+    }
+
+    struct NestedPagingSurface {
+        outer: ScrollHandle,
+        inner: ScrollHandle,
+    }
+
+    impl Render for NestedPagingSurface {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("outer-page-scroll")
+                .w(px(280.0))
+                .h(px(480.0))
+                .flex()
+                .flex_col()
+                .track_scroll(&self.outer)
+                .overflow_y_scroll()
+                .child(div().id("inner-page-scroll").w_full().h(px(160.0)).flex_none().track_scroll(&self.inner).overflow_y_scroll().child(div().h(px(2400.0)).flex_none()))
+                .child(div().h(px(1200.0)).flex_none())
+        }
+    }
+
+    #[gpui::test]
+    fn nested_touch_preview_stays_on_its_surface_and_settles_from_the_original_offset(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let outer = ScrollHandle::default();
+        let inner = ScrollHandle::default();
+        let (_, visual) = cx.add_window_view(|window, _| {
+            window.set_page_scroll_on_swipe(true);
+            NestedPagingSurface { outer: outer.clone(), inner: inner.clone() }
+        });
+        visual.run_until_parked();
+        let position = inner.bounds().center();
+        let scroll = |dy, touch_phase| ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(dy))), touch_phase, ..Default::default() };
+        visual.simulate_event(scroll(-20.0, TouchPhase::Started));
+        visual.simulate_event(scroll(-140.0, TouchPhase::Moved));
+        visual.run_until_parked();
+        assert_eq!(inner.offset().y, px(-160.0));
+        assert_eq!(outer.offset().y, Pixels::ZERO);
+        visual.simulate_event(scroll(0.0, TouchPhase::Ended));
+        visual.run_until_parked();
+        assert_eq!(inner.offset().y, px(-160.0), "the preview must not be added to the page target");
+        assert_eq!(outer.offset().y, Pixels::ZERO);
+        visual.simulate_event(scroll(-80.0, TouchPhase::Started));
+        visual.simulate_event(scroll(0.0, TouchPhase::Cancelled));
+        visual.run_until_parked();
+        assert_eq!(inner.offset().y, px(-160.0));
+        assert_eq!(outer.offset().y, Pixels::ZERO);
+    }
+
+    #[gpui::test]
+    fn nested_scroll_surfaces_page_once_and_bubble_only_at_the_boundary(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let outer = ScrollHandle::default();
+        let inner = ScrollHandle::default();
+        let (_, visual) = cx.add_window_view(|_, _| NestedPagingSurface { outer: outer.clone(), inner: inner.clone() });
+        visual.run_until_parked();
+        let position = inner.bounds().center();
+        let scroll = || ScrollWheelEvent { position, delta: ScrollDelta::Pages(point(0.0, -1.0)), touch_phase: TouchPhase::Ended, ..Default::default() };
+        visual.simulate_event(scroll());
+        visual.run_until_parked();
+        assert_eq!(inner.offset().y, -inner.bounds().size.height);
+        assert_eq!(outer.offset().y, Pixels::ZERO);
+        visual.simulate_event(scroll());
+        visual.run_until_parked();
+        assert_eq!(inner.offset().y, -inner.bounds().size.height * 2.0);
+        assert_eq!(outer.offset().y, Pixels::ZERO);
+        inner.set_offset(point(Pixels::ZERO, -inner.max_offset().y));
+        visual.update(|window, _| window.refresh());
+        visual.run_until_parked();
+        visual.simulate_event(scroll());
+        visual.run_until_parked();
+        assert_eq!(inner.offset().y, -inner.max_offset().y);
+        assert_eq!(outer.offset().y, -outer.bounds().size.height);
     }
 }

@@ -7,8 +7,7 @@ use axum::Router;
 use flate2::read::MultiGzDecoder;
 use metadata_contract::{
     AuthorIdentifier, AuthorMetadata, AuthorSource, Classification, ClassificationScheme, ClassificationSource, EditionIdentityMatch, EditionIdentityQuery, EditionIdentityResult, EditionIdentityStatus, EditionTitleMatch,
-    IsbnClassificationResult, LookupStatus, RichIsbnMetadataResult, RichWorkMetadataMatch, SnapshotDescription, SubjectHeading, WorkClassificationMatch, MAX_EDITION_QUERIES_PER_REQUEST,
-    MAX_ISBNS_PER_REQUEST, MAX_REQUEST_BYTES,
+    IsbnClassificationResult, LookupStatus, RichIsbnMetadataResult, RichWorkMetadataMatch, SnapshotDescription, SubjectHeading, WorkClassificationMatch, MAX_EDITION_QUERIES_PER_REQUEST, MAX_ISBNS_PER_REQUEST, MAX_REQUEST_BYTES,
 };
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
@@ -27,7 +26,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SCHEMA_VERSION: i64 = 1;
-const BUILDER_SCHEMA_VERSION: i64 = 1;
+const BUILDER_SCHEMA_VERSION: i64 = 10;
 const DESCRIPTION_SCHEMA_VERSION: i64 = 1;
 const DESCRIPTION_BUILDER_VERSION: i64 = 3;
 const MAX_REVERSE_TITLE_CANDIDATES: usize = 4_096;
@@ -159,24 +158,24 @@ struct KeyReference {
 mod query;
 
 pub(crate) use build::enrichment::{attach_authors, attach_rich_fields, classification_similarity_keys, load_embedded_work_descriptions, load_work_bisac_classifications, load_work_descriptions_from_table, lookup_one, sql_placeholders};
-pub use serve::http::app;
-pub use build::import::{import_description_snapshot, import_snapshot};
+pub use build::import::{import_description_snapshot, import_snapshot, import_subject_editions};
 pub(crate) use build::openlibrary::{
-    building_path, deserialize_key_references, deserialize_optional_description, deserialize_optional_string, deserialize_string_array, deserialize_work_author_references, dump_date, error, open_description_pool,
-    open_library_id, open_read_pool, valid_dump_date, valid_open_library_description,
+    building_path, deserialize_key_references, deserialize_optional_description, deserialize_optional_string, deserialize_string_array, deserialize_work_author_references, dump_date, error, open_description_pool, open_library_id,
+    valid_dump_date, valid_open_library_description,
 };
 pub(crate) use query::query_connection;
+pub use serve::http::app;
 mod isbn;
 pub(crate) use isbn::Isbn13;
 
 #[cfg(test)]
 pub(crate) use build::authority_ingestion::ingest_wikidata_authorities;
 
-mod schema;
 mod build;
-pub use build::{build_answers, build_answers_with_ratings, import_authorities, BuildReport};
+mod schema;
+mod snapshot;
+pub use build::{build_answers, build_answers_incremental, build_answers_with_ratings, extend_edition_index, import_authorities, index_work_classifications, reclassify_answers, BuildReport, EditionIndexReport};
 mod serve;
 pub use serve::MetadataService;
 mod crawl;
 pub use crawl::crawl;
-

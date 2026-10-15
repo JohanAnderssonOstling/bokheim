@@ -46,14 +46,11 @@ struct Prepared {
 }
 
 pub fn device(version: &str, taxonomy: Option<&ActiveTaxonomy>) -> Result<DeviceVersion, String> {
-    let mut db = rusqlite::Connection::open_in_memory().map_err(|e| e.to_string())?;
-    db.deserialize_bytes("main", subject_projection::DEFAULT_UNIFIED_TAXONOMY_SQLITE).map_err(|e| e.to_string())?;
-    let release: String = db.query_row("SELECT value FROM taxonomy_meta WHERE key='release_id'", [], |r| r.get(0)).map_err(|e| e.to_string())?;
     Ok(DeviceVersion {
         application: version.parse().map_err(|e| format!("{e}"))?,
         schema: library_database::LIBRARY_SCHEMA_VERSION as u32,
         taxonomy_formats: vec![1],
-        taxonomy_release: taxonomy.map(|t| t.release).unwrap_or(release.parse().map_err(|e| format!("{e}"))?),
+        taxonomy_release: taxonomy.map(|t| t.release).unwrap_or(subject_projection::bundled::RELEASE_ID),
         target: if cfg!(target_os = "android") {
             format!("android-{}-apk", ARCH)
         } else if cfg!(target_os = "windows") {
@@ -109,12 +106,16 @@ pub struct Host {
 impl Host {
     pub fn open(data: &Path, version: &str, config: DiscoveryConfig, appimage: Option<PathBuf>, executable: PathBuf) -> Result<Self, String> {
         let root = data.join("updates");
-        let _lock = UpdateLock::acquire(&root)?;
+        let lock = UpdateLock::acquire(&root)?;
         let taxonomy = active(&root)?;
         let mut installed = device(version, taxonomy.as_ref())?;
         if appimage.is_none() {
             installed.target = "linux-taxonomy-only".into();
         }
+        Self::open_locked(data, version, config, appimage, executable, installed, &lock)
+    }
+    fn open_locked(data: &Path, version: &str, config: DiscoveryConfig, appimage: Option<PathBuf>, executable: PathBuf, installed: DeviceVersion, _lock: &UpdateLock) -> Result<Self, String> {
+        let root = data.join("updates");
         let session = format!("{}-{}", std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos());
         let coordinator = Coordinator::open(SqliteStore::open(&root)?, config, installed, session)?;
         Ok(Self { root, data: data.into(), version: version.into(), executable, appimage, coordinator, trial: false })

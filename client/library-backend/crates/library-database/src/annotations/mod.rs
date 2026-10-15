@@ -63,4 +63,3 @@ fn read_annotation(row: &Row<'_>) -> rusqlite::Result<Annotation> {
 include_sql!("src/annotations/sql/schema/tables.sql");
 include_sql!("src/annotations/sql/schema/index.sql");
 include_sql!("src/annotations/sql/annotations.sql");
-

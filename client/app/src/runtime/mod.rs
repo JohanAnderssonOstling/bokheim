@@ -17,9 +17,13 @@ pub(crate) mod requests;
 pub(crate) use library_backend::library::commands::LibraryReply;
 pub use requests::AppCommand;
 #[cfg(target_arch = "wasm32")]
+pub(crate) mod bisac;
+#[cfg(target_arch = "wasm32")]
 pub(crate) mod web;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web::Transport;
+#[cfg(any(target_arch = "wasm32", test))]
+mod web_state;
 
 use crate::api::AppClient;
 pub use protocol::*;
@@ -30,9 +34,6 @@ mod host;
 mod taxonomy;
 #[cfg(target_arch = "wasm32")]
 pub use host::BackendWorkerHost;
-
-#[cfg(target_arch = "wasm32")]
-pub mod coordinator_lifecycle;
 
 // Shared subscription API; transports own delivery and cancellation.
 impl Transport {

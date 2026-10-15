@@ -5,21 +5,29 @@ edition = "2024"
 
 [features]
 default = []
-kobo = ["mobile"]
+kobo = ["mobile", "dep:gpui_kobo"]
 mobile = []
 
 [dependencies]
+web-time = "1"
+library-model = { path = "../../client/library-model", default-features = false }
 app-preferences = { path = "../../client/preferences" }
 gpui.workspace = true
+html.workspace = true
+html-gpui.workspace = true
 gpui-component.workspace = true
 gpui-component-assets.workspace = true
+gpui_kobo = { workspace = true, optional = true }
 unicode-normalization.workspace = true
 
 # Configure GPUI's shared decoder dependencies explicitly instead of enabling
 # its broad image-formats feature. Keep the same UI formats on every platform,
 # including raster images embedded inside SVGs.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 resvg = { version = "0.46", default-features = false, features = ["raster-images"] }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
 
 [package.metadata.cargo-machete]
 ignored = ["image", "resvg"]

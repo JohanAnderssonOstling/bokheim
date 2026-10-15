@@ -1,7 +1,7 @@
 //! Native (on-device) filesystem state: work, directories, staged books.
 
-use crate::placements::stored_book_path;
 use crate::placements::FolderPaths;
+use crate::placements::stored_book_path;
 use crate::transactions::WriteOutcome::{Commit, Rollback};
 pub(crate) mod observations;
 

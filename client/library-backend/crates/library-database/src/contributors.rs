@@ -1,4 +1,5 @@
-//! Contributor identity lookups and writes. Import supplies name-matching rules.
+//! Contributor identity lookups and writes. Import supplies name-matching
+//! rules; projection matches with `metadata_contract::matching::same_author`.
 use crate::SqlParam;
 pub(crate) use crate::shared_sql::SharedSql;
 pub(crate) use crate::{DatabaseError, import::ImportCommitSql, sync::SyncApplySql};
@@ -8,7 +9,8 @@ use content_address::ContentHash;
 pub(crate) type Identity = (i64, AgentId);
 pub(crate) type StoredCredit = (i64, Contributor);
 
-/// Import supplies its own name equivalence rule; storage does not normalize names.
+/// The name equivalence a caller matches new credits by; storage does not
+/// normalize names itself.
 pub type ContributorNameMatcher = fn(&str, &str) -> bool;
 
 pub(crate) fn resolve_identity(tx: &rusqlite::Transaction<'_>, id: AgentId, name: &str, matcher: Option<ContributorNameMatcher>) -> Result<Identity, DatabaseError> {

@@ -431,9 +431,9 @@ pub(crate) async fn write(handle: &Handle, name: String, bytes: &[u8]) -> Result
     write_files(handle, vec![(name, bytes.to_owned())], lease).await
 }
 
-pub(crate) async fn write_thumbnail_set(handle: &Handle, hash: &ContentHash, bytes: &[u8], browse: &[u8]) -> Result<(), AssetStoreError> {
+pub(crate) async fn write_thumbnail_set(handle: &Handle, hash: &ContentHash, bytes: &[u8], browse: &[u8], card_high_density: &[u8]) -> Result<(), AssetStoreError> {
     let Some(lease) = lease(handle, hash.to_hex().as_str(), true)? else { return Err(AssetStoreError::operation("thumbnail is being updated")) };
-    write_files(handle, vec![(super::asset_name(super::BlobKind::Thumbnail, hash), bytes.to_owned()), (super::thumbnail_variant_name(hash, thumbnail::BROWSE_THUMBNAIL_WIDTH), browse.to_owned())], lease).await
+    write_files(handle, vec![(super::asset_name(super::BlobKind::Thumbnail, hash), bytes.to_owned()), (super::thumbnail_variant_name(hash, thumbnail::BROWSE_THUMBNAIL_WIDTH), browse.to_owned()), (super::thumbnail_variant_name(hash, thumbnail::THUMBNAIL_WIDTH), card_high_density.to_owned())], lease).await
 }
 
 async fn write_files(handle: &Handle, files: Vec<(String, Vec<u8>)>, lease: Lease) -> Result<(), AssetStoreError> {

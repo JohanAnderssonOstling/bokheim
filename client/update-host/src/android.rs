@@ -18,18 +18,37 @@ pub struct AndroidHost {
 
 impl AndroidHost {
     pub fn open(data: &Path, version: &str, config: DiscoveryConfig, target: &str) -> Result<Self, String> {
+        let lock = UpdateLock::acquire(&data.join("updates"))?;
+        let taxonomy = active(&data.join("updates"))?;
+        Self::open_locked(data, version, config, target, taxonomy.as_ref(), &lock)
+    }
+
+    /// Keep one lock across construction and recovery so the initial state and
+    /// taxonomy can be reused before any library connections open.
+    pub fn open_and_startup(data: &Path, version: &str, config: DiscoveryConfig, target: &str, prepare: impl FnOnce(&Path) -> Result<(), String>) -> Result<(Self, bool), String> {
+        let lock = UpdateLock::acquire(&data.join("updates"))?;
+        let taxonomy = active(&data.join("updates"))?;
+        let mut host = Self::open_locked(data, version, config, target, taxonomy.as_ref(), &lock)?;
+        let trial = host.startup_locked(&lock, taxonomy, prepare)?;
+        Ok((host, trial))
+    }
+
+    fn open_locked(data: &Path, version: &str, config: DiscoveryConfig, target: &str, taxonomy: Option<&ActiveTaxonomy>, lock: &UpdateLock) -> Result<Self, String> {
         if !target.starts_with("android-") || !target.ends_with("-apk") {
             return Err("invalid Android package target".into());
         }
-        let mut inner = Host::open(data, version, config, None, PathBuf::new())?;
-        let mut installed = device(version, active(&inner.root)?.as_ref())?;
+        let mut installed = device(version, taxonomy)?;
         installed.target = target.into();
-        inner.coordinator.set_installed(installed);
+        let inner = Host::open_locked(data, version, config, None, PathBuf::new(), installed, lock)?;
         Ok(Self { inner, target: target.into() })
     }
 
     fn installed(&self) -> Result<DeviceVersion, String> {
-        let mut installed = device(&self.inner.version, active(&self.inner.root)?.as_ref())?;
+        self.installed_with_taxonomy(active(&self.inner.root)?.as_ref())
+    }
+
+    fn installed_with_taxonomy(&self, taxonomy: Option<&ActiveTaxonomy>) -> Result<DeviceVersion, String> {
+        let mut installed = device(&self.inner.version, taxonomy)?;
         installed.target = self.target.clone();
         Ok(installed)
     }
@@ -106,6 +125,11 @@ impl AndroidHost {
     pub fn startup(&mut self, prepare: impl FnOnce(&Path) -> Result<(), String>) -> Result<bool, String> {
         let lock = UpdateLock::acquire(&self.inner.root)?;
         self.inner.coordinator.reload()?;
+        let taxonomy = active(&self.inner.root)?;
+        self.startup_locked(&lock, taxonomy, prepare)
+    }
+
+    fn startup_locked(&mut self, lock: &UpdateLock, mut taxonomy: Option<ActiveTaxonomy>, prepare: impl FnOnce(&Path) -> Result<(), String>) -> Result<bool, String> {
         if let Some(journal) = Journal::load(&self.inner.root)? {
             if journal.state == State::Committed {
                 self.acknowledge_committed()?;
@@ -115,15 +139,16 @@ impl AndroidHost {
                 self.inner.coordinator.quarantine_after_recovery("Android data startup was interrupted; restored previous data".into())?;
             }
             Journal::clear(&self.inner.root)?;
-            self.inner.coordinator.set_installed(self.installed()?);
+            taxonomy = active(&self.inner.root)?;
         }
+        self.inner.coordinator.set_installed(self.installed_with_taxonomy(taxonomy.as_ref())?);
         if self.inner.coordinator.activation_due() {
             let manifest = self.inner.coordinator.approved_manifest()?;
             let needs_apk = self.inner.coordinator.record().approved.as_ref().unwrap().artifacts.iter().any(|a| a.kind == ArtifactKind::Application);
-            let installed = self.installed()?;
+            let installed = self.installed_with_taxonomy(taxonomy.as_ref())?;
             let apk_present = !needs_apk || manifest.application.as_ref().is_some_and(|app| installed.application >= app.version);
             if apk_present {
-                if let Err(error) = self.promote(&lock, prepare) {
+                if let Err(error) = self.promote(lock, prepare) {
                     if let Some(journal) = Journal::load(&self.inner.root)? {
                         journal.recover(&self.inner.root)?;
                         self.inner.coordinator.quarantine_after_recovery(error)?;
@@ -134,13 +159,15 @@ impl AndroidHost {
                     } else if self.inner.coordinator.record().approved.as_ref().is_some_and(|p| p.phase == Phase::Ready) {
                         self.inner.coordinator.activation_recovered_for_retry(now(), WaitReason::Retry, error)?;
                     }
-                    self.inner.coordinator.set_installed(self.installed()?);
+                    taxonomy = active(&self.inner.root)?;
+                    self.inner.coordinator.set_installed(self.installed_with_taxonomy(taxonomy.as_ref())?);
                 } else {
                     self.inner.trial = true;
+                    taxonomy = active(&self.inner.root)?;
                 }
             }
         }
-        if let Some(taxonomy) = active(&self.inner.root)? {
+        if let Some(taxonomy) = taxonomy {
             subject_projection::installed::activate(&taxonomy.path)?;
         }
         Ok(self.inner.trial)
@@ -254,6 +281,9 @@ mod tests {
         fn host(&self, version: &str) -> AndroidHost {
             AndroidHost::open(self.dir.path(), version, self.config.clone(), "android-aarch64-apk").unwrap()
         }
+        fn startup(&self, version: &str) -> (AndroidHost, bool) {
+            AndroidHost::open_and_startup(self.dir.path(), version, self.config.clone(), "android-aarch64-apk", |path| prepare_candidate(path, version)).unwrap()
+        }
         fn approved(&self) -> AndroidHost {
             let mut host = self.host("1.0.0");
             let manifest = Manifest { protocol_version: 1, channel: "stable".into(), sequence: 1,
@@ -280,6 +310,35 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_startup_reuses_state_without_committing_or_retaining_the_lock() {
+        let f = Fixture::new();
+        let (host, trial) = f.startup("1.0.0");
+        assert!(!trial);
+        let revision = host.inner.coordinator.record().revision;
+        drop(host);
+
+        let root = f.dir.path().join("updates");
+        let observer = rusqlite::Connection::open(root.join("state.sqlite")).unwrap();
+        let before: u32 = observer.pragma_query_value(None, "data_version", |r| r.get(0)).unwrap();
+        let (host, trial) = AndroidHost::open_and_startup(f.dir.path(), "1.0.0", f.config.clone(), "android-aarch64-apk", |_| panic!("ordinary startup must not migrate")).unwrap();
+        assert!(!trial);
+        assert_eq!(host.inner.coordinator.record().revision, revision);
+        let after: u32 = observer.pragma_query_value(None, "data_version", |r| r.get(0)).unwrap();
+        assert_eq!(before, after, "ordinary startup must not commit update-state writes");
+        assert!(UpdateLock::acquire(&root).is_ok(), "startup must release the lock before returning the host");
+    }
+
+    #[test]
+    fn separate_startup_reloads_changes_since_host_creation() {
+        let f = Fixture::new();
+        let mut host = f.host("1.0.0");
+        let mut other = f.host("1.0.0");
+        other.inner.coordinator.discovery_failed("changed in another session".into()).unwrap();
+        assert!(!host.startup(|_| panic!("ordinary startup must not migrate")).unwrap());
+        assert_eq!(host.inner.coordinator.record().last_discovery_error.as_deref(), Some("changed in another session"));
+    }
+
+    #[test]
     fn consent_and_installed_apk_gate_data_activation() {
         let f = Fixture::new();
         let mut host = f.approved();
@@ -290,26 +349,31 @@ mod tests {
         assert!(!host.startup(|_| panic!("APK not installed")).unwrap());
         assert_eq!(host.view(), UpdateView::Ready { action: update_client::coordinator::UpdateAction::Install });
         drop(host);
-        let mut host = f.host("2.0.0");
-        assert!(host.startup(|path| prepare_candidate(path, "2.0.0")).unwrap());
+        let (mut host, trial) = f.startup("2.0.0");
+        assert!(trial);
         host.healthy().unwrap();
         assert!(host.inner.coordinator.record().approved.is_none());
         assert_eq!(f.value(), "prior");
         drop(host);
-        assert!(!f.host("2.0.0").startup(|_| panic!("already committed")).unwrap());
+        let (_, trial) = f.startup("2.0.0");
+        assert!(!trial);
     }
 
     #[test]
-    fn interrupted_trial_restores_database_before_next_startup() {
+    fn interrupted_trial_restores_database_and_taxonomy_before_next_startup() {
         let f = Fixture::new(); drop(f.approved());
-        let mut host = f.host("2.0.0");
-        assert!(host.startup(|path| prepare_candidate(path, "2.0.0")).unwrap());
+        let (host, trial) = f.startup("2.0.0");
+        assert!(trial);
         rusqlite::Connection::open(f.dir.path().join("app-state-v1.sqlite3")).unwrap()
             .execute_batch("UPDATE setting SET v='trial change'").unwrap();
+        let root = f.dir.path().join("updates");
+        let trial_taxonomy = ActiveTaxonomy { path: root.join("uncommitted-taxonomy.sqlite3"), release: 99 };
+        activation::write_json(&root.join("active-taxonomy.json"), &Some(trial_taxonomy)).unwrap();
         drop(host);
-        let mut host = f.host("2.0.0");
-        assert!(!host.startup(|_| panic!("quarantined trial")).unwrap());
+        let (host, trial) = f.startup("2.0.0");
+        assert!(!trial);
         assert_eq!(f.value(), "prior");
+        assert!(active(&root).unwrap().is_none());
         assert_eq!(host.inner.coordinator.record().approved.as_ref().unwrap().phase, Phase::Quarantined);
     }
 

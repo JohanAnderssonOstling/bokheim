@@ -73,6 +73,12 @@ SELECT deleted_at IS NOT NULL FROM book WHERE content_hash=:content_hash;
 UPDATE book SET format=:format,added_at=:added_at
 WHERE content_hash=:content_hash AND (format,added_at) IS NOT (:format,:added_at);
 
+-- name: projection_set_book_popularity !
+-- param: content_hash: &ContentHash
+-- param: rating_count: Option<f64>
+UPDATE book SET popularity_rating_count=:rating_count
+WHERE content_hash=:content_hash AND popularity_rating_count IS NOT :rating_count;
+
 -- name: projection_set_book_lifecycle !
 -- param: content_hash: &ContentHash
 -- param: deleted_at: Option<i64>

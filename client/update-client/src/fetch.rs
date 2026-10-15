@@ -14,7 +14,13 @@ pub async fn discover(config: &DiscoveryConfig, now_unix: u64, minimum_sequence:
 }
 
 pub async fn download(artifact: &Artifact) -> Result<Vec<u8>, String> {
+    client_platform_runtime::transfers::retry(|| download_allowed(artifact)).await
+}
+
+async fn download_allowed(artifact: &Artifact) -> Result<Vec<u8>, String> {
     artifact.validate()?;
+    // Native reqwest and browser fetch decode HTTP compression before exposing
+    // the body, so the signed size and digest describe the original artifact.
     let response = reqwest::get(&artifact.url).await.and_then(|r| r.error_for_status()).map_err(|e| format!("update download failed: {e}"))?;
     let bytes = response.bytes().await.map_err(|e| format!("cannot read update: {e}"))?;
     let mut verified = Vec::with_capacity(bytes.len());

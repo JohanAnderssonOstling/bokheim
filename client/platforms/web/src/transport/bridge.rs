@@ -1,12 +1,11 @@
 //! Database-worker endpoints for coordinator messages. Owns cancellation and ports.
 
-use std::rc::Weak;
 use super::protocol::BridgeEvent;
-use super::{byte_reply, error_message, field, object, BytesFuture, BytesOperation, Port};
-use futures_channel::oneshot;
+use super::{BytesFuture, Port, byte_reply, error_message, field, object};
 use js_sys::{Array, Uint8Array};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::rc::Weak;
 use wasm_bindgen::prelude::*;
 use web_sys::{DedicatedWorkerGlobalScope, MessageChannel, MessageEvent};
 
@@ -39,113 +38,84 @@ fn bridge() -> Result<Rc<Bridge>, JsValue> {
         Ok(bridge)
     })
 }
-type Reply = oneshot::Sender<Result<Vec<u8>, String>>;
 struct Request {
     bridge: Rc<Bridge>,
     id: u64,
-    port: RefCell<Option<Port>>,
-    reply: RefCell<Option<Reply>>,
-    cancelled: async_channel::Receiver<()>,
-    run: BytesOperation,
+    port: Port,
+    completed: bool,
 }
 impl Request {
-    fn finish(&self, result: Result<Vec<u8>, String>) {
-        self.cancelled.close();
-        self.port.borrow_mut().take();
-        self.bridge.pending.take(self.id);
-        if let Some(reply) = self.reply.borrow_mut().take() {
-            let _ = reply.send(result);
-        }
-    }
-    fn receive(self: &Rc<Self>, data: JsValue) {
-        match BridgeEvent::decode(&data) {
-            Ok(BridgeEvent::Complete(result)) => self.finish(result),
-            Ok(BridgeEvent::Storage { id, bytes }) => self.execute(id, bytes),
-            Err(error) => self.finish(Err(error)),
-        }
-    }
-    fn execute(self: &Rc<Self>, id: u32, bytes: Vec<u8>) {
-        if self.cancelled.is_closed() {
-            return;
-        }
-        let run = (self.run)(bytes);
-        let state = self.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let result = tokio::select! {
-                biased;
-                _ = state.cancelled.recv() => return,
-                result = run => result,
-            };
-            let (message, transfer) = byte_reply(&[("id", id.into())], result);
-            let result = state.port.borrow().as_ref().map(|port| port.raw.post_message_with_transferable(&message, &transfer));
-            if let Some(Err(error)) = result {
-                state.finish(Err(error_message(&error)));
-            }
-        });
+    fn respond(&self, id: u32, result: Result<Vec<u8>, String>) -> Result<(), String> {
+        let (message, transfer) = byte_reply(&[("id", id.into())], result);
+        self.port.raw.post_message_with_transferable(&message, &transfer).map_err(|error| error_message(&error))
     }
 }
 impl Drop for Request {
     fn drop(&mut self) {
-        if let Some(port) = self.port.get_mut().as_ref() {
-            let _ = port.raw.post_message(&object(&[("kind", "cancel".into())]));
+        if !self.completed {
+            let _ = self.port.raw.post_message(&object(&[("kind", "cancel".into())]));
         }
         self.bridge.pending.take(self.id);
     }
 }
-pub fn sync_request(key: String, bytes: Vec<u8>, run: BytesOperation) -> Result<BytesFuture, JsValue> {
+pub fn sync_request(key: String, bytes: Vec<u8>, run: impl AsyncFnMut(Vec<u8>) -> Result<Vec<u8>, String> + 'static) -> Result<BytesFuture, JsValue> {
     let bridge = bridge()?;
     let id = bridge.pending.next_id();
     let channel = MessageChannel::new()?;
-    let (reply, response) = oneshot::channel();
-    // Dropping the returned future closes this sender and cancels active work.
-    // finish() closes the receiver to cancel work when a coordinator reply arrives.
-    let (cancel, cancelled) = async_channel::unbounded();
+    // Completion and commands use separate channels so completion can cancel an
+    // active operation without waiting for it or running any queued commands.
+    let (completed, response) = async_channel::bounded(1);
+    let (commands, incoming) = async_channel::unbounded();
+    let done = completed.clone();
+    let invalid = completed.clone();
+    let port = Port::new(
+        channel.port1(),
+        move |event| match BridgeEvent::decode(&event.data()) {
+            Ok(BridgeEvent::Complete(result)) => {
+                let _ = done.try_send(result);
+                done.close();
+                commands.close();
+            }
+            Ok(BridgeEvent::Storage { id, bytes }) => {
+                let _ = commands.try_send((id, bytes));
+            }
+            Err(error) => {
+                let _ = done.try_send(Err(error));
+                done.close();
+                commands.close();
+            }
+        },
+        move |_| {
+            let _ = invalid.try_send(Err("Invalid coordinator message".into()));
+            invalid.close();
+        },
+    );
+    let mut request = Request { bridge: bridge.clone(), id, port, completed: false };
+    let failed = completed.clone();
+    bridge.pending.insert(
+        id,
+        Box::new(move |error| {
+            let _ = failed.try_send(Err(error_message(&error)));
+            failed.close();
+        }),
+    );
     let message = object(&[("transport", "sync_request".into()), ("key", key.into()), ("port", channel.port2().into())]);
     let transfer = Array::of1(&channel.port2());
     let bytes = Uint8Array::from(bytes.as_slice());
     transfer.push(&bytes.buffer());
     js_sys::Reflect::set(&message, &"bytes".into(), &bytes)?;
-    let state = Rc::new_cyclic(|weak: &Weak<Request>| {
-        let message = weak.clone();
-        let error = weak.clone();
-        Request {
-            bridge: bridge.clone(),
-            id,
-            port: RefCell::new(Some(Port::new(
-                channel.port1(),
-                move |event| {
-                    if let Some(state) = message.upgrade() {
-                        state.receive(event.data());
-                    }
-                },
-                move |_| {
-                    if let Some(state) = error.upgrade() {
-                        state.finish(Err("Invalid coordinator message".into()));
-                    }
-                },
-            ))),
-            reply: RefCell::new(Some(reply)),
-            cancelled,
-            run,
-        }
-    });
-    let weak = Rc::downgrade(&state);
-    bridge.pending.insert(
-        id,
-        Box::new(move |error| {
-            if let Some(state) = weak.upgrade() {
-                state.finish(Err(error_message(&error)));
-            }
-        }),
-    );
     if let Err(error) = bridge.scope.post_message_with_transfer(&message, &transfer) {
         channel.port2().close();
-        state.finish(Err(error_message(&error)));
+        let _ = completed.try_send(Err(error_message(&error)));
+        completed.close();
     }
     Ok(Box::pin(async move {
-        let _state = state;
-        let _cancel = cancel;
-        response.await.unwrap_or_else(|_| Err("Coordinator request closed".into()))
+        // This future owns the port, handler, and registration even before its
+        // first poll. Dropping it cancels the active operation and queued work.
+        let result = crate::serial::serve_storage(run, incoming, response, |id, result| request.respond(id, result)).await;
+        request.completed = true;
+        drop(request);
+        result
     }))
 }
 

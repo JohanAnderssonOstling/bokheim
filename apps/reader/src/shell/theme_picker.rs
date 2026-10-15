@@ -14,5 +14,5 @@ pub(crate) fn reader_theme_picker<C: 'static>(cx: &mut Context<C>, theme: compon
             components::theme::select_palette(tint, appearance, cx);
         }));
     }
-    components::reader_settings_group(theme).child(components::reader_setting_row_smallcaps("Theme", theme).child(picker))
+    components::reader_setting_row_smallcaps("Theme", theme).child(picker)
 }

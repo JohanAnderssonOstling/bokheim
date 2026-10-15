@@ -24,7 +24,11 @@ use crate::{
 
 const CONTEXT: &str = "Sheet";
 pub(crate) fn init(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("escape", Cancel, Some(CONTEXT))])
+    cx.bind_keys([
+        KeyBinding::new("escape", Cancel, Some(CONTEXT)),
+        #[cfg(not(target_os = "android"))]
+        KeyBinding::new("back", Cancel, Some(CONTEXT)),
+    ])
 }
 
 /// The settings for sheets.
@@ -59,6 +63,11 @@ pub struct Sheet {
 }
 
 impl Sheet {
+    pub(crate) fn cancel_from_back(&self, window: &mut Window, cx: &mut App) {
+        window.close_sheet(cx);
+        (self.on_close)(&ClickEvent::default(), window, cx);
+    }
+
     /// Creates a new Sheet.
     pub fn new(_: &mut Window, cx: &mut App) -> Self {
         Self {

@@ -64,6 +64,23 @@ impl NormalizedAuthor {
 /// Number of distinct compatible author credits. Extra or missing credits do not
 /// veto a match; each credit can contribute at most one vote.
 pub fn matching_author_count(local: &[String], remote: &[String]) -> usize {
+    matching_author_count_using(local, remote, author_names_compatible)
+}
+
+pub fn matching_author_count_with_title(local: &[String], remote: &[String], title: &str, remote_title: &str) -> usize {
+    let compatible = if author_titles_agree(title, remote_title) { super::author_names_with_omitted_names } else { author_names_compatible };
+    matching_author_count_using(local, remote, compatible)
+}
+
+pub(super) fn author_titles_agree(title: &str, remote_title: &str) -> bool {
+    let local = NormalizedTitle::new(title);
+    let remote = NormalizedTitle::new(remote_title);
+    fn key(value: &str) -> &str { value.strip_prefix("the ").unwrap_or(value) }
+    !local.full.is_empty() && local.qualifiers == remote.qualifiers
+        && (key(&local.full) == key(&remote.full) || (local.subtitle.is_none() && key(&local.full) == key(&remote.main)))
+}
+
+fn matching_author_count_using(local: &[String], remote: &[String], compatible: fn(&str, &str) -> bool) -> usize {
     fn unique(values: &[String]) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
         for name in super::author_credits(values) {
@@ -94,7 +111,7 @@ pub fn matching_author_count(local: &[String], remote: &[String]) -> usize {
     }
     let local = unique(local);
     let remote = unique(remote);
-    let edges = local.iter().map(|a| remote.iter().enumerate().filter_map(|(i, b)| author_names_compatible(a, b).then_some(i)).collect()).collect::<Vec<Vec<usize>>>();
+    let edges = local.iter().map(|a| remote.iter().enumerate().filter_map(|(i, b)| compatible(a, b).then_some(i)).collect()).collect::<Vec<Vec<usize>>>();
     let mut owners = vec![None; remote.len()];
     (0..local.len()).filter(|&i| assign(i, &edges, &mut vec![false; remote.len()], &mut owners)).count()
 }
@@ -108,13 +125,24 @@ pub struct NormalizedTitle {
     pub qualifiers: BTreeSet<String>,
     original: String,
 }
+
+fn title_parts(text: &str) -> (&str, Option<&str>) {
+    let colon = text.find(':').map(|offset| (offset, 1));
+    let slash = text.find(" / ").map(|offset| (offset, 3));
+    match colon.into_iter().chain(slash).min_by_key(|(offset, _)| *offset) {
+        Some((offset, separator)) => (&text[..offset], Some(&text[offset + separator..])),
+        None => (text, None),
+    }
+}
+
 impl NormalizedTitle {
     pub fn new(value: &str) -> Self {
         // Catalogue titles carry no filename shapes; the device cleans those
         // out of a book's own titles before asking.
         let text = super::title_without_parenthetical_segments(&value.trim().replace(';', ": "), false);
         let full = bibliographic_title_match_key(&text);
-        let (main, subtitle) = text.split_once(':').map_or((full.clone(), None), |(main, sub)| (bibliographic_title_match_key(main), Some(bibliographic_title_match_key(sub))));
+        let (main, subtitle) = title_parts(&text);
+        let (main, subtitle) = (bibliographic_title_match_key(main), subtitle.map(bibliographic_title_match_key));
         Self { text, full, main, subtitle, qualifiers: title_qualifiers(value), original: value.to_owned() }
     }
     pub fn matches(&self, other: &Self) -> bool {
@@ -123,7 +151,7 @@ impl NormalizedTitle {
     /// Query both current and legacy punctuation keys without rewriting immutable snapshots.
     pub fn lookup_keys(&self) -> Vec<String> {
         let mut keys = Vec::new();
-        for text in [self.text.as_str(), self.original.as_str(), self.text.split(':').next().unwrap_or(&self.text)] {
+        for text in [self.text.as_str(), self.original.as_str(), title_parts(&self.text).0] {
             for key in [bibliographic_title_match_key(text), bibliographic_match_key(text)] {
                 if !key.is_empty() && !keys.contains(&key) {
                     keys.push(key);
@@ -141,6 +169,15 @@ impl NormalizedTitle {
                 (key, n)
             })
             .collect::<Vec<_>>();
+        // Initial articles vary between catalog entries. Keep these as lookup
+        // alternatives; persisted keys and exact edition comparisons stay intact.
+        for text in [&self.full, &self.main] {
+            if text.is_empty() { continue; }
+            let key = text.strip_prefix("the ").map_or_else(|| format!("the {text}"), str::to_owned);
+            if !keys.iter().any(|(old, _)| old == &key) {
+                keys.push((key, text.chars().count()));
+            }
+        }
         for item in title_substring_keys(&self.text, limit) {
             if !keys.iter().any(|(key, _)| key == &item.0) {
                 keys.push(item);

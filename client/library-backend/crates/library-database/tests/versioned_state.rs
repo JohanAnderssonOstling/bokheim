@@ -58,6 +58,87 @@ fn acknowledging_an_old_publication_cannot_remove_a_new_edit() {
     assert!(after_ack.contains(new_name));
 }
 
+#[test]
+fn outbox_readers_share_bounds_watermarks_and_ordering() {
+    let db = database();
+    for index in 1..=350 {
+        db.create_directory_with_id(&DirId::from_u128(index), &ROOT_DIR_ID, &format!("Shelf {index}")).unwrap();
+    }
+    let through = db.sync_outbox_watermark().unwrap();
+    let native = db.sync_publishable_mutations().unwrap();
+    assert!(native.len() > 256);
+    db.create_directory_with_id(&DirId::from_u128(351), &ROOT_DIR_ID, &"Newer edit".into()).unwrap();
+    let mut after = i64::MIN;
+    let mut paged = Vec::new();
+    loop {
+        let page = db.sync_pending_mutations_page(after, through).unwrap();
+        assert!(page.len() <= 256);
+        let Some(last) = page.last() else {
+            break;
+        };
+        after = last.publisher_seq.get() as i64;
+        let ids: Vec<_> = page.iter().map(|publication| publication.publisher_seq).collect();
+        paged.extend(page);
+        db.sync_acknowledge_mutations(&ids).unwrap();
+    }
+    assert_eq!(paged, native);
+    let remaining = db.sync_publishable_mutations().unwrap();
+    assert!(!remaining.is_empty());
+    assert!(remaining.iter().all(|publication| publication.publisher_seq.get() as i64 > through));
+}
+
+#[test]
+fn outbox_reader_allows_one_large_snapshot_and_continues_after_it() {
+    let db = database();
+    let large = "Large shelf ".repeat(32 * 1024);
+    db.create_directory_with_id(&DirId::from_u128(1), &ROOT_DIR_ID, &large).unwrap();
+    db.create_directory_with_id(&DirId::from_u128(2), &ROOT_DIR_ID, &"Small shelf".into()).unwrap();
+    let native = db.sync_publishable_mutations().unwrap();
+    let through = db.sync_outbox_watermark().unwrap();
+    let mut paged = Vec::new();
+    let mut after = i64::MIN;
+    loop {
+        let page = db.sync_pending_mutations_page(after, through).unwrap();
+        let Some(last) = page.last() else {
+            break;
+        };
+        after = last.publisher_seq.get() as i64;
+        let bytes: usize = page.iter().map(|publication| sync_common::wire::encode(&publication.state.value).unwrap().len()).sum();
+        assert!(bytes <= 256 * 1024 || page.len() == 1);
+        paged.extend(page);
+    }
+    assert_eq!(paged, native);
+}
+
+#[test]
+fn prepared_outbox_orders_lifecycles_and_survives_acknowledgements_and_new_edits() {
+    let db = database();
+    db.set_asset_storage_policy(false, false).unwrap();
+    for index in 1..=350 {
+        db.create_directory_with_id(&DirId::from_u128(index), &ROOT_DIR_ID, &format!("Shelf {index}")).unwrap();
+    }
+    let hash = import_book(&db, ROOT_DIR_ID, 1, "book.epub");
+    complete_no_match(&db, &hash);
+    let mut expected = db.sync_publishable_mutations().unwrap();
+    expected.sort_by_key(|p| !matches!(p.state.value, LibraryStateEntry::BookLifecycle { .. }));
+    let mut scan = db.sync_prepare_outbox().unwrap();
+    db.create_directory_with_id(&DirId::from_u128(351), &ROOT_DIR_ID, &"Later shelf".into()).unwrap();
+    let mut publications = Vec::new();
+    loop {
+        let page = db.sync_next_outbox_page(&mut scan).unwrap();
+        if page.is_empty() {
+            break;
+        }
+        assert!(page.len() <= 256);
+        let ids: Vec<_> = page.iter().map(|p| p.publisher_seq).collect();
+        publications.extend(page);
+        db.sync_acknowledge_mutations(&ids).unwrap();
+    }
+    assert_eq!(publications, expected);
+    assert!(!db.sync_publishable_mutations().unwrap().is_empty());
+    assert!(db.sync_next_outbox_page(&mut scan).unwrap().is_empty());
+}
+
 fn import_book(database: &Database, folder: DirId, number: u64, name: &str) -> sync_common::ContentHash {
     let hash = sync_common::ContentHash::new(&format!("{number:064x}"));
     database
@@ -199,7 +280,15 @@ fn offline_addition_waits_for_enrichment_then_publishes_one_complete_document() 
     let candidate = source.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
     let mut record = candidate.record;
     record.contributors = vec![Contributor::new("Enriched author", AUTHOR_MARC_RELATOR_CODE).unwrap()];
-    let answer = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::Found, record: Some(record), toc: None, cover: Some(metadata_contract::books::CoverSource { id: "cover-7".into() }), detail: String::new() };
+    let answer = BookEnrichment {
+        key: String::new(),
+        status: BookEnrichmentStatus::Found,
+        record: Some(record),
+        toc: None,
+        popularity: Some(metadata_contract::WorkPopularity { open_library_work_id: "OL10W".into(), rating_count: 12, snapshot_date: "2026-09-01".into() }),
+        cover: Some(metadata_contract::books::CoverSource { id: "cover-7".into() }),
+        detail: String::new(),
+    };
     source.record_enrichment(&hash, &candidate.request_key, &answer, 0).unwrap();
     let additions = source.sync_publishable_mutations().unwrap();
     assert_eq!(additions.iter().filter(|p| matches!(p.state.value, LibraryStateEntry::BookAdd { .. })).count(), 1);
@@ -210,12 +299,99 @@ fn offline_addition_waits_for_enrichment_then_publishes_one_complete_document() 
     assert!(target.enrichment_candidates(&[hash], i64::MAX).unwrap().is_empty());
     assert_eq!(target.enrichment_cover_source(&hash).unwrap().unwrap().id, "cover-7");
     assert_eq!(target.enrichment_next_retry().unwrap(), None);
+    assert_eq!(target.enrichment_popularity(&hash).unwrap(), answer.popularity);
+    assert_eq!(source.enrichment_popularity(&hash).unwrap(), answer.popularity);
 }
 
 fn complete_no_match(database: &Database, hash: &sync_common::ContentHash) {
     use metadata_contract::books::{BookEnrichment, BookEnrichmentStatus};
     let Some(candidate) = database.enrichment_candidates(&[*hash], 0).unwrap().pop() else { return };
-    database.record_enrichment(hash, &candidate.request_key, &BookEnrichment { key: String::new(), status: BookEnrichmentStatus::NoMatch, record: None, toc: None, cover: None, detail: String::new() }, 0).unwrap();
+    database.record_enrichment(hash, &candidate.request_key, &BookEnrichment { key: String::new(), status: BookEnrichmentStatus::NoMatch, record: None, toc: None, popularity: None, cover: None, detail: String::new() }, 0).unwrap();
+}
+
+#[cfg(feature = "scanner")]
+#[test]
+fn verified_audio_download_reuses_complete_synced_metadata_without_local_inspection() {
+    use book_inspection::{AudiobookMetadata, InspectedBook};
+    use book_model::{AudiobookChapter, AudiobookTrack, BookDetails, BookFormat, BookRecord, ChapterOrigin};
+    use library_database::{ImportCommit, NativeBookAcknowledgement, NativeBookCompletion, NativeBookSnapshot};
+    use library_model::PublishedStagedBook;
+
+    for (format, complete) in [(BookFormat::M4b, true), (BookFormat::Mp3Folder, true), (BookFormat::Mp3Folder, false)] {
+        let source = database();
+        let path = std::env::temp_dir().join(format!("synced-audio-cache-{}.db", uuid::Uuid::new_v4()));
+        let target = Database::open(&path).unwrap();
+        target.initialize_library().unwrap();
+        let hash = sync_common::ContentHash::new(&format!("{:064x}", 42));
+        let tracks = if format == BookFormat::Mp3Folder && complete { vec![AudiobookTrack { name: "01.mp3".into(), start_ms: 0, end_ms: 1000, offset: 0, length: 100, archive_hash: Some(hash) }] } else { vec![] };
+        source
+            .commit_import(ImportCommit {
+                parent_id: ROOT_DIR_ID,
+                file_name: "Audio".into(),
+                format,
+                content_hash: hash,
+                size_bytes: 100,
+                inspection_version: book_inspection::inspection_version(format),
+                inspection: Some(InspectedBook {
+                    pdf: None,
+                    toc: vec![],
+                    metadata: BookRecord { metadata: BookDetails { title: "Audio".into(), ..Default::default() }, description: String::new() },
+                    audiobook: Some(AudiobookMetadata {
+                        title: "Audio".into(),
+                        authors: vec![],
+                        description: String::new(),
+                        duration_ms: 1000,
+                        chapters: vec![AudiobookChapter { title: "Chapter".into(), start_ms: 0, end_ms: 1000 }],
+                        tracks,
+                        chapter_origin: ChapterOrigin::FullAudiobookFallback,
+                        recording: Default::default(),
+                    }),
+                }),
+                published: PublishedStagedBook { name: "Audio".into(), relative_path: "/Audio".into(), published: false, fingerprint: None },
+                request_thumbnail: false,
+                restore_paths: vec![],
+            })
+            .unwrap();
+        complete_no_match(&source, &hash);
+        pull(&target, source.sync_publishable_mutations().unwrap().iter().map(delivery).collect());
+        let metadata = target.audiobook_playback_metadata(&hash).unwrap().unwrap();
+        assert_eq!(metadata.duration_ms, 1000);
+        assert_eq!(metadata.chapters.len(), 1);
+        assert!(!target.has_import_inspection(&hash, format, book_inspection::inspection_version(format)).unwrap());
+        assert!(target.scan_snapshot().unwrap().books.is_empty(), "synced membership alone does not verify local bytes");
+
+        let relative_path = target.book_paths(&hash).unwrap().remove(0);
+        let name = relative_path.file_name().to_owned();
+        assert_eq!(
+            target
+                .complete_downloaded_book(
+                    NativeBookCompletion {
+                        snapshot: NativeBookSnapshot { content_hash: hash, directory: ROOT_DIR_ID, name: name.clone(), relative_path: relative_path.clone(), occupied_names: vec![], format },
+                        publication: PublishedStagedBook { name, relative_path: relative_path.to_string(), published: true, fingerprint: Some("42".into()) },
+                        size_bytes: 100,
+                    },
+                    true
+                )
+                .unwrap(),
+            NativeBookAcknowledgement::Applied
+        );
+        let expected = complete.then_some(format);
+        let snapshot = target.scan_snapshot().unwrap();
+        assert_eq!(snapshot.books.len(), 1);
+        assert_eq!(snapshot.books[0].fingerprint, 42);
+        assert_eq!(snapshot.books[0].inspection_version, None, "reusing synced facts does not fabricate a local inspection");
+        assert_eq!(snapshot.books[0].cached_audiobook_format, expected);
+        drop(target);
+
+        let reopened = Database::open(&path).unwrap();
+        assert_eq!(reopened.scan_snapshot().unwrap().books[0].cached_audiobook_format, expected);
+        let retained = reopened.audiobook_playback_metadata(&hash).unwrap().unwrap();
+        assert_eq!(retained.duration_ms, metadata.duration_ms);
+        assert_eq!(retained.chapters, metadata.chapters);
+        assert_eq!(retained.tracks, metadata.tracks);
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 #[test]
@@ -228,7 +404,7 @@ fn a_shared_no_match_finishes_enrichment_and_a_late_answer_cannot_replace_it() {
     pull(&target, source.sync_publishable_mutations().unwrap().iter().map(delivery).collect());
     acknowledge(&source);
     let candidate = source.enrichment_candidates(&[hash], 0).unwrap().pop().unwrap();
-    let mut answer = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::NoMatch, record: None, toc: None, cover: None, detail: String::new() };
+    let mut answer = BookEnrichment { key: String::new(), status: BookEnrichmentStatus::NoMatch, record: None, toc: None, popularity: None, cover: None, detail: String::new() };
     source.record_enrichment(&hash, &candidate.request_key, &answer, 0).unwrap();
     let original = source.sync_publishable_mutations().unwrap();
     pull(&target, original.iter().map(delivery).collect());
@@ -301,7 +477,6 @@ fn offline_draft_and_reading_progress_survive_reopening_before_enrichment() {
     std::fs::remove_file(path).unwrap();
 }
 
-
 #[test]
 fn annotations_round_trip_register_projection_sync_and_worker_transport() {
     use book_model::{Annotation, AnnotationAnchor, AnnotationStyle, PdfAnnotationAnchor, PdfAnnotationRect};
@@ -309,14 +484,15 @@ fn annotations_round_trip_register_projection_sync_and_worker_transport() {
 
     let source = database();
     let target = database();
+    source.set_asset_storage_policy(false, false).unwrap();
+    target.set_asset_storage_policy(false, false).unwrap();
     let hash = import_book(&source, ROOT_DIR_ID, 100, "Annotated.epub");
     import_book(&target, ROOT_DIR_ID, 100, "Annotated.epub");
+    complete_no_match(&source, &hash);
+    complete_no_match(&target, &hash);
     acknowledge(&source);
     acknowledge(&target);
-    for (index, anchor) in [
-        AnnotationAnchor::epub_cfi("epubcfi(/6/2)"),
-        AnnotationAnchor::Pdf(PdfAnnotationAnchor::new(3, vec![PdfAnnotationRect::new(0.1, 0.2, 0.3, 0.4)], None)),
-    ].into_iter().enumerate() {
+    for (index, anchor) in [AnnotationAnchor::epub_cfi("epubcfi(/6/2)"), AnnotationAnchor::Pdf(PdfAnnotationAnchor::new(3, vec![PdfAnnotationRect::new(0.1, 0.2, 0.3, 0.4)], None))].into_iter().enumerate() {
         let annotation = Annotation {
             id: format!("note-{index}"),
             content_hash: hash,

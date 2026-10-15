@@ -4,6 +4,7 @@ use ui_components as components;
 
 use super::listing::{BrowseCrumb, BrowseKind};
 use super::page::{BrowsePage, BrowseSplitClose, BrowseSplitRequest, BrowseSplitSide};
+use crate::BrowsePageSession;
 use crate::library::services::LibraryContext;
 
 /// Owns independent browse pages and gives each page an equal share of the
@@ -36,6 +37,23 @@ impl BrowseSplitPlane {
         self.panes[0].page.update(cx, |page, cx| page.open_book_detail(book, path, cx));
     }
 
+    pub(crate) fn shown_book_detail(&self, cx: &App) -> Option<library_model::BookLocator> {
+        self.panes.iter().find_map(|pane| pane.page.read(cx).shown_book_detail(cx))
+    }
+
+    pub(crate) fn saved_pages(&self, cx: &App) -> Vec<BrowsePageSession> {
+        self.panes.iter().map(|pane| pane.page.read(cx).saved_session(cx)).collect()
+    }
+
+    pub(crate) fn restore(&mut self, pages: Vec<BrowsePageSession>, cx: &mut Context<Self>) {
+        for (index, saved) in pages.into_iter().enumerate() {
+            if index >= self.panes.len() {
+                self.add_page_at(index, Vec::new(), cx);
+            }
+            self.panes[index].page.update(cx, |page, cx| page.restore_session(saved, cx));
+        }
+    }
+
     pub(crate) fn new(kind: BrowseKind, library: LibraryContext, cx: &mut Context<Self>) -> Self {
         let mut plane = Self { kind, library, panes: Vec::new(), focus: cx.focus_handle(), restore_focus: false };
         plane.add_page_at(0, Vec::new(), cx);
@@ -46,6 +64,16 @@ impl BrowseSplitPlane {
     fn add_page_at(&mut self, index: usize, path: Vec<BrowseCrumb>, cx: &mut Context<Self>) {
         let (kind, library) = (self.kind, self.library.clone());
         let page = cx.new(|cx| BrowsePage::new(kind, library, cx));
+        let mut saved = page.read(cx).saved_session(cx);
+        let observation = cx.observe(&page, move |_, page, cx| {
+            // Child entities repaint themselves. Only navigation needs to
+            // reach the session/window observers that persist the browser.
+            let next = page.read(cx).saved_session(cx);
+            if saved != next {
+                saved = next;
+                cx.notify();
+            }
+        });
         let subscription = cx.subscribe(&page, |plane, source, request: &BrowseSplitRequest, cx| {
             plane.add_page(source, request.side, request.path.clone(), cx);
         });
@@ -56,7 +84,7 @@ impl BrowseSplitPlane {
             page.update(cx, |page, cx| page.open_path(path, cx));
         }
         let insert_at = index.min(self.panes.len());
-        self.panes.insert(insert_at, BrowsePane { page, _subscriptions: vec![subscription, close_subscription] });
+        self.panes.insert(insert_at, BrowsePane { page, _subscriptions: vec![observation, subscription, close_subscription] });
         self.refresh_close_buttons(cx);
         cx.notify();
     }
@@ -95,6 +123,13 @@ impl BrowseSplitPlane {
 
     pub(crate) fn focus_handle(&self) -> FocusHandle {
         self.focus.clone()
+    }
+
+    /// Native Back must still reach the visible page after focus leaves it.
+    pub(crate) fn dismiss(&mut self, cx: &mut Context<Self>) -> bool {
+        // Native mobile navigation has one visible pane. Its state owns Back;
+        // the focused control never chooses the navigation destination.
+        self.panes.first().is_some_and(|pane| pane.page.update(cx, |page, cx| page.dismiss(cx)))
     }
 
     fn refresh_close_buttons(&mut self, cx: &mut Context<Self>) {

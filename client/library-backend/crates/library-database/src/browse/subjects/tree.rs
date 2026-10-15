@@ -1,7 +1,78 @@
 //! Build and compact the displayed subject tree from current assignments.
 pub(crate) use super::*;
+use crate::browse::revision::Revision;
+use rusqlite::{Connection, OptionalExtension};
+use std::sync::Arc;
+
+#[derive(Default)]
+pub(crate) struct SubjectTrees {
+    library: Option<CachedTree>,
+    catalog: Option<CachedTree>,
+}
+
+struct CachedTree {
+    revision: TreeRevision,
+    nodes: Arc<BTreeMap<i64, SubjectNode>>,
+}
+
+#[derive(PartialEq, Eq)]
+struct TreeRevision {
+    visibility: i64,
+    subjects: i64,
+    legacy: Option<(u64, i64)>,
+    taxonomy_revision: Option<String>,
+    taxonomy_local_changes: Option<u64>,
+    taxonomy_data_version: i64,
+    taxonomy_schema_version: i64,
+    catalog: Option<(Option<(i64, i64, i64, String)>, u64, i64)>,
+}
 
 impl Database {
+    /// Both sources reuse the same unfiltered, compacted tree. Book filters
+    /// and reading state belong to query results. Only visibility, assignment
+    /// or taxonomy changes invalidate the library tree; catalog changes
+    /// invalidate the catalog tree independently of library writes.
+    pub(in crate::browse) fn subject_tree_for(&self, books: Books) -> Result<Arc<BTreeMap<i64, SubjectNode>>, DatabaseError> {
+        match books {
+            Books::Library => self.cached_subject_tree(books, None, || self.load_subject_tree()),
+            Books::Catalog => crate::catalog::read(|catalog| self.catalog_subject_tree(catalog)),
+        }
+    }
+
+    fn cached_subject_tree(
+        &self, books: Books, catalog: Option<(Option<(i64, i64, i64, String)>, u64, i64)>, load: impl FnOnce() -> Result<BTreeMap<i64, SubjectNode>, DatabaseError>,
+    ) -> Result<Arc<BTreeMap<i64, SubjectNode>>, DatabaseError> {
+        let library = if matches!(books, Books::Library) { Revision::read(&self.connection)? } else { Revision::default() };
+        let revision = TreeRevision {
+            visibility: library.visibility,
+            subjects: library.subjects,
+            legacy: library.legacy,
+            taxonomy_revision: crate::browse::revision::taxonomy(&self.connection)?,
+            taxonomy_local_changes: (!self.connection.is_readonly("curated")?).then(|| self.connection.total_changes()),
+            taxonomy_data_version: self.connection.pragma_query_value(Some("curated"), "data_version", |row| row.get(0))?,
+            taxonomy_schema_version: self.connection.pragma_query_value(Some("curated"), "schema_version", |row| row.get(0))?,
+            catalog,
+        };
+        {
+            let trees = self.subject_trees.borrow();
+            let cached = match books {
+                Books::Library => &trees.library,
+                Books::Catalog => &trees.catalog,
+            };
+            if let Some(cached) = cached.as_ref().filter(|cached| cached.revision == revision) {
+                return Ok(Arc::clone(&cached.nodes));
+            }
+        }
+        let nodes = Arc::new(load()?);
+        let mut trees = self.subject_trees.borrow_mut();
+        let cached = match books {
+            Books::Library => &mut trees.library,
+            Books::Catalog => &mut trees.catalog,
+        };
+        *cached = Some(CachedTree { revision, nodes: Arc::clone(&nodes) });
+        Ok(nodes)
+    }
+
     pub(super) fn load_subject_tree(&self) -> Result<BTreeMap<i64, SubjectNode>, DatabaseError> {
         let mut assignments = Vec::new();
         self.connection.subject_assignments(|row| {
@@ -11,16 +82,23 @@ impl Database {
         self.subject_tree(assignments)
     }
 
-    /// The catalog's books, by position, at the routes of their concepts.
-    pub(super) fn catalog_subject_tree(&self) -> Result<BTreeMap<i64, SubjectNode>, DatabaseError> {
-        let books = crate::catalog::books();
-        let concepts = books.iter().flat_map(|book| book.concepts.iter().copied()).collect::<BTreeSet<_>>();
+    /// The catalog's persisted concept assignments, using the same taxonomy
+    /// route lookup and tree compaction as personal-library assignments.
+    pub(in crate::browse) fn catalog_subject_tree(&self, catalog: &Connection) -> Result<Arc<BTreeMap<i64, SubjectNode>>, DatabaseError> {
+        let revision = catalog.query_row("SELECT version,release_id,format_version,taxonomy_revision FROM catalog_browse_revision WHERE singleton=1", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).optional()?;
+        self.cached_subject_tree(Books::Catalog, Some((revision, catalog.total_changes(), catalog.pragma_query_value(None, "data_version", |row| row.get(0))?)), || self.load_catalog_subject_tree(catalog))
+    }
+
+    fn load_catalog_subject_tree(&self, catalog: &Connection) -> Result<BTreeMap<i64, SubjectNode>, DatabaseError> {
+        let mut statement = catalog.prepare("SELECT book_row_id,concept_id FROM catalog_browse_concept")?;
+        let concepts = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+        let selected = concepts.iter().map(|(_, concept)| *concept).collect::<BTreeSet<_>>();
         let mut routes = BTreeMap::<i64, Vec<i64>>::new();
-        self.connection.concept_routes(&serde_json::to_string(&concepts).map_err(DatabaseError::operation)?, |row| {
+        self.connection.concept_routes(&serde_json::to_string(&selected).map_err(DatabaseError::operation)?, |row| {
             routes.entry(row.get(0)?).or_default().push(row.get(1)?);
             Ok(())
         })?;
-        let assignments = books.iter().enumerate().flat_map(|(index, book)| book.concepts.iter().flat_map(|concept| routes.get(concept).into_iter().flatten()).map(move |route| (index as i64, *route))).collect();
+        let assignments = concepts.into_iter().flat_map(|(book, concept)| routes.get(&concept).into_iter().flatten().map(move |route| (book, *route))).collect();
         self.subject_tree(assignments)
     }
 
@@ -65,7 +143,7 @@ impl Database {
 
 /// Collapse small leaves, then absorb a sole child of an empty wrapper while
 /// keeping the wrapper's label. Membership is independent of page filters.
-pub(crate) fn compact_node(route: i64, nodes: &mut BTreeMap<i64, SubjectNode>) -> bool {
+pub(in crate::browse) fn compact_node(route: i64, nodes: &mut BTreeMap<i64, SubjectNode>) -> bool {
     let children = nodes[&route].children.clone();
     for child in children {
         if !compact_node(child, nodes) {
@@ -93,7 +171,7 @@ pub(crate) fn compact_node(route: i64, nodes: &mut BTreeMap<i64, SubjectNode>) -
     true
 }
 
-pub(crate) fn subtree_routes(nodes: &BTreeMap<i64, SubjectNode>, root: i64) -> BTreeSet<i64> {
+pub(in crate::browse) fn subtree_routes(nodes: &BTreeMap<i64, SubjectNode>, root: i64) -> BTreeSet<i64> {
     let mut routes = BTreeSet::new();
     let mut pending = vec![root];
     while let Some(route) = pending.pop() {
@@ -112,13 +190,105 @@ mod tests {
     use crate::transactions::WriteOutcome;
 
     #[test]
+    fn leaf_assignments_count_upwards_once_without_combining_separate_branches() {
+        let db = Database::open(":memory:").unwrap();
+        db.initialize_library().unwrap();
+        db.connection.fixtures_detach_curated_concept_2().unwrap();
+        let assignments = (1..=3).flat_map(|book| [(book, 4), (book, 5)]).chain((4..=6).map(|book| (book, 2))).collect();
+        let tree = db.subject_tree(assignments).unwrap();
+        assert_eq!(tree[&1].members, BTreeSet::from([1, 2, 3, 4, 5, 6]));
+        assert_eq!(tree[&3].members, BTreeSet::from([1, 2, 3]));
+        assert_eq!(tree[&0].members.len(), 6, "separate routes must not double-count books");
+        assert_eq!(tree[&1].direct, BTreeSet::from([4, 5, 6]), "descendants count upwards without direct parent assignments");
+        assert_eq!(tree[&4].direct, BTreeSet::from([1, 2, 3]));
+    }
+
+    #[test]
+    fn library_and_catalog_reuse_the_same_tree_structure_and_invalidate_on_edits() {
+        let db = Database::open(":memory:").unwrap();
+        db.initialize_library().unwrap();
+        db.connection.fixtures_detach_curated_concept_2().unwrap();
+        let catalog = Connection::open_in_memory().unwrap();
+        catalog.execute_batch(include_str!("../../catalog/schema.sql")).unwrap();
+        catalog.execute("INSERT INTO catalog_browse_revision VALUES(1,13,1,8,'test')", []).unwrap();
+        for id in 1..=3 {
+            db.connection.fixtures_insert_book_6(&id).unwrap();
+            db.connection.fixtures_insert_book_dir(&(sync_common::ROOT_DIR_ID.to_string()), &id, &(format!("book{id}.epub"))).unwrap();
+            db.connection.fixtures_insert_book_unified_concept_2(&id, &4).unwrap();
+            catalog.execute("INSERT INTO catalog_browse_concept VALUES(?1,4)", [id]).unwrap();
+        }
+        let library = db.subject_tree_for(Books::Library).unwrap();
+        let external = db.catalog_subject_tree(&catalog).unwrap();
+        let structure = |nodes: &BTreeMap<i64, SubjectNode>| nodes.iter().map(|(&route, node)| (route, node.label.clone(), node.parent, node.children.clone(), node.members.clone(), node.direct.clone())).collect::<Vec<_>>();
+        assert_eq!(structure(&library), structure(&external));
+        assert!(Arc::ptr_eq(&library, &db.subject_tree_for(Books::Library).unwrap()));
+        assert!(Arc::ptr_eq(&external, &db.catalog_subject_tree(&catalog).unwrap()));
+
+        // Filters affect counts and cards, never the cached tree's compaction.
+        let query = library_model::LibraryBrowseQuery {
+            location: BrowseLocation::Subject(0),
+            search: "science".into(),
+            languages: vec!["sv".into()],
+            file_types: vec![],
+            chip_sort: Default::default(),
+            book_sort: Default::default(),
+            hide_finished: false,
+            include_direct_child_books: false,
+        };
+        db.browse(&query, false).unwrap();
+        assert!(Arc::ptr_eq(&library, &db.subject_tree_for(Books::Library).unwrap()));
+
+        db.connection.fixtures_update_curated_concept_preferred_label_science().unwrap();
+        let renamed = db.subject_tree_for(Books::Library).unwrap();
+        assert!(!Arc::ptr_eq(&library, &renamed));
+        assert_eq!(renamed[&1].label, "Renamed science");
+        let renamed_catalog = db.catalog_subject_tree(&catalog).unwrap();
+        assert!(!Arc::ptr_eq(&external, &renamed_catalog));
+        assert_eq!(structure(&renamed), structure(&renamed_catalog));
+
+        catalog.execute_batch("DELETE FROM catalog_browse_concept WHERE book_row_id=3; UPDATE catalog_browse_revision SET release_id=2").unwrap();
+        let updated = db.catalog_subject_tree(&catalog).unwrap();
+        assert!(!Arc::ptr_eq(&renamed_catalog, &updated));
+        assert!(updated[&0].children.is_empty(), "new releases must recompute compaction");
+        assert_eq!(updated[&0].direct, BTreeSet::from([1, 2]));
+        assert!(Arc::ptr_eq(&renamed, &db.subject_tree_for(Books::Library).unwrap()), "catalog updates do not rebuild the library tree");
+
+        db.connection.fixtures_delete_book_dir().unwrap();
+        let removed = db.subject_tree_for(Books::Library).unwrap();
+        assert!(!Arc::ptr_eq(&renamed, &removed));
+        assert_eq!(removed[&0].direct.len(), 2);
+    }
+
+    #[test]
+    fn subject_tree_cache_observes_commits_from_another_library_connection() {
+        let path = std::env::temp_dir().join(format!("subject-tree-cache-{}.sqlite3", uuid::Uuid::new_v4()));
+        {
+            let reader = Database::open(&path).unwrap();
+            reader.initialize_library().unwrap();
+            let writer = Database::open(&path).unwrap();
+            writer.initialize_library().unwrap();
+            let before = reader.with_browse_snapshot(|| reader.subject_tree_for(Books::Library)).unwrap();
+            let changes = reader.connection.total_changes();
+            writer.connection.fixtures_insert_book_6(&1).unwrap();
+            writer.connection.fixtures_insert_book_dir(&(sync_common::ROOT_DIR_ID.to_string()), &1, &"book.epub").unwrap();
+            let concept: i64 = writer.connection.query_row("SELECT concept_id FROM curated.unified_concept_route WHERE parent_route_id!=0 LIMIT 1", [], |row| row.get(0)).unwrap();
+            writer.connection.fixtures_insert_book_unified_concept_2(&1, &concept).unwrap();
+            let after = reader.with_browse_snapshot(|| reader.subject_tree_for(Books::Library)).unwrap();
+            assert_eq!(reader.connection.total_changes(), changes);
+            assert!(!Arc::ptr_eq(&before, &after));
+            assert!(after[&0].members.contains(&1));
+            assert!(Arc::ptr_eq(&after, &reader.with_browse_snapshot(|| reader.subject_tree_for(Books::Library)).unwrap()));
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn read_time_compaction_restores_and_recascades_after_assignment_changes() {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
         // This fixture owns derived rows directly; do not enqueue canonical edits.
 
-        db.connection.fixtures_detach_curated_taxonomy_meta()
-            .unwrap();
+        db.connection.fixtures_detach_curated_taxonomy_meta().unwrap();
         let insert = |first: i64, last: i64| {
             db.with_write_transaction(|tx| {
                 for id in first..=last {
@@ -187,8 +357,7 @@ mod tests {
         db.initialize_library().unwrap();
         // This fixture owns derived rows directly; do not enqueue canonical edits.
 
-        db.connection.fixtures_detach_curated_taxonomy_meta_2()
-            .unwrap();
+        db.connection.fixtures_detach_curated_taxonomy_meta_2().unwrap();
         let insert = |range: std::ops::RangeInclusive<i64>| {
             db.with_write_transaction(|tx| {
                 for id in range {
@@ -238,12 +407,10 @@ mod tests {
     fn multiple_routes_filters_search_scope_and_taxonomy_edits_are_read_live() {
         let db = Database::open(":memory:").unwrap();
         db.initialize_library().unwrap();
-        db.connection.fixtures_detach_curated_concept_2()
-            .unwrap();
+        db.connection.fixtures_detach_curated_concept_2().unwrap();
         for id in 1..=3 {
             db.connection.fixtures_insert_book_6(&id).unwrap();
-            db.connection.fixtures_insert_book_dir_2(&(sync_common::ROOT_DIR_ID.to_string()), &id, &(format!("book{id}.epub")), &(i64::from(id == 1)))
-                .unwrap();
+            db.connection.fixtures_insert_book_dir_2(&(sync_common::ROOT_DIR_ID.to_string()), &id, &(format!("book{id}.epub")), &(i64::from(id == 1))).unwrap();
             db.connection.fixtures_insert_book_unified_concept_4(&id).unwrap();
             db.connection.fixtures_insert_book_language_2(&id, &(if id == 1 { "en" } else { "sv" })).unwrap();
         }
@@ -289,4 +456,21 @@ mod tests {
 
 #[cfg(test)]
 use crate::sql_fixtures::FixturesSql;
-
+#[test]
+fn reading_metadata_and_background_writes_preserve_structural_tree() {
+    let db = Database::open(":memory:").unwrap();
+    db.initialize_library().unwrap();
+    let concept: i64 = db.connection.query_row("SELECT concept_id FROM curated.unified_concept_route WHERE route_id!=0 LIMIT 1", [], |row| row.get(0)).unwrap();
+    for id in 1..=3 {
+        db.connection.fixtures_insert_book_6(&id).unwrap();
+        db.connection.fixtures_insert_book_dir(&sync_common::ROOT_DIR_ID.to_string(), &id, &format!("book{id}.epub")).unwrap();
+        db.connection.fixtures_insert_book_unified_concept_2(&id, &concept).unwrap();
+    }
+    let original = db.subject_tree_for(Books::Library).unwrap();
+    db.connection.execute("UPDATE book SET title='Updated',read_progress=0.5,read_at=100,popularity_rating_count=12", []).unwrap();
+    db.connection.execute("UPDATE library_local_state SET scan_state='pending'", []).unwrap();
+    db.connection.execute("UPDATE book_dir SET local_hash='new fingerprint',is_downloaded=1", []).unwrap();
+    assert!(Arc::ptr_eq(&original, &db.subject_tree_for(Books::Library).unwrap()));
+    db.connection.execute("DELETE FROM book_dir WHERE book_row_id=1", []).unwrap();
+    assert!(!Arc::ptr_eq(&original, &db.subject_tree_for(Books::Library).unwrap()));
+}
