@@ -9,6 +9,10 @@ on:
         type: boolean
         required: true
         default: false
+      source_commit:
+        description: Optional application source commit to package
+        type: string
+        required: false
       build_only:
         description: Build packages without running or requiring tests
         required: true
@@ -62,6 +66,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           path: bokheim
+          ref: ${{ inputs.source_commit || github.sha }}
       - uses: actions/checkout@v6
         with:
           repository: JohanAnderssonOstling/GPUI-Fork
@@ -96,6 +101,8 @@ jobs:
           workspaces: bokheim -> target
           cache-on-failure: true
           cache-workspace-crates: true
+      - name: Restore native speech dependencies
+        run: cargo clean --release --target "${{ matrix.target }}" -p sherpa-onnx-sys
       - name: Verify version tag
         env:
           PUBLISH_REQUESTED: ${{ inputs.publish || false }}
@@ -118,6 +125,7 @@ jobs:
             cargo test --release -p pdf-reader-core --test packaged_runtime --target "${{ matrix.target }}"
       - name: Package and verify architecture bundle
         run: |
+          export GITHUB_SHA="$(git rev-parse HEAD)"
           python3 apps/desktop-gpui/macos/package.py architecture \
             --arch "${{ matrix.arch }}" --output "$RUNNER_TEMP/macos-package"
       - uses: actions/upload-artifact@v4
@@ -142,6 +150,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           path: bokheim
+          ref: ${{ inputs.source_commit || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -151,6 +160,7 @@ jobs:
           path: packages
       - name: Combine, sign and verify universal app
         run: |
+          export GITHUB_SHA="$(git rev-parse HEAD)"
           python3 apps/desktop-gpui/macos/package.py universal \
             --arm64 "$GITHUB_WORKSPACE/packages/bokheim-macos-arm64/Bokheim-macOS-arm64.zip" \
             --x86-64 "$GITHUB_WORKSPACE/packages/bokheim-macos-x86_64/Bokheim-macOS-x86_64.zip" \
