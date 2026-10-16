@@ -122,7 +122,7 @@ pub fn open_ui(
     }
     profile.mark("fonts_register");
     #[cfg(feature = "kobo")]
-    if let Err(error) = cx.text_system().add_fonts(vec![Cow::Borrowed(include_bytes!("../../../reference/plato/fonts/TerminusTTF-Regular.ttf")), Cow::Borrowed(include_bytes!("../../../reference/plato/fonts/TerminusTTF-Bold.ttf"))]) {
+    if let Err(error) = cx.text_system().add_fonts(vec![Cow::Borrowed(include_bytes!("../../ui/design-tokens/assets/fonts/terminus/TerminusTTF-Regular.ttf")), Cow::Borrowed(include_bytes!("../../ui/design-tokens/assets/fonts/terminus/TerminusTTF-Bold.ttf"))]) {
         log::warn!("failed to install device fonts: {error}");
     }
     #[cfg(all(feature = "desktop", target_os = "linux"))]
