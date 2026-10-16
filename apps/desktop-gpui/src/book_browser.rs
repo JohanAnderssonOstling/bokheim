@@ -395,7 +395,7 @@ impl Browser {
         };
         if let Err(error) = (browser.native)(&json!({ "command": "open", "id": id, "request": request }).to_string()) {
             receive(id, &json!({ "kind": "error", "message": error }).to_string());
-            browser.error = Some(error);
+            browser.error = Some(components::user_facing_error(&error, "Could not open the browser. Please try again.").to_owned());
         }
         browser
     }
@@ -404,7 +404,7 @@ impl Browser {
         payload["command"] = command.into();
         payload["id"] = self.id.into();
         if let Err(error) = (self.native)(&payload.to_string()) {
-            self.error = Some(error);
+            self.error = Some(components::user_facing_error(&error, "Could not update the browser page. Please try again.").to_owned());
         }
     }
 
@@ -516,7 +516,7 @@ impl Browser {
             }
             NativeEvent::PageProgress { percent } => self.page_progress = percent,
             NativeEvent::Error { message } => {
-                self.error = Some(message);
+                self.error = Some(components::user_facing_error(&message, "Could not open this page. Check the address and try again.").to_owned());
                 if !self.opened {
                     cx.emit(Closed);
                 }

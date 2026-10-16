@@ -139,7 +139,7 @@ impl ReaderView {
 
     fn opening_failed(&mut self, error: String, cx: &mut Context<Self>) {
         log::error!("cannot load reader page for {:?}: {error}", self.title);
-        self.state = ReaderState::Error(error.clone().into());
+        self.state = ReaderState::Error(ui_components::user_facing_error(&error, "Could not open this book. Try opening it again, or download another copy.").into());
         cx.emit(BookOpenFailed(error));
         cx.notify();
     }

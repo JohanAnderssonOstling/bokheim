@@ -42,8 +42,8 @@ impl LibraryClient {
         }
         for book in &plan.books {
             let parent = if book.direct { destination } else { *folders.get(&book.directory).ok_or("destination folder hierarchy is incomplete")? };
-            let resource = source.transport.handle().map_err(|error| error.to_string())?.export_transfer_book(book.content_hash).await.map_err(|error| error.to_string())?;
-            let created = self.transport.handle().map_err(|error| error.to_string())?.import_transfer_book(parent, book.file_name.clone(), resource).await.map_err(|error| error.to_string())?;
+            let resource = source.transport.handle().await.map_err(|error| error.to_string())?.export_transfer_book(book.content_hash).await.map_err(|error| error.to_string())?;
+            let created = self.transport.handle().await.map_err(|error| error.to_string())?.import_transfer_book(parent, book.file_name.clone(), resource).await.map_err(|error| error.to_string())?;
             // Entire imported trees are already covered by their root's undo.
             if created && book.direct {
                 outcome.created_placements.push((book.content_hash, parent));

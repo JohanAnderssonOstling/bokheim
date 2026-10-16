@@ -1,44 +1,44 @@
 //! Application-owned transport and lifetime adapters for the library client.
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::executor::BoxedBackendFuture;
 use crate::AppClient;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::BackendError;
+use library_backend::client::{ClientTransport, LibraryClient};
 #[cfg(not(target_arch = "wasm32"))]
 use library_backend::LibraryHandle;
-use library_backend::client::{ClientTransport, LibraryClient};
 #[cfg(target_arch = "wasm32")]
 use library_backend::{ContentHash, DirId, DirectoryImport, ImportFailure, LibraryCommand, ResolvedBookData};
 use sync_common::LibraryId;
+#[cfg(not(target_arch = "wasm32"))]
+use tokio::sync::OnceCell;
 
 pub(crate) fn connect(app: AppClient, library_id: LibraryId) -> LibraryClient {
-    #[cfg(not(target_arch = "wasm32"))]
-    let handle = app.transport.libraries.get(&library_id);
     LibraryClient::new(
         library_id,
         Connection {
             app,
-            #[cfg(target_arch = "wasm32")]
             library_id,
             #[cfg(not(target_arch = "wasm32"))]
-            handle,
+            handle: OnceCell::new(),
         },
     )
 }
 
 struct Connection {
     // Retain the app worker/session for as long as this client can issue requests.
-    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     app: AppClient,
-    #[cfg(target_arch = "wasm32")]
     library_id: LibraryId,
+    // Resolve only when a request starts, after the shared startup phase.
     #[cfg(not(target_arch = "wasm32"))]
-    handle: Result<LibraryHandle, BackendError>,
+    handle: OnceCell<LibraryHandle>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ClientTransport for Connection {
-    fn handle(&self) -> Result<&LibraryHandle, BackendError> {
-        self.handle.as_ref().map_err(Clone::clone)
+    fn handle(&self) -> BoxedBackendFuture<'_, Result<&LibraryHandle, BackendError>> {
+        Box::pin(async move { self.handle.get_or_try_init(|| self.app.transport.library_handle(self.library_id)).await })
     }
 }
 
@@ -65,8 +65,8 @@ mod tests {
     #[tokio::test]
     async fn native_library_client_retains_worker_without_app_client() {
         use std::sync::{
-            Arc,
             atomic::{AtomicBool, Ordering},
+            Arc,
         };
         let root = tempfile::tempdir().unwrap();
         let context = crate::BackendContext::initialize(crate::AppDataLocation::native_path(root.path())).unwrap();

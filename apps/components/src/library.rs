@@ -11,8 +11,8 @@ use gpui_component::{Icon, IconName, Selectable, Sizable, box_shadow};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
-    BOOK_CARD_COVER_CONTENT_GAP, BOOK_CARD_TEXT_LINES, BOOK_CARD_TITLE_HEIGHT_REM, BOOK_CARD_TITLE_LINE_HEIGHT_EM, BOOK_CARD_TITLE_SIZE, BOOK_CARD_TITLE_WEIGHT, BOOK_COVER_ASPECT_RATIO, BrowserTheme, RADIUS_MD,
-    RADIUS_SM, SPACE_SM, SPACE_XS, TEXT_SM, TEXT_XS,
+    BOOK_CARD_COVER_CONTENT_GAP, BOOK_CARD_TEXT_LINES, BOOK_CARD_TITLE_HEIGHT_REM, BOOK_CARD_TITLE_LINE_HEIGHT_EM, BOOK_CARD_TITLE_SIZE, BOOK_CARD_TITLE_WEIGHT, BOOK_COVER_ASPECT_RATIO, BrowserTheme, RADIUS_MD, RADIUS_SM, SPACE_SM,
+    SPACE_XS, TEXT_SM, TEXT_XS,
 };
 
 /// Cover, then the text block. The two levels each have one gap: `SPACE_MD`
@@ -99,8 +99,8 @@ pub fn book_cover_frame(theme: BrowserTheme, aspect_ratio: f32) -> Div {
 const BOOK_COVER_GROUP: &str = "book-cover";
 
 /// A centered transport action revealed while the pointer is over the cover.
-pub fn book_cover_play_button(id: impl Into<ElementId>) -> Stateful<Div> {
-    book_cover_badge_plate()
+pub fn book_cover_play_button(id: impl Into<ElementId>, theme: BrowserTheme) -> Stateful<Div> {
+    book_cover_badge_plate(theme)
         .id(id)
         .absolute()
         .left(gpui::relative(0.5))
@@ -112,12 +112,12 @@ pub fn book_cover_play_button(id: impl Into<ElementId>) -> Stateful<Div> {
         .cursor_pointer()
         .invisible()
         .group_hover(BOOK_COVER_GROUP, |style| style.visible())
-        .hover(|style| style.bg(gpui::black().opacity(0.7)))
-        .child(Icon::empty().path("icons/play-fill.svg").size(gpui::rems(1.25)).text_color(gpui::white()))
+        .hover(move |style| style.bg(theme.accent_wash_hover))
+        .child(Icon::empty().path("icons/play-fill.svg").size(gpui::rems(1.25)).text_color(theme.text))
 }
 
 /// A compact length mark that also identifies an audiobook by its headphones.
-pub fn book_cover_audiobook_length(length: Option<impl Into<SharedString>>) -> Div {
+pub fn book_cover_audiobook_length(length: Option<impl Into<SharedString>>, theme: BrowserTheme) -> Div {
     div()
         .absolute()
         .left(px(8.0))
@@ -127,8 +127,10 @@ pub fn book_cover_audiobook_length(length: Option<impl Into<SharedString>>) -> D
         .gap(px(5.0))
         .px(px(7.0))
         .py(px(5.0))
-        .bg(gpui::black().opacity(0.55))
-        .text_color(gpui::white())
+        .bg(theme.page_bg)
+        .border_1()
+        .border_color(theme.rule)
+        .text_color(theme.text)
         .text_size(px(11.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .child(Icon::new(crate::Headphones).size(px(11.0)))
@@ -168,8 +170,7 @@ pub fn book_cover_image(id: impl Into<SharedString>, source: impl Into<ImageSour
         // mask regardless of its own corner radius — an image paints its
         // corners from its own style, so the rounding has to be set here too.
         .child(img(source).size_full().object_fit(ObjectFit::Contain).opacity(opacity).rounded_r(px(BOOK_COVER_RADIUS)))
-        .child(book_cover_spine())
-        .child(book_cover_hinge())
+        .when(!cfg!(feature = "kobo"), |cover| cover.child(book_cover_spine()).child(book_cover_hinge()))
         .into_any_element()
 }
 
@@ -228,7 +229,7 @@ pub fn book_cover_progress(progress: f32, theme: BrowserTheme) -> Option<AnyElem
             .flex()
             .flex_col()
             .justify_end()
-            .child(div().absolute().inset_0().bg(gpui::linear_gradient(0.0, gpui::linear_color_stop(gpui::black().opacity(0.6), 0.0), gpui::linear_color_stop(gpui::transparent_black(), 1.0))))
+            .when(!cfg!(feature = "kobo"), |cover| cover.child(div().absolute().inset_0().bg(gpui::linear_gradient(0.0, gpui::linear_color_stop(gpui::black().opacity(0.6), 0.0), gpui::linear_color_stop(gpui::transparent_black(), 1.0)))))
             .child(div().relative().h(px(crate::BOOK_COVER_PROGRESS_HEIGHT)).flex().flex_row().when(cfg!(feature = "kobo"), |track| track.bg(theme.page_bg)).child(div().w(gpui::relative(fraction)).h_full().bg(theme.accent)))
             .into_any_element(),
     )
@@ -299,6 +300,7 @@ pub fn section_card_band_index(kind: NavigationIcon, key: &str) -> usize {
     (hash % LIBRARY_GRADIENTS.len() as u64) as usize
 }
 
+#[cfg_attr(feature = "kobo", allow(dead_code))]
 fn section_card_band_colors(index: usize) -> (gpui::Hsla, gpui::Hsla) {
     #[cfg(feature = "kobo")]
     let (from, to) = (0x000000, 0x333333);
@@ -628,7 +630,9 @@ fn paint_generated_cover(design: CoverDesign, bounds: gpui::Bounds<Pixels>, lett
     let (title_line, subtitle_line) = (title_size * 1.18, subtitle_size * 1.25);
     let title = shape_cover_text(&lettering.title, raleway.clone(), ink, title_size, text_width, 5, window);
     let italic = gpui::Font { style: gpui::FontStyle::Italic, ..raleway.clone() };
-    let subtitle = lettering.subtitle.as_ref().map(|subtitle| shape_cover_text(subtitle, italic, ink.opacity(0.8), subtitle_size, text_width, 2, window)).unwrap_or_default();
+    // Softened on desktop; solid black on Kobo, where grey thresholds away on page turns.
+    let subtitle_colour = if cfg!(feature = "kobo") { ink } else { ink.opacity(0.8) };
+    let subtitle = lettering.subtitle.as_ref().map(|subtitle| shape_cover_text(subtitle, italic, subtitle_colour, subtitle_size, text_width, 2, window)).unwrap_or_default();
     let ornament_height = match design.ornament {
         CoverOrnament::Bars => 3.0 * line + 2.0 * across(1.5),
         CoverOrnament::Lozenge => across(4.8),
@@ -650,7 +654,8 @@ fn paint_generated_cover(design: CoverDesign, bounds: gpui::Bounds<Pixels>, lett
     let author_size = across(3.3).max(5.0);
     let author_line = author_size * 1.35;
     let bold = gpui::Font { weight: gpui::FontWeight::BOLD, ..raleway };
-    let author = shape_cover_text(&lettering.author, bold, ink, author_size, author_width, 2, window);
+    // Up to four lines: a book with several authors wraps rather than being cut off.
+    let author = shape_cover_text(&lettering.author, bold, ink, author_size, author_width, 4, window);
     let plate_height = 2.0 * line + across(2.4) + cover_text_height(&author, author_line) + pad;
     let plate_y = height - down(9.0) - plate_height;
     let plate_top = if author.is_empty() { height - down(9.0) } else { plate_y };
@@ -673,7 +678,8 @@ fn paint_generated_cover(design: CoverDesign, bounds: gpui::Bounds<Pixels>, lett
 }
 
 /// The generated jacket: one element whose canvas paints the whole design at
-/// the cover's real size, so the type scales with the card.
+/// the cover's real size, so the type scales with the card. Always 1.6 times
+/// as tall as it is wide, audiobooks included.
 fn generated_cover(design: CoverDesign, lettering: Option<CoverLettering>, theme: BrowserTheme) -> Div {
     book_cover(theme, BOOK_COVER_ASPECT_RATIO)
         .overflow_hidden()
@@ -821,43 +827,42 @@ pub fn book_card_title_row(title: impl Into<SharedString>, subtitle: Option<&str
 /// corner — the one the progress line, the audiobook tag and the spine leave
 /// free — and the control that fetches it.
 ///
-/// A dark plate under a light glyph, like the scrim the progress line sits on,
-/// so it reads against any cover art in either theme. No border: a bordered
-/// square beside a title read as a checkbox. `pending` swaps the glyph for a
-/// spinner in the same place, so nothing moves when the mark is pressed; the
+/// An opaque theme surface and a contrasting glyph keep the control readable
+/// over any cover art, including black ink on white paper on Kobo. `pending`
+/// swaps the glyph for a spinner in the same place, so nothing moves when the mark is pressed; the
 /// caller only makes the idle mark clickable.
-pub fn book_cover_download_badge(id: impl Into<ElementId>, pending: bool) -> Stateful<Div> {
-    book_cover_action_badge(id, pending, download_glyph())
+pub fn book_cover_download_badge(id: impl Into<ElementId>, pending: bool, theme: BrowserTheme) -> Stateful<Div> {
+    book_cover_action_badge(id, pending, download_glyph(), theme)
 }
 
 /// Waiting for transfer policy or another download requires no animation.
-pub fn book_cover_queued_badge(id: impl Into<ElementId>) -> Stateful<Div> {
-    book_cover_badge_hit_area(id).child(book_cover_badge_plate().child(Icon::empty().path("icons/hourglass.svg").size(gpui::rems(crate::DOWNLOAD_ICON_SIZE_REM)).text_color(gpui::white())))
+pub fn book_cover_queued_badge(id: impl Into<ElementId>, theme: BrowserTheme) -> Stateful<Div> {
+    book_cover_badge_hit_area(id).child(book_cover_badge_plate(theme).child(Icon::empty().path("icons/hourglass.svg").size(gpui::rems(crate::DOWNLOAD_ICON_SIZE_REM)).text_color(theme.text)))
 }
 
 /// The same corner for a catalog book: adding it to the library, which
 /// downloads it.
-pub fn book_cover_add_badge(id: impl Into<ElementId>, pending: bool) -> Stateful<Div> {
-    book_cover_action_badge(id, pending, download_glyph())
+pub fn book_cover_add_badge(id: impl Into<ElementId>, pending: bool, theme: BrowserTheme) -> Stateful<Div> {
+    book_cover_action_badge(id, pending, download_glyph(), theme)
 }
 
 /// The same corner for a feed book its feed sells: opening its store page.
-pub fn book_cover_buy_badge(id: impl Into<ElementId>) -> Stateful<Div> {
-    book_cover_action_badge(id, false, buy_glyph().size(gpui::rems(crate::DOWNLOAD_ICON_SIZE_REM)))
+pub fn book_cover_buy_badge(id: impl Into<ElementId>, theme: BrowserTheme) -> Stateful<Div> {
+    book_cover_action_badge(id, false, buy_glyph().size(gpui::rems(crate::DOWNLOAD_ICON_SIZE_REM)), theme)
 }
 
 /// The same corner for a catalog book the library already holds: a mark,
 /// not an action.
-pub fn book_cover_in_library_badge(id: impl Into<ElementId>) -> Stateful<Div> {
-    book_cover_badge_hit_area(id).child(book_cover_badge_plate().child(Icon::new(IconName::Check).size(gpui::rems(crate::DOWNLOAD_ICON_SIZE_REM)).text_color(gpui::white())))
+pub fn book_cover_in_library_badge(id: impl Into<ElementId>, theme: BrowserTheme) -> Stateful<Div> {
+    book_cover_badge_hit_area(id).child(book_cover_badge_plate(theme).child(Icon::new(IconName::Check).size(gpui::rems(crate::DOWNLOAD_ICON_SIZE_REM)).text_color(theme.text)))
 }
 
-fn book_cover_action_badge(id: impl Into<ElementId>, pending: bool, glyph: Icon) -> Stateful<Div> {
-    let plate_hover = gpui::black().opacity(0.7);
+fn book_cover_action_badge(id: impl Into<ElementId>, pending: bool, glyph: Icon, theme: BrowserTheme) -> Stateful<Div> {
+    let plate_hover = theme.accent_wash_hover;
     book_cover_badge_hit_area(id).when(!pending, |badge| badge.cursor_pointer()).child(
-        book_cover_badge_plate()
-            .when(pending, |plate| plate.child(Spinner::new().icon(IconName::LoaderCircle).xsmall().color(gpui::white())))
-            .when(!pending, |plate| plate.group_hover(BOOK_COVER_BADGE_GROUP, move |style| style.bg(plate_hover)).child(glyph.text_color(gpui::white()))),
+        book_cover_badge_plate(theme)
+            .when(pending, |plate| plate.child(Spinner::new().icon(IconName::LoaderCircle).xsmall().color(theme.text)))
+            .when(!pending, |plate| plate.group_hover(BOOK_COVER_BADGE_GROUP, move |style| style.bg(plate_hover)).child(glyph.text_color(theme.text))),
     )
 }
 
@@ -876,8 +881,8 @@ fn book_cover_badge_hit_area(id: impl Into<ElementId>) -> Stateful<Div> {
     }
 }
 
-fn book_cover_badge_plate() -> Div {
-    div().size(gpui::rems(DOWNLOAD_ACTION_SIZE_REM)).flex().items_center().justify_center().rounded(px(RADIUS_SM)).bg(gpui::black().opacity(0.45))
+fn book_cover_badge_plate(theme: BrowserTheme) -> Div {
+    div().size(gpui::rems(DOWNLOAD_ACTION_SIZE_REM)).flex().items_center().justify_center().rounded(px(RADIUS_SM)).border_1().border_color(theme.rule).bg(theme.page_bg).text_color(theme.text)
 }
 
 /// The cloud-and-arrow glyph every download action carries, on a book's cover
@@ -1060,10 +1065,21 @@ pub fn section_card_frame(washed: bool, theme: BrowserTheme) -> Div {
     div().absolute().inset_0().min_w_0().flex().flex_col().bg(if washed { theme.accent_wash } else { theme.page_bg })
 }
 
-/// Full-width colour behind a section card's heading.
+/// Full-width colour behind a section card's heading. On Kobo it is not
+/// filled: the page shows through, ruled in black above and at the sides, and
+/// the content box's own border closes it below.
 pub fn section_card_band(index: usize, heading: impl IntoElement) -> Div {
-    let (from, to) = section_card_band_colors(index);
-    div().flex_none().min_w_0().py(gpui::rems(crate::SECTION_CARD_HEADING_PADDING_REM)).px(px(SPACE_MD)).bg(gpui::linear_gradient(120.0, gpui::linear_color_stop(from, 0.0), gpui::linear_color_stop(to, 1.0))).child(heading)
+    let band = div().flex_none().min_w_0().py(gpui::rems(crate::SECTION_CARD_HEADING_PADDING_REM)).px(px(SPACE_MD));
+    #[cfg(feature = "kobo")]
+    {
+        let _ = index;
+        band.bg(gpui::white()).border_t_1().border_x_1().border_color(gpui::black()).child(heading)
+    }
+    #[cfg(not(feature = "kobo"))]
+    {
+        let (from, to) = section_card_band_colors(index);
+        band.bg(gpui::linear_gradient(120.0, gpui::linear_color_stop(from, 0.0), gpui::linear_color_stop(to, 1.0))).child(heading)
+    }
 }
 
 /// The area below a section card's heading, enclosed by its own square border.
@@ -1090,7 +1106,8 @@ pub fn section_card_heading(id: impl Into<ElementId>, title: impl Into<SharedStr
         .flex()
         .items_center()
         .gap(px(SPACE_SM))
-        .text_color(gpui::rgb(0xf2efe8))
+        // Light on the colour band; black on Kobo's unfilled one.
+        .text_color(if cfg!(feature = "kobo") { theme.text } else { gpui::rgb(0xf2efe8).into() })
         .when(opens, |heading| heading.cursor_pointer())
         .child(
             div()
@@ -1102,7 +1119,7 @@ pub fn section_card_heading(id: impl Into<ElementId>, title: impl Into<SharedStr
                 .text_ellipsis()
                 .font_family(theme.display_font_family())
                 .text_size(gpui::rems(TEXT_LG))
-                .when(focused, |title| title.text_color(gpui::white()))
+                .when(focused && !cfg!(feature = "kobo"), |title| title.text_color(gpui::white()))
                 .when(opens && !marquee, |title| title.group_hover("section-card-heading", |style| style.underline()))
                 .child(title.into()),
         )
@@ -1153,11 +1170,12 @@ pub fn section_card_cover_arrow(id: impl Into<ElementId>, label: impl Into<Share
         .items_center()
         .justify_center()
         .when(enabled, |arrow| arrow.cursor_pointer())
-        .text_color(gpui::rgb(0xf2efe8))
-        .bg(gpui::white().opacity(0.12))
         .border_1()
-        .border_color(gpui::white().opacity(0.28))
-        .when(enabled, |arrow| arrow.hover(|style| style.bg(gpui::white().opacity(0.22))))
+        // Translucent white on the colour band; outlined black on Kobo's white one.
+        .when(!cfg!(feature = "kobo"), |arrow| {
+            arrow.text_color(gpui::rgb(0xf2efe8)).bg(gpui::white().opacity(0.12)).border_color(gpui::white().opacity(0.28)).when(enabled, |arrow| arrow.hover(|style| style.bg(gpui::white().opacity(0.22))))
+        })
+        .when(cfg!(feature = "kobo"), |arrow| arrow.text_color(gpui::black()).bg(gpui::white()).border_color(gpui::black()))
         .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx))
         .child(Icon::new(icon).size(px(12.0)))
 }

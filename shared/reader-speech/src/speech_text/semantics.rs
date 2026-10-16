@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::ops::Range;
 
-use segment_parser::{NUMBER_VALUE_SCALE, ParseLanguage, SegmentTree, mathematical_operator_spans, measurement_facts, measurement_unit_word_forms, number_range_facts, parse_text_with_language};
+use segment_parser::{NUMBER_VALUE_SCALE, ParseLanguage, SegmentMeasurementFactRef, SegmentTree, mathematical_operator_spans, measurement_facts, measurement_unit_word_forms, number_range_facts, parse_text_with_language};
 
 use super::calendar::calendar_replacements;
 use super::decimals::{number_word_replacements, numeric_replacements};
@@ -78,13 +78,21 @@ pub(super) fn unit_phrase(unit: &str, plural: bool) -> Option<String> {
     }
 }
 
+pub(super) fn ambiguous_inch_abbreviation(tree: &SegmentTree, fact: &SegmentMeasurementFactRef<'_>) -> bool {
+    // In prose, a separated "in" commonly introduces a place or another
+    // phrase ("1988 in New York"). Require an attached abbreviation, a
+    // dotted abbreviation, or a full unit name before speaking inches.
+    let unit = fact.measurement_unit_span();
+    fact.measurement_fact().unit() == "in" && !fact.measurement_separator_span().is_empty() && tree.text()[unit.clone()].eq_ignore_ascii_case("in") && !tree.text()[unit.end..].starts_with('.')
+}
+
 fn measurement_replacements(tree: &SegmentTree) -> impl Iterator<Item = Replacement> + '_ {
     measurement_facts(tree).filter_map(|fact| {
         let measurement = fact.measurement_fact();
         let values = measurement.number_values();
         // Multi-value dimensions and repeated-unit ranges need individual unit
         // spans. Leave those intact rather than expand only their final unit.
-        if values.is_empty() || fact.number_format_requires_locale_change() || (values.len() > 1 && measurement.number_range_typography().is_none()) {
+        if values.is_empty() || fact.number_format_requires_locale_change() || ambiguous_inch_abbreviation(tree, &fact) || (values.len() > 1 && measurement.number_range_typography().is_none()) {
             return None;
         }
         let plural = values.len() != 1 || (values[0] != NUMBER_VALUE_SCALE && values[0] != -NUMBER_VALUE_SCALE);

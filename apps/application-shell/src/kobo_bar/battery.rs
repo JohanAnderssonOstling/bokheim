@@ -40,7 +40,8 @@ impl BatteryPanel {
                     }
                     Err(error) => {
                         panel.status = None;
-                        panel.error = Some(error);
+                        log::warn!("Device control failed: {error}");
+                        panel.error = Some("Could not read the battery level. Try reopening this panel.".into());
                     }
                 }
                 if previous != (panel.status.clone(), panel.error.clone()) {

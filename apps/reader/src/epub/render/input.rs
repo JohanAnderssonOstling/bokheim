@@ -2,8 +2,10 @@
 
 use crate::invalidation::notify;
 use gpui::{Context, Window};
+use html_view_gpui::HtmlPageSnapshot;
+use ui_components::PageTurn;
 
-use crate::epub::ReaderView;
+use crate::epub::{LoadState, ReaderView};
 use crate::invalidation::Component;
 use crate::shell::input::CommandTarget;
 use crate::shell::state_panel::{self, SidebarTab};
@@ -15,17 +17,30 @@ use crate::{
 
 impl CommandTarget<PreviousPage> for ReaderView {
     fn execute(&mut self, _: &PreviousPage, window: &mut Window, cx: &mut Context<Self>) {
-        self.dismiss_touch_selection(cx);
-        self.chrome.hide_for_motion(window, cx);
-        // Renderer position is authoritative. Progress is an asynchronous
-        // projection and may still contain its initial value on the first key.
-        self.with_renderer(cx, |renderer, cx| {
-            renderer.previous_page(cx);
-        });
+        self.turn_page(false, window, cx);
     }
 }
 
 impl ReaderView {
+    /// Every page navigation source shares one transition, including taps,
+    /// keys, wheel bursts and completed Android swipes.
+    fn turn_page(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_touch_selection(cx);
+        self.chrome.hide_for_motion(window, cx);
+        let LoadState::Ready(renderer) = &self.load_state else { return };
+        let renderer = renderer.clone();
+        let outgoing = PageTurn::<HtmlPageSnapshot>::enabled(cx).then(|| renderer.read(cx).page_snapshot()).flatten();
+        let moved = renderer.update(cx, |renderer, cx| if forward { renderer.next_page(cx) } else { renderer.previous_page(cx) });
+        if moved {
+            let drag = self.swipe_preview.take_offset();
+            self.page_turn = outgoing.and_then(|outgoing| PageTurn::new(outgoing, forward, drag, self.page_size.unwrap_or(window.viewport_size()), cx));
+        } else {
+            // The first/last page is a rejected turn, just like a short drag.
+            self.swipe_preview.settle();
+        }
+        cx.notify();
+    }
+
     pub(crate) fn native_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.image_preview.take().is_some() || self.footnote.take().is_some() || self.context_sheet.take().is_some() {
             cx.notify();
@@ -44,16 +59,14 @@ impl ReaderView {
 
 impl CommandTarget<NextPage> for ReaderView {
     fn execute(&mut self, _: &NextPage, window: &mut Window, cx: &mut Context<Self>) {
-        self.dismiss_touch_selection(cx);
-        self.chrome.hide_for_motion(window, cx);
-        self.with_renderer(cx, |renderer, cx| {
-            renderer.next_page(cx);
-        });
+        self.turn_page(true, window, cx);
     }
 }
 
 impl CommandTarget<PreviousLine> for ReaderView {
     fn execute(&mut self, _: &PreviousLine, window: &mut Window, cx: &mut Context<Self>) {
+        self.page_turn = None;
+        self.swipe_preview.clear();
         self.chrome.hide_for_motion(window, cx);
         self.with_renderer(cx, |renderer, cx| renderer.previous_line(cx));
     }
@@ -61,6 +74,8 @@ impl CommandTarget<PreviousLine> for ReaderView {
 
 impl CommandTarget<NextLine> for ReaderView {
     fn execute(&mut self, _: &NextLine, window: &mut Window, cx: &mut Context<Self>) {
+        self.page_turn = None;
+        self.swipe_preview.clear();
         self.chrome.hide_for_motion(window, cx);
         self.with_renderer(cx, |renderer, cx| renderer.next_line(cx));
     }
@@ -69,6 +84,8 @@ impl CommandTarget<NextLine> for ReaderView {
 impl CommandTarget<PreviousSection> for ReaderView {
     fn execute(&mut self, _: &PreviousSection, window: &mut Window, cx: &mut Context<Self>) {
         self.dismiss_touch_selection(cx);
+        self.page_turn = None;
+        self.swipe_preview.clear();
         self.chrome.hide_for_motion(window, cx);
         self.with_renderer(cx, |renderer, cx| renderer.previous_section(cx));
     }
@@ -77,6 +94,8 @@ impl CommandTarget<PreviousSection> for ReaderView {
 impl CommandTarget<NextSection> for ReaderView {
     fn execute(&mut self, _: &NextSection, window: &mut Window, cx: &mut Context<Self>) {
         self.dismiss_touch_selection(cx);
+        self.page_turn = None;
+        self.swipe_preview.clear();
         self.chrome.hide_for_motion(window, cx);
         self.with_renderer(cx, |renderer, cx| renderer.next_section(cx));
     }

@@ -106,7 +106,8 @@ impl LightControl {
                     }
                     Err(error) => {
                         panel.percent = None;
-                        panel.error = Some(error);
+                        log::warn!("Device control failed: {error}");
+                        panel.error = Some("Could not adjust the light. Try again, or restart Bokheim if the problem continues.".into());
                     }
                 }
                 cx.notify();

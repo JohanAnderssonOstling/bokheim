@@ -152,6 +152,10 @@ fn install_sidebar_keyboard<C: SidebarTarget>(owner: &C, target: &Entity<C>, win
             }
             let Some(target) = target.upgrade() else { return };
             let key = &event.keystroke;
+            // The reader-level Find handler opens Search from any tab.
+            if key.key == "f" && key.modifiers.control && !key.modifiers.shift && !key.modifiers.alt && !key.modifiers.platform {
+                return;
+            }
             if key.key == "tab" && !key.modifiers.alt && !key.modifiers.platform {
                 target.update(cx, |this, cx| {
                     visible.set(!components::uses_mobile_reader_controls(window));
@@ -320,6 +324,12 @@ mod tests {
         navigated: Vec<String>,
     }
 
+    impl super::super::input::CommandTarget<crate::FocusReaderSearch> for SettingsTest {
+        fn execute(&mut self, _: &crate::FocusReaderSearch, window: &mut Window, cx: &mut Context<Self>) {
+            self.select_sidebar_tab(SidebarTab::Search, window, cx);
+        }
+    }
+
     impl SidebarTarget for SettingsTest {
         fn close_reader(&mut self, _: &mut Window, _: &mut Context<Self>) {}
         fn hide_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -343,6 +353,7 @@ mod tests {
             true
         }
         fn select_sidebar_tab(&mut self, tab: SidebarTab, window: &mut Window, cx: &mut Context<Self>) {
+            self.sidebar_hidden = false;
             self.tab = tab;
             if tab == SidebarTab::Search {
                 self.search_open = true;
@@ -396,6 +407,7 @@ mod tests {
 
     impl Render for SettingsTest {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            super::super::input::install_reader_search(window, cx);
             let theme = components::browser_theme(cx);
             if components::uses_mobile_reader_controls(window) {
                 self.navigation.keyboard_visibility().set(false);
@@ -438,7 +450,7 @@ mod tests {
                 let rows = (0usize..40)
                     .map(|index| search::result_row(("test-search-hit", index), "An excerpt from a matching passage.".into(), false, theme).debug_selector(move || format!("test-search-hit-{index}")).into_any_element())
                     .collect();
-                search::panel(search::search_bar(&self.search_input, theme), rows, theme)
+                search::panel(search::search_bar(&self.search_input, theme, window, cx), rows, theme)
             } else {
                 div().children((0usize..3).map(|index| div().id(("test-note", index)).focusable().tab_stop(true).debug_selector(move || format!("test-note-{index}")).h(px(40.0)).child("A note"))).into_any_element()
             };
@@ -484,6 +496,67 @@ mod tests {
         let view = cx.update(|_, cx| root.read(cx).view().clone().downcast::<SettingsTest>().ok().unwrap());
         cx.run_until_parked();
         (view, cx)
+    }
+
+    #[gpui::test]
+    fn find_opens_and_focuses_search_from_document_sidebar_and_input(cx: &mut TestAppContext) {
+        let (view, cx) = setup(cx);
+        cx.simulate_keystrokes("ctrl-f");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let view = view.read(cx);
+            assert_eq!(view.tab, SidebarTab::Search);
+            assert!(view.search_input.read(cx).focus_handle(cx).is_focused(window));
+        });
+        cx.simulate_input("remember this query");
+        cx.simulate_keystrokes("ctrl-f");
+        view.read_with(cx, |view, cx| assert_eq!(view.search_input.read(cx).value().as_str(), "remember this query"));
+
+        cx.simulate_keystrokes("escape ctrl-f");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let view = view.read(cx);
+            assert!(!view.sidebar_hidden);
+            assert!(view.search_input.read(cx).focus_handle(cx).is_focused(window));
+            assert_eq!(view.search_input.read(cx).value().as_str(), "remember this query");
+        });
+
+        let settings = cx.debug_bounds("reader-rail-3").unwrap();
+        cx.simulate_click(settings.center(), Default::default());
+        cx.simulate_keystrokes("ctrl-f");
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let view = view.read(cx);
+            assert_eq!(view.tab, SidebarTab::Search);
+            assert!(view.search_input.read(cx).focus_handle(cx).is_focused(window));
+            assert_eq!(view.theme_changes, 0);
+            assert_eq!(view.document_keys, 0);
+        });
+    }
+
+    #[gpui::test]
+    fn search_autofocuses_when_mounted_without_stealing_focus_on_updates(cx: &mut TestAppContext) {
+        let (view, cx) = setup(cx);
+        for _ in 0..2 {
+            view.update(cx, |view, cx| {
+                view.tab = SidebarTab::Search;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                assert!(view.read(cx).search_input.read(cx).focus_handle(cx).is_focused(window));
+                let document_focus = view.read(cx).document_focus.clone();
+                document_focus.focus(window, cx);
+                view.update(cx, |_, cx| cx.notify());
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| assert!(view.read(cx).document_focus.is_focused(window)));
+            view.update(cx, |view, cx| {
+                view.tab = SidebarTab::Contents;
+                cx.notify();
+            });
+            cx.run_until_parked();
+        }
     }
 
     #[gpui::test]

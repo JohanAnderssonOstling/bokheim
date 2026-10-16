@@ -56,6 +56,14 @@ impl PdfTocState {
         self.chapter_pages().into_iter().rev().find(|start| *start <= page).unwrap_or(0)
     }
 
+    #[cfg(any(test, all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32"))))]
+    pub(crate) fn narration_start_page(&self, page: usize, page_count: usize) -> Option<usize> {
+        (page..page_count).find(|page| {
+            let entry = self.ordinal_at(*page).and_then(|ordinal| entry_in_order(&self.entries, ordinal, &mut 0));
+            entry.is_none_or(|entry| !html::layout::is_navigation_section_title(&entry.title))
+        })
+    }
+
     /// Changes the active outline entry and reports whether it moved.
     pub(crate) fn set_active(&mut self, active_id: Option<String>) -> bool {
         if self.active_id == active_id {
@@ -153,6 +161,21 @@ fn tree_items(entries: &[BookTocEntry], next: &mut usize) -> Vec<TreeItem> {
 #[cfg(test)]
 mod tts_tests {
     use super::*;
+
+    #[test]
+    fn narration_skips_contents_pages_and_resumes_at_the_next_section() {
+        let mut toc = PdfTocState::default();
+        toc.replace_entries(vec![
+            BookTocEntry { title: "Contents".into(), target: "pdf-page:1".into(), children: vec![] },
+            BookTocEntry { title: "List of Figures".into(), target: "pdf-page:3".into(), children: vec![] },
+            BookTocEntry { title: "Chapter One".into(), target: "pdf-page:4".into(), children: vec![] },
+        ]);
+        assert_eq!(toc.narration_start_page(0, 8), Some(0));
+        assert_eq!(toc.narration_start_page(1, 8), Some(4));
+        assert_eq!(toc.narration_start_page(2, 8), Some(4));
+        assert_eq!(toc.narration_start_page(4, 8), Some(4));
+        assert_eq!(toc.narration_start_page(1, 4), None);
+    }
 
     #[test]
     fn sleep_chapters_group_outline_subsections() {

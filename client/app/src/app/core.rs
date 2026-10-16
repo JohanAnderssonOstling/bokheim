@@ -1,10 +1,10 @@
-use client_platform_runtime::transfers;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(super) use super::data::AppDataLocation;
 pub(super) use super::data::{BackendContext, LibraryEntry, LibraryRegistry};
-use crate::AppStartupState;
-use crate::host::startup_profile::StartupProfile;
 use crate::executor::{BackendExecutor, BackendOutput, BackendSend, BackendTask};
+use crate::host::startup_profile::StartupProfile;
+use crate::AppStartupState;
+use client_platform_runtime::transfers;
 use library_backend::library::LibraryDirectory;
 use serde::Serialize;
 pub(super) use std::collections::HashSet;
@@ -76,6 +76,12 @@ impl AppBackend {
     }
 
     pub fn new(context: BackendContext) -> Result<Self, BackendError> {
+        let core = Self::new_without_libraries(context)?;
+        core.open_startup_libraries()?;
+        Ok(core)
+    }
+
+    pub(crate) fn new_without_libraries(context: BackendContext) -> Result<Self, BackendError> {
         let mut profile = StartupProfile::new("backend_construct");
         let executor = BackendExecutor::new().map_err(BackendError::operation)?;
         profile.mark("executor");
@@ -106,12 +112,17 @@ impl AppBackend {
         // Catalog queries share one disk database; activate it before libraries open.
         super::catalog::start(&context.app_data_dir, &executor, core.state.library_directory.clone());
         profile.mark("catalog_activate");
-        core.open_registered_libraries()?;
-        profile.mark("libraries_open");
-        core.start_pending_local_purges();
-        core.state.account_wake.send_replace(());
-        profile.mark("maintenance_schedule");
         Ok(core)
+    }
+
+    pub(crate) fn open_startup_libraries(&self) -> Result<(), BackendError> {
+        let mut profile = StartupProfile::new("library_startup");
+        self.open_registered_libraries()?;
+        profile.mark("libraries_open");
+        self.start_pending_local_purges();
+        self.state.account_wake.send_replace(());
+        profile.mark("maintenance_schedule");
+        Ok(())
     }
 
     pub(crate) fn library_list_changes(&self) -> watch::Receiver<()> {

@@ -1,3 +1,5 @@
+use ui_components::user_facing_error;
+
 use super::SyncPage;
 use crate::android_authentication::Session;
 use gpui::Context;
@@ -20,7 +22,7 @@ impl SyncPage {
         let (session, requests) = match Session::open(colors) {
             Ok(value) => value,
             Err(error) => {
-                self.error = Some(error.into());
+                self.error = Some(user_facing_error(&error, "Could not open the sign-in form. Please try again.").into());
                 cx.notify();
                 return;
             }
@@ -43,7 +45,7 @@ impl SyncPage {
                     _ => Err("Unknown authentication action".into()),
                 };
                 let signed_in = result.is_ok() && matches!(action, "login" | "verify");
-                Session::complete(id, result.err());
+                Session::complete(id, result.err().map(|error| ui_components::authentication_error(&error, action).to_owned()));
                 if signed_in {
                     let _ = page.update(cx, |page, cx| page.schedule_refresh(cx));
                 }

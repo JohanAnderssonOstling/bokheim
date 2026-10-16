@@ -4,6 +4,8 @@
 //! Also opens the browser and the catalog's saved stores. A store is kept
 //! on this device only, where its sign-in is.
 
+use ui_components::user_facing_error;
+
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, EventEmitter, Focusable, MouseButton, SharedString, Subscription, Window, div, px, rems};
 use gpui_component::button::ButtonVariants;
@@ -166,7 +168,7 @@ impl FeedActions {
                     Err(error) => {
                         if let Some(dialog) = actions.dialog.as_mut() {
                             dialog.busy = false;
-                            dialog.error = Some(error.into());
+                            dialog.error = Some(user_facing_error(&error, "Could not add or sign in to the catalog. Check its address and sign-in details, then try again.").into());
                         }
                     }
                 }
@@ -185,7 +187,7 @@ impl FeedActions {
                     notify_info("feed-removed", format!("Removed “{name}”"), window, cx);
                     cx.emit(FeedsChanged);
                 }
-                Err(error) => notify_error("feed-remove-error", format!("Could not remove “{name}”: {error}"), window, cx),
+                Err(error) => notify_error("feed-remove-error", format!("Could not remove “{name}”. {}", user_facing_error(&error, "Please try again.")), window, cx),
             });
         })
         .detach();
@@ -197,7 +199,7 @@ impl FeedActions {
         let (app, library_id) = (self.ui.app().clone(), *self.ui.backend().id());
         cx.spawn_in(window, async move |actions, cx| {
             if let Err(error) = app.open_store(id, library_id).await {
-                let _ = actions.update_in(cx, |_, window, cx| notify_error("store-open-error", format!("Could not open the store: {error}"), window, cx));
+                let _ = actions.update_in(cx, |_, window, cx| notify_error("store-open-error", format!("Could not open the store. {}", user_facing_error(&error, "Please try again.")), window, cx));
             }
         })
         .detach();
@@ -207,7 +209,7 @@ impl FeedActions {
         let (app, library_id) = (self.ui.app().clone(), *self.ui.backend().id());
         cx.spawn_in(window, async move |actions, cx| {
             if let Err(error) = app.open_browser(library_id).await {
-                let _ = actions.update_in(cx, |_, window, cx| notify_error("browser-open-error", format!("Could not open the browser: {error}"), window, cx));
+                let _ = actions.update_in(cx, |_, window, cx| notify_error("browser-open-error", format!("Could not open the browser. {}", user_facing_error(&error, "Please try again.")), window, cx));
             }
         })
         .detach();
@@ -222,16 +224,14 @@ impl FeedActions {
                     notify_info("store-removed", format!("Removed “{name}”"), window, cx);
                     cx.emit(FeedsChanged);
                 }
-                Err(error) => notify_error("store-remove-error", format!("Could not remove “{name}”: {error}"), window, cx),
+                Err(error) => notify_error("store-remove-error", format!("Could not remove “{name}”. {}", user_facing_error(&error, "Please try again.")), window, cx),
             });
         })
         .detach();
     }
 
     pub(crate) fn render_trigger(actions: Entity<Self>, cx: &App) -> AnyElement {
-        components::outlined_icon_button("catalog-add-feed", "Add OPDS feed", IconName::Plus, components::browser_theme(cx))
-            .on_click(move |_, window, cx| actions.update(cx, |actions, cx| actions.open_add(window, cx)))
-            .into_any_element()
+        components::outlined_icon_button("catalog-add-feed", "Add OPDS feed", IconName::Plus, components::browser_theme(cx)).on_click(move |_, window, cx| actions.update(cx, |actions, cx| actions.open_add(window, cx))).into_any_element()
     }
 
     /// Opens the browser directly where a browser window is available.
@@ -301,8 +301,8 @@ impl FeedActions {
                 components::modal_overlay().occlude().child(components::modal_scrim("feed-dialog-scrim", theme).on_click(move |_, _, cx| dismiss_actions.update(cx, |actions, cx| actions.dismiss_modal(cx)))).child(panel),
                 window,
             ))
-                .with_priority(2)
-                .into_any_element(),
+            .with_priority(2)
+            .into_any_element(),
         )
     }
 }

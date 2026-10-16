@@ -1,5 +1,7 @@
 //! Window-level browser shell.
 
+use ui_components::user_facing_error;
+
 use app_preferences::{ApplicationTheme, BrowsingPreferencePatch, ResolvedAppearance};
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render, Subscription, Window, px};
@@ -203,7 +205,7 @@ impl BrowserRoot {
             return;
         }
         if let Err(error) = self.preferences.update(cx, |preferences, cx| preferences.update_browsing(app_preferences::BrowsingPreferencePatch::UiFontSizePx(next), cx)) {
-            crate::services::notify_error("browser-error", format!("Could not save interface font size: {error}"), window, cx);
+            crate::services::notify_error("browser-error", format!("Could not save interface font size. {}", user_facing_error(&error, "Please try again.")), window, cx);
         }
     }
 }

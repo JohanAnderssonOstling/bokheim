@@ -3,7 +3,7 @@
 use std::time::Duration;
 use web_time::Instant;
 
-use gpui::{App, Axis, Pixels, Point, Window, point, px, touch_page_settle_duration, touch_page_settle_easing};
+use gpui::{App, Axis, Pixels, Point, Size, Window, point, px, touch_page_settle_duration, touch_page_settle_easing};
 
 /// A finger-controlled translation which can ease back after a rejected turn.
 #[derive(Default)]
@@ -18,7 +18,14 @@ pub struct SwipePreview {
 
 impl SwipePreview {
     pub fn drag(&mut self, travel: Point<f32>, window: &Window) -> bool {
-        let viewport = window.viewport_size();
+        self.drag_in_viewport(travel, window.viewport_size())
+    }
+
+    pub fn drag_in_viewport(&mut self, travel: Point<f32>, viewport: Size<Pixels>) -> bool {
+        if cfg!(feature = "kobo") {
+            self.clear();
+            return false;
+        }
         if self.returning_at.is_some() {
             self.axis = None;
         }
@@ -46,7 +53,23 @@ impl SwipePreview {
         notify
     }
 
+    /// Consume the current visual displacement when a page turn takes over.
+    pub fn take_offset(&mut self) -> Point<Pixels> {
+        let offset = if let Some(started_at) = self.returning_at {
+            let progress = (started_at.elapsed().as_secs_f32() / self.return_duration.as_secs_f32()).clamp(0.0, 1.0);
+            self.offset * (1.0 - touch_page_settle_easing(progress))
+        } else {
+            self.offset
+        };
+        self.clear();
+        offset
+    }
+
     pub fn settle(&mut self) {
+        if cfg!(feature = "kobo") {
+            self.clear();
+            return;
+        }
         self.return_duration = touch_page_settle_duration(self.offset.x.abs().max(self.offset.y.abs()), self.extent);
         self.returning_at = (self.offset != Point::default()).then(Instant::now);
     }
@@ -68,11 +91,78 @@ impl SwipePreview {
     }
 }
 
+/// Retains the outgoing page while the incoming page is prepared, then slides
+/// both by the same distance. No document layout is performed by the animation.
+pub struct PageTurn<S> {
+    pub outgoing: S,
+    viewport: Size<Pixels>,
+    travel: Point<Pixels>,
+    drag: Point<Pixels>,
+    started_at: Option<Instant>,
+    duration: Duration,
+}
+
+pub struct PageTurnFrame {
+    pub outgoing: Point<Pixels>,
+    pub incoming: Point<Pixels>,
+    pub ready: bool,
+}
+
+impl<S> PageTurn<S> {
+    pub fn enabled(cx: &App) -> bool {
+        !cfg!(feature = "kobo") && !cx.reduce_motion()
+    }
+
+    pub fn new(outgoing: S, forward: bool, drag: Point<Pixels>, viewport: Size<Pixels>, cx: &App) -> Option<Self> {
+        if !Self::enabled(cx) {
+            return None;
+        }
+        let direction = if forward { -1.0 } else { 1.0 };
+        let travel = if drag.y.abs() > drag.x.abs() { point(Pixels::ZERO, viewport.height * direction) } else { point(viewport.width * direction, Pixels::ZERO) };
+        let extent = travel.x.abs().max(travel.y.abs());
+        if extent <= Pixels::ZERO {
+            return None;
+        }
+        // A stale displacement from a cancelled gesture must not start the
+        // next keyboard turn on the wrong side of the page.
+        let along = f32::from(if drag.y.abs() > drag.x.abs() { drag.y } else { drag.x });
+        let drag = if along == 0.0 || (along < 0.0) == forward { drag } else { Point::default() };
+        let remaining = (travel - drag).x.abs().max((travel - drag).y.abs());
+        let fraction = (f32::from(remaining) / f32::from(extent)).clamp(0.0, 1.0);
+        let duration = Duration::from_secs_f32((80.0 + 100.0 * fraction) / 1000.0);
+        Some(Self { outgoing, viewport, travel, drag, started_at: None, duration })
+    }
+
+    fn offsets(&self, progress: f32, ready: bool) -> PageTurnFrame {
+        let outgoing = self.drag + (self.travel - self.drag) * touch_page_settle_easing(progress);
+        PageTurnFrame { outgoing, incoming: outgoing - self.travel, ready }
+    }
+
+    /// Returns None when complete or when resizing/reduced motion cancels it.
+    /// The clock starts only once the destination can actually be painted.
+    pub fn frame(&mut self, viewport: Size<Pixels>, ready: bool, window: &mut Window, cx: &App) -> Option<PageTurnFrame> {
+        if !Self::enabled(cx) || self.viewport != viewport {
+            return None;
+        }
+        if !ready {
+            return Some(self.offsets(0.0, false));
+        }
+        let started_at = *self.started_at.get_or_insert_with(Instant::now);
+        let progress = started_at.elapsed().as_secs_f32() / self.duration.as_secs_f32();
+        if progress >= 1.0 {
+            return None;
+        }
+        window.request_animation_frame();
+        Some(self.offsets(progress, true))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::TestAppContext;
 
+    #[cfg(not(feature = "kobo"))]
     #[gpui::test]
     fn a_burst_of_moves_invalidates_once_but_keeps_the_latest_position(cx: &mut TestAppContext) {
         let (_, visual) = cx.add_window_view(|_, _| gpui::Empty);
@@ -84,6 +174,85 @@ mod tests {
             }
             assert_eq!(preview.offset(window, cx), point(px(-99.0), Pixels::ZERO));
             assert!(preview.drag(point(-100.0, 0.0), window), "the next frame accepts another invalidation");
+        });
+    }
+    #[cfg(not(feature = "kobo"))]
+    #[gpui::test]
+    fn turns_continue_in_the_drag_direction_and_keep_pages_adjacent(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let viewport = gpui::size(px(600.0), px(800.0));
+            for (forward, drag, travel) in [
+                (true, point(px(-120.0), px(0.0)), point(px(-600.0), px(0.0))),
+                (false, point(px(120.0), px(0.0)), point(px(600.0), px(0.0))),
+                (true, point(px(0.0), px(-120.0)), point(px(0.0), px(-800.0))),
+                (false, point(px(0.0), px(120.0)), point(px(0.0), px(800.0))),
+                (true, Point::default(), point(px(-600.0), px(0.0))),
+                (false, Point::default(), point(px(600.0), px(0.0))),
+            ] {
+                let turn = PageTurn::new((), forward, drag, viewport, cx).unwrap();
+                assert_eq!(turn.offsets(0.0, true).outgoing, drag, "release must not snap back");
+                let mut previous = drag;
+                for progress in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                    let frame = turn.offsets(progress, true);
+                    assert_eq!(frame.outgoing - frame.incoming, travel, "the two pages must stay adjacent");
+                    let movement = frame.outgoing - previous;
+                    assert!(if forward { movement.x <= Pixels::ZERO && movement.y <= Pixels::ZERO } else { movement.x >= Pixels::ZERO && movement.y >= Pixels::ZERO });
+                    previous = frame.outgoing;
+                }
+                assert_eq!(turn.offsets(1.0, true).incoming, Point::default());
+            }
+        });
+    }
+
+    #[cfg(not(feature = "kobo"))]
+    #[gpui::test]
+    fn drag_is_bounded_by_the_document_and_hands_off_without_snapping(cx: &mut TestAppContext) {
+        let (_, visual) = cx.add_window_view(|_, _| gpui::Empty);
+        visual.update(|window, cx| {
+            let viewport = gpui::size(px(300.0), px(400.0));
+            let mut preview = SwipePreview::default();
+            preview.drag_in_viewport(point(0.0, 1000.0), viewport);
+            let drag = preview.take_offset();
+            assert_eq!(drag, point(px(0.0), px(340.0)));
+            assert_eq!(preview.offset(window, cx), Point::default());
+            let turn = PageTurn::new((), false, drag, viewport, cx).unwrap();
+            assert_eq!(turn.offsets(0.0, true).outgoing, drag);
+            assert!(turn.offsets(0.5, true).outgoing.y > drag.y, "completion must keep moving downward");
+        });
+    }
+
+    #[cfg(not(feature = "kobo"))]
+    #[gpui::test]
+    fn turns_wait_for_content_finish_and_cancel_for_resize_or_reduced_motion(cx: &mut TestAppContext) {
+        let (_, visual) = cx.add_window_view(|_, _| gpui::Empty);
+        visual.update(|window, cx| {
+            let viewport = window.viewport_size();
+            let mut turn = PageTurn::new((), true, Point::default(), viewport, cx).unwrap();
+            assert!(!turn.frame(viewport, false, window, cx).unwrap().ready);
+            assert!(turn.started_at.is_none(), "loading time must not consume animation time");
+            assert!(turn.frame(viewport, true, window, cx).unwrap().ready);
+            turn.started_at = Some(Instant::now() - Duration::from_secs(1));
+            assert!(turn.frame(viewport, true, window, cx).is_none());
+
+            let mut turn = PageTurn::new((), false, Point::default(), viewport, cx).unwrap();
+            assert!(turn.frame(gpui::size(viewport.width + px(10.0), viewport.height), true, window, cx).is_none());
+            cx.set_reduce_motion(true);
+            assert!(turn.frame(viewport, true, window, cx).is_none());
+            assert!(PageTurn::new((), true, Point::default(), viewport, cx).is_none());
+        });
+    }
+
+    #[cfg(feature = "kobo")]
+    #[gpui::test]
+    fn kobo_never_starts_page_or_settle_animations(cx: &mut TestAppContext) {
+        let (_, visual) = cx.add_window_view(|_, _| gpui::Empty);
+        visual.update(|window, cx| {
+            let mut preview = SwipePreview::default();
+            assert!(!preview.drag(point(-120.0, 0.0), window));
+            preview.settle();
+            assert_eq!(preview.offset(window, cx), Point::default());
+            assert!(preview.returning_at.is_none());
+            assert!(PageTurn::new((), true, Point::default(), window.viewport_size(), cx).is_none());
         });
     }
 }

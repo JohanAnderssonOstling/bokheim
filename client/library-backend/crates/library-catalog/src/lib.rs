@@ -199,7 +199,14 @@ async fn fetch_cover_asset(key: CardKey, suffix: &str) -> Result<Option<Vec<u8>>
 
 async fn fetch_cover_asset_allowed(key: CardKey, suffix: &str) -> Result<Option<Vec<u8>>, String> {
     let url = format!("{}/covers/{key}-{suffix}.jpg", origin());
-    let response = reqwest::Client::new().get(&url).header(reqwest::header::CACHE_CONTROL, "no-cache").send().await.map_err(|error| format!("could not download the cover: {error}"))?;
+    let request = reqwest::Client::new().get(&url);
+    // A manually supplied Cache-Control header triggers a CORS preflight.
+    // Let browser Fetch perform cache revalidation without that custom header.
+    #[cfg(target_arch = "wasm32")]
+    let request = request.fetch_cache_no_cache();
+    #[cfg(not(target_arch = "wasm32"))]
+    let request = request.header(reqwest::header::CACHE_CONTROL, "no-cache");
+    let response = request.send().await.map_err(|error| format!("could not download the cover: {error}"))?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }

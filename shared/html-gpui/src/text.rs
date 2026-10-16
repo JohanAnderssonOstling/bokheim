@@ -7,10 +7,8 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use web_time::Instant;
 
-use gpui::{Hsla, TextRun, font, px, rgba};
-use html::text::{
-    CharacterPlacement, FontMetricsRequest, FontRelativeMetrics, FontSlant, GlyphId, GlyphMetric, GlyphResourceStore, GlyphShaper, OpenTypeFeature, ShapeError, ShapedLine, ShapedTextRun, TextRunShapeRequest, TextShapeRequest, TextStyleSpan,
-};
+use gpui::{Font, FontStyle, FontWeight, Hsla, TextRun, font, px, rgba};
+use html::text::{FontMetricsRequest, FontRelativeMetrics, FontSlant, GlyphId, GlyphMetric, GlyphResourceStore, GlyphShaper, OpenTypeFeature, ShapeError, ShapedLine, ShapedTextRun, TextRunShapeRequest, TextShapeRequest, TextStyleSpan};
 use smallvec::SmallVec;
 
 /// OpenType features that form the book renderer's quality baseline. Required
@@ -258,13 +256,30 @@ struct CachedGlyphShape {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct FontStyleIdentity {
+    font_weight: u16,
+    font_style: u8,
+    family: Option<Box<str>>,
+    features: Box<[OpenTypeFeature]>,
+}
+
+impl FontStyleIdentity {
+    fn matches(&self, style: &TextStyleSpan<'_>) -> bool {
+        self.font_weight == style.font_weight() && self.font_style == font_slant_key(style.font_slant()) && self.family.as_deref() == style.font_family() && self.features.as_ref() == style.font_features()
+    }
+}
+
+#[derive(Clone)]
+struct PreparedFont {
+    identity: Arc<FontStyleIdentity>,
+    font: Font,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct LineStyleIdentity {
     byte_len: usize,
     font_size: u32,
-    font_weight: u16,
-    font_style: u8,
-    family: Option<String>,
-    features: Vec<([u8; 4], u32)>,
+    font: Arc<FontStyleIdentity>,
 }
 
 struct CachedLineShape {
@@ -353,14 +368,7 @@ impl CachedLineShape {
     fn matches(&self, text: &str, styles: &[TextStyleSpan<'_>]) -> bool {
         self.text.as_ref() == text
             && self.styles.len() == styles.len()
-            && self.styles.iter().zip(styles).all(|(cached, style)| {
-                cached.byte_len == style.byte_range().len()
-                    && cached.font_size == style.font_size().to_bits()
-                    && cached.font_weight == style.font_weight()
-                    && cached.font_style == font_slant_key(style.font_slant())
-                    && cached.family.as_deref() == style.font_family()
-                    && cached.features.iter().copied().eq(style.font_features().iter().map(|feature| (feature.tag(), feature.value())))
-            })
+            && self.styles.iter().zip(styles).all(|(cached, style)| cached.byte_len == style.byte_range().len() && cached.font_size == style.font_size().to_bits() && cached.font.matches(style))
     }
 }
 
@@ -374,6 +382,9 @@ pub struct TextShapeCacheStats {
     pub line_misses: u64,
     pub line_evictions: u64,
     pub retained_lines: usize,
+    pub font_setup_hits: u64,
+    pub font_setup_misses: u64,
+    pub retained_font_setups: usize,
     pub registered_glyphs: usize,
     pub backend_glyph_records: usize,
     pub trailing_whitespace_probes: u64,
@@ -384,10 +395,12 @@ pub struct TextShapeCacheStats {
 
 const SHAPE_CACHE_CAPACITY: usize = 4096;
 const LINE_SHAPE_CACHE_CAPACITY: usize = 1024;
+const FONT_SETUP_CACHE_CAPACITY: usize = 32;
 
 pub struct GpuiTextCache {
     text_system: Arc<gpui::WindowTextSystem>,
     font_families: HashMap<String, String>,
+    prepared_fonts: VecDeque<PreparedFont>,
     resources: GlyphResourceStore,
     table: HashMap<GlyphKey, GlyphId>,
     glyphs: GlyphStore,
@@ -408,6 +421,7 @@ impl GpuiTextCache {
         Self {
             text_system,
             font_families,
+            prepared_fonts: VecDeque::new(),
             resources: GlyphResourceStore::default(),
             table: HashMap::new(),
             glyphs: Rc::default(),
@@ -432,7 +446,14 @@ impl GpuiTextCache {
     }
 
     pub fn shape_cache_stats(&self) -> TextShapeCacheStats {
-        TextShapeCacheStats { retained_glyphs: self.shapes.len(), retained_lines: self.line_shapes.len(), registered_glyphs: self.glyphs.len(), backend_glyph_records: self.glyphs.records.len(), ..self.shape_cache_stats }
+        TextShapeCacheStats {
+            retained_font_setups: self.prepared_fonts.len(),
+            retained_glyphs: self.shapes.len(),
+            retained_lines: self.line_shapes.len(),
+            registered_glyphs: self.glyphs.len(),
+            backend_glyph_records: self.glyphs.records.len(),
+            ..self.shape_cache_stats
+        }
     }
 
     fn insert_shape(&mut self, key: GlyphKey, shape: CachedGlyphShape) {
@@ -485,6 +506,34 @@ impl GpuiTextCache {
         ".SystemUIFont".to_owned()
     }
 
+    /// Font selection and OpenType features do not depend on run length,
+    /// size, or paint color. Share this setup and its cache identity across
+    /// lines, with a small bound independent of the document's text length.
+    fn prepared_font(&mut self, style: &TextStyleSpan<'_>) -> PreparedFont {
+        if let Some(prepared) = self.prepared_fonts.iter().find(|prepared| prepared.identity.matches(style)) {
+            self.shape_cache_stats.font_setup_hits += 1;
+            return prepared.clone();
+        }
+        self.shape_cache_stats.font_setup_misses += 1;
+        let mut gpui_font = font(self.resolve_family(style.font_family()));
+        gpui_font.weight = FontWeight(style.font_weight() as f32);
+        gpui_font.style = match style.font_slant() {
+            FontSlant::Normal => FontStyle::Normal,
+            FontSlant::Italic => FontStyle::Italic,
+            FontSlant::Oblique => FontStyle::Oblique,
+        };
+        gpui_font.features = book_quality_font_features(style.font_features());
+        let prepared = PreparedFont {
+            identity: Arc::new(FontStyleIdentity { font_weight: style.font_weight(), font_style: font_slant_key(style.font_slant()), family: style.font_family().map(Into::into), features: style.font_features().into() }),
+            font: gpui_font,
+        };
+        if self.prepared_fonts.len() == FONT_SETUP_CACHE_CAPACITY {
+            self.prepared_fonts.pop_front();
+        }
+        self.prepared_fonts.push_back(prepared.clone());
+        prepared
+    }
+
     fn line_shape_fingerprint(text: &str, styles: &[TextStyleSpan<'_>]) -> u64 {
         let mut hasher = DefaultHasher::new();
         text.hash(&mut hasher);
@@ -500,20 +549,174 @@ impl GpuiTextCache {
         hasher.finish()
     }
 
-    fn set_text_run_colors(&mut self, run_id: u32, text: &str, colors: &[u32]) {
-        let Some(spans) = paint_color_spans(text, colors) else { return };
-        let runs = Rc::make_mut(&mut self.runs);
-        let Some(existing) = runs.get(run_id as usize).cloned() else { return };
-        runs[run_id as usize] = Arc::new(existing.with_colors(Arc::from(spans)));
+    fn shape_line_geometry(&mut self, text: &str, styles: &[TextStyleSpan<'_>], placement_request: Option<&TextShapeRequest<'_>>) -> Result<Option<ShapedLine>, ShapeError> {
+        let key = Self::line_shape_fingerprint(text, styles);
+        let placements_are_natural =
+            placement_request.is_none_or(|request| request.placements().iter().all(|placement| placement.extra_advance() == 0.0 && placement.advance_override().is_none() && placement.baseline_shift() == 0.0 && placement.paints()));
+        let mut colors = None;
+        let cached = if let Some(cached) = self.line_shapes.get(&key).filter(|cached| cached.matches(text, styles)) {
+            self.shape_cache_stats.line_hits += 1;
+            cached.geometry.clone()
+        } else {
+            self.shape_cache_stats.line_misses += 1;
+            let mut character_bytes = text.char_indices().map(|(byte, _)| byte).collect::<Vec<_>>();
+            character_bytes.push(text.len());
+            let mut text_runs = Vec::with_capacity(styles.len());
+            let mut miss_colors = Vec::with_capacity(styles.len());
+            let mut identities = Vec::with_capacity(styles.len());
+            for style in styles {
+                let prepared = self.prepared_font(style);
+                identities.push(LineStyleIdentity { byte_len: style.byte_range().len(), font_size: style.font_size().to_bits(), font: prepared.identity });
+                let color = Hsla::from(rgba(style.color()));
+                let byte_range = style.byte_range();
+                text_runs.push(TextRun { len: byte_range.len(), font: prepared.font, color, background_color: None, underline: None, strikethrough: None });
+                miss_colors.push((byte_range, color));
+            }
+            let single_font_size = styles.iter().all(|style| style.font_size().to_bits() == styles[0].font_size().to_bits());
+            // A single-size run can use the native boundary allocations
+            // directly. Mixed sizes need the aggregate line-coordinate arrays.
+            let mut raw_caret_stops: Arc<[f32]> = if single_font_size { Arc::default() } else { vec![0.0; character_bytes.len()].into() };
+            let mut raw_cluster_boundaries: Arc<[bool]> = if single_font_size { Arc::default() } else { vec![false; character_bytes.len()].into() };
+            if !single_font_size {
+                let boundaries = Arc::make_mut(&mut raw_cluster_boundaries);
+                boundaries[0] = true;
+                *boundaries.last_mut().expect("validated non-empty line") = true;
+            }
+            let mut glyphs = Vec::new();
+            let mut x_base = 0.0f32;
+            let mut ascent = 0.0f32;
+            let mut descent = 0.0f32;
+            let mut first_style = 0usize;
+            while first_style < styles.len() {
+                let font_size_bits = styles[first_style].font_size().to_bits();
+                let mut end_style = first_style + 1;
+                while end_style < styles.len() && styles[end_style].font_size().to_bits() == font_size_bits {
+                    end_style += 1;
+                }
+                let byte_start = styles[first_style].byte_range().start;
+                let byte_end = styles[end_style - 1].byte_range().end;
+                let group_text = &text[byte_start..byte_end];
+                let (character_start, character_end) = if single_font_size { (0, character_bytes.len() - 1) } else { (character_bytes.partition_point(|byte| *byte < byte_start), character_bytes.partition_point(|byte| *byte < byte_end)) };
+                if styles[first_style].font_size() == 0.0 {
+                    if single_font_size {
+                        raw_caret_stops = vec![0.0; character_bytes.len()].into();
+                        raw_cluster_boundaries = vec![true; character_bytes.len()].into();
+                    } else {
+                        Arc::make_mut(&mut raw_caret_stops)[character_start..=character_end].fill(x_base);
+                        Arc::make_mut(&mut raw_cluster_boundaries)[character_start..=character_end].fill(true);
+                    }
+                    first_style = end_style;
+                    continue;
+                }
+                let layout = self.text_system.layout_line(group_text, px(styles[first_style].font_size()), &text_runs[first_style..end_style], None);
+                let (mut local_caret_stops, local_cluster_boundaries) = build_text_boundaries_with_offsets(group_text, &layout, &character_bytes[character_start..=character_end], byte_start);
+                let mut group_width = f32::from(layout.width);
+                if group_text.chars().last().is_some_and(char::is_whitespace) && local_caret_stops.len() >= 2 && (local_caret_stops[local_caret_stops.len() - 1] - local_caret_stops[local_caret_stops.len() - 2]).abs() <= f32::EPSILON {
+                    let probe_started = trailing_whitespace_profiling_enabled().then(Instant::now);
+                    // Native line layout trims trailing whitespace from its
+                    // caret geometry. Probe with a following printable glyph
+                    // so the same font shapes that whitespace as interior
+                    // content, then retain only the caret before the probe.
+                    let mut probe_text = String::with_capacity(group_text.len() + 1);
+                    probe_text.push_str(group_text);
+                    probe_text.push('x');
+                    let mut probe_runs = text_runs[first_style..end_style].to_vec();
+                    if let Some(last) = probe_runs.last_mut() {
+                        last.len += 1;
+                    }
+                    let probe_layout = self.text_system.layout_line(&probe_text, px(styles[first_style].font_size()), &probe_runs, None);
+                    let (probe_carets, _) = build_text_boundaries(&probe_text, &probe_layout);
+                    let original_character_count = character_end - character_start;
+                    if let Some(&corrected_end) = probe_carets.get(original_character_count) {
+                        Arc::make_mut(&mut local_caret_stops)[original_character_count] = corrected_end;
+                        group_width = group_width.max(corrected_end);
+                    }
+                    self.shape_cache_stats.trailing_whitespace_probes += 1;
+                    self.shape_cache_stats.trailing_whitespace_probe_characters += original_character_count as u64;
+                    if let Some(started) = probe_started {
+                        self.shape_cache_stats.trailing_whitespace_probe_time += started.elapsed();
+                    }
+                }
+                if single_font_size {
+                    raw_caret_stops = local_caret_stops;
+                    raw_cluster_boundaries = local_cluster_boundaries;
+                } else {
+                    let carets = Arc::make_mut(&mut raw_caret_stops);
+                    for (offset, caret) in local_caret_stops.iter().copied().enumerate() {
+                        carets[character_start + offset] = x_base + caret;
+                    }
+                    let boundaries = Arc::make_mut(&mut raw_cluster_boundaries);
+                    for (offset, boundary) in local_cluster_boundaries.iter().copied().enumerate() {
+                        boundaries[character_start + offset] |= boundary;
+                    }
+                }
+                glyphs.reserve(layout.runs.iter().map(|run| run.glyphs.len()).sum::<usize>());
+                for shaped_run in &layout.runs {
+                    for glyph in &shaped_run.glyphs {
+                        glyphs.push(GpuiRunGlyph {
+                            font_id: shaped_run.font_id,
+                            glyph_id: glyph.id,
+                            position: gpui::point(px(x_base) + glyph.position.x, glyph.position.y),
+                            font_size: layout.font_size,
+                            byte_index: byte_start + glyph.index,
+                            is_emoji: glyph.is_emoji,
+                        });
+                    }
+                }
+                x_base += group_width;
+                ascent = ascent.max(f32::from(layout.ascent));
+                descent = descent.max(f32::from(layout.descent));
+                first_style = end_style;
+            }
+            let geometry = CachedLineGeometry { glyphs: Arc::from(glyphs), ascent, descent, caret_stops: raw_caret_stops, cluster_boundaries: raw_cluster_boundaries, character_bytes: Arc::from(character_bytes) };
+            self.insert_line_shape(key, CachedLineShape { text: text.into(), styles: identities.into_boxed_slice(), geometry: geometry.clone(), natural_run: None });
+            colors = Some(miss_colors);
+            geometry
+        };
+
+        let (glyphs, caret_stops) = if placements_are_natural {
+            (cached.glyphs.clone(), cached.caret_stops.clone())
+        } else {
+            let mut glyphs = cached.glyphs.to_vec();
+            let Some(caret_stops) = apply_line_placements(placement_request.expect("adjusted line request"), &cached.character_bytes, &cached.caret_stops, &mut glyphs) else { return Ok(None) };
+            (Arc::from(glyphs), caret_stops)
+        };
+
+        let reusable_run = placements_are_natural.then(|| self.line_shapes.get(&key).filter(|cached| cached.matches(text, styles)).and_then(|cached| cached.natural_run.as_ref()).filter(|run| run.colors_match(styles)).cloned()).flatten();
+        let run_resource = if let Some(run) = reusable_run {
+            run
+        } else {
+            let colors = Arc::from(colors.unwrap_or_else(|| styles.iter().map(|style| (style.byte_range(), Hsla::from(rgba(style.color())))).collect::<Vec<_>>()));
+            let mut run = GpuiTextRun::new(glyphs, px(cached.ascent), px(cached.descent), cached.character_bytes.clone(), colors);
+            run.caret_stops = caret_stops.clone();
+            let run = Arc::new(run);
+            if placements_are_natural && let Some(cached) = self.line_shapes.get_mut(&key).filter(|cached| cached.matches(text, styles)) {
+                cached.natural_run = Some(run.clone());
+            }
+            run
+        };
+        let run = self.runs.len() as u32;
+        Rc::make_mut(&mut self.runs).push(run_resource);
+        let (line_index, text_range) = if let Some(request) = placement_request {
+            (request.line_index(), request.text_range())
+        } else {
+            let Ok(character_count) = u32::try_from(cached.character_bytes.len() - 1) else { return Ok(None) };
+            (0, 0..character_count)
+        };
+        Ok(Some(ShapedLine { line_index, text_range, run, ascent: cached.ascent, caret_stops, cluster_boundaries: cached.cluster_boundaries }))
+    }
+
+    fn set_text_run_colors(&mut self, run_id: u32, colors: &[u32]) {
+        let Some(existing) = self.runs.get(run_id as usize).cloned() else { return };
+        let Some(spans) = paint_color_spans(&existing.character_bytes, colors) else { return };
+        Rc::make_mut(&mut self.runs)[run_id as usize] = Arc::new(existing.with_colors(Arc::from(spans)));
     }
 }
 
-fn paint_color_spans(text: &str, colors: &[u32]) -> Option<Vec<(Range<usize>, Hsla)>> {
-    if colors.len() != text.chars().count() || colors.is_empty() {
+fn paint_color_spans(character_bytes: &[usize], colors: &[u32]) -> Option<Vec<(Range<usize>, Hsla)>> {
+    if character_bytes.len() != colors.len().checked_add(1)? || colors.is_empty() {
         return None;
     }
-    let mut character_bytes = text.char_indices().map(|(byte, _)| byte).collect::<Vec<_>>();
-    character_bytes.push(text.len());
     let mut spans = Vec::new();
     let mut start = 0usize;
     let mut color = colors[0];
@@ -525,7 +728,7 @@ fn paint_color_spans(text: &str, colors: &[u32]) -> Option<Vec<(Range<usize>, Hs
         start = index;
         color = colors[index];
     }
-    spans.push((character_bytes[start]..text.len(), Hsla::from(rgba(color))));
+    spans.push((character_bytes[start]..*character_bytes.last()?, Hsla::from(rgba(color))));
     Some(spans)
 }
 
@@ -588,11 +791,11 @@ impl GlyphShaper for GpuiTextCache {
     fn font_relative_metrics(&mut self, request: FontMetricsRequest<'_>) -> Result<FontRelativeMetrics, ShapeError> {
         let family = self.resolve_family(request.font_family());
         let mut gpui_font = font(family);
-        gpui_font.weight = gpui::FontWeight(request.font_weight() as f32);
+        gpui_font.weight = FontWeight(request.font_weight() as f32);
         gpui_font.style = match request.font_slant() {
-            FontSlant::Normal => gpui::FontStyle::Normal,
-            FontSlant::Italic => gpui::FontStyle::Italic,
-            FontSlant::Oblique => gpui::FontStyle::Oblique,
+            FontSlant::Normal => FontStyle::Normal,
+            FontSlant::Italic => FontStyle::Italic,
+            FontSlant::Oblique => FontStyle::Oblique,
         };
         let font_id = self.text_system.resolve_font(&gpui_font);
         // CSS `ex` is the selected face's x-height, not the ink bounds of its
@@ -646,11 +849,11 @@ impl GlyphShaper for GpuiTextCache {
         }
 
         let mut gpui_font = font(family);
-        gpui_font.weight = gpui::FontWeight(font_weight as f32);
+        gpui_font.weight = FontWeight(font_weight as f32);
         gpui_font.style = match font_slant {
-            FontSlant::Normal => gpui::FontStyle::Normal,
-            FontSlant::Italic => gpui::FontStyle::Italic,
-            FontSlant::Oblique => gpui::FontStyle::Oblique,
+            FontSlant::Normal => FontStyle::Normal,
+            FontSlant::Italic => FontStyle::Italic,
+            FontSlant::Oblique => FontStyle::Oblique,
         };
         let mut utf8 = [0; 4];
         let text = ch.encode_utf8(&mut utf8);
@@ -780,15 +983,14 @@ impl GlyphShaper for GpuiTextCache {
     }
 
     fn shape_text_run(&mut self, request: TextRunShapeRequest<'_>) -> Result<Option<ShapedTextRun>, ShapeError> {
-        let character_count = request.text().chars().count();
         let paint_colors = request.paint_colors();
-        let placements = vec![CharacterPlacement::default(); character_count];
         let styles = [request.style().clone()];
-        let Some(line_request) = TextShapeRequest::new(0, 0..character_count as u32, request.text(), &styles, &placements) else { return Ok(None) };
-        let shaped = self.shape_line(line_request);
+        // TextRunShapeRequest already validates the full style span. Natural
+        // shaping needs no per-character placement buffer or second validation.
+        let shaped = self.shape_line_geometry(request.text(), &styles, None);
         let Some(shaped) = shaped? else { return Ok(None) };
         if let Some(colors) = paint_colors {
-            self.set_text_run_colors(shaped.run, request.text(), colors);
+            self.set_text_run_colors(shaped.run, colors);
         }
         Ok(shaped_text_run_from_line(&shaped))
     }
@@ -803,160 +1005,7 @@ impl GlyphShaper for GpuiTextCache {
     }
 
     fn shape_line(&mut self, request: TextShapeRequest<'_>) -> Result<Option<ShapedLine>, ShapeError> {
-        let text = request.text();
-        let text_range = request.text_range();
-        let styles = request.styles();
-        let placements = request.placements();
-        let key = Self::line_shape_fingerprint(text, styles);
-        let placements_are_natural = placements.iter().all(|placement| placement.extra_advance() == 0.0 && placement.advance_override().is_none() && placement.baseline_shift() == 0.0 && placement.paints());
-        let mut colors = None;
-        let cached = if let Some(cached) = self.line_shapes.get(&key).filter(|cached| cached.matches(text, styles)) {
-            self.shape_cache_stats.line_hits += 1;
-            cached.geometry.clone()
-        } else {
-            self.shape_cache_stats.line_misses += 1;
-            let mut character_bytes = text.char_indices().map(|(byte, _)| byte).collect::<Vec<_>>();
-            character_bytes.push(text.len());
-            let mut text_runs = Vec::with_capacity(styles.len());
-            let mut miss_colors = Vec::with_capacity(styles.len());
-            for style in styles {
-                let family = self.resolve_family(style.font_family());
-                let mut gpui_font = font(family);
-                gpui_font.weight = gpui::FontWeight(style.font_weight() as f32);
-                gpui_font.style = match style.font_slant() {
-                    FontSlant::Normal => gpui::FontStyle::Normal,
-                    FontSlant::Italic => gpui::FontStyle::Italic,
-                    FontSlant::Oblique => gpui::FontStyle::Oblique,
-                };
-                gpui_font.features = book_quality_font_features(style.font_features());
-                let color = Hsla::from(rgba(style.color()));
-                let byte_range = style.byte_range();
-                text_runs.push(TextRun { len: byte_range.len(), font: gpui_font, color, background_color: None, underline: None, strikethrough: None });
-                miss_colors.push((byte_range, color));
-            }
-            let mut raw_caret_stops = vec![0.0; character_bytes.len()];
-            let mut raw_cluster_boundaries = vec![false; character_bytes.len()];
-            raw_cluster_boundaries[0] = true;
-            *raw_cluster_boundaries.last_mut().expect("validated non-empty line") = true;
-            let mut glyphs = Vec::new();
-            let mut x_base = 0.0f32;
-            let mut ascent = 0.0f32;
-            let mut descent = 0.0f32;
-            let mut first_style = 0usize;
-            while first_style < styles.len() {
-                let font_size_bits = styles[first_style].font_size().to_bits();
-                let mut end_style = first_style + 1;
-                while end_style < styles.len() && styles[end_style].font_size().to_bits() == font_size_bits {
-                    end_style += 1;
-                }
-                let byte_start = styles[first_style].byte_range().start;
-                let byte_end = styles[end_style - 1].byte_range().end;
-                let group_text = &text[byte_start..byte_end];
-                let character_start = character_bytes.partition_point(|byte| *byte < byte_start);
-                if styles[first_style].font_size() == 0.0 {
-                    let character_count = group_text.chars().count();
-                    for offset in 0..=character_count {
-                        raw_caret_stops[character_start + offset] = x_base;
-                        raw_cluster_boundaries[character_start + offset] = true;
-                    }
-                    first_style = end_style;
-                    continue;
-                }
-                let layout = self.text_system.layout_line(group_text, px(styles[first_style].font_size()), &text_runs[first_style..end_style], None);
-                let (mut local_caret_stops, local_cluster_boundaries) = build_text_boundaries(group_text, &layout);
-                let mut group_width = f32::from(layout.width);
-                if group_text.chars().last().is_some_and(char::is_whitespace) && local_caret_stops.len() >= 2 && (local_caret_stops[local_caret_stops.len() - 1] - local_caret_stops[local_caret_stops.len() - 2]).abs() <= f32::EPSILON {
-                    let probe_started = trailing_whitespace_profiling_enabled().then(Instant::now);
-                    // Native line layout trims trailing whitespace from its
-                    // caret geometry. Probe with a following printable glyph
-                    // so the same font shapes that whitespace as interior
-                    // content, then retain only the caret before the probe.
-                    let mut probe_text = String::with_capacity(group_text.len() + 1);
-                    probe_text.push_str(group_text);
-                    probe_text.push('x');
-                    let mut probe_runs = text_runs[first_style..end_style].to_vec();
-                    if let Some(last) = probe_runs.last_mut() {
-                        last.len += 1;
-                    }
-                    let probe_layout = self.text_system.layout_line(&probe_text, px(styles[first_style].font_size()), &probe_runs, None);
-                    let (probe_carets, _) = build_text_boundaries(&probe_text, &probe_layout);
-                    let original_character_count = group_text.chars().count();
-                    if let Some(&corrected_end) = probe_carets.get(original_character_count) {
-                        Arc::make_mut(&mut local_caret_stops)[original_character_count] = corrected_end;
-                        group_width = group_width.max(corrected_end);
-                    }
-                    self.shape_cache_stats.trailing_whitespace_probes += 1;
-                    self.shape_cache_stats.trailing_whitespace_probe_characters += original_character_count as u64;
-                    if let Some(started) = probe_started {
-                        self.shape_cache_stats.trailing_whitespace_probe_time += started.elapsed();
-                    }
-                }
-                for (offset, caret) in local_caret_stops.iter().copied().enumerate() {
-                    raw_caret_stops[character_start + offset] = x_base + caret;
-                }
-                for (offset, boundary) in local_cluster_boundaries.iter().copied().enumerate() {
-                    raw_cluster_boundaries[character_start + offset] |= boundary;
-                }
-                for shaped_run in &layout.runs {
-                    for glyph in &shaped_run.glyphs {
-                        glyphs.push(GpuiRunGlyph {
-                            font_id: shaped_run.font_id,
-                            glyph_id: glyph.id,
-                            position: gpui::point(px(x_base) + glyph.position.x, glyph.position.y),
-                            font_size: layout.font_size,
-                            byte_index: byte_start + glyph.index,
-                            is_emoji: glyph.is_emoji,
-                        });
-                    }
-                }
-                x_base += group_width;
-                ascent = ascent.max(f32::from(layout.ascent));
-                descent = descent.max(f32::from(layout.descent));
-                first_style = end_style;
-            }
-            let identities = styles
-                .iter()
-                .map(|style| LineStyleIdentity {
-                    byte_len: style.byte_range().len(),
-                    font_size: style.font_size().to_bits(),
-                    font_weight: style.font_weight(),
-                    font_style: font_slant_key(style.font_slant()),
-                    family: style.font_family().map(str::to_owned),
-                    features: style.font_features().iter().map(|feature| (feature.tag(), feature.value())).collect(),
-                })
-                .collect::<Box<[_]>>();
-            let geometry = CachedLineGeometry { glyphs: Arc::from(glyphs), ascent, descent, caret_stops: Arc::from(raw_caret_stops), cluster_boundaries: Arc::from(raw_cluster_boundaries), character_bytes: Arc::from(character_bytes) };
-            self.insert_line_shape(key, CachedLineShape { text: text.into(), styles: identities, geometry: geometry.clone(), natural_run: None });
-            colors = Some(miss_colors);
-            geometry
-        };
-
-        let (glyphs, caret_stops) = if placements_are_natural {
-            (cached.glyphs.clone(), cached.caret_stops.clone())
-        } else {
-            let mut character_bytes = text.char_indices().map(|(byte, _)| byte).collect::<Vec<_>>();
-            character_bytes.push(text.len());
-            let mut glyphs = cached.glyphs.to_vec();
-            let Some(caret_stops) = apply_line_placements(&request, &character_bytes, &cached.caret_stops, &mut glyphs) else { return Ok(None) };
-            (Arc::from(glyphs), caret_stops)
-        };
-
-        let reusable_run = placements_are_natural.then(|| self.line_shapes.get(&key).filter(|cached| cached.matches(text, styles)).and_then(|cached| cached.natural_run.as_ref()).filter(|run| run.colors_match(styles)).cloned()).flatten();
-        let run_resource = if let Some(run) = reusable_run {
-            run
-        } else {
-            let colors = Arc::from(colors.unwrap_or_else(|| styles.iter().map(|style| (style.byte_range(), Hsla::from(rgba(style.color())))).collect::<Vec<_>>()));
-            let mut run = GpuiTextRun::new(glyphs, px(cached.ascent), px(cached.descent), cached.character_bytes.clone(), colors);
-            run.caret_stops = caret_stops.clone();
-            let run = Arc::new(run);
-            if placements_are_natural && let Some(cached) = self.line_shapes.get_mut(&key).filter(|cached| cached.matches(text, styles)) {
-                cached.natural_run = Some(run.clone());
-            }
-            run
-        };
-        let run = self.runs.len() as u32;
-        Rc::make_mut(&mut self.runs).push(run_resource);
-        Ok(Some(ShapedLine { line_index: request.line_index(), text_range, run, ascent: cached.ascent, caret_stops, cluster_boundaries: cached.cluster_boundaries }))
+        self.shape_line_geometry(request.text(), request.styles(), Some(&request))
     }
 
     fn begin_line_shaping(&mut self) {}
@@ -965,15 +1014,16 @@ impl GlyphShaper for GpuiTextCache {
 fn shaped_text_run_from_line(shaped: &ShapedLine) -> Option<ShapedTextRun> {
     let character_count = shaped.caret_stops.len().checked_sub(1)?;
     let mut advances = vec![0.0; character_count];
-    let boundary_indices = shaped.cluster_boundaries.iter().enumerate().filter_map(|(index, boundary)| boundary.then_some(index)).collect::<Vec<_>>();
-    for cluster in boundary_indices.windows(2) {
-        let start = cluster[0];
-        let end = cluster[1];
+    let mut boundary_indices = shaped.cluster_boundaries.iter().enumerate().filter_map(|(index, boundary)| boundary.then_some(index));
+    let mut start = boundary_indices.next().unwrap_or(0);
+    for end in boundary_indices {
         if start >= end || end > character_count {
+            start = end;
             continue;
         }
         let width = (shaped.caret_stops[end] - shaped.caret_stops[start]).abs();
         advances[start..end].fill(width / (end - start) as f32);
+        start = end;
     }
     ShapedTextRun::with_backend_run(Arc::from(advances), shaped.cluster_boundaries.clone(), shaped.run, shaped.caret_stops.clone(), shaped.ascent)
 }
@@ -999,54 +1049,68 @@ fn apply_line_placements(request: &TextShapeRequest<'_>, character_bytes: &[usiz
 fn build_text_boundaries(text: &str, layout: &gpui::LineLayout) -> (Arc<[f32]>, Arc<[bool]>) {
     let mut character_bytes = text.char_indices().map(|(byte, _)| byte).collect::<Vec<_>>();
     character_bytes.push(text.len());
+    build_text_boundaries_with_offsets(text, layout, &character_bytes, 0)
+}
+
+fn build_text_boundaries_with_offsets(text: &str, layout: &gpui::LineLayout, character_bytes: &[usize], byte_offset: usize) -> (Arc<[f32]>, Arc<[bool]>) {
     if character_bytes.len() <= 1 {
         return (Arc::from([]), Arc::from([true]));
     }
 
-    let mut cluster_bytes = layout.runs.iter().flat_map(|run| run.glyphs.iter().map(|glyph| glyph.index)).collect::<Vec<_>>();
-    cluster_bytes.push(0);
-    cluster_bytes.push(text.len());
-    cluster_bytes.sort_unstable();
-    cluster_bytes.dedup();
+    let glyph_bytes = || layout.runs.iter().flat_map(|run| run.glyphs.iter().map(|glyph| glyph.index));
+    if glyph_bytes().is_sorted() {
+        // Ordered clusters need no temporary index array or sorting. Include
+        // both ends so missing glyphs and trailing whitespace retain their width.
+        build_text_boundaries_from_clusters(text, layout, character_bytes, byte_offset, glyph_bytes().chain(std::iter::once(text.len())))
+    } else {
+        let mut cluster_bytes = glyph_bytes().collect::<Vec<_>>();
+        cluster_bytes.push(0);
+        cluster_bytes.push(text.len());
+        cluster_bytes.sort_unstable();
+        cluster_bytes.dedup();
+        build_text_boundaries_from_clusters(text, layout, character_bytes, byte_offset, cluster_bytes.into_iter())
+    }
+}
 
+fn build_text_boundaries_from_clusters(text: &str, layout: &gpui::LineLayout, character_bytes: &[usize], byte_offset: usize, cluster_bytes: impl Iterator<Item = usize>) -> (Arc<[f32]>, Arc<[bool]>) {
     let mut caret_stops = vec![0.0; character_bytes.len()];
     let mut cluster_boundaries = vec![false; character_bytes.len()];
     cluster_boundaries[0] = true;
     *cluster_boundaries.last_mut().expect("non-empty boundary list") = true;
     let mut glyphs = layout.runs.iter().flat_map(|run| run.glyphs.iter()).peekable();
-    // Cluster byte positions are queried in increasing order. Once a glyph's
-    // index is too small it can never match a later query, even when glyphs
-    // are in mixed visual order. Retain the first match, just as GPUI's
-    // x_for_index does, without restarting its scan for every boundary.
+    // Preserve GPUI's first-match lookup even for the mixed-order fallback.
     let mut x_for_index = |index| {
         while glyphs.peek().is_some_and(|glyph| glyph.index < index) {
             glyphs.next();
         }
         glyphs.peek().map_or(layout.width, |glyph| glyph.position.x)
     };
-    for bytes in cluster_bytes.windows(2) {
-        let byte_start = bytes[0].min(text.len());
-        let byte_end = bytes[1].min(text.len());
+    let mut byte_start = 0;
+    let mut char_start = 0;
+    for byte_end in cluster_bytes {
+        let byte_end = byte_end.min(text.len());
         if byte_start >= byte_end {
             continue;
         }
-        let char_start = character_bytes.partition_point(|byte| *byte < byte_start);
-        let char_end = character_bytes.partition_point(|byte| *byte < byte_end);
-        if char_start >= char_end {
-            continue;
+        // Cluster boundaries are increasing in both paths. Each character
+        // offset is visited once instead of being searched for every cluster.
+        let mut char_end = char_start;
+        while char_end < character_bytes.len() && character_bytes[char_end] < byte_offset + byte_end {
+            char_end += 1;
         }
-        cluster_boundaries[char_start] = true;
-        cluster_boundaries[char_end] = true;
-        let x0 = f32::from(x_for_index(byte_start));
-        // GPUI's index lookup places an end-of-run caret before trailing
-        // whitespace, while the line width includes that whitespace. CSS may
-        // keep such a space when an atomic inline item follows in the parent
-        // formatting context, so retain the full shaped run advance here.
-        let x1 = if byte_end == text.len() { f32::from(layout.width) } else { f32::from(x_for_index(byte_end)) };
-        let count = char_end - char_start;
-        for index in 0..=count {
-            caret_stops[char_start + index] = x0 + (x1 - x0) * index as f32 / count as f32;
+        if char_start < char_end {
+            cluster_boundaries[char_start] = true;
+            cluster_boundaries[char_end] = true;
+            let x0 = f32::from(x_for_index(byte_start));
+            // Use the full width at the end, including trailing whitespace.
+            let x1 = if byte_end == text.len() { f32::from(layout.width) } else { f32::from(x_for_index(byte_end)) };
+            let count = char_end - char_start;
+            for index in 0..=count {
+                caret_stops[char_start + index] = x0 + (x1 - x0) * index as f32 / count as f32;
+            }
         }
+        byte_start = byte_end;
+        char_start = char_end;
     }
     (Arc::from(caret_stops), Arc::from(cluster_boundaries))
 }
@@ -1091,12 +1155,25 @@ mod boundary_tests {
         let (carets, boundaries) = build_text_boundaries("office", &ligature);
         assert_eq!(&*carets, &[0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
         assert_eq!(&*boundaries, &[true, true, false, false, true, true, true]);
+        let offsets = (4..=10).collect::<Vec<_>>(); // "office" following a four-byte scalar
+        let reused = build_text_boundaries_with_offsets("office", &ligature, &offsets, 4);
+        assert_eq!(reused.0, carets);
+        assert_eq!(reused.1, boundaries);
 
         let text = "a\u{301}b";
         let combining = layout(text, &[&[(0, 0.0), (0, 2.0), (3, 10.0)]], 20.0);
         let (carets, boundaries) = build_text_boundaries(text, &combining);
         assert_eq!(&*carets, &[0.0, 5.0, 10.0, 20.0]);
         assert_eq!(&*boundaries, &[true, false, true, true]);
+    }
+
+    #[test]
+    fn ordered_multibyte_clusters_keep_first_duplicate_and_interpolate_combining_marks() {
+        let text = "aé\u{301}中z";
+        let native = layout(text, &[&[(0, 0.0), (1, 10.0), (1, 12.0)], &[(5, 40.0), (8, 50.0)]], 60.0);
+        let (carets, boundaries) = build_text_boundaries_with_offsets(text, &native, &[4, 5, 7, 9, 12, 13], 4);
+        assert_eq!(&*carets, &[0.0, 10.0, 25.0, 40.0, 50.0, 60.0]);
+        assert_eq!(&*boundaries, &[true, true, false, true, true, true]);
     }
 
     #[test]
@@ -1191,7 +1268,7 @@ mod ownership_tests {
                 let retained_run_count = runs.len();
 
                 shaper.begin_append_shaping().unwrap();
-                shaper.set_text_run_colors(0, "Retained text", &[0x0000ffff; 13]);
+                shaper.set_text_run_colors(0, &[0x0000ffff; 13]);
                 assert_eq!(runs[0].color_at(0), retained_color);
                 assert_ne!(shaper.run_store()[0].color_at(0), retained_color);
                 // Zero-ink glyphs allocate resources with deterministic metrics.
@@ -1225,5 +1302,148 @@ mod ownership_tests {
                 assert!(!painter.into_commands().is_empty());
             })
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod natural_run_tests {
+    use super::*;
+    use gpui::{EmptyView, TestAppContext};
+    use html::text::CharacterPlacement;
+
+    #[gpui::test]
+    fn natural_runs_match_the_general_line_api_with_native_geometry_and_colors(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        window
+            .update(cx, |_, window, _| {
+                let features = [OpenTypeFeature::new(*b"liga", 0), OpenTypeFeature::new(*b"kern", 0)];
+                for (text, size, slant) in [("office ffi", 19.0, FontSlant::Normal), ("a\u{301} 😀 אבג سلام", 27.0, FontSlant::Italic), ("word\u{2009}", 13.0, FontSlant::Oblique), ("zero size", 0.0, FontSlant::Normal)] {
+                    let mut direct = GpuiTextCache::new(window.text_system().clone());
+                    let mut general = GpuiTextCache::new(window.text_system().clone());
+                    let count = text.chars().count();
+                    let colors = (0..count).map(|index| if index % 2 == 0 { 0xff0000ff } else { 0x0000ffff }).collect::<Vec<_>>();
+                    let style = TextStyleSpan::new(0..text.len(), size, 700, slant, 0xff0000ff, Some("serif")).unwrap().with_font_features(features.to_vec());
+                    let request = TextRunShapeRequest::new(text, style.clone()).unwrap().with_paint_colors(&colors).unwrap();
+                    let natural = direct.shape_text_run(request).unwrap().unwrap();
+                    let styles = [style];
+                    let placements = vec![CharacterPlacement::default(); count];
+                    let request = TextShapeRequest::new(7, 10..10 + count as u32, text, &styles, &placements).unwrap();
+                    let line = general.shape_line(request).unwrap().unwrap();
+                    assert_eq!(line.line_index, 7);
+                    assert_eq!(line.text_range, 10..10 + count as u32);
+                    let expected = shaped_text_run_from_line(&line).unwrap();
+                    assert_eq!(natural.advances(), expected.advances(), "{text}");
+                    assert_eq!(natural.cluster_boundaries(), expected.cluster_boundaries());
+                    assert_eq!(natural.caret_stops(), expected.caret_stops());
+                    assert_eq!(natural.ascent(), expected.ascent());
+                    general.set_text_run_colors(line.run, &colors);
+                    let actual = &direct.runs[natural.backend_run().unwrap() as usize];
+                    let expected = &general.runs[line.run as usize];
+                    assert_eq!(actual.character_bytes, expected.character_bytes);
+                    assert_eq!(actual.colors, expected.colors);
+                    assert_eq!(actual.glyphs.len(), expected.glyphs.len());
+                    for (actual, expected) in actual.glyphs.iter().zip(expected.glyphs.iter()) {
+                        assert_eq!(
+                            (actual.font_id, actual.glyph_id, actual.position, actual.font_size, actual.byte_index, actual.is_emoji),
+                            (expected.font_id, expected.glyph_id, expected.position, expected.font_size, expected.byte_index, expected.is_emoji)
+                        );
+                    }
+                }
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn font_setup_reuses_features_across_size_and_color_but_distinguishes_font_selection(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        window
+            .update(cx, |_, window, _| {
+                let mut shaper = GpuiTextCache::new(window.text_system().clone());
+                let style = TextStyleSpan::new(0..1, 19.0, 400, FontSlant::Normal, 0xff0000ff, Some("serif")).unwrap();
+                let first = shaper.prepared_font(&style);
+                let resized = TextStyleSpan::new(0..8, 26.0, 400, FontSlant::Normal, 0x0000ffff, Some("serif")).unwrap();
+                let reused = shaper.prepared_font(&resized);
+                assert!(Arc::ptr_eq(&first.identity, &reused.identity));
+                assert!(Arc::ptr_eq(&first.font.features.0, &reused.font.features.0));
+                for (weight, slant, family) in [(700, FontSlant::Normal, "serif"), (400, FontSlant::Italic, "serif"), (400, FontSlant::Normal, "monospace")] {
+                    let distinct = shaper.prepared_font(&TextStyleSpan::new(0..1, 19.0, weight, slant, 0xff0000ff, Some(family)).unwrap());
+                    assert!(!Arc::ptr_eq(&first.identity, &distinct.identity));
+                }
+                let features = [OpenTypeFeature::new(*b"liga", 0)];
+                let disabled = shaper.prepared_font(&style.clone().with_font_features(features.to_vec()));
+                assert!(!Arc::ptr_eq(&first.identity, &disabled.identity));
+                assert_eq!(disabled.font.features.0.iter().find(|(tag, _)| tag == "liga").unwrap().1, 0);
+                let overrides = [OpenTypeFeature::new(*b"liga", 0), OpenTypeFeature::new(*b"liga", 1)];
+                let enabled = shaper.prepared_font(&style.with_font_features(overrides.to_vec()));
+                assert_eq!(enabled.font.features.0.iter().find(|(tag, _)| tag == "liga").unwrap().1, 1);
+                for weight in 100..100 + FONT_SETUP_CACHE_CAPACITY as u16 * 10 {
+                    shaper.prepared_font(&TextStyleSpan::new(0..1, 19.0, weight, FontSlant::Normal, 0xff0000ff, Some("serif")).unwrap());
+                }
+                assert_eq!(shaper.prepared_fonts.len(), FONT_SETUP_CACHE_CAPACITY);
+                assert_eq!(first.font.features.0.iter().find(|(tag, _)| tag == "liga").unwrap().1, 1, "retained identities and features survive cache eviction");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn mixed_font_sizes_zero_ink_and_adjusted_placements_keep_source_offsets(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        window
+            .update(cx, |_, window, _| {
+                let mut shaper = GpuiTextCache::new(window.text_system().clone());
+                let text = "aé中בz";
+                let style = |range, size| TextStyleSpan::new(range, size, 400, FontSlant::Normal, 0x000000ff, Some("serif")).unwrap();
+                let styles = [style(0..1, 19.0), style(1..3, 0.0), style(3..6, 26.0), style(6..9, 13.0)];
+                let placements = vec![CharacterPlacement::default(); 5];
+                let request = TextShapeRequest::new(2, 20..25, text, &styles, &placements).unwrap();
+                let natural = shaper.shape_line(request).unwrap().unwrap();
+                let mut expected_carets = vec![0.0; 6];
+                let mut expected_boundaries = vec![false; 6];
+                let mut x = 0.0;
+                let mut character_start = 0;
+                for span in &styles {
+                    let run_text = &text[span.byte_range()];
+                    let run_style = style(0..run_text.len(), span.font_size());
+                    let shaped = shaper.shape_text_run(TextRunShapeRequest::new(run_text, run_style).unwrap()).unwrap().unwrap();
+                    for (offset, stop) in shaped.caret_stops().unwrap().iter().enumerate() {
+                        expected_carets[character_start + offset] = x + stop;
+                    }
+                    for (offset, boundary) in shaped.cluster_boundaries().iter().enumerate() {
+                        expected_boundaries[character_start + offset] |= boundary;
+                    }
+                    x += shaped.caret_stops().unwrap().last().unwrap();
+                    character_start += run_text.chars().count();
+                }
+                assert_eq!(natural.caret_stops.as_ref(), expected_carets);
+                assert_eq!(natural.cluster_boundaries.as_ref(), expected_boundaries);
+                let placements = (0..5).map(|index| CharacterPlacement::with_baseline_shift(2.0, None, index as f32, index != 2).unwrap()).collect::<Vec<_>>();
+                let request = TextShapeRequest::new(3, 30..35, text, &styles, &placements).unwrap();
+                let expected_carets = request.adjusted_caret_stops(&natural.caret_stops).unwrap();
+                let shaped = shaper.shape_line(request).unwrap().unwrap();
+                assert_eq!(shaped.caret_stops, expected_carets);
+                assert_eq!(shaped.text_range, 30..35);
+                let original = &shaper.runs[natural.run as usize];
+                let adjusted = &shaper.runs[shaped.run as usize];
+                let expected = original
+                    .glyphs
+                    .iter()
+                    .filter_map(|glyph| {
+                        let index = text[..glyph.byte_index].chars().count();
+                        (index != 2).then_some((glyph.glyph_id, glyph.position.x + px(expected_carets[index] - natural.caret_stops[index]), glyph.position.y - px(index as f32)))
+                    })
+                    .collect::<Vec<_>>();
+                let actual = adjusted.glyphs.iter().map(|glyph| (glyph.glyph_id, glyph.position.x, glyph.position.y)).collect::<Vec<_>>();
+                assert_eq!(actual, expected);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn byte_offsets_reused_for_paint_colors_keep_multibyte_and_combining_ranges() {
+        let bytes = [0, 1, 3, 5, 9]; // a, combining acute, Hebrew, emoji
+        let spans = paint_color_spans(&bytes, &[0xff0000ff, 0xff0000ff, 0x0000ffff, 0x0000ffff]).unwrap();
+        assert_eq!(spans, [(0..3, Hsla::from(rgba(0xff0000ff))), (3..9, Hsla::from(rgba(0x0000ffff)))]);
+        assert!(paint_color_spans(&bytes, &[0xff0000ff]).is_none());
+        assert!(paint_color_spans(&[0], &[]).is_none());
     }
 }

@@ -44,3 +44,4 @@ The rich-text HTML parser uses `html5ever` 0.39 and the matching `markup5ever_rc
 - Context menus listen for GPUI's explicit long-press event as well as desktop right-click. Reader capture handlers can consume the hold before the generic menu opens.
 
 - Text inputs preview mobile page swipes live and settle from the gesture’s original offset, so release does not add the drag distance a second time. Cancelled swipes restore that offset and stay within the input.
+- Window text selection stops when pointer movement reports that the left mouse button is released, including after a consumed release or a release outside the window.

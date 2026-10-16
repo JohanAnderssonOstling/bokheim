@@ -142,7 +142,7 @@ impl ApplicationRoot {
                         _ => Err("Unknown authentication action".into()),
                     };
                     let authenticated = result.is_ok() && matches!(action.as_str(), "login" | "verify");
-                    let _ = reply.try_send(result);
+                    let _ = reply.try_send(result.map_err(|error| ui_components::authentication_error(&error, &action).to_owned()));
                     if authenticated {
                         let _ = sender.try_send(SyncEvent::WebAuthenticated);
                     }
@@ -515,8 +515,8 @@ impl ApplicationRoot {
     fn book_open_failed(&mut self, title: &str, error: String, window: &mut Window, cx: &mut Context<Self>) {
         log::error!("could not open {title:?}: {error}");
         self.return_to_library(window, cx);
-        let message = error.strip_prefix("stage=").and_then(|error| error.split_once(": ")).map_or(error.as_str(), |(_, message)| message);
-        window.push_notification(Notification::error(format!("Could not open “{title}”: {message}")).id1::<Self>("book-open-error").autohide(false).close_button_always_visible(true), cx);
+        let message = ui_components::user_facing_error(&error, "Try opening the book again. If it still won't open, download it again or try another edition.");
+        window.push_notification(Notification::error(format!("Could not open “{title}”. {message}")).id1::<Self>("book-open-error").autohide(false).close_button_always_visible(true), cx);
     }
 
     pub fn audiobook_session(&self) -> Option<Entity<reader_ui::PlaybackSession>> {
@@ -727,6 +727,7 @@ impl Render for ApplicationRoot {
         let root = root.children(opening_overlay);
         #[cfg(all(target_os = "linux", not(feature = "mobile")))]
         let root = root.when(matches!(window.window_decorations(), gpui::Decorations::Client { .. }), |root| {
+            let theme = ui_components::browser_theme(cx);
             if self.window_titlebar_visible {
                 root.child(
                     div()
@@ -750,7 +751,7 @@ impl Render for ApplicationRoot {
                         .id("window-titlebar-reveal")
                         .focusable()
                         .tab_index(0)
-                        .focus(|style| style.bg(gpui::rgba(0x80808080)))
+                        .focus(move |style| style.bg(theme.accent_wash))
                         .on_action(|_: &gpui_component::menu::OpenContextMenu, window, _| window.show_window_menu(gpui::point(gpui::px(12.), NATIVE_TITLEBAR_HOVER_HEIGHT)))
                         .absolute()
                         .top_0()

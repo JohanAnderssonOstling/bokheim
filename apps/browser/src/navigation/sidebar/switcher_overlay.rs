@@ -1,5 +1,7 @@
 //! Library creation, selection, and switcher overlay rendering.
 
+use ui_components::user_facing_error;
+
 use gpui::prelude::*;
 use gpui::{Context, Entity, KeyDownEvent, MouseButton, PathPromptOptions, SharedString, Window};
 use gpui::{Focusable, Subscription};
@@ -103,7 +105,14 @@ impl Sidebar {
         }
         let name = dialog.input.read(cx).value().trim().to_owned();
         if name.is_empty() || name.len() > 255 || name.chars().any(char::is_control) {
-            dialog.error = Some("Enter a shorter, nonempty library name without control characters.".into());
+            let message = if name.is_empty() {
+                "Enter a library name."
+            } else if name.len() > 255 {
+                "This library name is too long. Enter a shorter name."
+            } else {
+                "Remove line breaks, tabs, and other invisible characters from the library name."
+            };
+            dialog.error = Some(message.into());
             cx.notify();
             return;
         }
@@ -126,7 +135,7 @@ impl Sidebar {
                     Err(error) => {
                         if let Some(dialog) = navigation.library_name_dialog.as_mut() {
                             dialog.busy = false;
-                            dialog.error = Some(error.into());
+                            dialog.error = Some(user_facing_error(&error, "Could not save the library changes. Please try again.").into());
                         }
                     }
                 }
@@ -392,7 +401,7 @@ impl Sidebar {
                         match estimate {
                             Ok((local_books, local_bytes, local_unavailable)) => dialog.estimate = Some((books + local_books, bytes.saturating_add(local_bytes), unavailable + local_unavailable)),
                             Err(error) => {
-                                dialog.error = Some(error.into());
+                                dialog.error = Some(user_facing_error(&error, "Could not check the selected folders. Check that they are available, then try again.").into());
                                 dialog.estimate = Some((books, bytes, unavailable + 1));
                             }
                         }

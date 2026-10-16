@@ -1,4 +1,5 @@
 use app::host::startup_profile::StartupProfile;
+use app::host::defer_library_maintenance;
 use app::{AppDataLocation, host::BackendLaunch};
 use gpui_android::{AndroidApp, AndroidPlatform, AndroidPlatformOptions};
 use jni::EnvUnowned;
@@ -83,7 +84,7 @@ fn android_main(app: AndroidApp) {
     // Retain the application context and class, never an Activity: media
     // commands remain valid after the activity is destroyed or recreated.
     let audio_vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) };
-    let (audio_class, audio_context, profiling, defer_background, load_system_fonts, cache_gpu_pipelines, force_opengl) = audio_vm
+    let (audio_class, audio_context, profiling, defer_background, defer_maintenance, load_system_fonts, cache_gpu_pipelines, force_opengl) = audio_vm
         .attach_current_thread(|env| {
             let raw_activity = app.activity_as_ptr() as jni::sys::jobject;
             let activity = unsafe { env.as_cast_raw::<jni::refs::Global<JObject>>(&raw_activity)? };
@@ -99,13 +100,15 @@ fn android_main(app: AndroidApp) {
             let profiling = env.call_method(&intent, jni::jni_str!("getBooleanExtra"), jni::jni_sig!("(Ljava/lang/String;Z)Z"), &[jni::objects::JValue::Object(key.as_ref()), jni::objects::JValue::Bool(false)])?.z()?;
             let key = JString::from_str(env, "bokheim.startup_defer_background")?;
             let defer_background = profiling && env.call_method(&intent, jni::jni_str!("getBooleanExtra"), jni::jni_sig!("(Ljava/lang/String;Z)Z"), &[jni::objects::JValue::Object(key.as_ref()), jni::objects::JValue::Bool(false)])?.z()?;
+            let key = JString::from_str(env, "bokheim.startup_defer_maintenance")?;
+            let defer_maintenance = env.call_method(&intent, jni::jni_str!("getBooleanExtra"), jni::jni_sig!("(Ljava/lang/String;Z)Z"), &[jni::objects::JValue::Object(key.as_ref()), jni::objects::JValue::Bool(true)])?.z()?;
             let key = JString::from_str(env, "bokheim.android_system_fonts")?;
             let load_system_fonts = env.call_method(&intent, jni::jni_str!("getBooleanExtra"), jni::jni_sig!("(Ljava/lang/String;Z)Z"), &[jni::objects::JValue::Object(key.as_ref()), jni::objects::JValue::Bool(false)])?.z()?;
             let key = JString::from_str(env, "bokheim.gpu_pipeline_cache")?;
             let cache_gpu_pipelines = env.call_method(&intent, jni::jni_str!("getBooleanExtra"), jni::jni_sig!("(Ljava/lang/String;Z)Z"), &[jni::objects::JValue::Object(key.as_ref()), jni::objects::JValue::Bool(true)])?.z()?;
             let key = JString::from_str(env, "bokheim.force_opengl")?;
             let force_opengl = env.call_method(&intent, jni::jni_str!("getBooleanExtra"), jni::jni_sig!("(Ljava/lang/String;Z)Z"), &[jni::objects::JValue::Object(key.as_ref()), jni::objects::JValue::Bool(false)])?.z()?;
-            Ok::<_, jni::errors::Error>((class, env.new_global_ref(context)?, profiling, defer_background, load_system_fonts, cache_gpu_pipelines, force_opengl))
+            Ok::<_, jni::errors::Error>((class, env.new_global_ref(context)?, profiling, defer_background, defer_maintenance, load_system_fonts, cache_gpu_pipelines, force_opengl))
         })
         .expect("could not initialize Android audiobook bridge");
     if profiling {
@@ -264,6 +267,9 @@ fn android_main(app: AndroidApp) {
     .expect("failed to recover Android update");
     profile.mark("update_recovery");
     let mut startup_permit = (update_trial || defer_background).then(app::host::defer_background_work);
+    // Keep scan/sync/import I/O from competing with opening the remaining
+    // libraries and rendering the first frame. Foreground commands stay live.
+    let maintenance_permit = defer_maintenance.then(defer_library_maintenance);
     let incoming_directory = data_dir.join("incoming");
     std::fs::create_dir_all(&incoming_directory).expect("failed to create Android incoming book directory");
     cleanup_abandoned_incoming_files(&incoming_directory);
@@ -321,12 +327,16 @@ fn android_main(app: AndroidApp) {
             }
         }
         log::info!("shared Bokheim UI opened");
-        if profiling && opened.is_some() {
+        if opened.is_some() {
             profile.mark("update_healthy");
             let window = cx.windows()[0];
             let _ = window.update(cx, |_, window, _| {
                 window.on_next_frame(move |_, _| {
                     profile.mark("frame_callback");
+                    if let Some(permit) = maintenance_permit {
+                        log::info!("Android library maintenance released after first frame callback");
+                        drop(permit);
+                    }
                     if let Some(permit) = startup_permit {
                         permit.release();
                     }

@@ -34,11 +34,19 @@ export async function startApplication(panel, initialize, {reload = () => locati
             return false;
         }
         const message = document.createElement('p');
-        message.textContent = busy ? 'Close other Bokheim tabs, then reload.' : 'Could not update local data. Reload to try again.';
+        message.textContent = busy ? 'Close other Bokheim tabs, then reload.' : 'Bokheim could not start. Reload to try again.';
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = 'Error details';
+        const detail = document.createElement('pre');
+        detail.textContent = String(error);
+        detail.style.whiteSpace = 'pre-wrap';
+        detail.style.overflowWrap = 'anywhere';
+        details.append(summary, detail);
         const button = document.createElement('button');
         button.textContent = 'Reload';
         button.addEventListener('click', () => reload());
-        panel.replaceChildren(message, button);
+        panel.replaceChildren(message, details, button);
         return false;
     } finally {
         delete globalThis.__BOKHEIM_STARTUP_READY__;

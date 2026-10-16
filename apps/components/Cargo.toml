@@ -9,6 +9,7 @@ kobo = ["mobile", "dep:gpui_kobo"]
 mobile = []
 
 [dependencies]
+log = "0.4"
 web-time = "1"
 library-model = { path = "../../client/library-model", default-features = false }
 app-preferences = { path = "../../client/preferences" }

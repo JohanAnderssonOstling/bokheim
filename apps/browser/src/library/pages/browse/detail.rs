@@ -8,6 +8,8 @@
 //! uses its current pane bounds to reveal the complete book in its final
 //! layout rather than moving the title and controls as requests finish.
 
+use ui_components::user_facing_error;
+
 use crate::services::{book_transfer_error_message, notify_error, notify_info, track_catalog_import};
 use library_backend::{DownloadState, ThumbnailResolution};
 use std::collections::{HashMap, HashSet};
@@ -236,7 +238,7 @@ impl BookDetailPage {
                         notify_info("torrent-forgotten", "Torrent removed; downloaded files are kept", window, cx);
                     }
                 }
-                Err(error) => notify_error("torrent-error", error, window, cx),
+                Err(error) => notify_error("torrent-error", user_facing_error(&error, "Could not update this download. Please try again."), window, cx),
             });
         }));
     }
@@ -263,7 +265,7 @@ impl BookDetailPage {
                         page.detail = Some(detail);
                         page.error = None;
                     }
-                    Err(error) => page.error = Some(error.into()),
+                    Err(error) => page.error = Some(user_facing_error(&error, "Could not load book details. Please try again.").into()),
                 }
                 cx.notify();
             });
@@ -334,7 +336,7 @@ impl BookDetailPage {
         let (app, library_id) = (self.ui.app().clone(), *self.ui.backend().id());
         cx.spawn_in(window, async move |page, cx| {
             if let Err(error) = app.buy_opds_book(entry, library_id).await {
-                let _ = page.update_in(cx, |_, window, cx| notify_error("book-buy-error", format!("Could not open the store: {error}"), window, cx));
+                let _ = page.update_in(cx, |_, window, cx| notify_error("book-buy-error", format!("Could not open the store. {}", user_facing_error(&error, "Please try again.")), window, cx));
             }
         })
         .detach();
@@ -567,9 +569,7 @@ impl BookDetailPage {
             .when(book.library_file().is_some(), |cover| cover.cursor_pointer().on_click(cx.listener(|page, _, window, cx| page.open(None, window, cx))))
             .child(match self.cover.clone() {
                 Some(cover) => components::book_cover(theme, cover_aspect_ratio(&cover.image)).child(components::book_cover_image(format!("book-detail-cover-{}", book.key()), cover.image, 1.0, false, theme)),
-                None if self.cover_missing => {
-                    components::book_cover_generated(book.title.clone(), book.subtitle.as_deref(), &book.author, generated_cover_variant(book.key()), theme).aspect_ratio(if audiobook { 1.0 } else { components::BOOK_COVER_ASPECT_RATIO })
-                }
+                None if self.cover_missing => components::book_cover_generated(book.title.clone(), book.subtitle.as_deref(), &book.author, generated_cover_variant(book.key()), theme),
                 None => components::book_cover(theme, if audiobook { 1.0 } else { components::BOOK_COVER_ASPECT_RATIO }),
             })
             // Show the cover's progress bar only after the book has been started.

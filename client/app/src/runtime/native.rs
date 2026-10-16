@@ -1,13 +1,16 @@
-use crate::BackendError;
-use crate::host::startup_profile::StartupProfile;
 use crate::app::AppBackend;
-use library_backend::library::LibraryDirectory;
+use crate::host::startup_profile::StartupProfile;
+use crate::BackendError;
+use client_platform_runtime::storage_queue::{self, Priority};
+use library_backend::{library::LibraryDirectory, LibraryHandle};
 use std::future::Future;
+use std::sync::Arc;
 use tokio::sync::watch;
 #[derive(Clone)]
 pub(crate) struct Transport {
     jobs: async_channel::Sender<BackendJob>,
-    pub(crate) libraries: std::sync::Arc<LibraryDirectory>,
+    libraries: Arc<LibraryDirectory>,
+    library_startup: watch::Receiver<Option<Result<(), BackendError>>>,
 }
 
 use super::*;
@@ -75,17 +78,34 @@ pub(crate) enum BackendJob {
 
 pub(crate) struct AppWorker {
     jobs: async_channel::Receiver<BackendJob>,
+    library_startup: watch::Sender<Option<Result<(), BackendError>>>,
+    initialize_libraries: bool,
 }
 
 pub(crate) fn channel(backend: &AppBackend) -> (AppClient, AppWorker) {
+    channel_with_startup(backend, false)
+}
+
+fn channel_with_startup(backend: &AppBackend, initialize_libraries: bool) -> (AppClient, AppWorker) {
     let (jobs, incoming) = async_channel::bounded(64);
-    (AppClient { transport: Transport { jobs, libraries: backend.library_directory().clone() } }, AppWorker { jobs: incoming })
+    let (library_startup, ready) = watch::channel((!initialize_libraries).then_some(Ok(())));
+    (AppClient { transport: Transport { jobs, libraries: backend.library_directory().clone(), library_startup: ready } }, AppWorker { jobs: incoming, library_startup, initialize_libraries })
 }
 
 impl AppWorker {
-    /// Settings run in receive order. Waiting requests must not prevent local
-    /// commands from running; resource limits belong to the work they protect.
+    /// Deferred startup opens every library before serving queued commands.
+    /// Settings then run in receive order; waiting operations run concurrently.
     pub async fn serve(self, backend: AppBackend) {
+        if self.initialize_libraries {
+            crate::executor::library_maintenance_ready().await;
+            let initializer = backend.clone();
+            let result = storage_queue::run(Priority::Background, move || initializer.open_startup_libraries()).await.map_err(BackendError::message).and_then(|result| result);
+            self.library_startup.send_replace(Some(result.clone()));
+            if let Err(error) = result {
+                log::error!("could not open startup libraries: {error}");
+                return;
+            }
+        }
         let mut running = futures_util::stream::FuturesUnordered::new();
         loop {
             tokio::select! {
@@ -107,6 +127,23 @@ impl AppWorker {
 }
 
 impl Transport {
+    pub(crate) async fn library_handle(&self, library_id: LibraryId) -> Result<LibraryHandle, BackendError> {
+        self.wait_for_library_startup().await?;
+        let libraries = self.libraries.clone();
+        storage_queue::run(Priority::Interactive, move || libraries.get(&library_id)).await.map_err(BackendError::message)?
+    }
+
+    async fn wait_for_library_startup(&self) -> Result<(), BackendError> {
+        let mut ready = self.library_startup.clone();
+        loop {
+            let result = ready.borrow_and_update().clone();
+            if let Some(result) = result {
+                return result;
+            }
+            ready.changed().await.map_err(|_| BackendError::message("backend stopped during library startup"))?;
+        }
+    }
+
     pub(crate) async fn run<T, F, Fut>(&self, operation: F) -> Result<T, BackendError>
     where
         T: Send + 'static,
@@ -182,16 +219,18 @@ impl Transport {
 }
 
 impl AppClient {
-    /// Starts the native backend on its application-owned thread.
+    /// Loads startup metadata and starts the application-owned backend thread.
+    /// Hosts may defer the library-opening phase until their first frame.
     pub fn start_native(launch: crate::api::BackendLaunch) -> Result<(Self, AppStartupState), BackendError> {
         let mut profile = StartupProfile::new("native_backend");
+        let defer_libraries = launch.libraries_after_first_frame;
         let backend_context = launch.into_context()?;
         profile.mark("registry_open");
-        let backend = AppBackend::new(backend_context).map_err(BackendError::operation)?;
+        let backend = if defer_libraries { AppBackend::new_without_libraries(backend_context) } else { AppBackend::new(backend_context) }.map_err(BackendError::operation)?;
         profile.mark("backend_construct");
         let startup = backend.startup_state()?;
         profile.mark("startup_snapshot");
-        let (client, worker) = crate::runtime::native::channel(&backend);
+        let (client, worker) = if defer_libraries { channel_with_startup(&backend, true) } else { channel(&backend) };
         std::thread::Builder::new().name("bokheim-app-worker".to_owned()).spawn(move || backend.run_native_worker(worker)).map_err(|error| format!("failed to start application backend worker: {error}"))?;
         profile.mark("worker_start");
         Ok((client, startup))

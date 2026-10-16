@@ -399,6 +399,12 @@ Launch-to-log timings include earlier Android startup and use a measured device
 clock offset. Frame callbacks measure GPUI rendering, not panel presentation.
 Filesystem caches stay warm; these measurements do not simulate a device reboot.
 
+Android holds library scan/sync/import maintenance until the first GPUI frame
+callback. Foreground library commands remain available during startup; maintenance
+resumes automatically after rendering, including when profiling is disabled.
+Pass `--no-defer-maintenance` to compare immediate maintenance in the same APK
+(`bokheim.startup_defer_maintenance=false` on a force-stopped launch).
+
 Library traces include a library ID, resource construction, connection policy,
 schema initialization, transaction commit, and actor startup. The runner saves
 every event and per-library breakdowns in `runs.json`; `.sum_ms` metrics total a

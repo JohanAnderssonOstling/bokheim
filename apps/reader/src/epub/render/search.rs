@@ -1,7 +1,7 @@
 //! EPUB search controls and virtualized, chapter-grouped excerpts.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Entity, Modifiers, div, list, px};
+use gpui::{AnyElement, Context, Entity, Modifiers, Window, div, list, px};
 use gpui_component::scroll::{Scrollbar, ScrollbarAxis};
 use html_view_core::RendererCommand;
 use ui_components as components;
@@ -12,7 +12,7 @@ use crate::shell::search;
 use crate::shell::toolbar::SidebarTarget;
 
 impl ReaderView {
-    pub(super) fn render_search(&self, theme: components::BrowserTheme, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_search(&self, theme: components::BrowserTheme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let reader = cx.entity().downgrade();
         let results = list(self.search.list.clone(), move |row, _, cx| {
             let Some(reader) = reader.upgrade() else { return div().into_any_element() };
@@ -45,7 +45,7 @@ impl ReaderView {
                     cx.stop_propagation();
                 }
             })
-            .child(div().flex_none().child(search::search_bar(&self.search_input, theme)))
+            .child(div().flex_none().child(search::search_bar(&self.search_input, theme, window, cx)))
             .child(div().id("epub-search-results").relative().flex_1().min_h_0().min_w_0().bg(theme.page_bg).child(results).child(Scrollbar::new(&self.search.list).axis(ScrollbarAxis::Vertical)))
             .into_any_element()
     }

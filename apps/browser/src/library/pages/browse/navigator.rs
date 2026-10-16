@@ -3,6 +3,8 @@
 //! The page's views read it and redraw when it loads; none of them load
 //! anything themselves.
 
+use ui_components::user_facing_error;
+
 use gpui::{Context, EventEmitter, SharedString, Task};
 use library_backend::{DownloadState, LibraryBrowseData};
 use library_model::{BrowseLocation, BrowsePageRequest, LibraryBrowseQuery};
@@ -206,7 +208,7 @@ impl BrowseNavigator {
                     }
                     Err(error) => {
                         log::warn!("Loading the next feed page failed: {error}");
-                        navigator.error = Some(error.into());
+                        navigator.error = Some(user_facing_error(&error, "Could not load this page. Please try again.").into());
                     }
                 }
                 cx.notify();
@@ -248,7 +250,7 @@ impl BrowseNavigator {
                     Ok(None) => navigator.refresh(cx),
                     Err(error) => {
                         navigator.page_failed = true;
-                        navigator.error = Some(error.into());
+                        navigator.error = Some(user_facing_error(&error, "Could not load this page. Please try again.").into());
                     }
                 }
                 cx.notify();
@@ -348,7 +350,7 @@ impl BrowseNavigator {
             }
             Err(error) => {
                 log::warn!("Browse failed for {}: {}", destination.location, error);
-                self.error = Some(error.into());
+                self.error = Some(user_facing_error(&error, "Could not load this page. Please try again.").into());
             }
         }
         cx.notify();

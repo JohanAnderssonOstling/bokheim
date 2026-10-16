@@ -108,6 +108,7 @@ fn observe_frame(document: Entity<HtmlView>, sample: Sample, done: async_channel
                 "viewport_plan_ms": sample.plan_ms,
                 "frame_observed_ms": milliseconds(sample.started),
                 "glyph_misses": shapes.glyph_misses, "line_misses": shapes.line_misses,
+                "font_setup_hits": shapes.font_setup_hits, "font_setup_misses": shapes.font_setup_misses, "retained_font_setups": shapes.retained_font_setups,
                 "registered_glyphs": shapes.registered_glyphs, "backend_glyph_records": shapes.backend_glyph_records,
                 "trailing_whitespace_probes": shapes.trailing_whitespace_probes,
                 "trailing_whitespace_probe_characters": shapes.trailing_whitespace_probe_characters,
@@ -193,7 +194,7 @@ fn profile_whitespace() {
                 for family in ["serif", "sans-serif", "monospace"] {
                     for text in [" ", "   ", "word ", "word  ", "office ", "a\u{301} ", "אבג ", "سلام ", "word\u{a0}", "word\u{2003}", "word\u{2009}", "word\u{3000}", "word\t", "word\n", "word\u{2028}"] {
                         let before = shaper.shape_cache_stats();
-                        let style = TextStyleSpan::new(0..text.len(), font_size, weight, slant, 0x000000ff, Some(family)).unwrap().with_font_features(features);
+                        let style = TextStyleSpan::new(0..text.len(), font_size, weight, slant, 0x000000ff, Some(family)).unwrap().with_font_features(features.to_vec());
                         let request = TextRunShapeRequest::new(text, style).unwrap();
                         let mut glyphs = vec![0; text.chars().count()];
                         let shaped = shaper.shape_glyph_run(request, &mut glyphs).expect("native whitespace shaping").expect("native run");

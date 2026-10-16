@@ -1,7 +1,7 @@
 //! Search controls shared by every reader surface.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Div, ElementId, Entity, FontWeight, Stateful, div, px};
+use gpui::{AnyElement, App, Context, Div, ElementId, Entity, Focusable, FontWeight, Stateful, Window, div, px};
 use gpui_component::input::{Input, InputState};
 use gpui_component::{Disableable, IconName};
 use ui_components as components;
@@ -37,7 +37,11 @@ pub(crate) fn header_controls<C: SearchBarTarget>(owner: &C, target: &Entity<C>,
 }
 
 /// The query occupies its own full-width row below the panel header.
-pub(crate) fn search_bar(input: &Entity<InputState>, theme: components::BrowserTheme) -> AnyElement {
+pub(crate) fn search_bar(input: &Entity<InputState>, theme: components::BrowserTheme, window: &mut Window, cx: &mut App) -> AnyElement {
+    let focus = input.read(cx).focus_handle(cx);
+    // This state lives only while the query is rendered, so reopening the
+    // panel focuses it again without stealing focus on subsequent renders.
+    window.use_keyed_state(("reader-search-autofocus", input.entity_id()), cx, move |window, cx| focus.focus(window, cx));
     let query = components::reader_search_box(theme).debug_selector(|| "reader-search-query".into()).key_context("ReaderSearch").child(Input::new(input).appearance(false).cleanable(false).size_full().font_weight(FontWeight::BOLD));
     components::reader_search_bar(theme).debug_selector(|| "reader-search-row".into()).child(query).into_any_element()
 }

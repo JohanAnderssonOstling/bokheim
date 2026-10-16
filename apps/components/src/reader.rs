@@ -245,7 +245,7 @@ pub fn reader_annotation_color_swatch(id: impl Into<ElementId>, color: u32, name
                 .flex_none()
                 .rounded_full()
                 .border_1()
-                .border_color(gpui::black().opacity(0.25))
+                .border_color(theme.border)
                 .bg(reader_annotation_color(color))
                 .when(selected, |circle| circle.debug_selector(move || format!("reader-annotation-color-selected-{name}"))),
         )

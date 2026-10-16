@@ -11,12 +11,12 @@ struct BrowserNotification;
 
 /// Reports a failed action. Failures stay on screen until dismissed.
 pub(crate) fn notify_error(id: &'static str, message: impl Into<SharedString>, window: &mut Window, cx: &mut App) {
-    window.push_notification(Notification::error(message.into()).id1::<BrowserNotification>(id).autohide(false), cx);
+    window.push_notification(Notification::error(message.into()).id1::<BrowserNotification>(id).autohide(false).close_button_always_visible(true), cx);
 }
 
 /// Reports an action that partly succeeded.
 pub(crate) fn notify_warning(id: &'static str, message: impl Into<SharedString>, window: &mut Window, cx: &mut App) {
-    window.push_notification(Notification::warning(message.into()).id1::<BrowserNotification>(id).autohide(false), cx);
+    window.push_notification(Notification::warning(message.into()).id1::<BrowserNotification>(id).autohide(false).close_button_always_visible(true), cx);
 }
 
 /// Confirms an action that succeeded and left no trace on screen — an undo,

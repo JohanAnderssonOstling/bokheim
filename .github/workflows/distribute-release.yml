@@ -66,7 +66,9 @@ jobs:
           assert platform in ('windows', 'macos', 'kobo')
           assert run_id.isdecimal() and int(run_id) > 0
           assert re.fullmatch('[0-9a-f]{40}', sha)
-          assert re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag)
+          match = re.fullmatch(r'v([0-9]+\.[0-9]+\.[0-9]+)(?:-patch[1-9][0-9]*)?', tag)
+          assert match, 'Expected a release or patch staging tag'
+          version = match.group(1)
           workflow = {'windows': 'desktop-release.yml', 'macos': 'macos-release.yml', 'kobo': 'kobo-release.yml'}[platform]
           run = json.loads(command('gh', 'api', f'repos/{repository}/actions/runs/{run_id}'))
           workflow_sha = os.environ.get('WORKFLOW_COMMIT') or sha
@@ -78,7 +80,7 @@ jobs:
           assert release['isDraft'], 'Packages may only be added to a draft'
           existing = {item['name']: item for item in release['assets']}
           cargo = json.loads(command('gh', 'api', f'repos/{repository}/contents/apps/desktop-gpui/Cargo.toml?ref={sha}'))
-          assert tomllib.loads(base64.b64decode(cargo['content']).decode())['package']['version'] == tag[1:]
+          assert tomllib.loads(base64.b64decode(cargo['content']).decode())['package']['version'] == version
           with tempfile.TemporaryDirectory() as scratch:
               directory = Path(scratch)
               names = {'windows': ['bokheim-desktop-windows-x86-64'], 'macos': ['bokheim-macos-universal'],
@@ -90,7 +92,7 @@ jobs:
                   artifacts.validate(receipt, platform, sha, repository, directory)
                   assert receipt['workflow_run'] == int(run_id), 'Receipt belongs to a different build'
                   info = json.loads((directory / 'update-info-windows-x86_64-zip.json').read_text())
-                  assert info['application'] == tag[1:], 'Package version differs from release tag'
+                  assert info['application'] == version, 'Package version differs from release tag'
                   names = [*artifacts.FILES[platform], artifacts.receipt_name(platform)]
               elif platform == 'kobo':
                   packages = ['Bokheim-Kobo-Installer-Windows-x86_64.exe', 'Bokheim-Kobo-Installer-Linux-x86_64.AppImage']
@@ -101,7 +103,7 @@ jobs:
                       names.extend([package, package + '.sha256'])
               else:
                   metadata = json.loads((directory / 'build-macos.json').read_text())
-                  assert metadata['source_commit'] == sha and metadata['application'] == tag[1:]
+                  assert metadata['source_commit'] == sha and metadata['application'] == version
                   image = directory / 'Bokheim-macOS-universal.dmg'
                   assert metadata['artifact']['name'] == image.name
                   assert artifacts.fingerprint(image) == {key: metadata['artifact'][key] for key in ('bytes', 'sha256')}

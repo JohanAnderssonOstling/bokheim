@@ -4,6 +4,8 @@
 //! ago they were deleted: the question Trash is opened with is "what did I
 //! just delete?". Items are selected to restore or delete several at once.
 
+use ui_components::user_facing_error;
+
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
@@ -206,7 +208,7 @@ impl TrashPage {
                         // reader is open. Start the load on their next render.
                         page.covers_need_reload = true;
                     }
-                    Err(error) => page.error = Some(error.into()),
+                    Err(error) => page.error = Some(user_facing_error(&error, "Could not load Trash. Please try again.").into()),
                 }
                 cx.notify();
             });
@@ -289,7 +291,7 @@ impl TrashPage {
         cx.spawn(async move |page, cx| {
             if let Err(error) = operation.await {
                 cx.defer_update(page, move |page, cx| {
-                    page.error = Some(format!("Could not {action}: {error}").into());
+                    page.error = Some(format!("Could not {action}. {}", user_facing_error(&error, "Please try again.")).into());
                     cx.notify();
                 });
             }

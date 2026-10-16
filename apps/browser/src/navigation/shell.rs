@@ -4,6 +4,8 @@
 //! and per-library page state. Settings belongs to this shell.
 //! The sidebar draws whichever route it is handed.
 
+use ui_components::user_facing_error;
+
 use crate::NavigationSession;
 use crate::services::notify_error;
 use gpui::prelude::*;
@@ -252,7 +254,7 @@ impl BrowserShell {
 
     /// Reports a failure that occurred before an incoming file reached the library.
     pub fn incoming_import_failed(&mut self, error: String, window: &mut Window, cx: &mut Context<Self>) {
-        notify_error("incoming-book-stage-error", format!("Could not stage incoming book: {error}"), window, cx);
+        notify_error("incoming-book-stage-error", format!("Could not prepare this book for import. {}", user_facing_error(&error, "Please try again.")), window, cx);
     }
 
     /// Replaces the current page with the view represented by `route`.

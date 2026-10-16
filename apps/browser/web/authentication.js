@@ -129,7 +129,7 @@ export function openAuthentication(themeJson, minimum, submit) {
         return input;
     }
     const titles = {login:'Sign in', register:'Create account', verify:'Check your email', 'request-reset':'Reset your password', reset:'Set a new password'};
-    const actions = {login:'Sign in', register:'Create account', verify:'Verify email', 'request-reset':'Email me a reset token', reset:'Set new password'};
+    const actions = {login:'Sign in', register:'Create account', verify:'Verify email', 'request-reset':'Email me a reset code', reset:'Set new password'};
     function render(next, email = '', message = '') {
         flow = next;
         heading.textContent = titles[flow];
@@ -155,7 +155,7 @@ export function openAuthentication(themeJson, minimum, submit) {
             pin.maxLength = 6;
         }
         if (flow === 'reset') {
-            field('token', 'Reset token from your email', 'text', 'off');
+            field('token', 'Reset code from your email', 'text', 'off');
         }
         const primary = document.createElement('button');
         primary.type = 'submit';
@@ -210,7 +210,7 @@ export function openAuthentication(themeJson, minimum, submit) {
             if (action === 'login' || action === 'verify') { destroy(); return; }
             if (action === 'register') render('verify', email, 'Check your email for a six-digit verification PIN.');
             if (action === 'resend') status.textContent = 'Verification PIN sent if the address exists.';
-            if (action === 'request-reset') render('reset', email, 'Check your email for a reset token.');
+            if (action === 'request-reset') render('reset', email, 'Check your email for a reset code.');
             if (action === 'reset') render('login', email, 'Password updated. Sign in with your new password.');
         } catch (failure) {
             if (!closed) { status.textContent = ''; error.textContent = String(failure); }

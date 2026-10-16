@@ -28,7 +28,7 @@ impl AuthenticationInputs {
             email: input("Email", false, cx),
             registration_password: input("Password", true, cx),
             verification_pin,
-            reset_token: input("Reset token", false, cx),
+            reset_token: input("Reset code from your email", false, cx),
             new_password: input("New password", true, cx),
         }
     }
@@ -72,7 +72,7 @@ impl SyncPage {
                     }
                     Err(error) => {
                         page.message = None;
-                        page.error = Some(error.into());
+                        page.error = Some(page.authentication_error(&error).into());
                     }
                 }
                 cx.notify();
@@ -84,7 +84,7 @@ impl SyncPage {
         let email = self.authentication.login_email.read(cx).value().trim().to_owned();
         let password = self.authentication.password.read(cx).value().to_string();
         if email.is_empty() || password.is_empty() {
-            self.error = Some("Email and password are required".into());
+            self.error = Some("Enter your email address and password.".into());
             cx.notify();
             return;
         }
@@ -96,7 +96,7 @@ impl SyncPage {
         let email = self.authentication.email.read(cx).value().trim().to_owned();
         let password = self.authentication.registration_password.read(cx).value().to_string();
         if email.is_empty() || password.chars().count() < account_contract::PASSWORD_MIN_CHARACTERS {
-            self.error = Some("Check the email and password length".into());
+            self.error = Some(format!("Enter your email address and use a password with at least {} characters.", account_contract::PASSWORD_MIN_CHARACTERS).into());
             cx.notify();
             return;
         }
@@ -108,7 +108,7 @@ impl SyncPage {
     pub(super) fn start_resend_verification(&mut self, cx: &mut Context<Self>) {
         let email = self.authentication.email.read(cx).value().trim().to_owned();
         if email.is_empty() {
-            self.error = Some("Email is required".into());
+            self.error = Some("Enter your email address.".into());
             cx.notify();
             return;
         }
@@ -121,8 +121,13 @@ impl SyncPage {
         let email = self.authentication.email.read(cx).value().trim().to_owned();
         let pin = self.authentication.verification_pin.read(cx).value().trim().to_owned();
         let pin_digits = account_contract::EMAIL_VERIFICATION_PIN_DIGITS;
-        if email.is_empty() || pin.len() != pin_digits || !pin.bytes().all(|byte| byte.is_ascii_digit()) {
-            self.error = Some(format!("Enter the {pin_digits}-digit verification PIN").into());
+        if email.is_empty() {
+            self.error = Some("Enter your email address.".into());
+            cx.notify();
+            return;
+        }
+        if pin.len() != pin_digits || !pin.bytes().all(|byte| byte.is_ascii_digit()) {
+            self.error = Some(format!("Enter the {pin_digits}-digit verification PIN from your email.").into());
             cx.notify();
             return;
         }
@@ -133,20 +138,20 @@ impl SyncPage {
     pub(super) fn start_password_reset_request(&mut self, cx: &mut Context<Self>) {
         let email = self.authentication.email.read(cx).value().trim().to_owned();
         if email.is_empty() {
-            self.error = Some("Email is required".into());
+            self.error = Some("Enter your email address.".into());
             cx.notify();
             return;
         }
         let backend = self.services.backend.clone();
         let operation = Box::pin(async move { backend.request_password_reset(email).await });
-        self.start_account_request("Requesting reset…", "Reset token sent if the address exists", AccountFlow::ResetPassword, operation, cx);
+        self.start_account_request("Requesting reset…", "Check your email for a password reset code. If the address has an account, an email will arrive shortly.", AccountFlow::ResetPassword, operation, cx);
     }
 
     pub(super) fn start_password_reset(&mut self, cx: &mut Context<Self>) {
         let token = self.authentication.reset_token.read(cx).value().trim().to_owned();
         let password = self.authentication.new_password.read(cx).value().to_string();
         if token.is_empty() || password.chars().count() < account_contract::PASSWORD_MIN_CHARACTERS {
-            self.error = Some("Reset token and a long enough password are required".into());
+            self.error = Some(format!("Enter the reset code from your email and use a password with at least {} characters.", account_contract::PASSWORD_MIN_CHARACTERS).into());
             cx.notify();
             return;
         }

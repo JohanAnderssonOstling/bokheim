@@ -21,7 +21,16 @@ use crate::{
 // Button installs its own hover style during render. Setting a Div hover
 // override here would cause GPUI to panic when these navigation controls render.
 pub(crate) fn navigation_tile(id: impl Into<ElementId>, glyph: impl IntoElement, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
-    crate::base_button(id).ghost().min_w_0().p_0().rounded(px(RADIUS_MD)).text_color(theme.text).when(selected, |button| button.primary().bg(theme.accent).text_color(theme.accent_text)).child(
+    crate::base_button(id)
+        .ghost()
+        .min_w_0()
+        .p_0()
+        .rounded(px(RADIUS_MD))
+        .text_color(theme.text)
+        // On Kobo the current tile is outlined rather than filled.
+        .when(selected && cfg!(feature = "kobo"), |button| button.border_2().border_color(theme.accent))
+        .when(selected && !cfg!(feature = "kobo"), |button| button.primary().bg(theme.accent).text_color(theme.accent_text))
+        .child(
         div()
             .size_full()
             .min_w_0()
@@ -409,7 +418,9 @@ pub fn library_switcher_item(id: impl Into<ElementId>, label: impl Into<SharedSt
     crate::base_button(id)
         .ghost()
         .when(cursor && !selected, |button| button.bg(theme.accent_wash))
-        .when(selected, |button| button.bg(if cursor { theme.accent_hover } else { theme.accent }).text_color(theme.accent_text))
+        // On Kobo the library in use is outlined rather than filled.
+        .when(selected && cfg!(feature = "kobo"), |button| button.border_2().border_color(theme.accent))
+        .when(selected && !cfg!(feature = "kobo"), |button| button.bg(if cursor { theme.accent_hover } else { theme.accent }).text_color(theme.accent_text))
         .flex_1()
         .min_w_0()
         .h(gpui::rems(NAVIGATION_MODAL_ROW_HEIGHT_REM))
@@ -566,8 +577,9 @@ pub fn browser_settings_header_button(id: impl Into<ElementId>, label: impl Into
         .rounded(px(RADIUS_SM))
         .border_1()
         .border_color(if primary { theme.accent } else { theme.border })
-        .bg(if primary { theme.accent } else { theme.page_bg })
-        .text_color(if primary { theme.accent_text } else { theme.text })
+        // On Kobo the primary one is marked by its black border, not a fill.
+        .bg(if primary && !cfg!(feature = "kobo") { theme.accent } else { theme.page_bg })
+        .text_color(if primary && !cfg!(feature = "kobo") { theme.accent_text } else { theme.text })
         .text_size(gpui::rems(TEXT_XS))
 }
 

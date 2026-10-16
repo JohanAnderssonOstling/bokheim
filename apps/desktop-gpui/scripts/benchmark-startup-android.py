@@ -25,6 +25,7 @@ def main():
     parser.add_argument("--serial", required=True)
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--defer-background", action="store_true", help="hold backend asynchronous tasks until the first GPUI frame")
+    parser.add_argument("--no-defer-maintenance", action="store_true", help="start library maintenance immediately for comparison")
     parser.add_argument("--android-system-fonts", action="store_true", help="load Android system fonts in addition to Bokheim's bundled fonts")
     parser.add_argument("--no-gpu-cache", action="store_true", help="disable persistent GPU pipeline caching for comparison")
     parser.add_argument("--force-opengl", action="store_true", help="exercise the OpenGL rendering backend")
@@ -57,6 +58,7 @@ def main():
         "soc": shell("getprop", "ro.soc.model").strip(),
         "package": package, "runs": args.runs, "battery_before": shell("dumpsys", "battery"),
         "defer_background_until_frame": args.defer_background,
+        "defer_library_maintenance_until_frame": not args.no_defer_maintenance,
         "android_system_fonts": args.android_system_fonts,
         "gpu_pipeline_cache": not args.no_gpu_cache,
         "force_opengl": args.force_opengl,
@@ -81,6 +83,7 @@ def main():
                 launched_at = time.time()
                 launch = shell("am", "start", "-W", "-n", f"{package}/.MainActivity", "--ez", "bokheim.startup_profile", "true",
                                "--ez", "bokheim.startup_defer_background", "true" if args.defer_background else "false",
+                               "--ez", "bokheim.startup_defer_maintenance", "false" if args.no_defer_maintenance else "true",
                                "--ez", "bokheim.android_system_fonts", "true" if args.android_system_fonts else "false",
                                "--ez", "bokheim.gpu_pipeline_cache", "false" if args.no_gpu_cache else "true",
                                "--ez", "bokheim.force_opengl", "true" if args.force_opengl else "false", timeout=90)

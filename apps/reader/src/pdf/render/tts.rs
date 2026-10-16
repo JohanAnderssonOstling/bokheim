@@ -3,6 +3,7 @@ use crate::shell::tts::{self, TtsReader};
 use gpui::{App, Context};
 use reader_speech::{SpeechControl, SpeechEvent, SpeechPassage};
 use std::time::Duration;
+use ui_components::user_facing_error;
 
 impl PdfReaderView {
     pub(super) fn tts_navigation_changed(&mut self, _page: usize, _position: f32, cx: &mut Context<Self>) {
@@ -74,8 +75,23 @@ impl TtsReader for PdfReaderView {
             self.stop_tts(cx);
             return;
         }
+        let current_page = self.pdf.read(cx).current_page();
+        let Some(page) = self.toc.narration_start_page(current_page, self.page_count) else {
+            self.stop_tts(cx);
+            self.tts.status = "Finished".into();
+            cx.notify();
+            return;
+        };
+        if page != current_page {
+            if self.tts.sleep.and_then(|plan| plan.chapter()).is_some_and(|chapter| self.toc.chapter_at(page) > chapter) {
+                self.tts.finished = true;
+                self.sleep_tts(cx);
+                cx.notify();
+                return;
+            }
+            self.pdf.update(cx, |pdf, cx| pdf.advance_reading_page(page, cx));
+        }
         let pdf = self.pdf.read(cx);
-        let page = pdf.current_page();
         let position = pdf.full_page_position();
         self.tts_navigation_revision = pdf.navigation_revision();
         let Some(request) = pdf.reading_request(page) else {
@@ -115,14 +131,14 @@ impl TtsReader for PdfReaderView {
                                 Ok(None) => {}
                                 Err(error) => {
                                     reader.stop_tts(cx);
-                                    reader.tts.status = error;
+                                    reader.tts.status = user_facing_error(&error, "Read aloud could not continue. Check your audio output and try again.").to_owned();
                                 }
                             }
                         }
                     }
                     Err(error) => {
                         reader.stop_tts(cx);
-                        reader.tts.status = error.to_string();
+                        reader.tts.status = user_facing_error(&error.to_string(), "Read aloud could not continue. Check your audio output and try again.").to_owned();
                     }
                 }
                 cx.notify();
@@ -197,7 +213,7 @@ impl TtsReader for PdfReaderView {
             }
             SpeechEvent::Failed { message, .. } => {
                 self.stop_tts(cx);
-                self.tts.status = message;
+                self.tts.status = user_facing_error(&message, "Read aloud could not continue. Check your audio output and try again.").to_owned();
             }
         }
         cx.notify();

@@ -8,6 +8,8 @@ use std::time::Duration;
 use super::LibrarySession;
 use super::events::{LibraryEvent, LibraryEventRouter};
 use crate::BackendError;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_runtime::startup_profile::StartupProfile;
 use futures_util::FutureExt;
 use library_database::Database;
 use library_runtime::scheduler::{CycleInput, SyncRequest};
@@ -40,7 +42,11 @@ pub(super) fn observe_account(account: crate::integration::LibraryAccount, event
 /// Runs every worker until dropped; none of them ends on its own.
 pub(super) async fn run_workers(session: Rc<LibrarySession>, requests: WorkerRequests, observers: impl Future<Output = ()>) {
     #[cfg(not(target_arch = "wasm32"))]
-    client_platform_runtime::executor::library_maintenance_ready().await;
+    {
+        let mut profile = StartupProfile::for_library("library_maintenance", session.id);
+        client_platform_runtime::executor::library_maintenance_ready().await;
+        profile.mark("ready");
+    }
     let session = &*session;
     // Keep each scoped worker on the heap: their state machines contain large
     // parser/network futures, and the owning root must fit a normal thread stack.

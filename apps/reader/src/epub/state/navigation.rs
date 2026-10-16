@@ -97,6 +97,8 @@ impl ReaderView {
     }
 
     pub(in crate::epub) fn navigate_to(&mut self, href: String, cx: &mut Context<Self>) {
+        self.page_turn = None;
+        self.swipe_preview.clear();
         self.with_renderer(cx, |renderer, cx| renderer.apply(RendererCommand::NavigateToHref(href), cx));
         #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
         self.tts_navigation_changed(cx);

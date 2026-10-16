@@ -102,6 +102,7 @@ impl BrowserDownloads {
             }
             return;
         }
+        let message = if phase == BrowserDownloadPhase::Failed { Some(crate::book_transfer_error_message(message.as_deref().unwrap_or("")).to_owned()) } else { message };
         let text = message.as_ref().map_or_else(|| name.clone(), |message| format!("{name}: {message}"));
         let mut notification = match phase {
             BrowserDownloadPhase::Completed => {

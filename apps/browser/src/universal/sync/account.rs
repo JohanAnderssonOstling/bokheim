@@ -1,6 +1,7 @@
 //! Loads account and library state; local sizes and transfers arrive separately.
 
 use gpui::Context;
+use ui_components::user_facing_error;
 
 use super::SyncPage;
 #[cfg(not(target_arch = "wasm32"))]
@@ -29,6 +30,19 @@ pub(super) fn verify_email(backend: &AppClient, email: String, pin: String) -> U
 }
 
 impl SyncPage {
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+    pub(super) fn authentication_error(&self, error: &str) -> &'static str {
+        use crate::model::AccountFlow;
+        let action = match self.flow {
+            AccountFlow::SignIn => "login",
+            AccountFlow::Register => "register",
+            AccountFlow::VerifyEmail => "verify",
+            AccountFlow::RequestPasswordReset => "request-reset",
+            AccountFlow::ResetPassword => "reset",
+        };
+        ui_components::authentication_error(error, action)
+    }
+
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
         self.refresh_with_feedback(true, cx);
     }
@@ -153,9 +167,17 @@ impl SyncPage {
     }
 
     pub(super) fn apply_error(&mut self, error: String, cx: &mut Context<Self>) {
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android")))]
+        let authentication_message = (self.activity == super::AccountActivity::AccountRequest && !self.state.read(cx).account_status.signed_in()).then(|| self.authentication_error(&error));
+        #[cfg(any(target_arch = "wasm32", target_os = "android"))]
+        let authentication_message: Option<&'static str> = None;
+        let message = authentication_message.unwrap_or_else(|| {
+            let fallback = if self.activity == super::AccountActivity::AccountRequest { "Could not finish the account action. Please try again." } else { "Could not refresh your account and libraries. Please try again." };
+            user_facing_error(&error, fallback)
+        });
         self.activity = super::AccountActivity::Idle;
         self.message = None;
-        self.error = Some(error.into());
+        self.error = Some(message.into());
         cx.notify();
     }
 
@@ -235,7 +257,7 @@ impl SyncPage {
                             });
                             page.schedule_refresh(cx);
                         }
-                        Err(error) => page.error = Some(error.into()),
+                        Err(error) => page.error = Some(user_facing_error(&error, "Could not change cloud storage for this library. Please try again.").into()),
                     }
                     cx.notify();
                 });

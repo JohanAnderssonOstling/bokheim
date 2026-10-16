@@ -5,12 +5,13 @@ use html_view_core::cfi::{parse_cfi_spine_only, source_position_cfi};
 use html_view_core::{ReadingTarget, RendererCommand};
 use reader_speech::{SpeechChunk, SpeechControl, SpeechEvent, next_chunk_with_limit};
 use std::time::Duration;
+use ui_components::user_facing_error;
 
 impl ReaderView {
     pub(super) fn tts_document_failed(&mut self, message: &str, cx: &mut Context<Self>) {
         if self.tts.playing && (self.tts.needs_restart || self.tts.finished) {
             self.stop_tts(cx);
-            self.tts.status = format!("Could not load the next passage: {message}");
+            self.tts.status = user_facing_error(message, "Could not read the next passage. Try starting read aloud again.").to_owned();
         }
     }
 
@@ -136,7 +137,7 @@ impl TtsReader for ReaderView {
             return;
         }
         let LoadState::Ready(view) = &self.load_state else { return };
-        let Some((doc, start, glyph_start, fragments)) = view.read(cx).reading_items() else {
+        let Some((doc, _, glyph_start, mut fragments)) = view.read(cx).reading_items() else {
             self.tts.playing = true;
             self.tts.needs_restart = true;
             self.tts.status = "Loading the chapter…".into();
@@ -146,6 +147,8 @@ impl TtsReader for ReaderView {
             cx.notify();
             return;
         };
+        fragments.retain(|fragment| !view.read(cx).reading_target_cfi(fragment).is_some_and(|cfi| self.toc.narration_excludes_cfi(&cfi)));
+        let start = fragments.iter().position(|fragment| fragment.glyph_ranges.last().is_some_and(|range| range.end > glyph_start)).unwrap_or(fragments.len());
         self.tts_doc = doc;
         self.tts_navigation_revision = view.read(cx).navigation_revision();
         self.tts_fragments = fragments;
@@ -161,7 +164,7 @@ impl TtsReader for ReaderView {
             Ok(None) => {}
             Err(error) => {
                 self.tts.stop();
-                self.tts.status = error;
+                self.tts.status = user_facing_error(&error, "Read aloud could not continue. Check your audio output and try again.").to_owned();
             }
         }
         self.update_tts_chapter_limit(cx);
@@ -244,7 +247,7 @@ impl TtsReader for ReaderView {
             }
             SpeechEvent::Failed { message, .. } => {
                 self.stop_tts(cx);
-                self.tts.status = message;
+                self.tts.status = user_facing_error(&message, "Read aloud could not continue. Check your audio output and try again.").to_owned();
             }
         }
         cx.notify();

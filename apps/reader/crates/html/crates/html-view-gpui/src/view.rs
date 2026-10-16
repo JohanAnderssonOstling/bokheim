@@ -313,6 +313,54 @@ struct PreparedPaint {
     glyph_store: GlyphStore,
 }
 
+/// Passive retained page, used while the live view navigates to its successor.
+#[derive(Clone)]
+pub struct HtmlPageSnapshot {
+    paint: PreparedPaint,
+}
+
+impl IntoElement for HtmlPageSnapshot {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for HtmlPageSnapshot {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+    fn source_location(&self) -> Option<&'static Location<'static>> {
+        None
+    }
+
+    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App) -> (LayoutId, ()) {
+        let mut style = Style::default();
+        style.size.width = relative(1.0).into();
+        style.size.height = relative(1.0).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), _: &mut Window, _: &mut App) {}
+
+    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App) {
+        paint_page(&self.paint, bounds, window, cx);
+    }
+}
+
+fn paint_page(paint: &PreparedPaint, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+    window.paint_quad(gpui::fill(bounds, gpui::white()));
+    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+        paint_commands(paint.base_before_overlay.as_ref(), &paint.glyph_store, bounds, window, cx);
+        paint_commands(paint.overlay.as_ref(), &paint.glyph_store, bounds, window, cx);
+        paint_commands(paint.base_after_overlay.as_ref(), &paint.glyph_store, bounds, window, cx);
+    });
+}
+
 struct CachedPaint {
     base_key: DisplayCacheKey,
     overlay_key: DisplayCacheKey,
@@ -402,13 +450,7 @@ impl Element for HtmlDocumentElement {
     }
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, bounds: Bounds<Pixels>, _: &mut Self::RequestLayoutState, prepaint: &mut Self::PrepaintState, window: &mut Window, cx: &mut App) {
-        window.paint_quad(gpui::fill(bounds, gpui::white()));
-        let paint = &prepaint.paint;
-        window.with_content_mask(Some(ContentMask { bounds }), |window| {
-            paint_commands(paint.base_before_overlay.as_ref(), &paint.glyph_store, bounds, window, cx);
-            paint_commands(paint.overlay.as_ref(), &paint.glyph_store, bounds, window, cx);
-            paint_commands(paint.base_after_overlay.as_ref(), &paint.glyph_store, bounds, window, cx);
-        });
+        paint_page(&prepaint.paint, bounds, window, cx);
 
         if self.link_hovered {
             window.set_cursor_style(CursorStyle::PointingHand, &prepaint.hitbox);
@@ -602,10 +644,8 @@ impl HtmlView {
         true
     }
 
-    pub fn next_page(&mut self, _cx: &mut Context<Self>) -> bool {
-        let before = self.renderer.current_cfi();
-        self.renderer.next_page();
-        before != self.renderer.current_cfi()
+    pub fn next_page(&mut self, cx: &mut Context<Self>) -> bool {
+        self.turn_page(true, cx)
     }
 
     /// Controls whether this view consumes vertical wheel gestures itself.
@@ -615,10 +655,32 @@ impl HtmlView {
         self.wheel_scroll_enabled = enabled;
     }
 
-    pub fn previous_page(&mut self, _cx: &mut Context<Self>) -> bool {
+    pub fn previous_page(&mut self, cx: &mut Context<Self>) -> bool {
+        self.turn_page(false, cx)
+    }
+
+    fn turn_page(&mut self, forward: bool, cx: &mut Context<Self>) -> bool {
         let before = self.renderer.current_cfi();
-        self.renderer.previous_page();
-        before != self.renderer.current_cfi()
+        if forward {
+            self.renderer.next_page();
+        } else {
+            self.renderer.previous_page();
+        }
+        self.display_dirty = true;
+        // Pagination (especially a backward turn) settles during composition.
+        // Compose once here so boundary detection and rapid repeated turns use
+        // the destination, without waiting for asynchronous repaint messages.
+        if let Some(viewport) = self.prepared_viewport {
+            self.prepared_paint = Some(self.compose_viewport_display_list(viewport));
+            self.display_dirty = false;
+        }
+        cx.notify();
+        before != self.renderer.current_cfi() || self.renderer.reading_document().is_none()
+    }
+
+    /// Retain the displayed command buffers and glyphs without copying pixels.
+    pub fn page_snapshot(&self) -> Option<HtmlPageSnapshot> {
+        Some(HtmlPageSnapshot { paint: self.prepared_paint.clone()? })
     }
 
     pub fn next_line(&mut self, _cx: &mut Context<Self>) {

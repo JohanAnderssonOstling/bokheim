@@ -33,6 +33,11 @@ use crate::theme::BrowserTheme;
 /// an element — use [`selectable_button`] for those.
 pub trait Interactive: Styled + gpui::InteractiveElement + Sized {
     fn selectable(self, current: bool, theme: BrowserTheme) -> Self {
+        // On Kobo nothing is filled: current is a black border on the page.
+        if cfg!(feature = "kobo") {
+            let element = self.hover(move |style| style.bg(theme.hover));
+            return if current { element.border_2().border_color(theme.accent) } else { element };
+        }
         // A current surface is already the accent, so a wash laid over it
         // would be invisible. It darkens instead — the same distinction
         // `accent_hover` exists for.
@@ -60,6 +65,10 @@ pub fn selectable_button(button: gpui_component::button::Button, selected: bool,
     use gpui_component::Selectable;
     if !selected {
         return button;
+    }
+    // On Kobo nothing is filled: current is a black border on the page.
+    if cfg!(feature = "kobo") {
+        return button.selected(true).bg(theme.page_bg).text_color(theme.text).border_2().border_color(theme.accent).hover(move |style| style.bg(theme.hover));
     }
     button.selected(true).bg(theme.accent).text_color(theme.accent_text).hover(move |style| style.bg(theme.accent_hover))
 }

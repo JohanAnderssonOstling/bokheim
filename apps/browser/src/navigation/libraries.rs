@@ -9,6 +9,7 @@ use std::rc::Rc;
 use app::AppClient;
 use gpui::{App, AppContext, Context, Entity, SharedString, Task, Window};
 use sync_common::LibraryId;
+use ui_components::user_facing_error;
 
 use super::{LibrarySession, LibrarySummary};
 use crate::library::OpenBook;
@@ -69,8 +70,7 @@ impl Libraries {
         });
         // The shared backend scheduler owns startup reconciliation. Each tab
         // uses the initial local list and subscribes to discovery updates.
-        let sessions =
-            library_id.into_iter().filter(|id| entries.iter().any(|entry| entry.library_id() == id)).map(|id| (id, cx.new(|cx| LibrarySession::new(backend.clone(), open_book.clone(), id, cx)))).collect();
+        let sessions = library_id.into_iter().filter(|id| entries.iter().any(|entry| entry.library_id() == id)).map(|id| (id, cx.new(|cx| LibrarySession::new(backend.clone(), open_book.clone(), id, cx)))).collect();
         let libraries = Self { backend, open_book, sessions, entries, selected_id: library_id, creating_libraries: 0, selection_epoch, _list_updates: list_updates };
         libraries
     }
@@ -206,7 +206,7 @@ impl Libraries {
                 }
                 cx.notify();
                 if !errors.is_empty() {
-                    notify_warning("library-add-warning", format!("Some folders could not be added: {}", errors.join("; ")), window, cx);
+                    notify_warning("library-add-warning", format!("Some folders could not be added. {}", user_facing_error(&errors.join("; "), "Check that the folders are available and try adding them again.")), window, cx);
                 }
                 if let Some(library_id) = selected {
                     sessions.select_library(library_id, cx);
@@ -279,7 +279,8 @@ impl Libraries {
     }
 
     fn notify_error(&self, error: impl Into<SharedString>, window: &mut Window, cx: &mut App) {
-        crate::services::notify_error("library-operation-error", error, window, cx);
+        let error = error.into();
+        crate::services::notify_error("library-operation-error", user_facing_error(&error, "Could not finish the library action. Please try again."), window, cx);
     }
 }
 

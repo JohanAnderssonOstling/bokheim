@@ -1,3 +1,5 @@
+use ui_components::user_facing_error;
+
 use crate::library::pages::browse::profile::Stage;
 use crate::services::{BookCommand, book_transfer_error_message, notify_error, notify_info};
 use app_preferences::CoverText;
@@ -388,7 +390,7 @@ impl BookCardView {
         let (app, library_id) = (self.ui.app().clone(), *self.ui.backend().id());
         cx.spawn_in(window, async move |card, cx| {
             if let Err(error) = app.buy_opds_book(entry, library_id).await {
-                let _ = card.update_in(cx, |_, window, cx| notify_error("book-buy-error", format!("Could not open the store: {error}"), window, cx));
+                let _ = card.update_in(cx, |_, window, cx| notify_error("book-buy-error", format!("Could not open the store. {}", user_facing_error(&error, "Please try again.")), window, cx));
             }
         })
         .detach();
@@ -423,7 +425,7 @@ impl BookCardView {
                             mark_feed_book_added(key, cx);
                             notify_info("catalog-add", format!("Added “{title}” to the library"), window, cx);
                         }
-                        Err(error) => notify_error("catalog-add-error", format!("Could not add “{title}”: {error}"), window, cx),
+                        Err(error) => notify_error("catalog-add-error", format!("Could not add “{title}”. {}", user_facing_error(&error, "Please try again.")), window, cx),
                     }
                 }
                 cx.notify();
@@ -784,7 +786,7 @@ impl BookCardView {
                             cx.spawn(async move |card, cx| {
                                 if let Err(error) = operation.await {
                                     let _ = card.update_in(cx, |_, window, cx| {
-                                        notify_error("book-evict-error", format!("Could not remove download: {error}"), window, cx);
+                                        notify_error("book-evict-error", format!("Could not remove download. {}", user_facing_error(&error, "Please try again.")), window, cx);
                                     });
                                 }
                             })
@@ -907,7 +909,8 @@ impl BookCardView {
         let open_target = cx.entity();
         let cover_ratio = match &cover {
             Some(cover) => cover_aspect_ratio(&cover.image),
-            None if book.format_category == library_model::LibraryFileTypeFilter::Audiobook => 1.0,
+            // A generated cover keeps its own shape, audiobook or not.
+            None if book.format_category == library_model::LibraryFileTypeFilter::Audiobook && !matches!(self.cover, CoverState::Missing) => 1.0,
             None => components::BOOK_COVER_ASPECT_RATIO,
         };
         // A book not on this device says so on its cover, in the corner nothing
@@ -918,13 +921,13 @@ impl BookCardView {
         let download_badge = match book.source {
             // A catalog or feed book's corner adds it, or marks that the library holds it.
             BookSource::Catalog { .. } | BookSource::Opds { .. } | BookSource::ExternalCatalog { downloadable: true, .. } if held(&book, cx) => {
-                Some(components::book_cover_in_library_badge(format!("book-in-library-{key}")).tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("In your library").build(window, cx)))
+                Some(components::book_cover_in_library_badge(format!("book-in-library-{key}"), theme).tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("In your library").build(window, cx)))
             }
             // A feed book the feed sells opens its store page.
             BookSource::Opds { entry, downloadable: false, buyable: true, .. } => {
                 let buy_target = cx.entity();
                 Some(
-                    components::book_cover_buy_badge(format!("book-buy-{key}"))
+                    components::book_cover_buy_badge(format!("book-buy-{key}"), theme)
                         .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Buy").build(window, cx))
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(move |_, window, cx| {
@@ -939,7 +942,7 @@ impl BookCardView {
                 let add_target = cx.entity();
                 let added = book.clone();
                 Some(
-                    components::book_cover_add_badge(format!("book-add-{key}"), self.add_task.is_some())
+                    components::book_cover_add_badge(format!("book-add-{key}"), self.add_task.is_some(), theme)
                         .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Add to library").build(window, cx))
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(move |_, _, cx| {
@@ -951,14 +954,14 @@ impl BookCardView {
             }
             BookSource::Library { content_hash } => match self.ui.updates().read(cx).download_state(content_hash).unwrap_or(DownloadState::Queued) {
                 DownloadState::Downloaded => None,
-                DownloadState::Queued => Some(components::book_cover_queued_badge(format!("book-download-{key}")).tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Queued for download").build(window, cx))),
-                DownloadState::Downloading(_) => Some(components::book_cover_download_badge(format!("book-download-{key}"), true)),
+                DownloadState::Queued => Some(components::book_cover_queued_badge(format!("book-download-{key}"), theme).tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Queued for download").build(window, cx))),
+                DownloadState::Downloading(_) => Some(components::book_cover_download_badge(format!("book-download-{key}"), true, theme)),
                 // The browser streams books it does not hold instead of downloading them.
                 DownloadState::NotDownloaded if cfg!(target_arch = "wasm32") => None,
                 DownloadState::NotDownloaded => {
                     let download_target = cx.entity();
                     Some(
-                        components::book_cover_download_badge(format!("book-download-{key}"), false)
+                        components::book_cover_download_badge(format!("book-download-{key}"), false, theme)
                             .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Download to this device").build(window, cx))
                             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(move |_, _, cx| {
@@ -971,7 +974,7 @@ impl BookCardView {
         };
         let play_button = book.library_file().filter(|_| !interaction.marquee).map(|_| {
             let play_target = cx.entity();
-            components::book_cover_play_button(format!("book-play-{key}"))
+            components::book_cover_play_button(format!("book-play-{key}"), theme)
                 .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Play").build(window, cx))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(move |_, window, cx| {
@@ -985,7 +988,7 @@ impl BookCardView {
             .on_click(move |_, window, cx| Self::activate(&open_target, window, cx))
             .child(match cover {
                 Some(cover) => components::book_cover(theme, cover_ratio).child(retain_visible_cover(cover.image.clone())).child(components::book_cover_image(format!("book-cover-art-{key}"), cover.image, cover_opacity, false, theme)),
-                None if matches!(self.cover, CoverState::Missing) => components::book_cover_generated(book.title.clone(), book.subtitle.as_deref(), &book.author, generated_cover_variant(key), theme).aspect_ratio(cover_ratio),
+                None if matches!(self.cover, CoverState::Missing) => components::book_cover_generated(book.title.clone(), book.subtitle.as_deref(), &book.author, generated_cover_variant(key), theme),
                 // Keep the slot empty until absence is confirmed, including
                 // reloads after eviction and failed cover requests.
                 None => components::book_cover(theme, cover_ratio),
@@ -995,7 +998,7 @@ impl BookCardView {
             // The cover's action — add, download, or the held mark — is on every
             // cover, including those in section cards and the graph.
             .children(download_badge)
-            .when(grid_cover && book.format_category == library_model::LibraryFileTypeFilter::Audiobook, |frame| frame.child(components::book_cover_audiobook_length(book.audiobook_duration_ms.map(audiobook_card_length))));
+            .when(grid_cover && book.format_category == library_model::LibraryFileTypeFilter::Audiobook, |frame| frame.child(components::book_cover_audiobook_length(book.audiobook_duration_ms.map(audiobook_card_length), theme)));
 
         let context_menu = self.context_menu.as_ref().map(|active| mobile_context_menu::render(active.menu.clone(), active.position, window));
         let context_menu_target = cx.entity();

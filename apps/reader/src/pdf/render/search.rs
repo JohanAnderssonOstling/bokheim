@@ -3,7 +3,7 @@
 use crate::shell::search;
 use crate::shell::toolbar::SidebarTarget;
 use gpui::prelude::*;
-use gpui::{AnyElement, Context};
+use gpui::{AnyElement, Context, Window};
 use ui_components as components;
 
 use super::PdfReaderView;
@@ -20,7 +20,7 @@ impl SearchBarTarget for PdfReaderView {
 }
 
 impl PdfReaderView {
-    pub(super) fn render_search(&self, theme: components::BrowserTheme, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_search(&self, theme: components::BrowserTheme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let mut rows = Vec::new();
         let mut page = None;
         for (index, hit) in self.pdf.read(cx).search_hits().iter().enumerate() {
@@ -43,6 +43,6 @@ impl PdfReaderView {
                     .into_any_element(),
             );
         }
-        search::panel(search::search_bar(&self.search_input, theme), rows, theme)
+        search::panel(search::search_bar(&self.search_input, theme, window, cx), rows, theme)
     }
 }

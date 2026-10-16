@@ -62,11 +62,11 @@ impl ReaderView {
     }
 
     /// The selected panel's body; the shell supplies its rail and header.
-    pub(super) fn render_sidebar(&mut self, active: SidebarTab, entity: Entity<Self>, theme: components::BrowserTheme, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_sidebar(&mut self, active: SidebarTab, entity: Entity<Self>, theme: components::BrowserTheme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match active {
             SidebarTab::Contents => self.render_toc_body(entity, theme, cx),
             SidebarTab::Notes => self.render_annotations_body(theme, cx),
-            SidebarTab::Search => self.render_search(theme, cx),
+            SidebarTab::Search => self.render_search(theme, window, cx),
             SidebarTab::Settings => self.render_settings_panel(cx),
         }
     }

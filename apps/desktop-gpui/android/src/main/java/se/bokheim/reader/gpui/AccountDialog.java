@@ -154,14 +154,14 @@ final class AccountDialog extends Dialog {
             if (!flow.equals("login")) text("Use at least " + minimum + " characters.", 14);
         }
         if (flow.equals("verify")) pin = field(R.id.account_pin, "Verification PIN", InputType.TYPE_CLASS_NUMBER, null, "");
-        if (flow.equals("reset")) token = field(R.id.account_reset_token, "Reset token from your email", InputType.TYPE_CLASS_TEXT, null, "");
+        if (flow.equals("reset")) token = field(R.id.account_reset_token, "Reset code from your email", InputType.TYPE_CLASS_TEXT, null, "");
         EditText last = token != null ? token : pin != null ? pin : password != null ? password : email;
         last.setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING);
         last.setOnEditorActionListener((v, action, event) -> {
             if (action == EditorInfo.IME_ACTION_DONE) { perform(flow); return true; }
             return false;
         });
-        String action = flow.equals("verify") ? "Verify email" : flow.equals("request-reset") ? "Email me a reset token" : flow.equals("reset") ? "Set new password" : title;
+        String action = flow.equals("verify") ? "Verify email" : flow.equals("request-reset") ? "Email me a reset code" : flow.equals("reset") ? "Set new password" : title;
         Button primary = button(action, () -> perform(flow));
         primary.setBackgroundTintList(ColorStateList.valueOf(colors[3]));
         primary.setTextColor(colors[4]);
@@ -191,7 +191,7 @@ final class AccountDialog extends Dialog {
             password.setError(action.equals("login") ? "Enter your password" : "Use at least " + minimum + " characters"); password.requestFocus(); return;
         }
         if (action.equals("verify") && !secret.matches("[0-9]{6}")) { pin.setError("Enter the six-digit PIN"); pin.requestFocus(); return; }
-        if (action.equals("reset") && resetToken.isEmpty()) { token.setError("Enter the reset token"); token.requestFocus(); return; }
+        if (action.equals("reset") && resetToken.isEmpty()) { token.setError("Enter the reset code from your email"); token.requestFocus(); return; }
         pending = action;
         setBusy(true);
         feedback.setText("Please wait…");
@@ -221,7 +221,7 @@ final class AccountDialog extends Dialog {
             case "login": case "verify": dismiss(); break;
             case "register": render("verify", address, "Check your email for a six-digit verification PIN."); break;
             case "resend": feedback.setText("Verification PIN sent if the address exists."); break;
-            case "request-reset": render("reset", address, "Check your email for a reset token."); break;
+            case "request-reset": render("reset", address, "Check your email for a reset code."); break;
             case "reset": render("login", address, "Password updated. Sign in with your new password."); break;
         }
     }

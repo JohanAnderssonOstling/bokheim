@@ -32,8 +32,9 @@ pub fn settings_choice_button(id: impl Into<ElementId>, label: impl Into<SharedS
         .px(px(SPACE_SM))
         .rounded(px(0.0))
         .border_0()
-        .bg(if selected { theme.accent_wash } else { theme.page_bg })
+        // On Kobo the underline alone marks the choice; nothing is filled.
+        .bg(if selected && !cfg!(feature = "kobo") { theme.accent_wash } else { theme.page_bg })
         .text_color(theme.text)
         .text_size(rems(TEXT_SM))
-        .when(selected, |button| button.border_b(px(2.0)).border_color(theme.accent).hover(move |style| style.bg(theme.accent_wash_hover)))
+        .when(selected, |button| button.border_b(px(2.0)).border_color(theme.accent).hover(move |style| style.bg(if cfg!(feature = "kobo") { theme.hover } else { theme.accent_wash_hover })))
 }

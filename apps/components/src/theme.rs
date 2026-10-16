@@ -372,7 +372,7 @@ fn apply_widget_colours(theme: BrowserTheme, application: &mut Theme) {
     colors.list_even = theme.page_bg;
     colors.list_head = theme.page_bg;
     colors.list_hover = theme.hover;
-    colors.selection = theme.accent_wash;
+    colors.selection = theme.accent.opacity(f32::from(SELECTION_ALPHA) / 255.0);
     colors.sidebar = theme.page_bg;
     colors.sidebar_accent = theme.accent_wash;
     colors.sidebar_accent_foreground = theme.text_accent;
@@ -466,5 +466,21 @@ impl InteractionHighlights {
             active_annotation: highlight(theme.warning, ACTIVE_ANNOTATION_ALPHA),
             reading: highlight(theme.accent, READING_ALPHA),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn text_selection_highlight_stays_translucent(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            apply_appearance(&BrowsingPreferences::default(), cx);
+            let selection = Theme::global(cx).selection;
+            assert!(selection.a > 0.0 && selection.a < 1.0, "selection is painted over text and must keep the letters visible");
+        });
     }
 }

@@ -13,6 +13,8 @@
 //! stays inside the page instead of escaping into the navigation rail, which
 //! has no way back. Moving focus scrolls the section it landed in into view.
 
+use ui_components::user_facing_error;
+
 use crate::services::UpdateControls;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -141,7 +143,7 @@ impl SettingsPage {
                             return Err("Reinstall Bokheim with the latest installer before uninstalling from Settings.".to_owned());
                         }
                         let path = std::env::var_os("BOKHEIM_KOBO_EXIT_ACTION_FILE").ok_or_else(|| "The Kobo launcher is unavailable.".to_owned())?;
-                        std::fs::write(path, "uninstall").map_err(|error| format!("Could not start uninstall: {error}"))
+                        std::fs::write(path, "uninstall").map_err(|error| user_facing_error(&error.to_string(), "Could not start uninstalling Bokheim. Restart Bokheim and try again.").to_owned())
                     })();
                     match result {
                         Ok(()) => cx.quit(),
@@ -165,10 +167,10 @@ impl SettingsPage {
             UpdateView::Hidden => return None,
             UpdateView::Available => ("Update available".to_owned(), Some(("Update", UpdateAction::Update, false))),
             UpdateView::Preparing => ("Preparing update…".into(), Some(("Update", UpdateAction::Update, true))),
-            UpdateView::WaitingForConnection => ("Waiting for connection…".into(), Some(("Retry", UpdateAction::Update, false))),
+            UpdateView::WaitingForConnection => ("Check your internet connection, then retry the update.".into(), Some(("Retry", UpdateAction::Update, false))),
             UpdateView::Ready { action } => ("Update ready".into(), Some((if *action == UpdateAction::Install { "Install" } else { "Restart" }, action.clone(), false))),
             UpdateView::NeedsSpace { additional_bytes } => (format!("Free up {} to continue", crate::services::updates::needed_space(*additional_bytes)), Some(("Retry", UpdateAction::Update, false))),
-            UpdateView::NeedsPermission => ("Permission needed".into(), Some(("Continue", UpdateAction::GrantPermission, false))),
+            UpdateView::NeedsPermission => ("Allow Bokheim to install the update to continue.".into(), Some(("Continue", UpdateAction::GrantPermission, false))),
             UpdateView::Activating => ("Updating your library…".into(), None),
         };
         let message = if controls.worker_failed && button.is_some() { "Could not continue update. Try again.".to_owned() } else { message };
@@ -209,7 +211,7 @@ impl SettingsPage {
             cx.spawn(async move |page, cx| {
                 let result = saved.await;
                 let _ = page.update(cx, |page, cx| {
-                    page.transfer_save_error = result.err().map(|error| format!("Could not save the transfer setting: {error}").into());
+                    page.transfer_save_error = result.err().map(|error| format!("Could not save the transfer setting. {}", user_facing_error(&error, "Please try again.")).into());
                     cx.notify();
                 });
             })
@@ -234,7 +236,7 @@ impl SettingsPage {
             BrowsingPreferencePatch::KeyboardLayouts(_) => ("Keyboard layouts", showing.keyboard_layouts().join(", ")),
         };
         let result = self.preferences.update(cx, |preferences, cx| preferences.update_browsing(patch, cx));
-        self.error = result.err().map(|error| format!("{setting} was not saved: {error}. Still showing {current}.").into());
+        self.error = result.err().map(|error| format!("{setting} was not saved. {} Still showing {current}.", user_facing_error(&error, "Please try again.")).into());
         cx.notify();
     }
 

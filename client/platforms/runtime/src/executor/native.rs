@@ -11,6 +11,7 @@ static STARTUP_GATE: Mutex<Option<watch::Receiver<bool>>> = Mutex::new(None);
 
 // Foreground library commands remain available while the initial UI is built.
 // Only scan/sync/import maintenance waits for the host's first presented frame.
+// Hosts can also opt into opening their startup libraries after this gate.
 static LIBRARY_MAINTENANCE_GATE: Mutex<Option<watch::Receiver<bool>>> = Mutex::new(None);
 
 /// Releases startup maintenance when the host drops the guard.
@@ -33,7 +34,7 @@ pub fn defer_library_maintenance() -> LibraryMaintenancePermit {
     LibraryMaintenancePermit(sender)
 }
 
-/// Waits only in a library maintenance future, leaving foreground commands live.
+/// Waits for the host's first-frame gate without gating open actors' commands.
 pub async fn library_maintenance_ready() {
     let receiver = LIBRARY_MAINTENANCE_GATE.lock().expect("library maintenance gate poisoned").clone();
     if let Some(mut receiver) = receiver {
@@ -244,6 +245,36 @@ mod tests {
         assert!(received.recv_timeout(Duration::from_millis(30)).is_err());
         permit.release();
         received.recv_timeout(Duration::from_secs(2)).expect("background work resumes after commit");
+    }
+
+    #[test]
+    fn maintenance_waits_for_first_frame_without_blocking_foreground_jobs() {
+        let permit = defer_library_maintenance();
+        let executor = LibraryExecutor::new().unwrap();
+        let (started, waiting) = std::sync::mpsc::channel();
+        let (finished, resumed) = std::sync::mpsc::channel();
+        executor.run(move || {
+            tokio::task::spawn_local(async move {
+                started.send(()).unwrap();
+                library_maintenance_ready().await;
+                finished.send(()).unwrap();
+            });
+        });
+        waiting.recv_timeout(Duration::from_secs(2)).expect("maintenance future started");
+        let (foreground, reply) = std::sync::mpsc::channel();
+        executor.run(move || foreground.send(42).unwrap());
+        assert_eq!(reply.recv_timeout(Duration::from_secs(2)).unwrap(), 42, "foreground jobs remain available");
+        assert!(resumed.recv_timeout(Duration::from_millis(30)).is_err());
+        drop(permit);
+        resumed.recv_timeout(Duration::from_secs(2)).expect("maintenance resumes when the frame releases its guard");
+        let (late, reply) = std::sync::mpsc::channel();
+        executor.run(move || {
+            tokio::task::spawn_local(async move {
+                library_maintenance_ready().await;
+                late.send(()).unwrap();
+            });
+        });
+        reply.recv_timeout(Duration::from_secs(2)).expect("later maintenance starts without waiting");
     }
 
 

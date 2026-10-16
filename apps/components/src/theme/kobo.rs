@@ -1,5 +1,5 @@
 //! Fixed grayscale palette for e-ink. Never stored as an account theme choice.
-use super::{ApplicationPalette, BrowserTheme};
+use super::{ApplicationPalette, BrowserTheme, SELECTION_ALPHA};
 use gpui_component::ThemeColor;
 
 pub(super) const PALETTE: ApplicationPalette = ApplicationPalette {
@@ -26,6 +26,11 @@ pub(super) const PALETTE: ApplicationPalette = ApplicationPalette {
 
 pub(super) fn widget_colours(theme: BrowserTheme) -> ThemeColor {
     // Explicit coverage keeps newly added widget roles visible at compile time.
+    //
+    // No button is filled: every variant is white with black text, so a press
+    // or a page turn redraws a border rather than a solid block of ink. A
+    // primary button keeps its black edge, which `gpui_component` draws in
+    // `primary`; the other variants take their edge from their fill.
     ThemeColor {
         accent: theme.accent_wash,
         accent_foreground: theme.text,
@@ -37,30 +42,30 @@ pub(super) fn widget_colours(theme: BrowserTheme) -> ThemeColor {
         button_active: theme.accent_wash,
         button_foreground: theme.text,
         button_hover: theme.hover,
-        button_danger: theme.accent,
-        button_danger_active: theme.accent_active,
-        button_danger_foreground: theme.accent_text,
-        button_danger_hover: theme.accent_hover,
-        button_info: theme.accent,
-        button_info_active: theme.accent_active,
-        button_info_foreground: theme.accent_text,
-        button_info_hover: theme.accent_hover,
-        button_primary: theme.accent,
-        button_primary_active: theme.accent_active,
-        button_primary_foreground: theme.accent_text,
-        button_primary_hover: theme.accent_hover,
+        button_danger: theme.page_bg,
+        button_danger_active: theme.accent_wash,
+        button_danger_foreground: theme.text,
+        button_danger_hover: theme.hover,
+        button_info: theme.page_bg,
+        button_info_active: theme.accent_wash,
+        button_info_foreground: theme.text,
+        button_info_hover: theme.hover,
+        button_primary: theme.page_bg,
+        button_primary_active: theme.accent_wash,
+        button_primary_foreground: theme.text,
+        button_primary_hover: theme.hover,
         button_secondary: theme.page_bg,
         button_secondary_active: theme.accent_wash,
         button_secondary_foreground: theme.text,
         button_secondary_hover: theme.hover,
-        button_success: theme.accent,
-        button_success_active: theme.accent_active,
-        button_success_foreground: theme.accent_text,
-        button_success_hover: theme.accent_hover,
-        button_warning: theme.accent,
-        button_warning_active: theme.accent_active,
-        button_warning_foreground: theme.accent_text,
-        button_warning_hover: theme.accent_hover,
+        button_success: theme.page_bg,
+        button_success_active: theme.accent_wash,
+        button_success_foreground: theme.text,
+        button_success_hover: theme.hover,
+        button_warning: theme.page_bg,
+        button_warning_active: theme.accent_wash,
+        button_warning_foreground: theme.text,
+        button_warning_hover: theme.hover,
         group_box: theme.page_bg,
         group_box_foreground: theme.text,
         caret: theme.text,
@@ -111,7 +116,7 @@ pub(super) fn widget_colours(theme: BrowserTheme) -> ThemeColor {
         secondary_active: theme.accent_wash,
         secondary_foreground: theme.text,
         secondary_hover: theme.hover,
-        selection: theme.accent_wash,
+        selection: theme.accent.opacity(f32::from(SELECTION_ALPHA) / 255.0),
         sidebar: theme.page_bg,
         sidebar_accent: theme.accent_wash,
         sidebar_accent_foreground: theme.text,

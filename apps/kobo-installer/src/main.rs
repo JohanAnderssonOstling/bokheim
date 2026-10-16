@@ -6,7 +6,7 @@ use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -137,6 +137,9 @@ impl Installer {
                         if matches!(this.status, InstallerStatus::Installing) { return; }
                         if detected.devices != this.devices || detected.mount_error != this.mount_error {
                             this.devices = detected.devices;
+                            if let Some(error) = &detected.mount_error {
+                                eprintln!("Automatic Kobo mount failed: {error}");
+                            }
                             this.mount_error = detected.mount_error;
                             if !matches!(this.status, InstallerStatus::Installed(_)) || !this.devices.is_empty() {
                                 this.status = this.detected_status();
@@ -194,11 +197,22 @@ impl Installer {
                 progress.total_bytes.store(update.total_bytes, Ordering::Relaxed);
                 progress.copied_bytes.store(update.copied_bytes, Ordering::Relaxed);
             })
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                eprintln!("Kobo installation failed: {error}");
+                match error.kind() {
+                    ErrorKind::StorageFull => "There isn't enough free space on your Kobo. Free up space, then try installing again.",
+                    ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem => "The installer can't save files to your Kobo. Check that your computer can write to it, then try again.",
+                    ErrorKind::InvalidData => "The installation package couldn't be read. Download the installer again and retry.",
+                    _ => "Installation couldn't finish. Reconnect your Kobo via USB and try again.",
+                }.to_owned()
+            })?;
             let message = match eject_device(&root) {
                 Ok(EjectOutcome::Ejected) => "Installed and ejected. Disconnect the Kobo, let it restart, then tap Bokheim.".to_owned(),
                 Ok(EjectOutcome::Unmounted) => "Installed and safely unmounted. Disconnect the Kobo, let it restart, then tap Bokheim.".to_owned(),
-                Err(error) => format!("Installed. Safely eject the Kobo manually. Automatic eject failed: {error}"),
+                Err(error) => {
+                    eprintln!("Automatic Kobo eject failed: {error}");
+                    "Installed. Use your computer's eject option to safely remove your Kobo, then disconnect it and let it restart.".to_owned()
+                },
             };
             Ok::<_, String>(message)
         });
@@ -233,7 +247,7 @@ impl Installer {
 
     fn status_detail(&self) -> Option<SharedString> {
         match &self.status {
-            InstallerStatus::MountFailed(error) => Some(format!("Mount the Kobo manually. Automatic mount failed: {error}").into()),
+            InstallerStatus::MountFailed(_) => Some("Your computer couldn't open the Kobo automatically. Open it in your file manager, then return here to install Bokheim.".into()),
             InstallerStatus::Installed(message) | InstallerStatus::Failed(message) => Some(message.clone().into()),
             _ => None,
         }

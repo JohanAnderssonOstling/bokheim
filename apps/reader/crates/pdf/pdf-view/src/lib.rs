@@ -19,7 +19,7 @@ use std::io::{Read, Seek};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
-use ui_components as components;
+use ui_components::{self as components, PageTurn};
 use web_time::Instant;
 
 const DISPLAY_CACHE_BUDGET: usize = 64 * 1024 * 1024;
@@ -198,6 +198,7 @@ pub struct PdfView {
     /// in progress.
     touch_swipe: Option<Point<f32>>,
     swipe_preview: components::SwipePreview,
+    page_turn: Option<PageTurn<PdfFlowSnapshot>>,
     /// The swipe began in the bottom gesture area, so it is the system's and
     /// turns no page.
     touch_swipe_from_edge: bool,
@@ -227,6 +228,7 @@ struct PageSearchHits {
     hits: Arc<[PdfSearchHit]>,
 }
 
+#[derive(Clone)]
 struct PdfPageElement {
     page_index: usize,
     column: FitWidthColumn,
@@ -245,6 +247,61 @@ struct PdfPageElement {
     /// note panel, which has to be placed clear of the passage rather than over
     /// it. See [`PdfView::passage_bounds`].
     passage_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+}
+
+struct PdfFlowSnapshot {
+    column_height: f32,
+    remainder: f32,
+    fit_height: bool,
+    slots: Vec<PdfFlowSlot>,
+}
+
+struct PdfFlowSlot {
+    width: f32,
+    streams: Vec<Vec<PdfFlowFragment>>,
+}
+
+struct PdfFlowFragment {
+    column: FitWidthColumn,
+    page: Option<PdfPageElement>,
+}
+
+impl PdfFlowSnapshot {
+    fn is_ready(&self) -> bool {
+        let mut fragments = self.slots.iter().flat_map(|slot| &slot.streams).flatten().peekable();
+        fragments.peek().is_some() && fragments.all(|fragment| fragment.page.is_some())
+    }
+
+    fn element(&self, offset: Point<Pixels>) -> gpui::Div {
+        let mut columns = SmallVec::<[AnyElement; MAX_VISIBLE_PAGE_COUNT]>::new();
+        columns.push(div().flex_1().h_full().into_any_element());
+        for (slot_index, slot) in self.slots.iter().enumerate() {
+            let streams = slot.streams.iter().enumerate().map(|(stream_index, stream)| {
+                let mut fragments = SmallVec::<[AnyElement; 4]>::new();
+                for fragment in stream {
+                    if fragment.column.leading_page_gap() > 0.0 {
+                        fragments.push(div().h(px(fragment.column.leading_page_gap())).flex_shrink_0().bg(rgba(0xffffffff)).into_any_element());
+                    }
+                    fragments
+                        .push(fragment.page.as_ref().map(|page| page.clone().into_any_element()).unwrap_or_else(|| div().w(px(fragment.column.display_width())).h(px(fragment.column.display_height())).flex_shrink_0().into_any_element()));
+                }
+                div()
+                    .id(("pdf-logical-column", slot_index * 2 + stream_index))
+                    .w(px(slot.width))
+                    .h(px(self.column_height))
+                    .flex()
+                    .flex_col()
+                    .flex_shrink_0()
+                    .when(self.fit_height, |column| column.items_center().justify_center())
+                    .children(fragments)
+            });
+            columns.push(
+                div().id(("pdf-flow-slot", slot_index)).w(px(slot.width)).h(px(self.column_height)).overflow_hidden().flex_shrink_0().child(div().w_full().flex().flex_col().mt(px(-self.remainder)).children(streams)).into_any_element(),
+            );
+            columns.push(div().flex_1().h_full().when(slot_index + 1 < self.slots.len(), |gap| gap.bg(rgba(0xffffffff))).into_any_element());
+        }
+        div().w_full().h(px(self.column_height)).flex().flex_row().items_start().flex_shrink_0().transform(gpui::ElementTransform::default().translate(offset)).children(columns)
+    }
 }
 
 struct PdfPagePrepaint {
@@ -359,6 +416,7 @@ impl PdfView {
             wheel_debounce: None,
             touch_swipe: None,
             swipe_preview: components::SwipePreview::default(),
+            page_turn: None,
             touch_swipe_from_edge: false,
             scroll_handle: ScrollHandle::new(),
             focus,
@@ -418,6 +476,8 @@ impl PdfView {
     }
 
     pub fn set_trim_margins(&mut self, trim_margins: bool, cx: &mut Context<Self>) {
+        self.page_turn = None;
+        self.swipe_preview.clear();
         if self.trim_margins == trim_margins {
             return;
         }
@@ -446,6 +506,8 @@ impl PdfView {
     }
 
     pub fn set_full_page_position(&mut self, full_page_position: f32, cx: &mut Context<Self>) {
+        self.page_turn = None;
+        self.swipe_preview.clear();
         self.navigation_revision = self.navigation_revision.wrapping_add(1);
         self.pending_full_page_position = Some(full_page_position);
         if !self.pages.is_empty() {
@@ -456,23 +518,29 @@ impl PdfView {
     }
 
     pub fn next_page(&mut self, cx: &mut Context<Self>) {
-        self.navigation_revision = self.navigation_revision.wrapping_add(1);
-        if self.move_viewport_anchor(true, cx) {
-            return;
-        }
-        let target = self.keyboard_page_target(true);
-        self.clear_selection();
-        self.set_flow_offset(target, cx);
+        self.turn_page(true, cx);
     }
 
     pub fn previous_page(&mut self, cx: &mut Context<Self>) {
+        self.turn_page(false, cx);
+    }
+
+    fn turn_page(&mut self, forward: bool, cx: &mut Context<Self>) {
         self.navigation_revision = self.navigation_revision.wrapping_add(1);
-        if self.move_viewport_anchor(false, cx) {
-            return;
+        let before = (self.current_page, self.current_page_column, self.flow_offset, self.viewport_scroll_offset);
+        let outgoing = PageTurn::<PdfFlowSnapshot>::enabled(cx).then(|| self.flow_snapshot(true)).filter(PdfFlowSnapshot::is_ready);
+        if !self.move_viewport_anchor(forward, cx) {
+            let target = self.keyboard_page_target(forward);
+            self.clear_selection();
+            self.set_flow_offset(target, cx);
         }
-        let target = self.keyboard_page_target(false);
-        self.clear_selection();
-        self.set_flow_offset(target, cx);
+        if before != (self.current_page, self.current_page_column, self.flow_offset, self.viewport_scroll_offset) {
+            let drag = self.swipe_preview.take_offset();
+            self.page_turn = outgoing.and_then(|outgoing| PageTurn::new(outgoing, forward, drag, size(px(self.available_width), px(self.flow_column_height())), cx));
+        } else {
+            self.swipe_preview.settle();
+        }
+        cx.notify();
     }
 
     fn keyboard_page_target(&mut self, forward: bool) -> f32 {
@@ -490,6 +558,8 @@ impl PdfView {
             self.next_page(cx);
             return;
         }
+        self.page_turn = None;
+        self.swipe_preview.clear();
         let offsets = self.atomic_flow_offsets();
         let Some(target) = next_snap_offset(self.flow_offset, &offsets) else {
             return;
@@ -503,6 +573,8 @@ impl PdfView {
             self.previous_page(cx);
             return;
         }
+        self.page_turn = None;
+        self.swipe_preview.clear();
         let offsets = self.atomic_flow_offsets();
         let Some(target) = previous_snap_offset(self.flow_offset, &offsets) else {
             return;
@@ -512,6 +584,8 @@ impl PdfView {
     }
 
     pub fn set_page(&mut self, page_index: usize, cx: &mut Context<Self>) {
+        self.page_turn = None;
+        self.swipe_preview.clear();
         self.navigation_revision = self.navigation_revision.wrapping_add(1);
         if page_index >= self.page_count() || (page_index == self.current_page && self.current_page_column == 0) {
             return;
@@ -552,6 +626,8 @@ impl PdfView {
     }
 
     pub fn set_zoom_mode(&mut self, zoom_mode: PdfZoomMode, cx: &mut Context<Self>) {
+        self.page_turn = None;
+        self.swipe_preview.clear();
         if self.zoom_mode == zoom_mode {
             return;
         }
@@ -656,7 +732,7 @@ impl PdfView {
         let hits = match chunk {
             Ok(hits) => hits,
             Err(error) => {
-                self.error = Some(error.to_string());
+                self.error = Some(components::user_facing_error(&error.to_string(), "Could not display this PDF page. Try reopening the book.").to_owned());
                 cx.notify();
                 return false;
             }
@@ -865,7 +941,7 @@ impl PdfView {
                     }
                     Err(error) => {
                         let message = error.to_string();
-                        this.error = Some(message.clone());
+                        this.error = Some(components::user_facing_error(&message, "Could not open this PDF. Try reopening it or download another copy.").to_owned());
                         cx.emit(PdfViewEvent::LoadFailed(message));
                     }
                 }
@@ -1022,7 +1098,7 @@ impl PdfView {
             Ok(rendered) => rendered,
             Err(error) => {
                 if self.render_generation == generation {
-                    self.error = Some(error.to_string());
+                    self.error = Some(components::user_facing_error(&error.to_string(), "Could not display this PDF page. Try reopening the book.").to_owned());
                     cx.notify();
                 }
                 return false;
@@ -1032,7 +1108,7 @@ impl PdfView {
             Ok(page) => Arc::new(page),
             Err(error) => {
                 if self.render_generation == generation {
-                    self.error = Some(error);
+                    self.error = Some(components::user_facing_error(&error, "Could not display this PDF page. Try reopening the book.").to_owned());
                     cx.notify();
                 }
                 return false;
@@ -1154,6 +1230,8 @@ impl PdfView {
     }
 
     fn sync_flow_scroll_target(&mut self, delta_y: f32, cx: &mut Context<Self>) {
+        self.page_turn = None;
+        self.swipe_preview.clear();
         // Fit-width scrolling changes only this viewport's local offset, then
         // re-runs the forward local planner. Reverse packing is reserved for
         // crossing to the previous viewport, never for an ordinary wheel tick.
@@ -1193,20 +1271,23 @@ impl PdfView {
         self.set_flow_offset(self.flow_offset - delta_y, cx);
     }
 
-    /// One wheel burst or touch swipe turns one complete page in fit-height.
+    /// Touch swipes turn a complete viewport in every zoom mode. Physical
+    /// wheel bursts also turn complete pages in fit-height mode.
     /// `travel` is this event's movement on both axes. `from_edge` says a
     /// swipe began in the bottom gesture area; it is read when the swipe
     /// starts.
-    fn scroll_fit_height(&mut self, travel: Point<f32>, phase: TouchPhase, from_edge: bool, window: &Window, cx: &mut Context<Self>) {
+    fn handle_page_scroll(&mut self, travel: Point<f32>, phase: TouchPhase, from_edge: bool, window: &Window, cx: &mut Context<Self>) {
         if cfg!(target_os = "android") || window.is_page_scroll_swipe() || self.touch_swipe.is_some() {
+            let viewport = size(px(self.available_width), px(self.flow_column_height()));
             let travel = if travel.x.is_finite() && travel.y.is_finite() { travel } else { gpui::point(0.0, 0.0) };
             match phase {
                 TouchPhase::Started => {
+                    self.page_turn = None;
                     self.wheel_debounce.take();
                     self.touch_swipe = Some(travel);
                     self.touch_swipe_from_edge = from_edge;
                     if !from_edge {
-                        if self.swipe_preview.drag(travel, window) {
+                        if self.swipe_preview.drag_in_viewport(travel, viewport) {
                             cx.notify();
                         }
                     }
@@ -1216,7 +1297,7 @@ impl PdfView {
                     if let Some(swipe) = &mut self.touch_swipe {
                         *swipe = gpui::point(swipe.x + travel.x, swipe.y + travel.y);
                         if !self.touch_swipe_from_edge {
-                            if self.swipe_preview.drag(*swipe, window) {
+                            if self.swipe_preview.drag_in_viewport(*swipe, viewport) {
                                 cx.notify();
                             }
                         }
@@ -1227,16 +1308,17 @@ impl PdfView {
                     let Some(swipe) = self.touch_swipe.take() else { return };
                     // A swipe from the bottom edge is the system's.
                     let from_edge = std::mem::take(&mut self.touch_swipe_from_edge);
-                    if self.zoom_mode == PdfZoomMode::FitHeight {
-                        match components::swipe_turns_forward(swipe, window).filter(|_| !from_edge) {
-                            Some(forward) => {
-                                self.swipe_preview.clear();
-                                if forward { self.next_page(cx) } else { self.previous_page(cx) }
+                    match components::swipe_turns_forward(swipe, window).filter(|_| !from_edge) {
+                        Some(forward) => {
+                            if forward {
+                                self.next_page(cx)
+                            } else {
+                                self.previous_page(cx)
                             }
-                            None => self.swipe_preview.settle(),
                         }
-                        cx.notify();
+                        None => self.swipe_preview.settle(),
                     }
+                    cx.notify();
                     return;
                 }
                 TouchPhase::Cancelled => {
@@ -2059,14 +2141,65 @@ impl Element for PdfPageElement {
     }
 }
 
+impl PdfView {
+    fn flow_snapshot(&self, passive: bool) -> PdfFlowSnapshot {
+        // Outgoing highlights must not overwrite the live annotation position.
+        let passage_bounds = if passive { Rc::new(Cell::new(None)) } else { self.passage_bounds.clone() };
+        let base_index = self.flow_base_index();
+        let total = self.display_column_count().unwrap_or(0);
+        let fit_height = self.zoom_mode == PdfZoomMode::FitHeight;
+        let slots = self
+            .screen_column_widths()
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(slot_index, width)| {
+                let streams = screen_column_stream(base_index, slot_index, total)
+                    .take(if fit_height { 1 } else { 2 })
+                    .enumerate()
+                    .map(|(stream_index, current_index)| {
+                        columns_for_display(self.fit_width_plan.columns(), current_index)
+                            .iter()
+                            .copied()
+                            .map(|column| {
+                                let page_index = column.page_index();
+                                let page = self.pages.iter().find(|(candidate, _)| *candidate == page_index).map(|(_, page)| PdfPageElement {
+                                    page_index,
+                                    column,
+                                    page: page.clone(),
+                                    selection: (self.selection_page == Some(page_index)).then(|| self.selection.clone()).flatten(),
+                                    annotations: self.annotations.clone(),
+                                    reading_highlight: self.reading_highlight.as_ref().filter(|(page, _)| *page == page_index).map(|(_, rects)| rects.clone()),
+                                    active_annotation_id: self.active_annotation_id.clone(),
+                                    search_hits: self.search_page_hits.get(&page_index).cloned(),
+                                    active_search_hit: self.active_search_hit,
+                                    interaction_style: self.interaction_style,
+                                    instance_index: slot_index * 2 + stream_index,
+                                    passage_bounds: passage_bounds.clone(),
+                                });
+                                PdfFlowFragment { column, page }
+                            })
+                            .collect()
+                    })
+                    .collect();
+                PdfFlowSlot { width, streams }
+            })
+            .collect();
+        PdfFlowSnapshot { column_height: self.flow_column_height(), remainder: self.flow_remainder(), fit_height, slots }
+    }
+}
+
 impl Render for PdfView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = components::browser_theme(cx);
+        let theme = components::BrowserTheme { page_bg: rgba(0xffffffff).into(), ..components::browser_theme(cx) };
         self.device_pixel_ratio = window.scale_factor();
         // Cleared before the page elements are built, so what they record in
         // paint describes this frame and not the last one.
         self.passage_bounds.set(None);
-        if self.pages.is_empty() {
+        if self.error.is_some() {
+            self.page_turn = None;
+        }
+        if self.pages.is_empty() && self.page_turn.is_none() {
             return match self.error.clone() {
                 Some(message) => components::reader_document_message(message, theme).into_any_element(),
                 None if self.session.is_none() => components::reader_document_message("Opening PDF…", theme).into_any_element(),
@@ -2075,69 +2208,20 @@ impl Render for PdfView {
         }
         let view = cx.entity();
         let column_height = self.flow_column_height();
-        let base_index = self.flow_base_index();
-        let remainder = self.flow_remainder();
-        let total = self.display_column_count().unwrap_or(0);
-        let build_logical_column = |display_column_index: usize, instance_index: usize, column_width: f32| {
-            let mut fragments = SmallVec::<[AnyElement; 4]>::new();
-            for column in columns_for_display(self.fit_width_plan.columns(), display_column_index).iter().copied() {
-                if column.leading_page_gap() > 0.0 {
-                    fragments.push(div().h(px(column.leading_page_gap())).flex_shrink_0().bg(rgba(0xffffffff)).into_any_element());
-                }
-                let page_index = column.page_index();
-                let element = self
-                    .pages
-                    .iter()
-                    .find(|(candidate, _)| *candidate == page_index)
-                    .map(|(_, page)| {
-                        let page = page.clone();
-                        let selection = (self.selection_page == Some(page_index)).then(|| self.selection.clone()).flatten();
-                        PdfPageElement {
-                            page_index,
-                            column,
-                            page,
-                            selection,
-                            annotations: self.annotations.clone(),
-                            reading_highlight: self.reading_highlight.as_ref().filter(|(page, _)| *page == page_index).map(|(_, rects)| rects.clone()),
-                            active_annotation_id: self.active_annotation_id.clone(),
-                            search_hits: self.search_page_hits.get(&page_index).cloned(),
-                            active_search_hit: self.active_search_hit,
-                            interaction_style: self.interaction_style,
-                            instance_index,
-                            passage_bounds: self.passage_bounds.clone(),
-                        }
-                        .into_any_element()
-                    })
-                    .unwrap_or_else(|| div().w(px(column.display_width())).h(px(column.display_height())).flex_shrink_0().into_any_element());
-                fragments.push(element);
-            }
-            div()
-                .id(("pdf-logical-column", instance_index))
-                .w(px(column_width))
-                .h(px(column_height))
-                .flex()
-                .flex_col()
-                .flex_shrink_0()
-                .when(self.zoom_mode == PdfZoomMode::FitHeight, |column| column.items_center().justify_center())
-                .children(fragments)
-        };
-        let mut screen_columns = SmallVec::<[AnyElement; MAX_VISIBLE_PAGE_COUNT]>::new();
-        let widths = self.screen_column_widths();
-        // Every spacer owns the same share of the unused width. Only the
-        // internal spacers are white; outer margins keep the reader theme.
-        screen_columns.push(div().flex_1().h_full().into_any_element());
-        for (slot_index, column_width) in widths.iter().copied().enumerate() {
-            let mut stream = SmallVec::<[AnyElement; 2]>::new();
-            let stream_length = if self.zoom_mode == PdfZoomMode::FitHeight { 1 } else { 2 };
-            for (stream_index, current_index) in screen_column_stream(base_index, slot_index, total).take(stream_length).enumerate() {
-                stream.push(build_logical_column(current_index, slot_index * 2 + stream_index, column_width).into_any_element());
-            }
-            screen_columns
-                .push(div().id(("pdf-flow-slot", slot_index)).w(px(column_width)).h(px(column_height)).overflow_hidden().flex_shrink_0().child(div().w_full().flex().flex_col().mt(px(-remainder)).children(stream)).into_any_element());
-            screen_columns.push(div().flex_1().h_full().when(slot_index + 1 < widths.len(), |gap| gap.bg(rgba(0xffffffff))).into_any_element());
+        let incoming = self.flow_snapshot(false);
+        let viewport = size(px(self.available_width), px(column_height));
+        let turn_frame = self.page_turn.as_mut().and_then(|turn| turn.frame(viewport, incoming.is_ready(), window, cx));
+        if turn_frame.is_none() {
+            self.page_turn = None;
         }
-        let drag_offset = self.swipe_preview.offset(window, cx);
-        let document = div().id("pdf-flow").w_full().h(px(column_height)).flex().flex_row().items_start().flex_shrink_0().transform(gpui::ElementTransform::default().translate(drag_offset)).children(screen_columns);
+        let offset = turn_frame.as_ref().map_or_else(|| self.swipe_preview.offset(window, cx), |frame| frame.incoming);
+        let mut document = div().relative().w_full().h(px(column_height)).flex_shrink_0();
+        if let Some(frame) = &turn_frame
+            && let Some(turn) = &self.page_turn
+        {
+            document = document.child(div().id("pdf-turn-outgoing").absolute().inset_0().child(turn.outgoing.element(frame.outgoing).bg(theme.page_bg)));
+        }
+        document = document.child(div().id("pdf-flow").size_full().when(turn_frame.as_ref().is_some_and(|frame| !frame.ready), |page| page.invisible()).child(incoming.element(offset).bg(theme.page_bg)));
         let surface_bounds = Rc::new(Cell::new(Bounds::default()));
         let measured_bounds = surface_bounds.clone();
         let measure_target = view.clone();
@@ -2239,23 +2323,21 @@ impl Render for PdfView {
                 let flow_delta = if vertical != 0.0 { vertical } else { horizontal };
                 if window.is_page_scroll_swipe() {
                     let from_edge = components::in_bottom_gesture_edge(event.position, window);
-                    wheel_target.update(cx, |view, cx| view.scroll_fit_height(gpui::point(horizontal, vertical), event.touch_phase, from_edge, window, cx));
+                    wheel_target.update(cx, |view, cx| view.handle_page_scroll(gpui::point(horizontal, vertical), event.touch_phase, from_edge, window, cx));
                     cx.stop_propagation();
                     return;
                 }
-                if matches!(event.delta, ScrollDelta::Pages(_)) && wheel_target.read(cx).zoom_mode != PdfZoomMode::FitHeight {
+                if matches!(event.delta, ScrollDelta::Pages(_)) {
                     wheel_target.update(cx, |view, cx| {
                         view.touch_swipe = None;
                         view.touch_swipe_from_edge = false;
-                        if flow_delta == 0.0 {
-                            view.swipe_preview.settle();
+                        if flow_delta < 0.0 {
+                            view.next_page(cx);
+                        } else if flow_delta > 0.0 {
+                            view.previous_page(cx);
                         } else {
-                            view.swipe_preview.clear();
-                        }
-                        cx.notify();
-                        if flow_delta != 0.0 {
-                            view.navigation_revision = view.navigation_revision.wrapping_add(1);
-                            view.sync_flow_scroll_target(flow_delta, cx);
+                            view.swipe_preview.settle();
+                            cx.notify();
                         }
                     });
                     cx.stop_propagation();
@@ -2264,20 +2346,7 @@ impl Render for PdfView {
                 if wheel_target.read(cx).zoom_mode == PdfZoomMode::FitHeight {
                     let from_edge = components::in_bottom_gesture_edge(event.position, window);
                     wheel_target.update(cx, |view, cx| {
-                        if matches!(event.delta, ScrollDelta::Pages(_)) {
-                            view.touch_swipe = None;
-                            view.touch_swipe_from_edge = false;
-                            if flow_delta == 0.0 {
-                                view.swipe_preview.settle();
-                            } else {
-                                view.swipe_preview.clear();
-                            }
-                            cx.notify();
-                            view.wheel_delta = flow_delta;
-                            view.finish_fit_height_scroll(cx);
-                        } else {
-                            view.scroll_fit_height(gpui::point(horizontal, vertical), event.touch_phase, from_edge, window, cx);
-                        }
+                        view.handle_page_scroll(gpui::point(horizontal, vertical), event.touch_phase, from_edge, window, cx);
                     });
                     cx.stop_propagation();
                     return;
@@ -2350,6 +2419,67 @@ mod tests {
         })
     }
 
+    fn install_test_pages(view: &mut PdfView) {
+        let page = Arc::new(DisplayPage {
+            image: Arc::new(RenderImage::new(SmallVec::from_vec(vec![Frame::new(RgbaImage::new(1, 1))]))),
+            text_layout: Arc::new(PdfPageTextLayout::default()),
+            crop: PixelCrop::full(1, 1),
+            byte_len: 4,
+            break_avoidance: Arc::from([]),
+        });
+        view.pages = (0..5).map(|index| (index, page.clone())).collect();
+    }
+
+    #[gpui::test]
+    fn page_turn_retains_images_and_waits_for_the_destination(cx: &mut TestAppContext) {
+        let (view, visual) = setup(cx);
+        visual.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                install_test_pages(view);
+                let image = view.pages[0].1.image.clone();
+                view.swipe_preview.drag(point(0.0, -120.0), window);
+                view.next_page(cx);
+                assert_eq!(view.flow_offset, 800.0);
+                if !PageTurn::<PdfFlowSnapshot>::enabled(cx) {
+                    assert!(view.page_turn.is_none());
+                    return;
+                }
+                let incoming = view.flow_snapshot(false);
+                assert!(!incoming.is_ready());
+                let turn = view.page_turn.as_mut().expect("keyboard, tap and swipe navigation share a transition");
+                let outgoing = turn.outgoing.slots[0].streams[0][0].page.as_ref().unwrap();
+                assert!(Arc::ptr_eq(&outgoing.page.image, &image), "keep the existing raster rather than copying it");
+                assert!(!Rc::ptr_eq(&outgoing.passage_bounds, &view.passage_bounds), "outgoing paint is passive");
+                let viewport = size(px(view.available_width), px(800.0));
+                let frame = turn.frame(viewport, false, window, cx).unwrap();
+                assert!(!frame.ready);
+                assert_eq!(frame.outgoing, point(px(0.0), px(-120.0)));
+                install_test_pages(view);
+                assert!(view.flow_snapshot(false).is_ready());
+                assert!(view.page_turn.as_mut().unwrap().frame(viewport, true, window, cx).unwrap().ready);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn boundary_turns_do_not_animate_and_repeated_turns_keep_navigation_order(cx: &mut TestAppContext) {
+        let (view, visual) = setup(cx);
+        view.update(visual, |view, cx| {
+            install_test_pages(view);
+            view.previous_page(cx);
+            assert!(view.page_turn.is_none());
+            assert_eq!(view.flow_offset, 0.0);
+            for expected in [800.0, 1600.0, 2400.0] {
+                install_test_pages(view);
+                view.next_page(cx);
+                assert_eq!(view.flow_offset, expected);
+            }
+            install_test_pages(view);
+            view.previous_page(cx);
+            assert_eq!(view.flow_offset, 1600.0);
+        });
+    }
+
     #[gpui::test]
     fn fit_height_navigation_keeps_whole_pages_even_when_pages_are_short(cx: &mut TestAppContext) {
         let (view, cx) = setup(cx);
@@ -2404,7 +2534,7 @@ mod tests {
                 view.change_zoom(0.1, cx);
                 assert_eq!(view.zoom_mode, PdfZoomMode::FitHeight);
                 for _ in 0..5 {
-                    view.scroll_fit_height(gpui::point(0.0, -40.0), TouchPhase::Moved, false, window, cx);
+                    view.handle_page_scroll(gpui::point(0.0, -40.0), TouchPhase::Moved, false, window, cx);
                 }
                 assert_eq!(view.flow_offset, 0.0);
             })
@@ -2416,7 +2546,7 @@ mod tests {
             view.update(cx, |view, cx| {
                 assert_eq!(view.flow_offset, 800.0);
                 assert_eq!(view.flow_remainder(), 0.0);
-                view.scroll_fit_height(gpui::point(0.0, 40.0), TouchPhase::Moved, false, window, cx);
+                view.handle_page_scroll(gpui::point(0.0, 40.0), TouchPhase::Moved, false, window, cx);
             })
         });
         cx.run_until_parked();

@@ -5,6 +5,7 @@
 //! library list is reported upward so the root can update the shared
 //! [`Libraries`] rather than this page reaching into the navigation UI tree.
 
+use ui_components::user_facing_error;
 use std::collections::HashSet;
 mod account;
 #[cfg(target_os = "android")]
@@ -234,7 +235,7 @@ impl SyncPage {
                 let _ = page.update(cx, |page, cx| {
                     match result {
                         Ok(path) => page.default_library_location = path,
-                        Err(error) => page.error = Some(error.into()),
+                        Err(error) => page.error = Some(user_facing_error(&error, "Could not load the library location. Please try again.").into()),
                     }
                     cx.notify();
                 });
@@ -271,7 +272,7 @@ impl SyncPage {
                 self.asset_storage_pending.remove(&library_id);
                 match result {
                     Ok(()) => self.schedule_refresh(cx),
-                    Err(error) => self.error = Some(error.into()),
+                    Err(error) => self.error = Some(user_facing_error(&error, "Could not change cloud storage for this library. Please try again.").into()),
                 }
                 let _ = enabled;
                 cx.notify();

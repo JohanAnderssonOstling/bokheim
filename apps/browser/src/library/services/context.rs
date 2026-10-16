@@ -1,3 +1,5 @@
+use ui_components::user_facing_error;
+
 use crate::BOOK_IMPORT_EXTENSIONS;
 use crate::services::import_failure_message;
 use gpui::{App, Context, Entity, FileDialogFilter, PathPromptOptions, WeakEntity, Window};
@@ -85,7 +87,7 @@ impl LibraryContext {
             };
             if let Err(error) = result {
                 let _ = view.update_in(cx, |_, window, cx| {
-                    crate::services::notify_error("add-book-error", format!("Could not add book: {error}"), window, cx);
+                    crate::services::notify_error("add-book-error", format!("Could not add book. {}", user_facing_error(&error, "Please try again.")), window, cx);
                 });
             }
         })
@@ -124,7 +126,7 @@ impl LibraryContext {
             };
             let _ = view.update_in(cx, |_, window, cx| match result {
                 Ok(failures) if !failures.is_empty() => crate::services::notify_warning("add-folder-warning", failures.iter().map(import_failure_message).collect::<Vec<_>>().join("\n"), window, cx),
-                Err(error) => crate::services::notify_error("add-folder-error", format!("Could not add folder: {error}"), window, cx),
+                Err(error) => crate::services::notify_error("add-folder-error", format!("Could not add folder. {}", user_facing_error(&error, "Please try again.")), window, cx),
                 _ => {}
             });
         })
@@ -140,7 +142,7 @@ impl LibraryContext {
             let message = match library.import_paths(parent_id, paths, moving).await {
                 Ok(failures) if failures.is_empty() => None,
                 Ok(failures) => Some(failures.iter().map(import_failure_message).collect::<Vec<_>>().join("\n")),
-                Err(error) => Some(error),
+                Err(error) => Some(user_facing_error(&error, "Could not import the dropped files. Check that they are available and try again.").to_owned()),
             };
             if let Some(message) = message {
                 let _ = view.update_in(cx, |_, window, cx| crate::services::notify_warning("drop-import-warning", message, window, cx));

@@ -135,6 +135,22 @@ impl TocState {
         self.chapter_for_cfi(&format!("epubcfi(/6/{}!/0)", (document + 1) * 2))
     }
 
+    #[cfg(any(test, all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32"))))]
+    pub(crate) fn narration_excludes_cfi(&self, cfi: &str) -> bool {
+        let Some(position) = parse_source_position(cfi) else { return false };
+        let Some(ordinal) = self.ordinal_for_position(&position) else { return false };
+        let entry = &self.resolutions[ordinal];
+        // The sidebar falls back to an earlier entry across documents and
+        // before the first anchor. Those fallbacks must not suppress prose.
+        if entry.document != position.document {
+            return false;
+        }
+        if entry.anchor.is_some() && !self.source_positions.get(&position.document).is_some_and(|anchors| anchors.iter().any(|(path, index)| *index == ordinal && path <= &position.path)) {
+            return false;
+        }
+        self.title_for_ordinal(ordinal).is_some_and(|title| html::layout::is_navigation_section_title(&title))
+    }
+
     /// The publisher's own href for the entry the reader is inside — the
     /// identity a stored position is recorded against, since a title can be
     /// re-worded by a re-parsed navigation document.
@@ -285,6 +301,30 @@ mod tests {
         let mut toc = TocState::default();
         toc.set(entries, resolutions);
         toc
+    }
+
+    #[test]
+    fn narration_skips_named_sections_without_leaking_before_or_after_them() {
+        let entries = vec![TocEntry { title: "Contents".into(), link: "contents".into(), children: vec![] }, TocEntry { title: "Chapter One".into(), link: "one".into(), children: vec![] }];
+        let resolutions = TocState::resolve(&entries, |link| Some((0, Some(link.into()))));
+        let mut toc = TocState::default();
+        toc.set(entries, resolutions);
+        toc.install_source_positions(HashMap::from([(0, vec![(vec![4, 4], 0), (vec![4, 8], 1)])]), 2);
+        assert!(!toc.narration_excludes_cfi("epubcfi(/6/2!/4/2/1:0)"));
+        assert!(toc.narration_excludes_cfi("epubcfi(/6/2!/4/4/1:0)"));
+        assert!(toc.narration_excludes_cfi("epubcfi(/6/2!/4/6/1:0)"));
+        assert!(!toc.narration_excludes_cfi("epubcfi(/6/2!/4/8/1:0)"));
+        assert!(!toc.narration_excludes_cfi("epubcfi(/6/4!/4/2/1:0)"));
+        assert!(!toc.narration_excludes_cfi("invalid"));
+    }
+
+    #[test]
+    fn narration_document_labels_do_not_exclude_following_unlisted_documents() {
+        let mut toc = TocState::default();
+        toc.set(vec![entry("Table of Contents", vec![])], vec![ResolvedTocEntry { link: "Table of Contents.xhtml".into(), document: 0, anchor: None }]);
+        toc.install_source_positions(HashMap::new(), 2);
+        assert!(toc.narration_excludes_cfi("epubcfi(/6/2!/4/2/1:0)"));
+        assert!(!toc.narration_excludes_cfi("epubcfi(/6/4!/4/2/1:0)"));
     }
 
     #[test]

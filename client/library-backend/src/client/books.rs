@@ -42,7 +42,7 @@ impl LibraryClient {
     pub async fn resolve_book(&self, content_hash: ContentHash) -> Result<ResolvedBook, String> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.transport.handle().map_err(|error| error.to_string())?.resolve_book(content_hash).await.map_err(|error| error.to_string())
+            self.transport.handle().await.map_err(|error| error.to_string())?.resolve_book(content_hash).await.map_err(|error| error.to_string())
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -52,6 +52,6 @@ impl LibraryClient {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn resolve_audiobook_track(&self, content_hash: ContentHash, index: usize) -> Result<ResolvedBook, String> {
-        self.transport.handle().map_err(|error| error.to_string())?.resolve_audiobook_track(content_hash, index).await.map_err(|error| error.to_string())
+        self.transport.handle().await.map_err(|error| error.to_string())?.resolve_audiobook_track(content_hash, index).await.map_err(|error| error.to_string())
     }
 }

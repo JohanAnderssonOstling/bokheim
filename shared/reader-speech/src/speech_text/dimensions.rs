@@ -2,12 +2,18 @@
 use segment_parser::{NUMBER_VALUE_SCALE, SegmentMeasurementFactRef, SegmentTree, measurement_facts};
 
 use super::decimals::source_number_phrase;
-use super::semantics::{Replacement, unit_phrase};
+use super::semantics::{Replacement, ambiguous_inch_abbreviation, unit_phrase};
 
 fn geometry_phrase(tree: &SegmentTree, fact: &SegmentMeasurementFactRef<'_>) -> Option<String> {
     let measurement = fact.measurement_fact();
     let values = measurement.number_values();
-    if !(1..=2).contains(&values.len()) || measurement.number_formats().len() != values.len() || values.iter().any(|value| *value < 0) || measurement.number_range_typography().is_some() || fact.number_format_requires_locale_change() {
+    if !(1..=2).contains(&values.len())
+        || measurement.number_formats().len() != values.len()
+        || values.iter().any(|value| *value < 0)
+        || measurement.number_range_typography().is_some()
+        || fact.number_format_requires_locale_change()
+        || ambiguous_inch_abbreviation(tree, fact)
+    {
         return None;
     }
     // Lengths and pixel sizes denote geometry. Other physical quantities can

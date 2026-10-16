@@ -186,7 +186,7 @@ impl Render for PdfReaderView {
             let sidebar_body = match active {
                 SidebarTab::Contents => self.render_toc_body(entity.clone(), theme, cx),
                 SidebarTab::Notes => self.render_annotations_body(theme, cx),
-                SidebarTab::Search => self.render_search(theme, cx),
+                SidebarTab::Search => self.render_search(theme, window, cx),
                 SidebarTab::Settings => self.render_settings(cx),
             };
             let sidebar_content = SidebarContent::new(progress_fraction, progress_label.clone(), page_indicator, Some(pdf_document_focus), sidebar_body);

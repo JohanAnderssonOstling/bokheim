@@ -10,13 +10,14 @@ pub struct BackendLaunch {
     data_dir: PathBuf,
     default_library_root: PathBuf,
     discovery: Option<(String, PathBuf)>,
+    pub(crate) libraries_after_first_frame: bool,
 }
 
 impl BackendLaunch {
     pub fn initialize(location: AppDataLocation) -> Result<Self, String> {
         let default_library_root = location.default_library_root()?;
         let data_dir = location.data_dir()?;
-        Ok(Self { data_dir, default_library_root, discovery: None })
+        Ok(Self { data_dir, default_library_root, discovery: None, libraries_after_first_frame: false })
     }
 
     /// Location for platform-owned files such as desktop instance locks and UI sessions.
@@ -29,6 +30,14 @@ impl BackendLaunch {
     pub fn with_library_discovery(mut self, root: PathBuf, fallback_name: String, fallback_path: PathBuf) -> Self {
         self.default_library_root = root;
         self.discovery = Some((fallback_name, fallback_path));
+        self
+    }
+
+    /// Build the initial UI from registry metadata, then open all libraries on
+    /// the backend worker. The host must hold `defer_library_maintenance()`
+    /// until its first frame; early requests wait for opening to finish.
+    pub fn with_libraries_after_first_frame(mut self) -> Self {
+        self.libraries_after_first_frame = true;
         self
     }
 

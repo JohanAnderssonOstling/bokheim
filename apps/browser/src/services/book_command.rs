@@ -4,6 +4,8 @@
 //! folder can both be undone from Trash, so a prompt only slowed down the
 //! common case.
 
+use ui_components::user_facing_error;
+
 use gpui::{App, Window};
 
 use super::notify_error;
@@ -22,6 +24,6 @@ impl BookCommand {
             Self::TrashBook => ("book-trash-error", "Could not move book to Trash"),
             Self::TrashBooks => ("book-trash-error", "Could not move selected books to Trash"),
         };
-        notify_error(id, format!("{prefix}: {error}"), window, cx);
+        notify_error(id, format!("{prefix}. {}", user_facing_error(&error, "Please try again.")), window, cx);
     }
 }

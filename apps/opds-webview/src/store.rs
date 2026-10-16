@@ -37,7 +37,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, LazyLock, Mutex, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
 use url::Url;
-use ui_components::{SPACE_SM, TEXT_SM, TOPBAR_ACTION_HEIGHT_REM, SelectedPalette, apply_appearance, browser_address_control, browser_theme, error_text, outlined_icon_button, register_fonts};
+use ui_components::{user_facing_error, SPACE_SM, TEXT_SM, TOPBAR_ACTION_HEIGHT_REM, SelectedPalette, apply_appearance, browser_address_control, browser_theme, error_text, outlined_icon_button, register_fonts};
 use ui_components::{BrowserDownloads, BrowserDownloadPhase};
 use wry::dpi::{PhysicalPosition, PhysicalSize};
 use wry::{NewWindowResponse, PageLoadEvent, Rect, WebContext, WebView, WebViewBuilder};
@@ -276,7 +276,7 @@ impl Browser {
             }
             Err(error) => {
                 eprintln!("Could not embed the browser: {error}");
-                (None, Some(format!("Could not open the webpage: {error}")))
+                (None, Some(user_facing_error(&error.to_string(), "Could not open the webpage. Try reopening the browser.").to_owned()))
             }
         };
         #[cfg(target_os = "windows")]
@@ -386,7 +386,7 @@ impl Browser {
                             let _ = webview.focus();
                             self.set_address(window, cx);
                         }
-                        Err(error) => self.error = Some(format!("Could not open this address: {error}")),
+                        Err(error) => self.error = Some(user_facing_error(&error.to_string(), "Could not open this address. Check the address and try again.").to_owned()),
                     }
                 }
             }
@@ -451,7 +451,7 @@ impl Browser {
                     let opened = crate::profile::context(&request.data_directory)
                         .and_then(|context| open_browser_window(request, context, self.app_closed.clone(), cx));
                     if let Err(error) = opened {
-                        window.push_notification(Notification::error(format!("Could not open a new browser window: {error}")).autohide(false), cx);
+                        window.push_notification(Notification::error(user_facing_error(&error.to_string(), "Could not open a new browser window. Please try again.")).autohide(false), cx);
                     }
                 }
                 Action::Refused(path) => {

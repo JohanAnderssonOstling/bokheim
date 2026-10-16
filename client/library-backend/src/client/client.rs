@@ -1,13 +1,14 @@
+use crate::executor::BoxedBackendFuture;
 use crate::library::commands::LibraryReply;
 use crate::library::LibraryCommand;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::library::LibraryHandle;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::BackendError;
-use crate::LibraryId;
-use crate::LibraryUpdates;
 #[cfg(target_arch = "wasm32")]
 use crate::ContentHash;
+use crate::LibraryId;
+use crate::LibraryUpdates;
 
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc as Shared;
@@ -32,7 +33,7 @@ impl LibraryClient {
     pub async fn request<T: LibraryReply>(&self, command: LibraryCommand) -> Result<T, String> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.transport.handle().map_err(|error| error.to_string())?.dispatch(command).await.and_then(client_runtime::reply::Reply::take).map_err(|error| error.to_string())
+            self.transport.handle().await.map_err(|error| error.to_string())?.dispatch(command).await.and_then(client_runtime::reply::Reply::take).map_err(|error| error.to_string())
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -43,7 +44,7 @@ impl LibraryClient {
     pub async fn updates(&self) -> Result<(LibraryUpdates, bool), String> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let handle = self.transport.handle().map_err(|error| error.to_string())?;
+            let handle = self.transport.handle().await.map_err(|error| error.to_string())?;
             handle.subscribe_updates().await.map_err(|error| error.to_string())
         }
         #[cfg(target_arch = "wasm32")]
@@ -53,20 +54,19 @@ impl LibraryClient {
     }
 }
 
-/// Native hosts retain their worker lifetime while exposing the already-open library actor.
+/// Native hosts resolve an actor asynchronously, retaining their worker lifetime.
+/// Creating a client does not require the library to have opened yet.
 #[cfg(not(target_arch = "wasm32"))]
 pub trait ClientTransport: Send + Sync {
-    fn handle(&self) -> Result<&LibraryHandle, BackendError>;
+    fn handle(&self) -> BoxedBackendFuture<'_, Result<&LibraryHandle, BackendError>>;
 }
 #[cfg(not(target_arch = "wasm32"))]
 impl ClientTransport for LibraryHandle {
-    fn handle(&self) -> Result<&LibraryHandle, BackendError> {
-        Ok(self)
+    fn handle(&self) -> BoxedBackendFuture<'_, Result<&LibraryHandle, BackendError>> {
+        Box::pin(async move { Ok(self) })
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-use crate::executor::BoxedBackendFuture;
 #[cfg(target_arch = "wasm32")]
 pub type TransportResult<'a, T> = BoxedBackendFuture<'a, Result<T, String>>;
 

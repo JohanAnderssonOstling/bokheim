@@ -56,7 +56,12 @@ impl KoboDeviceBar {
                             cx.notify();
                         }
                         if let Some(message) = gpui_kobo::take_power_message() {
-                            bar.power_error = Some(message);
+                            bar.power_error = Some(if message.starts_with("Battery low (") {
+                                message
+                            } else {
+                                log::warn!("Kobo power action failed: {message}");
+                                "Could not complete the power action. Try again, or restart Bokheim if the problem continues.".into()
+                            });
                             bar.power_menu_open = true;
                             cx.notify();
                         }
@@ -76,7 +81,8 @@ impl KoboDeviceBar {
         match result {
             Ok(()) => cx.quit(),
             Err(error) => {
-                self.power_error = Some(error);
+                log::warn!("Could not leave Bokheim: {error}");
+                self.power_error = Some(if error.contains("launcher must be updated") { "Update Bokheim using the latest installer, then try this action again." } else { "Could not leave Bokheim. Restart Bokheim and try again." }.into());
                 cx.notify();
             }
         }
@@ -200,7 +206,10 @@ impl BluetoothPanel {
                         panel.status = status;
                         panel.error = None;
                     }
-                    Err(error) => panel.error = Some(error),
+                    Err(error) => {
+                        log::warn!("Bluetooth control failed: {error}");
+                        panel.error = Some("Could not change Bluetooth. Try again, or restart Bokheim if the problem continues.".into());
+                    }
                 }
                 cx.notify();
             });
@@ -335,10 +344,12 @@ impl WifiPanel {
                 let previous = (panel.snapshot.clone(), panel.error.clone());
                 match result {
                     Ok(snapshot) => {
-                        panel.error = snapshot.error.clone();
+                        if panel.snapshot.error != snapshot.error || snapshot.error.is_none() {
+                            panel.error = snapshot.error.as_deref().map(|error| components::wifi_error_message(error).to_owned());
+                        }
                         panel.snapshot = snapshot;
                     }
-                    Err(error) => panel.error = Some(error),
+                    Err(error) => panel.error = Some(components::wifi_error_message(&error).to_owned()),
                 }
                 if !is_status || previous != (panel.snapshot.clone(), panel.error.clone()) {
                     cx.notify();

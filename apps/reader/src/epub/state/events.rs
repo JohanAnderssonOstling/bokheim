@@ -126,6 +126,11 @@ impl ReaderView {
             }
             RendererEvent::OperationFailed { operation, message } => {
                 log::warn!("renderer failed to {operation}: {message}");
+                if *operation == html_view_core::RendererOperation::UpdateDocument {
+                    self.page_turn = None;
+                    self.swipe_preview.clear();
+                    cx.notify();
+                }
                 #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
                 if *operation == html_view_core::RendererOperation::UpdateDocument {
                     self.tts_document_failed(message, cx);

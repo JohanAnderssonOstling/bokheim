@@ -5,6 +5,8 @@
 //! keeping them together gives one picker, one confirmation and one error path
 //! for a selection that mixes the two.
 
+use ui_components::user_facing_error;
+
 use library_backend::DownloadState;
 use library_backend::LibraryClient;
 
@@ -325,7 +327,7 @@ impl FolderActions {
                     Err(error) => {
                         if let Some(dialog) = actions.name_dialog() {
                             dialog.busy = false;
-                            dialog.error = Some(error.into());
+                            dialog.error = Some(user_facing_error(&error, "Could not save the folder name. Please try again.").into());
                         }
                     }
                 }
@@ -434,7 +436,7 @@ impl FolderActions {
                     if changed {
                         crate::services::notify_undoable("library-transfer-partial", "Copied items; transfer did not finish", window, cx);
                     }
-                    notify_error("library-transfer-error", format!("Could not finish the transfer: {error}"), window, cx);
+                    notify_error("library-transfer-error", format!("Could not finish the transfer. Some items may already have been copied. {}", user_facing_error(&error, "Please try again.")), window, cx);
                 } else if changed {
                     crate::services::notify_undoable("library-transfer", confirmation, window, cx);
                 }
@@ -480,11 +482,12 @@ impl FolderActions {
                     notify_error(
                         "folder-placement-error",
                         format!(
-                            "Could not {} everything selected: {error}",
+                            "Could not {} everything selected. Some items may already have been transferred. {}",
                             match placement {
                                 FolderPlacement::Copy => "copy",
                                 FolderPlacement::Move => "move",
-                            }
+                            },
+                            user_facing_error(&error, "Please try again for the remaining items.")
                         ),
                         window,
                         cx,
@@ -527,7 +530,7 @@ impl FolderActions {
     fn finish_removal(result: Result<(), String>, label: String, id: &'static str, action: &'static str, window: &mut Window, cx: &mut Context<Self>) {
         match result {
             Ok(()) => crate::services::notify_undoable(id, label, window, cx),
-            Err(error) => notify_error(id, format!("Could not {action}: {error}"), window, cx),
+            Err(error) => notify_error(id, format!("Could not {action}. {}", user_facing_error(&error, "Please try again.")), window, cx),
         }
     }
 
@@ -578,7 +581,7 @@ impl FolderActions {
             }
             let _ = actions.update_in(cx, |_, window, cx| {
                 if let Err(error) = result {
-                    notify_error("folder-evict-error", format!("Could not remove every download: {error}"), window, cx);
+                    notify_error("folder-evict-error", format!("Could not remove every download. {}", user_facing_error(&error, "Please try again.")), window, cx);
                 }
             });
         })

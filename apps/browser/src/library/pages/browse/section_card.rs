@@ -2,6 +2,8 @@
 //! one horizontal paginator, with entries first. Tab reaches each child and
 //! book; Enter opens it and Ctrl+Enter opens its context menu.
 
+use ui_components::user_facing_error;
+
 use crate::library::widgets::PaginatorState;
 use std::{collections::BTreeMap, ops::Range, rc::Rc};
 
@@ -199,7 +201,7 @@ impl SectionCard {
             if let Some(error) = failure {
                 let _ = card.update_in(cx, |card, window, cx| {
                     if card.revision == revision && card.request_failed {
-                        crate::services::notify_error("section-books-error", format!("Could not load books: {error}"), window, cx);
+                        crate::services::notify_error("section-books-error", format!("Could not load books. {}", user_facing_error(&error, "Please try again.")), window, cx);
                     }
                 });
             }

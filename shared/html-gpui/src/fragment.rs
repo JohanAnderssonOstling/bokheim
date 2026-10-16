@@ -221,9 +221,13 @@ impl Element for HtmlFragmentElement {
             target.update(cx, |state, cx| {
                 let selection = state.selection.as_mut().unwrap();
                 if selection.dragging {
-                    selection.extend(event.position - bounds.origin);
+                    if event.pressed_button == Some(MouseButton::Left) {
+                        selection.extend(event.position - bounds.origin);
+                        cx.stop_propagation();
+                    } else {
+                        selection.dragging = false;
+                    }
                     cx.notify();
-                    cx.stop_propagation();
                 }
             });
         });

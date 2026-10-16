@@ -2,7 +2,7 @@
 
 use gpui::{App, Context, KeyBinding, Window};
 
-use crate::{NextSidebarTab, PreviousSidebarTab, CloseSearch, DecreaseScale, FocusReaderSearch, IncreaseScale, NextLine, NextPage, PreviousLine, PreviousPage, ReturnToLibrary, ToggleSearch, ToggleSidebar, ToggleToc};
+use crate::{CloseSearch, DecreaseScale, FocusReaderSearch, IncreaseScale, NextLine, NextPage, NextSidebarTab, PreviousLine, PreviousPage, PreviousSidebarTab, ReturnToLibrary, ToggleSearch, ToggleSidebar, ToggleToc};
 
 /// A reader implements this only for commands it supports.
 pub(crate) trait CommandTarget<C>: Sized + 'static {
@@ -63,7 +63,7 @@ pub(crate) fn bind_reader_keys(cx: &mut App) {
         KeyBinding::new("ctrl-tab", NextSidebarTab, Some("Reader")),
         KeyBinding::new("ctrl-shift-tab", PreviousSidebarTab, Some("Reader")),
         KeyBinding::new("ctrl-s", ToggleSidebar, Some("Reader")),
-        KeyBinding::new("ctrl-f", ToggleSearch, Some("Reader")),
+        KeyBinding::new("ctrl-f", FocusReaderSearch, Some("Reader")),
         KeyBinding::new("escape", CloseSearch, Some("Reader")),
         // Backspace leaves the book the same way the toolbar's library button
         // does, so the keyboard and the chrome cannot drift apart. The OS back
@@ -75,6 +75,31 @@ pub(crate) fn bind_reader_keys(cx: &mut App) {
         #[cfg(target_os = "android")]
         KeyBinding::new("f24", ToggleToc, None),
     ]);
+}
+
+/// Handle Find before nested inputs or sidebar navigation consume the shortcut.
+pub(crate) fn install_reader_search<R: CommandTarget<FocusReaderSearch>>(window: &mut Window, cx: &mut Context<R>) {
+    let target = cx.entity().downgrade();
+    let window_handle = window.window_handle();
+    window.use_keyed_state(("reader-search-keyboard", cx.entity_id()), cx, move |_, cx| {
+        cx.intercept_keystrokes(move |event, window, cx| {
+            let key = &event.keystroke;
+            if window.window_handle() != window_handle
+                || !event.context_stack.iter().any(|context| context.contains("Reader"))
+                || key.key != "f"
+                || !key.modifiers.control
+                || key.modifiers.shift
+                || key.modifiers.alt
+                || key.modifiers.platform
+            {
+                return;
+            }
+            if let Some(target) = target.upgrade() {
+                target.update(cx, |reader, cx| reader.execute(&FocusReaderSearch, window, cx));
+                cx.stop_propagation();
+            }
+        })
+    });
 }
 
 /// Binds navigation shared by reflowable and fixed-layout documents.

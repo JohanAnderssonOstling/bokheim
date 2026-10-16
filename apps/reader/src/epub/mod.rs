@@ -14,13 +14,14 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use gpui::{Entity, FocusHandle, ListState, Pixels, Point, Subscription};
+use gpui::{Entity, FocusHandle, ListState, Pixels, Point, Size, Subscription};
 use gpui_component::input::InputState;
 use gpui_component::tree::TreeState;
 use html_view_core::{ReadingPosition, SearchOptions};
-use html_view_gpui::HtmlView;
+use html_view_gpui::{HtmlPageSnapshot, HtmlView};
 use library_backend::LibraryClient;
 use library_model::BookLocator;
+use ui_components::PageTurn;
 
 use crate::epub::toc::TocState;
 use crate::shell::context_sheet::ContextActions;
@@ -111,6 +112,8 @@ pub(crate) struct ReaderView {
     /// in progress.
     touch_swipe: Option<gpui::Point<f32>>,
     swipe_preview: ui_components::SwipePreview,
+    page_turn: Option<PageTurn<HtmlPageSnapshot>>,
+    page_size: Option<Size<Pixels>>,
     /// The swipe began in the bottom gesture area, so it is the system's and
     /// turns no page.
     touch_swipe_from_edge: bool,

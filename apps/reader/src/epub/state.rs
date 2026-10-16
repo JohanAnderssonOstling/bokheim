@@ -98,6 +98,8 @@ impl ReaderView {
             wheel_debounce: None,
             touch_swipe: None,
             swipe_preview: ui_components::SwipePreview::default(),
+            page_turn: None,
+            page_size: None,
             touch_swipe_from_edge: false,
             search_input,
             search: SearchState::default(),
@@ -143,7 +145,7 @@ impl ReaderView {
                 // The parent installs its failure subscription after this
                 // constructor returns, before deferred events are delivered.
                 cx.defer_in(window, move |_, _, cx| cx.emit(crate::BookOpenFailed(failure)));
-                self.load_state = LoadState::Error(error);
+                self.load_state = LoadState::Error(ui_components::user_facing_error(&error, "Try opening this book again. If it still fails, download another copy or choose another edition.").to_owned());
                 cx.notify();
                 return;
             }

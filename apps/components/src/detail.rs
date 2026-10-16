@@ -280,14 +280,18 @@ pub fn book_detail_description(description: &str, theme: BrowserTheme) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{AppContext, Context, IntoElement, Modifiers, MouseButton, Render, TestAppContext, Window, point};
+    use crate::ScrollableElement as _;
+    use gpui::{AppContext, AvailableSpace, Context, FocusHandle, IntoElement, Modifiers, MouseButton, Render, TestAppContext, Window, canvas, point};
     use gpui_component::{Root, WindowExt};
 
     const TITLE: &str = "The <Unknown> &amp; *stars* \"Åsa\" 'é'";
+    const DESCRIPTION: &str = "Description & café follows the characters through a changing world, with friendships and unexpected discoveries along the way. This longer paragraph wraps across several justified lines so selection also exercises the book detail page's normal description layout.";
 
     struct LiteralTitle;
 
-    struct TitleAndDescription;
+    struct TitleAndDescription {
+        focus: FocusHandle,
+    }
 
     impl Render for LiteralTitle {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -297,12 +301,27 @@ mod tests {
 
     impl Render for TitleAndDescription {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div()
-                .w(px(600.))
-                .flex()
-                .flex_col()
-                .child(div().h(px(40.)).child(book_detail_text("literal-title", TITLE)))
-                .child(HtmlFragmentElement::new("description", "<p>Description &amp; café</p>").stylesheet("html, body, p { margin:0; padding:0; font-size:16px; line-height:24px; }").selectable(BrowserTheme::default().accent.opacity(0.3)))
+            let focus = self.focus.clone();
+            // Match the detail page: build the scrolling pane during canvas
+            // prepaint, inside a focusable page and the application Root.
+            canvas(
+                move |bounds, window, cx| {
+                    let mut body = div()
+                        .size_full()
+                        .w(px(300.))
+                        .track_focus(&focus)
+                        .flex()
+                        .flex_col()
+                        .child(div().h(px(40.)).child(book_detail_text("literal-title", TITLE)))
+                        .child(book_detail_description(&format!("<p>{}</p>", DESCRIPTION.replace('&', "&amp;")), BrowserTheme::default()).unwrap())
+                        .overflow_y_scrollbar()
+                        .into_any_element();
+                    body.prepaint_as_root(bounds.origin, bounds.size.map(AvailableSpace::Definite), window, cx);
+                    body
+                },
+                |_, mut body, window, cx| body.paint(window, cx),
+            )
+            .size_full()
         }
     }
 
@@ -335,7 +354,7 @@ mod tests {
     fn description_and_metadata_copy_follow_focus_in_application_root(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         let (_, cx) = cx.add_window_view(|window, cx| {
-            let content = cx.new(|_| TitleAndDescription);
+            let content = cx.new(|cx| TitleAndDescription { focus: cx.focus_handle() });
             Root::new(content, window, cx)
         });
         cx.run_until_parked();
@@ -345,9 +364,64 @@ mod tests {
         let select_and_copy = if cfg!(target_os = "macos") { "cmd-a cmd-c" } else { "ctrl-a ctrl-c" };
         cx.simulate_click(point(px(10.), px(50.)), Modifiers::default());
         cx.simulate_keystrokes(select_and_copy);
-        assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap().trim(), "Description & café");
+        assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap().trim(), DESCRIPTION);
         cx.simulate_click(point(px(10.), px(10.)), Modifiers::default());
         cx.simulate_keystrokes(select_and_copy);
         assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap().trim(), TITLE);
+    }
+
+    #[gpui::test]
+    fn description_drag_copies_text_and_hover_does_not_extend_selection(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let content = cx.new(|cx| TitleAndDescription { focus: cx.focus_handle() });
+            Root::new(content, window, cx)
+        });
+        cx.run_until_parked();
+        let from = point(px(1.), px(52.));
+        let to = point(px(120.), px(52.));
+        cx.simulate_mouse_move(from, None, Modifiers::default());
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+        let copy = if cfg!(target_os = "macos") { "cmd-c" } else { "ctrl-c" };
+        cx.simulate_keystrokes(copy);
+        let selected = cx.read_from_clipboard().unwrap().text().unwrap();
+        assert!(selected.starts_with("Description"), "description drag must copy its text: {selected:?}");
+        cx.simulate_mouse_move(point(px(500.), px(52.)), None, Modifiers::default());
+        cx.simulate_keystrokes(copy);
+        assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), selected);
+
+        // Wrapped lines use the same geometry as the painted description.
+        cx.simulate_mouse_down(point(px(1.), px(90.)), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(point(px(250.), px(150.)), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(point(px(250.), px(150.)), MouseButton::Left, Modifiers::default());
+        cx.simulate_keystrokes(copy);
+        let wrapped = cx.read_from_clipboard().unwrap().text().unwrap();
+        assert!(!wrapped.is_empty() && DESCRIPTION.contains(&wrapped), "wrapped selection must follow description text: {wrapped:?}");
+
+        // Recover even when the release happened outside the window.
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(point(px(500.), px(52.)), None, Modifiers::default());
+        cx.simulate_keystrokes(copy);
+        assert_eq!(cx.read_from_clipboard().unwrap().text().unwrap(), selected);
+    }
+
+    #[gpui::test]
+    fn metadata_hover_after_missed_release_does_not_select_text(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let content = cx.new(|_| LiteralTitle);
+            Root::new(content, window, cx)
+        });
+        cx.run_until_parked();
+        let from = point(px(1.), px(10.));
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(point(px(200.), px(10.)), None, Modifiers::default());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+            assert!(window.selected_text(cx).is_empty(), "hover must not extend a stale drag");
+        });
     }
 }

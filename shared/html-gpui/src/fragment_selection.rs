@@ -139,7 +139,7 @@ impl FragmentSelection {
 
     pub fn begin(&mut self, position: Point<Pixels>, clicks: usize) -> bool {
         self.clear();
-        let Some(run) = self.runs.iter().find(|run| run.bounds.contains(&position)) else { return false };
+        let Some(run) = self.run_at(position) else { return false };
         let offset = run.range.start;
         match clicks {
             2 => {
@@ -179,18 +179,20 @@ impl FragmentSelection {
         if !self.dragging {
             return;
         }
-        let Some(run) = self.runs.iter().min_by(|a, b| {
+        let Some(run) = self.run_at(position) else { return };
+        let cursor = run.cursor_at(position);
+        self.range = self.anchor.min(cursor)..self.anchor.max(cursor);
+    }
+
+    fn run_at(&self, position: Point<Pixels>) -> Option<&SelectionRun> {
+        self.runs.iter().min_by(|a, b| {
             let distance = |run: &SelectionRun| {
                 let y = (run.bounds.top() - position.y).max(position.y - run.bounds.bottom()).max(px(0.));
                 let x = (run.bounds.left() - position.x).max(position.x - run.bounds.right()).max(px(0.));
                 (f32::from(y), f32::from(x))
             };
             distance(a).partial_cmp(&distance(b)).unwrap_or(std::cmp::Ordering::Equal)
-        }) else {
-            return;
-        };
-        let cursor = run.cursor_at(position);
-        self.range = self.anchor.min(cursor)..self.anchor.max(cursor);
+        })
     }
 }
 
@@ -198,6 +200,27 @@ impl FragmentSelection {
 mod tests {
     use super::*;
     use gpui::{EmptyView, TestAppContext};
+
+    #[gpui::test]
+    fn description_selection_can_start_in_paragraph_padding(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        window
+            .update(cx, |_, _, cx| {
+                let mut selection = FragmentSelection::new(cx.focus_handle());
+                selection.text = "Hi".into();
+                selection.runs = vec![
+                    SelectionRun { range: 0..1, bounds: Bounds::from_corners(point(px(10.), px(10.)), point(px(20.), px(30.))), reversed: false },
+                    SelectionRun { range: 1..2, bounds: Bounds::from_corners(point(px(20.), px(10.)), point(px(30.), px(30.))), reversed: false },
+                ];
+                assert!(selection.begin(point(px(0.), px(20.)), 1));
+                selection.extend(point(px(40.), px(20.)));
+                assert_eq!(selection.selected_text(), "Hi");
+                assert!(selection.begin(point(px(40.), px(20.)), 1));
+                selection.extend(point(px(0.), px(20.)));
+                assert_eq!(selection.selected_text(), "Hi");
+            })
+            .unwrap();
+    }
 
     #[gpui::test]
     fn selection_keeps_clusters_whole_and_respects_rtl_carets(cx: &mut TestAppContext) {

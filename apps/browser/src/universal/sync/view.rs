@@ -10,6 +10,7 @@
 //! as something *a library* is doing, and a list beneath the libraries made the
 //! reader match names between two lists to find that out.
 
+use ui_components::user_facing_error;
 use super::*;
 use crate::services::format_storage_bytes;
 use gpui_component::Disableable;
@@ -257,13 +258,13 @@ impl SyncPage {
                 .child(components::section_header("Reset your password", "", theme))
                 .children(feedback)
                 .child(Input::new(&self.authentication.email))
-                .child(components::action_row().child(self.access_action(entity, "account-request-reset", "Email me a reset token", IconName::Redo2, Self::start_password_reset_request)))
+                .child(components::action_row().child(self.access_action(entity, "account-request-reset", "Email me a reset code", IconName::Redo2, Self::start_password_reset_request)))
                 .child(self.access_link(entity, "account-sign-in", "Back to sign in", AccountFlow::SignIn, theme)),
             AccountFlow::ResetPassword => {
                 // The token is a pasted string, not the six-digit PIN, so it is
                 // a plain input rather than the OTP boxes — drawing them alike
                 // invites people to type six of its characters and give up.
-                form.child(components::section_header("Set a new password", "Paste the token from the email. It is not the six-digit PIN.", theme))
+                form.child(components::section_header("Set a new password", "Paste the full reset code from your email. This is different from the six-digit verification PIN.", theme))
                     .children(feedback)
                     .child(Input::new(&self.authentication.reset_token))
                     .child(self.password_input(&self.authentication.new_password, "toggle-new-password", entity))
@@ -538,7 +539,7 @@ impl SyncPage {
                         page.default_library_location = Some(path);
                         page.error = None;
                     }
-                    Err(error) => page.error = Some(error.into()),
+                    Err(error) => page.error = Some(user_facing_error(&error, "Could not save the library location. Choose an accessible folder and try again.").into()),
                 }
                 cx.notify();
             });

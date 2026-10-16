@@ -107,3 +107,6 @@ gpui-component-assets = { path = "vendor/gpui-component/crates/assets" }
 
 [patch."https://github.com/JohanAnderssonOstling/HtmlViewCore"]
 html-view-core = { path = "../HtmlViewCore/crates/html-view-core" }
+
+[patch."https://github.com/JohanAnderssonOstling/HtmlEngine"]
+html-engine = { path = "../HtmlEngine/crates/html" }

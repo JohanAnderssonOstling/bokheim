@@ -35,7 +35,7 @@ impl LibraryClient {
     pub async fn import_directory(&self, parent_id: DirId, directory: DirectoryImport, create_root: bool) -> Result<Vec<ImportFailure>, String> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.transport.handle().map_err(|error| error.to_string())?.import_selected_directory(parent_id, directory, create_root).await.map_err(|error| error.to_string())
+            self.transport.handle().await.map_err(|error| error.to_string())?.import_selected_directory(parent_id, directory, create_root).await.map_err(|error| error.to_string())
         }
         #[cfg(target_arch = "wasm32")]
         {

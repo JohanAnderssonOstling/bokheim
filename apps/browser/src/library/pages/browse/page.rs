@@ -2,6 +2,8 @@
 //! chrome around them. Every kind has the cards; the trees also have a graph,
 //! and folders the commands that go with real directories.
 
+use ui_components::user_facing_error;
+
 use crate::services::notify_error;
 use crate::{BrowsePageSession, NewWindowTarget};
 use std::rc::Rc;
@@ -117,7 +119,9 @@ impl BrowsePage {
                 page.session_path = navigator.read(cx).destination.path.clone();
                 StartupProfile::new("browse").mark("listing_installed");
                 if log::log_enabled!(target: "browse_profile", log::Level::Debug) || StartupProfile::enabled() {
-                    if let Some(previous) = page.profile_render_pending.replace(Stage::deferred("listing installation to rendered frame")) { previous.cancel(); }
+                    if let Some(previous) = page.profile_render_pending.replace(Stage::deferred("listing installation to rendered frame")) {
+                        previous.cancel();
+                    }
                 }
             }),
             cx.subscribe(&search, |page, _, SearchChanged(query): &SearchChanged, cx| page.navigator.update(cx, |navigator, cx| navigator.search(query.clone(), cx))),
@@ -210,7 +214,7 @@ impl BrowsePage {
             let result = library.download_browse(query).await;
             let _ = page.update_in(cx, |page, window, cx| {
                 if let Err(error) = result {
-                    notify_error("hierarchy-download-error", format!("Could not queue downloads: {error}"), window, cx);
+                    notify_error("hierarchy-download-error", format!("Could not queue downloads. {}", user_facing_error(&error, "Please try again.")), window, cx);
                 }
                 page.navigator.update(cx, |navigator, cx| navigator.refresh(cx));
             });
@@ -548,7 +552,7 @@ impl BrowsePage {
                     // Undo is an inverse operation, not a rollback: the library
                     // can have moved on since, and then the inverse no longer
                     // fits what is there.
-                    Err(error) => notify_error("undo-error", format!("Could not undo {label}: {error}"), window, cx),
+                    Err(error) => notify_error("undo-error", format!("Could not undo {label}. {}", user_facing_error(&error, "Please try again.")), window, cx),
                 }
             });
         })

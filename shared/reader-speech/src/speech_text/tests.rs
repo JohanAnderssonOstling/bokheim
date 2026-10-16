@@ -71,6 +71,25 @@ fn spells_general_numbers_after_contextual_rules() {
 }
 
 #[test]
+fn distinguishes_preposition_in_from_explicit_inches() {
+    for (input, expected) in [
+        ("1988 in New York", "one thousand nine hundred and eighty-eight in New York"),
+        ("1988 in new york", "one thousand nine hundred and eighty-eight in new york"),
+        ("There were 12 in the room.", "There were twelve in the room."),
+        ("Put 5 in each box.", "Put five in each box."),
+        ("1988 in", "one thousand nine hundred and eighty-eight in"),
+        ("It measures 5in.", "It measures five inches."),
+        ("It measures 5 in.", "It measures five inches."),
+        ("1 inch and 5 inches.", "one inch and five inches."),
+        ("A 3 × 4 in frame.", "A 3 × 4 in frame."),
+        ("A 3 × 4in frame.", "A three by four inches frame."),
+        ("A 3 × 4 inches frame.", "A three by four inches frame."),
+    ] {
+        assert_eq!(prepare_speech_text(input), expected, "input: {input:?}");
+    }
+}
+
+#[test]
 fn spells_large_integer_digits_without_rounding() {
     for (input, expected) in [
         ("007", "zero zero seven"),
