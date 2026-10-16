@@ -1,0 +1,57 @@
+name: Replace published release with staged patch
+on:
+  workflow_dispatch:
+    inputs:
+      staging_tag:
+        description: Draft containing all replacement packages
+        required: true
+        type: string
+      target_tag:
+        description: Published release to patch without moving its tag
+        required: true
+        type: string
+      source_commit:
+        description: Application source commit in the patch receipts
+        required: true
+        type: string
+      kobo_source_commit:
+        description: Source commit embedding the patched Kobo package
+        required: true
+        type: string
+      previous_source_commit:
+        description: Expected currently published application source
+        required: true
+        type: string
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: replace-release-${{ inputs.target_tag }}
+  cancel-in-progress: false
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - name: Verify and replace the published packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGING_TAG: ${{ inputs.staging_tag }}
+          TARGET_TAG: ${{ inputs.target_tag }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          KOBO_SOURCE_COMMIT: ${{ inputs.kobo_source_commit }}
+          PREVIOUS_SOURCE_COMMIT: ${{ inputs.previous_source_commit }}
+        run: |
+          python3 scripts/ci/promote-release-patch.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --staging-tag "$STAGING_TAG" --target-tag "$TARGET_TAG" \
+            --source-commit "$SOURCE_COMMIT" --kobo-source-commit "$KOBO_SOURCE_COMMIT" \
+            --previous-source-commit "$PREVIOUS_SOURCE_COMMIT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: promoted-patch-metadata
+          path: |
+            promoted-release-assets.json
+            previous-release.json
+          if-no-files-found: error
