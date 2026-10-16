@@ -68,6 +68,8 @@ version = "2.12"
 features = ["proxy-from-env"]
 
 [build-dependencies.zip]
-version = "2"
+version = "8.6"
+default-features = false
+features = ["deflate-flate2-zlib-rs"]
 
 [workspace]
