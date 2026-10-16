@@ -12,7 +12,7 @@ import sys
 import tempfile
 import tomllib
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(os.environ.get("BOKHEIM_PACKAGE_SOURCE_ROOT", Path(__file__).resolve().parents[3])).resolve()
 ARCHES = {"arm64": "aarch64-apple-darwin", "x86_64": "x86_64-apple-darwin"}
 
 
@@ -64,14 +64,17 @@ def architecture(args, version, source):
         resources.mkdir(parents=True)
         executable(app).parent.mkdir(parents=True)
         shutil.copy2(binary, executable(app))
-        shutil.copy2(binary.parent / "taxonomy.sqlite3", executable(app).parent / "taxonomy.sqlite3")
+        shutil.copy2(binary.parent / "taxonomy.sqlite3", resources / "taxonomy.sqlite3")
+        (executable(app).parent / "taxonomy.sqlite3").symlink_to("../Resources/taxonomy.sqlite3")
         shutil.copy2(binary.with_name("bokheim-opds-webview"), browser_helper(app))
         pdfium(app).parent.mkdir()
         shutil.copy2(prepared / "libpdfium.dylib", pdfium(app))
         speech = binary.parent / "tts"
         if not (speech / "alba/en_GB-alba-medium.onnx").is_file() or not (speech / "george/model.onnx").is_file():
             raise ValueError("Prepare both desktop speech voices before packaging")
-        shutil.copytree(speech, executable(app).parent / "tts")
+        # Data belongs in Resources so codesign does not treat speech files as nested code.
+        shutil.copytree(speech, resources / "tts")
+        (executable(app).parent / "tts").symlink_to("../Resources/tts", target_is_directory=True)
         notices = resources / "pdfium"
         notices.mkdir()
         for name in ("LICENSE", "VERSION"):
@@ -125,7 +128,7 @@ def universal(args, version, source):
         staging = scratch / "disk"
         staging.mkdir()
         app = staging / "Bokheim.app"
-        shutil.copytree(apps["arm64"], app)
+        shutil.copytree(apps["arm64"], app, symlinks=True)
         for location in ("Contents/MacOS/Bokheim", "Contents/MacOS/bokheim-opds-webview", "Contents/Frameworks/libpdfium.dylib"):
             run("lipo", "-create", apps["arm64"] / location, apps["x86_64"] / location,
                 "-output", app / location)

@@ -38,6 +38,7 @@ env:
   RUSTUP_TOOLCHAIN: 1.95.0
   RUSTC_BOOTSTRAP: "1"
   MACOSX_DEPLOYMENT_TARGET: "13.0"
+  BOKHEIM_PACKAGE_SOURCE_ROOT: ${{ github.workspace }}/bokheim
   RELEASE_REPOSITORY: JohanAnderssonOstling/bokheim-release
   GPUI_FORK_REF: c0d74d1df53c1ed1a1ef61afdf12893afcfc56fa
   HTML_ENGINE_REF: b57416f7c0774851e08ff988fdd42e6ed634cc37
@@ -67,6 +68,12 @@ jobs:
         with:
           path: bokheim
           ref: ${{ inputs.source_commit || github.sha }}
+      - name: Check out packaging tools
+        uses: actions/checkout@v6
+        with:
+          path: release-packager
+          ref: ${{ github.sha }}
+          sparse-checkout: apps/desktop-gpui/macos/package.py
       - uses: actions/checkout@v6
         with:
           repository: JohanAnderssonOstling/GPUI-Fork
@@ -97,7 +104,7 @@ jobs:
         with:
           prefix-key: bokheim-macos-v1
           shared-key: desktop-macos-${{ matrix.arch }}
-          key: gpui-${{ env.GPUI_FORK_REF }}-engine-${{ env.HTML_ENGINE_REF }}-view-${{ env.HTML_VIEW_CORE_REF }}
+          key: gpui-${{ env.GPUI_FORK_REF }}-engine-${{ env.HTML_ENGINE_REF }}-view-${{ env.HTML_VIEW_CORE_REF }}-app-${{ inputs.source_commit || github.sha }}-speech-v2
           workspaces: bokheim -> target
           cache-on-failure: true
           cache-workspace-crates: true
@@ -149,7 +156,7 @@ jobs:
       - name: Package and verify architecture bundle
         run: |
           export GITHUB_SHA="$(git rev-parse HEAD)"
-          python3 apps/desktop-gpui/macos/package.py architecture \
+          python3 ../release-packager/apps/desktop-gpui/macos/package.py architecture \
             --arch "${{ matrix.arch }}" --output "$RUNNER_TEMP/macos-package"
       - uses: actions/upload-artifact@v4
         with:
@@ -174,6 +181,12 @@ jobs:
         with:
           path: bokheim
           ref: ${{ inputs.source_commit || github.sha }}
+      - name: Check out packaging tools
+        uses: actions/checkout@v6
+        with:
+          path: release-packager
+          ref: ${{ github.sha }}
+          sparse-checkout: apps/desktop-gpui/macos/package.py
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -184,7 +197,7 @@ jobs:
       - name: Combine, sign and verify universal app
         run: |
           export GITHUB_SHA="$(git rev-parse HEAD)"
-          python3 apps/desktop-gpui/macos/package.py universal \
+          python3 ../release-packager/apps/desktop-gpui/macos/package.py universal \
             --arm64 "$GITHUB_WORKSPACE/packages/bokheim-macos-arm64/Bokheim-macOS-arm64.zip" \
             --x86-64 "$GITHUB_WORKSPACE/packages/bokheim-macos-x86_64/Bokheim-macOS-x86_64.zip" \
             --output "$RUNNER_TEMP/macos-release"
