@@ -101,8 +101,31 @@ jobs:
           workspaces: bokheim -> target
           cache-on-failure: true
           cache-workspace-crates: true
-      - name: Restore native speech dependencies
-        run: cargo clean --release --target "${{ matrix.target }}" -p sherpa-onnx-sys
+      - name: Prepare native speech libraries
+        shell: python {0}
+        run: |
+          import os, platform, tarfile, tomllib, urllib.request
+          from pathlib import Path
+          version = tomllib.loads(Path('vendor/sherpa-onnx-sys/Cargo.toml').read_text())['package']['version']
+          if platform.system() == 'Windows':
+              suffix, library = 'win-x64-static-MT-Release-lib', 'sherpa-onnx-c-api.lib'
+          else:
+              arch = 'arm64' if platform.machine() == 'arm64' else 'x64'
+              suffix, library = f'osx-{arch}-static-lib', 'libsherpa-onnx-c-api.a'
+          stem = f'sherpa-onnx-v{version}-{suffix}'
+          destination = Path(os.environ['RUNNER_TEMP']) / 'bokheim-native-speech'
+          destination.mkdir(exist_ok=True)
+          archive = destination / (stem + '.tar.bz2')
+          url = f'https://github.com/k2-fsa/sherpa-onnx/releases/download/v{version}/{archive.name}'
+          urllib.request.urlretrieve(url, archive)
+          with tarfile.open(archive, 'r:bz2') as source:
+              source.extractall(destination, filter='data')
+          lib = destination / stem / 'lib'
+          assert (lib / library).is_file(), f'Missing speech library: {lib / library}'
+          assert (lib / library).stat().st_size > 0
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write(f'SHERPA_ONNX_LIB_DIR={lib}\n')
+          print(f'Prepared native speech libraries: {lib}')
       - name: Verify version tag
         env:
           PUBLISH_REQUESTED: ${{ inputs.publish || false }}

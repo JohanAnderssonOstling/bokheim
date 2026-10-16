@@ -17,7 +17,7 @@ on:
         type: string
         required: true
       workflow_commit:
-        description: Optional macOS workflow commit when packaging a pinned application source
+        description: Optional workflow commit when packaging a pinned application source
         type: string
         required: false
       tag:
@@ -71,7 +71,7 @@ jobs:
           run = json.loads(command('gh', 'api', f'repos/{repository}/actions/runs/{run_id}'))
           workflow_sha = os.environ.get('WORKFLOW_COMMIT') or sha
           assert re.fullmatch('[0-9a-f]{40}', workflow_sha)
-          assert workflow_sha == sha or platform == 'macos', 'Only macOS supports a separately pinned application source'
+          assert workflow_sha == sha or platform in ('windows', 'macos'), 'This platform does not support a separately pinned application source'
           assert run['head_sha'] == workflow_sha and run['conclusion'] == 'success', 'Build workflow or result differs'
           assert run['path'] == '.github/workflows/' + workflow, 'Unexpected packaging workflow'
           release = json.loads(command('gh', 'release', 'view', tag, '--repo', repository, '--json', 'isDraft,assets'))
