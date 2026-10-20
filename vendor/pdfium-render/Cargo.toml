@@ -105,11 +105,9 @@ thread_safe = []
 
 [lib]
 name = "pdfium_render"
-crate-type = [
-    "lib",
-    "staticlib",
-    "cdylib",
-]
+# Bokheim consumes Rust bindings only; the PDFium runtime is packaged separately.
+# Hashed rlib names keep builds with different features from overwriting metadata.
+crate-type = ["rlib"]
 path = "src/lib.rs"
 doctest = false
 
