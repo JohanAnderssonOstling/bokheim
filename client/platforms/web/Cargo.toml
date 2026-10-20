@@ -11,6 +11,7 @@ futures-util = { version = "0.3", features = ["io"] }
 async-channel = "2"
 client-platform-runtime = { path = "../runtime" }
 book-model = { path = "../../../shared/book-model" }
+content-address = { path = "../../../shared/content-address", features = ["sqlite"] }
 sync-common = { path = "../../../shared/sync-common" }
 sqlite-wasm-vfs = "0.2.0"
 rusqlite = { version = "0.40.0", features = ["bundled"] }
