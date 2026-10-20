@@ -199,8 +199,14 @@ jobs:
         run: |
           $probe = Join-Path $env:RUNNER_TEMP "windows-update-probe"
           Expand-Archive -Path "release/Bokheim-Windows-x86_64-Update.zip" -DestinationPath $probe -Force
-          $info = & (Join-Path $probe "Bokheim.exe") --bokheim-update-info
-          if ($LASTEXITCODE -ne 0) { throw "Packaged update metadata probe failed" }
+          $stdout = Join-Path $env:RUNNER_TEMP "windows-update-info.stdout"
+          $stderr = Join-Path $env:RUNNER_TEMP "windows-update-info.stderr"
+          $process = Start-Process -FilePath (Join-Path $probe "Bokheim.exe") -ArgumentList "--bokheim-update-info" -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          if ($process.ExitCode -ne 0) {
+            Get-Content $stderr
+            throw "Packaged update metadata probe failed with exit code $($process.ExitCode)"
+          }
+          $info = Get-Content -Raw $stdout
           $metadata = $info | ConvertFrom-Json
           if ($metadata.target -ne "windows-x86_64-zip" -or $metadata.application -ne $env:BOKHEIM_VERSION -or $metadata.schema -le 0) {
             throw "Packaged Windows update has invalid compatibility metadata"
