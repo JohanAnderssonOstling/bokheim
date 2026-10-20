@@ -2,6 +2,7 @@
 
 use crate::APP_HIDDEN_DIR;
 use content_address::hash_file;
+use fs2::{FileExt, lock_contended_error};
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,10 +57,10 @@ pub(crate) fn lease(handle: &Handle, hash: &str, exclusive: bool) -> Result<Opti
         return Err(AssetStoreError::operation("library storage is unavailable"));
     }
     let file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(handle.leases_root.join(hash))?;
-    let result = if exclusive { fs2::FileExt::try_lock_exclusive(&file) } else { fs2::FileExt::try_lock_shared(&file) };
+    let result = if exclusive { FileExt::try_lock_exclusive(&file) } else { FileExt::try_lock_shared(&file) };
     match result {
         Ok(()) => Ok(Some(Lease(file))),
-        Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(None),
+        Err(error) if error.kind() == ErrorKind::WouldBlock || error.raw_os_error().is_some_and(|code| Some(code) == lock_contended_error().raw_os_error()) => Ok(None),
         Err(error) => Err(error.into()),
     }
 }
