@@ -6,7 +6,9 @@ use book_content::{IdentifierScheme, MetadataCredit, MetadataProperty};
 use book_model::{
     marc_relator_code_from_metadata_role, unique_book_year, BookFormat, BookMetadata, BookMetadataError, BookRecord, BookSubject, BookTocEntry, Contributor, Identifier, LanguageTag, Scheme, Scope, AUTHOR_MARC_RELATOR_CODE,
 };
+use regex::Regex;
 use std::io::{Read, Seek};
+use std::sync::OnceLock;
 use std::path::Path;
 use std::time::Instant;
 
@@ -35,10 +37,10 @@ pub use pdf::{inspect_pdf, inspect_pdf_metadata, inspect_pdf_pages_reader, inspe
 /// results keyed on this value.
 pub fn inspection_version(format: BookFormat) -> i64 {
     match format {
-        BookFormat::Epub => i64::from(evidence::INSPECTION_VERSION) + 3,
-        BookFormat::Pdf => i64::from(evidence::INSPECTION_VERSION) + 1,
-        BookFormat::Mobi => 6,
-        _ => 3,
+        BookFormat::Epub => i64::from(evidence::INSPECTION_VERSION) + 4,
+        BookFormat::Pdf => i64::from(evidence::INSPECTION_VERSION) + 2,
+        BookFormat::Mobi => 7,
+        _ => 4,
     }
 }
 
@@ -160,6 +162,12 @@ fn author_names(raw: &str) -> Vec<String> {
     if is_author_tool(raw) {
         return Vec::new();
     }
+    // A comma after an explicit role ends that credit, rather than inverting
+    // two complete names as though they were one surname-first name.
+    static ROLE_SEPARATOR: OnceLock<Regex> = OnceLock::new();
+    let raw = ROLE_SEPARATOR
+        .get_or_init(|| Regex::new(r"(?i)(\((?:authors?|editors?|translators?|illustrators?|compiler|ed\.?|trans\.?)\))\s*,\s*").unwrap())
+        .replace_all(raw, "$1;");
     let mut parts = vec![raw.trim().to_owned()];
     for separator in SEPARATORS {
         parts = parts.iter().flat_map(|part| part.split(separator)).map(str::to_owned).collect();

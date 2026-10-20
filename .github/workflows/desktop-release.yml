@@ -54,6 +54,16 @@ jobs:
     timeout-minutes: 120
 
     steps:
+      - name: Validate application source selection
+        shell: pwsh
+        env:
+          PINNED_SOURCE: ${{ inputs.source_commit }}
+          BUILD_ONLY: ${{ inputs.build_only || false }}
+        run: |
+          if ($env:PINNED_SOURCE -and $env:BUILD_ONLY -ne "true") {
+            throw "A separately pinned application source requires build_only=true."
+          }
+
       - name: Set up PDFium preparation tools
         uses: actions/setup-python@v5
         with:

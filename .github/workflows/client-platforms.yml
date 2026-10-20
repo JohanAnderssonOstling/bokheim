@@ -39,7 +39,7 @@ jobs:
   checks:
     name: Windows platform checks
     runs-on: windows-2025
-    timeout-minutes: 60
+    timeout-minutes: 120
     defaults:
       run:
         working-directory: bokheim

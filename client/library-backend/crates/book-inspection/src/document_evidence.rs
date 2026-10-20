@@ -296,7 +296,7 @@ mod tests {
         let html = format!("<html><body><p>Copyright © 2004</p><p>I. Title. E3002.6.H2C48 2004</p><h3>Contents</h3><p>ISBN 9780393243277</p>{}</body></html>", "<p>Chapter text</p>".repeat(20000));
         let found = inspect(&html, &[]);
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].lcc, ["E3002.6.H2C48 2004"]);
+        assert_eq!(found[0].lcc, ["E3002.6 .H2C48 2004"]);
         assert!(found[0].isbns.is_empty());
     }
     #[test]

@@ -322,7 +322,7 @@ mod tests {
         let b = book("Oxford handbook");
         let oxford = inspect_section(&b, "pdf:page:2", "Library of Congress Cataloging in Publication Data\nISBN-13: 978–0–19–921932–2\nJZ1242.O94 2008");
         assert_eq!(oxford.isbns[0].isbn, "9780199219322");
-        assert_eq!(oxford.lcc, ["JZ1242.O94 2008"]);
+        assert_eq!(oxford.lcc, ["JZ1242 .O94 2008"]);
         let sutton = inspect_section(&b, "pdf:page:5", "Other Books by Author\n©1983 Antony Sutton\nISBN 0-9720207-4-8 Paper\nISBN 0-9720207-0-5 Hardcover");
         assert_eq!(sutton.isbns.len(), 2);
     }
@@ -362,17 +362,18 @@ mod tests {
         assert!(b.book.identifiers.iter().any(|id| id.scope() == Scope::Edition && id.canonical_value().as_deref() == Some("9780393243277")));
     }
     #[test]
-    fn bad_xmp_cannot_veto_copyright_codes_and_page_lcc_replaces_metadata() {
+    fn copyright_codes_remain_candidates_without_replacing_declared_metadata() {
         let mut b = book("0465002566-text.qxd:0465002566 text");
         b.contributors = vec![Contributor::new("Linda Mark", AUTHOR_MARC_RELATOR_CODE).unwrap()];
-        b.book.subjects.push(BookSubject::new(None, "Wrong", "package", Some("lcc".into()), Some("PT2381".into())).unwrap());
+        b.book.subjects.push(BookSubject::new(None, "Declared", "package", Some("lcc".into()), Some("PT2381".into())).unwrap());
         let text = "Copyright Aida D. Donald\nLibrary of Congress Cataloging-in-Book Data\nLion in the White House\nISBN 978-0-465-00213-9 (paperback)\nE757.D658 2007";
         let e = inspect_section(&b, "pdf:page:6", text);
         assert!(e.accepted);
         assert_eq!(e.isbns[0].isbn, "9780465002139");
+        assert_eq!(e.lcc, ["E757 .D658 2007"]);
         apply_evidence(&mut b, &[e], "pdf");
         assert_eq!(b.book.subjects.len(), 1);
-        assert_eq!(b.book.subjects[0].code(), Some("E757.D658 2007"));
+        assert_eq!(b.book.subjects[0].code(), Some("PT2381"));
         assert_eq!(lookup_candidates(&b.book.identifiers), ["9780465002139"]);
     }
     #[test]
@@ -455,7 +456,7 @@ mod tests {
     fn unresolvable_inline_lcc_is_retained_only_as_candidate() {
         let mut b = book("Alexander Hamilton");
         let e = inspect_section(&b, "copyright", "Copyright 2004\nI. Title. E3002.6.H2C48 2004");
-        assert_eq!(e.lcc, ["E3002.6.H2C48 2004"]);
+        assert_eq!(e.lcc, ["E3002.6 .H2C48 2004"]);
         assert!(!usable_lcc(&e.lcc[0]), "{:?}", subject_projection::unified_lcc_match_report(&e.lcc[0]));
         apply_evidence(&mut b, &[e], "epub");
         assert!(b.book.subjects.is_empty());
@@ -471,7 +472,7 @@ mod tests {
         assert!(e.accepted);
         assert_eq!(e.isbns[0].isbn, "9781556438547");
         assert_eq!(e.isbns[0].scope, IsbnScope::ElectronicEdition);
-        assert_eq!(e.lcc, ["RM231.2.H64 2007"]);
+        assert_eq!(e.lcc, ["RM231.2 .H64 2007"]);
     }
 
     #[test]
@@ -496,7 +497,7 @@ mod tests {
     fn image_text_decimal_in_place_of_cutter_does_not_override_subjects() {
         let mut b = book("Color Design Workbook");
         let e = inspect_section(&b, "pdf:image:page:4", "Copyright 2006\nISBN 1-59253-192-X\nNC1000.576 2006");
-        assert_eq!(e.lcc, ["NC1000.576 2006"]);
+        assert!(e.lcc.is_empty(), "OCR class without a Cutter is not accepted as a call number");
         apply_evidence(&mut b, &[e], "pdf");
         assert!(b.book.subjects.is_empty());
         assert_eq!(lookup_candidates(&b.book.identifiers), ["159253192X"]);
