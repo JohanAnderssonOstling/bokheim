@@ -19,6 +19,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
@@ -196,19 +197,18 @@ public class BookBrowserTest {
         // needed to verify that browser Back never reaches its key handler.
         MainActivity router = Robolectric.buildActivity(MainActivity.class).get();
         Map<Long, BookBrowserSurface> browsers = org.robolectric.util.ReflectionHelpers.getField(router, "bookBrowsers");
-        androidx.activity.OnBackPressedCallback callback = org.robolectric.util.ReflectionHelpers.getField(router, "bookBrowserBack");
+        AtomicInteger navigation = new AtomicInteger();
+        org.robolectric.util.ReflectionHelpers.setField(router, "backButtons", new BackButtonRouter(navigation::incrementAndGet));
         browsers.put(27L, browser);
-        callback.setEnabled(true);
         assertTrue(router.dispatchKeyEvent(new android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_BACK)));
-        assertEquals("back_pressed", events.get(events.size() - 1).getString("kind"));
-        int afterDown = events.size();
+        assertEquals(1, navigation.get());
+        int afterDown = navigation.get();
         assertTrue(router.dispatchKeyEvent(new android.view.KeyEvent(0, 0, android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_BACK, 1)));
-        assertEquals(afterDown, events.size());
+        assertEquals(afterDown, navigation.get());
         // GPUI may close the browser before Android delivers key-up.
         browsers.clear();
-        callback.setEnabled(false);
         assertTrue(router.dispatchKeyEvent(new android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_BACK)));
-        assertEquals(afterDown, events.size());
+        assertEquals(afterDown, navigation.get());
     }
 
     @Test public void pullDownRefreshOnlyStartsAtPageTopAndIgnoresOtherGestures() throws Exception {
