@@ -8,7 +8,7 @@ use ui_components::PageTurn;
 use crate::epub::{LoadState, ReaderView};
 use crate::invalidation::Component;
 use crate::shell::input::CommandTarget;
-use crate::shell::state_panel::{self, SidebarTab};
+use crate::shell::state_panel::SidebarTab;
 use crate::shell::toolbar::SidebarTarget;
 use crate::{
     CloseSearch, DecreaseColumnWidth, DecreaseFont, DecreaseScale, FocusReaderSearch, IncreaseColumnWidth, IncreaseFont, IncreaseScale, NextLine, NextPage, NextSection, NextSidebarTab, PreviousLine, PreviousPage, PreviousSection,
@@ -137,10 +137,8 @@ impl CommandTarget<ToggleSidebar> for ReaderView {
 }
 
 impl CommandTarget<ToggleToc> for ReaderView {
-    fn execute(&mut self, _: &ToggleToc, _: &mut Window, cx: &mut Context<Self>) {
-        self.chrome.show(cx);
-        state_panel::select_tab(&mut self.sidebar, SidebarTab::Contents, cx);
-        notify(cx, Component::ReaderShell, "toc_visibility_changed");
+    fn execute(&mut self, _: &ToggleToc, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_sidebar_tab(SidebarTab::Contents, window, cx);
     }
 }
 

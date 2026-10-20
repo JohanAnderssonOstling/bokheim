@@ -14,7 +14,7 @@ pub fn uses_mobile_navigation(window: &Window) -> bool {
 /// Touch readers use tappable bars and sheets even when browsing uses a rail.
 /// Kobo has no pointer hover or OS Back gesture to reveal desktop controls.
 pub fn uses_mobile_reader_controls(window: &Window) -> bool {
-    cfg!(feature = "kobo") || uses_mobile_navigation(window)
+    cfg!(feature = "kobo") || crate::touch_ui() || uses_mobile_navigation(window)
 }
 
 /// Native mobile builds have a real OS back button/gesture (wired to the same

@@ -373,7 +373,7 @@ impl PopupMenu {
             bounds: Bounds::default(),
             scrollable: false,
             dismiss_on_select: true,
-            touch_friendly: false,
+            touch_friendly: cfg!(target_family = "wasm") && cx.supports_touch_input(),
             scroll_handle: ScrollHandle::default(),
             external_link_icon: true,
             size: Size::default(),
@@ -1101,11 +1101,13 @@ impl PopupMenu {
         self.open = false;
         cx.emit(DismissEvent);
 
-        // Focus back to the previous focused handle.
-        if let Some(handle) = self
-            .previous_focus_handle
-            .as_ref()
-            .or(self.action_context.as_ref())
+        // Restore focus only while the menu still owns it. A selected item
+        // may already have focused a dialog, input, or destination view.
+        if self.focus_handle.contains_focused(window, cx)
+            && let Some(handle) = self
+                .previous_focus_handle
+                .as_ref()
+                .or(self.action_context.as_ref())
         {
             window.focus(handle, cx);
         }
@@ -1538,6 +1540,32 @@ impl Render for PopupMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn menu_dismissal_preserves_focus_set_by_its_action(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        for moves_focus in [false, true] {
+            cx.update(|window, cx| {
+                let previous = cx.focus_handle();
+                let destination = cx.focus_handle();
+                let focused = destination.clone();
+                let menu = cx.new(|cx| {
+                    PopupMenu::new(cx).item(PopupMenuItem::new("Open dialog").on_click(move |_, window, cx| {
+                        if moves_focus {
+                            focused.focus(window, cx);
+                        }
+                    }))
+                });
+                menu.update(cx, |menu, cx| {
+                    menu.previous_focus_handle = Some(previous.clone());
+                    menu.selected_index = Some(0);
+                    menu.focus_handle.focus(window, cx);
+                    menu.confirm(&Confirm { secondary: false }, window, cx);
+                });
+                assert!(if moves_focus { destination.is_focused(window) } else { previous.is_focused(window) });
+            });
+        }
+    }
 
     #[gpui::test]
     fn context_menu_split_row_chooses_side_and_confirms(cx: &mut gpui::TestAppContext) {

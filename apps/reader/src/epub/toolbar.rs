@@ -149,7 +149,19 @@ impl ReaderView {
         if cfg!(feature = "kobo") {
             &[SettingsRow::FontSize, SettingsRow::Typeface, SettingsRow::Alignment, SettingsRow::LineHeight, SettingsRow::SideMargins, SettingsRow::VerticalMargins]
         } else {
-            &[SettingsRow::Theme, SettingsRow::FontSize, SettingsRow::Typeface, SettingsRow::Alignment, SettingsRow::LineHeight, SettingsRow::LineLength, SettingsRow::SideMargins, SettingsRow::VerticalMargins, SettingsRow::ColumnGap]
+            &[
+                SettingsRow::Theme,
+                #[cfg(all(not(feature = "mobile"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+                SettingsRow::Fullscreen,
+                SettingsRow::FontSize,
+                SettingsRow::Typeface,
+                SettingsRow::Alignment,
+                SettingsRow::LineHeight,
+                SettingsRow::LineLength,
+                SettingsRow::SideMargins,
+                SettingsRow::VerticalMargins,
+                SettingsRow::ColumnGap,
+            ]
         }
     }
 
@@ -165,6 +177,7 @@ impl ReaderView {
             let current = ReaderSettings::preferences(cx).clone();
             match self.settings_navigation.selected(Self::settings_rows()) {
                 SettingsRow::Theme => settings_navigation::adjust_theme(direction, cx),
+                SettingsRow::Fullscreen => settings_navigation::set_fullscreen(direction > 0, window),
                 SettingsRow::Typeface => self.set_reader_font_family(adjacent_value(&TYPEFACES.map(|(family, _, _)| family), current.font_family, direction), cx),
                 SettingsRow::Alignment => self.set_reader_text_alignment(adjacent_value(&step_values(&ALIGNMENTS), current.text_alignment, direction), cx),
                 SettingsRow::FontSize => self.adjust_font_size(direction as f32, cx),
@@ -181,21 +194,28 @@ impl ReaderView {
         true
     }
 
-    pub(super) fn render_settings_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_settings_panel(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = components::browser_theme(cx);
         let current = ReaderSettings::preferences(cx).clone();
         components::reader_settings_tab_body(theme)
             .when(!cfg!(feature = "kobo"), |body| {
                 body.child(components::reader_settings_group(theme).child(self.settings_navigation.row(SettingsRow::Theme, Self::settings_rows(), crate::shell::theme_picker::reader_theme_picker(cx, theme), theme)))
             })
+            .children(self.settings_navigation.fullscreen_group(Self::settings_rows(), window, theme))
             .child(
                 components::reader_settings_group(theme)
-                    .child(components::reader_setting_row("Font size").map(|row| self.settings_navigation.row(SettingsRow::FontSize, Self::settings_rows(), row, theme)).child(components::settings_stepper(
-                        components::settings_stepper_button("font-size-smaller", "−", false, theme).tooltip("Decrease font size (Alt+-)").on_click(cx.listener(|this, _, _, cx| this.adjust_font_size(-1.0, cx))),
-                        format!("{:.0}px", current.font_size),
-                        components::settings_stepper_button("font-size-larger", "+", false, theme).tooltip("Increase font size (Alt++)").on_click(cx.listener(|this, _, _, cx| this.adjust_font_size(1.0, cx))),
-                        theme,
-                    )))
+                    .child(
+                        components::reader_setting_row("Font size").map(|row| self.settings_navigation.row(SettingsRow::FontSize, Self::settings_rows(), row, theme)).child(components::settings_stepper(
+                            components::settings_stepper_button("font-size-smaller", "−", false, theme)
+                                .tooltip(components::shortcut_tooltip("Decrease font size", "alt--"))
+                                .on_click(cx.listener(|this, _, _, cx| this.adjust_font_size(-1.0, cx))),
+                            format!("{:.0}px", current.font_size),
+                            components::settings_stepper_button("font-size-larger", "+", false, theme)
+                                .tooltip(components::shortcut_tooltip("Increase font size", "alt-+"))
+                                .on_click(cx.listener(|this, _, _, cx| this.adjust_font_size(1.0, cx))),
+                            theme,
+                        )),
+                    )
                     .child(self.typeface_row(current.font_family, theme, cx))
                     .child(self.tile_row("reader-alignment", SettingsRow::Alignment, "Alignment", &ALIGNMENTS, current.text_alignment, theme, cx, |this, alignment, _, cx| this.set_reader_text_alignment(alignment, cx))),
             )

@@ -22,6 +22,7 @@ use std::fmt;
 use std::fs;
 use std::io::SeekFrom;
 use std::io::{Read, Seek};
+use std::mem::{size_of, size_of_val};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -40,6 +41,10 @@ const PDFIUM_THIRD_PARTY_NOTICES: &str = include_str!(env!("PDFIUM_NOTICES_PATH"
 const DEFAULT_RENDER_WIDTH: u16 = 1400;
 const MIN_RENDER_WIDTH: u16 = 320;
 const MAX_RENDER_WIDTH: u16 = 3200;
+/// Vertical tile stride. Rasters include one neighboring pixel at each edge
+/// so texture filtering cannot introduce seams between tiles.
+pub const DISPLAY_TILE_HEIGHT: u32 = 512;
+const MAX_RASTER_PIXELS: u64 = 8 * 1024 * 1024;
 const ELEMENT_CROP_PADDING: f32 = 0.008;
 
 #[cfg(target_arch = "wasm32")]
@@ -94,11 +99,15 @@ struct PageAnalysis {
     text: Arc<PdfPageTextLayout>,
     images: Vec<NormalizedRect>,
     trim_bounds: OnceLock<Option<NormalizedRect>>,
+    geometry: [OnceLock<PdfPageGeometry>; 2],
+    cropped_text: OnceLock<Arc<PdfPageTextLayout>>,
 }
 
 impl PageAnalysis {
     fn byte_len(&self) -> usize {
-        std::mem::size_of::<Self>() + std::mem::size_of_val(self.text.geometry.characters()) + self.images.capacity() * std::mem::size_of::<NormalizedRect>()
+        // Reserve for lazy cropped text and both sets of bands up front. This
+        // charge must remain constant while the OnceLocks are populated.
+        size_of::<Self>() + 2 * size_of_val(self.text.geometry.characters()) + self.images.capacity() * size_of::<NormalizedRect>() + 2 * (self.text.geometry.characters().len() + self.images.len()) * size_of::<(f32, f32)>()
     }
 }
 
@@ -370,12 +379,12 @@ impl LocalDocumentSession {
     }
 
     pub fn render_page_with_margin_trim(&self, page_index: usize, target_width: Option<u16>, trim_margins: bool) -> PdfResult<RenderedPdfPage> {
-        self.render_page_pixels(page_index, target_width, trim_margins, false)
+        self.render_page_pixels(page_index, target_width, trim_margins, false, None, None)
     }
 
-    /// Renders GPUI's BGRA format directly on the document worker.
+    /// Renders GPUI's BGRA format directly on the document worker, preserving embedded image colors.
     pub fn render_page_for_display(&self, key: PageRenderKey) -> PdfResult<RenderedPdfBgraPage> {
-        self.render_page_pixels(key.page_index(), Some(key.target_width()), key.trim_margins(), true).map(RenderedPdfBgraPage)
+        self.render_page_pixels(key.page_index(), Some(key.target_width()), key.trim_margins(), true, Some((key.paper_color(), key.ink_color())), key.tile()).map(RenderedPdfBgraPage)
     }
 
     fn page_analysis(&self, page: &PdfPage<'_>, page_index: usize) -> PdfResult<Arc<PageAnalysis>> {
@@ -383,50 +392,68 @@ impl LocalDocumentSession {
         if let Some(analysis) = cached {
             return Ok(analysis);
         }
-        let analysis = Arc::new(PageAnalysis { text: Arc::new(extract_text_layout(page, page_index)?), images: extract_image_bounds(page), trim_bounds: OnceLock::new() });
+        let analysis =
+            Arc::new(PageAnalysis { text: Arc::new(extract_text_layout(page, page_index)?), images: extract_image_bounds(page), trim_bounds: OnceLock::new(), geometry: [OnceLock::new(), OnceLock::new()], cropped_text: OnceLock::new() });
         self.analysis.borrow_mut().insert(page_index, analysis.clone());
         Ok(analysis)
     }
 
-    fn render_page_pixels(&self, page_index: usize, target_width: Option<u16>, trim_margins: bool, bgra: bool) -> PdfResult<RenderedPdfPage> {
+    /// Logical page analysis is independent of raster resolution and theme.
+    pub fn page_geometry(&self, page_index: usize, trim_margins: bool) -> PdfResult<PdfPageGeometry> {
+        if let Some(source) = &self.page_source {
+            source.prepare_page(page_index).map_err(PdfError::new)?;
+        }
+        let page = self.document.pages().get(page_index as i32).map_err(|_| PdfError::new(format!("PDF page {} does not exist", page_index + 1)))?;
+        let analysis = self.page_analysis(&page, page_index)?;
+        Ok(analyzed_geometry(&page, &analysis, trim_margins))
+    }
+
+    fn render_page_pixels(&self, page_index: usize, target_width: Option<u16>, trim_margins: bool, bgra: bool, colors: Option<([u8; 3], [u8; 3])>, tile: Option<u32>) -> PdfResult<RenderedPdfPage> {
         if let Some(source) = &self.page_source {
             source.prepare_page(page_index).map_err(PdfError::new)?;
         }
         let mut page = self.document.pages().get(page_index as i32).map_err(|_| PdfError::new(format!("PDF page {} does not exist", page_index + 1)))?;
         suppress_bokheim_annotation_rendering(&mut page);
-        let width = target_width.unwrap_or(DEFAULT_RENDER_WIDTH).clamp(MIN_RENDER_WIDTH, MAX_RENDER_WIDTH) as i32;
+        let requested_width = target_width.unwrap_or(DEFAULT_RENDER_WIDTH).clamp(MIN_RENDER_WIDTH, MAX_RENDER_WIDTH) as u32;
         let analysis = self.page_analysis(&page, page_index)?;
-        // Match PDFium's target-width scaling, retaining full-page dimensions for
-        // selection transforms while allocating only the retained crop.
-        let pixel_width = width as u32;
-        let height = (page.height().value * (width as f32 / page.width().value)).round();
-        if !height.is_finite() || height < 1.0 || height >= i32::MAX as f32 {
-            return Err(PdfError::new("PDF page raster dimensions are out of range"));
-        }
-        let pixel_height = height as u32;
-        let crop = if trim_margins {
-            analysis
-                .trim_bounds
-                .get_or_init(|| {
-                    let elements = analyze_page_elements(&page, &analysis.text);
-                    content_bounds(&elements, RepeatingPageBands::default())
-                })
-                .map(|bounds| pixel_crop_from_normalized(bounds, pixel_width, pixel_height))
-                .unwrap_or_else(|| PixelCrop::full(pixel_width, pixel_height))
-        } else {
-            PixelCrop::full(pixel_width, pixel_height)
+        let geometry = analyzed_geometry(&page, &analysis, trim_margins);
+        let aspect = page.height().value as f64 / page.width().value as f64;
+        let (pixel_width, pixel_height) = raster_dimensions(requested_width, aspect, tile.is_some())?;
+        let crop = pixel_crop_from_normalized(geometry.crop, pixel_width, pixel_height);
+        let raster_crop = match tile {
+            Some(tile) => {
+                let offset = tile.checked_mul(DISPLAY_TILE_HEIGHT).filter(|offset| *offset < crop.height()).ok_or_else(|| PdfError::new("PDF tile is outside the page"))?;
+                let top = offset.saturating_sub(1);
+                let bottom = offset.saturating_add(DISPLAY_TILE_HEIGHT + 1).min(crop.height());
+                PixelCrop::new(pixel_width, pixel_height, crop.left(), crop.top() + top, crop.width(), bottom - top)
+            }
+            None => crop,
         };
-        let mut bitmap = PdfBitmap::empty(crop.width() as i32, crop.height() as i32, PdfBitmapFormat::BGRA).map_err(|error| PdfError::new(format!("allocating PDF page raster: {error}")))?;
-        let config = PdfRenderConfig::new().set_fixed_size(width, pixel_height as i32).set_origin(-(crop.left() as i32), -(crop.top() as i32)).set_format(PdfBitmapFormat::BGRA).set_reverse_byte_order(!bgra).render_annotations(true);
+        let mut bitmap = PdfBitmap::empty(raster_crop.width() as i32, raster_crop.height() as i32, PdfBitmapFormat::BGRA).map_err(|error| PdfError::new(format!("allocating PDF page raster: {error}")))?;
+        let config = PdfRenderConfig::new()
+            .set_fixed_size(pixel_width as i32, pixel_height as i32)
+            .set_origin(-(raster_crop.left() as i32), -(raster_crop.top() as i32))
+            .set_format(PdfBitmapFormat::BGRA)
+            .set_reverse_byte_order(!bgra)
+            .render_annotations(true);
         page.render_into_bitmap_with_config(&mut bitmap, &config).map_err(|error| PdfError::new(format!("rendering PDF page {}: {error}", page_index + 1)))?;
-        let rgba = bitmap.as_raw_bytes();
-        let mut text_layout = analysis.text.clone();
-        if !crop.is_full_page() {
-            Arc::make_mut(&mut text_layout).apply_crop(crop);
+        let mut rgba = bitmap.as_raw_bytes();
+        if let Some((paper, ink)) = colors {
+            recolor_around_images(&mut rgba, raster_crop, &analysis.images, paper, ink);
         }
-        let image_bands = analysis.images.iter().filter_map(|bounds| crop.full_rect_to_display(*bounds)).map(|bounds| ((bounds.top() - 0.002).max(0.0), (bounds.bottom() + 0.002).min(1.0)));
-        let break_avoidance = sorted_vertical_bands(text_layout.break_avoidance_bands().into_iter().chain(image_bands));
-        Ok(RenderedPdfPage { rgba, pixel_width: crop.width(), pixel_height: crop.height(), crop, text_layout, break_avoidance: break_avoidance.into() })
+        let text_layout = if trim_margins {
+            analysis
+                .cropped_text
+                .get_or_init(|| {
+                    let mut layout = (*analysis.text).clone();
+                    layout.apply_normalized_crop(geometry.crop);
+                    Arc::new(layout)
+                })
+                .clone()
+        } else {
+            analysis.text.clone()
+        };
+        Ok(RenderedPdfPage { rgba, pixel_width: raster_crop.width(), pixel_height: raster_crop.height(), crop, raster_crop, page_crop: geometry.crop, text_layout, break_avoidance: geometry.break_avoidance })
     }
 
     pub fn search(&self, query: &str) -> PdfResult<Vec<PdfSearchHit>> {
@@ -616,12 +643,69 @@ impl PdfPageInfo {
     }
 }
 
+/// Stable geometry in the original, normalized PDF coordinate system.
+/// Neither device pixels nor the render cache determine layout.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PdfPageGeometry {
+    pub crop: NormalizedRect,
+    /// Protected vertical bands in the cropped page's normalized coordinates.
+    pub break_avoidance: Arc<[(f32, f32)]>,
+}
+
+impl PdfPageGeometry {
+    pub fn full_to_display_y(&self, y: f32) -> f32 {
+        ((y - self.crop.top()) / self.crop.height()).clamp(0.0, 1.0)
+    }
+
+    pub fn display_to_full_y(&self, y: f32) -> f32 {
+        self.crop.top() + y * self.crop.height()
+    }
+}
+
+fn crop_rect(crop: NormalizedRect, rect: NormalizedRect) -> Option<NormalizedRect> {
+    let left = rect.left().max(crop.left());
+    let top = rect.top().max(crop.top());
+    let right = rect.right().min(crop.right());
+    let bottom = rect.bottom().min(crop.bottom());
+    (left < right && top < bottom).then(|| NormalizedRect::new((left - crop.left()) / crop.width(), (top - crop.top()) / crop.height(), (right - left) / crop.width(), (bottom - top) / crop.height()))
+}
+
+fn analyzed_geometry(page: &PdfPage<'_>, analysis: &PageAnalysis, trim_margins: bool) -> PdfPageGeometry {
+    analysis.geometry[usize::from(trim_margins)]
+        .get_or_init(|| {
+            let crop = if trim_margins {
+                analysis.trim_bounds.get_or_init(|| content_bounds(&analyze_page_elements(page, &analysis.text), RepeatingPageBands::default())).unwrap_or(NormalizedRect::new(0.0, 0.0, 1.0, 1.0))
+            } else {
+                NormalizedRect::new(0.0, 0.0, 1.0, 1.0)
+            };
+            let text_bands =
+                merge_line_rects(analysis.text.geometry.characters().iter().filter(|character| !character.character().is_control() && !character.character().is_whitespace()).filter_map(|character| crop_rect(crop, character.bounds())));
+            let bands = text_bands.into_iter().chain(analysis.images.iter().filter_map(|bounds| crop_rect(crop, *bounds))).map(|bounds| ((bounds.top() - 0.002).max(0.0), (bounds.bottom() + 0.002).min(1.0)));
+            PdfPageGeometry { crop, break_avoidance: sorted_vertical_bands(bands).into() }
+        })
+        .clone()
+}
+
+fn raster_dimensions(requested_width: u32, aspect: f64, tiled: bool) -> PdfResult<(u32, u32)> {
+    if !aspect.is_finite() || aspect <= 0.0 {
+        return Err(PdfError::new("PDF page raster dimensions are out of range"));
+    }
+    let width = if tiled { requested_width } else { requested_width.min((MAX_RASTER_PIXELS as f64 / aspect).sqrt().floor().max(1.0) as u32) };
+    let height = (width as f64 * aspect).round().max(1.0);
+    if height >= i32::MAX as f64 || (!tiled && width as f64 * height > MAX_RASTER_PIXELS as f64) {
+        return Err(PdfError::new("PDF page raster dimensions are out of range"));
+    }
+    Ok((width, height as u32))
+}
+
 #[derive(Clone, Debug)]
 pub struct RenderedPdfPage {
     rgba: Vec<u8>,
     pixel_width: u32,
     pixel_height: u32,
     crop: PixelCrop,
+    raster_crop: PixelCrop,
+    page_crop: NormalizedRect,
     text_layout: Arc<PdfPageTextLayout>,
     break_avoidance: Arc<[(f32, f32)]>,
 }
@@ -632,6 +716,8 @@ pub struct RenderedPdfPageParts {
     pub pixel_width: u32,
     pub pixel_height: u32,
     pub crop: PixelCrop,
+    pub raster_crop: PixelCrop,
+    pub page_crop: NormalizedRect,
     pub text_layout: Arc<PdfPageTextLayout>,
     pub break_avoidance: Arc<[(f32, f32)]>,
 }
@@ -672,7 +758,16 @@ impl RenderedPdfPage {
     }
 
     pub fn into_parts(self) -> RenderedPdfPageParts {
-        RenderedPdfPageParts { pixels: self.rgba, pixel_width: self.pixel_width, pixel_height: self.pixel_height, crop: self.crop, text_layout: self.text_layout, break_avoidance: self.break_avoidance }
+        RenderedPdfPageParts {
+            pixels: self.rgba,
+            pixel_width: self.pixel_width,
+            pixel_height: self.pixel_height,
+            crop: self.crop,
+            raster_crop: self.raster_crop,
+            page_crop: self.page_crop,
+            text_layout: self.text_layout,
+            break_avoidance: self.break_avoidance,
+        }
     }
 }
 
@@ -702,15 +797,11 @@ impl PdfPageTextLayout {
         &self.geometry
     }
 
-    fn apply_crop(&mut self, crop: PixelCrop) {
-        self.geometry = self.geometry.transformed(PageTransform::new(crop, PageRotation::None));
-    }
-
-    fn break_avoidance_bands(&self) -> Vec<(f32, f32)> {
-        merge_line_rects(self.geometry.characters().iter().filter(|character| !character.character().is_control() && !character.character().is_whitespace()).map(|character| character.bounds()))
-            .into_iter()
-            .map(|line| ((line.top() - 0.002).max(0.0), (line.bottom() + 0.002).min(1.0)))
-            .collect()
+    fn apply_normalized_crop(&mut self, crop: NormalizedRect) {
+        self.geometry = PageTextGeometry::new(self.geometry.characters().iter().filter_map(|character| {
+            let bounds = crop_rect(crop, character.bounds())?;
+            Some(TextCharacter::new(character.source_index(), character.character(), bounds))
+        }));
     }
 }
 
@@ -745,11 +836,54 @@ impl PdfSearchHit {
     }
 }
 
+/// Map BGRA pixels from black ink and white paper to the display colors.
+/// Antialiased edges blend into the paper.
+fn recolor_page(pixels: &mut [u8], [red, green, blue]: [u8; 3], [ink_red, ink_green, ink_blue]: [u8; 3]) {
+    if [red, green, blue] == [255; 3] && [ink_red, ink_green, ink_blue] == [0; 3] {
+        return;
+    }
+    for pixel in pixels.chunks_exact_mut(4) {
+        for ((channel, paper), ink) in pixel[..3].iter_mut().zip([blue, green, red]).zip([ink_blue, ink_green, ink_red]) {
+            let source = u16::from(*channel);
+            *channel = ((source * u16::from(paper) + (255 - source) * u16::from(ink) + 127) / 255) as u8;
+        }
+    }
+}
+
+/// Preserve the original raster within image bounds, including after margin trimming.
+fn recolor_around_images(pixels: &mut [u8], crop: PixelCrop, images: &[NormalizedRect], paper: [u8; 3], ink: [u8; 3]) {
+    if paper == [255; 3] && ink == [0; 3] {
+        return;
+    }
+    let images = images.iter().filter_map(|bounds| crop.full_rect_to_display(*bounds)).map(|bounds| pixel_crop_from_normalized(bounds, crop.width(), crop.height())).collect::<Vec<_>>();
+    if images.is_empty() {
+        recolor_page(pixels, paper, ink);
+        return;
+    }
+    let mut spans = Vec::with_capacity(images.len());
+    for (y, row) in pixels.chunks_exact_mut(crop.width() as usize * 4).enumerate() {
+        spans.clear();
+        spans.extend(images.iter().filter(|image| y >= image.top() as usize && y < (image.top() + image.height()) as usize).map(|image| (image.left() as usize * 4, (image.left() + image.width()) as usize * 4)));
+        spans.sort_unstable();
+        let mut start = 0;
+        for &(left, right) in &spans {
+            if left > start {
+                recolor_page(&mut row[start..left], paper, ink);
+            }
+            start = start.max(right);
+        }
+        recolor_page(&mut row[start..], paper, ink);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PageRenderKey {
     page_index: usize,
     target_width: u16,
+    tile: Option<u32>,
     trim_margins: bool,
+    paper_color: [u8; 3],
+    ink_color: [u8; 3],
 }
 
 impl PageRenderKey {
@@ -758,7 +892,36 @@ impl PageRenderKey {
     }
 
     pub fn with_margin_trim(page_index: usize, target_width: u16, trim_margins: bool) -> Self {
-        Self { page_index, target_width: target_width.clamp(MIN_RENDER_WIDTH, MAX_RENDER_WIDTH), trim_margins }
+        Self { page_index, target_width: target_width.clamp(MIN_RENDER_WIDTH, MAX_RENDER_WIDTH), tile: None, trim_margins, paper_color: [255; 3], ink_color: [0; 3] }
+    }
+
+    pub fn with_tile(mut self, tile: u32) -> Self {
+        self.tile = Some(tile);
+        self
+    }
+
+    pub fn tile(&self) -> Option<u32> {
+        self.tile
+    }
+
+    /// RGB paper color for display rasters. White with black ink preserves the original PDF.
+    pub fn with_paper_color(mut self, color: [u8; 3]) -> Self {
+        self.paper_color = color;
+        self
+    }
+
+    pub fn paper_color(&self) -> [u8; 3] {
+        self.paper_color
+    }
+
+    /// RGB color for originally black pixels outside embedded images.
+    pub fn with_ink_color(mut self, color: [u8; 3]) -> Self {
+        self.ink_color = color;
+        self
+    }
+
+    pub fn ink_color(&self) -> [u8; 3] {
+        self.ink_color
     }
 
     pub fn page_index(&self) -> usize {
@@ -980,7 +1143,32 @@ fn normalized_pdf_bounds(bounds: PdfRect, page_width: f32, page_height: f32) -> 
 fn extract_image_bounds(page: &PdfPage<'_>) -> Vec<NormalizedRect> {
     let page_width = page.width().value.max(1.0);
     let page_height = page.height().value.max(1.0);
-    page.objects().iter().filter(|object| object.as_image_object().is_some()).filter_map(|object| object.bounds().ok().map(|bounds| bounds.to_rect())).map(|bounds| normalized_pdf_bounds(bounds, page_width, page_height)).collect()
+    let rotation = match page.rotation().unwrap_or(PdfPageRenderRotation::None) {
+        PdfPageRenderRotation::None => PageRotation::None,
+        PdfPageRenderRotation::Degrees90 => PageRotation::Clockwise90,
+        PdfPageRenderRotation::Degrees180 => PageRotation::Clockwise180,
+        PdfPageRenderRotation::Degrees270 => PageRotation::Clockwise270,
+    };
+    let (width, height) = if matches!(rotation, PageRotation::Clockwise90 | PageRotation::Clockwise270) { (page_height, page_width) } else { (page_width, page_height) };
+    let mut images = Vec::new();
+    for object in page.objects().iter() {
+        collect_image_bounds(&object, PdfMatrix::IDENTITY, width, height, &mut images);
+    }
+    let transform = PageTransform::new(PixelCrop::full(1, 1), rotation);
+    images.into_iter().filter_map(|bounds| transform.full_rect_to_display(bounds)).collect()
+}
+
+fn collect_image_bounds(object: &PdfPageObject<'_>, parent: PdfMatrix, page_width: f32, page_height: f32, images: &mut Vec<NormalizedRect>) {
+    if object.as_image_object().is_some() {
+        if let Ok(bounds) = object.bounds() {
+            images.push(normalized_pdf_bounds(bounds.transform(parent).to_rect(), page_width, page_height));
+        }
+    } else if let Some(form) = object.as_x_object_form_object() {
+        let transform = form.matrix().unwrap_or(PdfMatrix::IDENTITY) * parent;
+        for child in form.iter() {
+            collect_image_bounds(&child, transform, page_width, page_height, images);
+        }
+    }
 }
 
 fn sorted_vertical_bands(bands: impl IntoIterator<Item = (f32, f32)>) -> Vec<(f32, f32)> {
@@ -1005,6 +1193,157 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn paper_tint_matches_white_pixels_and_preserves_black_and_alpha() {
+        let mut pixels = [255, 255, 255, 255, 0, 0, 0, 255, 128, 128, 128, 127, 20, 80, 160, 255];
+        let original = pixels;
+        recolor_page(&mut pixels, [255; 3], [0; 3]);
+        assert_eq!(pixels, original);
+        recolor_page(&mut pixels, [240, 230, 210], [0; 3]);
+        assert_eq!(pixels, [210, 230, 240, 255, 0, 0, 0, 255, 105, 115, 120, 127, 16, 72, 151, 255]);
+    }
+
+    #[test]
+    fn paper_tints_have_distinct_render_cache_keys() {
+        let white = PageRenderKey::with_margin_trim(2, 640, true);
+        let cream = white.with_paper_color([240, 230, 210]);
+        assert_eq!(white.paper_color(), [255; 3]);
+        assert_ne!(white, cream);
+        let mut cache = PageRenderCache::new(1024);
+        cache.insert(
+            white,
+            Arc::new(RenderedPdfPage {
+                rgba: vec![255; 4],
+                pixel_width: 1,
+                pixel_height: 1,
+                crop: PixelCrop::full(1, 1),
+                raster_crop: PixelCrop::full(1, 1),
+                page_crop: NormalizedRect::new(0.0, 0.0, 1.0, 1.0),
+                text_layout: Arc::new(PdfPageTextLayout::default()),
+                break_avoidance: Arc::from([]),
+            }),
+        );
+        assert!(cache.get(white).is_some());
+        assert!(cache.get(cream).is_none());
+        let dark = white.with_paper_color([24, 30, 36]).with_ink_color([230, 235, 240]);
+        assert_ne!(dark, dark.with_ink_color([255; 3]));
+        assert!(cache.get(dark).is_none());
+    }
+
+    #[test]
+    fn dark_page_colors_map_text_paper_and_antialiased_edges() {
+        let mut pixels = [255, 255, 255, 255, 0, 0, 0, 255, 128, 128, 128, 127];
+        recolor_page(&mut pixels, [24, 30, 36], [230, 235, 240]);
+        assert_eq!(pixels, [36, 30, 24, 255, 240, 235, 230, 255, 138, 132, 127, 127]);
+    }
+
+    #[test]
+    fn image_colors_survive_cropping_and_overlapping_image_bounds() {
+        let crop = PixelCrop::new(8, 4, 2, 1, 4, 2);
+        let original = [12, 34, 56, 255].repeat(8);
+        let mut pixels = original.clone();
+        let images = [NormalizedRect::new(0.125, 0.25, 0.5, 0.25), NormalizedRect::new(0.5, 0.25, 0.375, 0.5), NormalizedRect::new(0.0, 0.0, 0.125, 0.25)];
+        recolor_around_images(&mut pixels, crop, &images, [24, 30, 36], [230, 235, 240]);
+        assert_eq!(&pixels[..16], &original[..16], "overlapping image bounds preserve the first row");
+        assert_ne!(&pixels[16..24], &original[16..24], "uncovered pixels follow the theme");
+        assert_eq!(&pixels[24..], &original[24..], "the second image extends into the next row");
+    }
+
+    #[test]
+    fn full_page_scans_keep_their_original_colors() {
+        let original = vec![255, 255, 255, 255, 0, 0, 0, 255];
+        let mut pixels = original.clone();
+        recolor_around_images(&mut pixels, PixelCrop::full(2, 1), &[NormalizedRect::new(0.0, 0.0, 1.0, 1.0)], [24, 30, 36], [230, 235, 240]);
+        assert_eq!(pixels, original);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn document_with_image() -> runtime::Document {
+        let pdfium = shared_pdfium().unwrap();
+        let mut document = pdfium.create_new_pdf().unwrap();
+        let font = document.fonts_mut().helvetica();
+        let mut bytes = [20, 80, 200, 255, 255, 255, 255, 255, 0, 0, 0, 255, 200, 80, 20, 255].repeat(4);
+        let bitmap = PdfBitmap::from_bytes(4, 4, PdfBitmapFormat::BGRA, &mut bytes).unwrap();
+        let mut image = PdfPageImageObject::new(&document).unwrap();
+        image.set_bitmap(&bitmap).unwrap();
+        image.scale(120.0, 80.0).unwrap();
+        image.translate(PdfPoints::new(80.0), PdfPoints::new(100.0)).unwrap();
+        {
+            let mut page = document.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).unwrap();
+            page.objects_mut().add_image_object(image).unwrap();
+            page.objects_mut().create_text_object(PdfPoints::new(72.0), PdfPoints::new(720.0), "Dark theme text", font, PdfPoints::new(18.0)).unwrap();
+        }
+        document
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn assert_image_colors_preserved(document: runtime::Document) -> PdfResult<()> {
+        let session = LocalDocumentSession::from_document("image-colors".into(), document)?;
+        let rotation = session.document.pages().get(0).unwrap().rotation().unwrap();
+        let trim_modes: &[bool] = if rotation == PdfPageRenderRotation::None { &[false, true] } else { &[false] };
+        for &trim in trim_modes {
+            let key = PageRenderKey::with_margin_trim(0, 640, trim);
+            let original = session.render_page_for_display(key)?.into_parts();
+            for (paper, ink) in [([24, 30, 36], [230, 235, 240]), ([240, 230, 210], [0; 3])] {
+                let themed = session.render_page_for_display(key.with_paper_color(paper).with_ink_color(ink))?.into_parts();
+                assert_eq!(themed.crop, original.crop);
+                let mut colored_pixels = 0;
+                let mut changed_pixels = 0;
+                let mut light_text_pixels = 0;
+                for (source, output) in original.pixels.chunks_exact(4).zip(themed.pixels.chunks_exact(4)) {
+                    if source[0] != source[1] || source[1] != source[2] {
+                        colored_pixels += 1;
+                        assert_eq!(output, source, "embedded image colors changed after cropping or rotation");
+                    }
+                    if source != output {
+                        changed_pixels += 1;
+                    }
+                    if source[0] == source[1] && source[1] == source[2] && source[0] < 128 && output[..3].iter().zip(source).all(|(output, source)| output > source) {
+                        light_text_pixels += 1;
+                    }
+                }
+                assert!(colored_pixels > 100, "fixture must contain a visible color image");
+                assert!(changed_pixels > 100, "page background must still follow the theme");
+                assert!(ink == [0; 3] || light_text_pixels > 10, "text outside the image must still become light in dark mode: rotation={rotation:?}, trim={trim}, light_text_pixels={light_text_pixels}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn themed_rendering_preserves_images_on_rotated_and_trimmed_pages() -> PdfResult<()> {
+        runtime::run(|| {
+            for rotation in [PdfPageRenderRotation::None, PdfPageRenderRotation::Degrees90, PdfPageRenderRotation::Degrees180, PdfPageRenderRotation::Degrees270] {
+                let document = document_with_image();
+                document.pages().get(0).unwrap().set_rotation(rotation);
+                assert_image_colors_preserved(document)?;
+            }
+            Ok(())
+        })
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn themed_rendering_preserves_images_in_nested_transformed_groups() -> PdfResult<()> {
+        runtime::run(|| {
+            let mut document = document_with_image();
+            for (scale, x, y) in [(0.6, 50.0, 60.0), (0.8, 20.0, 30.0)] {
+                let bytes = {
+                    let source_page = document.pages().get(0).unwrap();
+                    let mut destination = shared_pdfium()?.create_new_pdf().unwrap();
+                    let mut form = source_page.objects().copy_into_x_object_form_object(&mut destination).unwrap();
+                    form.scale(scale, scale).unwrap();
+                    form.translate(PdfPoints::new(x), PdfPoints::new(y)).unwrap();
+                    destination.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).unwrap().objects_mut().add_object(form).unwrap();
+                    destination.save_to_bytes().unwrap()
+                };
+                document = shared_pdfium()?.load_pdf_from_byte_vec(bytes, None).unwrap();
+            }
+            assert_image_colors_preserved(document)
+        })
+    }
 
     fn fixture_path(label: &str) -> PdfResult<PathBuf> {
         let suffix = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| PdfError::new(error.to_string()))?.as_nanos();
@@ -1036,15 +1375,21 @@ mod tests {
             let fragments = document.extract_reading_fragments(0)?;
             assert_eq!(fragments[0].text, "First searchable page");
             let first = document.analysis.borrow_mut().get(0).unwrap();
-            let rendered = document.render_page_pixels(0, Some(320), false, false)?;
+            let rendered = document.render_page_pixels(0, Some(320), false, false, None, None)?;
             assert!(Arc::ptr_eq(&first.text, &rendered.text_layout), "TTS-first extraction is also used by rendering");
-            document.render_page_pixels(1, Some(320), true, false)?;
+            document.render_page_pixels(1, Some(320), true, false, None, None)?;
             let second = document.analysis.borrow_mut().get(1).unwrap();
             // A sentinel cached layout proves narration uses cached geometry
             // rather than re-extracting the PDF page's original text.
             let text = "Cached narration";
             let geometry = PageTextGeometry::new(text.chars().enumerate().map(|(index, ch)| TextCharacter::new(index, ch, NormalizedRect::new(0.1 + index as f32 * 0.015, 0.2, 0.015, 0.02))));
-            let cached = Arc::new(PageAnalysis { text: Arc::new(PdfPageTextLayout { page_index: 1, geometry }), images: second.images.clone(), trim_bounds: OnceLock::new() });
+            let cached = Arc::new(PageAnalysis {
+                text: Arc::new(PdfPageTextLayout { page_index: 1, geometry }),
+                images: second.images.clone(),
+                trim_bounds: OnceLock::new(),
+                geometry: [OnceLock::new(), OnceLock::new()],
+                cropped_text: OnceLock::new(),
+            });
             let mut cache = document.analysis.borrow_mut();
             let entry = cache.pages.iter_mut().find(|(index, _)| *index == 1).unwrap();
             entry.1 = cached.clone();
@@ -1269,6 +1614,58 @@ mod tests {
             fs::remove_file(path).unwrap();
             Ok(())
         })
+    }
+
+    #[test]
+    fn display_tiles_reassemble_the_full_raster_without_changing_geometry() -> PdfResult<()> {
+        runtime::run(move || {
+            let path = fixture_path("display-tiles")?;
+            create_fixture_pdf(&path)?;
+            let document = shared_pdfium()?.load_pdf_from_byte_vec(fs::read(&path).unwrap(), None).unwrap();
+            document.pages().get(1).unwrap().set_rotation(PdfPageRenderRotation::Degrees90);
+            let session = LocalDocumentSession::from_document("tiles".into(), document)?;
+            for page_index in 0..2 {
+                for trim in [false, true] {
+                    let geometry = session.page_geometry(page_index, trim)?;
+                    for width in [640, 1024] {
+                        let key = PageRenderKey::with_margin_trim(page_index, width, trim).with_paper_color([32; 3]).with_ink_color([230; 3]);
+                        let full = session.render_page_for_display(key)?.into_parts();
+                        let mut assembled = Vec::new();
+                        for tile in 0..full.pixel_height.div_ceil(DISPLAY_TILE_HEIGHT) {
+                            let rendered = session.render_page_for_display(key.with_tile(tile))?.into_parts();
+                            assert!(rendered.pixel_height <= DISPLAY_TILE_HEIGHT + 2);
+                            assert_eq!(rendered.pixel_width, full.pixel_width);
+                            assert_eq!(rendered.page_crop, geometry.crop);
+                            assert_eq!(rendered.break_avoidance, geometry.break_avoidance);
+                            assert!(Arc::ptr_eq(&rendered.text_layout, &full.text_layout), "tiles share page text instead of copying it");
+                            let start_row = full.crop.top() + tile * DISPLAY_TILE_HEIGHT - rendered.raster_crop.top();
+                            let rows = DISPLAY_TILE_HEIGHT.min(full.pixel_height - tile * DISPLAY_TILE_HEIGHT);
+                            let stride = full.pixel_width as usize * 4;
+                            assembled.extend_from_slice(&rendered.pixels[start_row as usize * stride..(start_row + rows) as usize * stride]);
+                        }
+                        assert_eq!(assembled, full.pixels, "tile seams or missing pixels on page {page_index}, trim={trim}, width={width}");
+                        assert_eq!(session.page_geometry(page_index, trim)?, geometry);
+                    }
+                }
+            }
+            fs::remove_file(path).unwrap();
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn full_rasters_have_a_pixel_budget_and_tiles_keep_the_requested_resolution() {
+        for aspect in [0.01, 1.0, 10.0, 1000.0] {
+            let (width, height) = raster_dimensions(3200, aspect, false).unwrap();
+            assert!(u64::from(width) * u64::from(height) <= MAX_RASTER_PIXELS);
+            let (width, _) = raster_dimensions(3200, aspect, true).unwrap();
+            assert_eq!(width, 3200);
+            assert!(u64::from(width) * u64::from(DISPLAY_TILE_HEIGHT + 2) <= MAX_RASTER_PIXELS);
+        }
+        for aspect in [f64::NAN, f64::INFINITY, 0.0, -1.0] {
+            assert!(raster_dimensions(3200, aspect, false).is_err());
+            assert!(raster_dimensions(3200, aspect, true).is_err());
+        }
     }
 
     #[test]

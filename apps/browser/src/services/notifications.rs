@@ -27,14 +27,14 @@ pub(crate) fn notify_info(id: &'static str, message: impl Into<SharedString>, wi
 }
 
 /// Confirms a library change the reader can take back, with the Undo right
-/// there. Undo is the same action Ctrl+Z dispatches, so it undoes the last
+/// there. Undo is the same action the keyboard shortcut dispatches, so it undoes the last
 /// library action wherever it was taken. It still autohides.
 pub(crate) fn notify_undoable(id: &'static str, message: impl Into<SharedString>, window: &mut Window, cx: &mut App) {
     let notification = Notification::info(message.into())
         .id1::<BrowserNotification>(id)
         .action(|_, _, cx| {
             let notification = cx.entity();
-            Button::new("undo").label("Undo").ghost().on_click(move |_, window, cx| {
+            Button::new("undo").label("Undo").tooltip(ui_components::shortcut_tooltip("Undo", "secondary-z")).ghost().on_click(move |_, window, cx| {
                 window.dispatch_action(Box::new(crate::UndoLibraryAction), cx);
                 notification.update(cx, |notification, cx| notification.dismiss(window, cx));
             })

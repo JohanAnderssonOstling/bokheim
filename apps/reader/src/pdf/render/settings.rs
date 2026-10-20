@@ -18,6 +18,9 @@ impl PdfReaderView {
         if !cfg!(feature = "kobo") {
             rows.push(SettingsRow::Theme);
         }
+        if settings_navigation::DESKTOP_FULLSCREEN {
+            rows.push(SettingsRow::Fullscreen);
+        }
         rows.extend([SettingsRow::PdfFit, SettingsRow::PdfMargins]);
         match self.pdf.read(cx).zoom_mode() {
             PdfZoomMode::FitWidth { .. } => rows.push(SettingsRow::PdfPages),
@@ -39,6 +42,7 @@ impl PdfReaderView {
         } else {
             match self.settings_navigation.selected(&rows) {
                 SettingsRow::Theme => settings_navigation::adjust_theme(direction, cx),
+                SettingsRow::Fullscreen => settings_navigation::set_fullscreen(direction > 0, window),
                 SettingsRow::PdfMargins => self.set_trim_margins(direction > 0, cx),
                 SettingsRow::PdfFit => {
                     let current = self.pdf.read(cx).zoom_mode();
@@ -102,7 +106,7 @@ impl PdfReaderView {
         notify(cx, Component::PdfShell, "trim_margins_changed");
     }
 
-    pub(super) fn render_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(super) fn render_settings(&self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
         let rows = self.settings_rows(cx);
         let zoom = self.pdf.read(cx).zoom();
@@ -111,6 +115,7 @@ impl PdfReaderView {
         let trim_margins = ReaderSettings::preferences(cx).pdf_trim_margins;
         components::reader_settings_tab_body(theme)
             .when(!cfg!(feature = "kobo"), |body| body.child(components::reader_settings_group(theme).child(self.settings_navigation.row(SettingsRow::Theme, &rows, crate::shell::theme_picker::reader_theme_picker(cx, theme), theme))))
+            .children(self.settings_navigation.fullscreen_group(&rows, window, theme))
             .child(
                 components::reader_settings_group(theme)
                     .child(
@@ -145,9 +150,9 @@ impl PdfReaderView {
                     }))
                     .children(matches!(zoom_mode, PdfZoomMode::Fixed { .. }).then(|| {
                         components::reader_setting_row("Zoom").map(|row| self.settings_navigation.row(SettingsRow::PdfZoom, &rows, row, theme)).child(components::settings_stepper(
-                            components::settings_stepper_button("pdf-zoom-out", "−", false, theme).tooltip("Zoom out (Ctrl+-)").on_click(cx.listener(|this, _, _, cx| this.adjust_zoom(-ZOOM_STEP, cx))),
+                            components::settings_stepper_button("pdf-zoom-out", "−", false, theme).tooltip(components::shortcut_tooltip("Zoom out", "secondary--")).on_click(cx.listener(|this, _, _, cx| this.adjust_zoom(-ZOOM_STEP, cx))),
                             format!("{:.0}%", zoom * 100.0),
-                            components::settings_stepper_button("pdf-zoom-in", "+", false, theme).tooltip("Zoom in (Ctrl++)").on_click(cx.listener(|this, _, _, cx| this.adjust_zoom(ZOOM_STEP, cx))),
+                            components::settings_stepper_button("pdf-zoom-in", "+", false, theme).tooltip(components::shortcut_tooltip("Zoom in", "secondary-+")).on_click(cx.listener(|this, _, _, cx| this.adjust_zoom(ZOOM_STEP, cx))),
                             theme,
                         ))
                     })),

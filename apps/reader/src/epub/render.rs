@@ -361,15 +361,17 @@ impl ReaderView {
 const DOCUMENT_CONTEXT: &str = "ReaderDocument";
 
 pub(crate) fn bind_keys(cx: &mut App) {
-    let primary = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
     shell_input::bind_document_keys(cx, DOCUMENT_CONTEXT);
     cx.bind_keys([
-        KeyBinding::new(&format!("{primary}-left"), PreviousSection, Some(DOCUMENT_CONTEXT)),
-        KeyBinding::new(&format!("{primary}-right"), NextSection, Some(DOCUMENT_CONTEXT)),
+        KeyBinding::new("secondary-left", PreviousSection, Some(DOCUMENT_CONTEXT)),
+        KeyBinding::new("secondary-right", NextSection, Some(DOCUMENT_CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
         KeyBinding::new("f11", ToggleFullscreen, Some("Reader")),
-        KeyBinding::new("ctrl-alt-=", IncreaseColumnWidth, Some(DOCUMENT_CONTEXT)),
-        KeyBinding::new("ctrl-alt-+", IncreaseColumnWidth, Some(DOCUMENT_CONTEXT)),
-        KeyBinding::new("ctrl-alt--", DecreaseColumnWidth, Some(DOCUMENT_CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("ctrl-cmd-f", ToggleFullscreen, Some("Reader")),
+        KeyBinding::new("secondary-alt-=", IncreaseColumnWidth, Some(DOCUMENT_CONTEXT)),
+        KeyBinding::new("secondary-alt-+", IncreaseColumnWidth, Some(DOCUMENT_CONTEXT)),
+        KeyBinding::new("secondary-alt--", DecreaseColumnWidth, Some(DOCUMENT_CONTEXT)),
         KeyBinding::new("alt-=", IncreaseFont, Some(DOCUMENT_CONTEXT)),
         KeyBinding::new("alt-+", IncreaseFont, Some(DOCUMENT_CONTEXT)),
         KeyBinding::new("alt--", DecreaseFont, Some(DOCUMENT_CONTEXT)),

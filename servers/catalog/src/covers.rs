@@ -1,7 +1,7 @@
 //! Retained cover images for hosted books and source-linked entries.
-use crate::{cover_from_image, get};
+use crate::{cover_from_book, cover_from_image, get, manifest::verify_standardebooks_identity};
 use reqwest::{blocking::Client, Url};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
@@ -23,6 +23,38 @@ struct Entry {
     /// An already downloaded image; relative paths resolve beside the manifest.
     #[serde(default)]
     file_path: Option<PathBuf>,
+}
+
+/// Stage source artwork for an existing catalog without changing its database,
+/// EPUBs or retained images. A receipt is written only after every book succeeds.
+pub fn extract_standardebooks(dir: &Path, output: &Path) -> Result<(), String> {
+    let db = Connection::open_with_flags(dir.join("curation.sqlite3"), OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|error| error.to_string())?;
+    let mut statement = db.prepare("SELECT DISTINCT book_hash,entry_id FROM source_entry WHERE source='standardebooks.org' AND book_hash IS NOT NULL ORDER BY book_hash,entry_id").map_err(|error| error.to_string())?;
+    let books = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    if books.is_empty() {
+        return Err("catalog has no hosted Standard Ebooks acquisitions".into());
+    }
+    fs::create_dir(output).map_err(|error| format!("{}: {error}", output.display()))?;
+    fs::create_dir(output.join("covers")).map_err(|error| error.to_string())?;
+    let mut receipt = Vec::new();
+    for (index, (hash, identity)) in books.iter().enumerate() {
+        blake3::Hash::from_hex(hash).map_err(|error| error.to_string())?;
+        let bytes = fs::read(dir.join("books").join(format!("{hash}.epub"))).map_err(|error| format!("{hash}: {error}"))?;
+        if content_address::hash_reader(&mut &bytes[..]).map_err(|error| error.to_string())?.to_hex() != *hash {
+            return Err(format!("catalog EPUB does not match its content hash: {hash}"));
+        }
+        verify_standardebooks_identity(&bytes, identity)?;
+        if !cover_from_book(output, hash, &bytes)? {
+            return Err(format!("{identity}: EPUB has no embedded cover"));
+        }
+        receipt.push(json!({"hash":hash,"entry_id":identity}));
+        if (index + 1) % 75 == 0 {
+            eprintln!("extracted {} / {} Standard Ebooks covers", index + 1, books.len());
+        }
+    }
+    fs::write(output.join("standardebooks-covers.json"), serde_json::to_vec_pretty(&receipt).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+    println!("{} Standard Ebooks covers extracted; source catalog unchanged", books.len());
+    Ok(())
 }
 
 /// Build versioned card derivatives from retained detail art. The source and
@@ -110,8 +142,61 @@ fn record_evidence(db: &Connection, source: &str, entry_id: &str, page: &str, ke
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use std::io::{Cursor, Write};
+    use zip::{write::SimpleFileOptions, ZipWriter};
+
+    pub(crate) fn standardebooks_epub(identity: &str) -> Vec<u8> {
+        let mut image = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(300, 450, image::Rgb([25, 80, 145]))).write_to(&mut image, image::ImageFormat::Png).unwrap();
+        let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+        let package = format!(
+            r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0" unique-identifier="book-id"><metadata><dc:identifier id="book-id">{identity}</dc:identifier><dc:title>A source work</dc:title><dc:creator>A writer</dc:creator><dc:language>en</dc:language><meta name="cover" content="cover"/></metadata><manifest><item id="cover" href="cover.png" media-type="image/png" properties="cover-image"/><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#
+        );
+        for (name, bytes) in [
+            ("mimetype", b"application/epub+zip".as_slice()),
+            ("META-INF/container.xml", br#"<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="book.opf"/></rootfiles></container>"#.as_slice()),
+            ("book.opf", package.as_bytes()),
+            ("cover.png", image.get_ref().as_slice()),
+            ("chapter.xhtml", br#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter</title></head><body><p>A source work.</p></body></html>"#.as_slice()),
+        ] {
+            archive.start_file(name, SimpleFileOptions::default()).unwrap();
+            archive.write_all(bytes).unwrap();
+        }
+        archive.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn standardebooks_repair_stages_only_verified_source_books_and_preserves_originals() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::curation::open(dir.path()).unwrap();
+        let identity = "https://standardebooks.org/ebooks/a-writer/a-source-work";
+        let bytes = standardebooks_epub(identity);
+        let hash = content_address::hash_reader(&mut &bytes[..]).unwrap().to_hex();
+        let record = BookRecord { metadata: BookDetails::default(), description: String::new() };
+        crate::curation::set_record(&db, &hash, &record).unwrap();
+        crate::curation::set_record(&db, "unrelated", &record).unwrap();
+        fs::write(dir.path().join(format!("books/{hash}.epub")), &bytes).unwrap();
+        fs::write(dir.path().join(format!("covers/{hash}-card.jpg")), b"previous chosen cover").unwrap();
+        record_evidence(&db, "standardebooks.org", identity, identity, &hash, false, json!({})).unwrap();
+        record_evidence(&db, "publicdomainlibrary.org", "other", "https://example.org/other", "unrelated", false, json!({})).unwrap();
+        let output = dir.path().join("staged");
+        extract_standardebooks(dir.path(), &output).unwrap();
+        let receipt: Value = serde_json::from_slice(&fs::read(output.join("standardebooks-covers.json")).unwrap()).unwrap();
+        assert_eq!(receipt, json!([{"hash":hash,"entry_id":identity}]));
+        let expected = thumbnail::generate_thumbnail_versions_with_pdf_renderer("epub", Cursor::new(bytes.clone()), thumbnail::render_pdf_cover).unwrap().unwrap();
+        assert_eq!(fs::read(output.join(format!("covers/{hash}-card.jpg"))).unwrap(), expected.browse);
+        assert_eq!(fs::read(output.join(format!("covers/{hash}-detail.jpg"))).unwrap(), expected.high_density);
+        assert_eq!(fs::read(dir.path().join(format!("covers/{hash}-card.jpg"))).unwrap(), b"previous chosen cover");
+        assert_eq!(fs::read(dir.path().join(format!("books/{hash}.epub"))).unwrap(), bytes);
+        assert_eq!(fs::read_dir(output.join("covers")).unwrap().count(), 4);
+        assert!(extract_standardebooks(dir.path(), &output).is_err());
+        db.execute("UPDATE source_entry SET entry_id='https://standardebooks.org/ebooks/another-work' WHERE source='standardebooks.org'", []).unwrap();
+        let rejected = dir.path().join("rejected");
+        assert!(extract_standardebooks(dir.path(), &rejected).is_err());
+        assert!(!rejected.join("standardebooks-covers.json").exists());
+    }
 
     #[test]
     fn recovering_one_derivative_preserves_the_existing_card() {

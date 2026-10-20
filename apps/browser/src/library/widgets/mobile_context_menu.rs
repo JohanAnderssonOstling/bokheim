@@ -8,7 +8,7 @@ pub(crate) fn size(window: &Window) -> Option<(Pixels, Pixels)> {
     if !components::uses_mobile_navigation(window) {
         return None;
     }
-    let safe = window.insets().safe_area;
+    let safe = window.insets().effective();
     let viewport = window.viewport_size();
     let available_width = (f32::from(viewport.width - safe.left - safe.right)).max(1.0);
     let available_height = (f32::from(viewport.height - safe.top - safe.bottom)).max(1.0);
@@ -18,13 +18,13 @@ pub(crate) fn size(window: &Window) -> Option<(Pixels, Pixels)> {
 pub(crate) fn configure(menu: PopupMenu, mobile_size: Option<(Pixels, Pixels)>) -> PopupMenu {
     match mobile_size {
         Some((width, height)) => menu.min_w(width).max_w(width).max_h(height).scrollable(true).touch_friendly(true),
-        None => menu,
+        None => menu.touch_friendly(components::touch_ui()),
     }
 }
 
 pub(crate) fn render(menu: Entity<PopupMenu>, position: Point<Pixels>, window: &Window) -> AnyElement {
     if let Some((width, _)) = size(window) {
-        let safe = window.insets().safe_area;
+        let safe = window.insets().effective();
         let viewport = window.viewport_size();
         let available_width = viewport.width - safe.left - safe.right;
         let centered_left = safe.left + px((f32::from(available_width - width) / 2.0).max(0.0));

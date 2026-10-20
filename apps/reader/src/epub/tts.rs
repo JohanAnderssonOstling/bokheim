@@ -1,4 +1,5 @@
 use crate::epub::{LoadState, ReaderView};
+use crate::shell::persistence::StoredPosition;
 use crate::shell::tts::{self, TtsReader};
 use gpui::{App, Context};
 use html_view_core::cfi::{parse_cfi_spine_only, source_position_cfi};
@@ -232,6 +233,12 @@ impl TtsReader for ReaderView {
                 self.tts.status = if self.tts.paused { "Paused" } else { "Reading" }.into();
                 if let Some(fragment) = self.tts_fragments.get(index) {
                     let target = ReadingTarget { element: fragment.element, glyph_ranges };
+                    if let LoadState::Ready(view) = &self.load_state
+                        && let Some(cfi) = view.read(cx).reading_target_cfi(&target)
+                        && let Some(position) = &self.reading_position
+                    {
+                        self.reading_positions.record_narration(StoredPosition::epub(cfi, position.fraction).within(self.toc.active_link()), view.read(cx).navigation_revision());
+                    }
                     self.with_renderer(cx, |view, cx| view.follow_reading_target(target, cx));
                 }
             }

@@ -141,7 +141,7 @@ fn default_column_gap() -> f32 {
 }
 
 fn default_sidebar_open() -> bool {
-    !cfg!(any(feature = "mobile", feature = "kobo"))
+    !cfg!(any(feature = "mobile", feature = "kobo")) && !ui_components::touch_ui()
 }
 
 fn default_pdf_trim_margins() -> bool {

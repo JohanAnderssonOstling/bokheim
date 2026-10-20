@@ -357,6 +357,10 @@ fn verified_audio_download_reuses_complete_synced_metadata_without_local_inspect
         let metadata = target.audiobook_playback_metadata(&hash).unwrap().unwrap();
         assert_eq!(metadata.duration_ms, 1000);
         assert_eq!(metadata.chapters.len(), 1);
+        let expected_titles = if format == BookFormat::Mp3Folder && complete { vec![("01.mp3".to_owned(), "Chapter".to_owned())] } else { vec![] };
+        assert_eq!(target.audiobook_download_track_titles(&hash).unwrap(), expected_titles);
+        let transfer = target.transfer_snapshot(&[hash]).unwrap();
+        assert_eq!(transfer.placements[0].book.as_ref().unwrap().audiobook_track_titles, expected_titles);
         assert!(!target.has_import_inspection(&hash, format, book_inspection::inspection_version(format)).unwrap());
         assert!(target.scan_snapshot().unwrap().books.is_empty(), "synced membership alone does not verify local bytes");
 
@@ -366,7 +370,7 @@ fn verified_audio_download_reuses_complete_synced_metadata_without_local_inspect
             target
                 .complete_downloaded_book(
                     NativeBookCompletion {
-                        snapshot: NativeBookSnapshot { content_hash: hash, directory: ROOT_DIR_ID, name: name.clone(), relative_path: relative_path.clone(), occupied_names: vec![], format },
+                        snapshot: NativeBookSnapshot { content_hash: hash, directory: ROOT_DIR_ID, name: name.clone(), relative_path: relative_path.clone(), occupied_names: vec![], format, audiobook_track_titles: vec![] },
                         publication: PublishedStagedBook { name, relative_path: relative_path.to_string(), published: true, fingerprint: Some("42".into()) },
                         size_bytes: 100,
                     },

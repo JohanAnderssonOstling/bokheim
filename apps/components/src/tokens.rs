@@ -132,11 +132,22 @@ pub const SPACE_2XL: f32 = 48.0;
 pub const SPACE_3XL: f32 = 64.0;
 pub const SPACE_4XL: f32 = 96.0;
 
-/// Phone builds are driven by fingers, so their controls take the 48dp
-/// minimum touch target (3rem at the default 16px UI font) where pointer
-/// builds use 2rem, and their layout is the phone's own. Kobo keeps its own
-/// e-ink geometry, and a narrow desktop or web window keeps the desktop's.
-pub const TOUCH_UI: bool = cfg!(all(feature = "mobile", not(feature = "kobo")));
+/// Control density follows the primary input, independently of window width.
+/// The live media query also follows changes to the browser's primary pointer.
+pub fn touch_ui() -> bool {
+    #[cfg(target_family = "wasm")]
+    {
+        use std::cell::OnceCell;
+        thread_local! {
+            static COARSE_POINTER: OnceCell<Option<web_sys::MediaQueryList>> = const { OnceCell::new() };
+        }
+        COARSE_POINTER.with(|query| query.get_or_init(|| web_sys::window()?.match_media("(pointer: coarse)").ok().flatten()).as_ref().is_some_and(web_sys::MediaQueryList::matches))
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        cfg!(all(feature = "mobile", not(feature = "kobo")))
+    }
+}
 pub const TOUCH_TARGET_REM: f32 = 3.0;
 
 /// Native surfaces and controls use square corners. Semantic pills and
@@ -326,19 +337,39 @@ pub const BOTTOM_NAV_HEIGHT_REM: f32 = 4.0;
 /// its own buttons at a large UI font. The inset rides along at 16px to the rem
 /// rather than staying fixed, because a height made of a rem part and a pixel
 /// part cannot be given to a single element.
-pub const TOPBAR_HEIGHT_REM: f32 = TOPBAR_ACTION_HEIGHT_REM + 2.0 * CONTENT_INSET / 16.0;
+pub fn topbar_height_rem() -> f32 {
+    topbar_action_height_rem() + 2.0 * CONTENT_INSET / 16.0
+}
 /// Also the size of every square icon button (`outlined_icon_button`).
-pub const TOPBAR_ACTION_HEIGHT_REM: f32 = if TOUCH_UI { TOUCH_TARGET_REM } else { 2.0 };
+pub fn topbar_action_height_rem() -> f32 {
+    if touch_ui() {
+        TOUCH_TARGET_REM
+    } else {
+        2.0
+    }
+}
 pub const TOPBAR_ACTION_LABEL_WEIGHT: FontWeight = FontWeight::NORMAL;
 /// Touch-sized icon buttons already carry their spacing as padding around the
 /// glyph, and a row of them must still fit a phone's width beside the title.
-pub const TOPBAR_ACTION_GAP: f32 = if TOUCH_UI { 0.0 } else { SPACE_SM };
+pub fn topbar_action_gap() -> f32 {
+    if touch_ui() {
+        0.0
+    } else {
+        SPACE_SM
+    }
+}
 pub const TOPBAR_ACTION_HORIZONTAL_PADDING: f32 = SPACE_SM;
 
 /// The switcher and the compact "More" sheet are one row height throughout —
 /// library rows, their delete buttons, the add button and the header all sit on
 /// it. It was repeated as a bare `40.0` in five places.
-pub const NAVIGATION_MODAL_ROW_HEIGHT_REM: f32 = if TOUCH_UI { TOUCH_TARGET_REM } else { 2.0 };
+pub fn navigation_modal_row_height_rem() -> f32 {
+    if touch_ui() {
+        TOUCH_TARGET_REM
+    } else {
+        2.0
+    }
+}
 /// The list stops growing here and scrolls instead.
 pub const NAVIGATION_MODAL_MAX_HEIGHT_REM: f32 = 32.0;
 /// Wide enough for a library name without being wider than a modal wants to be,
@@ -374,9 +405,12 @@ pub const SECTION_CARD_COVER_WIDTH: f32 = 200.0;
 ///
 /// The disclosure is small: it is a state marker beside a word, not a control
 /// in its own right, and at the reader's old 22px a column of them competed
-/// with the chapter titles. Its hit area is the row's full height, so the
-/// smaller glyph costs nothing to aim at.
-pub const CONTENTS_DISCLOSURE_SIZE_REM: f32 = 0.75;
+/// with the chapter titles. This is the glyph; the button around it is a
+/// square as tall as a one-line row, [`CONTENTS_ROW_MIN_HEIGHT_REM`], because
+/// on the detail page it is the only way to open a part.
+pub const CONTENTS_DISCLOSURE_SIZE_REM: f32 = 0.625;
+/// A one-line contents row, and so the side of its disclosure button.
+pub const CONTENTS_ROW_MIN_HEIGHT_REM: f32 = 2.25;
 /// One step of nesting. `SPACE_MD`, so a child is plainly indented from its
 /// parent without a deep entry running out of column.
 pub const CONTENTS_ROW_INDENT: f32 = SPACE_MD;
@@ -399,6 +433,12 @@ pub const CONTENTS_DIGIT_WIDTH_EM: f32 = 0.55;
 pub const TAB_UNDERLINE_HEIGHT: f32 = 2.0;
 
 /// Shared geometry for settings controls.
-pub const SETTINGS_CONTROL_SIZE_REM: f32 = if TOUCH_UI { TOUCH_TARGET_REM } else { 2.0 };
+pub fn settings_control_size_rem() -> f32 {
+    if touch_ui() {
+        TOUCH_TARGET_REM
+    } else {
+        2.0
+    }
+}
 pub const SETTINGS_STEPPER_VALUE_WIDTH_REM: f32 = 4.5;
 pub const SETTINGS_CONTROL_GAP: f32 = 1.0;

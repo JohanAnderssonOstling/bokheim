@@ -338,7 +338,7 @@ impl BrowsePage {
         if self.chip_menu.take().is_none() {
             return false;
         }
-        self.restore_focus = true;
+        self.restore_focus = !self.has_popup(cx);
         cx.notify();
         true
     }
@@ -347,8 +347,12 @@ impl BrowsePage {
     fn show_menu(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>, items: impl Fn(PopupMenu) -> PopupMenu + 'static) {
         let mobile_size = mobile_context_menu::size(window);
         let menu = PopupMenu::build(window, cx, move |menu, _, _| mobile_context_menu::configure(items(menu), mobile_size));
-        let subscription = cx.subscribe_in(&menu, window, |page, _, _: &DismissEvent, _, cx| {
+        let subscription = cx.subscribe_in(&menu, window, |page, menu, _: &DismissEvent, window, cx| {
+            let owned_focus = menu.focus_handle(cx).contains_focused(window, cx);
             page.dismiss_menu(cx);
+            // A menu action can focus a window-level dialog or another view
+            // as well as one of this page's own popups.
+            page.restore_focus &= owned_focus;
         });
         menu.focus_handle(cx).focus(window, cx);
         self.chip_menu = Some(ContextMenu { menu, position, _subscription: subscription });
@@ -476,12 +480,11 @@ impl BrowsePage {
     }
 
     fn menu_keys_enabled(&self, cx: &App) -> bool {
-        self.detail.is_none()
-            && self.shown_graph().is_none()
-            && self.chip_menu.is_none()
-            && !self.browse_options_sheet_open
-            && !self.folder_actions.as_ref().is_some_and(|actions| actions.read(cx).has_modal())
-            && !self.feed_actions.as_ref().is_some_and(|actions| actions.read(cx).has_modal())
+        self.detail.is_none() && self.shown_graph().is_none() && !self.has_popup(cx)
+    }
+
+    fn has_popup(&self, cx: &App) -> bool {
+        self.chip_menu.is_some() || self.browse_options_sheet_open || self.folder_actions.as_ref().is_some_and(|actions| actions.read(cx).has_modal()) || self.feed_actions.as_ref().is_some_and(|actions| actions.read(cx).has_modal())
     }
 
     fn on_toggle_grid_selection(&mut self, action: &ToggleGridSelection, window: &mut Window, cx: &mut Context<Self>) {
@@ -499,8 +502,9 @@ impl BrowsePage {
             }
             return;
         }
-        // Keys typed into the search field are the field's.
-        if event.keystroke.modifiers != gpui::Modifiers::default() || self.search.read(cx).is_focused(window, cx) {
+        // A popup or detail page owns its keys even if they bubble here or
+        // focus has not yet moved off the listing.
+        if self.detail.is_some() || self.has_popup(cx) || event.keystroke.modifiers != gpui::Modifiers::default() || self.search.read(cx).is_focused(window, cx) {
             return;
         }
         let key = event.keystroke.key.as_str();
@@ -767,7 +771,7 @@ impl BrowsePage {
             .children(browse_language_control(cx.entity(), &browse_controls, &selection, compact, menu_anchor, theme))
             .child(browse_options_control(cx.entity(), browse_controls, selection, compact, menu_anchor, theme));
         if graph_shown.is_some() {
-            div().h(gpui::rems(components::TOPBAR_HEIGHT_REM)).flex_none().flex().items_center().p(px(4.0)).rounded(px(8.0)).bg(theme.page_bg).border_1().border_color(theme.rule).child(controls).into_any_element()
+            div().h(gpui::rems(components::topbar_height_rem())).flex_none().flex().items_center().p(px(4.0)).rounded(px(8.0)).bg(theme.page_bg).border_1().border_color(theme.rule).child(controls).into_any_element()
         } else {
             components::topbar(theme).child(self.navigation_heading(window, cx)).child(controls).into_any_element()
         }
@@ -989,6 +993,43 @@ mod tests {
     use gpui::{TestAppContext, VisualTestContext};
     use gpui_component::Root;
     use std::fs;
+
+    #[gpui::test]
+    async fn create_folder_from_menu_keeps_enter_in_dialog(cx: &mut TestAppContext) {
+        let _backend = crate::test_support::BACKEND.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (_directory, _session, library) = LibrarySession::test_context(cx).await;
+        let updates = library.updates();
+        cx.condition(&updates, |updates, _| !updates.loading() && !updates.scanning()).await;
+        library.backend().create_directory(ROOT_DIR_ID, "Existing".into()).await.unwrap();
+        let page = cx.new(|cx| BrowsePage::new(BrowseKind::Folder, library.clone(), cx));
+        let navigator = page.read_with(cx, |page, _| page.navigator.clone());
+        let window = cx.add_window(|window, cx| Root::new(page.clone(), window, cx));
+        cx.condition(&navigator, |navigator, _| navigator.listing.children.iter().any(|row| row.name == "Existing")).await;
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+            page.update(cx, |page, cx| {
+                page.focus.focus(window, cx);
+                page.cards.update(cx, |cards, cx| assert!(cards.handle_key("down", window, cx)));
+                page.open_folder_menu(Point::default(), window, cx);
+            });
+        });
+        visual.simulate_keystrokes("down down down enter");
+        visual.run_until_parked();
+        visual.read_entity(&page, |page, cx| assert!(page.has_popup(cx)));
+        visual.simulate_keystrokes("enter");
+        visual.read_entity(&page, |page, cx| {
+            assert!(page.has_popup(cx));
+            assert_eq!(page.navigator.read(cx).destination.location, BrowseLocation::Folder(ROOT_DIR_ID));
+        });
+        visual.simulate_input("Created");
+        visual.simulate_keystrokes("enter");
+        visual.condition(&navigator, |navigator, _| navigator.listing.children.iter().any(|row| row.name == "Created")).await;
+        visual.read_entity(&page, |page, cx| {
+            assert!(!page.has_popup(cx));
+            assert_eq!(page.navigator.read(cx).destination.location, BrowseLocation::Folder(ROOT_DIR_ID));
+        });
+    }
 
     #[gpui::test]
     async fn open_folder_updates_after_a_directory_import(cx: &mut TestAppContext) {

@@ -38,7 +38,7 @@ pub(crate) fn library_view_heading(current: LibraryRoute, theme: ui_components::
 /// The mobile heading at the root of a library page, whether the page shows its
 /// books or the empty library.
 pub(crate) fn library_root_heading(route: LibraryRoute, theme: ui_components::BrowserTheme) -> gpui::Div {
-    if ui_components::TOUCH_UI && LIBRARY_VIEWS.contains(&route) {
+    if ui_components::touch_ui() && LIBRARY_VIEWS.contains(&route) {
         return library_view_heading(route, theme);
     }
     let (title, _) = sidebar::route_definition(Route::Library(route));

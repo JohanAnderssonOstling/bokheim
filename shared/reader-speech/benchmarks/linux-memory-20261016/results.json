@@ -1,0 +1,175 @@
+{
+  "date": "2026-10-16",
+  "platform": "Linux-7.2.7-arch1-1-x86_64-with-glibc2.44",
+  "voice": "Alba medium, CPU, 2 threads",
+  "description": "Standalone C API; identical 9-passage workload repeated 4 times; each generated waveform checked and freed. Both runs explicitly call glibc malloc_trim(0) after model destruction.",
+  "results": {
+    "default": {
+      "phases": [
+        {
+          "phase": "before_load",
+          "rss_kib": "6680",
+          "anonymous_rss_kib": "616",
+          "heap_allocated_kib": "189"
+        },
+        {
+          "phase": "after_load",
+          "rss_kib": "105504",
+          "anonymous_rss_kib": "84144",
+          "heap_allocated_kib": "82743"
+        },
+        {
+          "phase": "model_dropped",
+          "rss_kib": "124932",
+          "anonymous_rss_kib": "102032",
+          "heap_allocated_kib": "7604"
+        },
+        {
+          "phase": "after_malloc_trim",
+          "rss_kib": "33512",
+          "anonymous_rss_kib": "10612",
+          "heap_allocated_kib": "7604"
+        },
+        {
+          "phase": "after_drop_idle",
+          "rss_kib": "33576",
+          "anonymous_rss_kib": "10612",
+          "heap_allocated_kib": "7604"
+        }
+      ],
+      "retained_rss_after_synthesis_kib": [
+        143072,
+        254788,
+        258276,
+        445104,
+        445104,
+        509060,
+        509060,
+        509328,
+        509328,
+        509328,
+        509328,
+        509328,
+        615040,
+        615040,
+        757924,
+        757924,
+        758040,
+        758040,
+        758040,
+        758040,
+        758040,
+        815980,
+        815980,
+        816184,
+        816184,
+        816184,
+        816184,
+        816184,
+        816184,
+        816184,
+        816972,
+        816972,
+        817740,
+        817740,
+        817744,
+        817744
+      ],
+      "highest_observed_peak_rss_kib": 817744
+    },
+    "no-arena": {
+      "phases": [
+        {
+          "phase": "before_load",
+          "rss_kib": "7480",
+          "anonymous_rss_kib": "620",
+          "heap_allocated_kib": "189"
+        },
+        {
+          "phase": "after_load",
+          "rss_kib": "105996",
+          "anonymous_rss_kib": "83572",
+          "heap_allocated_kib": "81139"
+        },
+        {
+          "phase": "model_dropped",
+          "rss_kib": "177548",
+          "anonymous_rss_kib": "153884",
+          "heap_allocated_kib": "7642"
+        },
+        {
+          "phase": "after_malloc_trim",
+          "rss_kib": "34408",
+          "anonymous_rss_kib": "10744",
+          "heap_allocated_kib": "7642"
+        },
+        {
+          "phase": "after_drop_idle",
+          "rss_kib": "34472",
+          "anonymous_rss_kib": "10744",
+          "heap_allocated_kib": "7642"
+        }
+      ],
+      "retained_rss_after_synthesis_kib": [
+        128680,
+        150036,
+        132960,
+        266496,
+        186096,
+        215120,
+        218480,
+        214036,
+        214036,
+        214036,
+        176532,
+        177300,
+        159892,
+        216692,
+        207796,
+        214548,
+        186900,
+        186900,
+        186900,
+        177044,
+        177620,
+        163848,
+        221512,
+        220040,
+        256072,
+        172248,
+        177816,
+        177816,
+        177272,
+        177560,
+        256896,
+        179296,
+        159896,
+        216472,
+        172088,
+        177432
+      ],
+      "highest_observed_peak_rss_kib": 497200
+    }
+  },
+  "limitations": [
+    "Isolated runtime excludes reader UI and GPU resources.",
+    "Allocated native heap uses glibc mallinfo2 and does not account for every allocator used inside the prebuilt runtime."
+  ],
+  "native_worker_validation": {
+    "example": "shared/reader-speech/examples/worker_memory.rs",
+    "cycles": 2,
+    "first_warmed_rss_kib": 196380,
+    "first_closed_rss_kib": 68084,
+    "final_rss_kib": 63624,
+    "description": "Real native speech worker, default audio device, playback, pause and dropping the endpoint. Endpoint event receiver kept alive through teardown."
+  },
+  "validation": {
+    "speech_unit_tests_passed": 59,
+    "speech_unit_tests_ignored": 1,
+    "windows_packaging_tests_passed": 1,
+    "desktop_release_build": "passed",
+    "process_name": "bokheim",
+    "desktop_file": "se.bokheim.Bokheim",
+    "window_identity_verified": true
+  }
+}

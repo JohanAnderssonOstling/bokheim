@@ -274,9 +274,13 @@ impl FeedActions {
         let (cancel_actions, dismiss_actions, submit_actions) = (actions.clone(), actions.clone(), actions);
         let cancel = components::dialog_cancel_button("cancel-feed-dialog", "Cancel").disabled(busy).on_click(move |_, _, cx| cancel_actions.update(cx, |actions, cx| actions.dismiss_modal(cx)));
         let (idle, working) = if adding { ("Add", "Adding…") } else { ("Sign in", "Signing in…") };
-        let submit =
-            components::base_button("confirm-feed-dialog").primary().label(if busy { working } else { idle }).disabled(busy || !ready).on_click(move |_, window, cx| submit_actions.update(cx, |actions, cx| actions.submit(window, cx)));
-        let input_height = rems(components::TOPBAR_ACTION_HEIGHT_REM);
+        let submit = components::base_button("confirm-feed-dialog")
+            .primary()
+            .label(if busy { working } else { idle })
+            .tooltip(components::shortcut_tooltip(idle, "enter"))
+            .disabled(busy || !ready)
+            .on_click(move |_, window, cx| submit_actions.update(cx, |actions, cx| actions.submit(window, cx)));
+        let input_height = rems(components::topbar_action_height_rem());
         let panel = components::modal_surface(theme)
             .w(px(420.0))
             .max_w_full()

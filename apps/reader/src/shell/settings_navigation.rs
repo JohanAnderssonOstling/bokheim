@@ -2,13 +2,16 @@
 
 use std::{cell::Cell, rc::Rc};
 
-use gpui::{App, Div, MouseButton, canvas, div, prelude::*, px};
+use gpui::{App, Context, Div, MouseButton, Subscription, Window, canvas, div, prelude::*, px};
 use ui_components as components;
+
+pub(crate) const DESKTOP_FULLSCREEN: bool = cfg!(all(not(feature = "mobile"), any(target_os = "linux", target_os = "macos", target_os = "windows")));
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum SettingsRow {
     #[default]
     Theme,
+    Fullscreen,
     Typeface,
     Alignment,
     FontSize,
@@ -28,9 +31,35 @@ pub(crate) struct SettingsNavigation {
     selected: Rc<Cell<SettingsRow>>,
     scroll_pending: Rc<Cell<bool>>,
     keyboard_visible: Rc<Cell<bool>>,
+    _window_changes: Option<Subscription>,
 }
 
 impl SettingsNavigation {
+    pub(crate) fn new<C: 'static>(window: &mut Window, cx: &mut Context<C>) -> Self {
+        let window_changes = DESKTOP_FULLSCREEN.then(|| {
+            let mut fullscreen = window.is_fullscreen();
+            cx.observe_window_bounds(window, move |_, window, cx| {
+                // Native fullscreen transitions finish asynchronously and can
+                // also be triggered by the window manager.
+                let current = window.is_fullscreen();
+                if current != fullscreen {
+                    fullscreen = current;
+                    cx.notify();
+                }
+            })
+        });
+        Self { _window_changes: window_changes, ..Self::default() }
+    }
+
+    pub(crate) fn fullscreen_group(&self, rows: &[SettingsRow], window: &Window, theme: components::BrowserTheme) -> Option<Div> {
+        DESKTOP_FULLSCREEN.then(|| {
+            let label = if window.is_fullscreen() { "Exit full screen" } else { "Enter full screen" };
+            let button = components::reader_choice_button("reader-toggle-fullscreen", label, false, theme).on_click(|_, window, _| window.toggle_fullscreen());
+            let row = components::reader_setting_row_smallcaps("Full screen", theme).child(components::reader_choice_button_group("reader-fullscreen", [button], theme));
+            components::reader_settings_group(theme).child(self.row(SettingsRow::Fullscreen, rows, row, theme))
+        })
+    }
+
     pub(crate) fn keyboard_visibility(&self) -> Rc<Cell<bool>> {
         self.keyboard_visible.clone()
     }
@@ -71,6 +100,13 @@ impl SettingsNavigation {
                 .absolute()
                 .size_full(),
             )
+    }
+}
+
+/// Left exits fullscreen and right enters it, stopping at either state.
+pub(crate) fn set_fullscreen(fullscreen: bool, window: &Window) {
+    if window.is_fullscreen() != fullscreen {
+        window.toggle_fullscreen();
     }
 }
 

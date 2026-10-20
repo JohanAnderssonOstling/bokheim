@@ -164,6 +164,10 @@ impl BrowserSession {
         self.with_document(move |document| document.render_page_with_margin_trim(key.page_index(), Some(key.target_width()), key.trim_margins())).await
     }
 
+    pub async fn page_geometry(&self, page_index: usize, trim_margins: bool) -> PdfResult<PdfPageGeometry> {
+        self.with_document(move |document| document.page_geometry(page_index, trim_margins)).await
+    }
+
     pub async fn render_for_display(&self, key: PageRenderKey) -> PdfResult<RenderedPdfBgraPage> {
         self.with_document(move |document| document.render_page_for_display(key)).await
     }

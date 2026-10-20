@@ -1,6 +1,6 @@
 //! Explicit acquisition manifests supply source metadata before enrichment.
 //! Files stay in the acquisition directory so imports can be audited or resumed.
-use crate::{curation, get, store_book, store_book_preserving_covers};
+use crate::{curation, get, store_book, store_book_preserving_covers, store_book_with_embedded_cover};
 use book_model::{BookRecord, BookSubject, Contributor, Identifier, LanguageTag, Scheme};
 use reqwest::blocking::Client;
 use reqwest::Url;
@@ -135,14 +135,14 @@ pub fn import(dir: &Path, db: &Connection, http: &Client, path: &Path) -> Result
             let url = Url::parse(&entry.file_url).map_err(|e| e.to_string())?;
             let name = file.file_name().and_then(|name| name.to_str()).ok_or("manifest file has no UTF-8 filename")?.to_owned();
             let bytes = get(http, &url)?;
-            if entry.source == "standardebooks.org" {
-                verify_standardebooks_identity(&bytes, &entry.entry_id)?;
-            }
             (name, bytes)
         } else {
             read_epub(&file, entry.archive_member.as_deref())?
         };
-        let hash = if entry.preserve_covers {
+        let hash = if entry.source == "standardebooks.org" {
+            verify_standardebooks_identity(&bytes, &entry.entry_id)?;
+            store_book_with_embedded_cover(dir, db, http, &bytes, &name, Some(&entry.metadata))?
+        } else if entry.preserve_covers {
             store_book_preserving_covers(dir, db, http, &bytes, &name, Some(&entry.metadata))?
         } else {
             store_book(dir, db, http, &bytes, &name, Vec::new(), None, Some(&entry.metadata))?
@@ -155,7 +155,7 @@ pub fn import(dir: &Path, db: &Connection, http: &Client, path: &Path) -> Result
     Ok(())
 }
 
-fn verify_standardebooks_identity(bytes: &[u8], expected: &str) -> Result<(), String> {
+pub(crate) fn verify_standardebooks_identity(bytes: &[u8], expected: &str) -> Result<(), String> {
     let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let mut container = String::new();
     archive.by_name("META-INF/container.xml").map_err(|e| e.to_string())?.read_to_string(&mut container).map_err(|e| e.to_string())?;
@@ -164,7 +164,12 @@ fn verify_standardebooks_identity(bytes: &[u8], expected: &str) -> Result<(), St
     let mut xml = String::new();
     archive.by_name(package).map_err(|e| e.to_string())?.read_to_string(&mut xml).map_err(|e| e.to_string())?;
     let package = roxmltree::Document::parse(&xml).map_err(|e| e.to_string())?;
-    if !package.descendants().filter(|node| node.has_tag_name(("http://purl.org/dc/elements/1.1/", "identifier"))).filter_map(|node| node.text()).any(|value| value.trim().trim_start_matches("url:").trim_end_matches('/') == expected.trim_end_matches('/')) {
+    if !package
+        .descendants()
+        .filter(|node| node.has_tag_name(("http://purl.org/dc/elements/1.1/", "identifier")))
+        .filter_map(|node| node.text())
+        .any(|value| value.trim().trim_start_matches("url:").trim_end_matches('/') == expected.trim_end_matches('/'))
+    {
         return Err(format!("downloaded EPUB does not match Standard Ebooks identity {expected}"));
     }
     Ok(())
@@ -199,6 +204,38 @@ mod tests {
     use book_model::{BookDetails, BookMetadata, Scheme, Scope};
     use std::io::Write;
     use zip::write::SimpleFileOptions;
+
+    #[test]
+    fn standardebooks_reimport_replaces_copied_art_even_when_preserve_covers_is_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = curation::open(dir.path()).unwrap();
+        let identity = "https://standardebooks.org/ebooks/a-writer/a-source-work";
+        let bytes = crate::covers::tests::standardebooks_epub(identity);
+        let hash = content_address::hash_reader(&mut &bytes[..]).unwrap().to_hex();
+        let record = BookRecord { metadata: BookDetails { title: "Curated title".into(), ..Default::default() }, description: "Curated description".into() };
+        curation::set_record(&db, &hash, &record).unwrap();
+        for suffix in ["card".to_owned(), "detail".to_owned(), thumbnail::card_thumbnail_suffix(thumbnail::BROWSE_THUMBNAIL_WIDTH), thumbnail::card_thumbnail_suffix(thumbnail::THUMBNAIL_WIDTH)] {
+            std::fs::write(dir.path().join(format!("covers/{hash}-{suffix}.jpg")), b"copied artwork").unwrap();
+        }
+        std::fs::write(dir.path().join("book.epub"), &bytes).unwrap();
+        let manifest = dir.path().join("manifest.json");
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!([{
+                "file":"book.epub","source":"standardebooks.org","entry_id":identity,
+                "entry_url":identity,"file_url":format!("{identity}/downloads/book.epub"),"preserve_covers":true
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+        let http = Client::builder().no_proxy().timeout(std::time::Duration::from_millis(100)).build().unwrap();
+        import(dir.path(), &db, &http, &manifest).unwrap();
+        let versions = thumbnail::generate_thumbnail_versions_with_pdf_renderer("epub", Cursor::new(bytes.clone()), thumbnail::render_pdf_cover).unwrap().unwrap();
+        assert_eq!(std::fs::read(dir.path().join(format!("covers/{hash}-card.jpg"))).unwrap(), versions.browse);
+        assert_eq!(std::fs::read(dir.path().join(format!("covers/{hash}-detail.jpg"))).unwrap(), versions.high_density);
+        assert_eq!(curation::record(&db, &hash).unwrap().unwrap(), record);
+        assert_eq!(std::fs::read(dir.path().join("book.epub")).unwrap(), bytes);
+    }
 
     #[test]
     fn downloaded_standardebooks_must_match_the_requested_identity() {

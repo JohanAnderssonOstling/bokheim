@@ -20,11 +20,11 @@ use ui_components as components;
 // intrinsic panel at the bottom edge of the top bar. The bar and its buttons
 // are rems, so the offset is worked out at the window's rem size.
 fn popup_top(rem_size: gpui::Pixels) -> gpui::Pixels {
-    rem_size * (components::TOPBAR_HEIGHT_REM - (components::TOPBAR_HEIGHT_REM - components::TOPBAR_ACTION_HEIGHT_REM) / 2.0) - px(2.0 * components::SPACE_XS)
+    rem_size * (components::topbar_height_rem() - (components::topbar_height_rem() - components::topbar_action_height_rem()) / 2.0) - px(2.0 * components::SPACE_XS)
 }
 
 fn device_button(id: &'static str, label: impl Into<gpui::SharedString>, icon: impl Into<Icon>) -> Button {
-    components::base_button(id).icon(icon).tooltip(label).ghost().border_0().size(gpui::rems(components::TOPBAR_ACTION_HEIGHT_REM)).px_0()
+    components::base_button(id).icon(icon).tooltip(label).ghost().border_0().size(gpui::rems(components::topbar_action_height_rem())).px_0()
 }
 
 pub(super) struct KoboDeviceBar {
@@ -105,13 +105,13 @@ impl Render for KoboDeviceBar {
         let bluetooth_label = if bluetooth_state.available { if bluetooth_state.powered { "Bluetooth on" } else { "Bluetooth off" } } else { "Bluetooth unavailable" };
         gpui::div()
             .id("kobo-device-topbar")
-            .h(gpui::rems(components::TOPBAR_HEIGHT_REM))
+            .h(gpui::rems(components::topbar_height_rem()))
             .flex_none()
             .w_full()
             .flex()
             .items_center()
             .px(px(components::CONTENT_INSET))
-            .gap(px(components::TOPBAR_ACTION_GAP))
+            .gap(px(components::topbar_action_gap()))
             .bg(theme.page_bg)
             .child(
                 Popover::new("kobo-power-menu")

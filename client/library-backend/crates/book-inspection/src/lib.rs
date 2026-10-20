@@ -35,9 +35,9 @@ pub use pdf::{inspect_pdf, inspect_pdf_metadata, inspect_pdf_pages_reader, inspe
 /// results keyed on this value.
 pub fn inspection_version(format: BookFormat) -> i64 {
     match format {
-        BookFormat::Epub => i64::from(evidence::INSPECTION_VERSION) + 2,
+        BookFormat::Epub => i64::from(evidence::INSPECTION_VERSION) + 3,
         BookFormat::Pdf => i64::from(evidence::INSPECTION_VERSION) + 1,
-        BookFormat::Mobi => 5,
+        BookFormat::Mobi => 6,
         _ => 3,
     }
 }
@@ -244,16 +244,13 @@ pub fn metadata_from_book(path: &Path, provider: &mut Book) -> MetadataResult<Bo
 }
 
 fn metadata_from_declared(path: &Path, metadata: DeclaredMetadata) -> MetadataResult<BookRecord> {
-    let mut authors = metadata
+    let authors = metadata
         .creators
         .iter()
         .filter(|creator| marc_relator_code_from_metadata_role(creator.role.as_str()) == AUTHOR_MARC_RELATOR_CODE && !is_author_tool(&creator.name))
         .flat_map(|creator| author_names(&creator.name))
         .filter_map(author_from_field)
         .collect::<Vec<_>>();
-    if authors.is_empty() {
-        authors.extend(metadata.creators.first().into_iter().flat_map(|creator| author_names(&creator.name)).filter_map(author_from_field));
-    }
 
     let mut identifiers = metadata
         .identifiers
@@ -357,6 +354,28 @@ use book_model::from_metadata_value;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use book_content::CreatorRole;
+    use book_model::MarcRelatorCode;
+
+    #[test]
+    fn declared_non_author_creators_are_never_promoted_to_authors() {
+        for role in ["trl", "edt", "ill", "ctb"] {
+            let credit = MetadataCredit { role: CreatorRole::new(role), ..MetadataCredit::author("A Contributor".into()) };
+            for include_author in [false, true] {
+                let mut metadata = DeclaredMetadata { title: "Credits".into(), creators: vec![credit.clone()], ..Default::default() };
+                if include_author {
+                    metadata.creators.push(MetadataCredit::author("An Author".into()));
+                }
+                metadata.contributors.push(MetadataCredit { role: CreatorRole::contributor(), ..MetadataCredit::author("Untyped Credit".into()) });
+                let record = metadata_from_declared(Path::new("book.epub"), metadata).unwrap();
+                let authors = record.authors().map(|author| author.name()).collect::<Vec<_>>();
+                assert_eq!(authors, if include_author { vec!["An Author"] } else { Vec::new() }, "{role}");
+                let contributor = record.contributors.iter().find(|credit| credit.name() == "A Contributor").unwrap();
+                assert_eq!(contributor.role_code().as_str(), role);
+                assert_eq!(record.contributors.iter().find(|credit| credit.name() == "Untyped Credit").unwrap().role_code(), MarcRelatorCode(*b"ctb"));
+            }
+        }
+    }
 
     #[test]
     fn page_inspection_without_images_yields_no_identifiers() {

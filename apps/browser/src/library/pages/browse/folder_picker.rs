@@ -249,7 +249,14 @@ impl Render for FolderPicker {
                     .border_color(theme.rule)
                     .child(div().flex_1())
                     .child(components::dialog_cancel_button("cancel-folder-picker", "Cancel").on_click(move |_, _, cx| cancel_picker.update(cx, |picker, cx| picker.cancel(cx))))
-                    .child(components::base_button("confirm-folder-picker").primary().disabled(!can_select).label("Choose").on_click(move |_, _, cx| confirm_picker.update(cx, |picker, cx| picker.confirm(cx)))),
+                    .child(
+                        components::base_button("confirm-folder-picker")
+                            .primary()
+                            .disabled(!can_select)
+                            .label("Choose")
+                            .tooltip(components::shortcut_tooltip("Choose", "enter"))
+                            .on_click(move |_, _, cx| confirm_picker.update(cx, |picker, cx| picker.confirm(cx))),
+                    ),
             )
             .child(column_strip);
         let dismiss_picker = picker;

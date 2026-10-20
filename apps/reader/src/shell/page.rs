@@ -60,8 +60,8 @@ pub(crate) fn reader_surface<C: CommonReaderCommands + SidebarTarget>(owner: &C,
 pub(crate) fn reader_page<C: CommonReaderCommands>(
     window: &mut Window, cx: &mut Context<C>, theme: components::BrowserTheme, document_ready: bool, loading_focus: &FocusHandle, chrome_visible: bool, mobile_chrome: MobileChrome, content: AnyElement,
 ) -> Div {
-    input::install_reader_search(window, cx);
-    let safe_area = window.insets().safe_area;
+    input::install_reader_shortcuts(window, cx);
+    let safe_area = window.insets().effective();
     let mobile = components::uses_mobile_reader_controls(window);
 
     let page = components::reader_app_page(window, cx, theme)

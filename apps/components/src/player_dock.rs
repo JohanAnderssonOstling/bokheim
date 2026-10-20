@@ -7,7 +7,7 @@
 //! an audiobook's cover and title, or nothing at all for narration.
 
 use gpui::prelude::*;
-use gpui::{Div, ElementId, SharedString, Window, div, px, relative, rems};
+use gpui::{App, DispatchPhase, Div, ElementId, HitboxBehavior, SharedString, TouchEvent, TouchPhase, Window, canvas, div, px, relative, rems};
 use gpui_component::button::Button;
 use gpui_component::button::ButtonVariants;
 
@@ -21,6 +21,24 @@ pub const PLAYER_DOCK_CAPTION_SIZE_REM: f32 = 0.75;
 /// is taller than the line inside it.
 pub const PLAYER_DOCK_TRACK_HIT_HEIGHT_REM: f32 = 1.0;
 const PROGRESS_LINE_HEIGHT: f32 = 3.0;
+
+/// Attach inside a positioned scrub track. Only an unobscured track can begin
+/// a touch scrub; its owner tracks the contact id through release/cancellation,
+/// including when the finger moves outside the track.
+pub fn playback_scrub_touch_listener(listener: impl Fn(&TouchEvent, &mut Window, &mut App) + 'static) -> impl IntoElement {
+    canvas(
+        |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+        move |_, hitbox, window, _| {
+            window.on_touch(move |event, phase, window, cx| {
+                if phase == DispatchPhase::Capture && (event.phase != TouchPhase::Started || hitbox.is_under_pointer(window)) {
+                    listener(event, window, cx);
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_full()
+}
 
 /// Total dock height in pixels, including its fixed top border.
 pub fn player_dock_height_px(window: &Window) -> f32 {
@@ -62,7 +80,7 @@ pub fn player_dock_text_button(id: impl Into<ElementId>, label: impl Into<Shared
     let label = label.into();
     crate::base_button(id)
         .ghost()
-        .h(rems(crate::TOPBAR_ACTION_HEIGHT_REM))
+        .h(rems(crate::topbar_action_height_rem()))
         .px(rems(SPACE_SM / 16.0))
         .flex_none()
         .text_color(theme.text)

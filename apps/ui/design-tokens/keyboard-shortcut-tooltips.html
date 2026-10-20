@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en" data-platform="mac" data-locations="true">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bokheim · Where keyboard shortcuts appear</title>
+  <style>
+    @font-face { font-family: Raleway; src: url('../../desktop-gpui/assets/fonts/Raleway-Regular.ttf'); font-display: swap; }
+    @font-face { font-family: Garamond; src: url('../../desktop-gpui/assets/fonts/NV_Garamond-Regular.ttf'); font-display: swap; }
+    @font-face { font-family: Bodoni; src: url('../../desktop-gpui/assets/fonts/BodoniModa-Regular.ttf'); font-display: swap; }
+    :root { color-scheme: light; --canvas:#eae5dc; --paper:#f6f2eb; --ink:#22201d; --muted:#6b675f; --rule:#c5bdac; --accent:#466853; --wash:#d9e8de; --hover:#22201d08; }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    html { scroll-behavior: smooth; }
+    body { margin:0; background:var(--canvas); color:var(--ink); font:14px/1.5 Raleway,system-ui,sans-serif; }
+    button,input { font:inherit; color:inherit; }
+    button { cursor:pointer; }
+    button:focus-visible,input:focus-visible { outline:2px solid var(--accent); outline-offset:4px; }
+    button { border:0; background:transparent; }
+    svg { width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round; flex:none; }
+    .sprite { position:absolute; width:0; height:0; overflow:hidden; }
+    .wrap { max-width:1440px; margin:auto; padding:36px 42px 28px; }
+    .masthead { display:flex; align-items:center; justify-content:space-between; gap:20px; padding-bottom:24px; border-bottom:1px solid var(--rule); }
+    .brand { display:flex; align-items:center; gap:12px; font-size:13px; letter-spacing:.12em; text-transform:uppercase; }
+    .brand-mark { width:30px; height:30px; border:1px solid var(--accent); border-radius:50%; display:grid; place-items:center; color:var(--accent); font:24px Garamond,Georgia,serif; }
+    .controls { display:flex; align-items:center; gap:20px; }
+    .segmented { display:flex; padding:3px; border:1px solid var(--rule); background:var(--paper); border-radius:6px; gap:2px; }
+    .segmented button { padding:6px 12px; border-radius:3px; font-size:12px; white-space:nowrap; }
+    .segmented [aria-pressed="true"] { background:var(--ink); color:var(--paper); }
+    .locations-toggle { display:flex; gap:7px; align-items:center; color:var(--muted); font-size:12px; white-space:nowrap; }
+    input[type="checkbox"] { accent-color:var(--accent); }
+    .intro { padding:26px 0 28px; display:flex; justify-content:space-between; align-items:flex-end; gap:24px; }
+    h1 { font:44px/1.1 Bodoni,Georgia,serif; margin:0 0 10px; letter-spacing:-.025em; }
+    .intro p { color:var(--muted); margin:0; max-width:640px; }
+    .count { flex:none; color:var(--accent); font-size:11px; text-transform:uppercase; letter-spacing:.12em; padding-bottom:4px; }
+    .layout { display:grid; grid-template-columns:minmax(0,1fr) 292px; gap:28px; align-items:start; }
+    .scenes { min-width:0; }
+    .section-heading { display:flex; align-items:center; justify-content:space-between; gap:14px; margin:0 0 12px; }
+    h2 { margin:0; font-weight:500; font-size:15px; }
+    .eyebrow { color:var(--muted); text-transform:uppercase; font-size:10px; letter-spacing:.13em; margin:0 0 6px; }
+    .reader-views { display:flex; flex-wrap:wrap; gap:4px; }
+    .reader-views button { color:var(--muted); padding:5px 8px; font-size:11px; border-radius:3px; }
+    .reader-views [aria-pressed="true"] { background:var(--wash); color:var(--accent); }
+    .window { background:var(--paper); border:1px solid #b9b09e; border-radius:8px; box-shadow:0 12px 30px #22201d0a; }
+    .titlebar { height:35px; border-bottom:1px solid var(--rule); display:flex; align-items:center; justify-content:space-between; padding:0 13px; gap:10px; color:var(--muted); font-size:10px; }
+    .window-dots { display:flex; gap:5px; }
+    .window-dots i { width:7px; height:7px; border:1px solid #b6ad9b; border-radius:50%; }
+    .reader-body { display:grid; grid-template-columns:52px 286px minmax(0,1fr); min-height:430px; }
+    .reader.closed .reader-body { grid-template-columns:minmax(0,1fr); }
+    .reader.closed .rail,.reader.closed .sidepanel { display:none; }
+    .rail { display:flex; flex-direction:column; align-items:center; gap:8px; padding:15px 0; border-right:1px solid var(--rule); }
+    .rail-gap { height:10px; }
+    .rail .settings { margin-top:auto; font:23px Garamond,Georgia,serif; }
+    .rail .ring { height:27px; width:27px; border:2px solid var(--accent); border-radius:50%; display:grid; place-items:center; font-size:9px; color:var(--muted); margin-top:8px; }
+    .icon-button { display:inline-flex; justify-content:center; align-items:center; width:32px; height:32px; padding:6px; border-radius:4px; flex:none; }
+    .icon-button:hover,.text-button:hover,.stepper button:hover { background:var(--hover); }
+    .icon-button.active { color:var(--accent); background:var(--wash); }
+    .sidepanel { border-right:1px solid var(--rule); min-width:0; }
+    .panel-header { height:48px; display:flex; align-items:center; padding:0 11px 0 15px; border-bottom:1px solid var(--rule); gap:2px; }
+    .panel-heading { flex:1; min-width:0; font-size:15px; font-variant:small-caps; }
+    .panel-header .icon-button { width:27px; height:29px; padding:5px; }
+    .match-count { color:var(--muted); font-size:10px; white-space:nowrap; margin-right:3px; }
+    .query-wrap { padding:14px; border-bottom:1px solid var(--rule); }
+    .query-wrap input { background:transparent; border:0; border-bottom:1px solid var(--ink); width:100%; font-weight:600; padding:4px 0 8px; font-size:17px; }
+    .scope { margin-top:10px; color:var(--muted); font-size:10px; }
+    .results { padding:15px; font:15px/1.5 Garamond,Georgia,serif; }
+    .result-heading { color:var(--muted); font:10px Raleway,system-ui,sans-serif; text-transform:uppercase; letter-spacing:.08em; margin:0 0 12px; }
+    .result { margin:0 -5px 8px; padding:9px 6px; border-radius:3px; }
+    .result.current { background:var(--wash); }
+    mark { background:#cbdcc8; color:inherit; padding:0 1px; }
+    .page { padding:34px 32px 20px; display:flex; flex-direction:column; min-width:0; }
+    .running-head { text-align:center; color:var(--muted); text-transform:uppercase; letter-spacing:.13em; font-size:9px; margin-bottom:30px; }
+    .page h3 { text-align:center; font:27px/1.15 Bodoni,Georgia,serif; font-weight:400; margin:0 0 22px; }
+    .book-copy { font:var(--book-size,17px)/1.6 Garamond,Georgia,serif; margin:0 0 14px; }
+    .folio { margin-top:auto; padding-top:12px; text-align:center; font:12px Garamond,Georgia,serif; color:var(--muted); }
+    .reader-note { border-top:1px solid var(--rule); min-height:35px; padding:8px 13px; color:var(--muted); font-size:10px; display:flex; justify-content:space-between; align-items:center; gap:12px; }
+    .reader-note button { color:var(--accent); text-decoration:underline; font-size:10px; }
+    .settings-body { padding:18px 15px; }
+    .setting-label { color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.06em; margin-bottom:10px; }
+    .setting-group { padding-bottom:22px; margin-bottom:17px; border-bottom:1px solid var(--rule); }
+    .stepper { display:flex; align-items:center; border:1px solid var(--rule); height:35px; border-radius:3px; }
+    .stepper button { width:36px; height:33px; font-size:19px; }
+    .stepper output { flex:1; text-align:center; font-size:13px; min-width:0; }
+    .choices { display:flex; border:1px solid var(--rule); border-radius:3px; }
+    .choices span { text-align:center; padding:8px 4px; flex:1; font-size:11px; }
+    .choices span+span { border-left:1px solid var(--rule); }
+    .choices .chosen { background:var(--wash); color:var(--accent); }
+    .toc { list-style:none; padding:0 14px; font:15px/1.6 Garamond,Georgia,serif; }
+    .toc li { padding:10px 4px; border-bottom:1px solid var(--rule); }
+    .toc li:first-child { color:var(--accent); background:var(--wash); }
+    .phone-placements { display:flex; gap:16px; align-items:center; padding:13px 1px 25px; color:var(--muted); font-size:10px; }
+    .phone-placements .mini-bar { display:flex; align-items:center; border:1px solid var(--rule); background:var(--paper); border-radius:4px; gap:12px; padding:3px 10px; }
+    .mini-bar .icon-button { height:25px; width:25px; }
+    .mini-bar svg { height:17px; width:17px; }
+    .mini-bar .mini-label { min-width:58px; }
+    .library-grid { display:grid; grid-template-columns:1fr 1fr; gap:18px; margin-top:14px; }
+    .compact { min-height:338px; display:flex; flex-direction:column; }
+    .compact-header { height:47px; display:flex; align-items:center; border-bottom:1px solid var(--rule); padding:0 15px; gap:12px; }
+    .compact-header h3 { font-size:14px; font-weight:500; margin:0; }
+    .compact-body { padding:23px; }
+    .compact-body h4 { font:23px Bodoni,Georgia,serif; margin:0 0 22px; }
+    .compact .setting-group { padding-bottom:15px; margin-bottom:16px; }
+    .text-button { display:inline-flex; align-items:center; gap:6px; padding:5px 0; font-size:12px; }
+    .detail-body { display:flex; gap:18px; padding:22px; }
+    .cover { height:124px; width:88px; background:#466853; color:#f3edda; flex:none; box-shadow:inset 5px 0 #ffffff12; display:flex; flex-direction:column; justify-content:space-around; align-items:center; text-align:center; padding:12px; font:19px/1.05 Bodoni,Georgia,serif; border:1px solid #3c5b49; }
+    .cover small { font:7px Raleway,system-ui,sans-serif; text-transform:uppercase; letter-spacing:.16em; }
+    .detail-copy h4 { font:25px/1.1 Bodoni,Georgia,serif; margin:4px 0 6px; }
+    .detail-copy p { margin:0 0 9px; color:var(--muted); font-size:11px; }
+    .read-button { padding:6px 15px; border:1px solid var(--rule); font-size:11px; margin-top:5px; }
+    .notification { display:flex; align-items:center; justify-content:space-between; gap:14px; margin:auto 16px 17px; padding:12px; border:1px solid var(--rule); background:#ede9df; border-radius:4px; font-size:10px; }
+    .notification button { color:var(--accent); font-size:12px; padding:3px; }
+    .caption { color:var(--muted); font-size:11px; margin:11px 1px 0; }
+    .guide { position:sticky; top:18px; max-height:calc(100vh - 36px); overflow:auto; scrollbar-width:thin; border-left:1px solid var(--rule); padding-left:22px; padding-right:3px; }
+    .preview { padding:16px 0 18px; border-bottom:1px solid var(--rule); margin-bottom:16px; }
+    .preview-label { color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.1em; }
+    #preview-text { font-size:17px; margin:9px 0; font-family:Raleway,system-ui,sans-serif; }
+    #preview-location { color:var(--muted); font-size:11px; margin:0; min-height:46px; }
+    .guide-group { margin:0 0 16px; }
+    .guide-group h3 { text-transform:uppercase; letter-spacing:.09em; font-size:9px; color:var(--muted); font-weight:500; margin:0 0 5px; }
+    .guide-item { display:flex; align-items:center; gap:9px; width:100%; padding:5px; text-align:left; border-radius:4px; font-size:11px; }
+    .guide-item:hover { background:var(--hover); }
+    .guide-item[aria-pressed="true"] { background:var(--wash); color:var(--accent); }
+    .guide-num { width:18px; height:18px; border:1px solid var(--rule); border-radius:50%; display:grid; place-items:center; flex:none; font:9px system-ui,sans-serif; }
+    .guide-name { flex:1; min-width:0; }
+    .guide-key { font:11px system-ui,sans-serif; white-space:nowrap; }
+    .guide-footnote { color:var(--muted); font-size:10px; border-top:1px solid var(--rule); padding-top:14px; }
+    [data-hotspot] { position:relative; scroll-margin:150px; }
+    .marker { position:absolute; right:-5px; top:-5px; width:16px; height:16px; display:grid; place-items:center; border-radius:50%; font:9px system-ui,sans-serif; color:var(--accent); background:var(--paper); border:1px solid var(--accent); pointer-events:none; z-index:2; }
+    [data-locations="false"] .marker { display:none; }
+    .spotlight { outline:2px solid var(--accent); outline-offset:3px; background:var(--wash) !important; }
+    .tip { position:fixed; z-index:50; padding:8px 11px; border:1px solid #c1b8a5; border-radius:4px; background:#faf7f0; box-shadow:0 5px 15px #22201d1c; color:var(--ink); font:12px/1.4 Raleway,system-ui,sans-serif; white-space:nowrap; pointer-events:none; max-width:calc(100vw - 20px); }
+    .extras { margin-top:28px; }
+    .extra-card { min-height:0; padding:0 18px 18px; }
+    .extra-card .compact-header { margin:0 -18px 16px; padding-inline:18px; }
+    .extra-card .compact-header h3 { flex:1; }
+    .dialog-sample + .dialog-sample { border-top:1px solid var(--rule); margin-top:17px; padding-top:16px; }
+    .dialog-sample label { display:block; color:var(--muted); font-size:10px; margin-bottom:6px; }
+    .sample-input { width:100%; padding:7px 9px; background:transparent; border:1px solid var(--rule); border-radius:3px; font-size:12px; }
+    .dialog-actions { display:flex; justify-content:flex-end; gap:12px; margin-top:13px; }
+    .dialog-actions button { padding:6px 13px; border:1px solid var(--rule); border-radius:3px; font-size:11px; }
+    .dialog-actions button:last-child { background:var(--wash); color:var(--accent); }
+    .switcher-line { display:flex; align-items:center; justify-content:space-between; padding:8px 10px; border:1px solid var(--rule); margin-bottom:6px; font-size:12px; }
+    .switcher-line.selected { background:var(--wash); }
+    .extra-note { font-size:10px; color:var(--muted); margin:15px 0 0; }
+    footer { border-top:1px solid var(--rule); margin-top:28px; padding-top:16px; display:flex; justify-content:space-between; gap:20px; color:var(--muted); font-size:10px; }
+    @media(max-width:1180px) { .wrap{padding:25px;} .layout{grid-template-columns:minmax(0,1fr) 245px;gap:20px;} .guide{padding-left:16px;} .reader-body{grid-template-columns:48px 266px minmax(0,1fr);} .page{padding:29px 22px 18px;} .page h3{font-size:23px;} .book-copy{font-size:16px;} }
+    @media(max-width:960px) { .layout{grid-template-columns:1fr;} .guide{position:static;max-height:none;border:1px solid var(--rule);padding:20px;background:var(--paper);display:grid;grid-template-columns:1fr 1fr;gap:0 24px;} .guide>h2,.preview,.guide-footnote{grid-column:1/-1;} #shortcut-index{grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr;gap:0 24px;} .preview{padding-top:8px;} #preview-location{min-height:0;} .intro{align-items:flex-start;} .count{padding-top:8px;} }
+    @media(max-width:620px) { .wrap{padding:18px 14px;} .masthead{flex-direction:column;align-items:flex-start;gap:16px;} .controls{width:100%;justify-content:space-between;gap:8px;} h1{font-size:34px;} .intro{display:block;padding:24px 0;} .count{display:block;margin-top:15px;} .section-heading{align-items:flex-start;flex-direction:column;} .reader-body{grid-template-columns:45px 1fr;min-height:410px;} .page{display:none;} .sidepanel{border-right:0;} .reader.closed .page{display:flex;} .reader.closed .reader-body{min-height:410px;} .phone-placements{flex-wrap:wrap;gap:8px;} .phone-placements>span{width:100%;} .library-grid{grid-template-columns:1fr;gap:24px;} .guide{grid-template-columns:1fr;} #shortcut-index{grid-template-columns:1fr;} .titlebar{font-size:9px;} .reader-note{align-items:flex-start;} footer{flex-direction:column;gap:5px;} }
+    @media(prefers-reduced-motion:reduce) { html{scroll-behavior:auto;} }
+  </style>
+</head>
+<body>
+  <svg class="sprite" aria-hidden="true"><defs>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="m10 5-7 7 7 7M3 12h18"/></symbol>
+    <symbol id="i-contents" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+    <symbol id="i-notes" viewBox="0 0 24 24"><path d="M15 4H5v16h14v-9M12 12l8-8 2 2-8 8-3 1z"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-left" viewBox="0 0 24 24"><path d="m14 5-7 7 7 7"/></symbol>
+    <symbol id="i-right" viewBox="0 0 24 24"><path d="m10 5 7 7-7 7"/></symbol>
+  </defs></svg>
+  <main class="wrap">
+    <header class="masthead">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">B</span> Bokheim <span style="color:var(--muted)">/ Interface guide</span></div>
+      <div class="controls">
+        <div class="segmented" role="group" aria-label="Shortcut platform">
+          <button type="button" data-platform-choice="mac" aria-pressed="true">macOS</button>
+          <button type="button" data-platform-choice="other" aria-pressed="false">Windows / Linux</button>
+        </div>
+        <label class="locations-toggle"><input id="locations" type="checkbox" checked> Show locations</label>
+      </div>
+    </header>
+    <div class="intro">
+      <div><h1>Shortcuts, in their place.</h1><p>Hover or focus a numbered control to see its tooltip. Choose an item in the index to find it in the UI.</p></div>
+      <span class="count">24 tooltip types</span>
+    </div>
+    <div class="layout">
+      <div class="scenes">
+        <section aria-labelledby="reader-heading">
+          <div class="section-heading">
+            <div><p class="eyebrow">01 / The reader</p><h2 id="reader-heading">Rail, panel header, and reader settings</h2></div>
+            <div class="reader-views" role="group" aria-label="Illustrated reader panel">
+              <button type="button" data-view="search" aria-pressed="true">Search</button>
+              <button type="button" data-view="epub" aria-pressed="false">EPUB settings</button>
+              <button type="button" data-view="pdf" aria-pressed="false">PDF settings</button>
+            </div>
+          </div>
+          <div class="window reader" id="reader">
+            <div class="titlebar"><span class="window-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>Field Notes · Bokheim</span><span id="format-label">EPUB</span></div>
+            <div class="reader-body">
+              <nav class="rail" aria-label="Reader navigation">
+                <button type="button" class="icon-button" data-hotspot="1" data-tip-side="right"><svg><use href="#i-back"/></svg></button>
+                <div class="rail-gap"></div>
+                <button type="button" class="icon-button" data-hotspot="2" data-tip-side="right"><svg><use href="#i-contents"/></svg></button>
+                <button type="button" class="icon-button" aria-label="Notes"><svg><use href="#i-notes"/></svg></button>
+                <button type="button" class="icon-button active" data-hotspot="3" data-tip-side="right"><svg><use href="#i-search"/></svg></button>
+                <button type="button" class="icon-button settings" id="reader-settings" aria-label="Reader settings">Aa</button>
+                <div class="ring" aria-label="62 percent read">62</div>
+              </nav>
+              <aside class="sidepanel" aria-label="Reader panel">
+                <div class="panel-header"><span class="panel-heading" id="panel-title">Search</span>
+                  <span class="match-count search-only" id="match-count">2 of 7</span>
+                  <button type="button" class="icon-button search-only" data-hotspot="5"><svg><use href="#i-left"/></svg></button>
+                  <button type="button" class="icon-button search-only" data-hotspot="6"><svg><use href="#i-right"/></svg></button>
+                  <button type="button" class="icon-button" data-hotspot="4"><svg><use href="#i-close"/></svg></button>
+                </div>
+                <div data-panel="search">
+                  <div class="query-wrap"><input id="search-input" aria-label="Search current chapter" value="river"><div class="scope">Current chapter · Match case off</div></div>
+                  <div class="results"><p class="result-heading">The river at dusk</p><p class="result">The path followed the <mark>river</mark> past the last of the houses.</p><p class="result current">For a moment the <mark>river</mark> held the whole evening in its surface.</p><p class="result">Across the <mark>river</mark>, a light appeared in an upstairs window.</p></div>
+                </div>
+                <div data-panel="contents" hidden><ol class="toc"><li>The river at dusk</li><li>Paths through the meadow</li><li>A small observation</li><li>The long way home</li></ol></div>
+                <div data-panel="epub" class="settings-body" hidden>
+                  <div class="setting-group"><div class="setting-label">Font size</div><div class="stepper"><button type="button" data-hotspot="7">−</button><output id="epub-size">18px</output><button type="button" data-hotspot="8">+</button></div></div>
+                  <div class="setting-group"><div class="setting-label">Typeface</div><div class="choices"><span class="chosen">Book</span><span>Serif</span><span>Sans serif</span></div></div>
+                  <div class="setting-group"><div class="setting-label">Alignment</div><div class="choices"><span class="chosen">Book</span><span>Left</span><span>Justified</span></div></div>
+                  <div class="setting-label">Line length</div><div class="choices"><span>Short</span><span class="chosen">Medium</span><span>Long</span></div>
+                </div>
+                <div data-panel="pdf" class="settings-body" hidden>
+                  <div class="setting-group"><div class="setting-label">Zoom mode</div><div class="choices"><span>Fit width</span><span>Fit page</span><span class="chosen">Fixed</span></div></div>
+                  <div class="setting-group"><div class="setting-label">Zoom</div><div class="stepper"><button type="button" data-hotspot="9">−</button><output id="pdf-zoom">100%</output><button type="button" data-hotspot="10">+</button></div></div>
+                  <div class="setting-label">Page layout</div><div class="choices"><span class="chosen">Single</span><span>Facing</span></div>
+                </div>
+              </aside>
+              <article class="page" aria-label="Sample reading page">
+                <div class="running-head">Field Notes / Chapter one</div><h3>The river at dusk</h3>
+                <p class="book-copy">The path followed the river past the last of the houses. The day's warmth had settled into the stones, and the branches above the water were very still.</p>
+                <p class="book-copy">For a moment the river held the whole evening in its surface. We stopped at the bridge, with nowhere particular left to go.</p>
+                <p class="book-copy">Across the river, a light appeared in an upstairs window. It was an ordinary thing, but in the gathering blue it seemed enough.</p>
+                <div class="folio">24</div>
+              </article>
+            </div>
+            <div class="reader-note"><span id="reader-note">The shortcut is appended to the tooltip, not to the button or panel title.</span><button type="button" id="reopen" hidden>Reopen Search</button></div>
+          </div>
+          <div class="phone-placements"><span>On a phone, before opening a sheet:</span>
+            <div class="mini-bar"><span class="mini-label">Top bar</span><span>Book title</span><button type="button" class="icon-button" data-hotspot="3"><svg><use href="#i-search"/></svg></button></div>
+            <div class="mini-bar"><span class="mini-label">Bottom bar</span><button type="button" class="icon-button" data-hotspot="2"><svg><use href="#i-contents"/></svg></button><span>Notes</span><span>Aa</span></div>
+          </div>
+        </section>
+        <section aria-labelledby="library-heading">
+          <p class="eyebrow">02 / The library</p><h2 id="library-heading">Settings, navigation, and notifications</h2>
+          <div class="library-grid">
+            <div>
+              <div class="window compact" id="appearance-scene">
+                <div class="titlebar"><span>Compact library / Appearance</span><span>Bokheim</span></div>
+                <div class="compact-header"><button type="button" class="icon-button" data-hotspot="11"><svg><use href="#i-back"/></svg></button><h3>Settings</h3></div>
+                <div class="compact-body"><h4>Appearance</h4><div class="setting-group"><div class="setting-label">UI typeface</div><div class="choices"><span>Serif</span><span class="chosen">Sans serif</span></div></div><div class="setting-label">UI font size</div><div class="stepper"><button type="button" data-hotspot="12">−</button><output id="ui-size">16px</output><button type="button" data-hotspot="13">+</button></div></div>
+              </div><p class="caption">Back appears in compact library navigation. Font-size controls live under Settings → Appearance.</p>
+            </div>
+            <div>
+              <div class="window compact" id="detail-scene">
+                <div class="titlebar"><span>Book details / Notification</span><span>Bokheim</span></div>
+                <div class="compact-header"><button type="button" class="text-button" data-hotspot="14"><svg><use href="#i-back"/></svg>Library</button></div>
+                <div class="detail-body"><div class="cover" aria-hidden="true"><small>E. Morgan</small>Field<br>Notes<small>On looking closely</small></div><div class="detail-copy"><h4>Field Notes</h4><p>E. Morgan</p><p>EPUB · 212 pages</p><button type="button" class="read-button" id="read-demo">Read book</button></div></div>
+                <div class="notification"><span id="notification-copy">Book moved to Reading.</span><button type="button" data-hotspot="15">Undo</button></div>
+              </div><p class="caption">Library is the book-detail return button. Undo sits in the bottom-right confirmation notification after a library change.</p>
+            </div>
+          </div>
+        </section>
+        <section class="extras" aria-labelledby="extra-heading">
+          <p class="eyebrow">03 / More existing shortcuts</p><h2 id="extra-heading">Dialogs, library management, and browse options</h2>
+          <div class="library-grid">
+            <div class="window extra-card">
+              <div class="compact-header"><h3>Folder & name dialogs</h3></div>
+              <div class="dialog-sample"><label>Choose destination</label><div class="choices"><span>Library</span><span class="chosen">Reading</span><span>Reference</span></div><div class="dialog-actions"><button type="button" data-hotspot="16">Cancel</button><button type="button" data-hotspot="17">Choose</button></div></div>
+              <div class="dialog-sample"><label for="demo-create-name">Create folder</label><input class="sample-input" id="demo-create-name" value="Reading"><div class="dialog-actions"><button type="button" data-hotspot="18">Create</button></div></div>
+              <div class="dialog-sample"><label for="demo-rename-name">Rename folder or library</label><input class="sample-input" id="demo-rename-name" value="Fiction"><div class="dialog-actions"><button type="button" data-hotspot="19">Rename</button></div></div>
+              <p class="extra-note">Enter submits while the picker or name field is active. Cancel uses Escape throughout these dialogs.</p>
+            </div>
+            <div class="window extra-card">
+              <div class="compact-header"><h3>Feed dialogs</h3></div>
+              <div class="dialog-sample"><label for="demo-feed-url">Add OPDS feed</label><input class="sample-input" id="demo-feed-url" value="https://example.org/opds"><div class="dialog-actions"><button type="button" data-hotspot="16">Cancel</button><button type="button" data-hotspot="20">Add</button></div></div>
+              <div class="dialog-sample"><label for="demo-feed-user">Sign in to a feed</label><input class="sample-input" id="demo-feed-user" value="Reader"><div class="dialog-actions"><button type="button" data-hotspot="16">Cancel</button><button type="button" data-hotspot="21">Sign in</button></div></div>
+              <p class="extra-note">The existing Enter action submits from the feed’s text fields. These are illustrative fields; nothing is sent.</p>
+            </div>
+            <div class="window extra-card">
+              <div class="compact-header"><h3>Libraries</h3><button type="button" class="icon-button" data-hotspot="22">+</button></div>
+              <div class="switcher-line selected"><span>Fiction</span><button type="button" class="icon-button" data-hotspot="23">⋮</button></div><div class="switcher-line"><span>Reference</span><span>⋮</span></div>
+              <p class="extra-note">Use the arrows to select Add or a library’s management button. Enter opens the selected action.</p>
+            </div>
+            <div class="window extra-card">
+              <div class="compact-header"><h3>Sort & filter</h3><button type="button" class="icon-button" data-hotspot="24"><svg><use href="#i-close"/></svg></button></div>
+              <div class="setting-label">Sort</div><div class="choices"><span class="chosen">Title</span><span>Author</span><span>Added</span></div><div class="setting-label" style="margin-top:18px">Show</div><div class="choices"><span class="chosen">All books</span><span>Downloaded</span></div>
+              <p class="extra-note">The close button dismisses the same browse-options sheet as Escape.</p>
+            </div>
+          </div>
+        </section>
+      </div>
+      <aside class="guide" aria-labelledby="guide-heading">
+        <h2 id="guide-heading">Find a tooltip</h2>
+        <div class="preview" aria-live="polite"><div class="preview-label">Exactly what appears on hover</div><p id="preview-text">Search (⌘F)</p><p id="preview-location">Reader → left rail → Search. Also in the phone's top bar.</p></div>
+        <div id="shortcut-index"></div>
+        <p class="guide-footnote">Shared desktop and phone controls count once. Reader Settings has no direct shortcut; <span id="sidebar-key">⌘S</span> still shows or hides the sidebar.</p>
+      </aside>
+    </div>
+    <footer><span>Illustration of the current controls and shortcut labels. The numbered badges are annotations for this guide.</span><span>Hover · keyboard focus · click an index item</span></footer>
+  </main>
+  <div class="tip" id="tooltip" role="tooltip" hidden></div>
+  <script>
+    const entries = [
+      {id:1,group:'Reader navigation',name:'Return to library',label:'Return to library',mac:'⌫',other:'Backspace',view:'search',location:'Reader → first button in the left rail.'},
+      {id:2,group:'Reader navigation',name:'Contents',label:'Contents',mac:'⌘T',other:'Ctrl+T',view:'search',location:'Reader → left rail → Contents. Also in the phone’s bottom bar.'},
+      {id:3,group:'Reader navigation',name:'Search',label:'Search',mac:'⌘F',other:'Ctrl+F',view:'search',location:'Reader → left rail → Search. Also in the phone’s top bar.'},
+      {id:4,group:'Reader navigation',name:'Close sidebar',label:'Close sidebar',mac:'⎋',other:'Esc',view:'search',location:'Reader → panel header → close button. Present on every panel.'},
+      {id:5,group:'Search results',name:'Previous match',label:'Previous match',mac:'⇧⏎ / ↑',other:'Shift+Enter / Up',view:'search',location:'Reader → Search panel header → left arrow. Up is an alternative while Search is active.'},
+      {id:6,group:'Search results',name:'Next match',label:'Next match',mac:'⏎ / ↓',other:'Enter / Down',view:'search',location:'Reader → Search panel header → right arrow. Down is an alternative while Search is active.'},
+      {id:7,group:'Reader settings',name:'EPUB font smaller',label:'Decrease font size',mac:'⌥-',other:'Alt+-',view:'epub',location:'EPUB reader → Settings (Aa) → Font size → minus button.'},
+      {id:8,group:'Reader settings',name:'EPUB font larger',label:'Increase font size',mac:'⌥+',other:'Alt++',view:'epub',location:'EPUB reader → Settings (Aa) → Font size → plus button.'},
+      {id:9,group:'Reader settings',name:'PDF zoom out',label:'Zoom out',mac:'⌘-',other:'Ctrl+-',view:'pdf',location:'PDF reader → Settings (Aa) → Fixed zoom mode → Zoom → minus button.'},
+      {id:10,group:'Reader settings',name:'PDF zoom in',label:'Zoom in',mac:'⌘+',other:'Ctrl++',view:'pdf',location:'PDF reader → Settings (Aa) → Fixed zoom mode → Zoom → plus button.'},
+      {id:11,group:'Library & application',name:'Back',label:'Back',mac:'⎋',other:'Esc',location:'Compact library navigation → heading → Back button.'},
+      {id:12,group:'Library & application',name:'Interface font smaller',label:'Decrease interface font size',mac:'⌘-',other:'Ctrl+-',location:'Application Settings → Appearance → UI font size → minus button.'},
+      {id:13,group:'Library & application',name:'Interface font larger',label:'Increase interface font size',mac:'⌘+',other:'Ctrl++',location:'Application Settings → Appearance → UI font size → plus button.'},
+      {id:14,group:'Library & application',name:'Book-detail return',label:'Return to library',mac:'⎋',other:'Esc',location:'Book details → Library return button above the cover and title.'},
+      {id:15,group:'Library & application',name:'Undo',label:'Undo',mac:'⌘Z',other:'Ctrl+Z',location:'Library → bottom-right confirmation notification → Undo button.'},
+      {id:16,group:'Dialog actions',name:'Cancel a dialog',label:'Cancel',mac:'⎋',other:'Esc',location:'Dialog → Cancel. Shared by name, feed, folder picker, and confirmation dialogs.'},
+      {id:17,group:'Dialog actions',name:'Choose a folder',label:'Choose',mac:'⏎',other:'Enter',location:'Folder destination picker → Choose. Enter confirms the current folder.'},
+      {id:18,group:'Dialog actions',name:'Create from a name',label:'Create',mac:'⏎',other:'Enter',location:'Create folder or editable library-name dialog → Create. Enter submits from the name field; this hint is omitted when library-import review disables that field.'},
+      {id:19,group:'Dialog actions',name:'Rename folder / library',label:'Rename',mac:'⏎',other:'Enter',location:'Rename folder or library → Rename. Enter submits the active name field.'},
+      {id:20,group:'Dialog actions',name:'Add an OPDS feed',label:'Add',mac:'⏎',other:'Enter',location:'Add OPDS feed dialog → Add. Enter submits from a feed field.'},
+      {id:21,group:'Dialog actions',name:'Sign in to a feed',label:'Sign in',mac:'⏎',other:'Enter',location:'Feed sign-in dialog → Sign in. Enter submits from the username or password field.'},
+      {id:22,group:'Library management',name:'Add library',label:'Add library',mac:'⏎',other:'Enter',location:'Libraries switcher → plus button. Enter activates it when selected by the keyboard cursor.'},
+      {id:23,group:'Library management',name:'Manage a library',label:'Manage Fiction',mac:'⏎',other:'Enter',location:'Libraries switcher → a library’s three-dot button. Move right to select it, then Enter opens its menu.'},
+      {id:24,group:'Library management',name:'Close browse options',label:'Close',mac:'⎋',other:'Esc',location:'Compact library → Sort & filter sheet → close button.'}
+    ];
+    const byId = new Map(entries.map(entry => [entry.id, entry]));
+    let platform = 'mac', selected = 3, activeView = 'search', tipTarget = null, match = 2;
+    let fontSize = 18, zoom = 100, uiSize = 16;
+    const tooltip = document.getElementById('tooltip');
+    const key = entry => entry[platform];
+    const tooltipText = (entry, target) => `${entry.id === 1 && target?.dataset.shortLabel ? 'Library' : entry.label} (${key(entry)})`;
+
+    for (const group of [...new Set(entries.map(entry => entry.group))]) {
+      const section = document.createElement('div'); section.className = 'guide-group';
+      const heading = document.createElement('h3'); heading.textContent = group; section.append(heading);
+      for (const entry of entries.filter(entry => entry.group === group)) {
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'guide-item'; button.dataset.entry = entry.id;
+        const number = document.createElement('span'); number.className = 'guide-num'; number.textContent = entry.id;
+        const label = document.createElement('span'); label.className = 'guide-name'; label.textContent = entry.name;
+        const shortcut = document.createElement('span'); shortcut.className = 'guide-key'; shortcut.dataset.shortcut = entry.id;
+        button.append(number, label, shortcut); button.addEventListener('click', () => locate(entry)); section.append(button);
+      }
+      document.getElementById('shortcut-index').append(section);
+    }
+
+    function select(entry) {
+      selected = entry.id;
+      document.getElementById('preview-text').textContent = tooltipText(entry);
+      document.getElementById('preview-location').textContent = entry.location;
+      document.querySelectorAll('[data-entry]').forEach(button => button.setAttribute('aria-pressed', String(Number(button.dataset.entry) === selected)));
+    }
+    function showTip(target) {
+      if (!target.getClientRects().length) return;
+      if (tipTarget) tipTarget.removeAttribute('aria-describedby');
+      tipTarget = target;
+      const entry = byId.get(Number(target.dataset.hotspot)); select(entry);
+      tooltip.textContent = tooltipText(entry, target); tooltip.hidden = false; target.setAttribute('aria-describedby', 'tooltip');
+      const box = target.getBoundingClientRect(), tip = tooltip.getBoundingClientRect();
+      let left = target.dataset.tipSide === 'right' ? box.right + 12 : box.left + (box.width - tip.width) / 2;
+      let top = target.dataset.tipSide === 'right' ? box.top + (box.height - tip.height) / 2 : box.bottom + 10;
+      if (top + tip.height > innerHeight - 10) top = box.top - tip.height - 10;
+      tooltip.style.left = `${Math.max(10, Math.min(left, innerWidth - tip.width - 10))}px`;
+      tooltip.style.top = `${Math.max(10, top)}px`;
+    }
+    function hideTip() {
+      tooltip.hidden = true;
+      if (tipTarget) tipTarget.removeAttribute('aria-describedby');
+      tipTarget = null;
+    }
+    function setView(view) {
+      activeView = view; hideTip(); document.getElementById('reader').classList.remove('closed');
+      document.getElementById('reopen').hidden = true;
+      document.getElementById('reader-note').textContent = 'The shortcut is appended to the tooltip, not to the button or panel title.';
+      document.querySelectorAll('[data-panel]').forEach(panel => panel.hidden = panel.dataset.panel !== view);
+      document.querySelectorAll('.search-only').forEach(control => control.hidden = view !== 'search');
+      document.getElementById('panel-title').textContent = view === 'search' ? 'Search' : view === 'contents' ? 'Contents' : 'Settings';
+      document.getElementById('format-label').textContent = view === 'pdf' ? 'PDF' : 'EPUB';
+      document.querySelectorAll('[data-view]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.view === view)));
+      document.querySelectorAll('.rail .icon-button').forEach(button => button.classList.toggle('active', view === 'search' ? button.dataset.hotspot === '3' : view === 'contents' ? button.dataset.hotspot === '2' : button.id === 'reader-settings'));
+    }
+    function locate(entry) {
+      document.querySelectorAll('.spotlight').forEach(control => control.classList.remove('spotlight'));
+      if (entry.view) setView(entry.view);
+      const target = document.querySelector(`[data-hotspot="${entry.id}"]`);
+      target.classList.add('spotlight'); target.scrollIntoView({behavior:'smooth',block:'center'});
+      target.focus({preventScroll:true}); select(entry);
+      // Reposition once smooth scrolling finishes; hover/focus also works without motion.
+      setTimeout(() => { if (selected === entry.id) showTip(target); }, 450);
+    }
+    function updatePlatform() {
+      document.documentElement.dataset.platform = platform;
+      document.querySelectorAll('[data-platform-choice]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.platformChoice === platform)));
+      document.querySelectorAll('[data-shortcut]').forEach(element => element.textContent = key(byId.get(Number(element.dataset.shortcut))));
+      document.querySelectorAll('[data-hotspot]').forEach(button => button.setAttribute('aria-label', tooltipText(byId.get(Number(button.dataset.hotspot)), button)));
+      document.getElementById('sidebar-key').textContent = platform === 'mac' ? '⌘S' : 'Ctrl+S';
+      select(byId.get(selected)); if (tipTarget) showTip(tipTarget);
+    }
+    document.querySelectorAll('[data-hotspot]').forEach(button => {
+      const entry = byId.get(Number(button.dataset.hotspot));
+      const marker = document.createElement('span'); marker.className = 'marker'; marker.textContent = entry.id; marker.setAttribute('aria-hidden','true'); button.append(marker);
+      button.addEventListener('mouseenter', () => showTip(button)); button.addEventListener('mouseleave', hideTip);
+      button.addEventListener('focus', () => showTip(button)); button.addEventListener('blur', hideTip);
+      button.addEventListener('click', () => {
+        select(entry);
+        if (entry.id === 2) setView('contents');
+        if (entry.id === 3) { setView('search'); document.getElementById('search-input').focus({preventScroll:true}); }
+        if (entry.id === 4) { document.getElementById('reader').classList.add('closed'); document.getElementById('reopen').hidden = false; document.getElementById('reader-note').textContent = 'The sidebar is hidden. Reopen Search to show the controls again.'; hideTip(); }
+        if (entry.id === 5 || entry.id === 6) { match = ((match - 1 + (entry.id === 5 ? -1 : 1) + 7) % 7) + 1; document.getElementById('match-count').textContent = `${match} of 7`; }
+        if (entry.id === 7 || entry.id === 8) { fontSize = Math.max(12,Math.min(28,fontSize + (entry.id === 7 ? -1 : 1))); document.getElementById('epub-size').textContent = `${fontSize}px`; document.getElementById('reader').style.setProperty('--book-size',`${fontSize}px`); }
+        if (entry.id === 9 || entry.id === 10) { zoom = Math.max(50,Math.min(200,zoom + (entry.id === 9 ? -10 : 10))); document.getElementById('pdf-zoom').textContent = `${zoom}%`; }
+        if (entry.id === 12 || entry.id === 13) { uiSize = Math.max(12,Math.min(24,uiSize + (entry.id === 12 ? -1 : 1))); document.getElementById('ui-size').textContent = `${uiSize}px`; }
+        if (entry.id === 15) document.getElementById('notification-copy').textContent = 'Move undone. Book restored.';
+      });
+    });
+    document.querySelectorAll('[data-platform-choice]').forEach(button => button.addEventListener('click', () => { platform = button.dataset.platformChoice; updatePlatform(); }));
+    document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => { setView(button.dataset.view); select(byId.get(button.dataset.view === 'search' ? 3 : button.dataset.view === 'epub' ? 7 : 9)); }));
+    document.getElementById('reader-settings').addEventListener('click', () => setView(activeView === 'pdf' ? 'pdf' : 'epub'));
+    document.getElementById('reopen').addEventListener('click', () => { setView('search'); document.getElementById('search-input').focus({preventScroll:true}); });
+    document.getElementById('read-demo').addEventListener('click', () => { setView('search'); document.getElementById('reader').scrollIntoView({behavior:'smooth',block:'center'}); });
+    document.getElementById('locations').addEventListener('change', event => document.documentElement.dataset.locations = String(event.target.checked));
+    document.addEventListener('keydown', event => { if (event.key === 'Escape') hideTip(); });
+    document.addEventListener('scroll', hideTip, {capture:true,passive:true});
+    window.addEventListener('resize', hideTip);
+    updatePlatform();
+  </script>
+</body>
+</html>

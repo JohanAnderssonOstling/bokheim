@@ -26,6 +26,10 @@ pub(crate) fn evict_book_files(handle: &Handle, relative_paths: &[RelativeBookPa
                         let _ = std::fs::remove_dir(parent);
                     }
                 }
+                let mapping = path.join(audiobook_folder::PATH_MAPPING_FILE);
+                if mapping.try_exists()? {
+                    std::fs::remove_file(mapping)?;
+                }
                 let _ = std::fs::remove_dir(&path);
             } else {
                 std::fs::remove_file(&path)?;

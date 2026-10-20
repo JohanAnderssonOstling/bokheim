@@ -5,6 +5,7 @@
 //! and debounces position updates.
 
 use library_backend::ContentHash;
+use std::cell::RefCell;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::time::Duration;
@@ -116,6 +117,7 @@ impl<P: 'static> PositionWriter<P> {
 /// 0–100: readers work in their own coordinates — an EPUB layout fraction, a
 /// page out of a count — and convert exactly once, in the constructor for
 /// their format.
+#[derive(Clone)]
 pub(crate) struct StoredPosition {
     position: String,
     percent: f32,
@@ -160,6 +162,7 @@ impl StoredPosition {
 /// coordinates.
 pub(crate) struct ReadingPositionWriter {
     writer: PositionWriter<StoredPosition>,
+    narration_position: RefCell<Option<(u64, StoredPosition)>>,
 }
 
 impl ReadingPositionWriter {
@@ -176,10 +179,82 @@ impl ReadingPositionWriter {
             },
             library,
         );
-        Self { writer }
+        Self { writer, narration_position: RefCell::new(None) }
     }
 
-    pub(crate) fn record(&self, position: StoredPosition) {
+    pub(crate) fn record(&self, position: StoredPosition, navigation_revision: u64) {
+        let mut narration = self.narration_position.borrow_mut();
+        let position = match narration.as_ref() {
+            Some((revision, spoken)) if *revision == navigation_revision => spoken.clone(),
+            _ => {
+                *narration = None;
+                position
+            }
+        };
         self.writer.record(position, "reading position");
+    }
+
+    /// Keep the audible source address until the user navigates. Following a
+    /// passage or reflowing its page may emit a coarser viewport position later.
+    pub(crate) fn record_narration(&self, position: StoredPosition, navigation_revision: u64) {
+        *self.narration_position.borrow_mut() = Some((navigation_revision, position.clone()));
+        self.writer.record(position, "reading position");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn writer() -> (ReadingPositionWriter, async_channel::Receiver<StoredPosition>) {
+        let (updates, incoming) = async_channel::unbounded();
+        (ReadingPositionWriter { writer: PositionWriter { updates }, narration_position: RefCell::new(None) }, incoming)
+    }
+
+    #[test]
+    fn spoken_epub_chunks_survive_coarser_viewport_updates_until_manual_navigation() {
+        let (writer, incoming) = writer();
+        let viewport = || StoredPosition::epub("epubcfi(/6/2!/4/2/1:0)".into(), 0.2).within(Some("chapter.xhtml".into()));
+        let spoken = "epubcfi(/6/2!/4/2/1:120)";
+        writer.record_narration(StoredPosition::epub(spoken.into(), 0.2).within(Some("chapter.xhtml".into())), 7);
+        assert_eq!(incoming.try_recv().unwrap().position, spoken);
+
+        // Layout can publish its page start after the playback event, including
+        // while narration is paused or after it has stopped.
+        writer.record(viewport(), 7);
+        let saved = incoming.try_recv().unwrap();
+        assert_eq!(saved.position, spoken);
+        assert_eq!(saved.percent, 20.0);
+        assert_eq!(saved.entry.as_deref(), Some("chapter.xhtml"));
+
+        let next_chunk = "epubcfi(/6/2!/4/2/1:240)";
+        writer.record_narration(StoredPosition::epub(next_chunk.into(), 0.2), 7);
+        assert_eq!(incoming.try_recv().unwrap().position, next_chunk);
+        writer.record(viewport(), 7);
+        assert_eq!(incoming.try_recv().unwrap().position, next_chunk);
+
+        writer.record(viewport(), 8);
+        assert_eq!(incoming.try_recv().unwrap().position, viewport().position);
+        assert!(writer.narration_position.borrow().is_none());
+    }
+
+    #[test]
+    fn spoken_pdf_block_keeps_its_full_page_offset_until_manual_navigation() {
+        let (writer, incoming) = writer();
+        let spoken = || StoredPosition::pdf_page(4, 0.63, 20);
+        writer.record_narration(spoken(), 3);
+        assert_eq!(incoming.try_recv().unwrap().position, spoken().position);
+
+        writer.record(StoredPosition::pdf_page(4, 0.5, 20), 3);
+        let saved = incoming.try_recv().unwrap();
+        assert_eq!(saved.position, spoken().position);
+        assert_eq!(saved.percent, spoken().percent);
+        assert_eq!(saved.entry, spoken().entry);
+
+        let navigated = StoredPosition::pdf_page(5, 0.0, 20);
+        let expected = navigated.position.clone();
+        writer.record(navigated, 4);
+        assert_eq!(incoming.try_recv().unwrap().position, expected);
+        assert!(writer.narration_position.borrow().is_none());
     }
 }

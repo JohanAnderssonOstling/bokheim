@@ -1,3 +1,5 @@
+import hashlib
+import sqlite3
 import importlib.util
 import io
 import json
@@ -89,9 +91,33 @@ class StandardEbooksTests(unittest.TestCase):
                     archive.writestr('nested/book.epub', content.getvalue())
             entries = importer.inventory(root)
             self.assertEqual(len(entries), 1)
-            self.assertTrue(entries[0]['preserve_covers'])
+            self.assertFalse(entries[0]['preserve_covers'])
             self.assertEqual(len(entries[0]['source_evidence']['archive_observations']), 2)
             self.assertEqual(len(list(root.iterdir())), 2)
+
+    def test_cover_verification_allows_embedded_restoration_but_rejects_other_cover_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'covers').mkdir()
+            with sqlite3.connect(root / 'curation.sqlite3') as db:
+                db.execute('CREATE TABLE source_entry(source TEXT,book_hash TEXT)')
+                db.execute("INSERT INTO source_entry VALUES('standardebooks.org','incoming')")
+                db.execute("INSERT INTO source_entry VALUES('publicdomainlibrary.org','preferred')")
+            originals = {}
+            for key in ('incoming', 'preferred'):
+                name = key + '-card.jpg'
+                (root / 'covers' / name).write_bytes(b'previous cover')
+                originals[name] = hashlib.sha256(b'previous cover').hexdigest()
+            (root / 'covers/incoming-card.jpg').write_bytes(b'embedded Standard Ebooks cover')
+            changed = importer.verify_existing_covers(root, originals)
+            self.assertEqual([row['file'] for row in changed], ['incoming-card.jpg'])
+            (root / 'covers/preferred-card.jpg').write_bytes(b'unexpected replacement')
+            with self.assertRaisesRegex(RuntimeError, 'Non-Standard-Ebooks covers changed'):
+                importer.verify_existing_covers(root, originals)
+            (root / 'covers/preferred-card.jpg').write_bytes(b'previous cover')
+            (root / 'covers/incoming-card.jpg').unlink()
+            with self.assertRaisesRegex(RuntimeError, 'disappeared'):
+                importer.verify_existing_covers(root, originals)
 
     def test_rate_limit_saves_progress_and_stops_without_retrying_or_requesting_next_book(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -1,7 +1,7 @@
 use gpui::prelude::*;
-use gpui::{Div, ElementId, FontWeight, MouseButton, SharedString, Stateful, div, px, rems};
+use gpui::{App, Div, ElementId, FontWeight, KeyDownEvent, MouseButton, SharedString, Stateful, Window, div, px, rems};
 
-use gpui_component::{Icon, IconName};
+use gpui_component::{Icon, IconName, tooltip::Tooltip};
 
 use crate::{BrowserTheme, RADIUS_MD, SPACE_MD, SPACE_SM, SPACE_XXS, TEXT_MD, TEXT_XS};
 
@@ -11,7 +11,16 @@ use crate::{BrowserTheme, RADIUS_MD, SPACE_MD, SPACE_SM, SPACE_XXS, TEXT_MD, TEX
 /// On its own it fills its parent, so callers pin it to the window with
 /// [`anchor_to_window`].
 pub fn modal_overlay() -> Div {
-    crate::absolute_full_size().flex().items_center().justify_center().p(px(crate::SPACE_MD))
+    crate::absolute_full_size().flex().items_center().justify_center().p(px(crate::SPACE_MD)).on_key_down(contain_modal_key)
+}
+
+/// Child controls handle bindings first. Contain remaining non-text keys so
+/// navigation cannot reach the page underneath. Printable input must continue
+/// to the platform input handler; Escape keeps the caller's dismissal path.
+fn contain_modal_key(event: &KeyDownEvent, _: &mut Window, cx: &mut App) {
+    if event.keystroke.key != "escape" && event.keystroke.key_char.as_deref().is_none_or(|text| text.chars().all(char::is_control)) {
+        cx.stop_propagation();
+    }
 }
 
 /// Pins a modal layer to the window's origin at the window's size, so the
@@ -25,7 +34,8 @@ pub fn anchor_to_window(overlay: Div, window: &gpui::Window) -> gpui::Anchored {
     let viewport = window.viewport_size();
     #[cfg(feature = "kobo")]
     let viewport = gpui::size(viewport.width, viewport.height - gpui_kobo::keyboard_height(window));
-    gpui::anchored().position(gpui::point(px(0.0), px(0.0))).child(overlay.w(viewport.width).h(viewport.height))
+    let insets = window.insets().effective();
+    gpui::anchored().position(gpui::point(insets.left, insets.top)).child(overlay.w((viewport.width - insets.left - insets.right).max(px(0.0))).h((viewport.height - insets.top - insets.bottom).max(px(0.0))))
 }
 
 /// A modal's pointer-blocking backdrop.
@@ -57,7 +67,9 @@ pub fn confirmation_dialog(dialog: gpui_component::dialog::AlertDialog, window: 
 /// Passed to the dialog as its footer, with nothing above it. The dialog's own
 /// minimum height and the gap it keeps between a header and a footer would
 /// otherwise leave an empty band over the row, so both are cleared.
-pub fn confirmation_dialog_row(dialog: gpui_component::dialog::AlertDialog, question: impl Into<SharedString>, cancel: gpui_component::button::Button, confirm: gpui_component::button::Button, theme: BrowserTheme) -> gpui_component::dialog::AlertDialog {
+pub fn confirmation_dialog_row(
+    dialog: gpui_component::dialog::AlertDialog, question: impl Into<SharedString>, cancel: gpui_component::button::Button, confirm: gpui_component::button::Button, theme: BrowserTheme,
+) -> gpui_component::dialog::AlertDialog {
     dialog.min_h_0().gap_0().footer(
         div()
             .w_full()
@@ -76,7 +88,7 @@ pub fn confirmation_dialog_row(dialog: gpui_component::dialog::AlertDialog, ques
 /// floating centered. The caller supplies the scrim and surface, same as
 /// `modal_overlay`, so it keeps its own identity and dismissal behavior.
 pub fn bottom_sheet_overlay() -> Div {
-    crate::absolute_full_size().flex().flex_col().justify_end()
+    crate::absolute_full_size().flex().flex_col().justify_end().on_key_down(contain_modal_key)
 }
 
 /// The sheet's own surface: full width, capped height with its own scroll,
@@ -105,12 +117,14 @@ pub fn bottom_sheet_header(title: impl Into<SharedString>, theme: BrowserTheme) 
 /// A bottom sheet's close button, for the end of `bottom_sheet_header`: the
 /// muted glyph, centred in a touch target on a phone.
 pub fn bottom_sheet_close_button(id: impl Into<ElementId>, theme: BrowserTheme) -> Stateful<Div> {
+    let tooltip = crate::shortcut_tooltip("Close", "escape");
     div()
         .id(id)
         .flex_none()
         .cursor_pointer()
         .text_color(theme.text_muted)
-        .when(crate::TOUCH_UI, |button| button.size(rems(crate::TOUCH_TARGET_REM)).flex().items_center().justify_center())
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .when(crate::touch_ui(), |button| button.size(rems(crate::TOUCH_TARGET_REM)).flex().items_center().justify_center())
         .child(Icon::new(IconName::Close).size(px(16.0)))
 }
 
@@ -143,4 +157,55 @@ pub fn bottom_sheet_row(id: impl Into<ElementId>, label: impl Into<SharedString>
         .when(checked, |row| row.bg(theme.accent).text_color(theme.accent_text))
         .child(div().flex_1().min_w_0().whitespace_normal().child(label.into()))
         .when(checked, |row| row.child(Icon::new(IconName::Check).size(px(15.0))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Context, Entity, Focusable, Render, Subscription, TestAppContext};
+    use gpui_component::input::{Input, InputEvent, InputState};
+
+    struct ModalTest {
+        input: Entity<InputState>,
+        sheet: bool,
+        submitted: usize,
+        background_keys: Vec<String>,
+        _subscription: Subscription,
+    }
+
+    impl Render for ModalTest {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let overlay = if self.sheet { bottom_sheet_overlay() } else { modal_overlay() };
+            div().size_full().on_key_down(cx.listener(|view, event: &KeyDownEvent, _, _| view.background_keys.push(event.keystroke.key.clone()))).child(overlay.child(Input::new(&self.input)))
+        }
+    }
+
+    #[gpui::test]
+    fn modal_and_sheet_keep_navigation_keys_without_breaking_typing_or_escape(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        for sheet in [false, true] {
+            let (root, cx) = cx.add_window_view(|window, cx| {
+                let view = cx.new(|cx| {
+                    let input = cx.new(|cx| InputState::new(window, cx));
+                    input.read(cx).focus_handle(cx).focus(window, cx);
+                    let subscription = cx.subscribe(&input, |view: &mut ModalTest, _, event, _| {
+                        if matches!(event, InputEvent::PressEnter { .. }) {
+                            view.submitted += 1;
+                        }
+                    });
+                    ModalTest { input, sheet, submitted: 0, background_keys: Vec::new(), _subscription: subscription }
+                });
+                gpui_component::Root::new(view, window, cx)
+            });
+            let view = cx.update(|_, cx| root.read(cx).view().clone().downcast::<ModalTest>().ok().unwrap());
+            cx.simulate_keystrokes("a b c enter pagedown");
+            view.read_with(cx, |view, cx| {
+                assert_eq!(view.input.read(cx).value().as_str(), "abc");
+                assert_eq!(view.submitted, 1);
+                assert!(!view.background_keys.iter().any(|key| matches!(key.as_str(), "enter" | "pagedown")));
+            });
+            cx.simulate_keystrokes("escape");
+            view.read_with(cx, |view, _| assert_eq!(view.background_keys.last().map(String::as_str), Some("escape")));
+        }
+    }
 }

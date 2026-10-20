@@ -13,7 +13,7 @@ case "$platform" in
     cargo test --release -p linux-update-host
     python3 apps/desktop-gpui/scripts/build.py
     export APPIMAGE_EXTRACT_AND_RUN=1
-    RELEASE_DIRECTORY="$output" DESKTOP_BINARY="${CARGO_TARGET_DIR:-$root/target}/release/desktop-gpui" \
+    RELEASE_DIRECTORY="$output" DESKTOP_BINARY="${CARGO_TARGET_DIR:-$root/target}/release/bokheim" \
       bash apps/desktop-gpui/linux/appimage/build-appimage.sh
     "$output/Bokheim-x86_64.AppImage" --bokheim-update-info > "$output/update-info-linux-x86_64-appimage.json"
     python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["schema"] > 0 and p["target"] == "linux-x86_64-appimage"' "$output/update-info-linux-x86_64-appimage.json"
@@ -21,10 +21,10 @@ case "$platform" in
     scratch=$(mktemp -d)
     trap 'rm -r -- "$scratch"' EXIT
     (cd "$scratch" && "$output/Bokheim-x86_64.AppImage" --appimage-extract >/dev/null)
-    test -x "$scratch/squashfs-root/usr/bin/desktop-gpui"
+    test -x "$scratch/squashfs-root/usr/bin/bokheim"
     test -f "$scratch/squashfs-root/se.bokheim.Bokheim.desktop"
     test -e "$scratch/squashfs-root/se.bokheim.Bokheim.svg" -o -e "$scratch/squashfs-root/se.bokheim.Bokheim.png"
-    ldd "$scratch/squashfs-root/usr/bin/desktop-gpui" > "$scratch/ldd.txt"
+    ldd "$scratch/squashfs-root/usr/bin/bokheim" > "$scratch/ldd.txt"
     if grep -F 'not found' "$scratch/ldd.txt"; then exit 1; fi
     bash apps/desktop-gpui/linux/appimage/verify-glibc-compatibility.sh "$output/Bokheim-x86_64.AppImage" 2.35
     bash apps/desktop-gpui/linux/appimage/verify-glibc-compatibility.sh "$scratch/squashfs-root" 2.35

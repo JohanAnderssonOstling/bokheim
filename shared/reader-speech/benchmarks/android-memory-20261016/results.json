@@ -1,0 +1,124 @@
+{
+  "date": "2026-10-16",
+  "device": "Sony Xperia 10 IV XQ-CC54, Android 13",
+  "voice": "Alba en_GB medium, 2 inference threads",
+  "native_runtime": {
+    "sherpa_onnx": "1.13.8",
+    "native_git_sha": "11afbd00",
+    "onnxruntime": "1.28.2"
+  },
+  "sha256": {
+    "model": "c904d007a8047ab13628b021351b983d0a2627c0d7a81c64a6fe9ad661adb1cf",
+    "sherpa_library": "c85e2382e2ca12b0513826be926eaccfea896b4cbf568182e287671ba526f80d",
+    "onnxruntime_library": "33847ad43bffe204699fd4a27f7f3603452a8cdaf2f9a44983a0bc31ffcf2da1",
+    "probe_source": "ed1395c11638bd1dd740dc1e173dfa23eb3e93af03aea2deec872ad03e8e7fdf",
+    "workload": "53e5695db41f3fbda0870ec152f182282300063b511012892fa3ac20dee21fab",
+    "patched_rust_loader": "96cf516fe74bd2318646eaaaa1adb0bc56c4337b61f17d9c9a57d2ec8c53977b"
+  },
+  "measurement": {
+    "rss": "/proc/self/status VmRSS, RssAnon and VmHWM in KiB",
+    "heap": "Android mallinfo uordblks / 1024; allocated heap includes nonresident arena regions",
+    "sampling": "After each generated waveform is checked for finite, nonzero samples and freed",
+    "workload": "9 passages of varying lengths, repeated 4 times for primary comparisons and twice for secondary comparisons",
+    "affinity_comparison": "Fresh processes, both restricted by taskset c0 to CPUs 6 and 7; same passage sequence and thread count"
+  },
+  "results": {
+    "default": {
+      "completed": true,
+      "synthesis_count": 36,
+      "last_loaded_rss_kib": 783452,
+      "last_loaded_heap_allocated_kib": 1165345,
+      "maximum_observed_peak_rss_kib": 822160,
+      "warm_synthesis_seconds": 85.0944,
+      "warm_audio_seconds": 315.7217,
+      "warm_synthesis_per_audio_second": 0.2695234442231877,
+      "after_model_drop_rss_kib": 48764
+    },
+    "no-arena": {
+      "completed": true,
+      "synthesis_count": 36,
+      "last_loaded_rss_kib": 147536,
+      "last_loaded_heap_allocated_kib": 55304,
+      "maximum_observed_peak_rss_kib": 461696,
+      "warm_synthesis_seconds": 57.6795,
+      "warm_audio_seconds": 315.8378,
+      "warm_synthesis_per_audio_second": 0.18262380247076188,
+      "after_model_drop_rss_kib": 91616
+    },
+    "no-pattern": {
+      "completed": true,
+      "synthesis_count": 18,
+      "last_loaded_rss_kib": 539696,
+      "last_loaded_heap_allocated_kib": 623783,
+      "maximum_observed_peak_rss_kib": 543772,
+      "warm_synthesis_seconds": 15.1918,
+      "warm_audio_seconds": 105.0586,
+      "warm_synthesis_per_audio_second": 0.14460310721825725,
+      "after_model_drop_rss_kib": 88152
+    },
+    "default-affinity-retry": {
+      "completed": true,
+      "synthesis_count": 18,
+      "last_loaded_rss_kib": 776480,
+      "last_loaded_heap_allocated_kib": 1165266,
+      "maximum_observed_peak_rss_kib": 779900,
+      "warm_synthesis_seconds": 15.9554,
+      "warm_audio_seconds": 104.7453,
+      "warm_synthesis_per_audio_second": 0.15232568907626404,
+      "after_model_drop_rss_kib": 93644
+    },
+    "no-arena-affinity": {
+      "completed": true,
+      "synthesis_count": 18,
+      "last_loaded_rss_kib": 145804,
+      "last_loaded_heap_allocated_kib": 71052,
+      "maximum_observed_peak_rss_kib": 458992,
+      "warm_synthesis_seconds": 20.0542,
+      "warm_audio_seconds": 105.4187,
+      "warm_synthesis_per_audio_second": 0.19023380102391702,
+      "after_model_drop_rss_kib": 90044
+    },
+    "no-arena-no-pattern-affinity": {
+      "completed": true,
+      "synthesis_count": 18,
+      "last_loaded_rss_kib": 147068,
+      "last_loaded_heap_allocated_kib": 68066,
+      "maximum_observed_peak_rss_kib": 427464,
+      "warm_synthesis_seconds": 24.830000000000002,
+      "warm_audio_seconds": 105.1052,
+      "warm_synthesis_per_audio_second": 0.23623950099519342,
+      "after_model_drop_rss_kib": 93596
+    }
+  },
+  "rust_loader_verification": "Existing alba_memory example cross-compiled after the Android loader change and run with the shipped native libraries/model. See rust-fixed.csv. The generated provider options file contained EnableCpuMemArena=0.",
+  "conclusion": "The default ONNX Runtime CPU arena retains synthesis workspaces and expands in large steps. Disabling the arena returns large temporary allocations between synthesis calls without unloading the model. Disabling memory patterns alone leaves substantial retained arena memory.",
+  "limitations": [
+    "Standalone runtime measurements exclude the reader UI and playback queue.",
+    "This is not a full APK test or an overnight stability test.",
+    "Early primary comparisons did not pin CPU affinity; use the affinity comparison for timing. CPU clocks and other device activity were not fixed.",
+    "Output audio duration varies slightly because VITS synthesis is stochastic.",
+    "The first attempt at the affinity baseline was interrupted by a USB disconnect and is excluded; the retry is recorded."
+  ],
+  "upstream_sources": [
+    "https://onnxruntime.ai/docs/get-started/with-c.html#features",
+    "https://github.com/k2-fsa/sherpa-onnx/blob/v1.13.8/sherpa-onnx/csrc/session.cc",
+    "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v1.13.8/sherpa-onnx/c-api/c-api.h"
+  ],
+  "reproduce": [
+    "Download the linked c-api.h into this directory; compile probe.c with the Android NDK aarch64-linux-android26-clang, -O2 -lm and the two libraries from target/android-speech/jniLibs/arm64-v8a.",
+    "Copy the executable, both libraries, bundled Alba model directory, passages.txt and configuration files to a temporary directory on the phone.",
+    "Run with LD_LIBRARY_PATH set to that directory: probe MODEL_DIRECTORY cpu passages.txt 4, then a fresh process: probe MODEL_DIRECTORY cpu:ABSOLUTE_NO_ARENA_CONFIG_PATH passages.txt 4.",
+    "Use taskset c0 and 2 repeats for the CPU affinity comparison. No sound is played; every generated waveform is freed."
+  ],
+  "validation": {
+    "android_rust_loader_build": "passed: cargo build --offline --release --target aarch64-linux-android -p reader-speech --example alba_memory",
+    "android_rust_loader_on_device": "passed; see rust-fixed.csv",
+    "existing_host_speech_tests": {
+      "passed": 57,
+      "failed": 0,
+      "ignored": 1,
+      "note": "The test compiler completed normally. Shared SSHFS storage stalled linking, so the exact linker inputs were copied locally and linked with the same rust-lld arguments, changing only cache paths and the output path."
+    },
+    "full_apk_redeployed": false
+  }
+}

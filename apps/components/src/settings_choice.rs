@@ -5,7 +5,7 @@ use gpui::{Div, ElementId, SharedString, div, px, rems};
 use gpui_component::Selectable;
 use gpui_component::button::{Button, ButtonVariants};
 
-use crate::{BrowserTheme, RADIUS_SM, SETTINGS_CONTROL_GAP, SETTINGS_CONTROL_SIZE_REM, SPACE_SM, TEXT_SM, base_button};
+use crate::{BrowserTheme, RADIUS_SM, SETTINGS_CONTROL_GAP, SPACE_SM, TEXT_SM, base_button, settings_control_size_rem};
 
 /// One quiet outline with single-pixel separators between equal-width choices.
 /// Callers choose the width to suit their settings surface.
@@ -28,7 +28,7 @@ pub fn settings_choice_button(id: impl Into<ElementId>, label: impl Into<SharedS
         .selected(selected)
         .flex_1()
         .min_w_0()
-        .h(rems(SETTINGS_CONTROL_SIZE_REM))
+        .h(rems(settings_control_size_rem()))
         .px(px(SPACE_SM))
         .rounded(px(0.0))
         .border_0()

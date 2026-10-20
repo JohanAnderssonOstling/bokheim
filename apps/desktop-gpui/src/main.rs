@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use app::{AppDataLocation, host::BackendLaunch};
 
 fn main() {
@@ -53,11 +55,14 @@ fn main() {
     #[cfg(target_os = "windows")]
     let startup_permit = desktop_gpui::windows_updates::trial_pending().then(app::host::defer_background_work);
     gpui_platform::application().with_assets(ui_components::Assets).run(move |cx| {
+        cx.set_app_identity("se.bokheim.Bokheim", "Bokheim");
         let opened = desktop_gpui::open_ui(backend_context, desktop_gpui::UiLaunchOptions::DESKTOP, None, Some(activations), cx);
         #[cfg(target_os = "windows")]
         if opened.is_some() {
             desktop_gpui::windows_updates::healthy().expect("failed to commit healthy update startup");
-            if let Some(permit) = startup_permit { permit.release(); }
+            if let Some(permit) = startup_permit {
+                permit.release();
+            }
         }
         #[cfg(target_os = "linux")]
         if opened.is_some() {

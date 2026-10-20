@@ -89,7 +89,7 @@ impl SyncPage {
             return;
         }
         let operation = super::account::login(&self.services.backend, email, password);
-        self.start_snapshot_operation("Signing in…", "Signed in", true, operation, cx);
+        self.start_snapshot_operation("Signing in…", None, true, operation, cx);
     }
 
     pub(super) fn start_registration(&mut self, cx: &mut Context<Self>) {
@@ -132,7 +132,7 @@ impl SyncPage {
             return;
         }
         let operation = super::account::verify_email(&self.services.backend, email, pin);
-        self.start_snapshot_operation("Verifying email…", "Email verified", false, operation, cx);
+        self.start_snapshot_operation("Verifying email…", Some("Email verified"), false, operation, cx);
     }
 
     pub(super) fn start_password_reset_request(&mut self, cx: &mut Context<Self>) {

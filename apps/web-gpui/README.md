@@ -228,3 +228,54 @@ tabs keep running; deployment retains their immutable assets for later requests.
 The web Settings page opens a real HTML authentication dialog so password
 managers can discover the username and password fields. It submits through the
 existing Rust account client.
+
+## Mobile browser input and layout
+
+The browser uses the shared phone controls when its primary pointer is coarse
+(`(pointer: coarse)`). Control density is independent of the existing window
+width classes: a tablet can keep its sidebar while using touch-sized controls.
+Changes to the primary pointer refresh cached views without reloading. The web
+always retains its on-screen Back button; it does not enable the native mobile
+Cargo feature.
+
+Canvas layout uses CSS pixel dimensions even on high-DPI displays. Physical
+backing dimensions use the browser's device-pixel box when it agrees with DPR,
+and otherwise use CSS size times DPR (including browser device emulation).
+
+The GPUI web platform dispatches raw touch contacts and recognizes taps,
+scrolling, long presses, and two-finger pinch gestures. A claimed contact, a
+cancelled gesture, and the remaining finger after a pinch cannot produce a
+click. Lost pointer capture and a hidden tab cancel active contacts. Mouse and
+hardware keyboard input keep their existing paths.
+
+Safe-area CSS values and VisualViewport changes feed GPUI's window insets.
+Browser toolbar changes resize the canvas; keyboard occlusion moves overlays
+and controls above the keyboard without changing the book viewport. Tapping a
+text field finishes its focus frame synchronously before requesting the browser
+keyboard. Other taps retain hardware-keyboard focus with `inputmode=none`.
+Mobile `beforeinput` and composition events feed the focused GPUI text handler.
+
+To exercise the actual backend and shared controls in Chromium with desktop,
+phone, and tablet input emulation, build the small fixture:
+
+```sh
+RUSTC_BOOTSTRAP=1 cargo build --release -p web-gpui --example mobile_probe --target wasm32-unknown-unknown
+python3 apps/web-gpui/scripts/test-mobile-browser.py target/mobile-browser-probe --wasm target/wasm32-unknown-unknown/release/examples/mobile_probe.wasm
+```
+
+The runner packages the fixture with `wasm-bindgen` (from `PATH`,
+`WASM_BINDGEN`, or the repository's `target/wasm-bindgen-cli/bin` installation),
+creates its test page from the production HTML shell, and serves it locally
+with cross-origin isolation headers.
+
+Pass `--browser webkit` to run the fixture with an installed Playwright WebKit.
+`WEBKIT_PATH` can select another Playwright-compatible WebKit executable. Chromium
+uses browser-generated touch gestures; WebKit exercises the same production
+listeners with injected PointerEvents.
+
+The fixture needs no account, backend workers, library, or book downloads. It
+checks density and width classes, capability changes, tap/drag separation,
+scrolling, holds, pinch, cancellation, text input/composition, and viewport
+insets. Python Playwright and Chromium are required. `CHROMIUM_PATH` overrides
+the Chromium executable. Hardware keyboards, virtual keyboards, browser bars,
+and OS gestures should also be checked on physical Android and iOS devices.

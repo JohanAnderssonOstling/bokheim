@@ -352,6 +352,8 @@ pub struct InputState {
     pub(super) last_cursor: Option<usize>,
     /// The input container bounds
     pub(super) input_bounds: Bounds<Pixels>,
+    /// The full Input control, including padding and prefix/suffix controls.
+    pub(super) control_bounds: Cell<Option<Bounds<Pixels>>>,
     /// The text bounds
     pub(super) last_bounds: Option<Bounds<Pixels>>,
     pub(super) last_selected_range: Option<Selection>,
@@ -471,6 +473,7 @@ impl InputState {
             selection_reversed: false,
             ime_marked_range: None,
             input_bounds: Bounds::default(),
+            control_bounds: Cell::new(None),
             selecting: false,
             disabled: false,
             masked: false,
@@ -2673,6 +2676,10 @@ impl InputState {
 }
 
 impl EntityInputHandler for InputState {
+    fn element_bounds(&self, _window: &Window, _cx: &App) -> Option<Bounds<Pixels>> {
+        self.control_bounds.get()
+    }
+
     fn text_for_range(
         &mut self,
         range_utf16: Range<usize>,

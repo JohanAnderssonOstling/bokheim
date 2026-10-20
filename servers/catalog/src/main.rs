@@ -46,6 +46,7 @@ const USAGE: &str = "usage: catalog DIR search FEED_URL
        catalog DIR subject|unsubject HASH lcc|ddc|bisac|unified CODE
        catalog DIR cover HASH IMAGE_URL
        catalog DIR retain-covers MANIFEST_JSON
+       catalog DIR extract-standardebooks-covers OUT_DIR
        catalog DIR publish OUT_DIR RELEASE_ID
        catalog compact-snapshot INPUT OUTPUT
        catalog compress-snapshot INPUT
@@ -96,6 +97,11 @@ fn run(args: &[String]) -> Result<(), String> {
     if let [command, input, output] = args {
         if command == "compact-snapshot" {
             return publish::compact_snapshot(Path::new(input), Path::new(output));
+        }
+    }
+    if let [dir, command, output] = args {
+        if command == "extract-standardebooks-covers" {
+            return covers::extract_standardebooks(Path::new(dir), Path::new(output));
         }
     }
     let [dir, command, rest @ ..] = args else { return Err(USAGE.into()) };
@@ -197,7 +203,8 @@ fn add(dir: &Path, db: &Connection, http: &Client, feed: &str, entry_id: Option<
     let evidence = format!("catalog:{source}");
     let lcsh = entry.lcsh.iter().filter_map(|name| BookSubject::new(None, name, &evidence, Some("lcsh".into()), None).ok());
     let lcc = entry.lcc.iter().filter_map(|code| BookSubject::new(None, code, &evidence, Some("lcc".into()), Some(code.clone())).ok());
-    let hash = store_book(dir, db, http, &bytes, &file_name, lcsh.chain(lcc).collect(), entry.image.as_ref(), Some(&metadata))?;
+    let cover_policy = if source == "standardebooks.org" { CoverPolicy::Embedded } else { CoverPolicy::Automatic };
+    let hash = store_book_with_cover_policy(dir, db, http, &bytes, &file_name, lcsh.chain(lcc).collect(), entry.image.as_ref(), Some(&metadata), cover_policy)?;
     curation::add_source(db, &hash, source, &entry.id, Some(base.as_str()), Some(epub.as_str()))
 }
 
@@ -220,7 +227,10 @@ fn import(dir: &Path, db: &Connection, http: &Client) -> Result<(), String> {
     for file in files {
         let source = file.parent().and_then(Path::file_name).map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         let name = file.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-        let added = std::fs::read(&file).map_err(|e| e.to_string()).and_then(|bytes| store_book(dir, db, http, &bytes, &name, Vec::new(), None, None)).and_then(|hash| curation::add_source(db, &hash, &source, &name, None, None));
+        let added = std::fs::read(&file)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| if source == "standardebooks.org" { store_book_with_embedded_cover(dir, db, http, &bytes, &name, None) } else { store_book(dir, db, http, &bytes, &name, Vec::new(), None, None) })
+            .and_then(|hash| curation::add_source(db, &hash, &source, &name, None, None));
         match added {
             Ok(()) => std::fs::remove_file(&file).map_err(|e| e.to_string())?,
             Err(error) => eprintln!("{}: {error}", file.display()),
@@ -233,17 +243,35 @@ fn import(dir: &Path, db: &Connection, http: &Client) -> Result<(), String> {
 /// and returns its hash. `evidence` is the source's own classification;
 /// `image` its cover, used when the file has none.
 fn store_book(dir: &Path, db: &Connection, http: &Client, bytes: &[u8], file_name: &str, evidence: Vec<BookSubject>, image: Option<&Url>, metadata: Option<&manifest::SourceMetadata>) -> Result<String, String> {
-    store_book_with_cover_policy(dir, db, http, bytes, file_name, evidence, image, metadata, false)
+    store_book_with_cover_policy(dir, db, http, bytes, file_name, evidence, image, metadata, CoverPolicy::Automatic)
 }
 
 fn store_book_preserving_covers(dir: &Path, db: &Connection, http: &Client, bytes: &[u8], file_name: &str, metadata: Option<&manifest::SourceMetadata>) -> Result<String, String> {
-    store_book_with_cover_policy(dir, db, http, bytes, file_name, Vec::new(), None, metadata, true)
+    store_book_with_cover_policy(dir, db, http, bytes, file_name, Vec::new(), None, metadata, CoverPolicy::Preserve)
 }
 
-fn store_book_with_cover_policy(dir: &Path, db: &Connection, http: &Client, bytes: &[u8], file_name: &str, evidence: Vec<BookSubject>, image: Option<&Url>, metadata: Option<&manifest::SourceMetadata>, preserve_covers: bool) -> Result<String, String> {
+fn store_book_with_embedded_cover(dir: &Path, db: &Connection, http: &Client, bytes: &[u8], file_name: &str, metadata: Option<&manifest::SourceMetadata>) -> Result<String, String> {
+    store_book_with_cover_policy(dir, db, http, bytes, file_name, Vec::new(), None, metadata, CoverPolicy::Embedded)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CoverPolicy {
+    Automatic,
+    Preserve,
+    Embedded,
+}
+
+fn store_book_with_cover_policy(
+    dir: &Path, db: &Connection, http: &Client, bytes: &[u8], file_name: &str, evidence: Vec<BookSubject>, image: Option<&Url>, metadata: Option<&manifest::SourceMetadata>, cover_policy: CoverPolicy,
+) -> Result<String, String> {
     let _timing = timing::measure("epub_total", file_name);
     let content_hash = content_address::hash_reader(&mut &bytes[..]).map_err(|e| e.to_string())?;
     let hash = content_hash.to_hex();
+    // A source-owned cover must also replace artwork copied by an older import.
+    // Do this before the existing-record shortcut, without requesting cover enrichment.
+    if cover_policy == CoverPolicy::Embedded && !cover_from_book(dir, &hash, bytes)? {
+        return Err(format!("{file_name}: EPUB has no embedded cover"));
+    }
     if let Some(mut record) = curation::record(db, &hash)? {
         if let Some(metadata) = metadata {
             let previous = record.clone();
@@ -252,7 +280,7 @@ fn store_book_with_cover_policy(dir: &Path, db: &Connection, http: &Client, byte
                 curation::set_record(db, &hash, &record)?;
             }
         }
-        if !preserve_covers {
+        if cover_policy != CoverPolicy::Preserve {
             println!("{hash}  already in the catalog");
             return Ok(hash);
         }
@@ -271,17 +299,18 @@ fn store_book_with_cover_policy(dir: &Path, db: &Connection, http: &Client, byte
         }
     }
     let covers_timing = timing::measure("epub_covers", file_name);
-    let local_cover = !preserve_covers && (has_cover(dir, &hash) || cover_from_book(dir, &hash, bytes)? || source_cover(dir, &hash, http, image));
+    let automatic_cover = cover_policy == CoverPolicy::Automatic;
+    let local_cover = automatic_cover && (has_cover(dir, &hash) || cover_from_book(dir, &hash, bytes)? || source_cover(dir, &hash, http, image));
     drop(covers_timing);
     let original_record = record.clone();
-    let (record, cover_id, found) = enrich(http, record, file_name, !preserve_covers && !local_cover)?;
-    if preserve_covers {
+    let (record, cover_id, found) = enrich(http, record, file_name, automatic_cover && !local_cover)?;
+    if cover_policy == CoverPolicy::Preserve {
         preserve_matching_cover(dir, db, &hash, &record, &original_record)?;
         if !has_cover(dir, &hash) {
             cover_from_book(dir, &hash, bytes)?;
         }
     }
-    if !preserve_covers && !local_cover {
+    if automatic_cover && !local_cover {
         let _timing = timing::measure("epub_cover_fallback", file_name);
         if let Some(image) = cover_id.map(|id| metadata_url()?.join(&format!("v3/covers/{id}")).map_err(|e| e.to_string())).transpose()? {
             if let Err(error) = get(http, &image).and_then(|bytes| cover_from_image(dir, &hash, &bytes)) {
@@ -309,7 +338,11 @@ fn preserve_matching_cover(dir: &Path, db: &Connection, hash: &str, record: &Boo
         return Ok(());
     }
     let mut statement = db.prepare("SELECT hash FROM book WHERE (title=?1 AND author=?2) OR (title=?3 AND author=?4) ORDER BY rowid").map_err(|e| e.to_string())?;
-    let matches = statement.query_map(rusqlite::params![record.title, curation::author(record), original.title, curation::author(original)], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    let matches = statement
+        .query_map(rusqlite::params![record.title, curation::author(record), original.title, curation::author(original)], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
     for previous in matches {
         if previous == hash || !has_cover(dir, &previous) {
             continue;
@@ -373,6 +406,61 @@ mod enrichment_tests {
     use std::net::TcpListener;
     use std::thread::spawn;
     use std::time::Duration;
+
+    #[test]
+    fn standardebooks_new_import_uses_embedded_art_and_never_requests_an_enriched_cover() {
+        struct RestoreEnvironment(Option<std::ffi::OsString>);
+        impl Drop for RestoreEnvironment {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("BOKHEIM_METADATA_URL", value),
+                    None => std::env::remove_var("BOKHEIM_METADATA_URL"),
+                }
+            }
+        }
+        let _restore = RestoreEnvironment(std::env::var_os("BOKHEIM_METADATA_URL"));
+        let dir = tempfile::tempdir().unwrap();
+        let db = curation::open(dir.path()).unwrap();
+        let bytes = crate::covers::tests::standardebooks_epub("https://standardebooks.org/ebooks/a-writer/a-source-work");
+        let hash = content_address::hash_reader(&mut &bytes[..]).unwrap().to_hex();
+        let inspected = book_inspection::inspect_book_reader_with_hash(Path::new("book.epub"), BookFormat::Epub, Cursor::new(bytes.clone()), None).unwrap();
+        curation::set_record(&db, "matching-old-edition", &inspected.metadata).unwrap();
+        for key in ["matching-old-edition", &hash] {
+            for suffix in ["card", "detail"] {
+                std::fs::write(dir.path().join(format!("covers/{key}-{suffix}.jpg")), b"another edition's cover").unwrap();
+            }
+        }
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        std::env::set_var("BOKHEIM_METADATA_URL", format!("http://{}/", server.local_addr().unwrap()));
+        let serving = spawn(move || {
+            let (mut stream, _) = server.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).unwrap();
+                header.push(byte[0]);
+            }
+            let header = String::from_utf8(header).unwrap();
+            assert!(header.starts_with("POST /v3/books"));
+            let length = header.lines().find_map(|line| line.split_once(':').filter(|(key, _)| key.eq_ignore_ascii_case("content-length")).map(|(_, size)| size.trim().parse::<usize>().unwrap())).unwrap();
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).unwrap();
+            let request: BookEnrichmentRequest = serde_json::from_slice(&body).unwrap();
+            assert!(!request.books[0].needs_cover);
+            let response = serde_json::to_vec(&serde_json::json!({"policy":"books_v5","results":[{"key":"","status":"found","record":request.books[0].record,"cover":{"id":"unwanted-cover"}}]})).unwrap();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", response.len()).unwrap();
+            stream.write_all(&response).unwrap();
+        });
+        let http = Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
+        assert_eq!(store_book_with_embedded_cover(dir.path(), &db, &http, &bytes, "book.epub", None).unwrap(), hash);
+        serving.join().unwrap();
+        let expected = thumbnail::generate_thumbnail_versions_with_pdf_renderer("epub", Cursor::new(bytes.clone()), thumbnail::render_pdf_cover).unwrap().unwrap();
+        assert_eq!(std::fs::read(dir.path().join(format!("covers/{hash}-card.jpg"))).unwrap(), expected.browse);
+        assert_eq!(std::fs::read(dir.path().join(format!("covers/{hash}-detail.jpg"))).unwrap(), expected.high_density);
+        assert_eq!(std::fs::read(dir.path().join(format!("books/{hash}.epub"))).unwrap(), bytes);
+        assert_eq!(std::fs::read(dir.path().join("covers/matching-old-edition-card.jpg")).unwrap(), b"another edition's cover");
+    }
 
     #[test]
     fn replacement_reuses_existing_cover_without_modifying_old_images() {

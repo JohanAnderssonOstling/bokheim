@@ -114,18 +114,37 @@ impl<S> PageTurn<S> {
     }
 
     pub fn new(outgoing: S, forward: bool, drag: Point<Pixels>, viewport: Size<Pixels>, cx: &App) -> Option<Self> {
+        let axis = if drag.y.abs() > drag.x.abs() { Axis::Vertical } else { Axis::Horizontal };
+        Self::with_axis(outgoing, forward, drag, viewport, axis, cx)
+    }
+
+    pub fn new_on_axis(outgoing: S, forward: bool, drag: Point<Pixels>, viewport: Size<Pixels>, axis: Axis, cx: &App) -> Option<Self> {
+        let drag = match axis {
+            Axis::Vertical => point(Pixels::ZERO, drag.y),
+            Axis::Horizontal => point(drag.x, Pixels::ZERO),
+        };
+        Self::with_axis(outgoing, forward, drag, viewport, axis, cx)
+    }
+
+    fn with_axis(outgoing: S, forward: bool, drag: Point<Pixels>, viewport: Size<Pixels>, axis: Axis, cx: &App) -> Option<Self> {
         if !Self::enabled(cx) {
             return None;
         }
         let direction = if forward { -1.0 } else { 1.0 };
-        let travel = if drag.y.abs() > drag.x.abs() { point(Pixels::ZERO, viewport.height * direction) } else { point(viewport.width * direction, Pixels::ZERO) };
+        let travel = match axis {
+            Axis::Vertical => point(Pixels::ZERO, viewport.height * direction),
+            Axis::Horizontal => point(viewport.width * direction, Pixels::ZERO),
+        };
         let extent = travel.x.abs().max(travel.y.abs());
         if extent <= Pixels::ZERO {
             return None;
         }
         // A stale displacement from a cancelled gesture must not start the
         // next keyboard turn on the wrong side of the page.
-        let along = f32::from(if drag.y.abs() > drag.x.abs() { drag.y } else { drag.x });
+        let along = f32::from(match axis {
+            Axis::Vertical => drag.y,
+            Axis::Horizontal => drag.x,
+        });
         let drag = if along == 0.0 || (along < 0.0) == forward { drag } else { Point::default() };
         let remaining = (travel - drag).x.abs().max((travel - drag).y.abs());
         let fraction = (f32::from(remaining) / f32::from(extent)).clamp(0.0, 1.0);
@@ -141,6 +160,14 @@ impl<S> PageTurn<S> {
     /// Returns None when complete or when resizing/reduced motion cancels it.
     /// The clock starts only once the destination can actually be painted.
     pub fn frame(&mut self, viewport: Size<Pixels>, ready: bool, window: &mut Window, cx: &App) -> Option<PageTurnFrame> {
+        let frame = self.advance(viewport, ready, cx)?;
+        if frame.ready {
+            window.request_animation_frame();
+        }
+        Some(frame)
+    }
+
+    fn advance(&mut self, viewport: Size<Pixels>, ready: bool, cx: &App) -> Option<PageTurnFrame> {
         if !Self::enabled(cx) || self.viewport != viewport {
             return None;
         }
@@ -152,7 +179,6 @@ impl<S> PageTurn<S> {
         if progress >= 1.0 {
             return None;
         }
-        window.request_animation_frame();
         Some(self.offsets(progress, true))
     }
 }
@@ -161,6 +187,10 @@ impl<S> PageTurn<S> {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+    #[cfg(not(feature = "kobo"))]
+    use gpui::prelude::*;
+    #[cfg(not(feature = "kobo"))]
+    use gpui::{Context, IntoElement, Render};
 
     #[cfg(not(feature = "kobo"))]
     #[gpui::test]
@@ -206,6 +236,26 @@ mod tests {
 
     #[cfg(not(feature = "kobo"))]
     #[gpui::test]
+    fn explicit_vertical_turns_keep_keyboard_and_drag_motion_on_that_axis(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let viewport = gpui::size(px(600.0), px(800.0));
+            for forward in [true, false] {
+                let direction = if forward { -1.0 } else { 1.0 };
+                for drag in [Point::default(), point(px(100.0), px(120.0 * direction))] {
+                    let turn = PageTurn::new_on_axis((), forward, drag, viewport, Axis::Vertical, cx).unwrap();
+                    for progress in [0.0, 0.5, 1.0] {
+                        let frame = turn.offsets(progress, true);
+                        assert_eq!(frame.outgoing.x, Pixels::ZERO);
+                        assert_eq!(frame.incoming.x, Pixels::ZERO);
+                        assert_eq!(frame.outgoing.y - frame.incoming.y, viewport.height * direction);
+                    }
+                }
+            }
+        });
+    }
+
+    #[cfg(not(feature = "kobo"))]
+    #[gpui::test]
     fn drag_is_bounded_by_the_document_and_hands_off_without_snapping(cx: &mut TestAppContext) {
         let (_, visual) = cx.add_window_view(|_, _| gpui::Empty);
         visual.update(|window, cx| {
@@ -228,18 +278,57 @@ mod tests {
         visual.update(|window, cx| {
             let viewport = window.viewport_size();
             let mut turn = PageTurn::new((), true, Point::default(), viewport, cx).unwrap();
-            assert!(!turn.frame(viewport, false, window, cx).unwrap().ready);
+            assert!(!turn.advance(viewport, false, cx).unwrap().ready);
             assert!(turn.started_at.is_none(), "loading time must not consume animation time");
-            assert!(turn.frame(viewport, true, window, cx).unwrap().ready);
+            assert!(turn.advance(viewport, true, cx).unwrap().ready);
             turn.started_at = Some(Instant::now() - Duration::from_secs(1));
-            assert!(turn.frame(viewport, true, window, cx).is_none());
+            assert!(turn.advance(viewport, true, cx).is_none());
 
             let mut turn = PageTurn::new((), false, Point::default(), viewport, cx).unwrap();
-            assert!(turn.frame(gpui::size(viewport.width + px(10.0), viewport.height), true, window, cx).is_none());
+            assert!(turn.advance(gpui::size(viewport.width + px(10.0), viewport.height), true, cx).is_none());
             cx.set_reduce_motion(true);
-            assert!(turn.frame(viewport, true, window, cx).is_none());
+            assert!(turn.advance(viewport, true, cx).is_none());
             assert!(PageTurn::new((), true, Point::default(), viewport, cx).is_none());
         });
+    }
+
+    #[cfg(not(feature = "kobo"))]
+    struct TurnView {
+        turn: Option<PageTurn<()>>,
+        renders: usize,
+    }
+
+    #[cfg(not(feature = "kobo"))]
+    impl Render for TurnView {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.renders += 1;
+            if self.turn.as_mut().and_then(|turn| turn.frame(window.viewport_size(), true, window, cx)).is_none() {
+                self.turn = None;
+            }
+            gpui::div().size_full()
+        }
+    }
+
+    #[cfg(not(feature = "kobo"))]
+    #[gpui::test]
+    fn turns_schedule_frames_from_render_and_stop_when_complete(cx: &mut TestAppContext) {
+        let (view, visual) = cx.add_window_view(|window, cx| TurnView { turn: PageTurn::new((), true, Point::default(), window.viewport_size(), cx), renders: 0 });
+        visual.run_until_parked();
+        let renders = view.read_with(visual, |view, _| {
+            assert!(view.turn.as_ref().unwrap().started_at.is_some());
+            view.renders
+        });
+        visual.update(|window, cx| {
+            assert!(window.simulate_next_frame(cx) > 0);
+        });
+        visual.run_until_parked();
+        view.update(visual, |view, cx| {
+            assert!(view.renders > renders, "the scheduled callback must redraw the owning view");
+            view.turn.as_mut().unwrap().started_at = Some(Instant::now() - Duration::from_secs(1));
+            cx.notify();
+        });
+        visual.run_until_parked();
+        view.read_with(visual, |view, _| assert!(view.turn.is_none()));
     }
 
     #[cfg(feature = "kobo")]

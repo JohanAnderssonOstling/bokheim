@@ -9,6 +9,9 @@ use std::path::Path;
 
 use audiobook_archive::{Cover, Cue, MAX_COVER_BYTES, MAX_CUE_BYTES, MAX_NFO_BYTES, MAX_TRACKS, Nfo, Track, audio_file, natural_cmp, valid_sidecar_name};
 
+mod local_names;
+pub use local_names::{PATH_MAPPING_FILE, copy_path_mapping, extract_download, extract_for_windows, resolve_track_path};
+
 #[derive(Default)]
 pub struct Mp3Facts {
     pub duration_ms: u64,
@@ -123,6 +126,7 @@ pub fn inspect_mp3<R: symphonia::core::io::MediaSource + 'static>(reader: R, art
 }
 
 fn discover_sidecar(folder: &Path, accepts: impl Fn(&str) -> bool, maximum: u64) -> io::Result<Option<Nfo>> {
+    let mapping = local_names::load(folder)?;
     let mut files = Vec::new();
     for entry in fs::read_dir(folder)? {
         let entry = entry?;
@@ -136,6 +140,7 @@ fn discover_sidecar(folder: &Path, accepts: impl Fn(&str) -> bool, maximum: u64)
         if !valid_sidecar_name(&name) || entry.metadata()?.len() > maximum {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid or oversized audiobook sidecar"));
         }
+        let name = mapping.as_ref().map_or(name.clone(), |mapping| mapping.logical_name(&name).to_owned());
         files.push(Nfo { name, path: entry.path() });
     }
     if files.len() > 1 {
@@ -289,6 +294,15 @@ fn order_from_cue(folder: &Path, tracks: &mut Vec<Track>) -> io::Result<()> {
 /// Finds the tracks belonging to this book folder. Only numbered disc folders
 /// are folded into the book; other child folders remain separate scan targets.
 pub fn discover(folder: &Path) -> io::Result<Vec<Track>> {
+    let mapping = local_names::load(folder)?;
+    let mut tracks = discover_physical(folder)?;
+    if let Some(mapping) = mapping {
+        mapping.apply_tracks(folder, &mut tracks)?;
+    }
+    Ok(tracks)
+}
+
+fn discover_physical(folder: &Path) -> io::Result<Vec<Track>> {
     let mut tracks = Vec::new();
     let mut discs = Vec::new();
     for entry in fs::read_dir(folder)? {
@@ -335,11 +349,18 @@ pub fn discover(folder: &Path) -> io::Result<Vec<Track>> {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn folder_hash(folder: &Path) -> io::Result<blake3::Hash> {
     let tracks = discover(folder)?;
+    let archive = write_folder_archive(folder, tempfile::tempfile()?, &tracks)?;
+    audiobook_archive::archive_hash(archive)
+}
+
+/// Use logical member names and source ZIP metadata for mapped native files.
+pub fn write_folder_archive<W: io::Write + io::Seek>(folder: &Path, writer: W, tracks: &[Track]) -> io::Result<W> {
     let nfo = discover_nfo(folder)?;
     let cue = discover_cue(folder)?;
     let cover = discover_cover(folder)?;
-    let archive = audiobook_archive::write_archive_with_sidecars(tempfile::tempfile()?, &tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref())?;
-    audiobook_archive::archive_hash(archive)
+    let mapping = local_names::load(folder)?;
+    let formats = mapping.as_ref().map_or(&[][..], |mapping| mapping.formats.as_slice());
+    audiobook_archive::write_archive_with_formats(writer, tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref(), formats)
 }
 
 #[cfg(test)]

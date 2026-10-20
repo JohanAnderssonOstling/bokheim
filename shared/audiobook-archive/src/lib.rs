@@ -2,6 +2,7 @@
 //! playback order, followed by optional NFO, CUE and cover sidecars. Clients
 //! write it; the server reads its layout to serve each track by byte range.
 
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -9,7 +10,7 @@ use std::io::{self, Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 use zip::write::SimpleFileOptions;
-use zip::{CompressionMethod, ZipArchive, ZipWriter};
+use zip::{CompressionMethod, DateTime, System, ZipArchive, ZipWriter};
 
 pub const MAX_TRACKS: usize = 1024;
 pub const MAX_NFO_BYTES: u64 = 256 * 1024;
@@ -39,6 +40,62 @@ pub struct ArchivedTrack {
     pub length: u64,
 }
 
+/// Header fields that differ between platforms but participate in content identity.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EntryFormat {
+    pub name: String,
+    pub system: u8,
+    pub modified: [u16; 6],
+    pub permissions: u32,
+}
+
+impl EntryFormat {
+    pub fn is_native_default(&self) -> bool {
+        self.system == if cfg!(windows) { 0 } else { 3 } && self.modified == [1980, 1, 1, 0, 0, 0] && self.permissions == 0o100644
+    }
+
+    fn options(&self) -> io::Result<SimpleFileOptions> {
+        let [year, month, day, hour, minute, second] = self.modified;
+        let component = |value: u16| u8::try_from(value).map_err(io::Error::other);
+        let modified = DateTime::from_date_and_time(year, component(month)?, component(day)?, component(hour)?, component(minute)?, component(second)?).map_err(io::Error::other)?;
+        Ok(SimpleFileOptions::default().compression_method(CompressionMethod::Stored).system(System::from(self.system)).last_modified_time(modified).unix_permissions(self.permissions))
+    }
+}
+
+/// Read transport header metadata before extracting, including the ZIP origin
+/// OS byte, which ZipFile's portable file options do not currently expose.
+pub fn entry_formats<R: Read + Seek>(reader: &mut R) -> io::Result<Vec<EntryFormat>> {
+    use std::io::SeekFrom;
+    let mut headers = Vec::new();
+    {
+        let mut archive = ZipArchive::new(&mut *reader).map_err(io::Error::other)?;
+        if archive.len() > MAX_TRACKS + 3 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "audiobook ZIP has too many entries"));
+        }
+        for index in 0..archive.len() {
+            let file = archive.by_index(index).map_err(io::Error::other)?;
+            let modified = file.last_modified().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid audiobook ZIP timestamp"))?;
+            headers.push((
+                file.central_header_start(),
+                EntryFormat {
+                    name: file.name().to_owned(),
+                    system: 0,
+                    modified: [modified.year(), modified.month().into(), modified.day().into(), modified.hour().into(), modified.minute().into(), modified.second().into()],
+                    permissions: file.unix_mode().unwrap_or(0o100644),
+                },
+            ));
+        }
+    }
+    for (offset, format) in &mut headers {
+        reader.seek(SeekFrom::Start(offset.checked_add(4).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "ZIP offset overflow"))?))?;
+        let mut version = [0; 2];
+        reader.read_exact(&mut version)?;
+        format.system = version[1];
+    }
+    Ok(headers.into_iter().map(|(_, format)| format).collect())
+}
+
 pub fn audio_file(path: &Path) -> bool {
     path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("mp3"))
 }
@@ -65,29 +122,42 @@ pub fn write_archive<W: Write + Seek>(writer: W, tracks: &[Track]) -> io::Result
 }
 
 pub fn write_archive_with_sidecars<W: Write + Seek>(writer: W, tracks: &[Track], nfo: Option<&Nfo>, cue: Option<&Cue>, cover: Option<&Cover>) -> io::Result<W> {
+    write_archive_with_formats(writer, tracks, nfo, cue, cover, &[])
+}
+
+/// Rebuild a materialized archive with its original entry order and platform metadata.
+pub fn write_archive_with_formats<W: Write + Seek>(writer: W, tracks: &[Track], nfo: Option<&Nfo>, cue: Option<&Cue>, cover: Option<&Cover>, formats: &[EntryFormat]) -> io::Result<W> {
     if tracks.is_empty() || tracks.len() > MAX_TRACKS {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "audiobook has no MP3 tracks"));
     }
     let mut zip = ZipWriter::new(writer);
-    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    let options = |name: &str| formats.iter().find(|format| format.name == name).map_or_else(|| Ok(SimpleFileOptions::default().compression_method(CompressionMethod::Stored)), EntryFormat::options);
     let mut names = HashSet::new();
+    let mut entries = Vec::new();
     for track in tracks {
         if !valid_entry_name(&track.name) || !names.insert(track.name.to_lowercase()) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid or duplicate audiobook track name"));
         }
-        zip.start_file(&track.name, options).map_err(io::Error::other)?;
-        io::copy(&mut File::open(&track.path)?, &mut zip)?;
+        entries.push((&track.name, &track.path, None));
     }
     for (sidecar, maximum, kind) in [(nfo, MAX_NFO_BYTES, SidecarKind::Nfo), (cue, MAX_CUE_BYTES, SidecarKind::Cue), (cover, MAX_COVER_BYTES, SidecarKind::Cover)] {
         if let Some(sidecar) = sidecar {
             if sidecar_kind(&sidecar.name) != Some(kind) || !names.insert(sidecar.name.to_lowercase()) || fs::metadata(&sidecar.path)?.len() > maximum {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid or oversized audiobook sidecar"));
             }
-            zip.start_file(&sidecar.name, options).map_err(io::Error::other)?;
-            let size = io::copy(&mut File::open(&sidecar.path)?.take(maximum + 1), &mut zip)?;
-            if size > maximum {
+            entries.push((&sidecar.name, &sidecar.path, Some(maximum)));
+        }
+    }
+    entries.sort_by_key(|(name, _, maximum)| (maximum.is_some(), formats.iter().position(|format| &format.name == *name).unwrap_or(formats.len())));
+    for (name, path, maximum) in entries {
+        zip.start_file(name, options(name)?).map_err(io::Error::other)?;
+        let mut file = File::open(path)?;
+        if let Some(maximum) = maximum {
+            if io::copy(&mut file.take(maximum + 1), &mut zip)? > maximum {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "audiobook sidecar changed while archiving"));
             }
+        } else {
+            io::copy(&mut file, &mut zip)?;
         }
     }
     zip.finish().map_err(io::Error::other)
@@ -283,6 +353,12 @@ fn valid_entry_name(name: &str) -> bool {
     !name.is_empty() && name.split('/').all(|part| !part.is_empty() && part != "." && part != ".." && !part.contains('\\') && !part.contains(':') && !part.chars().any(char::is_control)) && audio_file(Path::new(name))
 }
 
+/// Logical names permitted in an audiobook transport archive, independent of
+/// the filenames used to store its members on this device.
+pub fn valid_archive_name(name: &str) -> bool {
+    valid_entry_name(name) || sidecar_kind(name).is_some()
+}
+
 /// Reads the byte positions needed to serve each MP3 as a separate resource.
 pub fn archived_tracks<R: Read + Seek>(reader: R) -> io::Result<Vec<ArchivedTrack>> {
     let mut archive = ZipArchive::new(reader).map_err(io::Error::other)?;
@@ -324,12 +400,19 @@ pub fn archived_tracks<R: Read + Seek>(reader: R) -> io::Result<Vec<ArchivedTrac
 /// Extracts tracks into a caller-owned staging directory. The caller publishes
 /// that directory only after this function returns successfully.
 pub fn extract_archive<R: Read + Seek>(reader: R, destination: &Path) -> io::Result<Vec<String>> {
+    extract_archive_with_names(reader, destination, |name| Ok(name.to_owned()))
+}
+
+/// Extract with device-local filenames while retaining the archive's logical
+/// names in the returned index. Callers persist their mapping before publishing.
+pub fn extract_archive_with_names<R: Read + Seek>(reader: R, destination: &Path, mut local_name: impl FnMut(&str) -> io::Result<String>) -> io::Result<Vec<String>> {
     let mut archive = ZipArchive::new(reader).map_err(io::Error::other)?;
     if archive.len() > MAX_TRACKS + 3 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "audiobook ZIP has too many entries"));
     }
     let mut names = Vec::with_capacity(archive.len());
     let mut seen = HashSet::new();
+    let mut local_names = HashSet::new();
     let mut sidecars = HashSet::new();
     let mut in_sidecars = false;
     for index in 0..archive.len() {
@@ -345,11 +428,15 @@ pub fn extract_archive<R: Read + Seek>(reader: R, destination: &Path) -> io::Res
         } else if in_sidecars {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "audio track follows audiobook sidecar"));
         }
-        let output = destination.join(&name);
+        let local = local_name(&name)?;
+        if !valid_archive_name(&local) || !local_names.insert(local.to_lowercase()) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid or duplicate local audiobook filename"));
+        }
+        let output = destination.join(&local);
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent)?;
         }
-        io::copy(&mut entry, &mut File::create(output)?)?;
+        io::copy(&mut entry, &mut fs::OpenOptions::new().write(true).create_new(true).open(output)?)?;
         names.push(name);
     }
     if !names.iter().any(|name| name.to_ascii_lowercase().ends_with(".mp3")) {
@@ -363,6 +450,21 @@ mod tests {
     use super::*;
 
     const JPEG: &[u8] = &[0xff, 0xd8, 0xff, 0xe0, 0xff, 0xd9];
+
+    #[test]
+    fn mapped_extraction_rejects_escape_and_never_overwrites_an_aliased_track() {
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, bytes) in [("one.mp3", b"first"), ("two.mp3", b"other")] {
+            zip.start_file(name, SimpleFileOptions::default().compression_method(CompressionMethod::Stored)).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        let bytes = zip.finish().unwrap().into_inner();
+        let destination = tempfile::tempdir().unwrap();
+        assert!(extract_archive_with_names(Cursor::new(&bytes), destination.path(), |_| Ok("../escape.mp3".into())).is_err());
+        assert!(fs::read_dir(destination.path()).unwrap().next().is_none());
+        assert!(extract_archive_with_names(Cursor::new(&bytes), destination.path(), |_| Ok("same.mp3".into())).is_err());
+        assert_eq!(fs::read(destination.path().join("same.mp3")).unwrap(), b"first");
+    }
 
     fn audio() -> &'static [u8] {
         include_bytes!("../../../client/library-backend/crates/book-inspection/tests/fixtures/silence.mp3")

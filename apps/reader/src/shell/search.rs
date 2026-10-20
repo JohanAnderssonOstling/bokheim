@@ -27,12 +27,19 @@ pub(crate) fn header_controls<C: SearchBarTarget>(owner: &C, target: &Entity<C>,
         .items_center()
         .gap(px(components::SPACE_XXS))
         .child(components::reader_match_count(format!("{current} of {total}"), theme))
-        .child(components::outlined_icon_button("reader-search-previous", "Previous match", IconName::ChevronLeft, theme).disabled(total == 0).tooltip("Previous match (Shift+Enter)").on_click(move |_, _, cx| {
-            previous_target.update(cx, |this, cx| this.search_navigate(-1, cx));
-        }))
-        .child(components::outlined_icon_button("reader-search-next", "Next match", IconName::ChevronRight, theme).disabled(total == 0).tooltip("Next match (Enter)").on_click(move |_, _, cx| {
-            next_target.update(cx, |this, cx| this.search_navigate(1, cx));
-        }));
+        .child(
+            components::outlined_icon_button("reader-search-previous", "Previous match", IconName::ChevronLeft, theme)
+                .disabled(total == 0)
+                .tooltip(components::shortcut_tooltip_with_alternatives("Previous match", &["shift-enter", "up"]))
+                .on_click(move |_, _, cx| {
+                    previous_target.update(cx, |this, cx| this.search_navigate(-1, cx));
+                }),
+        )
+        .child(components::outlined_icon_button("reader-search-next", "Next match", IconName::ChevronRight, theme).disabled(total == 0).tooltip(components::shortcut_tooltip_with_alternatives("Next match", &["enter", "down"])).on_click(
+            move |_, _, cx| {
+                next_target.update(cx, |this, cx| this.search_navigate(1, cx));
+            },
+        ));
     controls.into_any_element()
 }
 

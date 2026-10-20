@@ -5,7 +5,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPOSITORY_ROOT=$(cd "$SCRIPT_DIR/../../../.." && pwd)
 PACKAGE_VERSION=${1:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$REPOSITORY_ROOT/apps/desktop-gpui/Cargo.toml" | head -n 1)}
 RELEASE_DIRECTORY=${RELEASE_DIRECTORY:-"$REPOSITORY_ROOT/release"}
-DESKTOP_BINARY=${DESKTOP_BINARY:-"$REPOSITORY_ROOT/target/release/desktop-gpui"}
+DESKTOP_BINARY=${DESKTOP_BINARY:-"$REPOSITORY_ROOT/target/release/bokheim"}
 OPDS_BROWSER=${OPDS_BROWSER:-"$(dirname "$DESKTOP_BINARY")/bokheim-opds-webview"}
 LINUXDEPLOY=${LINUXDEPLOY:-linuxdeploy-x86_64.AppImage}
 APPIMAGETOOL=${APPIMAGETOOL:-appimagetool-x86_64.AppImage}

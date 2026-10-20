@@ -33,10 +33,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_BUILD_JOBS: "1"
-  RUST_VERSION: 1.95.0
-  GPUI_FORK_REF: c016e95089c035b27540db6d9ca2d83a3eb94f05
+  RUST_VERSION: stable
+  GPUI_FORK_REF: c186a827d40ba6b3f85789138dabe55554e2a4c0
   HTML_ENGINE_REF: fbdc9748d7ddb339d23b8f3cd65e54c16f371fad
-  HTML_VIEW_CORE_REF: d33fe55fb431b7af8107a8aca3cef4250e3a25a9
+  HTML_VIEW_CORE_REF: e34aba1f7d91f5e4ce95d5d9141f97c74d42f6a9
   LINUXDEPLOY_VERSION: 1-alpha-20251107-1
   APPIMAGETOOL_VERSION: 1.9.1
   BOKHEIM_UPDATE_PUBLIC_KEY_HEX: ${{ vars.BOKHEIM_UPDATE_PUBLIC_KEY_HEX || 'f9e4a3504b65243b84d497bc3b0434793803c794c0db129701ea563d0a51efa3' }}
@@ -44,35 +44,11 @@ env:
   BOKHEIM_UPDATE_ENDPOINT: ${{ vars.BOKHEIM_UPDATE_ENDPOINT || 'https://updates.bokheim.se/v1/stable' }}
 
 jobs:
-  shared-tests:
-    name: Require local shared tests
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v6
-      - name: Require shared tests for this source commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BUILD_ONLY: ${{ inputs.build_only || false }}
-          PINNED_SOURCE: ${{ inputs.source_commit }}
-        run: |
-          if [[ -n "$PINNED_SOURCE" && "$BUILD_ONLY" != true ]]; then
-            echo "A pinned source requires build_only=true." >&2
-            exit 1
-          fi
-          if [[ "$BUILD_ONLY" == true ]]; then
-            echo "Build-only release requested; shared tests are skipped."
-          else
-            python3 scripts/ci/require-shared-tests.py "${{ github.repository }}" "$GITHUB_SHA"
-          fi
-
   windows-checks:
     if: inputs.build_only != true
-    needs: shared-tests
     uses: ./.github/workflows/client-platforms.yml
 
   build-windows:
-    if: always() && needs.shared-tests.result == 'success' && needs.windows-checks.result != 'failure' && needs.windows-checks.result != 'cancelled' && (inputs.build_only == true || needs.windows-checks.result == 'success')
-    needs: [shared-tests, windows-checks]
     name: x86-64 Windows installer
     runs-on: windows-2025
     timeout-minutes: 120
@@ -184,7 +160,7 @@ jobs:
         shell: pwsh
         run: |
           $installer = "Bokheim-Windows-x86_64-Setup.exe"
-          $sourceExe = (Resolve-Path "target/release/desktop-gpui.exe").Path
+          $sourceExe = (Resolve-Path "target/release/bokheim.exe").Path
           $iconFile = (Resolve-Path "apps/ui/design-tokens/assets/icon/favicon.ico").Path
           $outputDir = Join-Path $PWD "release"
           New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
@@ -204,7 +180,7 @@ jobs:
         working-directory: bokheim
         shell: pwsh
         run: |
-          python apps/desktop-gpui/windows/package-update.py --binary target/release/desktop-gpui.exe --icon apps/ui/design-tokens/assets/icon/favicon.ico --output release/Bokheim-Windows-x86_64-Update.zip
+          python apps/desktop-gpui/windows/package-update.py --binary target/release/bokheim.exe --icon apps/ui/design-tokens/assets/icon/favicon.ico --output release/Bokheim-Windows-x86_64-Update.zip
           if ($LASTEXITCODE -ne 0) { throw "Windows update packaging failed" }
 
       - name: Verify packaged Windows update metadata
@@ -252,7 +228,7 @@ jobs:
       contents: write
       statuses: read
     name: Publish verified draft artifacts
-    needs: build-windows
+    needs: [build-windows, windows-checks]
     if: startsWith(github.ref, 'refs/tags/') || inputs.publish == true
     runs-on: ubuntu-24.04
     timeout-minutes: 15

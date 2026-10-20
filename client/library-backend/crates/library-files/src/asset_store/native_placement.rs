@@ -72,20 +72,20 @@ impl AssetStore {
         }
         if source.is_dir() {
             let output = tempfile::Builder::new().prefix(".bokheim-copy-").tempdir_in(destination.parent().unwrap())?;
-            for track in audiobook_folder::discover(&source)? {
-                let target = output.path().join(&track.name);
+            let copy_member = |path: &Path| -> Result<(), AssetStoreError> {
+                let local = path.strip_prefix(&source).map_err(AssetStoreError::operation)?;
+                let target = output.path().join(local);
                 std::fs::create_dir_all(target.parent().unwrap())?;
-                std::fs::copy(&track.path, target)?;
+                std::fs::copy(path, target)?;
+                Ok(())
+            };
+            for track in audiobook_folder::discover(&source)? {
+                copy_member(&track.path)?;
             }
-            if let Some(nfo) = audiobook_folder::discover_nfo(&source)? {
-                std::fs::copy(nfo.path, output.path().join(nfo.name))?;
+            for sidecar in [audiobook_folder::discover_nfo(&source)?, audiobook_folder::discover_cue(&source)?, audiobook_folder::discover_cover(&source)?].into_iter().flatten() {
+                copy_member(&sidecar.path)?;
             }
-            if let Some(cue) = audiobook_folder::discover_cue(&source)? {
-                std::fs::copy(cue.path, output.path().join(cue.name))?;
-            }
-            if let Some(cover) = audiobook_folder::discover_cover(&source)? {
-                std::fs::copy(cover.path, output.path().join(cover.name))?;
-            }
+            audiobook_folder::copy_path_mapping(&source, output.path())?;
             if !content_matches(output.path(), hash)? {
                 return Err(AssetStoreError::operation("audiobook changed during copy"));
             }

@@ -22,6 +22,7 @@ use crate::settings::{ReaderSettings, library_interaction_palette, library_link_
 use crate::shell::marks::MarkSession;
 use crate::shell::persistence::ReadingPositionWriter;
 use crate::shell::search::SearchBarTarget;
+use crate::shell::settings_navigation::SettingsNavigation;
 use crate::shell::state_panel::SidebarState;
 use app_preferences::LINE_WIDTH_MAX;
 
@@ -125,7 +126,7 @@ impl ReaderView {
             focus,
             sidebar_focus: cx.focus_handle().tab_index(0).tab_stop(true),
             rail_focus: cx.focus_handle().tab_stop(true),
-            settings_navigation: Default::default(),
+            settings_navigation: SettingsNavigation::new(window, cx),
             renderer_subscription: None,
             document_tap_subscription: None,
             reading_positions,

@@ -7,6 +7,7 @@ use crate::ingestion::fingerprint as book_fingerprint;
 use crate::ingestion::{ingest_audiobook_folder, ingest_file};
 use futures_util::StreamExt;
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -102,6 +103,12 @@ pub fn is_audiobook_folder(folder: &Path) -> std::io::Result<bool> {
     Ok(!tracks?.is_empty())
 }
 
+// Database paths use forward slashes on every platform. Join native components
+// rather than replacing characters that could be part of a Unix filename.
+fn portable_relative_path(path: &Path) -> Option<String> {
+    Some(path.iter().map(OsStr::to_str).collect::<Option<Vec<_>>>()?.join("/"))
+}
+
 /// Walk `root` and return directory/file observations. Marker creation is
 /// physical filesystem work; all inventory decisions are deferred to the caller.
 pub fn discover(root: impl Into<PathBuf>, snapshot: &ScanSnapshot) -> FilesystemScan {
@@ -143,6 +150,13 @@ pub fn discover(root: impl Into<PathBuf>, snapshot: &ScanSnapshot) -> Filesystem
             }
             continue;
         }
+        let Some(relative_path) = portable_relative_path(relative) else {
+            result.readable = false;
+            if entry.is_dir() {
+                walk.skip_current_dir();
+            }
+            continue;
+        };
         while parents.len() > entry.depth() {
             parents.pop();
         }
@@ -167,9 +181,9 @@ pub fn discover(root: impl Into<PathBuf>, snapshot: &ScanSnapshot) -> Filesystem
                     continue;
                 }
                 Ok(tracks) if !tracks.is_empty() && !other_book_in_audiobook_candidate(entry.path(), &root, |path| excluded(snapshot, path)).unwrap_or(true) => {
-                    match (relative.to_str(), folder_fingerprint(entry.path(), &tracks)) {
-                        (Some(path), Ok(fingerprint)) => result.files.push(ScanFileObservation { directory: parent_id, name, path: path.to_owned(), fingerprint }),
-                        _ => result.readable = false,
+                    match folder_fingerprint(entry.path(), &tracks) {
+                        Ok(fingerprint) => result.files.push(ScanFileObservation { directory: parent_id, name, path: relative_path, fingerprint }),
+                        Err(_) => result.readable = false,
                     }
                     walk.skip_current_dir();
                     continue;
@@ -221,20 +235,15 @@ pub fn discover(root: impl Into<PathBuf>, snapshot: &ScanSnapshot) -> Filesystem
                 }
                 seen.insert(id);
             }
-            let Some(path) = relative.to_str().map(str::to_owned) else {
-                result.readable = false;
-                walk.skip_current_dir();
-                continue;
-            };
-            result.directories.push(ScanDirectoryObservation { id, parent_id, name, path });
+            result.directories.push(ScanDirectoryObservation { id, parent_id, name, path: relative_path });
             parents.push(id);
         } else if entry.is_file() && supported(entry.path()) {
-            let (Some(name), Some(path)) = (entry.file_name().to_str(), relative.to_str()) else {
+            let Some(name) = entry.file_name().to_str() else {
                 result.readable = false;
                 continue;
             };
             match book_fingerprint(entry.path()) {
-                Ok(fingerprint) => result.files.push(ScanFileObservation { directory: parent_id, name: name.to_owned(), path: path.to_owned(), fingerprint }),
+                Ok(fingerprint) => result.files.push(ScanFileObservation { directory: parent_id, name: name.to_owned(), path: relative_path, fingerprint }),
                 Err(_) => result.readable = false,
             }
         }
@@ -346,6 +355,59 @@ mod tests {
     }
     fn host() -> Arc<dyn cpu_host::CpuHost> {
         Arc::new(FailingHost)
+    }
+
+    #[tokio::test]
+    async fn repaired_audiobook_paths_keep_verified_download_metadata_reusable() {
+        let root = tempfile::tempdir().unwrap();
+        let source = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(source.path(), b"audio").unwrap();
+        let archive = audiobook_archive::write_archive(std::io::Cursor::new(Vec::new()), &[audiobook_archive::Track { name: "NUL.mp3".into(), path: source.path().to_owned() }]).unwrap().into_inner();
+        let hash = ContentHash::from(blake3::hash(&archive));
+        let folder = root.path().join("Story");
+        std::fs::create_dir(&folder).unwrap();
+        audiobook_folder::extract_for_windows(std::io::Cursor::new(&archive), &folder, &[("NUL.mp3".into(), "Introduction".into())]).unwrap();
+        let mut snapshot = ScanSnapshot { placements: vec![], work_revision: 0, scan_id: 1, excluded_paths: vec![], directories: vec![], tombstoned_files: vec![], books: vec![] };
+        let scan = discover(root.path(), &snapshot);
+        assert!(scan.readable);
+        assert_eq!(scan.files.len(), 1);
+        assert_eq!(scan.files[0].path, "Story");
+        assert_eq!(ContentHash::from(audiobook_folder::folder_hash(&folder).unwrap()), hash);
+        snapshot.books.push(library_database::ScanKnownBook {
+            content_hash: hash,
+            directory: ROOT_DIR_ID,
+            name: "Story".into(),
+            fingerprint: scan.files[0].fingerprint,
+            inspection_version: None,
+            cached_audiobook_format: Some(BookFormat::Mp3Folder),
+        });
+        let inspected = inspect(root.path(), &scan, &snapshot, &host()).await;
+        assert!(inspected.readable);
+        assert!(inspected.books.is_empty(), "physical renaming must not force a new content identity or inspection");
+    }
+
+    #[test]
+    fn nested_books_and_audiobooks_use_portable_observation_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let shelf = root.path().join("Shelf");
+        let nested = shelf.join("Nested");
+        let audiobook = shelf.join("Story");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&audiobook).unwrap();
+        std::fs::write(nested.join("book.epub"), b"book").unwrap();
+        std::fs::write(audiobook.join("01.mp3"), b"audio").unwrap();
+        let snapshot = ScanSnapshot { placements: vec![], work_revision: 0, scan_id: 1, excluded_paths: vec![], directories: vec![], tombstoned_files: vec![], books: vec![] };
+        let found = discover(root.path(), &snapshot);
+        assert!(found.readable);
+        let mut files = found.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>();
+        files.sort_unstable();
+        assert_eq!(files, ["Shelf/Nested/book.epub", "Shelf/Story"]);
+        let mut directories = found.directories.iter().map(|directory| directory.path.as_str()).collect::<Vec<_>>();
+        directories.sort_unstable();
+        assert_eq!(directories, ["Shelf", "Shelf/Nested"]);
+        for path in files.into_iter().chain(directories) {
+            assert!(root.path().join(path).exists(), "portable path must still open its native entry: {path}");
+        }
     }
 
     #[test]

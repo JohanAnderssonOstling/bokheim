@@ -387,7 +387,7 @@ impl Render for BrowserShell {
             .flex_col()
             .children(mobile_heading)
             .child(gpui::div().relative().flex_1().min_h_0().w_full().flex().flex_col().child(content).children(gpui_component::Root::render_notification_layer(window, cx)));
-        let safe_area = window.insets().safe_area;
+        let safe_area = window.insets().effective();
         let sidebar = self.navigation.clone();
         // The route reaches the shell by several paths (the rail, the session's
         // own navigation, restored state), so the view is noted where they all

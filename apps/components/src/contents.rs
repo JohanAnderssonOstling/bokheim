@@ -20,7 +20,7 @@ use gpui::prelude::*;
 use gpui::{Div, ElementId, MouseButton, SharedString, Stateful, div, px};
 use gpui_component::{Icon, IconName};
 
-use crate::{BrowserTheme, CONTENTS_AMOUNT_WIDTH_REM, CONTENTS_DIGIT_WIDTH_EM, CONTENTS_DISCLOSURE_SIZE_REM, CONTENTS_ROW_GAP, CONTENTS_ROW_INDENT, SPACE_SM, SPACE_XS, TEXT_SM, TEXT_XS};
+use crate::{BrowserTheme, CONTENTS_AMOUNT_WIDTH_REM, CONTENTS_DIGIT_WIDTH_EM, CONTENTS_DISCLOSURE_SIZE_REM, CONTENTS_ROW_GAP, CONTENTS_ROW_INDENT, CONTENTS_ROW_MIN_HEIGHT_REM, SPACE_SM, SPACE_XS, TEXT_SM, TEXT_XS};
 
 /// What one row of a contents list is.
 ///
@@ -81,17 +81,24 @@ pub fn contents_title(id: impl Into<ElementId>, title: impl Into<SharedString>, 
 /// Rows without children keep the empty column so that every title in the list
 /// starts on the same line — a ragged left edge reads as damage.
 /// Callers can attach their own toggle handler when `row.has_children` is true.
+///
+/// The button is as wide as a one-line row is tall, and always the row's full
+/// height: it stretches, and negative margins give back the row's padding on
+/// three sides, so a wrapped title's taller row gets a taller button while
+/// every title still starts on one line. On the current row the hover is
+/// `accent_text` at a low alpha, since `hover` is the accent itself and would
+/// vanish over it.
 pub fn contents_disclosure(id: impl Into<ElementId>, row: ContentsRow, theme: BrowserTheme) -> Stateful<Div> {
-    let size = gpui::rems(CONTENTS_DISCLOSURE_SIZE_REM);
-    div().id(id).w(size).h(size).flex_none().when(row.has_children, |disclosure| {
+    div().id(id).w(gpui::rems(CONTENTS_ROW_MIN_HEIGHT_REM)).self_stretch().my(px(-ROW_PADDING_Y)).ml(px(-SPACE_SM)).flex_none().when(row.has_children, |disclosure| {
+        let hovered = if row.marked { theme.accent_text.opacity(0.2) } else { theme.hover };
         disclosure
             .flex()
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .text_color(if row.marked { theme.accent_text } else { theme.text_muted })
-            .hover(move |style| style.bg(theme.hover))
-            .child(Icon::new(if row.expanded { IconName::ChevronDown } else { IconName::ChevronRight }).size(gpui::rems(CONTENTS_DISCLOSURE_SIZE_REM * 0.7)))
+            .text_color(if row.marked { theme.accent_text } else { theme.text })
+            .hover(move |style| style.bg(hovered))
+            .child(Icon::new(if row.expanded { IconName::ChevronDown } else { IconName::ChevronRight }).size(gpui::rems(CONTENTS_DISCLOSURE_SIZE_REM)))
     })
 }
 
@@ -134,8 +141,8 @@ pub fn contents_row(id: impl Into<ElementId>, row: ContentsRow, disclosure: Opti
         .flex_row()
         .items_center()
         .gap(px(CONTENTS_ROW_GAP))
-        .min_h(gpui::rems(2.25))
-        .py(px(SPACE_XS))
+        .min_h(gpui::rems(CONTENTS_ROW_MIN_HEIGHT_REM))
+        .py(px(ROW_PADDING_Y))
         .px(px(SPACE_SM))
         .pl(px(indent))
         .cursor_pointer()
@@ -173,3 +180,8 @@ pub fn contents_digits(largest: usize) -> usize {
 /// navigable; it simply stops marching rightwards in a column that may be a
 /// sidebar's width.
 const MAXIMUM_DRAWN_DEPTH: usize = 3;
+
+/// Above and below a row's title, the same whether it holds one line or two.
+/// Owned here rather than by each surface because the disclosure's margins
+/// cancel exactly this, to run the row's full height.
+const ROW_PADDING_Y: f32 = SPACE_SM;

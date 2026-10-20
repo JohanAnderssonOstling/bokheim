@@ -8,14 +8,14 @@
 //! is inside, and whether the file is on the device are the page's business.
 
 use gpui::prelude::*;
-use gpui::{Div, ElementId, SharedString, Stateful, div, px, rems};
+use gpui::{Div, ElementId, SharedString, Stateful, div, px, rems, rgba};
 use gpui_component::text::TextView;
 use html::document::plain_text_from_fragment;
 use html_gpui::HtmlFragmentElement;
 
 use crate::{
     BOOK_DETAIL_COLUMN_GAP, BOOK_DETAIL_COLUMN_MAX_WIDTH_REM, BOOK_DETAIL_COVER_FRACTION, BOOK_DETAIL_COVER_WIDTH, BOOK_DETAIL_DESCRIPTION_LINE_HEIGHT_EM, BOOK_DETAIL_DESCRIPTION_SIZE, BOOK_DETAIL_HERO_GAP, BOOK_DETAIL_PAGE_MARGIN,
-    BOOK_DETAIL_PAGE_WIDTH_REM, BOOK_DETAIL_SECTION_GAP, BrowserTheme, SPACE_LG, SPACE_SM, SPACE_XS, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD, TOPBAR_ACTION_HEIGHT_REM,
+    BOOK_DETAIL_PAGE_WIDTH_REM, BOOK_DETAIL_SECTION_GAP, BrowserTheme, InteractionHighlights, SPACE_LG, SPACE_SM, SPACE_XS, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, TITLE_MD, topbar_action_height_rem,
 };
 
 /// How hard a desktop column grows against a margin or gap. The columns take
@@ -100,7 +100,7 @@ pub fn book_detail_column_body() -> Div {
 /// of the book.
 pub fn book_detail_back(id: impl Into<ElementId>, theme: BrowserTheme) -> gpui_component::button::Button {
     use gpui_component::button::ButtonVariants as _;
-    crate::base_button(id).ghost().text_color(theme.text).icon(gpui_component::IconName::ArrowLeft).label("Library").self_start().h(rems(TOPBAR_ACTION_HEIGHT_REM)).px_0()
+    crate::base_button(id).ghost().text_color(theme.text).icon(gpui_component::IconName::ArrowLeft).label("Library").tooltip(crate::shortcut_tooltip("Return to library", "escape")).self_start().h(rems(topbar_action_height_rem())).px_0()
 }
 
 /// The cover and the words beside it, side by side down to a width where the
@@ -228,7 +228,7 @@ pub fn book_detail_heading(heading: impl Into<SharedString>, theme: BrowserTheme
 pub fn book_detail_section_heading(heading: impl Into<SharedString>, summary: Option<impl Into<SharedString>>, open: Option<bool>, theme: BrowserTheme) -> Div {
     div()
         .w_full()
-        .min_h(rems(TOPBAR_ACTION_HEIGHT_REM))
+        .min_h(rems(topbar_action_height_rem()))
         .min_w_0()
         .flex()
         .flex_row()
@@ -274,7 +274,8 @@ pub fn book_detail_description(description: &str, theme: BrowserTheme) -> Option
          p:first-child {{ margin-top: 0; }}
          p:last-child {{ margin-bottom: 0; }}"
     );
-    Some(div().w_full().min_w_0().flex_none().child(HtmlFragmentElement::new("book-detail-description-html", description.to_owned()).stylesheet(stylesheet).justify().text_color(theme.text).selectable(theme.accent.opacity(0.3))))
+    let selection_color = rgba(u32::from_be_bytes(InteractionHighlights::from_theme(theme).selection)).into();
+    Some(div().w_full().min_w_0().flex_none().child(HtmlFragmentElement::new("book-detail-description-html", description.to_owned()).stylesheet(stylesheet).justify().text_color(theme.text).selectable(selection_color)))
 }
 
 #[cfg(test)]

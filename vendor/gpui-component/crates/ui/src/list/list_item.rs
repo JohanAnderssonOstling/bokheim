@@ -164,8 +164,6 @@ impl ParentElement for ListItem {
 
 impl RenderOnce for ListItem {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let is_active = self.confirmed || self.selected || self.secondary_selected;
-
         let corner_radii = self.style.corner_radii.clone();
 
         let mut selected_style = StyleRefinement::default();
@@ -197,9 +195,6 @@ impl RenderOnce for ListItem {
                                     handler(ev, window, cx)
                                 })
                             })
-                    })
-                    .when(!is_active, |this| {
-                        this.hover(|this| this.bg(cx.theme().tokens.list_hover))
                     })
             })
             .when(!is_selectable, |this| {

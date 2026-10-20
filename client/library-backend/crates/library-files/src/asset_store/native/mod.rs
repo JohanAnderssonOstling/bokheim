@@ -387,6 +387,14 @@ pub(crate) fn open_playback_file(handle: &Handle, relative_path: &RelativeBookPa
     }
 }
 
+pub(crate) fn open_audiobook_track(handle: &Handle, folder: &RelativeBookPath, logical_name: &str) -> Result<Option<BoxedBookReader>, AssetStoreError> {
+    let folder = placement_path(handle, folder);
+    if !folder.try_exists()? {
+        return Ok(None);
+    }
+    open_file_reader(&audiobook_folder::resolve_track_path(&folder, logical_name)?)
+}
+
 pub(crate) fn open_book_at_path(handle: &Handle, relative_path: &RelativeBookPath) -> Result<Option<BoxedBookReader>, AssetStoreError> {
     let path = placement_path(handle, relative_path);
     if path.is_dir() {
@@ -395,10 +403,7 @@ pub(crate) fn open_book_at_path(handle: &Handle, relative_path: &RelativeBookPat
         if tracks.is_empty() {
             return Ok(None);
         }
-        let nfo = audiobook_folder::discover_nfo(&path)?;
-        let cue = audiobook_folder::discover_cue(&path)?;
-        let cover = audiobook_folder::discover_cover(&path)?;
-        let mut archive = audiobook_archive::write_archive_with_sidecars(tempfile::tempfile()?, &tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref())?;
+        let mut archive = audiobook_folder::write_folder_archive(&path, tempfile::tempfile()?, &tracks)?;
         archive.rewind()?;
         return Ok(Some(Box::new(archive)));
     }

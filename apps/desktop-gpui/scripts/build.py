@@ -20,7 +20,7 @@ def main():
         subprocess.check_output(["rustc", "-vV"], text=True).splitlines() if line.startswith("host: "))
     prepare = runpy.run_path(str(ROOT / "shared/pdfium/prepare.py"))["prepare"]
     prepared = prepare(target, offline=args.offline)
-    command = ["cargo", "build", "--release", "-p", "desktop-gpui", "--bin", "desktop-gpui",
+    command = ["cargo", "build", "--release", "-p", "desktop-gpui", "--bin", "bokheim",
                "--no-default-features", "--features", "flatpak" if args.flatpak else "desktop"]
     if requested_target:
         command += ["--target", target]

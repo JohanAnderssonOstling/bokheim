@@ -90,7 +90,7 @@ pub(crate) fn reader_sidebar<C: SidebarTarget>(owner: &C, target: &Entity<C>, co
             header
         })
         .when(active == SidebarTab::Search, |header| header.child(search::header_controls(owner, target, theme)))
-        .child(components::outlined_icon_button("reader-sidebar-close", "Close sidebar", IconName::Close, theme).on_click(move |_, window, cx| {
+        .child(components::outlined_icon_button("reader-sidebar-close", components::shortcut_tooltip("Close sidebar", "escape"), IconName::Close, theme).on_click(move |_, window, cx| {
             cx.stop_propagation();
             close_target.update(cx, |this, cx| this.hide_sidebar(window, cx));
         }));
@@ -152,8 +152,8 @@ fn install_sidebar_keyboard<C: SidebarTarget>(owner: &C, target: &Entity<C>, win
             }
             let Some(target) = target.upgrade() else { return };
             let key = &event.keystroke;
-            // The reader-level Find handler opens Search from any tab.
-            if key.key == "f" && key.modifiers.control && !key.modifiers.shift && !key.modifiers.alt && !key.modifiers.platform {
+            // Reader panel shortcuts work from every tab, including inputs.
+            if matches!(key.key.as_str(), "f" | "t") && components::primary_modifier_only(key.modifiers) {
                 return;
             }
             if key.key == "tab" && !key.modifiers.alt && !key.modifiers.platform {
@@ -265,13 +265,13 @@ pub(crate) fn reader_top_bar<C: SidebarTarget>(target: &Entity<C>, title: String
     let search_target = target.clone();
     components::ruled_topbar(theme)
         .when(cfg!(feature = "kobo") || !components::has_native_back_button(), |bar| {
-            bar.child(components::outlined_icon_button("reader-top-library", ReaderDestination::Library.label(), ReaderDestination::Library.icon(), theme).on_click(move |_, window, cx| {
+            bar.child(components::outlined_icon_button("reader-top-library", ReaderDestination::Library.tooltip(ReaderDestination::Library.label()), ReaderDestination::Library.icon(), theme).on_click(move |_, window, cx| {
                 library_target.update(cx, |this, cx| this.close_reader(window, cx));
             }))
         })
         .child(components::reader_top_bar_progress(progress_label, theme))
         .child(components::reader_top_bar_title(title, chapter, theme))
-        .child(components::outlined_icon_button("reader-top-search", ReaderDestination::Search.label(), ReaderDestination::Search.icon(), theme).on_click(move |_, window, cx| {
+        .child(components::outlined_icon_button("reader-top-search", ReaderDestination::Search.tooltip(ReaderDestination::Search.label()), ReaderDestination::Search.icon(), theme).on_click(move |_, window, cx| {
             search_target.update(cx, |this, cx| this.toggle_sidebar_tab(SidebarTab::Search, window, cx));
         }))
         .into_any_element()
@@ -327,6 +327,12 @@ mod tests {
     impl super::super::input::CommandTarget<crate::FocusReaderSearch> for SettingsTest {
         fn execute(&mut self, _: &crate::FocusReaderSearch, window: &mut Window, cx: &mut Context<Self>) {
             self.select_sidebar_tab(SidebarTab::Search, window, cx);
+        }
+    }
+
+    impl super::super::input::CommandTarget<crate::ToggleToc> for SettingsTest {
+        fn execute(&mut self, _: &crate::ToggleToc, window: &mut Window, cx: &mut Context<Self>) {
+            self.select_sidebar_tab(SidebarTab::Contents, window, cx);
         }
     }
 
@@ -407,7 +413,7 @@ mod tests {
 
     impl Render for SettingsTest {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            super::super::input::install_reader_search(window, cx);
+            super::super::input::install_reader_shortcuts(window, cx);
             let theme = components::browser_theme(cx);
             if components::uses_mobile_reader_controls(window) {
                 self.navigation.keyboard_visibility().set(false);
@@ -501,7 +507,7 @@ mod tests {
     #[gpui::test]
     fn find_opens_and_focuses_search_from_document_sidebar_and_input(cx: &mut TestAppContext) {
         let (view, cx) = setup(cx);
-        cx.simulate_keystrokes("ctrl-f");
+        cx.simulate_keystrokes("secondary-f");
         cx.run_until_parked();
         cx.update(|window, cx| {
             let view = view.read(cx);
@@ -509,10 +515,10 @@ mod tests {
             assert!(view.search_input.read(cx).focus_handle(cx).is_focused(window));
         });
         cx.simulate_input("remember this query");
-        cx.simulate_keystrokes("ctrl-f");
+        cx.simulate_keystrokes("secondary-f");
         view.read_with(cx, |view, cx| assert_eq!(view.search_input.read(cx).value().as_str(), "remember this query"));
 
-        cx.simulate_keystrokes("escape ctrl-f");
+        cx.simulate_keystrokes("escape secondary-f");
         cx.run_until_parked();
         cx.update(|window, cx| {
             let view = view.read(cx);
@@ -523,7 +529,7 @@ mod tests {
 
         let settings = cx.debug_bounds("reader-rail-3").unwrap();
         cx.simulate_click(settings.center(), Default::default());
-        cx.simulate_keystrokes("ctrl-f");
+        cx.simulate_keystrokes("secondary-f");
         cx.run_until_parked();
         cx.update(|window, cx| {
             let view = view.read(cx);
@@ -532,6 +538,26 @@ mod tests {
             assert_eq!(view.theme_changes, 0);
             assert_eq!(view.document_keys, 0);
         });
+    }
+
+    #[gpui::test]
+    fn contents_shortcut_opens_and_focuses_contents_from_search_and_hidden_sidebar(cx: &mut TestAppContext) {
+        let (view, cx) = setup(cx);
+        cx.simulate_keystrokes("secondary-f");
+        cx.simulate_input("remember this query");
+        for keys in ["secondary-t", "escape secondary-t", "secondary-t"] {
+            cx.simulate_keystrokes(keys);
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let view = view.read(cx);
+                assert!(!view.sidebar_hidden);
+                assert_eq!(view.tab, SidebarTab::Contents);
+                assert!(view.sidebar_focus.contains_focused(window, cx));
+                assert!(!view.sidebar_focus.is_focused(window));
+                assert_eq!(view.toc_tree.read(cx).selected_index(), Some(0));
+                assert_eq!(view.search_input.read(cx).value().as_str(), "remember this query");
+            });
+        }
     }
 
     #[gpui::test]

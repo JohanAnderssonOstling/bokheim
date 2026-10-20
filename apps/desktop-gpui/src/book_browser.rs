@@ -625,7 +625,7 @@ impl Render for Browser {
                             .id(("android-address-suggestion", index))
                             .debug_selector(move || format!("android-address-suggestion-{index}"))
                             .flex_none()
-                            .h(rems(components::TOPBAR_ACTION_HEIGHT_REM))
+                            .h(rems(components::topbar_action_height_rem()))
                             .px(px(components::SPACE_SM))
                             .flex()
                             .items_center()

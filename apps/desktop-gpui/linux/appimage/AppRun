@@ -2,4 +2,4 @@
 set -eu
 
 APPDIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-exec "$APPDIR/usr/bin/desktop-gpui" "$@"
+exec "$APPDIR/usr/bin/bokheim" "$@"

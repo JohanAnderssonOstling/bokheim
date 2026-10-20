@@ -42,7 +42,7 @@ def package(binary, icon, output):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--binary', required=True, type=Path, help='Release desktop-gpui.exe')
+    parser.add_argument('--binary', required=True, type=Path, help='Release bokheim.exe')
     parser.add_argument('--icon', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()

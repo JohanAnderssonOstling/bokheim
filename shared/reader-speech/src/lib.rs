@@ -8,7 +8,7 @@ mod output;
 mod prefetch;
 mod speech_text;
 
-pub use chunks::{FIRST_CHUNK_CHARS, MAX_CHUNK_CHARS, next_chunk, next_chunk_with_limit};
+pub use chunks::{FIRST_CHUNK_CHARS, MAX_CHUNK_CHARS, next_chunk, next_chunk_in_tree, next_chunk_with_limit};
 pub use model::{Voice, load_model, load_model_with_threads, load_voice, load_voice_with_threads, model_directory, set_model_preparer, voice_directory};
 
 use async_channel::{Receiver, Sender};
@@ -654,6 +654,19 @@ fn worker(commands: mpsc::Receiver<Command>, wake: mpsc::Sender<Command>, events
     worker_with(commands, wake, events, shared, load_voice, output::open_default, VOICE_IDLE_TIMEOUT);
 }
 
+fn unload_voice<E>(engine: &mut Option<E>) {
+    if let Some(voice) = engine.take() {
+        drop(voice);
+        // glibc can retain freed inference buffers in the synthesis thread's
+        // heap. Return those pages when the voice is explicitly retired, while
+        // leaving the hot synthesis path and paused sessions alone.
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
+}
+
 fn worker_with<E: SpeechEngine, O: OutputControl + 'static>(
     commands: mpsc::Receiver<Command>, wake: mpsc::Sender<Command>, events: SpeechEvents, shared: Arc<Shared>, mut load: impl FnMut(Voice) -> Result<E, String>, mut open: impl FnMut() -> Result<(Arc<Player>, O, Duration), String>,
     voice_idle_timeout: Duration,
@@ -687,7 +700,7 @@ fn worker_with<E: SpeechEngine, O: OutputControl + 'static>(
             // Starting publishes the item count before sending its command.
             // Keep the warm model if a new start already raced this deadline.
             if shared.count.load(Ordering::Acquire) == 0 {
-                engine = None;
+                unload_voice(&mut engine);
             }
             unload_at = None;
         }
@@ -801,7 +814,7 @@ fn worker_with<E: SpeechEngine, O: OutputControl + 'static>(
                 retire_at = None;
                 unload_at = None;
                 release_output(&shared, &mut player, &mut output);
-                engine = None;
+                unload_voice(&mut engine);
                 buffered = Arc::new(AtomicUsize::new(0));
             }
             Some(Command::Replace { generation: next, text, start }) => {
@@ -926,7 +939,7 @@ fn worker_with<E: SpeechEngine, O: OutputControl + 'static>(
             let voice = *shared.voice.lock().unwrap();
             if engine_voice != Some(voice) {
                 // Drop the previous session before allocating the next model.
-                engine = None;
+                unload_voice(&mut engine);
                 engine_voice = Some(voice);
             }
             if engine.is_none() {
@@ -1027,6 +1040,7 @@ fn worker_with<E: SpeechEngine, O: OutputControl + 'static>(
         }
     }
     release_output(&shared, &mut player, &mut output);
+    unload_voice(&mut engine);
 }
 
 struct FragmentSource {

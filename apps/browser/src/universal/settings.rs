@@ -326,9 +326,11 @@ impl Render for SettingsPage {
             application_themes
         };
 
-        let [decrease, increase] =
-            [("decrease-ui-font-size", "−", current_font_size.saturating_sub(1).max(UI_FONT_SIZE_MIN), UI_FONT_SIZE_MIN), ("increase-ui-font-size", "+", current_font_size.saturating_add(1).min(UI_FONT_SIZE_MAX), UI_FONT_SIZE_MAX)]
-                .map(|(id, label, value, limit)| Self::preference_button(components::settings_stepper_button(id, label, current_font_size == limit, theme), BrowsingPreferencePatch::UiFontSizePx(value), cx));
+        let [decrease, increase] = [
+            ("decrease-ui-font-size", "−", components::shortcut_tooltip("Decrease interface font size", "secondary--"), current_font_size.saturating_sub(1).max(UI_FONT_SIZE_MIN), UI_FONT_SIZE_MIN),
+            ("increase-ui-font-size", "+", components::shortcut_tooltip("Increase interface font size", "secondary-+"), current_font_size.saturating_add(1).min(UI_FONT_SIZE_MAX), UI_FONT_SIZE_MAX),
+        ]
+        .map(|(id, label, tooltip, value, limit)| Self::preference_button(components::settings_stepper_button(id, label, current_font_size == limit, theme).tooltip(tooltip), BrowsingPreferencePatch::UiFontSizePx(value), cx));
         let font_size = components::settings_stepper(decrease, format!("{current_font_size}px"), increase, theme);
 
         let font_families = {
@@ -391,7 +393,7 @@ impl Render for SettingsPage {
             .child(Self::preference_button(components::browser_settings_choice_button("transfers-unmetered", "Off", !metered, theme), BrowsingPreferencePatch::AllowMeteredTransfers(false), cx))
             .child(Self::preference_button(components::browser_settings_choice_button("transfers-metered", "On", metered, theme), BrowsingPreferencePatch::AllowMeteredTransfers(true), cx));
         let transfers = components::browser_settings_fieldset("Transfers", theme)
-            .child(components::browser_settings_row("Allow transfers on metered connections", "Applies to downloads, uploads, torrents and app updates. Transfers wait while the connection is metered.", transfer_choices, theme).border_t_0())
+            .child(components::browser_settings_compact_row("Allow transfers on metered connections", transfer_choices, theme).border_t_0())
             .children(self.transfer_save_error.clone().map(|error| components::browser_settings_group_error(error, theme)));
         let mut sections = components::browser_settings_sections().child(appearance_settings).child(self.section(Section::Transfers, transfers)).child(self.section(Section::Account, self.account.clone()));
 

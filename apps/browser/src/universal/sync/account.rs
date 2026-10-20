@@ -182,7 +182,7 @@ impl SyncPage {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn start_snapshot_operation(&mut self, progress: &'static str, success: &'static str, reveal_password_reset_on_error: bool, operation: UiFuture<CloudSnapshot>, cx: &mut Context<Self>) {
+    pub(super) fn start_snapshot_operation(&mut self, progress: &'static str, success: Option<&'static str>, reveal_password_reset_on_error: bool, operation: UiFuture<CloudSnapshot>, cx: &mut Context<Self>) {
         if self.is_busy() {
             return;
         }
@@ -199,7 +199,7 @@ impl SyncPage {
             let _ = page.update(cx, |page, cx| match result {
                 Ok(snapshot) => {
                     page.login_failed = false;
-                    page.apply_snapshot(snapshot, Some(success), cx);
+                    page.apply_snapshot(snapshot, success, cx);
                 }
                 Err(error) => {
                     page.login_failed = reveal_password_reset_on_error;
@@ -225,7 +225,7 @@ impl SyncPage {
         {
             let backend = self.services.backend.clone();
             let operation = Box::pin(async move { backend.logout().await });
-            self.start_snapshot_operation("Signing out…", "Signed out", false, operation, cx);
+            self.start_snapshot_operation("Signing out…", Some("Signed out"), false, operation, cx);
         }
     }
 }

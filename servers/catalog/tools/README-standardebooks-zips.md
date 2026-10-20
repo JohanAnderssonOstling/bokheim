@@ -25,11 +25,26 @@ Standard Ebooks' advertised download URL first returns a download-started page;
 use the EPUB URL from its automatic redirect, with `?source=download`, as
 `file_url` when preparing a direct-download manifest.
 
-With cover preservation enabled, enrichment requests no cover and any
-returned cover is ignored. Exact title/author replacements reuse existing
-catalog artwork; new entries use their embedded artwork. The EPUB bytes remain
-unchanged. Existing cover files are checked by SHA-256 before and after local
-publication.
+Standard Ebooks acquisitions always use the artwork embedded in their own
+EPUB, including reimports and entries whose covers were previously copied from
+another edition. This source policy takes precedence over `preserve_covers` in
+older manifests. Enrichment requests no cover and any returned cover is ignored.
+An EPUB without a usable embedded cover fails instead of inheriting another
+edition's artwork. EPUB bytes remain unchanged. Existing cover files are checked
+by SHA-256 before and after publication; only covers belonging to Standard Ebooks
+acquisitions may change. The audit records those changes in `cover-changes.json`.
+
+To stage a repair for previously imported Standard Ebooks covers:
+
+```sh
+catalog /path/to/catalog extract-standardebooks-covers /path/to/new-staging-directory
+```
+
+The command reads the curation database without writing it, verifies each retained
+EPUB's content hash and canonical Standard Ebooks identifier, and extracts all four
+cover sizes into the staging directory. It writes `standardebooks-covers.json`
+only after every book succeeds. Back up current served cover files before
+installing staged files, and verify their hashes after installation.
 
 The output directory contains a verified compressed SQLite backup, inventory,
 source archive/member observations, resumable progress, logs, replacement plan,

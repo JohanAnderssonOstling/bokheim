@@ -9,14 +9,16 @@ use gpui_component::button::Button;
 use gpui_component::menu::PopupMenu;
 use gpui_component::popover::Popover;
 
-use crate::{BrowserTheme, RADIUS_MD, RADIUS_SM, SETTINGS_CONTROL_SIZE_REM, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, ScrollableElement, TEXT_SM, TEXT_XS, browser_theme, menu_item, outlined_text_button, scroll::Scrollable};
+use crate::{BrowserTheme, RADIUS_MD, RADIUS_SM, SPACE_MD, SPACE_SM, SPACE_XS, SPACE_XXS, ScrollableElement, TEXT_SM, TEXT_XS, browser_theme, menu_item, outlined_text_button, scroll::Scrollable, settings_control_size_rem};
 
 /// The toolbar and its controls grow together with the UI font. The same 2rem
-/// step as `TOPBAR_ACTION_HEIGHT_REM`, kept under its own name because the
+/// step as `topbar_action_height_rem()`, kept under its own name because the
 /// toolbar's height feeds its own geometry math below.
-pub const READER_TOOLBAR_SIZE_REM: f32 = crate::TOPBAR_ACTION_HEIGHT_REM;
+pub fn reader_toolbar_size_rem() -> f32 {
+    crate::topbar_action_height_rem()
+}
 pub fn reader_toolbar_size_px(window: &Window) -> f32 {
-    f32::from(gpui::rems(READER_TOOLBAR_SIZE_REM).to_pixels(window.rem_size()))
+    f32::from(gpui::rems(reader_toolbar_size_rem()).to_pixels(window.rem_size()))
 }
 const READER_SETTINGS_POPOVER_GAP: f32 = 4.0;
 const READER_SETTINGS_POPOVER_WINDOW_MARGIN: f32 = 8.0;
@@ -173,7 +175,7 @@ pub fn reader_annotation_editor(note: impl IntoElement, theme: BrowserTheme) -> 
         .child(div().w_full().flex_none().debug_selector(|| "reader-annotation-note-row".into()).p(px(SPACE_XS)).rounded(px(RADIUS_SM)).border_1().border_color(theme.rule).bg(theme.page_bg).child(note))
 }
 
-/// Editor controls run at `SETTINGS_CONTROL_SIZE_REM`, the shared settings
+/// Editor controls run at `settings_control_size_rem()`, the shared settings
 /// geometry, rather than a third name for the same 2rem step.
 
 /// The annotation palette, in hue order.
@@ -225,8 +227,8 @@ pub fn reader_annotation_color_swatch(id: impl Into<ElementId>, color: u32, name
     div()
         .id(id)
         .debug_selector(move || format!("reader-annotation-color-{name}"))
-        .w(gpui::rems(SETTINGS_CONTROL_SIZE_REM))
-        .h(gpui::rems(SETTINGS_CONTROL_SIZE_REM))
+        .w(gpui::rems(settings_control_size_rem()))
+        .h(gpui::rems(settings_control_size_rem()))
         .min_w(px(20.0))
         .flex_shrink_1()
         .flex()
@@ -253,7 +255,7 @@ pub fn reader_annotation_color_swatch(id: impl Into<ElementId>, color: u32, name
 
 /// A compact text action in the annotation editor.
 pub fn reader_annotation_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool, theme: BrowserTheme) -> Button {
-    crate::selectable_button(outlined_text_button(id, label).h(gpui::rems(SETTINGS_CONTROL_SIZE_REM)).rounded(px(RADIUS_SM)).border_color(theme.rule).bg(theme.page_bg), selected, theme)
+    crate::selectable_button(outlined_text_button(id, label).h(gpui::rems(settings_control_size_rem())).rounded(px(RADIUS_SM)).border_color(theme.rule).bg(theme.page_bg), selected, theme)
 }
 
 /// Width of the disclosure column. Doubles as the row's left inset and as the
@@ -349,6 +351,18 @@ impl ReaderDestination {
             Self::Tts => "TTS",
         }
     }
+
+    /// Keep keyboard hints consistent across the rail and mobile controls.
+    pub fn tooltip(self, label: impl Into<SharedString>) -> SharedString {
+        let label = label.into();
+        let shortcut = match self {
+            Self::Library => "backspace",
+            Self::Contents => "secondary-t",
+            Self::Search => "secondary-f",
+            Self::Notes | Self::Settings | Self::Tts => return label,
+        };
+        crate::shortcut_tooltip(label, shortcut)
+    }
 }
 
 /// A sidebar panel's own header: its name and a close button.
@@ -398,7 +412,7 @@ pub fn reader_bottom_bar_item(id: impl Into<ElementId>, destination: ReaderDesti
         .when(mark == ReaderRailMark::Active, |glyph| glyph.text_color(theme.accent))
         .child(destination.glyph(crate::NAV_RAIL_ICON_SIZE_REM, theme))
         .children(reader_activity_dot(mark, theme).map(|dot| dot.top(px(-2.0)).right(px(-6.0))));
-    crate::browser::bottom_navigation_tile(id, glyph, destination.label(), mark == ReaderRailMark::Selected, theme)
+    crate::browser::bottom_navigation_tile(id, glyph, destination.label(), mark == ReaderRailMark::Selected, theme).tooltip(destination.tooltip(destination.label()))
 }
 
 /// Width of the reader sidebar's icon rail. The rail belongs to the sidebar:
@@ -434,7 +448,7 @@ pub enum ReaderRailMark {
 
 /// One rail destination: an icon, named by its tooltip.
 pub fn reader_rail_item(id: impl Into<ElementId>, destination: ReaderDestination, label: impl Into<SharedString>, mark: ReaderRailMark, theme: BrowserTheme) -> Stateful<Div> {
-    let label = label.into();
+    let label = destination.tooltip(label);
     let ink = match mark {
         ReaderRailMark::Selected => theme.text,
         ReaderRailMark::Active => theme.accent,
@@ -564,7 +578,7 @@ pub fn reader_typeface_sample(family: Option<&'static str>) -> Div {
 
 /// The query field fills the space beside the search controls.
 pub fn reader_search_box(theme: BrowserTheme) -> Div {
-    div().flex_1().min_w_0().h(gpui::rems(READER_TOOLBAR_SIZE_REM)).overflow_hidden().rounded(px(RADIUS_SM)).border_1().border_color(theme.border).bg(theme.page_bg)
+    div().flex_1().min_w_0().h(gpui::rems(reader_toolbar_size_rem())).overflow_hidden().rounded(px(RADIUS_SM)).border_1().border_color(theme.border).bg(theme.page_bg)
 }
 
 /// Search shares the sidebar's inset, with space above and below its controls.

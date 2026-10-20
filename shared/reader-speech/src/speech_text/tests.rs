@@ -147,13 +147,14 @@ fn expands_typed_fractions_only_with_units() {
 }
 
 #[test]
-fn collapses_ellipses_for_speech() {
+fn renders_parsed_ellipses_as_hesitations_for_speech() {
     for (input, expected) in [
-        ("Wait.. really... Yes....", "Wait. really. Yes."),
-        ("Wait… really…… Yes.….", "Wait. really. Yes."),
-        ("“Well...” she said…", "“Well.” she said."),
-        ("At 3.14... Dr. Smith paused.", "At three point one four. Doctor Smith paused."),
-        ("Visit https://example.com/a...b and wait...", "Visit https://example.com/a...b and wait."),
+        ("Wait.. really... Yes....", "Wait. really, Yes,"),
+        ("Wait… really…… Yes.….", "Wait, really, Yes,"),
+        ("“Well...” she said…", "“Well,” she said,"),
+        ("At 3.14... Dr. Smith paused.", "At three point one four, Doctor Smith paused."),
+        ("Visit https://example.com/a...b and wait...", "Visit https://example.com/a...b and wait,"),
+        ("Code `wait...` and pause… here.", "Code `wait...` and pause, here."),
     ] {
         assert_eq!(prepare_speech_text(input), expected, "input: {input:?}");
     }
@@ -161,8 +162,30 @@ fn collapses_ellipses_for_speech() {
 
 #[test]
 fn separates_words_at_em_dashes_for_speech() {
-    for (input, expected) in [("Did you—did", "Did you did"), ("“Did you—did you hear?”", "“Did you did you hear?”"), ("A well-known writer—perhaps.", "A well-known writer perhaps."), ("Wait—really...", "Wait really.")] {
+    for (input, expected) in [("Did you—did", "Did you did"), ("“Did you—did you hear?”", "“Did you did you hear?”"), ("A well-known writer—perhaps.", "A well-known writer perhaps."), ("Wait—really...", "Wait really,")] {
         assert_eq!(prepare_speech_text(input), expected, "input: {input:?}");
+    }
+}
+
+#[test]
+fn silences_asterisk_markers_for_speech() {
+    for (input, expected) in [
+        ("A footnote* and another**.", "A footnote and another."),
+        ("Read *this* and **that**.", "Read this and that."),
+        ("before***after", "before after"),
+        ("***", ""),
+        ("First.\n* * *\nNext.", "First.\n  \nNext."),
+        ("2 * 3 = 6.", "two times three equals six."),
+        ("Code `a * b` stays literal.", "Code `a * b` stays literal."),
+    ] {
+        assert_eq!(prepare_speech_text(input), expected, "input: {input:?}");
+    }
+}
+
+#[test]
+fn expands_page_abbreviations_with_or_without_spaces() {
+    for input in ["p. 48", "p.48"] {
+        assert_eq!(prepare_speech_text(input), "page forty-eight", "input: {input:?}");
     }
 }
 

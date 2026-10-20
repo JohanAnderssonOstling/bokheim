@@ -53,7 +53,7 @@ def sign_and_verify(app):
 
 def architecture(args, version, source):
     target = ARCHES[args.arch]
-    binary = ROOT / "target" / target / "release/desktop-gpui"
+    binary = ROOT / "target" / target / "release/bokheim"
     prepared = ROOT / ".pdfium" / target
     if not binary.is_file() or not (prepared / "libpdfium.dylib").is_file():
         raise ValueError(f"Build the optimized {target} desktop app first")

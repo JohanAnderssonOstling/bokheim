@@ -197,6 +197,9 @@ impl Sidebar {
                             } else {
                                 "Rename"
                             })
+                            // Folder-import review disables the input, so its
+                            // submit button has no Enter shortcut to advertise.
+                            .when(dialog.folders.is_none(), |button| button.tooltip(components::shortcut_tooltip(if dialog.id.is_none() { "Create" } else { "Rename" }, "enter")))
                             .disabled(dialog.busy || dialog.estimate.is_none() || dialog.input.read(cx).value().trim().is_empty())
                             .on_click(move |_, _, cx| submit.update(cx, |navigation, cx| navigation.submit_library_name(cx))),
                     ),

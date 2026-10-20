@@ -2,6 +2,7 @@
 
 mod metadata;
 pub use metadata::{PdfByteRange, PdfDependencyIndex, PdfPageSource, PdfReaderMetadata, PdfStoredAnnotation, PdfStoredAnnotationKind, PdfStoredPage};
+use std::collections::HashSet;
 
 const DEFAULT_CONTENT_DIFFERENCE_THRESHOLD: u8 = 24;
 const DEFAULT_PADDING_PIXELS: u32 = 12;
@@ -205,11 +206,31 @@ pub struct FitWidthPage {
     page_index: usize,
     width: f32,
     height: f32,
+    source_top: f32,
+    source_height: f32,
 }
 
 impl FitWidthPage {
     pub fn new(page_index: usize, width: f32, height: f32) -> Option<Self> {
-        valid_layout_extent(width, height).then_some(Self { page_index, width, height })
+        valid_layout_extent(width, height).then_some(Self { page_index, width, height, source_top: 0.0, source_height: 1.0 })
+    }
+
+    /// Maps this cropped layout back into original PDF page coordinates.
+    /// Navigation history remains independent of changes in margin analysis.
+    pub fn with_source_crop(mut self, crop: NormalizedRect) -> Self {
+        if crop.top().is_finite() && crop.height().is_finite() && crop.height() > 0.0 {
+            self.source_top = crop.top();
+            self.source_height = crop.height();
+        }
+        self
+    }
+
+    fn source_y(self, display_y: f32) -> f32 {
+        self.source_top + display_y * self.source_height
+    }
+
+    fn display_y(self, source_y: f32) -> f32 {
+        ((source_y - self.source_top) / self.source_height).clamp(0.0, 1.0)
     }
 
     pub const fn page_index(self) -> usize {
@@ -235,7 +256,8 @@ pub struct FitWidthViewport {
 /// A stable source position used to begin a bounded fit-width viewport.
 ///
 /// Unlike a display-column index, this survives a change in column count or
-/// viewport height: it always identifies a point in the original PDF page.
+/// viewport height. It identifies an original PDF point even when the supplied
+/// page geometry is cropped; see [`FitWidthPage::with_source_crop`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FitWidthAnchor {
     page_index: usize,
@@ -279,53 +301,102 @@ pub struct FitWidthAnchorPager {
     viewport: FitWidthViewport,
     column_count: usize,
     window: FitWidthViewportWindow,
+    backward_history: Vec<FitWidthAnchor>,
+    forward_history: Vec<FitWidthAnchor>,
 }
 
 impl FitWidthAnchorPager {
     pub fn new(pages: impl IntoIterator<Item = (FitWidthPage, Vec<(f32, f32)>)>, viewport: FitWidthViewport, column_count: usize, start: FitWidthAnchor) -> Result<Self, FitWidthPlanError> {
         let pages = pages.into_iter().collect::<Vec<_>>();
         let window = Self::build_window(&pages, viewport, column_count, start)?;
-        Ok(Self { pages, viewport, column_count: column_count.max(1), window })
+        Ok(Self { pages, viewport, column_count: column_count.max(1), window, backward_history: Vec::new(), forward_history: Vec::new() })
+    }
+
+    /// Refreshes page geometry without losing visited positions. Changing the
+    /// viewport or column count starts a new navigation sequence.
+    pub fn reconfigure(&mut self, pages: impl IntoIterator<Item = (FitWidthPage, Vec<(f32, f32)>)>, viewport: FitWidthViewport, column_count: usize, start: FitWidthAnchor) -> Result<(), FitWidthPlanError> {
+        let mut next = Self::new(pages, viewport, column_count, start)?;
+        if self.viewport == next.viewport && self.column_count == next.column_count && self.window.start == next.window.start {
+            let page_indices: HashSet<_> = next.pages.iter().map(|(page, _)| page.page_index()).collect();
+            next.backward_history = self.backward_history.iter().copied().filter(|anchor| page_indices.contains(&anchor.page_index())).collect();
+            next.forward_history = self.forward_history.iter().copied().filter(|anchor| page_indices.contains(&anchor.page_index())).collect();
+        }
+        *self = next;
+        Ok(())
     }
 
     pub fn window(&self) -> &FitWidthViewportWindow {
         &self.window
     }
 
+    pub fn clear_history(&mut self) {
+        self.backward_history.clear();
+        self.forward_history.clear();
+    }
+
+    /// Refines the current position after a render/crop refresh, preserving
+    /// the positions visited before and after it.
+    pub fn restore_start(&mut self, start: FitWidthAnchor) -> Result<(), FitWidthPlanError> {
+        if start != self.window.start {
+            self.window = Self::build_window(&self.pages, self.viewport, self.column_count, start)?;
+        }
+        Ok(())
+    }
+
     pub fn can_forward(&self) -> bool {
-        self.window.end.is_some()
+        !self.forward_history.is_empty() || self.window.end.is_some()
     }
 
     pub fn can_backward(&self) -> bool {
-        self.previous_window_start().is_some()
+        !self.backward_history.is_empty() || self.previous_window_start().is_some()
     }
 
-    /// Promotes this viewport's end source anchor to the next viewport start.
+    /// Restores a visited next position, or promotes this viewport's end to
+    /// the next start. The current start is retained for an exact reversal.
     pub fn forward(&mut self) -> Result<bool, FitWidthPlanError> {
-        let Some(next_start) = self.window.end else {
+        let remembered = self.forward_history.last().copied();
+        let Some(next_start) = remembered.or(self.window.end) else {
             return Ok(false);
         };
-        self.window = Self::build_window(&self.pages, self.viewport, self.column_count, next_start)?;
+        let window = Self::build_window(&self.pages, self.viewport, self.column_count, next_start)?;
+        self.backward_history.push(self.window.start);
+        if remembered.is_some() {
+            self.forward_history.pop();
+        }
+        self.window = window;
         Ok(true)
     }
 
-    /// Derives the prior viewport by packing backward from the current source
-    /// start. It never depends on navigation history or a document-wide layout.
+    /// Restores the exact previous start. Reverse packing is used only when
+    /// navigating before the first position visited in this sequence.
     pub fn backward(&mut self) -> Result<bool, FitWidthPlanError> {
-        let Some(previous_start) = self.previous_window_start() else {
+        let remembered = self.backward_history.last().copied();
+        let Some(previous_start) = remembered.or_else(|| self.previous_window_start()) else {
             return Ok(false);
         };
-        self.window = Self::build_window(&self.pages, self.viewport, self.column_count, previous_start)?;
+        let window = Self::build_window(&self.pages, self.viewport, self.column_count, previous_start)?;
+        self.forward_history.push(self.window.start);
+        if remembered.is_some() {
+            self.backward_history.pop();
+        }
+        self.window = window;
         Ok(true)
     }
 
     /// Reflows from an arbitrary source position reached during continuous
     /// scrolling, a page jump, a search hit, or a TOC target.
-    pub fn seek(&mut self, start: FitWidthAnchor, _remember_previous: bool) -> Result<(), FitWidthPlanError> {
+    pub fn seek(&mut self, start: FitWidthAnchor, remember_previous: bool) -> Result<(), FitWidthPlanError> {
         if start == self.window.start {
             return Ok(());
         }
-        self.window = Self::build_window(&self.pages, self.viewport, self.column_count, start)?;
+        let window = Self::build_window(&self.pages, self.viewport, self.column_count, start)?;
+        if remember_previous {
+            self.backward_history.push(self.window.start);
+        } else {
+            self.backward_history.clear();
+        }
+        self.forward_history.clear();
+        self.window = window;
         Ok(())
     }
 
@@ -338,9 +409,99 @@ impl FitWidthAnchorPager {
         Ok(Self::build_window(&self.pages, self.viewport, self.column_count, anchor)?.plan)
     }
 
+    /// Moves through source content in display pixels. A wheel pixel always
+    /// travels one pixel, regardless of how many columns fill a viewport.
+    /// Scrolling commits the same source anchor used by page and line turns.
+    pub fn scroll_by(&mut self, distance: f32) -> Result<bool, FitWidthPlanError> {
+        if !distance.is_finite() || distance == 0.0 {
+            return Ok(false);
+        }
+        let Some(mut index) = self.pages.iter().position(|(page, _)| page.page_index() == self.window.start.page_index()) else { return Ok(false) };
+        let mut y = self.pages[index].0.display_y(self.window.start.page_y());
+        let mut remaining = distance;
+        loop {
+            let height = self.scaled_height(index);
+            let next_y = y + remaining / height;
+            if next_y < 0.0 && index > 0 {
+                remaining += y * height;
+                index -= 1;
+                y = 1.0;
+            } else if next_y >= 1.0 && index + 1 < self.pages.len() {
+                remaining -= (1.0 - y) * height;
+                index += 1;
+                y = 0.0;
+            } else {
+                y = next_y.clamp(0.0, (1.0 - 0.5 / height).max(0.0));
+                break;
+            }
+        }
+        let mut next = FitWidthAnchor::new(self.pages[index].0.page_index(), self.pages[index].0.source_y(y));
+        if distance > 0.0 {
+            let last = self.pages.len() - 1;
+            let end = self.previous_start_from(last, 1.0).unwrap_or_else(|| FitWidthAnchor::new(self.pages[0].0.page_index(), 0.0));
+            // Direct jumps may intentionally begin beyond the last full
+            // viewport. Scrolling there must not jump backward to the limit.
+            if anchor_after(next, end) {
+                next = if anchor_after(self.window.start, end) { self.window.start } else { end };
+            }
+        }
+        let current = self.pages.iter().find(|(page, _)| page.page_index() == self.window.start.page_index()).map(|(page, _)| *page);
+        if next == self.window.start || current.is_some_and(|page| next.page_index() == page.page_index() && page.display_y(next.page_y()) == page.display_y(self.window.start.page_y())) {
+            return Ok(false);
+        }
+        self.seek(next, false)?;
+        Ok(true)
+    }
+
+    /// A text/image boundary in source coordinates, independent of the local
+    /// display-column indices discarded by each reflow.
+    pub fn adjacent_boundary(&self, forward: bool) -> Option<FitWidthAnchor> {
+        let mut index = self.pages.iter().position(|(page, _)| page.page_index() == self.window.start.page_index())?;
+        let y = self.pages[index].0.display_y(self.window.start.page_y());
+        let tolerance = 0.5 / self.scaled_height(index);
+        let bands = &self.pages[index].1;
+        if forward {
+            if let Some(top) = bands.iter().map(|band| band.0).filter(|top| *top > y + tolerance).min_by(f32::total_cmp) {
+                return Some(FitWidthAnchor::new(self.pages[index].0.page_index(), self.pages[index].0.source_y(top)));
+            }
+            index += 1;
+            self.pages.get(index).map(|(page, _)| FitWidthAnchor::new(page.page_index(), page.source_y(0.0)))
+        } else {
+            if let Some(top) = bands.iter().map(|band| band.0).filter(|top| *top < y - tolerance).max_by(f32::total_cmp) {
+                return Some(FitWidthAnchor::new(self.pages[index].0.page_index(), self.pages[index].0.source_y(top)));
+            }
+            if y > tolerance {
+                return Some(FitWidthAnchor::new(self.pages[index].0.page_index(), self.pages[index].0.source_y(0.0)));
+            }
+            index = index.checked_sub(1)?;
+            let top = self.pages[index].1.iter().map(|band| band.0).max_by(f32::total_cmp).unwrap_or(0.0);
+            Some(FitWidthAnchor::new(self.pages[index].0.page_index(), self.pages[index].0.source_y(top)))
+        }
+    }
+
+    pub fn distance_to(&self, anchor: FitWidthAnchor) -> Option<f32> {
+        let start = self.pages.iter().position(|(page, _)| page.page_index() == self.window.start.page_index())?;
+        let end = self.pages.iter().position(|(page, _)| page.page_index() == anchor.page_index())?;
+        let mut distance = self.pages[end].0.display_y(anchor.page_y()) * self.scaled_height(end) - self.pages[start].0.display_y(self.window.start.page_y()) * self.scaled_height(start);
+        if end >= start {
+            distance += (start..end).map(|index| self.scaled_height(index)).sum::<f32>();
+        } else {
+            distance -= (end..start).map(|index| self.scaled_height(index)).sum::<f32>();
+        }
+        Some(distance)
+    }
+
+    fn scaled_height(&self, index: usize) -> f32 {
+        let page = self.pages[index].0;
+        (page.height() / page.width() * self.viewport.column_width()).max(f32::EPSILON)
+    }
+
     fn previous_window_start(&self) -> Option<FitWidthAnchor> {
-        let mut page_position = self.pages.iter().position(|(page, _)| page.page_index() == self.window.start.page_index())?;
-        let mut page_y = self.window.start.page_y();
+        let page_position = self.pages.iter().position(|(page, _)| page.page_index() == self.window.start.page_index())?;
+        self.previous_start_from(page_position, self.pages[page_position].0.display_y(self.window.start.page_y()))
+    }
+
+    fn previous_start_from(&self, mut page_position: usize, mut page_y: f32) -> Option<FitWidthAnchor> {
         let had_preceding_content = page_position > 0 || page_y > f32::EPSILON;
         for _ in 0..self.column_count {
             let mut remaining_height = self.viewport.column_height();
@@ -351,17 +512,20 @@ impl FitWidthAnchorPager {
                 let top = safe_slice_start(ideal_top, page_y, bands);
                 remaining_height -= (page_y - top) * scaled_height;
                 page_y = top;
-                if remaining_height <= 0.5 {
+                // A protected band can leave unused space in this column.
+                // Its earlier source content still belongs to the preceding
+                // column, rather than to the preceding physical PDF page.
+                if remaining_height <= 0.5 || top > 0.0 {
                     break;
                 }
                 if page_position == 0 {
-                    return had_preceding_content.then(|| FitWidthAnchor::new(page.page_index(), 0.0));
+                    return had_preceding_content.then(|| FitWidthAnchor::new(page.page_index(), page.source_y(0.0)));
                 }
                 page_position -= 1;
                 page_y = 1.0;
             }
         }
-        Some(FitWidthAnchor::new(self.pages.get(page_position)?.0.page_index(), page_y))
+        Some(FitWidthAnchor::new(self.pages.get(page_position)?.0.page_index(), self.pages.get(page_position)?.0.source_y(page_y)))
     }
 
     fn anchor_at_offset(&self, display_offset: f32) -> Option<FitWidthAnchor> {
@@ -374,17 +538,23 @@ impl FitWidthAnchorPager {
             y -= column.leading_page_gap;
             if y <= column.display_height {
                 let fraction = (y / column.display_height.max(f32::EPSILON)).clamp(0.0, 1.0);
-                return Some(FitWidthAnchor::new(column.page_index, column.page_rect.top() + fraction * column.page_rect.height()));
+                let page = self.pages.iter().find(|(page, _)| page.page_index() == column.page_index)?.0;
+                return Some(FitWidthAnchor::new(column.page_index, page.source_y(column.page_rect.top() + fraction * column.page_rect.height())));
             }
             y -= column.display_height;
             last = Some(*column);
         }
-        last.map(|column| FitWidthAnchor::new(column.page_index, column.page_rect.bottom()))
+        last.and_then(|column| self.pages.iter().find(|(page, _)| page.page_index() == column.page_index).map(|(page, _)| FitWidthAnchor::new(column.page_index, page.source_y(column.page_rect.bottom()))))
     }
 
     fn build_window(pages: &[(FitWidthPage, Vec<(f32, f32)>)], viewport: FitWidthViewport, column_count: usize, start: FitWidthAnchor) -> Result<FitWidthViewportWindow, FitWidthPlanError> {
-        FitWidthPlan::viewport_window_from_anchor_avoiding_breaks(pages.iter().map(|(page, bands)| (*page, bands.as_slice())), viewport, start, column_count)
+        let start_index = pages.partition_point(|(page, _)| page.page_index() < start.page_index());
+        FitWidthPlan::viewport_window_from_anchor_avoiding_breaks(pages[start_index..].iter().map(|(page, bands)| (*page, bands.as_slice())), viewport, start, column_count)
     }
+}
+
+fn anchor_after(left: FitWidthAnchor, right: FitWidthAnchor) -> bool {
+    left.page_index() > right.page_index() || (left.page_index() == right.page_index() && left.page_y() > right.page_y())
 }
 
 impl FitWidthAnchor {
@@ -542,11 +712,11 @@ impl FitWidthPlan {
                     continue;
                 }
                 found_anchor = true;
-                anchor.page_y()
+                page.display_y(anchor.page_y())
             } else {
                 0.0
             };
-            let layout = layout_fit_width_columns_from(page, viewport, protected_bands, 0.0, initial_top, state)?;
+            let layout = layout_fit_width_columns_from(page, viewport, protected_bands, 0.0, initial_top, state, None)?;
             state = layout.state;
             for mut column in layout.columns {
                 column.flow_index = columns.len();
@@ -563,8 +733,36 @@ impl FitWidthPlan {
     pub fn viewport_window_from_anchor_avoiding_breaks<'a>(
         pages: impl IntoIterator<Item = (FitWidthPage, &'a [(f32, f32)])>, viewport: FitWidthViewport, anchor: FitWidthAnchor, column_count: usize,
     ) -> Result<FitWidthViewportWindow, FitWidthPlanError> {
-        let plan = Self::from_anchor_avoiding_breaks(pages, viewport, anchor)?;
-        let end = plan.anchor_for_display_column(column_count.max(1));
+        // Include one look-ahead column to identify the next viewport anchor,
+        // and stop *inside* a page as well as between pages.
+        let limit = column_count.max(1).saturating_add(1);
+        let mut end = None;
+        let mut columns = Vec::new();
+        let mut state = FitWidthColumnState::default();
+        let mut found_anchor = false;
+        for (page, bands) in pages {
+            let top = if found_anchor {
+                0.0
+            } else if page.page_index() == anchor.page_index() {
+                found_anchor = true;
+                page.display_y(anchor.page_y())
+            } else {
+                continue;
+            };
+            let layout = layout_fit_width_columns_from(page, viewport, bands, 0.0, top, state, Some(limit))?;
+            state = layout.state;
+            for mut column in layout.columns {
+                if end.is_none() && column.display_column_index == column_count.max(1) {
+                    end = Some(FitWidthAnchor::new(page.page_index(), page.source_y(column.page_rect.top())));
+                }
+                column.flow_index = columns.len();
+                columns.push(column);
+            }
+            if state.display_column_index >= limit {
+                break;
+            }
+        }
+        let plan = Self { columns };
         Ok(FitWidthViewportWindow { start: anchor, end, plan })
     }
 
@@ -581,7 +779,7 @@ impl FitWidthPlan {
                 state.used_display_height = 0.0;
             }
             state.used_display_height += leading_page_gap;
-            let layout = layout_fit_width_columns_from(page, viewport, protected_bands, leading_page_gap, 0.0, state)?;
+            let layout = layout_fit_width_columns_from(page, viewport, protected_bands, leading_page_gap, 0.0, state, None)?;
             state = layout.state;
             for mut column in layout.columns {
                 column.flow_index = columns.len();
@@ -647,17 +845,19 @@ struct FitWidthPageLayout {
 
 /// Computes one page's columns and returns the updated packing position.
 /// The caller assigns flow indices when appending these columns to its plan.
-fn layout_fit_width_columns_from(page: FitWidthPage, viewport: FitWidthViewport, protected_bands: &[(f32, f32)], leading_page_gap: f32, initial_top: f32, mut state: FitWidthColumnState) -> Result<FitWidthPageLayout, FitWidthPlanError> {
+fn layout_fit_width_columns_from(
+    page: FitWidthPage, viewport: FitWidthViewport, protected_bands: &[(f32, f32)], leading_page_gap: f32, initial_top: f32, mut state: FitWidthColumnState, display_column_limit: Option<usize>,
+) -> Result<FitWidthPageLayout, FitWidthPlanError> {
     let mut leading_page_gap = leading_page_gap;
     let scaled_page_height = (page.height as f64 / page.width as f64 * viewport.column_width as f64) as f32;
     let estimated_columns = (scaled_page_height / viewport.column_height).ceil().max(1.0);
-    if estimated_columns > MAX_FIT_WIDTH_COLUMNS_PER_PAGE as f32 {
+    if display_column_limit.is_none() && estimated_columns > MAX_FIT_WIDTH_COLUMNS_PER_PAGE as f32 {
         return Err(FitWidthPlanError::TooManyColumns { page_index: page.page_index, required_columns: estimated_columns.min(u32::MAX as f32) as u32 });
     }
 
     let mut segments = Vec::new();
     let mut top = initial_top.clamp(0.0, 1.0);
-    while top < 1.0 {
+    while top < 1.0 && display_column_limit.is_none_or(|limit| state.display_column_index < limit) {
         let available_height = (viewport.column_height - state.used_display_height).max(0.0);
         if available_height <= f32::EPSILON {
             state.display_column_index += 1;
@@ -693,8 +893,10 @@ fn layout_fit_width_columns_from(page: FitWidthPage, viewport: FitWidthViewport,
     }
 
     let page_column_count = segments.len() as u32;
-    let columns = segments.into_iter().enumerate().map(|(page_column_index, (top, bottom, display_height, leading_page_gap, segment_display_column))| {
-        FitWidthColumn {
+    let columns = segments
+        .into_iter()
+        .enumerate()
+        .map(|(page_column_index, (top, bottom, display_height, leading_page_gap, segment_display_column))| FitWidthColumn {
             flow_index: page_column_index,
             display_column_index: segment_display_column,
             page_index: page.page_index,
@@ -704,8 +906,8 @@ fn layout_fit_width_columns_from(page: FitWidthPage, viewport: FitWidthViewport,
             display_width: viewport.column_width,
             display_height,
             leading_page_gap,
-        }
-    }).collect();
+        })
+        .collect();
     Ok(FitWidthPageLayout { columns, state })
 }
 

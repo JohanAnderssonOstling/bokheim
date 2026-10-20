@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Import Standard Ebooks ZIP members in memory, enrich, retain covers and replace exact matches."""
+"""Import Standard Ebooks ZIP members with their embedded covers and replace exact matches."""
 import argparse
 from datetime import datetime, timezone
 import hashlib
@@ -57,12 +57,12 @@ def inventory(downloads):
                     if not url:
                         raise ValueError('Missing Standard Ebooks identity: ' + member)
                     entries[digest] = {'file': str(path.resolve()), 'archive_member': member,
-                        'preserve_covers': True, 'source': 'standardebooks.org', 'entry_id': url,
+                        'preserve_covers': False, 'source': 'standardebooks.org', 'entry_id': url,
                         'entry_url': url, 'file_url': url + '/downloads/' + Path(member).name,
                         'source_evidence': {'archive_observations': [observation], 'sha256': digest,
                             'title': metadata.findtext('{*}title'),
                             'authors': [node.text or '' for node in metadata.findall('{*}creator')],
-                            'cover_policy': 'retain existing catalog artwork; embedded cover for new books; no cover enrichment'}}
+                            'cover_policy': 'embedded Standard Ebooks artwork; no cover enrichment or artwork reuse'}}
     return list(entries.values())
 
 
@@ -90,6 +90,27 @@ def replacement_plan(db, catalog, imported):
         group['kept_sources'] = [r[0] for r in db.execute('SELECT source FROM book_source WHERE hash=?', (kept['id'],))] if kept['kind'] == 'book' else [dedup.PREFERRED_SOURCE]
         decisions.append(group)
     return dedup, decisions
+
+
+
+def verify_existing_covers(catalog, originals):
+    """Only Standard Ebooks acquisitions may replace previously chosen artwork."""
+    with sqlite3.connect((catalog / 'curation.sqlite3').resolve().as_uri() + '?mode=ro', uri=True) as db:
+        embedded = {row[0] for row in db.execute(
+            "SELECT book_hash FROM source_entry WHERE source='standardebooks.org' AND book_hash IS NOT NULL")}
+    changed = []
+    unexpected = []
+    for name, digest in originals.items():
+        path = catalog / 'covers' / name
+        current = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+        if current != digest:
+            if current is not None and name.split('-', 1)[0] in embedded:
+                changed.append({'file': name, 'before_sha256': digest, 'after_sha256': current})
+            else:
+                unexpected.append(name)
+    if unexpected:
+        raise RuntimeError('Non-Standard-Ebooks covers changed or disappeared: ' + repr(unexpected))
+    return changed
 
 
 def run(args):
@@ -219,18 +240,14 @@ def run(args):
                    'applied_at': datetime.now(timezone.utc).isoformat()}
         write_json(receipt_path, receipt)
     original_covers = json.loads(covers_path.read_text())
-    changed = [name for name, digest in original_covers.items()
-               if hashlib.sha256((args.catalog / 'covers' / name).read_bytes()).hexdigest() != digest]
-    if changed:
-        raise RuntimeError('Existing covers changed: ' + repr(changed))
+    verify_existing_covers(args.catalog, original_covers)
     publisher = module('standardebooks_publish', 'run-volume-merge-pass.py')
     publisher.publish(SimpleNamespace(catalog=args.catalog, binary=args.binary, output=args.output))
-    changed = [name for name, digest in original_covers.items()
-               if hashlib.sha256((args.catalog / 'covers' / name).read_bytes()).hexdigest() != digest]
-    if changed:
-        raise RuntimeError('Publication changed existing covers: ' + repr(changed))
+    changed = verify_existing_covers(args.catalog, original_covers)
+    write_json(args.output / 'cover-changes.json', changed)
     print(json.dumps({'state': 'complete', **json.loads(receipt_path.read_text()),
-                      'existing_covers_verified_unchanged': len(original_covers)}), flush=True)
+                      'existing_cover_files_verified_unchanged': len(original_covers) - len(changed),
+                      'standardebooks_cover_files_updated': len(changed)}), flush=True)
 
 
 if __name__ == '__main__':

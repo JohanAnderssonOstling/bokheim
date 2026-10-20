@@ -215,7 +215,7 @@ pub(crate) fn with_sidebar(sidebar: AnyElement, document: AnyElement, partial: b
 /// document's height while a sheet is opened and closed.
 pub(crate) fn sidebar_sheet(sidebar: AnyElement, partial: bool, window: &Window) -> AnyElement {
     let mobile = ui_components::uses_mobile_reader_controls(window);
-    let safe_area = window.insets().safe_area;
+    let safe_area = window.insets().effective();
     let top = match (mobile, partial) {
         (true, true) => safe_area.top + window.viewport_size().height * PARTIAL_SHEET_GAP,
         (true, false) => safe_area.top,

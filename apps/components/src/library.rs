@@ -874,7 +874,7 @@ const BOOK_COVER_BADGE_GROUP: &str = "book-cover-badge";
 /// the same inset, so the badge keeps its size on a small cover.
 fn book_cover_badge_hit_area(id: impl Into<ElementId>) -> Stateful<Div> {
     let area = div().id(id).group(BOOK_COVER_BADGE_GROUP).absolute().flex().items_start().justify_end();
-    if crate::TOUCH_UI {
+    if crate::touch_ui() {
         area.top_0().right_0().min_w(gpui::rems(crate::TOUCH_TARGET_REM)).min_h(gpui::rems(crate::TOUCH_TARGET_REM)).p(px(BOOK_COVER_BADGE_INSET))
     } else {
         area.top(px(BOOK_COVER_BADGE_INSET)).right(px(BOOK_COVER_BADGE_INSET))

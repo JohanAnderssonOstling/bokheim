@@ -53,7 +53,7 @@ pub fn selection_checkbox(id: impl Into<ElementId>, checked: bool, theme: Browse
         .border_color(if checked { theme.accent } else { theme.border })
         .bg(if checked { theme.accent } else { theme.page_bg })
         .when(checked, |square| square.child(Icon::new(IconName::Check).size(px(12.0)).text_color(theme.accent_text)));
-    div().id(id).flex_none().size(gpui::rems(crate::TOPBAR_ACTION_HEIGHT_REM)).flex().items_center().justify_center().cursor_pointer().child(square)
+    div().id(id).flex_none().size(gpui::rems(crate::topbar_action_height_rem())).flex().items_center().justify_center().cursor_pointer().child(square)
 }
 
 /// A book's cover at row size. `cover` is the cover image or its generated
@@ -64,17 +64,8 @@ pub fn trash_book_thumbnail(cover: impl IntoElement) -> Div {
 
 /// A folder's glyph, in the box a book's cover takes, so titles line up.
 pub fn trash_folder_thumbnail(theme: BrowserTheme) -> Div {
-    div()
-        .flex_none()
-        .w(px(TRASH_THUMBNAIL_WIDTH))
-        .h(px(TRASH_THUMBNAIL_WIDTH / BOOK_COVER_ASPECT_RATIO))
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_color(theme.text_muted)
-        .child(Icon::new(IconName::Folder).size(px(28.0)))
+    div().flex_none().w(px(TRASH_THUMBNAIL_WIDTH)).h(px(TRASH_THUMBNAIL_WIDTH / BOOK_COVER_ASPECT_RATIO)).flex().items_center().justify_center().text_color(theme.text_muted).child(Icon::new(IconName::Folder).size(px(28.0)))
 }
-
 
 /// The bar that acts on the selection, below the list. `label` says what is
 /// selected.

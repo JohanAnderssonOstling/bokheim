@@ -22,6 +22,7 @@ pub struct NativeBookSnapshot {
     pub relative_path: library_model::RelativeBookPath,
     pub occupied_names: Vec<String>,
     pub format: book_model::BookFormat,
+    pub audiobook_track_titles: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug)]

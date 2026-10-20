@@ -332,7 +332,7 @@ impl SyncPage {
         // set, and one slot means a form cannot grow two lines of chrome.
         let feedback = match (&self.error, &self.message) {
             (Some(error), _) => Some(Alert::error("account-error", error.clone()).with_size(Size::Small).into_any_element()),
-            (None, Some(message)) => Some(Alert::info("account-message", message.clone()).with_size(Size::Small).into_any_element()),
+            (None, Some(message)) => Some(Alert::new("account-message", message.clone()).with_size(Size::Small).into_any_element()),
             (None, None) => None,
         };
 

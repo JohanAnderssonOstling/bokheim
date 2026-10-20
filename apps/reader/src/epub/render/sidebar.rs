@@ -67,7 +67,7 @@ impl ReaderView {
             SidebarTab::Contents => self.render_toc_body(entity, theme, cx),
             SidebarTab::Notes => self.render_annotations_body(theme, cx),
             SidebarTab::Search => self.render_search(theme, window, cx),
-            SidebarTab::Settings => self.render_settings_panel(cx),
+            SidebarTab::Settings => self.render_settings_panel(window, cx),
         }
     }
 }

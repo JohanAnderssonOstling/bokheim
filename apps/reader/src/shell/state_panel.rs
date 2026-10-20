@@ -285,7 +285,7 @@ where
                     expanded: entry.is_expanded(),
                     marked,
                     read: !entry.is_folder() && current_index.is_some_and(|current| index < current),
-                    focused: keyboard_visible && selected && !marked,
+                    focused: keyboard_visible && selected,
                     number: numbers.get(index).copied(),
                     number_digits,
                 };
@@ -298,14 +298,13 @@ where
                 // The tree insists on a `ListItem`, which is where its own click and
                 // keyboard handling attach; the row inside it is the shared one, so a
                 // sidebar entry and a chapter in the player are the same drawing.
-                // Content-sized rows keep the same padding above and below the
-                // title, whether it occupies one line or two.
+                // Rows are content-sized, so a two-line title keeps the row's own
+                // padding above and below it.
                 ListItem::new(("reader-toc-item", index)).w_full().min_w_0().p_0().child(
                     components::contents_row(("reader-toc-row", index), row, nested.then(|| components::contents_disclosure(("reader-toc-disclosure", index), row, theme)), title, None, theme)
                         .debug_selector(move || format!("reader-toc-row-{index}"))
                         .min_h_0()
-                        .line_height(gpui::relative(1.2))
-                        .py(gpui::px(components::SPACE_SM)),
+                        .line_height(gpui::relative(1.2)),
                 )
             })
             .pr(gpui::px(components::READER_SCROLLBAR_GUTTER_PX)),

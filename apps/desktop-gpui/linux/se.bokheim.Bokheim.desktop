@@ -2,7 +2,7 @@
 Type=Application
 Name=Bokheim
 Comment=Read and organize your books
-Exec=desktop-gpui
+Exec=bokheim
 Icon=se.bokheim.Bokheim
 Terminal=false
 Categories=Office;Viewer;

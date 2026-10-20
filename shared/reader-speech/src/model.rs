@@ -1,6 +1,13 @@
 use sherpa_onnx::{OfflineTts, OfflineTtsConfig, OfflineTtsKokoroModelConfig, OfflineTtsModelConfig, OfflineTtsVitsModelConfig};
+use std::env;
+#[cfg(any(target_os = "android", target_os = "linux"))]
+use std::fs;
+#[cfg(target_os = "linux")]
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+#[cfg(target_os = "linux")]
+use tempfile::NamedTempFile;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Voice {
@@ -47,25 +54,22 @@ pub fn model_directory() -> PathBuf {
 
 pub fn voice_directory(voice: Voice) -> PathBuf {
     if voice == Voice::George
-        && let Some(path) = std::env::var_os("BOKHEIM_TTS_GEORGE_MODEL_DIR")
+        && let Some(path) = env::var_os("BOKHEIM_TTS_GEORGE_MODEL_DIR")
     {
         return path.into();
     }
-    if let Some(path) = std::env::var_os("BOKHEIM_TTS_MODEL_DIR") {
+    if let Some(path) = env::var_os("BOKHEIM_TTS_MODEL_DIR") {
         let path = PathBuf::from(path);
         return if voice == Voice::Alba { path } else { path.parent().unwrap_or(Path::new(".")).join(voice.directory_name()) };
     }
-    if let Ok(executable) = std::env::current_exe() {
+    if let Ok(executable) = env::current_exe() {
         let packaged = executable.parent().unwrap_or_else(|| Path::new(".")).join("tts").join(voice.directory_name());
         if packaged.join(voice.model_file()).is_file() {
             return packaged;
         }
     }
-    let data = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from("."));
+    let data =
+        env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| env::var_os("LOCALAPPDATA").map(PathBuf::from)).or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))).unwrap_or_else(|| PathBuf::from("."));
     data.join("bokheim/tts").join(voice.directory_name())
 }
 
@@ -109,7 +113,30 @@ pub fn load_voice_with_threads(voice: Voice, threads: i32) -> Result<OfflineTts,
     // worker, instead of linking them into the application's startup graph.
     #[cfg(target_os = "android")]
     sherpa_onnx_sys::initialize_tts()?;
-    let mut model_config = OfflineTtsModelConfig { num_threads: threads, provider: Some("cpu".into()), ..Default::default() };
+    #[cfg(not(any(target_os = "android", target_os = "linux")))]
+    let provider = "cpu".to_owned();
+    #[cfg(target_os = "linux")]
+    let runtime_options = {
+        // Packaged voices can be read-only (AppImage/Flatpak). Keep these tiny
+        // options in the user cache, and alive until session creation returns.
+        let cache = env::var_os("XDG_CACHE_HOME").map(PathBuf::from).or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"))).ok_or("Could not locate the speech runtime cache.")?.join("bokheim/tts");
+        fs::create_dir_all(&cache).map_err(|error| format!("Could not create the speech runtime cache: {error}"))?;
+        let mut options = NamedTempFile::new_in(cache).map_err(|error| format!("Could not configure offline speech memory: {error}"))?;
+        options.write_all(b"EnableCpuMemArena=0\n").map_err(|error| format!("Could not configure offline speech memory: {error}"))?;
+        options
+    };
+    #[cfg(target_os = "linux")]
+    let provider = format!("cpu:{}", runtime_options.path().display());
+    #[cfg(target_os = "android")]
+    let provider = {
+        // ORT's CPU arena retains larger synthesis workspaces until the model
+        // is destroyed. Normal allocations return these between chunks rather
+        // than allowing a long Android narration session to keep growing.
+        let options = root.join("onnxruntime-cpu.conf");
+        fs::write(&options, "EnableCpuMemArena=0\n").map_err(|error| format!("Could not configure offline speech memory: {error}"))?;
+        format!("cpu:{}", options.display())
+    };
+    let mut model_config = OfflineTtsModelConfig { num_threads: threads, provider: Some(provider), ..Default::default() };
     match voice {
         Voice::Alba => {
             model_config.vits = OfflineTtsVitsModelConfig {

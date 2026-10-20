@@ -3,7 +3,7 @@
 use crate::invalidation::notify;
 use std::sync::Arc;
 
-use gpui::{Context, Window};
+use gpui::{App, Context, Window};
 use html_view_core::RendererEvent;
 use html_view_core::cfi::source_position_cfi;
 
@@ -30,7 +30,7 @@ impl ReaderView {
                 if toc_changed {
                     self.sync_toc_position(cx);
                 }
-                self.record_current_reading_position();
+                self.record_current_reading_position(cx);
                 #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
                 self.tts_navigation_changed(cx);
                 notify(cx, Component::ReaderShell, "reading_position_changed");
@@ -141,9 +141,11 @@ impl ReaderView {
     }
 
     /// Save the source address, progress and resolved entry from one snapshot.
-    pub(super) fn record_current_reading_position(&self) {
-        if let Some(position) = &self.reading_position {
-            self.reading_positions.record(StoredPosition::epub(source_position_cfi(&position.source), position.fraction).within(self.toc.active_link()));
+    pub(super) fn record_current_reading_position(&self, cx: &App) {
+        if let Some(position) = &self.reading_position
+            && let LoadState::Ready(view) = &self.load_state
+        {
+            self.reading_positions.record(StoredPosition::epub(source_position_cfi(&position.source), position.fraction).within(self.toc.active_link()), view.read(cx).navigation_revision());
         }
     }
 }

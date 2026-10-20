@@ -608,6 +608,7 @@ impl FolderActions {
         let submit = components::base_button(format!("confirm-{id_suffix}"))
             .primary()
             .label(if busy { busy_label } else { idle_label })
+            .tooltip(components::shortcut_tooltip(idle_label, "enter"))
             .disabled(busy || input.read(cx).value().trim().is_empty())
             .on_click(move |_, window, cx| submit_actions.update(cx, |actions, cx| actions.submit_name_dialog(window, cx)));
         let panel = components::modal_surface(theme)
@@ -620,7 +621,7 @@ impl FolderActions {
             .gap(px(components::SPACE_MD))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(div().text_size(rems(1.125)).text_color(theme.text).child(title))
-            .child(Input::new(&input).h(gpui::rems(components::TOPBAR_ACTION_HEIGHT_REM)))
+            .child(Input::new(&input).h(gpui::rems(components::topbar_action_height_rem())))
             .children(error.map(|error| components::error_text(theme).child(error)))
             .child(div().flex_1())
             .child(div().flex().items_center().justify_end().gap(px(components::SPACE_SM)).child(cancel).child(submit));

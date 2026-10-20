@@ -1,31 +1,31 @@
 //! A native GPUI browser window with an embedded Wry webpage. Downloads
 //! are reported to the app, which imports supported books into the library.
-#[cfg(target_os = "linux")]
-mod native_focus;
-#[cfg(target_os = "linux")]
-mod native_host;
+#[cfg(target_os = "macos")]
+mod macos_downloads;
 #[cfg(target_os = "linux")]
 mod native_downloads;
 #[cfg(target_os = "linux")]
 mod native_events;
 #[cfg(target_os = "linux")]
+mod native_focus;
+#[cfg(target_os = "linux")]
+mod native_host;
+#[cfg(target_os = "linux")]
 mod native_navigation;
+mod passwords;
 #[cfg(target_os = "windows")]
 mod windows_downloads;
-#[cfg(target_os = "macos")]
-mod macos_downloads;
-mod passwords;
-use client_platform_runtime::transfers;
 use crate::address::{AddressHistory, normalize};
 use anyhow::{Result, bail};
 use app_preferences::ResolvedAppearance;
+use client_platform_runtime::transfers;
 use gpui::prelude::*;
 use gpui::{App, AppContext, Bounds, Context, Entity, Focusable, KeyDownEvent, MouseButton, Subscription, Window, WindowBounds, WindowOptions, canvas, deferred, div, px, rems, size};
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme, Disableable, Icon, IconName, Root, Sizable, WindowExt};
-use library_opds::browser::{BrowserFeedback, StoreEvent, StoreRequest, torrent_download};
 use library_opds::browser::address::{PAGE_METADATA_SCRIPT, PageMetadata};
+use library_opds::browser::{BrowserFeedback, StoreEvent, StoreRequest, torrent_download};
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, WindowHandle};
 use reqwest_client::ReqwestClient;
 use std::cell::RefCell;
@@ -34,28 +34,34 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, LazyLock, Mutex, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    Arc, LazyLock, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
+use ui_components::{BrowserDownloadPhase, BrowserDownloads};
+use ui_components::{SPACE_SM, SelectedPalette, TEXT_SM, apply_appearance, browser_address_control, browser_theme, error_text, outlined_icon_button, register_fonts, topbar_action_height_rem, user_facing_error};
 use url::Url;
-use ui_components::{user_facing_error, SPACE_SM, TEXT_SM, TOPBAR_ACTION_HEIGHT_REM, SelectedPalette, apply_appearance, browser_address_control, browser_theme, error_text, outlined_icon_button, register_fonts};
-use ui_components::{BrowserDownloads, BrowserDownloadPhase};
-use wry::dpi::{PhysicalPosition, PhysicalSize};
-use wry::{NewWindowResponse, PageLoadEvent, Rect, WebContext, WebView, WebViewBuilder};
 #[cfg(target_os = "linux")]
 use webkit2gtk::{BackForwardListExt, BackForwardListItemExt, ContextMenuAction, ContextMenuExt, ContextMenuItemExt, WebViewExt};
+#[cfg(target_os = "macos")]
+use wry::WebViewExtMacOS;
 #[cfg(target_os = "linux")]
 use wry::WebViewExtUnix;
 #[cfg(target_os = "windows")]
 use wry::WebViewExtWindows;
-#[cfg(target_os = "macos")]
-use wry::WebViewExtMacOS;
+use wry::dpi::{PhysicalPosition, PhysicalSize};
+use wry::{NewWindowResponse, PageLoadEvent, Rect, WebContext, WebView, WebViewBuilder};
 
 const BOOKS: [&str; 6] = ["epub", "pdf", "mobi", "azw", "azw3", "m4b"];
 const STATUS_HEIGHT: f32 = 34.0;
 static FEEDBACK: LazyLock<Mutex<Vec<Sender<Action>>>> = LazyLock::new(Mutex::default);
 
 enum Action {
-    PasswordResult { nonce: String, result: Result<crate::passwords::Reply, String> },
+    PasswordResult {
+        nonce: String,
+        result: Result<crate::passwords::Reply, String>,
+    },
     PasswordMessage(passwords::Message),
     PageLoaded(String),
     PageVisited(PageMetadata),
@@ -67,15 +73,23 @@ enum Action {
     Refused(PathBuf),
     DownloadStarted(PathBuf),
     #[cfg(target_os = "linux")]
-    DownloadProgress { path: PathBuf, percent: u8 },
-    DownloadFinished { path: PathBuf, succeeded: bool },
+    DownloadProgress {
+        path: PathBuf,
+        percent: u8,
+    },
+    DownloadFinished {
+        path: PathBuf,
+        succeeded: bool,
+    },
 }
 
 pub(crate) fn run() -> Result<()> {
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     let request: StoreRequest = serde_json::from_str(&line)?;
-    if let Some(path) = &request.transfer_policy_file { transfers::configure_reader(path.clone()); }
+    if let Some(path) = &request.transfer_policy_file {
+        transfers::configure_reader(path.clone());
+    }
     let start = Url::parse(&request.url)?;
     if !matches!(start.scheme(), "http" | "https") && start.as_str() != "about:blank" {
         bail!("a browser needs an HTTP address");
@@ -90,7 +104,9 @@ pub(crate) fn run() -> Result<()> {
         move || {
             loop {
                 let mut line = String::new();
-                if std::io::stdin().read_line(&mut line).is_err() || line.is_empty() { break; }
+                if std::io::stdin().read_line(&mut line).is_err() || line.is_empty() {
+                    break;
+                }
                 if let Ok(feedback) = serde_json::from_str::<BrowserFeedback>(&line) {
                     FEEDBACK.lock().unwrap().retain(|sender| sender.send(Action::Feedback(feedback.clone())).is_ok());
                 }
@@ -100,7 +116,9 @@ pub(crate) fn run() -> Result<()> {
     });
     gpui_platform::application().with_assets(ui_components::Assets).with_http_client(Arc::new(ReqwestClient::new())).run(move |cx: &mut App| {
         gpui_component::init(cx);
-        if let Err(error) = register_fonts(cx) { eprintln!("Could not register browser fonts: {error}"); }
+        if let Err(error) = register_fonts(cx) {
+            eprintln!("Could not register browser fonts: {error}");
+        }
         apply_appearance(&request.preferences, cx);
         #[cfg(target_os = "linux")]
         if let Some(settings) = gtk::Settings::default() {
@@ -112,7 +130,12 @@ pub(crate) fn run() -> Result<()> {
             eprintln!("Could not open the browser: {error}");
             cx.quit();
         }
-        cx.on_window_closed(|cx, _| { if cx.windows().is_empty() { cx.quit(); } }).detach();
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
         cx.activate(true);
     });
     Ok(())
@@ -122,10 +145,7 @@ fn open_browser_window(request: StoreRequest, web_context: WebContext, app_close
     let bounds = Bounds::centered(None, size(px(1100.0), px(800.0)), cx);
     let (sender, receiver) = mpsc::channel();
     FEEDBACK.lock().unwrap().push(sender.clone());
-    cx.open_window(WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        ..Default::default()
-    }, move |window, cx| {
+    cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() }, move |window, cx| {
         window.set_window_title(&request.title);
         let browser = cx.new(|cx| Browser::new(request, web_context, app_closed, sender, receiver, window, cx));
         let closing = browser.downgrade();
@@ -180,10 +200,15 @@ impl Browser {
     fn close_native(&mut self, window: &mut Window, cx: &mut App) {
         self.downloads.clear(window, cx);
         #[cfg(target_os = "linux")]
-        { self.native_focus = None; self.native_navigation = None; }
+        {
+            self.native_focus = None;
+            self.native_navigation = None;
+        }
         self.webview = None;
         #[cfg(target_os = "linux")]
-        { self.native_host = None; }
+        {
+            self.native_host = None;
+        }
     }
 
     fn new(request: StoreRequest, mut web_context: WebContext, app_closed: Arc<AtomicBool>, sender: Sender<Action>, receiver: Receiver<Action>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -201,31 +226,42 @@ impl Browser {
             .with_url("about:blank")
             .with_focused(false)
             .with_ipc_handler(passwords.handler(sender.clone()))
-            .with_on_page_load_handler({ let sender = sender.clone(); let guard = passwords.guard.clone(); move |event, url| {
-                if matches!(event, PageLoadEvent::Started) { guard.borrow_mut().take(); }
-                if matches!(event, PageLoadEvent::Finished) && matches!(Url::parse(&url).map(|url| url.scheme().to_owned()).as_deref(), Ok("http" | "https")) {
-                    let _ = sender.send(Action::PageLoaded(url));
+            .with_on_page_load_handler({
+                let sender = sender.clone();
+                let guard = passwords.guard.clone();
+                move |event, url| {
+                    if matches!(event, PageLoadEvent::Started) {
+                        guard.borrow_mut().take();
+                    }
+                    if matches!(event, PageLoadEvent::Finished) && matches!(Url::parse(&url).map(|url| url.scheme().to_owned()).as_deref(), Ok("http" | "https")) {
+                        let _ = sender.send(Action::PageLoaded(url));
+                    }
                 }
-            } })
-            .with_new_window_req_handler({ let sender = sender.clone(); move |url, _| {
-                if url.starts_with("magnet:") {
-                    report(StoreEvent::Magnet { url });
-                    return NewWindowResponse::Deny;
+            })
+            .with_new_window_req_handler({
+                let sender = sender.clone();
+                move |url, _| {
+                    if url.starts_with("magnet:") {
+                        report(StoreEvent::Magnet { url });
+                        return NewWindowResponse::Deny;
+                    }
+                    let _ = sender.send(Action::Open(url));
+                    NewWindowResponse::Deny
                 }
-                let _ = sender.send(Action::Open(url));
-                NewWindowResponse::Deny
-            } })
-            .with_navigation_handler({ move |url| match Url::parse(&url) {
-                Ok(url) if url.scheme() == "magnet" => {
-                    report(StoreEvent::Magnet { url: url.to_string() });
-                    false
+            })
+            .with_navigation_handler({
+                move |url| match Url::parse(&url) {
+                    Ok(url) if url.scheme() == "magnet" => {
+                        report(StoreEvent::Magnet { url: url.to_string() });
+                        false
+                    }
+                    Ok(url) if !matches!(url.scheme(), "http" | "https" | "about" | "data" | "blob") => {
+                        open_externally(&url);
+                        false
+                    }
+                    _ => true,
                 }
-                Ok(url) if !matches!(url.scheme(), "http" | "https" | "about" | "data" | "blob") => {
-                    open_externally(&url);
-                    false
-                }
-                _ => true,
-            } });
+            });
         let builder = with_downloads(builder, downloads.clone(), sender.clone());
         #[cfg(target_os = "windows")]
         let builder = {
@@ -241,7 +277,9 @@ impl Browser {
             match native_host {
                 Ok(host) => {
                     let page = builder.build_gtk(&host.container).map_err(Into::into);
-                    if page.is_ok() { host.show(); }
+                    if page.is_ok() {
+                        host.show();
+                    }
                     (page, Some(Rc::new(host)))
                 }
                 Err(error) => (Err(error), None),
@@ -254,15 +292,16 @@ impl Browser {
             #[cfg(target_os = "linux")]
             page.webview().connect_context_menu(|_, menu, _, _| {
                 for item in menu.items() {
-                    if item.stock_action() == ContextMenuAction::DownloadLinkToDisk { menu.remove(&item); }
+                    if item.stock_action() == ContextMenuAction::DownloadLinkToDisk {
+                        menu.remove(&item);
+                    }
                 }
                 false
             });
             #[cfg(target_os = "linux")]
             native_downloads::observe(&page, sender.clone());
             if request.url == "about:blank" {
-                let html = ui_components::browser_start_page(history.most_visited().iter().map(|saved|
-                    (saved.page.url.as_str(), saved.page.title.as_str(), saved.page.icon.as_deref())), browser_theme(cx));
+                let html = ui_components::browser_start_page(history.most_visited().iter().map(|saved| (saved.page.url.as_str(), saved.page.title.as_str(), saved.page.icon.as_deref())), browser_theme(cx));
                 page.load_html(&html)?;
             } else {
                 page.load_url(&request.url)?;
@@ -291,19 +330,31 @@ impl Browser {
         let address = cx.new(|cx| InputState::new(window, cx).placeholder("Enter a web address or search Google"));
         address.update(cx, |address, cx| {
             address.set_value(display_url(&request.url), window, cx);
-            if editing { address.focus(window, cx); }
+            if editing {
+                address.focus(window, cx);
+            }
         });
         if !editing {
             #[cfg(target_os = "linux")]
-            if let Some(focus) = &native_focus { focus.page(); }
-            if let Some(page) = &webview { let _ = page.focus(); }
+            if let Some(focus) = &native_focus {
+                focus.page();
+            }
+            if let Some(page) = &webview {
+                let _ = page.focus();
+            }
         }
         let subscription = cx.subscribe_in(&address, window, |browser, _, event: &InputEvent, window, cx| {
             match event {
-                InputEvent::Change => { browser.editing = true; browser.error = None; browser.suggest(cx); }
+                InputEvent::Change => {
+                    browser.editing = true;
+                    browser.error = None;
+                    browser.suggest(cx);
+                }
                 InputEvent::Focus => {
                     #[cfg(target_os = "linux")]
-                    if let Some(focus) = &browser.native_focus { focus.toolbar(); }
+                    if let Some(focus) = &browser.native_focus {
+                        focus.toolbar();
+                    }
                     browser.editing = true;
                     browser.suggest(cx);
                     browser.address.update(cx, |input, cx| input.set_selected_range(0..input.value().len(), cx));
@@ -324,12 +375,34 @@ impl Browser {
                 cx.background_executor().timer(Duration::from_millis(16)).await;
                 #[cfg(target_os = "linux")]
                 native_events::pump(&gtk::glib::MainContext::default());
-                if browser.update_in(cx, |browser, window, cx| browser.tick(window, cx)).is_err() { break; }
+                if browser.update_in(cx, |browser, window, cx| browser.tick(window, cx)).is_err() {
+                    break;
+                }
             }
-        }).detach();
-        Self { passwords, request: window_request, app_closed, address, history, current_url: request.url, page, suggestions: Vec::new(), selected: None,
-            editing, error, navigation: (false, false), notification_subscription: None,
-            webview, _web_context: web_context, downloads: BrowserDownloads::default(), deferred_downloads: VecDeque::new(), receiver, sender, _subscription: subscription, page_layout: None,
+        })
+        .detach();
+        Self {
+            passwords,
+            request: window_request,
+            app_closed,
+            address,
+            history,
+            current_url: request.url,
+            page,
+            suggestions: Vec::new(),
+            selected: None,
+            editing,
+            error,
+            navigation: (false, false),
+            notification_subscription: None,
+            webview,
+            _web_context: web_context,
+            downloads: BrowserDownloads::default(),
+            deferred_downloads: VecDeque::new(),
+            receiver,
+            sender,
+            _subscription: subscription,
+            page_layout: None,
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             download_gate,
             #[cfg(target_os = "linux")]
@@ -363,11 +436,15 @@ impl Browser {
         self.passwords.cancel();
         match normalize(address) {
             Ok(url) => {
-                if let Err(error) = self.history.remember(address) { eprintln!("Could not save browser address history: {error}"); }
+                if let Err(error) = self.history.remember(address) {
+                    eprintln!("Could not save browser address history: {error}");
+                }
                 if let Some(webview) = &self.webview {
                     #[cfg(target_os = "linux")]
                     let loaded: wry::Result<()> = {
-                        if let Some(navigation) = &self.native_navigation { navigation.load(&webview.webview(), url.as_str()); }
+                        if let Some(navigation) = &self.native_navigation {
+                            navigation.load(&webview.webview(), url.as_str());
+                        }
                         Ok(())
                     };
                     #[cfg(not(target_os = "linux"))]
@@ -382,7 +459,9 @@ impl Browser {
                             self.selected = None;
                             window.blur();
                             #[cfg(target_os = "linux")]
-                            if let Some(focus) = &self.native_focus { focus.page(); }
+                            if let Some(focus) = &self.native_focus {
+                                focus.page();
+                            }
                             let _ = webview.focus();
                             self.set_address(window, cx);
                         }
@@ -419,11 +498,15 @@ impl Browser {
                 Action::PasswordResult { nonce, result } => self.passwords.apply(self.webview.as_ref(), &nonce, result),
                 Action::PasswordMessage(message) => self.passwords.receive(message),
                 Action::PageLoaded(url) => {
-                    if let Some(page) = &self.webview && page.url().ok().as_deref() == Some(url.as_str()) {
+                    if let Some(page) = &self.webview
+                        && page.url().ok().as_deref() == Some(url.as_str())
+                    {
                         self.passwords.install(page);
                         let sender = self.sender.clone();
                         let _ = page.evaluate_script_with_callback(PAGE_METADATA_SCRIPT, move |result| {
-                            if let Ok(page) = serde_json::from_str::<PageMetadata>(&result) && page.url == url {
+                            if let Ok(page) = serde_json::from_str::<PageMetadata>(&result)
+                                && page.url == url
+                            {
                                 let _ = sender.send(Action::PageVisited(page));
                             }
                         });
@@ -434,28 +517,50 @@ impl Browser {
                         self.page = page.clone();
                         cx.notify();
                     }
-                    if let Err(error) = self.history.record_visit(page) { eprintln!("Could not save browser page visit: {error}"); }
+                    if let Err(error) = self.history.record_visit(page) {
+                        eprintln!("Could not save browser page visit: {error}");
+                    }
                 }
                 #[cfg(target_os = "macos")]
-                Action::DownloadEnded(url) => { if let Some(gate) = &mut self.download_gate { gate.complete(&url); } }
+                Action::DownloadEnded(url) => {
+                    if let Some(gate) = &mut self.download_gate {
+                        gate.complete(&url);
+                    }
+                }
                 Action::DownloadDeferred(url) => {
-                    if !self.deferred_downloads.contains(&url) { self.deferred_downloads.push_back(url); }
+                    if !self.deferred_downloads.contains(&url) {
+                        self.deferred_downloads.push_back(url);
+                    }
                     if self.downloads.is_empty() {
-                        self.downloads.apply(BrowserFeedback { replaces: None, download: "network-transfer".into(), name: "Downloads".into(), phase: BrowserDownloadPhase::Waiting, percent: None, message: Some("Waiting for an unmetered connection".into()) }, window, cx);
+                        self.downloads.apply(
+                            BrowserFeedback { replaces: None, download: "network-transfer".into(), name: "Downloads".into(), phase: BrowserDownloadPhase::Waiting, percent: None, message: Some("Waiting for an unmetered connection".into()) },
+                            window,
+                            cx,
+                        );
                     }
                 }
                 Action::Feedback(feedback) => self.downloads.apply(feedback, window, cx),
                 Action::Open(url) => {
                     let mut request = self.request.clone();
                     request.url = url;
-                    let opened = crate::profile::context(&request.data_directory)
-                        .and_then(|context| open_browser_window(request, context, self.app_closed.clone(), cx));
+                    let opened = crate::profile::context(&request.data_directory).and_then(|context| open_browser_window(request, context, self.app_closed.clone(), cx));
                     if let Err(error) = opened {
                         window.push_notification(Notification::error(user_facing_error(&error.to_string(), "Could not open a new browser window. Please try again.")).autohide(false), cx);
                     }
                 }
                 Action::Refused(path) => {
-                    self.downloads.apply(BrowserFeedback { replaces: None, download: path.to_string_lossy().into_owned(), name: download_name(&path), phase: BrowserDownloadPhase::Failed, percent: None, message: Some("This file is not supported. Bokheim cannot read DRM-protected downloads.".into()) }, window, cx);
+                    self.downloads.apply(
+                        BrowserFeedback {
+                            replaces: None,
+                            download: path.to_string_lossy().into_owned(),
+                            name: download_name(&path),
+                            phase: BrowserDownloadPhase::Failed,
+                            percent: None,
+                            message: Some("This file is not supported. Bokheim cannot read DRM-protected downloads.".into()),
+                        },
+                        window,
+                        cx,
+                    );
                 }
                 Action::DownloadStarted(path) => {
                     self.downloads.apply(BrowserFeedback { replaces: None, download: path.to_string_lossy().into_owned(), name: download_name(&path), phase: BrowserDownloadPhase::Downloading, percent: None, message: None }, window, cx);
@@ -466,13 +571,22 @@ impl Browser {
                 }
                 Action::DownloadFinished { path, succeeded } => {
                     let id = path.to_string_lossy().into_owned();
-                    if !succeeded && !transfers::allowed() { self.downloads.waiting(&id, window, cx); }
-                    else { self.downloads.apply(BrowserFeedback { replaces: None, download: id, name: download_name(&path), phase: if succeeded { BrowserDownloadPhase::Completed } else { BrowserDownloadPhase::Failed }, percent: None, message: None }, window, cx); }
+                    if !succeeded && !transfers::allowed() {
+                        self.downloads.waiting(&id, window, cx);
+                    } else {
+                        self.downloads.apply(
+                            BrowserFeedback { replaces: None, download: id, name: download_name(&path), phase: if succeeded { BrowserDownloadPhase::Completed } else { BrowserDownloadPhase::Failed }, percent: None, message: None },
+                            window,
+                            cx,
+                        );
+                    }
                 }
             }
         }
         #[cfg(any(target_os = "windows", target_os = "macos"))]
-        if let Some(gate) = &mut self.download_gate { gate.tick(!self.downloads.is_empty()); }
+        if let Some(gate) = &mut self.download_gate {
+            gate.tick(!self.downloads.is_empty());
+        }
         if transfers::allowed() {
             self.downloads.apply(BrowserFeedback { replaces: None, download: "network-transfer".into(), name: String::new(), phase: BrowserDownloadPhase::Dismissed, percent: None, message: None }, window, cx);
             if let Some(url) = self.deferred_downloads.pop_front() {
@@ -480,27 +594,42 @@ impl Browser {
                     #[cfg(target_os = "linux")]
                     page.webview().download_uri(&url);
                     #[cfg(not(target_os = "linux"))]
-                    if let Err(error) = page.load_url(&url) { eprintln!("Could not resume a browser download: {error}"); }
+                    if let Err(error) = page.load_url(&url) {
+                        eprintln!("Could not resume a browser download: {error}");
+                    }
                 }
             }
         }
         #[cfg(target_os = "linux")]
-        if let Some(page) = &self.webview && let Some(navigation) = &self.native_navigation { navigation.tick(&page.webview()); }
+        if let Some(page) = &self.webview
+            && let Some(navigation) = &self.native_navigation
+        {
+            navigation.tick(&page.webview());
+        }
         #[cfg(target_os = "linux")]
         let pending_navigation = self.native_navigation.as_ref().is_some_and(|navigation| navigation.pending());
         #[cfg(not(target_os = "linux"))]
         let pending_navigation = false;
-        if !pending_navigation && let Some(page) = &self.webview && let Ok(url) = page.url() && url != self.current_url {
+        if !pending_navigation
+            && let Some(page) = &self.webview
+            && let Ok(url) = page.url()
+            && url != self.current_url
+        {
             let unchanged_input = self.address.read(cx).value().as_str() == display_url(&self.current_url);
             self.current_url = url;
             if self.page.url != self.current_url {
                 self.page = self.history.page(&self.current_url).cloned().unwrap_or_else(|| PageMetadata::for_url(&self.current_url));
             }
-            if !self.editing || unchanged_input { self.set_address(window, cx); }
+            if !self.editing || unchanged_input {
+                self.set_address(window, cx);
+            }
             cx.notify();
         }
         let navigation = self.webview.as_ref().map(navigation_state).unwrap_or_default();
-        if navigation != self.navigation { self.navigation = navigation; cx.notify(); }
+        if navigation != self.navigation {
+            self.navigation = navigation;
+            cx.notify();
+        }
         self.layout(window);
     }
 
@@ -515,7 +644,9 @@ impl Browser {
         self.passwords.cancel();
         if let Some(page) = &self.webview {
             #[cfg(target_os = "linux")]
-            if let Some(navigation) = &self.native_navigation { navigation.history(&page.webview(), forward); }
+            if let Some(navigation) = &self.native_navigation {
+                navigation.history(&page.webview(), forward);
+            }
             #[cfg(not(target_os = "linux"))]
             navigate_history(page, forward);
         }
@@ -525,7 +656,9 @@ impl Browser {
         self.passwords.cancel();
         if let Some(page) = &self.webview {
             #[cfg(target_os = "linux")]
-            if let Some(navigation) = &self.native_navigation { navigation.reload(&page.webview()); }
+            if let Some(navigation) = &self.native_navigation {
+                navigation.reload(&page.webview());
+            }
             #[cfg(not(target_os = "linux"))]
             let _ = page.reload();
         }
@@ -548,15 +681,21 @@ impl Browser {
                 bounds
             };
             #[cfg(target_os = "linux")]
-            if let Some(host) = &self.native_host { let _ = host.set_bounds(bounds); }
+            if let Some(host) = &self.native_host {
+                let _ = host.set_bounds(bounds);
+            }
             #[cfg(not(target_os = "linux"))]
-            if let Some(page) = &self.webview { let _ = page.set_bounds(bounds); }
+            if let Some(page) = &self.webview {
+                let _ = page.set_bounds(bounds);
+            }
             self.page_layout = Some(layout);
         }
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.editing { return; }
+        if !self.editing {
+            return;
+        }
         match event.keystroke.key.as_str() {
             "down" | "up" if !self.suggestions.is_empty() => {
                 let count = self.suggestions.len();
@@ -576,8 +715,12 @@ impl Browser {
                 self.set_address(window, cx);
                 window.blur();
                 #[cfg(target_os = "linux")]
-                if let Some(focus) = &self.native_focus { focus.page(); }
-                if let Some(page) = &self.webview { let _ = page.focus(); }
+                if let Some(focus) = &self.native_focus {
+                    focus.page();
+                }
+                if let Some(page) = &self.webview {
+                    let _ = page.focus();
+                }
                 self.layout(window);
                 cx.stop_propagation();
                 cx.notify();
@@ -595,27 +738,55 @@ impl Render for Browser {
         let active = self.editing || self.address.read(cx).focus_handle(cx).is_focused(window);
         let mut address = browser_address_control(&self.address, active, self.page.display_name().to_owned(), self.page.icon.as_deref(), theme);
         if !self.suggestions.is_empty() {
-            let mut popup = div().id("browser-address-suggestions").absolute().top(rems(TOPBAR_ACTION_HEIGHT_REM))
-                .left_0().w_full().h(px(self.suggestions.len() as f32 * row_height + 2.0))
-                .flex().flex_col().bg(theme.page_bg).border_1().border_color(theme.rule)
-                .text_color(theme.text).text_size(rems(TEXT_SM)).occlude();
+            let mut popup = div()
+                .id("browser-address-suggestions")
+                .absolute()
+                .top(rems(topbar_action_height_rem()))
+                .left_0()
+                .w_full()
+                .h(px(self.suggestions.len() as f32 * row_height + 2.0))
+                .flex()
+                .flex_col()
+                .bg(theme.page_bg)
+                .border_1()
+                .border_color(theme.rule)
+                .text_color(theme.text)
+                .text_size(rems(TEXT_SM))
+                .occlude();
             for (index, suggestion) in self.suggestions.iter().cloned().enumerate() {
-                popup = popup.child(div().id(("address-suggestion", index)).h(px(row_height)).px(px(SPACE_SM))
-                    .flex().items_center().gap(px(SPACE_SM)).cursor_pointer()
-                    .bg(if self.selected == Some(index) { theme.accent_wash } else { theme.page_bg })
-                    .hover(|style| style.bg(theme.hover))
-                    // Selecting a suggestion must not blur the address field first.
-                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-                    .on_click(cx.listener(move |browser, _, window, cx| browser.navigate(&suggestion, window, cx)))
-                    .child(Icon::new(IconName::Search).small().text_color(theme.text_muted))
-                    .child(div().flex_1().min_w_0().text_ellipsis().child(self.suggestions[index].clone())));
+                popup = popup.child(
+                    div()
+                        .id(("address-suggestion", index))
+                        .h(px(row_height))
+                        .px(px(SPACE_SM))
+                        .flex()
+                        .items_center()
+                        .gap(px(SPACE_SM))
+                        .cursor_pointer()
+                        .bg(if self.selected == Some(index) { theme.accent_wash } else { theme.page_bg })
+                        .hover(|style| style.bg(theme.hover))
+                        // Selecting a suggestion must not blur the address field first.
+                        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                        .on_click(cx.listener(move |browser, _, window, cx| browser.navigate(&suggestion, window, cx)))
+                        .child(Icon::new(IconName::Search).small().text_color(theme.text_muted))
+                        .child(div().flex_1().min_w_0().text_ellipsis().child(self.suggestions[index].clone())),
+                );
             }
             #[cfg(target_os = "linux")]
             if let Some(host) = self.native_host.clone() {
                 let top = self.toolbar_height(window);
-                popup = popup.child(canvas(move |bounds, window, _| {
-                    host.set_overlay("suggestions", page_bounds(window, top), Some(bounds), window.scale_factor());
-                }, |_, _, _, _| {}).absolute().top_0().left_0().size_full());
+                popup = popup.child(
+                    canvas(
+                        move |bounds, window, _| {
+                            host.set_overlay("suggestions", page_bounds(window, top), Some(bounds), window.scale_factor());
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+                );
             }
             address = address.child(deferred(popup).with_priority(1));
         } else {
@@ -624,24 +795,47 @@ impl Render for Browser {
                 host.set_overlay("suggestions", page_bounds(window, self.toolbar_height(window)), None, window.scale_factor());
             }
         }
-        let mut toolbar = div().id("browser-toolbar").flex().flex_col().w_full()
-            .bg(theme.page_bg).text_color(theme.text)
+        let mut toolbar = div()
+            .id("browser-toolbar")
+            .flex()
+            .flex_col()
+            .w_full()
+            .bg(theme.page_bg)
+            .text_color(theme.text)
             .capture_key_down(cx.listener(Self::key_down))
             .capture_any_mouse_down(cx.listener(|browser, _, _, _| {
                 #[cfg(target_os = "linux")]
-                if let Some(focus) = &browser.native_focus { focus.toolbar(); }
+                if let Some(focus) = &browser.native_focus {
+                    focus.toolbar();
+                }
             }))
-            .child(div().flex().items_center().gap(px(SPACE_SM)).px(px(SPACE_SM)).h(px(controls_height(window)))
-                .child(outlined_icon_button("back", "Back", IconName::ArrowLeft, theme).disabled(!self.navigation.0)
-                    .when(!self.navigation.0, |button| button.text_color(theme.text_muted.opacity(0.5)).cursor_default())
-                    .on_click(cx.listener(|browser, _, _, _| browser.navigate_history(false))))
-                .child(outlined_icon_button("forward", "Forward", IconName::ArrowRight, theme).disabled(!self.navigation.1)
-                    .when(!self.navigation.1, |button| button.text_color(theme.text_muted.opacity(0.5)).cursor_default())
-                    .on_click(cx.listener(|browser, _, _, _| browser.navigate_history(true))))
-                .child(outlined_icon_button("reload", "Reload", Icon::empty().path("icons/arrow-clockwise.svg"), theme).disabled(self.webview.is_none() || self.current_url == "about:blank")
-                    .when(self.webview.is_none() || self.current_url == "about:blank", |button| button.text_color(theme.text_muted.opacity(0.5)).cursor_default())
-                    .on_click(cx.listener(|browser, _, _, _| browser.reload())))
-                .child(address));
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(SPACE_SM))
+                    .px(px(SPACE_SM))
+                    .h(px(controls_height(window)))
+                    .child(
+                        outlined_icon_button("back", "Back", IconName::ArrowLeft, theme)
+                            .disabled(!self.navigation.0)
+                            .when(!self.navigation.0, |button| button.text_color(theme.text_muted.opacity(0.5)).cursor_default())
+                            .on_click(cx.listener(|browser, _, _, _| browser.navigate_history(false))),
+                    )
+                    .child(
+                        outlined_icon_button("forward", "Forward", IconName::ArrowRight, theme)
+                            .disabled(!self.navigation.1)
+                            .when(!self.navigation.1, |button| button.text_color(theme.text_muted.opacity(0.5)).cursor_default())
+                            .on_click(cx.listener(|browser, _, _, _| browser.navigate_history(true))),
+                    )
+                    .child(
+                        outlined_icon_button("reload", "Reload", Icon::empty().path("icons/arrow-clockwise.svg"), theme)
+                            .disabled(self.webview.is_none() || self.current_url == "about:blank")
+                            .when(self.webview.is_none() || self.current_url == "about:blank", |button| button.text_color(theme.text_muted.opacity(0.5)).cursor_default())
+                            .on_click(cx.listener(|browser, _, _, _| browser.reload())),
+                    )
+                    .child(address),
+            );
         if let Some(error) = &self.error {
             toolbar = toolbar.child(error_text(theme).h(px(STATUS_HEIGHT)).px(px(SPACE_SM)).flex().items_center().child(error.clone()));
         }
@@ -652,28 +846,42 @@ impl Render for Browser {
             self.notification_subscription = Some(cx.observe(&notifications, |_, _, cx| cx.notify()));
         }
         let visible = !notifications.read(cx).notifications().is_empty();
-        let mut content = div().relative().size_full().flex().flex_col().bg(theme.page_bg)
-            .child(toolbar).child(div().flex_1());
+        let mut content = div().relative().size_full().flex().flex_col().bg(theme.page_bg).child(toolbar).child(div().flex_1());
         if visible {
-            let mut layer = div().id("browser-download-toasts").absolute().bottom_0().right_0()
+            let mut layer = div()
+                .id("browser-download-toasts")
+                .absolute()
+                .bottom_0()
+                .right_0()
                 .capture_any_mouse_down(cx.listener(|browser, _, _, _| {
                     #[cfg(target_os = "linux")]
-                    if let Some(focus) = &browser.native_focus { focus.toolbar(); }
+                    if let Some(focus) = &browser.native_focus {
+                        focus.toolbar();
+                    }
                 }))
                 .child(notifications);
             #[cfg(target_os = "linux")]
             if let Some(host) = self.native_host.clone() {
                 let top = self.toolbar_height(window);
                 let inset = cx.theme().notification.margins.top - px(8.0);
-                layer = layer.child(canvas(move |mut bounds, window, _| {
-                    // Exclude the list's empty top margin; allow its shadow and
-                    // slide animation in the right and bottom edge margins.
-                    bounds.origin.y += inset;
-                    bounds.size.height -= inset;
-                    bounds.origin.x -= px(8.0);
-                    bounds.size.width += px(8.0);
-                    host.set_overlay("notifications", page_bounds(window, top), Some(bounds), window.scale_factor());
-                }, |_, _, _, _| {}).absolute().top_0().left_0().size_full());
+                layer = layer.child(
+                    canvas(
+                        move |mut bounds, window, _| {
+                            // Exclude the list's empty top margin; allow its shadow and
+                            // slide animation in the right and bottom edge margins.
+                            bounds.origin.y += inset;
+                            bounds.size.height -= inset;
+                            bounds.origin.x -= px(8.0);
+                            bounds.size.width += px(8.0);
+                            host.set_overlay("notifications", page_bounds(window, top), Some(bounds), window.scale_factor());
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+                );
             }
             #[cfg(not(target_os = "linux"))]
             {
@@ -681,18 +889,26 @@ impl Render for Browser {
                 // notifications, just as they do for address suggestions.
                 let browser = cx.entity().downgrade();
                 let inset = cx.theme().notification.margins.top - px(8.0);
-                layer = layer.child(canvas(move |bounds, window, cx| {
-                    let height = f32::from(bounds.size.height - inset)
-                        .clamp(0.0, (f32::from(window.viewport_size().height) - controls_height(window)).max(0.0));
-                    cx.defer(move |cx| {
-                        let _ = browser.update(cx, |browser, cx| {
-                            if browser.notification_height != height {
-                                browser.notification_height = height;
-                                cx.notify();
-                            }
-                        });
-                    });
-                }, |_, _, _, _| {}).absolute().top_0().left_0().size_full());
+                layer = layer.child(
+                    canvas(
+                        move |bounds, window, cx| {
+                            let height = f32::from(bounds.size.height - inset).clamp(0.0, (f32::from(window.viewport_size().height) - controls_height(window)).max(0.0));
+                            cx.defer(move |cx| {
+                                let _ = browser.update(cx, |browser, cx| {
+                                    if browser.notification_height != height {
+                                        browser.notification_height = height;
+                                        cx.notify();
+                                    }
+                                });
+                            });
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
+                );
             }
             content = content.child(deferred(layer).with_priority(2));
         } else {
@@ -714,14 +930,12 @@ fn download_name(path: &Path) -> String {
     path.file_name().unwrap_or_default().to_string_lossy().into_owned()
 }
 
-
 fn navigation_state(page: &WebView) -> (bool, bool) {
     #[cfg(target_os = "linux")]
     {
         let native = page.webview();
         // The blank page used to prepare cookies is not a useful Back target.
-        let back = native.back_forward_list().and_then(|list| list.back_item())
-            .is_some_and(|item| item.uri().is_some_and(|url| url != "about:blank"));
+        let back = native.back_forward_list().and_then(|list| list.back_item()).is_some_and(|item| item.uri().is_some_and(|url| url != "about:blank"));
         (back && native.can_go_back(), native.can_go_forward())
     }
     #[cfg(target_os = "windows")]
@@ -748,33 +962,42 @@ fn navigate_history(page: &WebView, forward: bool) {
     #[cfg(target_os = "windows")]
     {
         let native = page.webview();
-        unsafe { let _ = if forward { native.GoForward() } else { native.GoBack() }; }
+        unsafe {
+            let _ = if forward { native.GoForward() } else { native.GoBack() };
+        }
     }
     #[cfg(target_os = "macos")]
     {
         let native = page.webview();
         // SAFETY: Navigation runs on the main thread while `page` owns the
         // live WKWebView and its navigation history.
-        unsafe { if forward { let _ = native.goForward(); } else { let _ = native.goBack(); } }
+        unsafe {
+            if forward {
+                let _ = native.goForward();
+            } else {
+                let _ = native.goBack();
+            }
+        }
     }
 }
 
 fn controls_height(window: &Window) -> f32 {
-    f32::from(window.rem_size()) * TOPBAR_ACTION_HEIGHT_REM + 2.0 * SPACE_SM
+    f32::from(window.rem_size()) * topbar_action_height_rem() + 2.0 * SPACE_SM
 }
 
 fn suggestion_height(window: &Window) -> f32 {
     f32::from(window.rem_size()) * TEXT_SM + 2.0 * SPACE_SM
 }
 
-fn display_url(url: &str) -> &str { if url == "about:blank" { "" } else { url } }
+fn display_url(url: &str) -> &str {
+    if url == "about:blank" { "" } else { url }
+}
 
 fn page_bounds(window: &Window, top: f32) -> Rect {
     let viewport = window.viewport_size();
     let scale = f64::from(window.scale_factor());
     // GPUI and GTK can use different logical scale factors under XWayland.
-    Rect { position: PhysicalPosition::new(0.0, top as f64 * scale).into(),
-        size: PhysicalSize::new((f64::from(viewport.width) * scale).max(1.0), ((f64::from(viewport.height) - top as f64) * scale).max(1.0)).into() }
+    Rect { position: PhysicalPosition::new(0.0, top as f64 * scale).into(), size: PhysicalSize::new((f64::from(viewport.width) * scale).max(1.0), ((f64::from(viewport.height) - top as f64) * scale).max(1.0)).into() }
 }
 
 /// GPUI exposes an XCB handle; Wry expects the same X11 window ID in an
@@ -794,10 +1017,9 @@ impl HasWindowHandle for NativeParent<'_> {
     }
 }
 
-
 fn with_downloads<'a>(builder: WebViewBuilder<'a>, downloads: PathBuf, sender: Sender<Action>) -> WebViewBuilder<'a> {
     let saving: Rc<RefCell<HashMap<String, VecDeque<PathBuf>>>> = Rc::default();
-        let started = {
+    let started = {
         let saving = saving.clone();
         let sender = sender.clone();
         move |url: String, path: &mut PathBuf| {
@@ -806,9 +1028,7 @@ fn with_downloads<'a>(builder: WebViewBuilder<'a>, downloads: PathBuf, sender: S
                 return false;
             }
             let name = path.file_name().map_or_else(|| PathBuf::from("download"), PathBuf::from);
-            *path = unused_path_unless(&downloads, &name, |candidate| {
-                saving.borrow().values().any(|paths| paths.iter().any(|path| path == candidate))
-            });
+            *path = unused_path_unless(&downloads, &name, |candidate| saving.borrow().values().any(|paths| paths.iter().any(|path| path == candidate)));
             saving.borrow_mut().entry(url).or_default().push_back(path.clone());
             let _ = sender.send(Action::DownloadStarted(path.clone()));
             true
@@ -821,13 +1041,17 @@ fn with_downloads<'a>(builder: WebViewBuilder<'a>, downloads: PathBuf, sender: S
         let pending = saving.get_mut(&url);
         let path = match (pending, path) {
             (Some(paths), Some(path)) => {
-                if let Some(index) = paths.iter().position(|pending| *pending == path) { paths.remove(index); }
+                if let Some(index) = paths.iter().position(|pending| *pending == path) {
+                    paths.remove(index);
+                }
                 Some(path)
             }
             (Some(paths), None) => paths.pop_front(),
             (None, path) => path,
         };
-        if saving.get(&url).is_some_and(VecDeque::is_empty) { saving.remove(&url); }
+        if saving.get(&url).is_some_and(VecDeque::is_empty) {
+            saving.remove(&url);
+        }
         let Some(path) = path else { return };
         if !succeeded {
             let _ = std::fs::remove_file(&path);
@@ -836,14 +1060,22 @@ fn with_downloads<'a>(builder: WebViewBuilder<'a>, downloads: PathBuf, sender: S
         }
         if torrent_download(&path) {
             let download = path.to_string_lossy().into_owned();
-            let _ = sender.send(Action::Feedback(BrowserFeedback { replaces: None, download: download.clone(), name: download_name(&path), phase: BrowserDownloadPhase::Preparing, percent: None, message: Some("Resolving torrent metadata".into()) }));
+            let _ = sender.send(Action::Feedback(BrowserFeedback {
+                replaces: None,
+                download: download.clone(),
+                name: download_name(&path),
+                phase: BrowserDownloadPhase::Preparing,
+                percent: None,
+                message: Some("Resolving torrent metadata".into()),
+            }));
             report(StoreEvent::TorrentFile { path, download: Some(download) });
             return;
         }
         match book(&path) {
             Some(book) => {
                 let download = path.to_string_lossy().into_owned();
-                let _ = sender.send(Action::Feedback(BrowserFeedback { replaces: None, download: download.clone(), name: download_name(&book), phase: BrowserDownloadPhase::Preparing, percent: None, message: Some("Adding to library".into()) }));
+                let _ =
+                    sender.send(Action::Feedback(BrowserFeedback { replaces: None, download: download.clone(), name: download_name(&book), phase: BrowserDownloadPhase::Preparing, percent: None, message: Some("Adding to library".into()) }));
                 report(StoreEvent::Downloaded { path: book, download: Some(download) });
             }
             None => {

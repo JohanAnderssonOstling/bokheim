@@ -69,10 +69,7 @@ pub async fn ingest_audiobook_folder(path: PathBuf, name: String, host: &dyn cpu
             }
             let fingerprint = library_files::filesystem::audiobook_fingerprint(&path, &tracks)?;
             require_folder_unchanged(&path, fingerprint)?;
-            let nfo = audiobook_folder::discover_nfo(&path)?;
-            let cue = audiobook_folder::discover_cue(&path)?;
-            let cover = audiobook_folder::discover_cover(&path)?;
-            let mut archive = audiobook_archive::write_archive_with_sidecars(tempfile::tempfile()?, &tracks, nfo.as_ref(), cue.as_ref(), cover.as_ref())?;
+            let mut archive = audiobook_folder::write_folder_archive(&path, tempfile::tempfile()?, &tracks)?;
             require_folder_unchanged(&path, fingerprint)?;
             archive.rewind()?;
             let mut hasher = blake3::Hasher::new();

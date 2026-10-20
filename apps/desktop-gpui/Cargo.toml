@@ -1,6 +1,6 @@
 [package]
 name = "desktop-gpui"
-version = "0.1.9"
+version = "0.1.10"
 edition = "2024"
 
 [lib]
@@ -29,7 +29,7 @@ mobile = ["browser-ui/mobile", "reader-ui/mobile", "application-shell/mobile", "
 android = ["mobile", "reader-ui/native-tts", "dep:reader-speech", "dep:audiobook-player", "dep:gpui_android", "dep:gpui_platform", "dep:update-client", "dep:linux-update-host"]
 
 [[bin]]
-name = "desktop-gpui"
+name = "bokheim"
 path = "src/main.rs"
 required-features = ["desktop"]
 

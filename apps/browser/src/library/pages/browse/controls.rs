@@ -188,7 +188,7 @@ pub(super) fn browse_language_control(page: Entity<BrowsePage>, controls: &Brows
         return None;
     }
     Some(components::outlined_icon_button("browse-languages", "Languages", Icon::empty().path("icons/translate.svg"), theme)
-        .dropdown_menu_with_anchor(anchor, move |menu, _, cx| options_menu(menu.touch_friendly(compact), page.clone(), true, cx))
+        .dropdown_menu_with_anchor(anchor, move |menu, _, cx| options_menu(menu.touch_friendly(compact || components::touch_ui()), page.clone(), true, cx))
         .into_any_element())
 }
 

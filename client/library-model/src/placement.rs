@@ -1,7 +1,7 @@
 //! Shared physical placement, upload intent, and validated library-relative paths.
 
-use std::error::Error;
 use content_address::ContentHash;
+use std::error::Error;
 use std::fmt;
 
 /// "/book.epub" at the library root, "/a/b/book.epub" below it.
@@ -20,7 +20,7 @@ impl Error for RelativeBookPathError {}
 
 impl RelativeBookPath {
     pub fn parse(value: &str) -> Result<Self, RelativeBookPathError> {
-        if value.is_empty() || value.contains('\\') || value.chars().any(char::is_control) {
+        if value.is_empty() || value.contains(['\\', ':']) || value.chars().any(char::is_control) {
             return Err(RelativeBookPathError);
         }
         let relative = value.strip_prefix('/').unwrap_or(value);
@@ -84,7 +84,7 @@ impl Error for RelativeDirPathError {}
 
 impl RelativeDirPath {
     pub fn parse(value: &str) -> Result<Self, RelativeDirPathError> {
-        if value.is_empty() || value.contains('\\') || value.chars().any(char::is_control) {
+        if value.is_empty() || value.contains(['\\', ':']) || value.chars().any(char::is_control) {
             return Err(RelativeDirPathError);
         }
         let relative = value.strip_prefix('/').unwrap_or(value);
@@ -107,6 +107,14 @@ impl RelativeDirPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relative_paths_reject_windows_prefixes_and_alternate_streams() {
+        for path in ["C:/outside/book.epub", "/C:/outside/book.epub", "C:book.epub", "Shelf/book.epub:stream", "Shelf/C:/book.epub", "//server/share/book.epub", r"\\server\share\book.epub", r"\\?\C:\book.epub"] {
+            assert!(RelativeBookPath::parse(path).is_err(), "accepted book path: {path}");
+            assert!(RelativeDirPath::parse(path).is_err(), "accepted directory path: {path}");
+        }
+    }
 
     #[test]
     fn relative_paths_reject_escape_and_normalize_valid_inputs() {

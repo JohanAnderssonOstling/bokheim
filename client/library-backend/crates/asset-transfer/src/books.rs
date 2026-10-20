@@ -153,7 +153,7 @@ impl BookTransfers {
                 return Err(TransferError::rejected(error.to_string()));
             }
         };
-        let published = destination.publish_snapshot(&self.assets, &book.relative_path, &book.occupied_names, book.format == book_model::BookFormat::Mp3Folder)?;
+        let published = destination.publish_snapshot_with_track_titles(&self.assets, &book.relative_path, &book.occupied_names, book.format == book_model::BookFormat::Mp3Folder, &book.audiobook_track_titles)?;
         // The write revalidates the placement and name conflicts before applying the result.
         let completion = NativeBookCompletion { snapshot: book, publication: published, size_bytes: completed_bytes };
         self.database.complete_downloaded_book(completion, self.assets.thumbnail_set_exists(content_hash)?)?;

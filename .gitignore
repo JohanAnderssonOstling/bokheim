@@ -22,6 +22,7 @@ flamegraph.svg
 # Scratch analysis runs and test scratch directories. These hold multi-gigabyte
 # extracts and built wasm bundles, so they must never be staged.
 /tmp/
+/.tmp/
 /.test-tmp/
 /client/.test-tmp/
 /.orphan-sql-report
@@ -116,6 +117,7 @@ venv/
 
 # Local books, large test assets, and external reference checkouts
 *.epub
+!/client/library-backend/crates/book-inspection/tests/fixtures/*.epub
 /TestData/
 /client/app/tests/test_folder/
 /reference/plato/

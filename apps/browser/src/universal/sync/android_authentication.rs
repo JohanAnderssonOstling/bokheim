@@ -12,7 +12,7 @@ impl SyncPage {
     pub(super) fn open_android_authentication(&mut self, cx: &mut Context<Self>) {
         self.android_authentication = None;
         let theme = ui_components::browser_theme(cx);
-        let colors = [theme.page_bg, theme.text, theme.text_muted, theme.accent, theme.accent_text]
+        let colors = [theme.page_bg, theme.text, theme.text_muted, theme.accent, theme.accent_text, theme.border, theme.text_accent, theme.danger, theme.accent_wash]
             .into_iter()
             .map(|color| {
                 let c = color.to_rgb();

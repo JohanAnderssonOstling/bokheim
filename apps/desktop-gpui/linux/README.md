@@ -145,7 +145,7 @@ cargo build --locked --release -p opds-webview
 Install the artifacts into the Flatpak application prefix:
 
 ```text
-/app/bin/desktop-gpui
+/app/bin/bokheim
 /app/bin/bokheim-opds-webview
 /app/lib/libpdfium.so  # from .pdfium/x86_64-unknown-linux-gnu/
 /app/share/applications/se.bokheim.Bokheim.desktop

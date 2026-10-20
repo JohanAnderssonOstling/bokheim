@@ -26,6 +26,10 @@ mod native {
             self.0.info()
         }
 
+        pub async fn page_geometry(&self, page_index: usize, trim_margins: bool) -> PdfResult<pdf_reader_core::PdfPageGeometry> {
+            self.0.page_geometry(page_index, trim_margins).await
+        }
+
         pub async fn render_for_display(&self, key: PageRenderKey) -> PdfResult<RenderedPdfBgraPage> {
             self.0.render_for_display(key).await
         }

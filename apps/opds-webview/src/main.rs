@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 //! One browser verification attempt, or with `store` a store's window,
 //! isolated from the GPUI event loop.
 mod store;

@@ -1,5 +1,5 @@
 use super::*;
-use gpui::{EventEmitter, relative, rems};
+use gpui::{EventEmitter, TouchEvent, TouchId, TouchPhase, relative, rems};
 use gpui_component::menu::DropdownMenu as _;
 use std::rc::Rc;
 use ui_components::{FlexItem as _, PLAYER_DOCK_CAPTION_SIZE_REM, PLAYER_DOCK_TEXT_SIZE_REM, PlaybackTransportAction, SPACE_SM, SPACE_XXS, TransportLayout};
@@ -23,16 +23,17 @@ const SWIPE_THRESHOLD: f32 = 40.0;
 /// footer, so using it as the sheet's containing block clips the menu.
 fn page_sheet(sheet: gpui::AnyElement, window: &Window) -> gpui::AnyElement {
     let viewport = window.viewport_size();
-    let usable_height = viewport.height - window.insets().safe_area.bottom;
-    gpui::anchored().position(gpui::point(px(0.0), px(0.0))).anchor(gpui::Anchor::TopLeft).child(div().relative().w(viewport.width).h(usable_height).child(sheet)).into_any_element()
+    let safe_area = window.insets().effective();
+    let usable_height = (viewport.height - safe_area.top - safe_area.bottom).max(px(0.0));
+    gpui::anchored().position(gpui::point(px(0.0), safe_area.top)).anchor(gpui::Anchor::TopLeft).child(div().relative().w(viewport.width).h(usable_height).pl(safe_area.left).pr(safe_area.right).child(sheet)).into_any_element()
 }
 
 /// The phone's expanded player covers the whole window, bottom navigation
 /// included, and keeps its controls clear of the system bars itself.
 fn full_window(page: gpui::Div, window: &Window) -> gpui::AnyElement {
     let viewport = window.viewport_size();
-    let safe_area = window.insets().safe_area;
-    gpui::anchored().position(gpui::point(px(0.0), px(0.0))).anchor(gpui::Anchor::TopLeft).child(page.w(viewport.width).h(viewport.height).pt(safe_area.top).pb(safe_area.bottom)).into_any_element()
+    let safe_area = window.insets().effective();
+    gpui::anchored().position(gpui::point(px(0.0), px(0.0))).anchor(gpui::Anchor::TopLeft).child(page.w(viewport.width).h(viewport.height).pt(safe_area.top).pb(safe_area.bottom).pl(safe_area.left).pr(safe_area.right)).into_any_element()
 }
 
 /// Compact projection of the retained playback entity. It has no decoder or
@@ -52,6 +53,7 @@ pub struct AudiobookDock {
     /// position to. Present only during a drag, and what the progress bar
     /// reads while it is.
     scrub: Option<f32>,
+    scrub_touch: Option<TouchId>,
     /// Where the progress track was last laid out, so a drag that has left it
     /// can still be turned into a position.
     progress_bounds: Rc<Cell<Bounds<Pixels>>>,
@@ -72,7 +74,7 @@ impl AudiobookDock {
 
     fn create(player: Entity<PlaybackSession>, inline: bool, cx: &mut Context<Self>) -> Self {
         cx.observe(&player, |_, _, cx| cx.notify()).detach();
-        Self { player, inline, speed_menu_open: false, sleep_menu_open: false, chapters_menu_open: false, mobile_expanded: false, scrub: None, progress_bounds: Rc::new(Cell::new(Bounds::default())), swipe: None }
+        Self { player, inline, speed_menu_open: false, sleep_menu_open: false, chapters_menu_open: false, mobile_expanded: false, scrub: None, scrub_touch: None, progress_bounds: Rc::new(Cell::new(Bounds::default())), swipe: None }
     }
 
     /// Collapses the full-screen player back to the docked bar, e.g.
@@ -153,6 +155,33 @@ impl AudiobookDock {
         cx.notify();
     }
 
+    fn handle_scrub_touch(&mut self, event: &TouchEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if event.phase == TouchPhase::Started && self.scrub.is_none() {
+            self.begin_scrub(event.position.x, cx);
+            if self.scrub.is_some() {
+                self.scrub_touch = Some(event.id);
+            }
+        }
+        if self.scrub_touch != Some(event.id) {
+            return;
+        }
+        window.prevent_default();
+        cx.stop_propagation();
+        match event.phase {
+            TouchPhase::Started | TouchPhase::Moved => self.hover_scrub(event.position.x, cx),
+            TouchPhase::Ended => {
+                self.hover_scrub(event.position.x, cx);
+                self.scrub_touch = None;
+                self.finish_scrub(cx);
+            }
+            TouchPhase::Cancelled => {
+                self.scrub_touch = None;
+                self.scrub = None;
+                cx.notify();
+            }
+        }
+    }
+
     /// Chapter skip, the seconds skips and play, at the size `layout` gives them.
     fn transport(&self, playing: bool, layout: TransportLayout, theme: ui_components::BrowserTheme, cx: &Context<Self>) -> Vec<(PlaybackTransportAction, gpui::AnyElement)> {
         ui_components::playback_transport_buttons("now-playing", playing, layout, Some(["Previous chapter", "Next chapter"]), ui_components::PlaybackSkipKind::Seconds, theme)
@@ -187,10 +216,89 @@ impl AudiobookDock {
             .on_mouse_move(cx.listener(|dock, event: &MouseMoveEvent, _, cx| dock.hover_scrub(event.position.x, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|dock, _, _, cx| dock.finish_scrub(cx)))
             .on_mouse_up_out(MouseButton::Left, cx.listener(|dock, _, _, cx| dock.finish_scrub(cx)))
+            .child(ui_components::playback_scrub_touch_listener(cx.listener(Self::handle_scrub_touch)))
     }
 }
 
 impl EventEmitter<DockAction> for AudiobookDock {}
+
+#[cfg(test)]
+mod touch_tests {
+    use super::*;
+    use gpui::{MouseDownEvent, MouseUpEvent, Subscription, TestAppContext, VisualTestContext, point};
+
+    struct ScrubTest {
+        dock: Entity<AudiobookDock>,
+        commits: usize,
+        covered: bool,
+        _subscription: Subscription,
+    }
+
+    impl Render for ScrubTest {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let track = self.dock.update(cx, |dock, cx| dock.scrubbable(ui_components::now_playing_scrub_track(0.0, ui_components::browser_theme(cx)).w(px(200.0)), cx));
+            div().size_full().relative().child(track).when(self.covered, |view| view.child(div().absolute().top_0().left_0().w(px(200.0)).h(px(24.0)).occlude()))
+        }
+    }
+
+    fn touch(cx: &mut VisualTestContext, id: u64, phase: TouchPhase, x: f32, y: f32) {
+        cx.simulate_event(TouchEvent { id: TouchId(id), phase, position: point(px(x), px(y)), force: None });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn touch_scrub_follows_its_contact_and_commits_only_on_release(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            let (sender, _) = async_channel::unbounded();
+            let player = cx.new(|_| PlaybackSession::new(1.0, sender));
+            let subscription = cx.observe(&player, |view: &mut ScrubTest, _, _| view.commits += 1);
+            let dock = cx.new(|cx| AudiobookDock::new(player, cx));
+            ScrubTest { dock, commits: 0, covered: false, _subscription: subscription }
+        });
+        cx.run_until_parked();
+        let dock = view.read_with(cx, |view, _| view.dock.clone());
+        touch(cx, 1, TouchPhase::Started, 40.0, 12.0);
+        dock.read_with(cx, |dock, _| assert_eq!(dock.scrub, Some(0.2)));
+        touch(cx, 1, TouchPhase::Moved, 150.0, 80.0);
+        dock.read_with(cx, |dock, _| assert_eq!(dock.scrub, Some(0.75)));
+        touch(cx, 2, TouchPhase::Started, 80.0, 12.0);
+        touch(cx, 2, TouchPhase::Ended, 80.0, 12.0);
+        dock.read_with(cx, |dock, _| assert_eq!(dock.scrub, Some(0.75)));
+        view.read_with(cx, |view, _| assert_eq!(view.commits, 0));
+        touch(cx, 1, TouchPhase::Ended, 180.0, 80.0);
+        dock.read_with(cx, |dock, _| assert!(dock.scrub.is_none() && dock.scrub_touch.is_none()));
+        view.read_with(cx, |view, _| assert_eq!(view.commits, 1));
+        touch(cx, 1, TouchPhase::Ended, 180.0, 80.0);
+        touch(cx, 3, TouchPhase::Started, 40.0, 12.0);
+        touch(cx, 3, TouchPhase::Moved, 150.0, 80.0);
+        touch(cx, 3, TouchPhase::Cancelled, 150.0, 80.0);
+        dock.read_with(cx, |dock, _| assert!(dock.scrub.is_none() && dock.scrub_touch.is_none()));
+        view.read_with(cx, |view, _| assert_eq!(view.commits, 1));
+        touch(cx, 4, TouchPhase::Started, 40.0, 80.0);
+        touch(cx, 4, TouchPhase::Ended, 40.0, 80.0);
+        view.update(cx, |view, cx| {
+            view.covered = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        touch(cx, 5, TouchPhase::Started, 40.0, 12.0);
+        touch(cx, 5, TouchPhase::Ended, 40.0, 12.0);
+        view.read_with(cx, |view, _| assert_eq!(view.commits, 1));
+        view.update(cx, |view, cx| {
+            view.covered = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_event(MouseDownEvent { button: MouseButton::Left, position: point(px(40.0), px(12.0)), ..Default::default() });
+        cx.simulate_event(MouseMoveEvent { pressed_button: Some(MouseButton::Left), position: point(px(150.0), px(12.0)), ..Default::default() });
+        dock.read_with(cx, |dock, _| assert_eq!(dock.scrub, Some(0.75)));
+        cx.simulate_event(MouseUpEvent { button: MouseButton::Left, position: point(px(150.0), px(80.0)), ..Default::default() });
+        cx.run_until_parked();
+        dock.read_with(cx, |dock, _| assert!(dock.scrub.is_none()));
+        view.read_with(cx, |view, _| assert_eq!(view.commits, 2));
+    }
+}
 
 /// A window-wide mouse listener installed for the duration of a scrub, so a
 /// drag that strays off the (thin) progress bar still tracks. Releasing off
@@ -327,7 +435,7 @@ impl Render for AudiobookDock {
             let speed = ui_components::now_playing_speed_button("now-playing-speed", super::format_playback_rate(rate), !super::same_rate(rate, 1.0), theme)
                 .dropdown_menu_with_anchor(gpui::Anchor::TopLeft, move |menu, _, _| super::speed_menu(rate).dropdown(menu, set_rate.clone()));
             let transport = self.transport(playing, TransportLayout::Inline, theme, cx);
-            let controls = if ui_components::TOUCH_UI {
+            let controls = if ui_components::touch_ui() {
                 ui_components::now_playing_inline_controls().justify_between().child(speed).children(transport.into_iter().map(|(_, button)| button)).child(sleep)
             } else {
                 let (chapters, playback): (Vec<_>, Vec<_>) = transport.into_iter().partition(|(action, _)| matches!(action, PlaybackTransportAction::Previous | PlaybackTransportAction::Next));

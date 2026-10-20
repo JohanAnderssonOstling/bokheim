@@ -114,6 +114,7 @@ impl Database {
                     Some((_, directory, name)) => Some(NativeBookSnapshot {
                         content_hash: *hash,
                         format: self.book_format(hash)?.ok_or_else(|| DatabaseError::message("book has no format"))?,
+                        audiobook_track_titles: self.audiobook_download_track_titles(hash)?,
                         directory: *directory,
                         name: name.clone(),
                         relative_path: rel_path.clone(),

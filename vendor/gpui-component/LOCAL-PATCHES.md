@@ -45,3 +45,6 @@ The rich-text HTML parser uses `html5ever` 0.39 and the matching `markup5ever_rc
 
 - Text inputs preview mobile page swipes live and settle from the gesture’s original offset, so release does not add the drag distance a second time. Cancelled swipes restore that offset and stay within the input.
 - Window text selection stops when pointer movement reports that the left mouse button is released, including after a consumed release or a release outside the window.
+- Browser popup menus default to touch-sized rows when GPUI reports a coarse primary pointer. Explicit menu overrides remain available; native and Kobo defaults are unchanged.
+- Inputs report their full control bounds to platform text handlers, including padding, while retaining text bounds for caret and IME candidate positioning.
+- `ListItem` draws no hover of its own, and trees no longer mark their items selected or secondary-selected. The tree's only caller, the reader's contents sidebar, draws hover and the keyboard cursor in its row from the `selected` flag `render_item` receives; the item's own fills laid a second hover under the row and left a washed, outlined selection behind every click.

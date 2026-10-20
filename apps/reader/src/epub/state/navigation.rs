@@ -50,7 +50,7 @@ impl ReaderView {
         self.toc.install_source_positions(positions, self.book.document_uris().len());
         self.search.rebuild_rows(&self.toc);
         self.sync_toc_position(cx);
-        self.record_current_reading_position();
+        self.record_current_reading_position(cx);
         crate::invalidation::notify(cx, Component::ReaderShell, "toc_loaded");
     }
 

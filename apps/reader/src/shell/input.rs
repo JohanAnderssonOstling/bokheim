@@ -62,8 +62,9 @@ pub(crate) fn bind_reader_keys(cx: &mut App) {
         KeyBinding::new("shift-tab", PreviousSidebarTab, Some("Reader")),
         KeyBinding::new("ctrl-tab", NextSidebarTab, Some("Reader")),
         KeyBinding::new("ctrl-shift-tab", PreviousSidebarTab, Some("Reader")),
-        KeyBinding::new("ctrl-s", ToggleSidebar, Some("Reader")),
-        KeyBinding::new("ctrl-f", FocusReaderSearch, Some("Reader")),
+        KeyBinding::new("secondary-s", ToggleSidebar, Some("Reader")),
+        KeyBinding::new("secondary-t", ToggleToc, Some("Reader")),
+        KeyBinding::new("secondary-f", FocusReaderSearch, Some("Reader")),
         KeyBinding::new("escape", CloseSearch, Some("Reader")),
         // Backspace leaves the book the same way the toolbar's library button
         // does, so the keyboard and the chrome cannot drift apart. The OS back
@@ -77,25 +78,21 @@ pub(crate) fn bind_reader_keys(cx: &mut App) {
     ]);
 }
 
-/// Handle Find before nested inputs or sidebar navigation consume the shortcut.
-pub(crate) fn install_reader_search<R: CommandTarget<FocusReaderSearch>>(window: &mut Window, cx: &mut Context<R>) {
+/// Handle panel shortcuts before nested inputs or sidebar navigation consume them.
+pub(crate) fn install_reader_shortcuts<R: CommandTarget<FocusReaderSearch> + CommandTarget<ToggleToc>>(window: &mut Window, cx: &mut Context<R>) {
     let target = cx.entity().downgrade();
     let window_handle = window.window_handle();
-    window.use_keyed_state(("reader-search-keyboard", cx.entity_id()), cx, move |_, cx| {
+    window.use_keyed_state(("reader-panel-keyboard", cx.entity_id()), cx, move |_, cx| {
         cx.intercept_keystrokes(move |event, window, cx| {
             let key = &event.keystroke;
-            if window.window_handle() != window_handle
-                || !event.context_stack.iter().any(|context| context.contains("Reader"))
-                || key.key != "f"
-                || !key.modifiers.control
-                || key.modifiers.shift
-                || key.modifiers.alt
-                || key.modifiers.platform
-            {
+            if window.window_handle() != window_handle || !event.context_stack.iter().any(|context| context.contains("Reader")) || !matches!(key.key.as_str(), "f" | "t") || !ui_components::primary_modifier_only(key.modifiers) {
                 return;
             }
             if let Some(target) = target.upgrade() {
-                target.update(cx, |reader, cx| reader.execute(&FocusReaderSearch, window, cx));
+                target.update(cx, |reader, cx| match key.key.as_str() {
+                    "t" => reader.execute(&ToggleToc, window, cx),
+                    _ => reader.execute(&FocusReaderSearch, window, cx),
+                });
                 cx.stop_propagation();
             }
         })
@@ -112,8 +109,8 @@ pub(crate) fn bind_document_keys(cx: &mut App, context: &'static str) {
         KeyBinding::new("pageup", PreviousPage, Some(context)),
         KeyBinding::new("pagedown", NextPage, Some(context)),
         KeyBinding::new("space", NextPage, Some(context)),
-        KeyBinding::new("ctrl-=", IncreaseScale, Some(context)),
-        KeyBinding::new("ctrl-+", IncreaseScale, Some(context)),
-        KeyBinding::new("ctrl--", DecreaseScale, Some(context)),
+        KeyBinding::new("secondary-=", IncreaseScale, Some(context)),
+        KeyBinding::new("secondary-+", IncreaseScale, Some(context)),
+        KeyBinding::new("secondary--", DecreaseScale, Some(context)),
     ]);
 }

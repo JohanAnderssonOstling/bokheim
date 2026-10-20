@@ -426,7 +426,7 @@ pub(crate) fn dock<C: TtsReader>(state: &Narration, compact: bool, theme: compon
         let entity = cx.entity().downgrade();
         let voice = components::player_dock_text_button("tts-voice", voice_label, theme);
         // Leave room for the speed/pause row inside the fixed-height phone dock.
-        let voice = if compact { voice.h(rems(components::PLAYER_DOCK_HEIGHT_REM - components::TOPBAR_ACTION_HEIGHT_REM)) } else { voice };
+        let voice = if compact { voice.h(rems(components::PLAYER_DOCK_HEIGHT_REM - components::topbar_action_height_rem())) } else { voice };
         let voice = voice.tooltip("Narration voice").dropdown_menu_with_anchor(if compact { gpui::Anchor::BottomLeft } else { gpui::Anchor::BottomRight }, move |mut menu, _, _| {
             for (choice, _, label, _) in VOICE_CHOICES {
                 let entity = entity.clone();

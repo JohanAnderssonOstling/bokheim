@@ -111,17 +111,17 @@ pub fn bind_keys(cx: &mut App) {
         // Only platforms with an OS back button/gesture send this key.
         #[cfg(not(target_os = "android"))]
         KeyBinding::new("back", DismissSettings, Some("Browser")),
-        KeyBinding::new("ctrl--", DecreaseUiFontSize, Some("Browser")),
-        KeyBinding::new("ctrl-=", IncreaseUiFontSize, Some("Browser")),
-        KeyBinding::new("ctrl-+", IncreaseUiFontSize, Some("Browser")),
+        KeyBinding::new("secondary--", DecreaseUiFontSize, Some("Browser")),
+        KeyBinding::new("secondary-=", IncreaseUiFontSize, Some("Browser")),
+        KeyBinding::new("secondary-+", IncreaseUiFontSize, Some("Browser")),
         // Selectable grids override these destination shortcuts below.
-        KeyBinding::new("ctrl-up", PreviousDestination, Some("Browser")),
-        KeyBinding::new("ctrl-down", NextDestination, Some("Browser")),
-        KeyBinding::new("ctrl-left", ToggleGridSelection(CursorMove::Left), Some(GRID_SELECTION_KEY_CONTEXT)),
-        KeyBinding::new("ctrl-right", ToggleGridSelection(CursorMove::Right), Some(GRID_SELECTION_KEY_CONTEXT)),
-        KeyBinding::new("ctrl-up", ToggleGridSelection(CursorMove::Up), Some(GRID_SELECTION_KEY_CONTEXT)),
-        KeyBinding::new("ctrl-down", ToggleGridSelection(CursorMove::Down), Some(GRID_SELECTION_KEY_CONTEXT)),
-        KeyBinding::new("ctrl-z", UndoLibraryAction, Some("Browser")),
+        KeyBinding::new("secondary-up", PreviousDestination, Some("Browser")),
+        KeyBinding::new("secondary-down", NextDestination, Some("Browser")),
+        KeyBinding::new("secondary-left", ToggleGridSelection(CursorMove::Left), Some(GRID_SELECTION_KEY_CONTEXT)),
+        KeyBinding::new("secondary-right", ToggleGridSelection(CursorMove::Right), Some(GRID_SELECTION_KEY_CONTEXT)),
+        KeyBinding::new("secondary-up", ToggleGridSelection(CursorMove::Up), Some(GRID_SELECTION_KEY_CONTEXT)),
+        KeyBinding::new("secondary-down", ToggleGridSelection(CursorMove::Down), Some(GRID_SELECTION_KEY_CONTEXT)),
+        KeyBinding::new("secondary-z", UndoLibraryAction, Some("Browser")),
         // Settings is a form rather than a grid, so it is walked control by
         // control. The arrows do what Tab does, for the devices whose only
         // keyboard is a four-way pad; a text field keeps them for its cursor,

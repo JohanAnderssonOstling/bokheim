@@ -6,7 +6,7 @@ use gpui::{Div, ElementId, Pixels, SharedString, div, px, rems};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Icon, IconName};
 
-use crate::{BrowserTheme, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TEXT_LG, TEXT_SM, TEXT_XS, TOUCH_UI};
+use crate::{BrowserTheme, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, TEXT_LG, TEXT_SM, TEXT_XS, touch_ui};
 
 /// The scrub line is drawn a little heavier than the dock's, with a round
 /// thumb — like play, the player's one other circle — inside a hit area a
@@ -108,7 +108,7 @@ impl TransportControl {
             (TransportControl::Chapter | TransportControl::Skip, TransportLayout::Dock) => (2.5, 1.25),
             (TransportControl::Play, TransportLayout::Dock) => (4.0, 2.0),
         };
-        match (self, layout, TOUCH_UI) {
+        match (self, layout, touch_ui()) {
             (Self::Play, TransportLayout::Dock, false) => (DESKTOP_DOCK_PLAY_SIZE_REM, DESKTOP_DOCK_PLAY_ICON_SIZE_REM),
             (Self::Play, _, false) => (DESKTOP_PLAY_SIZE_REM, icon_size),
             _ => (size, icon_size),
@@ -249,7 +249,7 @@ fn transport_button(id: impl Into<ElementId>, label: impl Into<SharedString>, ic
     let icon = icon.into().size(rems(icon_size)).flex_none();
     let button = crate::base_button(id).ghost().text_color(color).bg(theme.page_bg).p_0().flex_none().size(rems(size)).tooltip(label).child(icon);
     match (control, layout) {
-        (TransportControl::Play, _) => button.rounded_full().when(!TOUCH_UI, |button| button.min_w(px(DESKTOP_PLAY_MIN_SIZE_PX)).min_h(px(DESKTOP_PLAY_MIN_SIZE_PX)).max_w(px(DESKTOP_PLAY_MAX_SIZE_PX)).max_h(px(DESKTOP_PLAY_MAX_SIZE_PX))),
+        (TransportControl::Play, _) => button.rounded_full().when(!touch_ui(), |button| button.min_w(px(DESKTOP_PLAY_MIN_SIZE_PX)).min_h(px(DESKTOP_PLAY_MIN_SIZE_PX)).max_w(px(DESKTOP_PLAY_MAX_SIZE_PX)).max_h(px(DESKTOP_PLAY_MAX_SIZE_PX))),
         (TransportControl::Chapter, TransportLayout::Inline) => button.mx(rems(-(INLINE_OVERHANG_REM + CHEVRON_TRIM_REM))),
         (TransportControl::Skip, TransportLayout::Inline) => button.mx(rems(-INLINE_OVERHANG_REM)),
         _ => button,

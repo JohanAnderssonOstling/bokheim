@@ -130,11 +130,11 @@ impl LibrarySession {
         }
         let mut path = info.path.ok_or_else(|| BackendError::message("audiobook placement is unavailable"))?;
         if matches!(self.persistent_download_state(hash)?, DownloadState::Downloaded) {
-            let mut reader = self.assets.open_book_at_path(path.join(&track.name).map_err(BackendError::operation)?).await.map_err(BackendError::operation)?;
+            let mut reader = self.assets.open_audiobook_track(path.clone(), track.name.clone()).await.map_err(BackendError::operation)?;
             if reader.is_none() {
                 if let Some(fresh) = refresh_local_path(self, hash).await? {
                     path = fresh;
-                    reader = self.assets.open_book_at_path(path.join(&track.name).map_err(BackendError::operation)?).await.map_err(BackendError::operation)?;
+                    reader = self.assets.open_audiobook_track(path.clone(), track.name.clone()).await.map_err(BackendError::operation)?;
                 }
             }
             if let Some(reader) = reader {

@@ -116,7 +116,7 @@ public final class MainActivity extends GameActivity {
                 case "open":
                     if (accountDialog != null) accountDialog.dismiss();
                     org.json.JSONArray palette = message.getJSONArray("colors");
-                    int[] colors = new int[5];
+                    int[] colors = new int[9];
                     for (int i = 0; i < colors.length; i++) colors[i] = (int) palette.getLong(i);
                     accountDialog = new AccountDialog(this, id, message.getInt("minimum"), colors, (session, request) -> {
                         nativeAuthenticationRequest(session, request);

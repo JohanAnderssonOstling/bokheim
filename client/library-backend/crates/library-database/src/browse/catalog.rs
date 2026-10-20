@@ -108,7 +108,7 @@ fn catalog_authors(books: &[CatalogBook]) -> BTreeMap<AuthorId, Author> {
     let mut by_identity = HashMap::<AuthorId, AuthorId>::new();
     let mut by_name = HashMap::<String, AuthorId>::new();
     for (index, book) in books.iter().enumerate() {
-        for credit in &book.record.contributors {
+        for credit in book.record.authors() {
             let keys = metadata_contract::matching::author_match_keys(credit.name());
             let id = by_identity.get(&credit.agent_id()).or_else(|| keys.iter().find_map(|key| by_name.get(key))).copied().unwrap_or(credit.agent_id());
             by_identity.insert(credit.agent_id(), id);
@@ -504,16 +504,19 @@ mod tests {
     }
 
     #[test]
-    fn composite_catalog_authors_use_individual_credits_and_include_all_contributors() {
-        let mut books = vec![authored_book(1, vec![credit(1, "Alex Smith, Jamie Jones, Terry White", b"aut"), credit(2, "Alex Smith", b"aut"), credit(3, "Jamie Jones", b"aut"), credit(4, "Terry White", b"edt")])];
+    fn composite_catalog_authors_use_individual_credits_and_exclude_non_authors() {
+        let mut books = vec![authored_book(1, vec![credit(1, "Alex Smith, Jamie Jones, Terry White", b"aut"), credit(2, "Alex Smith", b"aut"), credit(3, "Jamie Jones", b"aut"), credit(4, "Terry White", b"edt"), credit(5, "Untyped Credit", b"ctb")])];
         crate::catalog::normalize_author_lists(&mut books);
         assert_eq!(books[0].record.authors().map(|author| author.name()).collect::<Vec<_>>(), ["Alex Smith", "Jamie Jones"]);
         assert_eq!(books[0].author, "Alex Smith, Jamie Jones");
         assert!(books[0].record.contributors.contains(&credit(4, "Terry White", b"edt")));
         let authors = catalog_authors(&books);
-        assert_eq!(authors.len(), 3);
-        for id in [AuthorId::from_u128(2), AuthorId::from_u128(3), AuthorId::from_u128(4)] {
+        assert_eq!(authors.len(), 2);
+        for id in [AuthorId::from_u128(2), AuthorId::from_u128(3)] {
             assert_eq!(candidates(Some(id), &authors), BTreeSet::from([0]));
+        }
+        for id in [AuthorId::from_u128(4), AuthorId::from_u128(5)] {
+            assert!(candidates(Some(id), &authors).is_empty());
         }
         assert_eq!(candidates(None, &authors), BTreeSet::from([0]));
         let query = LibraryBrowseQuery {

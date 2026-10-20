@@ -20,6 +20,18 @@ cleanup when an interrupted operation drops its hasher.
 Library registration, lifecycle, relocation, account state, and UI events remain
 backend responsibilities. This crate does not depend on `library-backend`.
 
+Windows audiobook downloads repair filenames that Windows cannot create, using
+synced chapter titles with numbered fallbacks. The audiobook folder keeps a local
+`.bokheim-audiobook-paths.json` mapping from original archive names to physical
+filenames. Playback resolves that mapping; scanning and uploads retain the original
+names, order, ZIP header metadata, and sidecar bytes so the content hash stays unchanged. Placement
+copies carry the mapping with the files. Keep the mapping when moving or backing
+up a repaired audiobook folder.
+
+All native downloads preserve the source ZIP metadata and member order when
+needed, so audiobooks created on Windows retain their identity on Unix clients
+as well. Unix downloads keep their original filenames.
+
 ## Validation
 
 ```sh

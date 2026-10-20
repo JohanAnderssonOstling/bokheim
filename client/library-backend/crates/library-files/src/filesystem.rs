@@ -87,7 +87,7 @@ pub fn open(path: impl AsRef<Path>) -> std::io::Result<File> {
 }
 
 pub fn fingerprint(path: impl AsRef<Path>) -> std::io::Result<u64> {
-    client_platform_native::file_fingerprint::file_metadata_fingerprint(&std::fs::metadata(path)?)
+    client_platform_native::file_fingerprint::file_fingerprint(path)
 }
 
 /// Fingerprint the ordered tracks as one scanned placement. Both the scanner
@@ -97,6 +97,11 @@ pub fn audiobook_fingerprint(folder: &Path, tracks: &[audiobook_archive::Track])
     for track in tracks {
         hasher.update(track.name.as_bytes());
         hasher.update(&fingerprint(&track.path)?.to_le_bytes());
+    }
+    let mapping = folder.join(audiobook_folder::PATH_MAPPING_FILE);
+    if mapping.try_exists()? {
+        hasher.update(audiobook_folder::PATH_MAPPING_FILE.as_bytes());
+        hasher.update(&fingerprint(mapping)?.to_le_bytes());
     }
     if let Some(nfo) = audiobook_folder::discover_nfo(folder)? {
         hasher.update(nfo.name.as_bytes());

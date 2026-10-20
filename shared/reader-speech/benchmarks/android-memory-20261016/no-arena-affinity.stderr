@@ -1,0 +1,4 @@
+sherpa=1.13.8 sha=11afbd00 ort=1.28.2 provider=cpu:/data/local/tmp/bokheim-tts-growth-probe/no-arena.conf
+/home/runner/work/sherpa-onnx/sherpa-onnx/sherpa-onnx/csrc/session.cc:SplitProviderAndConfig:130 Provider string: cpu. Config path: /data/local/tmp/bokheim-tts-growth-probe/no-arena.conf
+/home/runner/work/sherpa-onnx/sherpa-onnx/sherpa-onnx/csrc/session.cc:SplitProviderAndConfig:133 Provider config: DEBUG=1
+/home/runner/work/sherpa-onnx/sherpa-onnx/sherpa-onnx/csrc/session.cc:SplitProviderAndConfig:133 Provider config: EnableCpuMemArena=0

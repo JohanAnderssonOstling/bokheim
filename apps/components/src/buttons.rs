@@ -3,7 +3,7 @@ use gpui::{ElementId, SharedString, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::{Disableable, Icon, IconName, Sizable};
 
-use crate::{BrowserTheme, SPACE_MD, TEXT_SM, TOPBAR_ACTION_HEIGHT_REM};
+use crate::{BrowserTheme, SPACE_MD, TEXT_SM, topbar_action_height_rem};
 
 /// Common entry point for interactive controls.
 ///
@@ -32,7 +32,7 @@ fn outlined_button_impl(id: ElementId, theme: BrowserTheme) -> Button {
     base_button_impl(id).outline().border_color(theme.rule)
 }
 
-/// A borderless square icon action, `TOPBAR_ACTION_HEIGHT_REM` on a side (2rem,
+/// A borderless square icon action, `topbar_action_height_rem()` on a side (2rem,
 /// or the touch target on phones), on the page background, with a
 /// 1rem icon and ink text rather than an accent — the standard size and
 /// shape shared by every square icon button in the app (square corners, to
@@ -43,7 +43,7 @@ pub fn outlined_icon_button(id: impl Into<ElementId>, label: impl Into<SharedStr
 }
 
 fn outlined_icon_button_impl(id: ElementId, label: SharedString, icon: Icon, theme: BrowserTheme) -> Button {
-    base_button_impl(id).ghost().text_color(theme.text).bg(theme.page_bg).icon(icon).size(gpui::rems(TOPBAR_ACTION_HEIGHT_REM)).tooltip(label)
+    base_button_impl(id).ghost().text_color(theme.text).bg(theme.page_bg).icon(icon).size(gpui::rems(topbar_action_height_rem())).tooltip(label)
 }
 
 /// A compact neutral outlined text button.
@@ -79,7 +79,8 @@ pub fn dialog_cancel_button(id: impl Into<ElementId>, label: impl Into<SharedStr
 }
 
 fn dialog_cancel_button_impl(id: ElementId, label: SharedString) -> Button {
-    base_button_impl(id).label(label).secondary().outline()
+    let tooltip = crate::shortcut_tooltip(label.clone(), "escape");
+    base_button_impl(id).label(label).tooltip(tooltip).secondary().outline()
 }
 
 pub fn primary_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: impl Into<Icon>, disabled: bool) -> Button {
@@ -87,7 +88,7 @@ pub fn primary_action_button(id: impl Into<ElementId>, label: impl Into<SharedSt
 }
 
 fn primary_action_button_impl(id: ElementId, label: SharedString, icon: Icon, disabled: bool) -> Button {
-    base_button_impl(id).label(label).icon(icon).primary().h(gpui::rems(TOPBAR_ACTION_HEIGHT_REM)).px(px(SPACE_MD)).disabled(disabled)
+    base_button_impl(id).label(label).icon(icon).primary().h(gpui::rems(topbar_action_height_rem())).px(px(SPACE_MD)).disabled(disabled)
 }
 
 pub fn secondary_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, disabled: bool) -> Button {
@@ -95,7 +96,7 @@ pub fn secondary_action_button(id: impl Into<ElementId>, label: impl Into<Shared
 }
 
 fn secondary_action_button_impl(id: ElementId, label: SharedString, icon: IconName, disabled: bool) -> Button {
-    base_button_impl(id).label(label).icon(icon).secondary().outline().h(gpui::rems(TOPBAR_ACTION_HEIGHT_REM)).px(px(SPACE_MD)).disabled(disabled)
+    base_button_impl(id).label(label).icon(icon).secondary().outline().h(gpui::rems(topbar_action_height_rem())).px(px(SPACE_MD)).disabled(disabled)
 }
 
 /// A text action that carries no frame of its own, for the way out of a form

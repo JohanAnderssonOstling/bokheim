@@ -392,32 +392,27 @@ fn normalize_layout(text: &str) -> Cow<'_, str> {
     Cow::Owned(result)
 }
 
-fn normalize_ellipses(text: &str) -> Cow<'_, str> {
+fn normalize_asterisks(text: &str) -> Cow<'_, str> {
     let mut result = TextEdits::new(text);
-    let mut characters = text.char_indices().peekable();
-    while let Some((start, character)) = characters.next() {
-        if !matches!(character, '.' | '…') {
-            continue;
+    let mut asterisks = text.match_indices('*').peekable();
+    while let Some((start, _)) = asterisks.next() {
+        let mut end = start + 1;
+        while asterisks.peek().is_some_and(|(index, _)| *index == end) {
+            asterisks.next();
+            end += 1;
         }
-        let mut end = start + character.len_utf8();
-        while let Some(&(index, next)) = characters.peek() {
-            if !matches!(next, '.' | '…') {
-                break;
-            }
-            end = index + next.len_utf8();
-            characters.next();
-        }
-        // Repeated punctuation can disrupt synthesis, especially with George.
-        result.replace(start..end, ".");
+        // Silence footnote and emphasis markers without joining adjacent words.
+        let separates_words = text[..start].chars().next_back().is_some_and(char::is_alphanumeric) && text[end..].chars().next().is_some_and(char::is_alphanumeric);
+        result.replace(start..end, if separates_words { " " } else { "" });
     }
     result.finish()
 }
 
 fn normalize_prose(text: &str) -> Cow<'_, str> {
-    let text = normalize_reading_labels(text);
+    let text = normalize_asterisks(text);
+    let text = normalize_step(text, normalize_reading_labels);
     let text = normalize_step(text, normalize_months);
     let text = normalize_step(text, normalize_abbreviations);
-    let text = normalize_step(text, normalize_ellipses);
     normalize_step(text, |text| {
         let mut result = TextEdits::new(text);
         for (start, dash) in text.match_indices('—') {

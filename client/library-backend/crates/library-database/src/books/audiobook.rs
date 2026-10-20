@@ -75,6 +75,32 @@ pub(crate) fn navigation_from_chapters(chapters: &[AudiobookChapter]) -> Vec<Boo
 }
 
 impl Database {
+    /// Naming hints only: logical track names and content identity stay intact.
+    pub fn audiobook_download_track_titles(&self, hash: &ContentHash) -> Result<Vec<(String, String)>, DatabaseError> {
+        if self.book_format(hash)? != Some(BookFormat::Mp3Folder) {
+            return Ok(Vec::new());
+        }
+        let Some(metadata) = self.audiobook_playback_metadata(hash)? else { return Ok(Vec::new()) };
+        if !book_model::tracks_match_archive(&metadata.tracks, *hash) {
+            return Ok(Vec::new());
+        }
+        Ok(metadata
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(index, track)| {
+                let title = metadata
+                    .chapters
+                    .iter()
+                    .find(|chapter| chapter.start_ms >= track.start_ms && chapter.start_ms < track.end_ms)
+                    .map(|chapter| chapter.title.clone())
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or_else(|| format!("Track {}", index + 1));
+                (track.name.clone(), title)
+            })
+            .collect())
+    }
+
     /// Everything a player needs to open the book without inspecting its
     /// file, except the cover, which lives in asset storage. `None` until the
     /// file's chapters and duration have been cached.

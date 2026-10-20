@@ -20,6 +20,7 @@ use crate::settings::{ReaderSettings, library_interaction_style};
 use crate::shell::marks::MarkSession;
 use crate::shell::persistence::{ReadingPositionWriter, StoredPosition};
 use crate::shell::search::SearchBarTarget;
+use crate::shell::settings_navigation::SettingsNavigation;
 use crate::shell::state_panel::{SidebarState, SidebarTab};
 
 use super::PdfReaderView;
@@ -103,7 +104,7 @@ impl PdfReaderView {
             focus,
             sidebar_focus: cx.focus_handle().tab_index(0).tab_stop(true),
             rail_focus: cx.focus_handle().tab_stop(true),
-            settings_navigation: Default::default(),
+            settings_navigation: SettingsNavigation::new(window, cx),
             _subscriptions: vec![pdf_subscription, search_subscription],
         };
         reader.load_reader_state(cx);
@@ -111,21 +112,24 @@ impl PdfReaderView {
         reader
     }
 
-    fn handle_pdf_event(&mut self, pdf: &Entity<PdfView>, event: &PdfViewEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn handle_pdf_event(&mut self, _pdf: &Entity<PdfView>, event: &PdfViewEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
-            PdfViewEvent::PageChanged { current, total } => {
-                let current_page = current.saturating_sub(1);
-                let full_page_position = pdf.read(cx).full_page_position();
+            PdfViewEvent::PositionChanged { position, total } => {
+                if *total == 0 {
+                    return;
+                }
+                let current_page = position.page_index();
+                let full_page_position = position.page_y();
                 let unchanged = self.current_page == current_page && self.page_count == *total;
                 self.current_page = current_page;
                 self.page_count = *total;
                 self.update_active_toc(current_page, cx);
                 #[cfg(all(feature = "native-tts", not(feature = "kobo"), not(target_arch = "wasm32")))]
-                self.tts_navigation_changed(current_page, full_page_position, cx);
+                self.tts_navigation_changed(cx);
+                self.positions.record(StoredPosition::pdf_page(current_page, full_page_position, *total), self.pdf.read(cx).navigation_revision());
                 if unchanged {
                     return;
                 }
-                self.positions.record(StoredPosition::pdf_page(current_page, full_page_position, *total));
                 notify(cx, Component::PdfShell, "page_changed");
             }
             PdfViewEvent::SearchChanged { current, total } => {

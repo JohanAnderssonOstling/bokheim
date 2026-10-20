@@ -14,6 +14,7 @@ mod errors;
 mod fonts;
 pub mod graph;
 pub mod infinite_canvas;
+pub mod keyboard;
 pub mod layout;
 pub mod library;
 mod menu_items;
@@ -44,6 +45,7 @@ pub use errors::{authentication_error, is_http_status, user_facing_error, wifi_e
 pub use fonts::{InterfaceFontFace, interface_font_faces, register_fonts};
 pub use graph::*;
 pub use infinite_canvas::*;
+pub use keyboard::*;
 pub use layout::*;
 pub use library::*;
 pub use menu_items::*;

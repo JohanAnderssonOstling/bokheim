@@ -9,7 +9,7 @@ use gpui::{
 };
 
 use crate::{
-    Selectable as _, StyledExt,
+    StyledExt,
     actions::{Confirm, SelectDown, SelectLeft, SelectRight, SelectUp},
     list::ListItem,
     menu::{ContextMenuExt as _, PopupMenu},
@@ -577,17 +577,14 @@ impl Render for TreeState {
                     cx.processor(move |state, ix, window, cx| {
                         let entry = &state.entries[ix];
                         let selected = Some(ix) == state.selected_ix;
-                        let right_clicked = Some(ix) == state.right_clicked_ix;
+                        // `render_item` is told the selection and draws it;
+                        // the item paints no selection of its own.
                         let item = (render_item)(ix, entry, selected, window, cx);
 
                         div()
                             .id(ix)
                             .w_full()
-                            .child(
-                                item.disabled(entry.item().is_disabled())
-                                    .selected(selected)
-                                    .secondary_selected(right_clicked),
-                            )
+                            .child(item.disabled(entry.item().is_disabled()))
                             .when(!entry.item().is_disabled(), |this| {
                                 this.on_mouse_down(
                                     MouseButton::Left,

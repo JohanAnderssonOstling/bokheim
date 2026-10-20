@@ -5,14 +5,16 @@
 //! object in OPFS; their folder and trash locations exist only in SQLite.
 
 use book_access::BoxedBookReader;
+#[cfg(not(target_arch = "wasm32"))]
+use client_platform_native::file_fingerprint::file_fingerprint;
 use library_model::BlobKind;
 use library_model::RelativeBookPath;
 use std::fmt;
 use std::fs::File;
 use std::io::{ErrorKind, SeekFrom};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 pub(crate) use sync_common::ContentHash;
 
@@ -232,6 +234,13 @@ impl AssetStore {
     pub async fn open_book_at_path(&self, relative_path: RelativeBookPath) -> Result<Option<BoxedBookReader>, AssetStoreError> {
         let store = self.clone();
         client_platform_runtime::executor::run_blocking(move || imp::open_book_at_path(&store.0, &relative_path)).await.map_err(AssetStoreError::operation)?
+    }
+
+    /// Resolve a logical archive track through this folder's local name mapping.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn open_audiobook_track(&self, folder: RelativeBookPath, logical_name: String) -> Result<Option<BoxedBookReader>, AssetStoreError> {
+        let store = self.clone();
+        client_platform_runtime::executor::run_blocking(move || imp::open_audiobook_track(&store.0, &folder, &logical_name)).await.map_err(AssetStoreError::operation)?
     }
 
     /// Opens a pinned file for independent asynchronous document cursors.
@@ -571,6 +580,13 @@ impl StagedBook {
     /// the resulting placement through the database acknowledgement API.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn publish_snapshot(self, store: &AssetStore, relative_path: &RelativeBookPath, occupied_names: &[String], audiobook_archive: bool) -> Result<PublishedStagedBook, AssetStoreError> {
+        self.publish_snapshot_with_track_titles(store, relative_path, occupied_names, audiobook_archive, &[])
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn publish_snapshot_with_track_titles(
+        self, store: &AssetStore, relative_path: &RelativeBookPath, occupied_names: &[String], audiobook_archive: bool, track_titles: &[(String, String)],
+    ) -> Result<PublishedStagedBook, AssetStoreError> {
         let hash = self.content_hash();
         let imp::StagedBook { temporary_path, direct, .. } = self.inner;
         // A direct import already wrote its bytes straight to the final
@@ -578,7 +594,7 @@ impl StagedBook {
         // path already occupied by itself and discard it as a duplicate.
         if let Some(direct) = direct {
             imp::sync_parent(&direct.path)?;
-            let fingerprint = Some(client_platform_native::file_fingerprint::file_metadata_fingerprint(&std::fs::metadata(&direct.path)?)?.to_string());
+            let fingerprint = Some(file_fingerprint(&direct.path)?.to_string());
             let name = relative_path.file_name().to_owned();
             temporary_path.keep().map_err(|error| AssetStoreError::operation(format!("could not finalize the imported book '{}': {}", direct.path.display(), error.error)))?;
             return Ok(PublishedStagedBook { name, relative_path: relative_path.to_string(), published: true, fingerprint });
@@ -604,7 +620,10 @@ impl StagedBook {
                     continue;
                 }
                 let staged = tempfile::Builder::new().prefix(".bokheim-audio-").tempdir_in(destination.parent().unwrap())?;
-                audiobook_archive::extract_archive(File::open(&temporary_path)?, staged.path())?;
+                audiobook_folder::extract_download(File::open(&temporary_path)?, staged.path(), track_titles)?;
+                if ContentHash::from(audiobook_folder::folder_hash(staged.path())?) != hash {
+                    return Err(AssetStoreError::operation("downloaded audiobook cannot be reconstructed with its original content identity"));
+                }
                 let tracks = audiobook_folder::discover(staged.path())?;
                 let fingerprint = crate::filesystem::audiobook_fingerprint(staged.path(), &tracks)?.to_string();
                 std::fs::rename(staged.path(), &destination)?;
@@ -636,7 +655,7 @@ impl StagedBook {
                     }
                 };
                 imp::sync_parent(&destination)?;
-                let fingerprint = if published { Some(client_platform_native::file_fingerprint::file_metadata_fingerprint(&std::fs::metadata(&destination)?)?.to_string()) } else { None };
+                let fingerprint = if published { Some(file_fingerprint(&destination)?.to_string()) } else { None };
                 return Ok(PublishedStagedBook { name: chosen, relative_path: relative.to_string(), published, fingerprint });
             }
             chosen = alternatives.next().expect("numeric name suffix space is unbounded");
@@ -678,6 +697,92 @@ mod tests {
 
     fn path(value: &str) -> RelativeBookPath {
         RelativeBookPath::parse(value).unwrap()
+    }
+
+    fn nonportable_audio_archive() -> Vec<u8> {
+        use std::io::{Cursor, Write};
+        use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, bytes) in [("NUL.mp3", b"opening".as_slice()), ("Disc?/track?.mp3", b"ending".as_slice()), ("chapters?.cue", b"FILE \"NUL.mp3\" MP3\nTRACK 01 AUDIO\nINDEX 01 00:00:00\n".as_slice())] {
+            zip.start_file(name, SimpleFileOptions::default().compression_method(CompressionMethod::Stored).system(zip::System::Unix)).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[tokio::test]
+    async fn mapped_audio_tracks_survive_copy_scanning_and_reupload() {
+        use std::io::{Cursor, Read};
+        let library = tempfile::tempdir().unwrap();
+        let archive = nonportable_audio_archive();
+        let hash = ContentHash::from(blake3::hash(&archive));
+        let source = library.path().join("Story");
+        std::fs::create_dir(&source).unwrap();
+        audiobook_folder::extract_for_windows(Cursor::new(&archive), &source, &[("NUL.mp3".into(), "Introduction".into())]).unwrap();
+        let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+        assert!(store.book_exists(&hash, &[path("Story")]).unwrap());
+        let tracks = audiobook_folder::discover(&source).unwrap();
+        let fingerprint = crate::filesystem::audiobook_fingerprint(&source, &tracks).unwrap();
+        assert_eq!(fingerprint, crate::filesystem::audiobook_fingerprint(&source, &tracks).unwrap());
+        let mut playback = store.open_audiobook_track(path("Story"), "NUL.mp3".into()).await.unwrap().unwrap();
+        let mut audio = Vec::new();
+        playback.read_to_end(&mut audio).unwrap();
+        assert_eq!(audio, b"opening");
+        store.prepare_placement(&hash, &path("Copy"), &[path("Story")], &[]).unwrap().unwrap().publish().unwrap();
+        assert!(library.path().join("Copy").join(audiobook_folder::PATH_MAPPING_FILE).is_file());
+        assert!(store.book_exists(&hash, &[path("Copy")]).unwrap());
+        let mut copied = store.open_book_at_path(path("Copy")).await.unwrap().unwrap();
+        let mut uploaded = Vec::new();
+        copied.read_to_end(&mut uploaded).unwrap();
+        assert_eq!(uploaded, archive);
+        store.evict_book_files(&[path("Story")], &hash).unwrap();
+        assert!(!source.join(audiobook_folder::PATH_MAPPING_FILE).exists());
+        assert!(!source.join("001 - Introduction.mp3").exists());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_download_repairs_names_using_database_title_hints() {
+        let library = tempfile::tempdir().unwrap();
+        let archive = nonportable_audio_archive();
+        let hash = ContentHash::from(blake3::hash(&archive));
+        let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+        let mut writer = store.begin_book_write(&path("Story"), &hash).await.unwrap();
+        writer.write_all(&archive).await.unwrap();
+        let staged = writer.verify().await.unwrap().finish_book().await.unwrap();
+        let published = staged.publish_snapshot_with_track_titles(&store, &path("Story"), &[], true, &[("NUL.mp3".into(), "Database chapter title".into())]).unwrap();
+        assert!(published.published);
+        assert_eq!(std::fs::read(library.path().join("Story/001 - Database chapter title.mp3")).unwrap(), b"opening");
+        assert!(store.book_exists(&hash, &[path("Story")]).unwrap());
+    }
+
+    #[tokio::test]
+    async fn foreign_audiobook_download_keeps_its_identity_through_copy_and_upload() {
+        use std::io::{Cursor, Read, Write};
+        use zip::{write::SimpleFileOptions, CompressionMethod, System, ZipWriter};
+        let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored).system(if cfg!(windows) { System::Unix } else { System::Dos });
+        for (name, bytes) in [("02.mp3", b"opening".as_slice()), ("01.mp3", b"ending".as_slice()), ("book.cue", b"FILE 02.mp3 MP3\n".as_slice()), ("book.nfo", b"Title: Story\n".as_slice())] {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        let archive = zip.finish().unwrap().into_inner();
+        let hash = ContentHash::from(blake3::hash(&archive));
+        let library = tempfile::tempdir().unwrap();
+        let store = AssetStore::open(library.path().to_str().unwrap()).unwrap();
+        let mut writer = store.begin_book_write(&path("Story"), &hash).await.unwrap();
+        writer.write_all(&archive).await.unwrap();
+        let staged = writer.verify().await.unwrap().finish_book().await.unwrap();
+        let published = staged.publish_snapshot(&store, &path("Story"), &[], true).unwrap();
+        assert!(published.published);
+        assert!(store.book_exists(&hash, &[path("Story")]).unwrap());
+        assert!(library.path().join("Story/02.mp3").is_file());
+        store.prepare_placement(&hash, &path("Copy"), &[path("Story")], &[]).unwrap().unwrap().publish().unwrap();
+        assert!(store.book_exists(&hash, &[path("Copy")]).unwrap());
+        let mut verified = store.verified_book_reader(hash, vec![path("Copy")]).await.unwrap().unwrap();
+        let mut uploaded = Vec::new();
+        verified.reader.read_to_end(&mut uploaded).unwrap();
+        assert_eq!(uploaded, archive);
     }
 
     #[tokio::test]

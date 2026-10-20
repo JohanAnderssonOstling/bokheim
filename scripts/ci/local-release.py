@@ -36,7 +36,7 @@ def main():
         return
     sha = artifacts.command('git', 'rev-parse', 'HEAD')
     artifacts.clean_revision(sha)
-    env = {**os.environ, 'RUSTUP_TOOLCHAIN': '1.95.0', 'RUSTC_BOOTSTRAP': '1'}
+    env = {**os.environ, 'RUSTUP_TOOLCHAIN': 'stable', 'RUSTC_BOOTSTRAP': '1'}
     env.setdefault('CARGO_BUILD_JOBS', '1')
     # Use the same public update trust as the Windows build; never load a private feed key.
     import re

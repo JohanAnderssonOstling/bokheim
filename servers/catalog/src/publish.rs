@@ -168,10 +168,10 @@ struct Authors {
 }
 
 impl Authors {
-    /// Every source contributor is an author; no role or ordering is retained.
+    /// Only author credits enter the catalog's author index.
     fn store(&mut self, db: &Connection, key: &str, record: &BookRecord) -> Result<(), String> {
         let key = book_id(db, key)?;
-        for credit in &record.contributors {
+        for credit in record.authors() {
             let keys = author_match_keys(credit.name());
             let id = self.by_identity.get(&credit.agent_id()).or_else(|| keys.iter().find_map(|key| self.by_name.get(key))).copied().unwrap_or(credit.agent_id());
             self.by_identity.insert(credit.agent_id(), id);
@@ -432,7 +432,7 @@ mod tests {
         assert_eq!(db.query_row("SELECT count(*) FROM subject WHERE code='PR6003'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
     }
     use crate::links::{store_entry, Entry};
-    use book_model::{BookDetails, BookFormat, BookRecord, BookSubject, BookTocEntry};
+    use book_model::{BookDetails, BookFormat, BookRecord, BookSubject, BookTocEntry, Contributor, MarcRelatorCode, AUTHOR_MARC_RELATOR_CODE};
 
     const EPUB: &[u8] = include_bytes!("../../../client/library-backend/crates/book-inspection/tests/fixtures/ocr-image-priority.epub");
 
@@ -443,6 +443,44 @@ mod tests {
         curation::set_record(db, &hash, &record).unwrap();
         curation::add_source(db, &hash, "test", "entry", None, None).unwrap();
         (hash, record)
+    }
+
+    #[test]
+    fn publication_indexes_only_authors_for_hosted_and_external_epubs() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = curation::open(dir.path()).unwrap();
+        let (hash, mut record) = fixture(dir.path(), &db);
+        record.contributors = vec![
+            Contributor::new("An Editor", MarcRelatorCode(*b"edt")).unwrap(),
+            Contributor::new("An Author", AUTHOR_MARC_RELATOR_CODE).unwrap(),
+            Contributor::new("A Translator", MarcRelatorCode(*b"trl")).unwrap(),
+            Contributor::new("An Illustrator", MarcRelatorCode(*b"ill")).unwrap(),
+            Contributor::new("A Contributor", MarcRelatorCode(*b"ctb")).unwrap(),
+        ];
+        curation::set_record(&db, &hash, &record).unwrap();
+        for (entry_id, include_author) in [("with-author", true), ("without-author", false)] {
+            let mut external = record.clone();
+            if !include_author {
+                external.contributors.retain(|credit| credit.role_code() != AUTHOR_MARC_RELATOR_CODE);
+            }
+            store_entry(
+                &db,
+                &Entry {
+                    source: "test".into(), entry_id: entry_id.into(), entry_url: format!("https://source.example/{entry_id}"),
+                    license: "source-only".into(), record: external, file_url: None, format: BookFormat::Epub,
+                    toc: Vec::new(), source_evidence: None, enriched: false,
+                },
+            ).unwrap();
+        }
+        let out = dir.path().join("published");
+        publish(dir.path(), &db, &out, 1).unwrap();
+        let snapshot = Connection::open(out.join("releases/1/catalog.sqlite3")).unwrap();
+        let names = snapshot.prepare("SELECT name FROM author").unwrap().query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(names, ["An Author"]);
+        let counts = snapshot.prepare("SELECT external,count(author_row_id) FROM book LEFT JOIN book_author ON book.row_id=book_author.book_row_id GROUP BY book.row_id ORDER BY external,count(author_row_id)")
+            .unwrap().query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(counts, [(0, 1), (1, 0), (1, 1)]);
+        assert_eq!(curation::record(&db, &hash).unwrap().unwrap().contributors, record.contributors);
     }
 
     #[test]

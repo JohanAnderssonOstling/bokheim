@@ -32,9 +32,10 @@ All platforms must use the same source commit. Do not create or move a version
 tag as part of building; publication requires an existing version tag. The tag may point to older source;
 the build receipts record the actual tested commit.
 
-Install Rust 1.95.0, Python 3.11+, gh, and the platform build tools. The local
-command selects Rust through its environment, without changing your default
-toolchain. All builds/tests use optimized release profiles.
+Install the latest stable Rust (`rustup update stable`), Python 3.11+, gh, and
+the platform build tools. CI and local releases use the `stable` channel. The
+local command selects Rust through its environment, without changing your
+default toolchain. All builds/tests use optimized release profiles.
 
 - Shared suite: PostgreSQL tools (`initdb`, `pg_ctl`, `createdb`), ripgrep and
   native build libraries. The suite creates an isolated temporary database when
@@ -61,7 +62,7 @@ toolchain. All builds/tests use optimized release profiles.
 
 ```bash
 # Optional: run/report shared tests first. Platform commands reuse this success.
-RUSTUP_TOOLCHAIN=1.95.0 RUSTC_BOOTSTRAP=1 python3 scripts/ci/shared-tests.py --report JohanAnderssonOstling/bokheim-release
+RUSTUP_TOOLCHAIN=stable RUSTC_BOOTSTRAP=1 python3 scripts/ci/shared-tests.py --report JohanAnderssonOstling/bokheim-release
 
 # One platform at a time. Output must be a fresh directory outside the checkout.
 python3 scripts/ci/local-release.py linux --output "$HOME/bokheim-builds/linux-01"
@@ -152,3 +153,6 @@ platform, successful packaging run ID, full build source SHA, and draft tag.
 This avoids downloading and re-uploading hosted packages through the workstation.
 It checks the build source, package version, and recorded hashes without running
 tests or creating tags; existing assets must already contain identical bytes.
+
+Windows packaging and native checks run concurrently. Publishing waits for both
+jobs and requires the successful shared-suite status for the exact source commit.

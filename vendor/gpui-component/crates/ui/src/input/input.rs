@@ -4,7 +4,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, DefiniteLength, Edges, EdgesRefinement, Entity, Hsla, InteractiveElement as _,
     IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Rems, RenderOnce, Role,
-    StatefulInteractiveElement as _, StyleRefinement, Styled, TextAlign, Window, div, px, relative,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, TextAlign, Window, canvas, div, px, relative,
 };
 
 use crate::button::{Button, ButtonVariants as _};
@@ -395,6 +395,13 @@ impl RenderOnce for Input {
 
         div()
             .id(("input", self.state.entity_id()))
+            .relative()
+            .child({
+                let state = self.state.clone();
+                canvas(move |bounds, _, cx| state.read(cx).control_bounds.set(Some(bounds)), |_, _, _, _| {})
+                    .absolute()
+                    .inset_0()
+            })
             .role(accessibility_role)
             .flex()
             .key_context(crate::input::CONTEXT)

@@ -1,4 +1,4 @@
-use crate::{CONTENT_INSET, NAV_RAIL_ICON_SIZE_REM, NAV_RAIL_LABEL_SIZE, NAVIGATION_MODAL_ROW_HEIGHT_REM, TOPBAR_HEIGHT_REM};
+use crate::{CONTENT_INSET, NAV_RAIL_ICON_SIZE_REM, NAV_RAIL_LABEL_SIZE, navigation_modal_row_height_rem, topbar_height_rem};
 use std::cell::Cell;
 use std::path::Path;
 use std::rc::Rc;
@@ -10,8 +10,8 @@ use gpui_component::input::InputState;
 use gpui_component::{Icon, IconName};
 
 use crate::{
-    BrowserTheme, RADIUS_MD, RADIUS_SM, SETTINGS_CONTROL_SIZE_REM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, TAB_UNDERLINE_HEIGHT, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS,
-    THEME_PICKER_WIDTH_REM, TITLE_MD, TOPBAR_ACTION_GAP, TOPBAR_ACTION_HEIGHT_REM, TOPBAR_ACTION_HORIZONTAL_PADDING,
+    BrowserTheme, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS, SPACE_XXS, Scrollable, ScrollableElement, TAB_UNDERLINE_HEIGHT, TEXT_LG, TEXT_MD, TEXT_SM, TEXT_XS, THEME_PICKER_WIDTH_REM, TITLE_MD,
+    TOPBAR_ACTION_HORIZONTAL_PADDING, settings_control_size_rem, topbar_action_gap, topbar_action_height_rem,
 };
 
 /// A navigation destination, in the sidebar rail and the bottom bar alike: its
@@ -31,17 +31,17 @@ pub(crate) fn navigation_tile(id: impl Into<ElementId>, glyph: impl IntoElement,
         .when(selected && cfg!(feature = "kobo"), |button| button.border_2().border_color(theme.accent))
         .when(selected && !cfg!(feature = "kobo"), |button| button.primary().bg(theme.accent).text_color(theme.accent_text))
         .child(
-        div()
-            .size_full()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(SPACE_XXS))
-            .child(div().flex_none().child(glyph))
-            .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().child(label.into())),
-    )
+            div()
+                .size_full()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(SPACE_XXS))
+                .child(div().flex_none().child(glyph))
+                .child(div().w_full().min_w_0().overflow_hidden().whitespace_nowrap().text_ellipsis().text_center().child(label.into())),
+        )
 }
 
 /// A rail destination: a square tile with a name in its original case.
@@ -79,7 +79,7 @@ pub(crate) fn bottom_navigation_tile(id: impl Into<ElementId>, glyph: impl IntoE
 /// any larger UI font.
 pub fn navigation_modal_list(item_count: usize, rem_size: Pixels, theme: BrowserTheme) -> Scrollable<Div> {
     let rem = f32::from(rem_size);
-    let rows = (item_count + 1) as f32 * NAVIGATION_MODAL_ROW_HEIGHT_REM * rem;
+    let rows = (item_count + 1) as f32 * navigation_modal_row_height_rem() * rem;
     let gaps = item_count as f32 * SPACE_XS + SPACE_MD * 2.0;
     let height = (rows + gaps).min(crate::NAVIGATION_MODAL_MAX_HEIGHT_REM * rem);
     crate::modal_surface(theme).w(gpui::rems(crate::NAVIGATION_MODAL_WIDTH_REM)).max_w_full().h(px(height)).max_h_full().overflow_y_scrollbar()
@@ -127,7 +127,7 @@ pub fn browser_search_control(state: &gpui::Entity<gpui_component::input::InputS
         .flex()
         .items_center()
         .justify_center()
-        .child(div().w_full().min_w_0().h(gpui::rems(TOPBAR_ACTION_HEIGHT_REM)).flex_1().child(gpui::Styled::h(gpui_component::input::Input::new(state).cleanable(true), gpui::rems(TOPBAR_ACTION_HEIGHT_REM))))
+        .child(div().w_full().min_w_0().h(gpui::rems(topbar_action_height_rem())).flex_1().child(gpui::Styled::h(gpui_component::input::Input::new(state).cleanable(true), gpui::rems(topbar_action_height_rem()))))
 }
 
 /// Keep the URL editor mounted for keyboard focus, covering it with a centered
@@ -211,7 +211,7 @@ pub fn library_switcher_group(theme: BrowserTheme) -> Div {
 /// it carries no underline: the breadcrumb and the actions already mark the
 /// boundary. See [`crate::nav_rail_destinations`].
 pub fn topbar(theme: BrowserTheme) -> Div {
-    div().w_full().min_w_0().h(gpui::rems(TOPBAR_HEIGHT_REM)).flex_none().flex().flex_row().items_center().gap(px(SPACE_MD)).bg(theme.page_bg)
+    div().w_full().min_w_0().h(gpui::rems(topbar_height_rem())).flex_none().flex().flex_row().items_center().gap(px(SPACE_MD)).bg(theme.page_bg)
 }
 
 /// A topbar ruled off from the book under it, with its controls at the window's
@@ -225,7 +225,7 @@ pub fn browser_topbar_left() -> Div {
 }
 
 pub fn mobile_back_button(theme: BrowserTheme) -> Button {
-    crate::outlined_icon_button("mobile-navigation-back", "Back", IconName::ArrowLeft, theme).debug_selector(|| "mobile-navigation-back".into())
+    crate::outlined_icon_button("mobile-navigation-back", crate::shortcut_tooltip("Back", "escape"), IconName::ArrowLeft, theme).debug_selector(|| "mobile-navigation-back".into())
 }
 
 /// Shared navigation heading for browsing, book loading, and reading. `back`
@@ -245,7 +245,7 @@ pub fn mobile_navigation_menu_heading(title: impl IntoElement, back: Option<Butt
 /// chevron saying it can be changed. Pulled left by its own padding so the
 /// text lines up with the plain titles of other pages.
 pub fn mobile_navigation_menu_title(id: impl Into<ElementId>, title: impl Into<SharedString>, theme: BrowserTheme) -> Button {
-    crate::base_button(id).ghost().min_w_0().h(gpui::rems(TOPBAR_ACTION_HEIGHT_REM)).px(px(SPACE_XS)).ml(px(-SPACE_XS)).text_color(theme.text).child(
+    crate::base_button(id).ghost().min_w_0().h(gpui::rems(topbar_action_height_rem())).px(px(SPACE_XS)).ml(px(-SPACE_XS)).text_color(theme.text).child(
         div()
             .min_w_0()
             .flex()
@@ -269,7 +269,7 @@ pub fn mobile_navigation_bar(title: impl Into<SharedString>, back: Option<Button
 /// one for the content. `CONTENT_INSET` is the same token the breadcrumb's first
 /// crumb uses on the other side.
 pub fn browser_topbar_right() -> Div {
-    div().flex_none().min_w_0().flex().items_center().justify_end().gap(px(TOPBAR_ACTION_GAP)).pr(px(CONTENT_INSET))
+    div().flex_none().min_w_0().flex().items_center().justify_end().gap(px(topbar_action_gap())).pr(px(CONTENT_INSET))
 }
 
 /// Centred, quiet status text for a section that is still loading.
@@ -323,7 +323,7 @@ fn browser_actionable_empty_parts(title: SharedString, description: Option<Share
 /// both at `SPACE_MD` the rightmost tab and the leftmost action were the same
 /// distance apart as two tabs, and the bar read as one row of six things.
 pub fn browser_tab_bar() -> Div {
-    div().w_full().h(gpui::rems(TOPBAR_ACTION_HEIGHT_REM)).flex_none().flex().flex_row().items_stretch().gap(px(SPACE_XL))
+    div().w_full().h(gpui::rems(topbar_action_height_rem())).flex_none().flex().flex_row().items_stretch().gap(px(SPACE_XL))
 }
 
 /// The tabs themselves, at the left of a [`browser_tab_bar`].
@@ -393,7 +393,7 @@ pub fn library_switcher_panel() -> Div {
 }
 
 pub fn library_switcher_header(title: impl Into<SharedString>, theme: BrowserTheme) -> Div {
-    div().h(gpui::rems(NAVIGATION_MODAL_ROW_HEIGHT_REM)).w_full().flex().items_center().justify_between().pl(px(SPACE_SM)).pb(px(SPACE_XS)).text_size(gpui::rems(TEXT_MD)).text_color(theme.text).child(title.into())
+    div().h(gpui::rems(navigation_modal_row_height_rem())).w_full().flex().items_center().justify_between().pl(px(SPACE_SM)).pb(px(SPACE_XS)).text_size(gpui::rems(TEXT_MD)).text_color(theme.text).child(title.into())
 }
 
 /// `cursor` is the keyboard's transient position — the same tier `contents_row`
@@ -401,7 +401,7 @@ pub fn library_switcher_header(title: impl Into<SharedString>, theme: BrowserThe
 /// itself "in", which is what the solid accent is reserved for. Shared by
 /// every square icon action in the library switcher list.
 fn library_switcher_action_button(id: impl Into<ElementId>, label: impl Into<SharedString>, icon: IconName, cursor: bool, theme: BrowserTheme) -> Button {
-    crate::outlined_icon_button(id, label, icon, theme).flex_none().when(cursor, |button| button.bg(theme.accent_wash))
+    crate::outlined_icon_button(id, crate::shortcut_tooltip(label, "enter"), icon, theme).flex_none().when(cursor, |button| button.bg(theme.accent_wash))
 }
 
 pub fn library_switcher_add_button(cursor: bool, theme: BrowserTheme) -> Button {
@@ -423,7 +423,7 @@ pub fn library_switcher_item(id: impl Into<ElementId>, label: impl Into<SharedSt
         .when(selected && !cfg!(feature = "kobo"), |button| button.bg(if cursor { theme.accent_hover } else { theme.accent }).text_color(theme.accent_text))
         .flex_1()
         .min_w_0()
-        .h(gpui::rems(NAVIGATION_MODAL_ROW_HEIGHT_REM))
+        .h(gpui::rems(navigation_modal_row_height_rem()))
         .px(px(SPACE_SM))
         .justify_start()
         .overflow_hidden()
@@ -446,7 +446,7 @@ pub fn topbar_action_button(id: impl Into<ElementId>, label: impl Into<SharedStr
         .text_color(theme.text)
         .text_size(gpui::rems(TEXT_SM))
         .font_weight(crate::TOPBAR_ACTION_LABEL_WEIGHT)
-        .h(gpui::rems(TOPBAR_ACTION_HEIGHT_REM))
+        .h(gpui::rems(topbar_action_height_rem()))
         .px(px(TOPBAR_ACTION_HORIZONTAL_PADDING))
         .rounded(px(RADIUS_MD))
 }
@@ -560,7 +560,7 @@ fn browser_settings_header(title: impl Into<SharedString>, theme: BrowserTheme) 
         .items_center()
         .justify_between()
         .gap(px(SPACE_SM))
-        .child(browser_settings_legend(title, theme).flex_none().w_auto().min_h(gpui::rems(SETTINGS_CONTROL_SIZE_REM)).flex().items_center())
+        .child(browser_settings_legend(title, theme).flex_none().w_auto().min_h(gpui::rems(settings_control_size_rem())).flex().items_center())
 }
 
 /// An action in a settings group's header.
@@ -572,7 +572,7 @@ pub fn browser_settings_header_button(id: impl Into<ElementId>, label: impl Into
     crate::base_button(id)
         .label(label)
         .ghost()
-        .h(gpui::rems(SETTINGS_CONTROL_SIZE_REM))
+        .h(gpui::rems(settings_control_size_rem()))
         .px(px(SPACE_MD))
         .rounded(px(RADIUS_SM))
         .border_1()
@@ -647,7 +647,7 @@ pub fn browser_settings_choice_button(id: impl Into<ElementId>, label: impl Into
 /// that identifies it — rather than the root, which is the same for every path
 /// a user is choosing between.
 pub fn browser_settings_path_button(id: impl Into<ElementId>, path: impl Into<SharedString>, theme: BrowserTheme) -> Button {
-    crate::outlined_text_button(id, path).h(gpui::rems(SETTINGS_CONTROL_SIZE_REM)).px(px(SPACE_SM)).rounded(px(RADIUS_SM)).border_color(theme.border).text_color(theme.text).text_size(gpui::rems(TEXT_XS))
+    crate::outlined_text_button(id, path).h(gpui::rems(settings_control_size_rem())).px(px(SPACE_SM)).rounded(px(RADIUS_SM)).border_color(theme.border).text_color(theme.text).text_size(gpui::rems(TEXT_XS))
 }
 
 /// Abbreviate only a complete home-directory prefix; keep the actual path for

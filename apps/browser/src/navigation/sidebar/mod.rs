@@ -80,7 +80,7 @@ impl Sidebar {
     fn render_bottom_navigation(&self, emitter: Entity<Self>, route: Route, library_view: LibraryRoute, safe_area: Edges<Pixels>, cx: &gpui::App) -> gpui::AnyElement {
         let theme = components::browser_theme(cx);
         let in_library_view = matches!(route, Route::Library(view) if super::LIBRARY_VIEWS.contains(&view));
-        let tabs = if components::TOUCH_UI {
+        let tabs = if components::touch_ui() {
             vec![Route::Library(LibraryRoute::Home), Route::Library(library_view), Route::Library(LibraryRoute::Catalog), Route::Global(GlobalRoute::Settings)]
         } else {
             RAIL_ROUTES.to_vec()
@@ -88,7 +88,7 @@ impl Sidebar {
         let mut navigation = components::bottom_navigation(theme);
         for target in tabs {
             let (id, icon) = route_definition(target);
-            let library_tab = components::TOUCH_UI && target == Route::Library(library_view);
+            let library_tab = components::touch_ui() && target == Route::Library(library_view);
             let (id, label, selected) = if library_tab { ("library", "Library", in_library_view) } else { (id, id, route == target) };
             let select = emitter.clone();
             navigation = navigation.child(components::bottom_navigation_item(format!("bottom-{id}"), icon, label, selected, theme).on_click(move |_, window, cx| {

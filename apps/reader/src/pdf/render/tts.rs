@@ -1,4 +1,5 @@
 use super::PdfReaderView;
+use crate::shell::persistence::StoredPosition;
 use crate::shell::tts::{self, TtsReader};
 use gpui::{App, Context};
 use reader_speech::{SpeechControl, SpeechEvent, SpeechPassage};
@@ -6,7 +7,7 @@ use std::time::Duration;
 use ui_components::user_facing_error;
 
 impl PdfReaderView {
-    pub(super) fn tts_navigation_changed(&mut self, _page: usize, _position: f32, cx: &mut Context<Self>) {
+    pub(super) fn tts_navigation_changed(&mut self, cx: &mut Context<Self>) {
         if !self.tts.playing || self.pdf.read(cx).navigation_revision() == self.tts_navigation_revision {
             return;
         }
@@ -173,6 +174,7 @@ impl TtsReader for PdfReaderView {
     }
 
     fn speech_event(&mut self, event: SpeechEvent, cx: &mut Context<Self>) {
+        self.tts_navigation_changed(cx);
         if !self.tts.accepts(&event) {
             return;
         }
@@ -199,6 +201,9 @@ impl TtsReader for PdfReaderView {
                 if let Some(fragment) = self.tts_fragments.get(index) {
                     let rects = fragment.clone();
                     let page = self.tts_page;
+                    if let Some(bounds) = rects.first() {
+                        self.positions.record_narration(StoredPosition::pdf_page(page, bounds.top(), self.page_count), self.pdf.read(cx).navigation_revision());
+                    }
                     self.pdf.update(cx, |pdf, cx| {
                         pdf.follow_reading_fragment(page, rects, cx);
                     });

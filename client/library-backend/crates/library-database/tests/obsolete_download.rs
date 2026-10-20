@@ -8,7 +8,15 @@ fn late_download_requeues_removal_after_purge_work_has_finished() {
     let hash = ContentHash::new(&"a".repeat(64));
     // The book and its original purge jobs are already gone when the download finishes.
     let mut completion = NativeBookCompletion {
-        snapshot: NativeBookSnapshot { content_hash: hash, directory: ROOT_DIR_ID, name: "book.epub".into(), relative_path: "/book.epub".into(), occupied_names: Vec::new(), format: book_model::BookFormat::Epub },
+        snapshot: NativeBookSnapshot {
+            content_hash: hash,
+            directory: ROOT_DIR_ID,
+            name: "book.epub".into(),
+            relative_path: "/book.epub".into(),
+            occupied_names: Vec::new(),
+            format: book_model::BookFormat::Epub,
+            audiobook_track_titles: Vec::new(),
+        },
         publication: library_model::PublishedStagedBook { name: "book (1).epub".into(), relative_path: "/book (1).epub".into(), published: false, fingerprint: Some("verified".into()) },
         size_bytes: 123,
     };

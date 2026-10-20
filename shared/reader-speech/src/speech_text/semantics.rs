@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::ops::Range;
 
-use segment_parser::{NUMBER_VALUE_SCALE, ParseLanguage, SegmentMeasurementFactRef, SegmentTree, mathematical_operator_spans, measurement_facts, measurement_unit_word_forms, number_range_facts, parse_text_with_language};
+use segment_parser::{NUMBER_VALUE_SCALE, NodeKind, ParseLanguage, SegmentMeasurementFactRef, SegmentTree, mathematical_operator_spans, measurement_facts, measurement_unit_word_forms, number_range_facts, parse_text_with_language};
 
 use super::calendar::calendar_replacements;
 use super::decimals::{number_word_replacements, numeric_replacements};
@@ -153,6 +153,29 @@ fn protected_spans(tree: &SegmentTree) -> Vec<Range<usize>> {
     })
 }
 
+fn ellipsis_replacements(tree: &SegmentTree) -> Vec<Replacement> {
+    let mut result = Vec::new();
+    let mut nodes = tree.iter_nodes().peekable();
+    while let Some(node) = nodes.next() {
+        if node.kind() != NodeKind::Ellipsis && !(node.kind() == NodeKind::Punct && node.text() == ".") {
+            continue;
+        }
+        let mut span = node.span();
+        let mut ellipsis = node.kind() == NodeKind::Ellipsis;
+        while let Some(next) = nodes.peek().filter(|next| next.span().start == span.end && (next.kind() == NodeKind::Ellipsis || (next.kind() == NodeKind::Punct && next.text() == "."))) {
+            span.end = next.span().end;
+            ellipsis |= next.kind() == NodeKind::Ellipsis;
+            nodes.next();
+        }
+        // A comma gives the voice a hesitation within the sentence. Merge
+        // adjacent punctuation without touching dots inside semantic nodes.
+        if ellipsis || span.len() > 1 {
+            result.push(Replacement::new(span, if ellipsis { "," } else { "." }));
+        }
+    }
+    result
+}
+
 fn replacements(tree: &SegmentTree, protected: &[Range<usize>]) -> Vec<Replacement> {
     let ranges = number_range_facts(tree).filter_map(|fact| fact.separator_region_span().map(|span| Replacement::new(span, " to ")));
     let operators = mathematical_operator_spans(tree).into_iter().filter_map(|span| {
@@ -183,6 +206,7 @@ fn replacements(tree: &SegmentTree, protected: &[Range<usize>]) -> Vec<Replaceme
         .chain(quantity_abbreviation_replacements(tree))
         .chain(calendar_replacements(tree))
         .chain(ratio_replacements(tree))
+        .chain(ellipsis_replacements(tree))
         .filter(|replacement| !protected.iter().any(|span| span.start < replacement.span.end && replacement.span.start < span.end))
         .collect::<Vec<_>>();
     replacements.sort_by_key(|replacement| (replacement.span.start, Reverse(replacement.span.end)));
