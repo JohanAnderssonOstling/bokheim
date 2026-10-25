@@ -19,6 +19,8 @@ path = "src/main.rs"
 required-features = ["gui"]
 
 [dependencies]
+kobo-package = { path = "../../shared/kobo-package" }
+kobo-profile = { path = "../../shared/kobo-profile" }
 client-platform-kobo = { path = "../../client/platforms/kobo" }
 flate2 = "1"
 gpui = { git = "https://github.com/JohanAnderssonOstling/GPUI-Fork", rev = "68b0a5ba82860ac222c18acd9036b3838a43a08b", optional = true }

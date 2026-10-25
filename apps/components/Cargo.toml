@@ -5,10 +5,11 @@ edition = "2024"
 
 [features]
 default = []
-kobo = ["mobile", "dep:gpui_kobo"]
+kobo = ["mobile", "dep:gpui_kobo", "dep:kobo-profile"]
 mobile = []
 
 [dependencies]
+kobo-profile = { path = "../../shared/kobo-profile", optional = true }
 log = "0.4"
 web-time = "1"
 library-model = { path = "../../client/library-model", default-features = false }

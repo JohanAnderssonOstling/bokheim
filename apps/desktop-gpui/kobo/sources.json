@@ -1,0 +1,48 @@
+{
+  "toolchain": {
+    "url": "https://toolchains.bootlin.com/downloads/releases/toolchains/armv7-eabihf/tarballs/armv7-eabihf--glibc--stable-2017.05-toolchains-1-1.tar.bz2",
+    "sha256": "8ee10ed4c8110a72423229d212bff1047577bc21ce27e68e1b3a304c6c2c1e69",
+    "archive": "legacy.tar.bz2",
+    "directory": "legacy"
+  },
+  "glibc": {
+    "url": "https://ftp.gnu.org/gnu/glibc/glibc-2.23.tar.xz",
+    "sha256": "94efeb00e4603c8546209cefb3e1a50a5315c86fa9b078b6fad758e187ce13e9",
+    "archive": "glibc-2.23.tar.xz",
+    "directory": "glibc-2.23-source"
+  },
+  "fbink": {
+    "revision": "886f25f13368859ad8a899b88d04c26e19cda32e",
+    "url": "https://codeload.github.com/NiLuJe/FBInk/tar.gz/886f25f13368859ad8a899b88d04c26e19cda32e",
+    "sha256": "f71a30bf27ad25e40da24bed54e4148a68a7b79ff68b81b7a9f0054b1d65a6e9",
+    "archive": "FBInk-886f25f13368859ad8a899b88d04c26e19cda32e.tar.gz",
+    "directory": "fbink-source"
+  },
+  "font8x8": {
+    "revision": "fa74831b9076805271cdedc0ee12137aa548e524",
+    "url": "https://codeload.github.com/NiLuJe/font8x8/tar.gz/fa74831b9076805271cdedc0ee12137aa548e524",
+    "sha256": "e48e7d5bb47fba400b0b28db30b09aed0cf499679b3d69274bc321d8852fd07e",
+    "archive": "font8x8-fa74831b9076805271cdedc0ee12137aa548e524.tar.gz",
+    "directory": "fbink-source/font8x8"
+  },
+  "make": {
+    "url": "https://ftp.gnu.org/gnu/make/make-4.3.tar.gz",
+    "sha256": "e05fdde47c5f7ca45cb697e973894ff4f5d79e13b750ed57d7b66d8defc78e19",
+    "archive": "make-4.3.tar.gz",
+    "directory": "make-source"
+  },
+  "i2c-tools": {
+    "revision": "ec1267371e378fc6aaf1cd7686b5b9b31293255a",
+    "url": "https://git.kernel.org/pub/scm/utils/i2c-tools/i2c-tools.git/snapshot/i2c-tools-ec1267371e378fc6aaf1cd7686b5b9b31293255a.tar.gz",
+    "sha256": "40ed507bc529c5851d411be6eca169f95d21e02afb424700c2cece5aa33b9c61",
+    "archive": "i2c-tools.tar.gz",
+    "directory": "fbink-source/i2c-tools"
+  },
+  "stb": {
+    "revision": "dfa32facac4a16184dd66f8e482bf15a678f2bf3",
+    "url": "https://codeload.github.com/NiLuJe/stb/tar.gz/dfa32facac4a16184dd66f8e482bf15a678f2bf3",
+    "sha256": "1f0869b730489da3c19311cf2c133cb35309319cabb07c8907cb74795116df93",
+    "archive": "stb.tar.gz",
+    "directory": "fbink-source/stb"
+  }
+}
